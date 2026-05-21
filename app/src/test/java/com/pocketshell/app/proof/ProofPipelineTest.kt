@@ -4,6 +4,7 @@ import android.os.Looper
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.terminal.bridge.SshTerminalBridge
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -267,6 +268,54 @@ class ProofPipelineTest {
             pumpScope.cancel()
             collectorScope.cancel()
             state.detachExternalProducer()
+        }
+    }
+
+    /**
+     * Item 3 of issue #33: emulator-content assertion.
+     *
+     * The existing [attachExternalProducerEmitsBytesOnOutputFlow] test proves
+     * that bytes reach [TerminalSurfaceState.output], but `output` is a side
+     * channel `TerminalSurfaceState.attachExternalProducer` emits to *in
+     * addition to* feeding the bridge. A passing assertion on `output` does
+     * not by itself prove the bridge's
+     * [SshTerminalBridge.feedBytes] → `MSG_NEW_INPUT` → [Handler] →
+     * `TerminalEmulator.append` chain ever executes — that path is silent
+     * until something inspects the emulator's screen buffer.
+     *
+     * This test closes the gap. It constructs an [SshTerminalBridge]
+     * directly (the same one [TerminalSurfaceState.attachExternalProducer]
+     * builds internally), feeds it `echo phase0\n`, idles the Robolectric
+     * main looper so the queued `MSG_NEW_INPUT` message runs, and reads back
+     * the visible transcript. If `phase0` is missing the bridge's reflective
+     * wiring (e.g. the hardcoded `MSG_NEW_INPUT = 1`, the `mEmulator` /
+     * `mProcessToTerminalIOQueue` / `mMainThreadHandler` field names) has
+     * broken silently and the proof-of-life screen would render an empty
+     * terminal at runtime without the test catching it.
+     *
+     * Does not need Docker — exercises the bridge in isolation.
+     */
+    @Test
+    fun feedBytesRendersOntoEmulatorScreenBuffer() {
+        val bridge = SshTerminalBridge()
+        try {
+            val mainLooperShadow = shadowOf(Looper.getMainLooper())
+            val payload = "echo phase0\n".toByteArray()
+            bridge.feedBytes(payload)
+            // The bridge posts MSG_NEW_INPUT to the session's main-thread
+            // handler; without idling the looper the message stays queued
+            // and `TerminalEmulator.append` never runs. This is exactly the
+            // path the issue calls out as silent.
+            mainLooperShadow.idle()
+
+            val transcript = bridge.emulator.screen.transcriptText
+            assertTrue(
+                "expected `phase0` to appear in the emulator transcript " +
+                    "after feedBytes(\"echo phase0\\n\"); got:\n$transcript",
+                transcript.contains("phase0"),
+            )
+        } finally {
+            bridge.stop()
         }
     }
 

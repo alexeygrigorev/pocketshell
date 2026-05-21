@@ -18,13 +18,22 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 /**
  * The PocketShell Room database.
  *
- * Version 1 is the initial schema: extracted entities from
+ * Version 1 was the initial schema: extracted entities from
  * `ssh-auto-forward-android` ([HostEntity], [SshKeyEntity],
  * [PortRemappingEntity]) plus the Phase 1+ stubs ([SessionEntity],
  * [SnippetEntity], [AgentSessionEntity]). PocketShell is a new app — the
  * version number resets to 1 here, no migration from the
  * `ssh-auto-forward-android` v2 schema is needed (different package, no
  * shared DB file).
+ *
+ * Version 2 (issue #49) added the host-bootstrap cache columns to
+ * [HostEntity]:
+ *
+ * - `tmuxInstalled` (`Boolean?`) — last-known tmux presence on the host
+ * - `lastBootstrapAt` (`Long?`) — epoch-millis of the last probe
+ *
+ * The migration SQL lives in
+ * [com.pocketshell.core.storage.migrations.MIGRATION_1_2].
  *
  * `exportSchema = false` matches the reference module. When the schema
  * starts evolving in real users' hands, flip this on and check generated
@@ -39,7 +48,7 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
         SnippetEntity::class,
         AgentSessionEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {

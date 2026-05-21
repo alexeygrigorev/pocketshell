@@ -38,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.app.bootstrap.HostBootstrapSheet
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.uikit.components.HostCard
@@ -74,6 +75,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
  * `HostCard` (`ui-kit`) the wire-up returns; until then the parameter
  * is intentionally unused at this call site.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun HostListScreen(
     onAddHost: () -> Unit,
@@ -85,6 +87,9 @@ fun HostListScreen(
 ) {
     val hosts by viewModel.hosts.collectAsState()
     val updateInfo by viewModel.updateAvailable.collectAsState()
+    val bootstrapState by viewModel.bootstrapState.collectAsState()
+    val bootstrapHostName by viewModel.bootstrapHostName.collectAsState()
+    val pendingNavigation by viewModel.pendingNavigation.collectAsState()
     val context = LocalContext.current
 
     // Read the installed `versionName` once and cache it for the lifetime
@@ -108,6 +113,12 @@ fun HostListScreen(
     // hosts flow. `hosts` and `onOpenSession` are pulled in via
     // `rememberUpdatedState` so the collector body always sees the latest
     // values without forcing a new subscription on each change.
+    //
+    // Issue #49 inserts a bootstrap step: the tap kicks the ViewModel's
+    // `bootstrapHost(...)`, which probes for tmux, optionally shows the
+    // sheet, and signals readiness via `pendingNavigation`. The
+    // navigation collector watches that StateFlow and fires
+    // `onOpenSession` only once `ready == true`.
     val tapRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
     val currentHosts by rememberUpdatedState(hosts)
     val currentOpenSession by rememberUpdatedState(onOpenSession)
@@ -115,7 +126,19 @@ fun HostListScreen(
         tapRequests.collect { hostId ->
             val host = currentHosts.find { it.id == hostId } ?: return@collect
             val key = viewModel.keyFor(host.keyId) ?: return@collect
-            currentOpenSession(host, key.privateKeyPath)
+            viewModel.bootstrapHost(host, key.privateKeyPath)
+        }
+    }
+
+    // Fire `onOpenSession` once the ViewModel marks the pending
+    // navigation ready. The ViewModel handles the cache-hit fast path
+    // (immediate ready) as well as the sheet-driven slow path
+    // (ready after Skip / Continue / Close).
+    LaunchedEffect(pendingNavigation) {
+        val pending = pendingNavigation
+        if (pending != null && pending.ready) {
+            currentOpenSession(pending.host, pending.keyPath)
+            viewModel.consumePendingNavigation()
         }
     }
 
@@ -199,6 +222,21 @@ fun HostListScreen(
                 text = "+",
                 fontSize = 28.sp,
                 fontWeight = FontWeight.Medium,
+            )
+        }
+
+        // Issue #49: bootstrap sheet — only attached while the ViewModel
+        // holds a non-null state. Tapping Install / Skip / dismiss all
+        // route through the ViewModel, which then nudges
+        // `pendingNavigation.ready` and the `LaunchedEffect` above
+        // navigates.
+        bootstrapState?.let { state ->
+            HostBootstrapSheet(
+                state = state,
+                hostName = bootstrapHostName,
+                onInstall = { viewModel.installTmuxOnPendingHost() },
+                onSkip = { viewModel.dismissBootstrapAndOpen() },
+                onDismiss = { viewModel.dismissBootstrapAndOpen() },
             )
         }
     }

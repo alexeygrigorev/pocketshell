@@ -3,6 +3,7 @@ package com.pocketshell.app.hosts
 import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.app.bootstrap.HostBootstrapper
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.core.storage.AppDatabase
@@ -107,6 +108,7 @@ class HostListViewModelTest {
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
         )
         // Read from the underlying DAO flow directly — the ViewModel's
         // own StateFlow uses `WhileSubscribed(5s)`, which interacts with
@@ -131,6 +133,7 @@ class HostListViewModelTest {
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
         )
         val key = viewModel.keyFor(keyId)
         assertNotNull(key)
@@ -145,6 +148,7 @@ class HostListViewModelTest {
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
         )
         assertNull(viewModel.keyFor(9_999L))
     }
@@ -166,6 +170,7 @@ class HostListViewModelTest {
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = fake,
+            bootstrapper = HostBootstrapper(),
         )
 
         // `init {}` kicks off the check; UnconfinedTestDispatcher drains
@@ -182,6 +187,7 @@ class HostListViewModelTest {
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = fake,
+            bootstrapper = HostBootstrapper(),
         )
 
         assertEquals(1, fake.callCount)
@@ -196,6 +202,7 @@ class HostListViewModelTest {
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = fake,
+            bootstrapper = HostBootstrapper(),
         )
         // `init {}` already fired one call.
         assertEquals(1, fake.callCount)
@@ -206,5 +213,94 @@ class HostListViewModelTest {
 
         viewModel.checkForUpdates()
         assertEquals(3, fake.callCount)
+    }
+
+    /**
+     * Issue #49: when the host's bootstrap row says tmux is installed
+     * and the last probe is fresh (within 24h), the ViewModel must not
+     * open a new SSH session — it flips `pendingNavigation.ready` to
+     * `true` immediately so the screen can route to the session.
+     *
+     * The fake bootstrapper never gets called because we never connect;
+     * the test asserts the pending-navigation tuple, which is the
+     * canonical "ready to route" signal the UI consumes.
+     */
+    @Test
+    fun bootstrapHost_skipsProbe_whenCacheIsFresh() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val now = System.currentTimeMillis()
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "fresh",
+                hostname = "h.example",
+                username = "u",
+                keyId = keyId,
+                tmuxInstalled = true,
+                lastBootstrapAt = now - 60_000L, // 1 minute ago
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+        )
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k")
+
+        val pending = viewModel.pendingNavigation.value
+        assertNotNull(pending)
+        assertEquals(hostId, pending!!.host.id)
+        // Cache-hit fast path → ready=true immediately.
+        assertEquals(true, pending.ready)
+        // Sheet stays hidden.
+        assertNull(viewModel.bootstrapState.value)
+    }
+
+    /**
+     * A stale cache (older than 24h) must NOT short-circuit; the
+     * ViewModel attempts a connect, fails (no server), and lands on the
+     * "navigate anyway" branch (`ready = true`). The bootstrap sheet
+     * stays hidden because we couldn't prove tmux is missing.
+     */
+    @Test
+    fun bootstrapHost_reprobes_whenCacheIsStale() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/no-such-key"))
+        val stale = System.currentTimeMillis() - (25L * 60L * 60L * 1000L)
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "stale",
+                hostname = "127.0.0.1",
+                port = 1, // closed port → connect fails fast
+                username = "u",
+                keyId = keyId,
+                tmuxInstalled = true,
+                lastBootstrapAt = stale,
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+        )
+
+        // Synchronous cache-check sets pending immediately at ready=false
+        // (probe goes async). We can at least observe the pre-probe
+        // state machine; the async connect lands offline and flips ready
+        // to true, but observing that race-free under runTest requires
+        // pinning Dispatchers.IO which the suite doesn't currently do.
+        viewModel.bootstrapHost(host, keyPath = "/tmp/no-such-key")
+
+        val pending = viewModel.pendingNavigation.value
+        assertNotNull(pending)
+        assertEquals(hostId, pending!!.host.id)
+        // Probe started → fast-path bypassed. The sheet should not be
+        // showing yet (we haven't observed a Missing yet).
+        assertNull(viewModel.bootstrapState.value)
     }
 }

@@ -6,6 +6,7 @@ import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SnippetDao
 import com.pocketshell.core.storage.dao.SshKeyDao
+import com.pocketshell.core.storage.migrations.MIGRATION_1_2
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -38,12 +39,16 @@ object StorageModule {
             AppDatabase::class.java,
             DATABASE_NAME,
         )
-            // No migrations exist yet — Phase 1 ships with version 1. When the
-            // schema evolves, replace this with explicit migrations and switch
-            // `exportSchema = true` in :shared:core-storage so they are
-            // reviewable. `dropAllTables = false` is the safer default; if a
-            // schema mismatch surfaces, Room throws rather than silently
-            // wiping user data.
+            // Issue #49 introduced schema v2 (host-bootstrap cache columns).
+            // The migration is hand-rolled in `core-storage/migrations` so the
+            // SQL is explicit and unit-testable. We still keep
+            // `fallbackToDestructiveMigration` as a backstop for the
+            // pre-release era — if a schema mismatch surfaces from a route
+            // we haven't covered, Room would otherwise throw and brick the
+            // app. `dropAllTables = false` keeps user data on the safer
+            // path; once we ship to real users this fallback should be
+            // removed and missing migrations should hard-fail.
+            .addMigrations(MIGRATION_1_2)
             .fallbackToDestructiveMigration(dropAllTables = false)
             .build()
 

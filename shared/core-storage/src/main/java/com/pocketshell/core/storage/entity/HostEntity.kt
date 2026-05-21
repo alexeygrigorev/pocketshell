@@ -12,6 +12,15 @@ import androidx.room.PrimaryKey
  * fields ([maxAutoPort], [skipPortsBelow], [scanIntervalSec]) live here for
  * now; if PocketShell ends up with a different port-forwarding model they
  * can migrate out, but keeping them avoids a schema split today.
+ *
+ * Issue #49 added [tmuxInstalled] and [lastBootstrapAt]: the host-bootstrap
+ * flow probes for `tmux` on first connect and caches the outcome here so we
+ * only re-check after 24h or on explicit user trigger. Both columns are
+ * nullable; `null` means "never checked", `true` / `false` mean
+ * "verified at [lastBootstrapAt]". Stored as epoch-millis `Long?` to match
+ * the existing `createdAt` / `lastConnectedAt` convention — the issue body
+ * mentioned `Instant?` but the codebase has no `kotlinx-datetime` dependency
+ * and the brief forbids adding new catalog entries.
  */
 @Entity(
     tableName = "hosts",
@@ -38,4 +47,6 @@ data class HostEntity(
     val enabled: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
     val lastConnectedAt: Long? = null,
+    val tmuxInstalled: Boolean? = null,
+    val lastBootstrapAt: Long? = null,
 )

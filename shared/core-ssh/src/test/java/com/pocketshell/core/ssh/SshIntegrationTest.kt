@@ -13,6 +13,7 @@ import org.junit.Assume.assumeTrue
 import java.io.File
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.util.concurrent.TimeUnit
 
 /**
  * End-to-end integration tests for [SshConnection] / [SshSession] driven by
@@ -185,6 +186,105 @@ class SshIntegrationTest {
         assertTrue("expected failure, got success", result.isFailure)
         val ex = result.exceptionOrNull()!!
         assertTrue("expected SshException, got ${ex.javaClass.name}", ex is SshException)
+    }
+
+    @Test
+    fun startShellOpensInteractiveShellAndEchoesInput() = runTest {
+        // End-to-end shell-channel test against the `pocketshell-test:ssh`
+        // container's `testuser` (POSIX sh / busybox on alpine). We send a
+        // single command on the shell's stdin, then drain stdout until we
+        // see the expected token. This locks down `startShell()`'s
+        // contract: streams are real blocking JDK streams pointing at a
+        // remote PTY, closeable as a unit, and survive normal traffic.
+        val session = SshConnection.connect(
+            host = container!!.host,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Path(privateKeyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrThrow()
+
+        session.use {
+            it.startShell().use { shell ->
+                // Quickly send a command with a unique marker so we can
+                // detect the echo without false positives from MOTD or
+                // prompt output.
+                val marker = "POCKETSHELL_STARTSHELL_OK"
+                shell.stdin.write("echo $marker\n".toByteArray(Charsets.UTF_8))
+                shell.stdin.flush()
+
+                // Read until either we see the marker or the deadline
+                // expires. Reading in fixed-size chunks keeps this off the
+                // EOF path — busybox sh stays open until we close the
+                // channel, so a naive `readBytes()` would block forever.
+                val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+                val collected = StringBuilder()
+                val buf = ByteArray(1024)
+                var sawMarker = false
+                while (System.nanoTime() < deadline) {
+                    if (shell.stdout.available() > 0) {
+                        val n = shell.stdout.read(buf)
+                        if (n < 0) break
+                        if (n > 0) {
+                            collected.append(String(buf, 0, n, Charsets.UTF_8))
+                            // The shell echoes the command line itself
+                            // *and* prints the echo's output, so the
+                            // marker shows up twice. We want the printed
+                            // copy (i.e. after a newline that's not part
+                            // of `echo $marker`). Anything containing
+                            // `\n$marker` or `$marker\r` past the echoed
+                            // command is good enough.
+                            val s = collected.toString()
+                            val idx = s.indexOf(marker)
+                            if (idx >= 0) {
+                                // Confirm the marker appears at least
+                                // twice (once as echo of the command,
+                                // once as the command's output) OR
+                                // appears on a line by itself, which
+                                // means the PTY echoed the command and
+                                // the shell printed the output.
+                                val second = s.indexOf(marker, idx + marker.length)
+                                if (second >= 0) {
+                                    sawMarker = true
+                                    break
+                                }
+                            }
+                        }
+                    } else {
+                        // Avoid a tight CPU spin.
+                        Thread.sleep(20)
+                    }
+                }
+                assertTrue(
+                    "expected to see marker `$marker` echoed back from the remote shell within 10s; got:\n$collected",
+                    sawMarker,
+                )
+            }
+            // Session should still be usable after the shell is closed.
+            assertTrue("session should remain connected after shell close", it.isConnected)
+            val followUp = it.exec("echo after-shell-close")
+            assertEquals(0, followUp.exitCode)
+            assertEquals("after-shell-close", followUp.stdout.trim())
+        }
+    }
+
+    @Test
+    fun startShellOnClosedSessionThrowsSshException() = runTest {
+        val session = SshConnection.connect(
+            host = container!!.host,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Path(privateKeyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrThrow()
+        session.close()
+        val ex = runCatching { session.startShell() }.exceptionOrNull()
+        assertTrue(
+            "expected SshException after close, got $ex",
+            ex is SshException,
+        )
     }
 
     @Test

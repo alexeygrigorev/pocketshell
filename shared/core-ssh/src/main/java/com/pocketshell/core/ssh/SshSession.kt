@@ -56,6 +56,22 @@ public interface SshSession : AutoCloseable {
         localPort: Int,
     ): SshPortForward
 
+    /**
+     * Open a remote interactive shell. Allocates a default PTY on a new
+     * session channel and binds it to the user's login shell. Returns an
+     * [SshShell] whose [SshShell.stdin] / [SshShell.stdout] / [SshShell.stderr]
+     * are ordinary blocking JDK streams pointing at the remote shell's stdio.
+     *
+     * Closing the returned [SshShell] (or `use`-ing it) tears down only
+     * the shell channel — the parent [SshSession] stays connected and can
+     * still be used for further [exec] / [tail] / [openLocalPortForward] /
+     * `startShell` calls.
+     *
+     * Throws [SshException] on transport-level failure (channel open
+     * failure, PTY allocation refused by the server, shell start refused).
+     */
+    public fun startShell(): SshShell
+
     /** Disconnect and free all resources. Idempotent. */
     override fun close()
 }

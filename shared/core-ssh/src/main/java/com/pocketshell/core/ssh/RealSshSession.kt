@@ -107,6 +107,33 @@ internal class RealSshSession(
         }
     }
 
+    override fun startShell(): SshShell {
+        ensureConnected()
+        // Two-step open mirroring sshj's idiomatic interactive-shell
+        // recipe: `startSession()` to get a session channel, allocate the
+        // default PTY (xterm-256color, 80x24 — the emulator will resize on
+        // first layout), then `startShell()` to bind the channel to the
+        // user's login shell.
+        //
+        // Failures at any of the three steps are wrapped in SshException
+        // so callers don't have to know about sshj's exception hierarchy.
+        // If `startShell` itself fails we close the half-opened session
+        // channel before propagating, so we never leak a channel on error.
+        val sessionChannel = try {
+            client.startSession()
+        } catch (t: Throwable) {
+            throw SshException("Failed to open SSH session channel for shell: ${t.message}", t)
+        }
+        try {
+            sessionChannel.allocateDefaultPTY()
+            val shell = sessionChannel.startShell()
+            return RealSshShell(sessionChannel = sessionChannel, shell = shell)
+        } catch (t: Throwable) {
+            runCatching { sessionChannel.close() }
+            throw SshException("Failed to start remote shell: ${t.message}", t)
+        }
+    }
+
     override fun close() {
         scope.cancel()
         runCatching { client.disconnect() }

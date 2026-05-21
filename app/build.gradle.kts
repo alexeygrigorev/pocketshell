@@ -10,6 +10,22 @@ android {
     namespace = "com.pocketshell.app"
     compileSdk = 35
 
+    // Issue #42: pin both debug and release APKs to a single committed
+    // keystore so upgrading an existing install never trips the
+    // "signatures do not match" / "uninstall first" path. The password
+    // is the public Android debug password — the file has no real
+    // security value, it just gives every machine (laptop, CI, release
+    // tag build) the same signing identity. Mirrors
+    // `ssh-auto-forward-android`'s setup.
+    signingConfigs {
+        create("debugKeystore") {
+            storeFile = file("../debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     defaultConfig {
         applicationId = "com.pocketshell.app"
         minSdk = 26
@@ -22,6 +38,7 @@ android {
         release {
             isMinifyEnabled = false
             isShrinkResources = false
+            signingConfig = signingConfigs.getByName("debugKeystore")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
@@ -29,6 +46,7 @@ android {
         }
         debug {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debugKeystore")
         }
     }
 
@@ -142,6 +160,12 @@ dependencies {
     // so this single dependency brings the DAOs + entities + AppDatabase
     // onto the classpath.
     implementation(project(":shared:core-storage"))
+
+    // Issue #15: the voice prompt composer needs WhisperClient,
+    // AudioRecorder, and ApiKeyStorage from the core-voice module. The
+    // module already exposes OkHttp + coroutines transitively via `api`,
+    // so no extra catalog wiring is needed here.
+    implementation(project(":shared:core-voice"))
 
     // ProofPipelineTest connects to the `pocketshell-test:ssh` Docker
     // container the same way `core-ssh`'s integration test does, so the

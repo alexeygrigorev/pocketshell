@@ -1,7 +1,10 @@
 package com.pocketshell.app.hosts
 
+import android.content.Context
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.app.release.ReleaseChecker
+import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
@@ -27,6 +30,10 @@ import org.robolectric.annotation.Config
  *
  * The `MainDispatcherRule` swaps `Dispatchers.Main` for a test dispatcher
  * so `viewModelScope`-launched flows are observable inside `runTest`.
+ *
+ * Issue #40 brought in the auto-update banner — these tests inject a
+ * fake [ReleaseChecker] so the suite never hits the network and the
+ * update-banner state machine is observable end-to-end.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
@@ -36,11 +43,13 @@ class HostListViewModelTest {
     val mainDispatcherRule = MainDispatcherRule()
 
     private lateinit var db: AppDatabase
+    private lateinit var context: Context
 
     @Before
     fun setUp() {
+        context = ApplicationProvider.getApplicationContext()
         db = Room.inMemoryDatabaseBuilder(
-            ApplicationProvider.getApplicationContext(),
+            context,
             AppDatabase::class.java,
         )
             // Pin Room's executors to a synchronous runner so suspending
@@ -57,6 +66,29 @@ class HostListViewModelTest {
         db.close()
     }
 
+    /**
+     * A test double for [ReleaseChecker] that returns a pre-canned
+     * [ReleaseInfo] (or `null`) and records the number of `check()`
+     * calls so the test can assert that `init {}` and `checkForUpdates()`
+     * both invoke the network path.
+     *
+     * Subclassing the concrete class (rather than introducing an
+     * interface in production code) avoids the boilerplate of an
+     * interface that has only one implementation — the test-only
+     * surface is the only consumer.
+     */
+    private class FakeReleaseChecker(
+        private val result: ReleaseInfo?,
+    ) : ReleaseChecker() {
+        var callCount: Int = 0
+            private set
+
+        override suspend fun check(currentVersion: String): ReleaseInfo? {
+            callCount += 1
+            return result
+        }
+    }
+
     @Test
     fun hostsFlow_emitsStoredHosts_orderedByName() = runTest {
         // Seed two keys + two hosts in non-alphabetic order; expect the
@@ -70,7 +102,12 @@ class HostListViewModelTest {
             HostEntity(name = "alpha", hostname = "a.example", username = "u", keyId = keyB),
         )
 
-        val viewModel = HostListViewModel(db.hostDao(), db.sshKeyDao())
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+        )
         // Read from the underlying DAO flow directly — the ViewModel's
         // own StateFlow uses `WhileSubscribed(5s)`, which interacts with
         // the test dispatcher in ways that complicate the assertion. The
@@ -89,7 +126,12 @@ class HostListViewModelTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "my-key", privateKeyPath = "/tmp/id_ed25519"),
         )
-        val viewModel = HostListViewModel(db.hostDao(), db.sshKeyDao())
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+        )
         val key = viewModel.keyFor(keyId)
         assertNotNull(key)
         assertEquals("my-key", key!!.name)
@@ -98,7 +140,71 @@ class HostListViewModelTest {
 
     @Test
     fun keyFor_returnsNullForMissingId() = runTest {
-        val viewModel = HostListViewModel(db.hostDao(), db.sshKeyDao())
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+        )
         assertNull(viewModel.keyFor(9_999L))
+    }
+
+    @Test
+    fun updateAvailable_emitsReleaseInfo_whenCheckerReturnsNonNull() = runTest {
+        // Pre-canned "there is a newer release" response. The fake
+        // skips the network entirely and returns the canned value
+        // synchronously on the test dispatcher.
+        val info = ReleaseInfo(
+            tagName = "v0.2.0",
+            htmlUrl = "https://github.com/alexeygrigorev/pocketshell/releases/tag/v0.2.0",
+            apkUrl = "https://example.com/pocketshell-0.2.0-debug.apk",
+        )
+        val fake = FakeReleaseChecker(result = info)
+
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = fake,
+        )
+
+        // `init {}` kicks off the check; UnconfinedTestDispatcher drains
+        // the launch synchronously, so the state is settled by here.
+        assertEquals(1, fake.callCount)
+        assertEquals(info, viewModel.updateAvailable.value)
+    }
+
+    @Test
+    fun updateAvailable_staysNull_whenCheckerReturnsNull() = runTest {
+        val fake = FakeReleaseChecker(result = null)
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = fake,
+        )
+
+        assertEquals(1, fake.callCount)
+        assertNull(viewModel.updateAvailable.value)
+    }
+
+    @Test
+    fun checkForUpdates_canBeReInvoked() = runTest {
+        val fake = FakeReleaseChecker(result = null)
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = fake,
+        )
+        // `init {}` already fired one call.
+        assertEquals(1, fake.callCount)
+
+        // Pull-to-refresh re-fires.
+        viewModel.checkForUpdates()
+        assertEquals(2, fake.callCount)
+
+        viewModel.checkForUpdates()
+        assertEquals(3, fake.callCount)
     }
 }

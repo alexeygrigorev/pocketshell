@@ -1,5 +1,7 @@
 package com.pocketshell.app.hosts
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -31,10 +33,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.model.HostStatus
@@ -75,6 +80,19 @@ fun HostListScreen(
     viewModel: HostListViewModel = hiltViewModel(),
 ) {
     val hosts by viewModel.hosts.collectAsState()
+    val updateInfo by viewModel.updateAvailable.collectAsState()
+    val context = LocalContext.current
+
+    // Read the installed `versionName` once and cache it for the lifetime
+    // of this composable — `versionName` is a build-time constant for the
+    // running APK, so `remember` without a key is correct.
+    val versionName = remember {
+        try {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown"
+        } catch (_: Exception) {
+            "unknown"
+        }
+    }
 
     // Resolve-key-then-navigate is async (suspending DAO read) but the tap
     // originates from the main thread. The request is funneled through a
@@ -96,6 +114,20 @@ fun HostListScreen(
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             HostsAppBar(onKeysClick = onManageKeys)
+
+            // Issue #40: surface the upgrade prompt at the top so the
+            // user sees it before the host list, but only when the
+            // ViewModel has confirmed a strictly-newer release.
+            updateInfo?.let { info ->
+                UpdateBanner(
+                    info = info,
+                    onUpdate = {
+                        context.startActivity(
+                            Intent(Intent.ACTION_VIEW, Uri.parse(info.apkUrl)),
+                        )
+                    },
+                )
+            }
 
             SectionLabel(
                 label = "Hosts",
@@ -133,6 +165,11 @@ fun HostListScreen(
                     }
                 }
             }
+
+            // Footer: installed version. Sits at the bottom of the
+            // column so the host list keeps its prominence; muted text
+            // colour so it doesn't compete with the FAB.
+            VersionFooter(versionName = versionName)
         }
 
         FloatingActionButton(
@@ -151,6 +188,98 @@ fun HostListScreen(
                 fontWeight = FontWeight.Medium,
             )
         }
+    }
+}
+
+/**
+ * Top-of-screen banner advertising a newer GitHub Release. Tapping
+ * "Update" fires `Intent.ACTION_VIEW` against the APK download URL —
+ * the system browser / download manager handles the rest. We do NOT
+ * silently install (no `REQUEST_INSTALL_PACKAGES` permission, no
+ * background download).
+ *
+ * Style follows the PocketShell design language rather than vanilla
+ * Material 3: the accent token tints the surface so the banner reads
+ * as actionable without being alarming. A `Card` here would have
+ * dragged in a Material elevation overlay that fights the dark theme.
+ */
+@Composable
+private fun UpdateBanner(info: ReleaseInfo, onUpdate: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .background(
+                color = PocketShellColors.AccentSoft,
+                shape = RoundedCornerShape(12.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.Accent,
+                shape = RoundedCornerShape(12.dp),
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "New version available",
+                color = PocketShellColors.Text,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = info.tagName,
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+            )
+        }
+
+        Spacer(modifier = Modifier.width(12.dp))
+
+        // Pill-shaped "Update" button. Background uses the solid accent
+        // so the tap target reads as primary action on top of the
+        // accent-soft banner surface.
+        Box(
+            modifier = Modifier
+                .clickable(role = Role.Button, onClick = onUpdate)
+                .background(
+                    color = PocketShellColors.Accent,
+                    shape = RoundedCornerShape(10.dp),
+                )
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+        ) {
+            Text(
+                text = "Update",
+                color = PocketShellColors.OnAccent,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
+
+/**
+ * Footer carrying the installed `versionName`. Muted colour so the
+ * marker is observable for support / debugging but doesn't compete
+ * visually with the host list.
+ */
+@Composable
+private fun VersionFooter(versionName: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 22.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "v$versionName",
+            color = PocketShellColors.TextMuted,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 0.4.sp,
+        )
     }
 }
 

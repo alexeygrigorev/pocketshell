@@ -25,6 +25,15 @@ kotlinx-coroutines = "1.10.2"
 testcontainers = "1.21.3"
 junit = "4.13.2"
 
+# core-storage (issue #6). Room version mirrors ssh-auto-forward-android so
+# the extracted entities/DAOs build identically. Robolectric lets the
+# in-memory Room DB run as a host-JVM unit test (Room needs an Android
+# Context; Robolectric provides one without booting an emulator).
+room = "2.7.1"
+robolectric = "4.14.1"
+androidx-test-core = "1.6.1"
+androidx-test-ext-junit = "1.2.1"
+
 [libraries]
 core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
 activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
@@ -49,6 +58,15 @@ kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-cor
 kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-test", version.ref = "kotlinx-coroutines" }
 testcontainers = { group = "org.testcontainers", name = "testcontainers", version.ref = "testcontainers" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+
+# core-storage (issue #6).
+room-runtime = { group = "androidx.room", name = "room-runtime", version.ref = "room" }
+room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
+room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
+room-testing = { group = "androidx.room", name = "room-testing", version.ref = "room" }
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+androidx-test-core = { group = "androidx.test", name = "core", version.ref = "androidx-test-core" }
+androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidx-test-ext-junit" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

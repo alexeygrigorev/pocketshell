@@ -15,21 +15,21 @@ How work on PocketShell is delegated, reviewed, and merged.
 ## Default workflow per issue
 
 1. **Pick an issue.** `gh issue view N` to read scope and acceptance criteria.
-2. **Decide isolation.** Use `isolation: "worktree"` when running multiple agents in parallel, or when an agent's work might conflict with other in-flight work. Single-agent on a fresh branch otherwise.
+2. **Decide isolation.** Use `isolation: "worktree"` when running multiple agents in parallel, or when an agent's work might conflict with other in-flight work. Otherwise let the agent work in the main checkout.
 3. **Brief the agent.** Self-contained prompt: scope, relevant code locations, acceptance criteria, exact file paths, docs to read, what to NOT touch. Always link the issue (`gh issue view N --json url`).
 4. **Agent executes.** Foreground by default. Background only when the orchestrator has genuinely independent work to do meanwhile.
 5. **Verify.** Don't trust the summary. Run the [verification checklist](#verification-checklist).
 6. **Iterate if needed.** Continue the same agent via `SendMessage` for tight corrections; launch a fresh agent if the context is messy.
-7. **Commit + PR.** Orchestrator creates the commit. Opens the PR via `gh pr create`, linking the issue with `Closes #N`.
-8. **Self-merge after PR review,** then close the issue.
+7. **Commit directly to `main`.** Orchestrator creates the commit, pushes immediately. No feature branches, no PRs.
+8. **Close the issue** with `gh issue close N --comment "<commit url>"`.
 
-## Branch & PR conventions
+## Commit conventions
 
-- Branch name: `issue-N-short-kebab-slug` (e.g. `issue-1-gradle-scaffold`)
-- Commit messages: imperative mood, scoped to the issue (`scaffold gradle multi-module project`)
-- PR title: same as issue title
-- PR body: `Closes #N` + 2-4 bullet test-plan items
-- One issue per PR. If the agent grew scope, split.
+- Commit messages: imperative mood, scoped prefix (`scaffold:`, `feat:`, `fix:`, `docs:`, `infra:`)
+- First line: short summary (under 70 chars)
+- Body: what changed and *why* — link to the issue (`Closes #N`)
+- One issue per commit when feasible; squash inside a worktree before merging if the sub-agent made many intermediate commits
+- For parallel work in worktrees: orchestrator collects each agent's diff, applies it cleanly on `main`, resolves any conflicts before push
 
 ## Briefing rules
 
@@ -160,7 +160,7 @@ When updating the user (the human, not the agent):
 - **Delegating without verification.** Always check before commit.
 - **Delegating understanding.** Don't say "based on what the agent found, do X." Read the output yourself, synthesise, then act.
 - **Long agent chains.** If issue work spans 5+ agent turns, the brief was wrong. Stop, regroup, re-brief.
-- **Agent commits directly to main.** Never. Orchestrator commits.
+- **Agent pushes its own commits.** Never. Orchestrator commits + pushes. Agent reports a dirty worktree, orchestrator inspects and commits.
 - **Parallel agents on overlapping files.** Conflicts will eat the time savings.
 - **Skipping the brief because "it's obvious".** The agent has zero context. Always brief.
 

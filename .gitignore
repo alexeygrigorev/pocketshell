@@ -1,0 +1,54 @@
+# Android / Gradle / IDE ignores — mirrors ssh-auto-forward-android.
+
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+/app/build
+/app/debug
+/app/release
+
+# Shared module build outputs
+/shared/*/build
+
+*.apk
+*.aab
+*.ap_
+*.dex
+
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+*.war
+*.ear
+
+.kotlin/
+
+# Gradle
+.gradle/
+build/
+*/build/
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+*.keystore
+!debug.keystore
+*.jks
+keystore.properties

@@ -73,9 +73,9 @@ Agents never talk to each other directly. The orchestrator is always the messeng
 ## Workflow per issue
 
 1. Orchestrator refines the issue. Acceptance criteria must be specific and verifiable.
-2. Orchestrator launches an implementer agent with a self-contained brief.
-3. Implementer works, then posts a status comment.
-4. Orchestrator launches a reviewer agent, briefing it with the issue number and the implementer's comment URL.
+2. Orchestrator launches an implementer agent in the background with a self-contained brief.
+3. The orchestrator returns control to the user immediately; the agent runs asynchronously.
+4. When notified that the implementer finished, orchestrator launches a reviewer agent (also background) with the issue number and the implementer's comment URL.
 5. Reviewer reads, runs build / tests, posts a review comment.
 6. If `CHANGES REQUESTED`:
    - Orchestrator launches a fresh implementer (no memory between runs) with a brief that includes the rejection comment verbatim
@@ -83,6 +83,42 @@ Agents never talk to each other directly. The orchestrator is always the messeng
 7. If `APPROVED`:
    - Orchestrator runs the [verification checklist](#verification-checklist) one last time
    - Orchestrator commits to main with `Closes #N`, pushes, GitHub auto-closes the issue
+
+## Launching agents — async by default
+
+Every implementer and reviewer launch uses `run_in_background: true`. This is the default, not the exception. Reasons:
+
+- The user must be able to ask questions and redirect work without waiting on any agent
+- The orchestrator keeps a non-blocking loop: while one agent works, the orchestrator can be refining the next issue, answering questions, reviewing another agent's output, or running QA checks
+- The harness notifies the orchestrator automatically when an async agent completes — no polling, no sleeping
+
+Foreground launches are only justified when the orchestrator genuinely needs the agent's output to compose the very next message (rare).
+
+## Parallelism in practice
+
+Async + parallel are two different things. Async lets the orchestrator stay responsive to the user. Parallelism is about running multiple agents at once on different issues.
+
+To run agents in parallel, send multiple `Agent` tool calls in one orchestrator message. Each launches in the background; the orchestrator gets one notification per completion.
+
+### When parallel is safe
+
+- Issues touch entirely different files (different modules, different paths)
+- No issue depends on another's not-yet-merged work
+
+Example from Phase 0 Round 3: `#4 core-ssh`, `#6 core-storage`, `#7 vendor terminal`, `#10 CI workflow`. Each touches a different module path. All four can run in parallel.
+
+### When parallel is NOT safe
+
+- Two issues edit the same file (e.g. both want to modify `settings.gradle.kts` or `gradle/libs.versions.toml`). They will clobber each other's edits in the same working tree.
+- One issue's output is the next issue's input (sequential dependency).
+
+Example: `#2 app module` and `#3 shared scaffolds` both edit `settings.gradle.kts` and `libs.versions.toml`. They run sequentially until git worktree isolation is wired up.
+
+### Future: true isolation
+
+The `Agent` tool supports `isolation: "worktree"` to run each agent in its own git worktree, which would let overlapping-file issues run in parallel safely. This requires `WorktreeCreate` / `WorktreeRemove` hooks in `~/.claude/settings.json` and is not currently configured for this repo. Set up later if Phase 0 wall-clock time becomes painful.
+
+Until then: read the dependency graph, parallelise the non-overlapping issues, sequence the overlapping ones.
 
 ## Briefing rules
 

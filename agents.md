@@ -1,169 +1,216 @@
 # Agent Orchestration
 
-How work on PocketShell is delegated, reviewed, and merged.
+PocketShell uses a three-actor process: orchestrator + implementer + reviewer. The orchestrator (Claude in the main thread) prepares issues, dispatches agents, and ensures the process is followed. Agents never talk to each other directly — they communicate through GitHub issue comments, with the orchestrator as messenger.
 
-## Roles
+## Actors
 
-**Orchestrator** (Claude in the main thread). Plans, delegates, reviews, integrates. Never writes the bulk of feature code directly — instead briefs sub-agents, verifies their output, and commits.
+### Orchestrator (main thread)
 
-**Sub-agent** (Claude launched via the `Agent` tool). Does focused implementation work for one issue at a time. Doesn't see the orchestrator's conversation; needs a self-contained brief every time.
+Owns:
 
-## Responsibility
+- Reading new asks from the user, refining them into well-shaped issues
+- Ensuring each issue has scope, acceptance criteria, file paths, doc links, non-goals
+- Launching the implementer sub-agent with a self-contained brief
+- Launching the reviewer sub-agent once the implementer reports done
+- Relaying review feedback to the implementer (via a fresh implementer run) if changes are requested
+- Running the pre-merge QA gate (build, emulator, Docker)
+- Committing to main and closing the issue after the reviewer approves
+- Keeping this file (`agents.md`) up to date when the process needs to evolve
 
-**The orchestrator is responsible for what gets merged.** An agent's "I successfully implemented X" claim is not enough. The orchestrator must verify X actually works — build, test, read the diff — before commit. Bad merges are the orchestrator's fault, not the agent's.
+Never:
 
-## Default workflow per issue
+- Writes the bulk of implementation code directly (small fixes excepted — see the "When to skip delegation" section)
 
-1. **Pick an issue.** `gh issue view N` to read scope and acceptance criteria.
-2. **Decide isolation.** Use `isolation: "worktree"` when running multiple agents in parallel, or when an agent's work might conflict with other in-flight work. Otherwise let the agent work in the main checkout.
-3. **Brief the agent.** Self-contained prompt: scope, relevant code locations, acceptance criteria, exact file paths, docs to read, what to NOT touch. Always link the issue (`gh issue view N --json url`).
-4. **Agent executes.** Foreground by default. Background only when the orchestrator has genuinely independent work to do meanwhile.
-5. **Verify.** Don't trust the summary. Run the [verification checklist](#verification-checklist).
-6. **Iterate if needed.** Continue the same agent via `SendMessage` for tight corrections; launch a fresh agent if the context is messy.
-7. **Commit directly to `main`.** Orchestrator creates the commit, pushes immediately. No feature branches, no PRs.
-8. **Close the issue** with `gh issue close N --comment "<commit url>"`.
+### Implementer (sub-agent)
 
-## Commit conventions
+Does:
 
-- Commit messages: imperative mood, scoped prefix (`scaffold:`, `feat:`, `fix:`, `docs:`, `infra:`)
-- First line: short summary (under 70 chars)
-- Body: what changed and *why* — link to the issue (`Closes #N`)
-- One issue per commit when feasible; squash inside a worktree before merging if the sub-agent made many intermediate commits
-- For parallel work in worktrees: orchestrator collects each agent's diff, applies it cleanly on `main`, resolves any conflicts before push
+- Reads the issue, linked docs, relevant existing code
+- Writes code and tests in the local working tree
+- Runs the build and tests itself before reporting done
+- Posts a status comment on the issue (`gh issue comment N --body "..."`) with:
+  - List of files changed
+  - Build / test results (paste the last lines of output)
+  - Judgment calls (version choices, naming, scope edges)
+  - Open questions if any
+- If the reviewer rejected a previous attempt: reads the rejection comment first, addresses every item, then posts a new status comment summarising the fixes
+
+Does NOT:
+
+- Commit, push, or close the issue
+- Modify files outside the issue's scope
+- Argue with the reviewer in comments — fix the code, then post a new status
+
+### Reviewer (sub-agent)
+
+Does:
+
+- Reads the implementer's most recent status comment and the actual working-tree diff
+- Runs the build (`./gradlew assembleDebug` or the relevant subcommand) and any tests
+- Checks each acceptance-criteria checkbox on the issue body explicitly
+- Looks for: bugs, missing tests, dead code, scope creep, security issues, style drift, version mismatches, ignored docs
+- Posts a review comment on the issue using one of two clear shapes:
+  - `APPROVED` — orchestrator may commit and close
+  - `CHANGES REQUESTED` — bulleted, specific, each item actionable
+
+Does NOT:
+
+- Commit, push, or close the issue
+- Edit code itself (suggest changes only)
+- Approve without running the build and tests
+
+## Communication
+
+GitHub Issues are the contract. Every artifact lives there:
+
+- Issue body: scope, acceptance criteria with `- [ ]` checkboxes, doc links, non-goals
+- Implementer comments: status reports
+- Reviewer comments: `APPROVED` or `CHANGES REQUESTED`
+- Orchestrator comments: relays, decisions, links to the eventual commit
+
+Agents never talk to each other directly. The orchestrator is always the messenger. This keeps the audit trail complete and observable from the issue page alone.
+
+## Workflow per issue
+
+1. Orchestrator refines the issue. Acceptance criteria must be specific and verifiable.
+2. Orchestrator launches an implementer agent with a self-contained brief.
+3. Implementer works, then posts a status comment.
+4. Orchestrator launches a reviewer agent, briefing it with the issue number and the implementer's comment URL.
+5. Reviewer reads, runs build / tests, posts a review comment.
+6. If `CHANGES REQUESTED`:
+   - Orchestrator launches a fresh implementer (no memory between runs) with a brief that includes the rejection comment verbatim
+   - Loop to step 3
+7. If `APPROVED`:
+   - Orchestrator runs the [verification checklist](#verification-checklist) one last time
+   - Orchestrator commits to main with `Closes #N`, pushes, GitHub auto-closes the issue
 
 ## Briefing rules
 
-A bad brief is the #1 source of bad agent output. Always include:
+A bad brief is the top source of bad output. Always include in the implementer brief:
 
-- **Issue number and title** — canonical scope
-- **Relevant docs** — e.g. for Phase 0 issues: `docs/architecture.md`, `docs/decisions.md`
-- **Exact file paths** when modifying existing code (not "edit the build file" — `app/build.gradle.kts`)
-- **Acceptance criteria** verbatim from the issue
-- **Non-goals** — "don't refactor anything outside this issue's scope"
-- **What to commit vs leave** — usually: leave commit/PR for the orchestrator
-- **Reference projects** when the work is an adaptation — e.g. for SSH extraction: `/home/alexey/git/ssh-auto-forward-android/`
+- Issue number and URL
+- Project context — link `CLAUDE.md`, relevant `docs/*.md`
+- Reference code — exact paths in other repos when adapting
+- Scope and acceptance criteria, verbatim from the issue
+- Exact file paths to create or modify
+- Non-goals — what to NOT touch
+- Required deliverable: `gh issue comment N --body "..."`
+- Hard rule: do not commit, do not push, leave the working tree dirty
+
+For the reviewer brief, always include:
+
+- Issue number and URL
+- The implementer's most recent comment URL
+- Instruction to run the build and tests
+- Instruction to verify each acceptance-criteria checkbox
+- Required deliverable: a single review comment with `APPROVED` or `CHANGES REQUESTED`
+- Hard rule: do not edit code, do not commit, do not close the issue
 
 Terse command-style prompts produce shallow work. Brief like a smart colleague who hasn't seen the conversation.
 
-## Choosing the sub-agent type
+## Issue quality (orchestrator's responsibility)
 
-| Task | `subagent_type` |
-|---|---|
-| Read-only research, "where is X", finding files | `Explore` |
-| Multi-step implementation work | `general-purpose` |
-| Designing implementation strategy before coding | `Plan` |
-| Reviewing a completed change | `code-reviewer` (if available) |
+A bad issue produces a bad implementation. Every issue must have:
 
-Default for Phase 0–4 implementation: `general-purpose`.
+- Title: imperative, specific
+- Scope: bulleted list of files or behaviours to add or change
+- Acceptance criteria: `- [ ]` checklist, machine-verifiable where possible
+- Non-goals: what's explicitly out of scope
+- Doc links: relevant architecture / design / decisions docs
+- Reference code: paths in other repos that show the pattern
 
-## Dependency analysis (when to parallelize)
+If the implementer or reviewer comes back asking "what does this mean?" — fix the issue first, then re-launch.
 
-Before launching agents, study the issue dependency graph. Many issues are independent and can run in parallel using worktrees, cutting wall-clock time dramatically.
+## Dependency analysis (when to parallelise)
 
-### Example: Phase 0 graph
+Study the issue dependency graph before launching. Many issues are independent and could run in parallel if isolation is available.
+
+Phase 0 graph:
 
 ```
 #1 Gradle scaffold (root)
-├── #2 App module
-│   └── #10 CI workflow
-└── #3 Shared module scaffolds
-    ├── #4 core-ssh ──── #5 core-portfwd
-    ├── #6 core-storage
-    └── #7 Vendor terminal ── #8 Compose adapter
-                                └── (with #2, #4) #9 Proof-of-life
++-- #2 App module
+|   +-- #10 CI workflow
++-- #3 Shared module scaffolds
+    +-- #4 core-ssh ---- #5 core-portfwd
+    +-- #6 core-storage
+    +-- #7 Vendor terminal ---- #8 Compose adapter
+                                +-- (with #2, #4) #9 Proof-of-life
 ```
 
-After #1 ships, **#2 and #3 run in parallel** (one agent each, separate worktrees).
+After #1 ships, #2 and #3 are independent except for both editing `settings.gradle.kts`. After they ship, #4 / #6 / #7 / #10 are four independent streams.
 
-After #2 and #3 both ship: **#4, #6, #7, #10 all run in parallel** — four streams. Then #5 follows #4, #8 follows #7, and #9 closes the phase once #2, #4, #8 are merged.
+### Sequential vs parallel
 
-That cuts a 10-step serial chain to ~4 sequential rounds of mostly parallel work.
+Parallel work needs isolation. The Agent tool's built-in `isolation: "worktree"` is not currently configured for this repo, so we run sequentially. To unlock parallel runs later, configure `WorktreeCreate`/`WorktreeRemove` hooks in `~/.claude/settings.json`. Until then:
 
-### How to spot parallelism
+- One implementer at a time
+- One reviewer at a time
+- One issue end-to-end before starting the next
 
-- Different modules → usually parallel
-- Same module, different files → maybe parallel (verify no Gradle / AndroidManifest conflicts)
-- Same file → never parallel
+### Spotting parallelism (for when worktrees come online)
 
-### How to launch parallel agents
+- Different modules: usually parallel
+- Same module, different files: maybe (verify no Gradle / manifest conflicts)
+- Same file: never parallel
 
-In **one orchestrator message**, multiple `Agent` tool calls:
+## Verification checklist (orchestrator's pre-merge gate)
 
-```
-Agent({description: "Issue #4 core-ssh", isolation: "worktree", prompt: ...})
-Agent({description: "Issue #6 core-storage", isolation: "worktree", prompt: ...})
-Agent({description: "Issue #7 Vendor terminal", isolation: "worktree", prompt: ...})
-```
-
-Each agent gets its own worktree, can't conflict with the others. Orchestrator collects results when they finish.
-
-Verification still happens serially after merge — one PR at a time.
-
-## Parallel agents — limits
-
-**Don't parallelize:**
-
-- Two issues touching the same module (race on Gradle files, etc.)
-- Sequential dependencies (issue B depends on issue A's output)
-- Anything where verification of one would block the other
-- More than ~4 agents at once — verification queue gets unwieldy
-
-## Verification checklist
-
-After every agent run, before committing:
+Even after the reviewer approves, the orchestrator runs:
 
 - [ ] `git status` shows the expected file list — no surprises
 - [ ] `git diff` reads sensibly — no hallucinated code, no scope creep, no commented-out junk
-- [ ] Build succeeds: `./gradlew assembleDebug` (once Phase 0 ships) or relevant subcommand
-- [ ] Tests pass (if any exist for the touched code)
-- [ ] No accidental commits of secrets, generated files (`build/`, `.gradle/`, `local.properties`)
-- [ ] Issue's acceptance criteria are *demonstrably* met, not just claimed
-- [ ] **For UI changes**: installed on the Android emulator and visually compared with the matching mockup at `docs/mockups/<screen>.html`
-- [ ] **For SSH / tmux / agent / usage changes**: relevant integration test against the Docker remote server passes
+- [ ] Build succeeds: `./gradlew assembleDebug` (once #2 ships) or the relevant subcommand
+- [ ] Tests pass for touched code
+- [ ] No accidental commits of secrets or generated files (`build/`, `.gradle/`, `local.properties`)
+- [ ] Issue's acceptance criteria are demonstrably met, not just claimed
+- [ ] For UI changes: installed on the Android emulator and compared with the matching mockup at `docs/mockups/<screen>.html`
+- [ ] For SSH / tmux / agent / usage changes: relevant Testcontainers integration test passes
 
-If any check fails: **don't commit.** Re-engage the agent with the specific failure, or do the fix directly if it's trivial.
+If any check fails: do not commit. Re-engage the implementer with the specific failure, or do the fix directly if it is trivial.
 
 ## Quality assurance
 
 Two emulation surfaces let the orchestrator verify changes without touching real devices or hosts:
 
-- **Android emulator** for UI / visual validation
-- **Docker remote server** (sshd + tmux + agent CLIs + helper tools) for SSH / tmux / agent-detection / usage tests
+- Android emulator for UI / visual validation
+- Docker remote server (sshd + tmux + agent CLIs + helper tools) for SSH / tmux / agent-detection / usage tests
 
-Both are first-class. Every PR that touches the relevant layer is validated against the corresponding surface before merge. The orchestrator runs this — it is not delegated to the sub-agent. Sub-agents may write the test, but the orchestrator runs it and judges the result.
+Both are first-class. Every PR that touches the relevant layer is validated before merge. The orchestrator runs this — it is not delegated. Sub-agents may write the test; the orchestrator runs it and judges the result.
 
-Full setup, image build instructions, fixture conventions: [docs/testing.md](docs/testing.md)
+Full setup: [docs/testing.md](docs/testing.md)
+
+## Commit conventions
+
+- Imperative mood, scoped prefix (`scaffold:`, `feat:`, `fix:`, `docs:`, `infra:`)
+- First line under 70 chars
+- Body explains what changed and why, links the issue with `Closes #N`
+- One issue per commit when feasible
+- Commit only after reviewer `APPROVED` and orchestrator's verification
 
 ## When to skip delegation
 
-Some work is faster done directly than briefing an agent:
+Some work is faster done directly than briefing an implementer:
 
 - Trivial single-line edits
 - Reading and summarising a file
-- Running a one-shot CLI command
-- Reviewing an agent's output
-- Editing docs (the orchestrator wrote them; they have context)
+- One-shot CLI commands
+- Reviewing an agent's output (this is the orchestrator's job)
+- Editing docs (the orchestrator wrote them; has context)
+- Renaming files, fixing imports, dependency bumps without behavioural change
 
-Rule of thumb: if briefing the agent would take longer than just doing it, just do it.
+Rule of thumb: if briefing the agent would take longer than just doing it, just do it. Note the bypass in a one-line commit message.
 
-## Communication style
+## Anti-patterns
 
-When updating the user (the human, not the agent):
-
-- State results, not narration
-- "Issue #1 done, PR opened: <url>" — not "I'm going to delegate this to an agent and then verify..."
-- If an agent failed: say what failed and what you'll do, briefly
-- If you need a decision: ask one specific question, not three options
-
-## Anti-patterns to avoid
-
-- **Delegating without verification.** Always check before commit.
-- **Delegating understanding.** Don't say "based on what the agent found, do X." Read the output yourself, synthesise, then act.
-- **Long agent chains.** If issue work spans 5+ agent turns, the brief was wrong. Stop, regroup, re-brief.
-- **Agent pushes its own commits.** Never. Orchestrator commits + pushes. Agent reports a dirty worktree, orchestrator inspects and commits.
-- **Parallel agents on overlapping files.** Conflicts will eat the time savings.
-- **Skipping the brief because "it's obvious".** The agent has zero context. Always brief.
+- Skipping the reviewer because "this issue is small." Run the reviewer on every issue — speed gains aren't worth the audit-trail loss.
+- Implementer committing or pushing. Never. Orchestrator commits.
+- Reviewer approving without running the build. Reject the review; ask reviewer to actually run things.
+- Reviewer editing code. They suggest; implementer implements.
+- Agents commenting on issues for each other to read directly without orchestrator mediation. Not allowed.
+- Long agent chains. If an issue takes 5+ implementer rounds, the issue scope is wrong. Stop, re-scope, re-launch.
+- Approving an issue whose acceptance criteria changed mid-flight. Update the issue body first, restart.
 
 ## Process evolution
 
-This file is the playbook, not scripture. If a pattern emerges (a kind of brief that works well, a failure mode that keeps recurring, a verification step that catches bugs) — update this file. The orchestrator owns the process as much as the code.
+This file is the playbook, not scripture. If a pattern emerges (a brief shape that consistently works, a failure mode that recurs, a verification step that catches bugs early), update this file. The orchestrator owns the process as much as the code.

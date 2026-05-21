@@ -6,12 +6,12 @@ The full alternative-to-typing strategy. PocketShell reduces keyboard reliance t
 
 | Surface | Purpose | Trigger |
 |---|---|---|
-| **Prompt Composer** | Voice/text composing for agent prompts | Tap mic FAB on session view |
-| **Inline dictation** | Voice straight into the terminal at cursor | Tap mic icon in the key bar |
-| **Key bar** | Single special keys + sticky modifiers (Esc, Tab, Ctrl, Alt, arrows) | Always visible above the system keyboard |
-| **Command chips / snippets** | Whole commands or prompt templates | Always-visible chip row when keyboard is down |
+| Prompt Composer | Voice/text composing for agent prompts | Tap mic FAB on session view |
+| Inline dictation | Voice straight into the terminal at cursor | Tap mic icon in the key bar |
+| Key bar | Single special keys + sticky modifiers (Esc, Tab, Ctrl, Alt, arrows) | Always visible above the system keyboard |
+| Command chips / snippets | Whole commands or prompt templates | Always-visible chip row when keyboard is down |
 
-For tmux operations (detach, switch sessions, etc.) PocketShell uses **native UI controls** rather than a chord palette — see [Quick navigation](#quick-navigation-replaces-chord-palette) below.
+For tmux operations (detach, switch sessions, etc.) PocketShell uses native UI controls rather than a chord palette — see [Quick navigation](#quick-navigation-replaces-chord-palette) below.
 
 ---
 
@@ -19,7 +19,7 @@ For tmux operations (detach, switch sessions, etc.) PocketShell uses **native UI
 
 ### Engine
 
-**Whisper via OpenAI Audio Transcriptions API.** Existing `openai-transcribe` skill is the integration reference.
+Whisper via OpenAI Audio Transcriptions API. Existing `openai-transcribe` skill is the integration reference.
 
 Trade-offs accepted:
 - Per-request cost (~$0.006/min)
@@ -57,7 +57,7 @@ Configuration: API key stored in Android Keystore. Future: support self-hosted `
 
 Behaviours:
 - Bottom sheet, modal over terminal (terminal dims behind)
-- Big mic button: **tap to start, tap again to stop**; auto-stop after 5s silence
+- Big mic button: tap to start, tap again to stop; auto-stop after 5s silence
 - Live partial transcription streams into the text area as you speak
 - Text area is editable — tap any word to fix before sending
 - `Send` writes to PTY without newline; `Send + ↵` sends with Enter; `Snippets` opens the saved-prompt library
@@ -74,7 +74,7 @@ Used for: `git status`, file names mid-command, dictating an `ssh` target.
 
 ## Key bar
 
-**Always visible** above the system keyboard, only while the keyboard is up. Eight slots:
+Always visible above the system keyboard, only while the keyboard is up. Eight slots:
 
 ```
 ├─────────────────────────────────────────┤
@@ -87,9 +87,9 @@ Used for: `git status`, file names mid-command, dictating an `ssh` target.
 ```
 
 Interactions:
-- **Tap** a modifier (Ctrl/Alt) → next key sent with modifier; modifier auto-releases
-- **Double-tap** a modifier → sticky (stays on until tapped again or auto-releases after timeout)
-- **Tap** Esc/Tab/arrows → sends key immediately
+- Tap a modifier (Ctrl/Alt) → next key sent with modifier; modifier auto-releases
+- Double-tap a modifier → sticky (stays on until tapped again or auto-releases after timeout)
+- Tap Esc/Tab/arrows → sends key immediately
 
 Active modifiers light up in the accent colour. Bar height ~40dp. For Ctrl+C, Ctrl+R, etc. — tap `Ctrl` then the letter (two taps).
 
@@ -124,7 +124,7 @@ Distinct from key bar entries: chips send literal text strings; key bar sends ke
 
 ## Screen real estate
 
-**Keyboard up:**
+Keyboard up:
 
 ```
 ┌────────────────────────────┐
@@ -138,7 +138,7 @@ Distinct from key bar entries: chips send literal text strings; key bar sends ke
 └────────────────────────────┘
 ```
 
-**Keyboard down:**
+Keyboard down:
 
 ```
 ┌────────────────────────────┐
@@ -155,9 +155,9 @@ Distinct from key bar entries: chips send literal text strings; key bar sends ke
 ## Settings
 
 Single "Input methods" settings screen with sub-pages:
-- **Voice**: Whisper API key, language, auto-stop silence threshold
-- **Key bar**: which keys appear, ordering
-- **Snippets**: organize, share, per-host
+- Voice: Whisper API key, language, auto-stop silence threshold
+- Key bar: which keys appear, ordering
+- Snippets: organize, share, per-host
 
 ---
 

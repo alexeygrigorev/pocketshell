@@ -2,7 +2,7 @@
 
 ## Composition layout
 
-PocketShell is a new app. It does **not** fork `ssh-auto-forward-android`. Instead, we extract the existing app's reusable parts into shared Gradle modules that both apps consume.
+PocketShell is a new app. It does not fork `ssh-auto-forward-android`. Instead, we extract the existing app's reusable parts into shared Gradle modules that both apps consume.
 
 ```
 ssh-auto-forward-android/   (existing app, slimmed to shell + UI)
@@ -20,11 +20,11 @@ shared/                     (sibling repo or sibling folder, TBD)
 
 Both apps depend on the shared modules. Neither app reaches into the other.
 
-**Migration approach:** swap JSch → sshj *during* the extraction. Doing it later, after both apps depend on the old API, is much more expensive.
+Migration approach: swap JSch → sshj *during* the extraction. Doing it later, after both apps depend on the old API, is much more expensive.
 
 ## App identity
 
-- Display name: **PocketShell**
+- Display name: PocketShell
 - Package: `com.pocketshell.app`
 
 ## Tech stack
@@ -33,20 +33,20 @@ Both apps depend on the shared modules. Neither app reaches into the other.
 |---|---|---|
 | Language | Kotlin | Native Android, best interop |
 | UI | Jetpack Compose | Declarative, matches the dynamic per-pane rendering model |
-| SSH | **sshj** (not JSch) | Actively maintained, ed25519, modern KEX. JSch is effectively abandoned. |
+| SSH | sshj (not JSch) | Actively maintained, ed25519, modern KEX. JSch is effectively abandoned. |
 | Terminal emulator | Vendored Termux `terminal-emulator` + `terminal-view` | Battle-tested xterm-256color. Writing a VT emulator from scratch is a 6-month detour. |
 | Tmux integration | `tmux -CC` control mode | Structured protocol — see "Three load-bearing decisions" below. |
 | Storage | Room (SQLite) | Standard. Already in use in `ssh-auto-forward-android`. |
 | DI | Hilt | Standard. Already in use. |
 | Background | Foreground service | Required to keep SSH connections alive; existing app already has this. |
-| Speech-to-text | **Whisper via OpenAI API** | Better than Android `SpeechRecognizer` on technical content. See [input-methods.md](input-methods.md). |
+| Speech-to-text | Whisper via OpenAI API | Better than Android `SpeechRecognizer` on technical content. See [input-methods.md](input-methods.md). |
 | Min SDK | API 26 (Android 8.0) | Required for foreground services + NotificationChannel |
 
 ## Three load-bearing decisions
 
 These drive the rest of the design. Get them wrong and the app doesn't feel native.
 
-### 1. Tmux **control mode** (`tmux -CC`), not screen scraping
+### 1. Tmux control mode (`tmux -CC`), not screen scraping
 
 This is the single most important call. iTerm2's tmux integration uses `tmux -CC` — a structured protocol where tmux emits `%output`, `%session-changed`, `%window-add`, `%layout-change`, etc. Benefits:
 
@@ -66,9 +66,9 @@ Tmux's native split layout is unreadable on a phone. With control mode we know a
 
 ## Server-side scheduler (locked decision — see decisions.md)
 
-Recurring tmux-send jobs run **on each host** via `tmuxctl jobs daemon`, not on the phone. Jobs survive phone offline / sleep / network drops.
+Recurring tmux-send jobs run on each host via `tmuxctl jobs daemon`, not on the phone. Jobs survive phone offline / sleep / network drops.
 
-**Consequence — host bootstrap is now a real UX concern:**
+Consequence — host bootstrap is now a real UX concern:
 
 When you add a host, PocketShell should:
 
@@ -83,10 +83,10 @@ This needs to be first-class onboarding, not a hidden prerequisite. If we skip t
 
 | Screen | Purpose |
 |---|---|
-| **Workspace dashboard** (home) | Hosts (favourites + recent), all tmux sessions across connected hosts sorted by activity, running jobs |
-| **Session view** | Full-screen terminal for one pane. Swipe L/R = next/prev pane. Swipe up = window switcher. Swipe down = session switcher. Top breadcrumb = `host › session › window › pane`. |
-| **Quick send panel** | Send snippet or schedule recurring (delegates to remote `tmuxctl jobs add`) |
-| **Port panel** | Slide-in panel on a host — the existing `ssh-auto-forward-android` table, absorbed |
-| **Connection setup** | SSH config import, key gen + push via paste/QR, biometric unlock for passphrases |
+| Workspace dashboard (home) | Hosts (favourites + recent), all tmux sessions across connected hosts sorted by activity, running jobs |
+| Session view | Full-screen terminal for one pane. Swipe L/R = next/prev pane. Swipe up = window switcher. Swipe down = session switcher. Top breadcrumb = `host › session › window › pane`. |
+| Quick send panel | Send snippet or schedule recurring (delegates to remote `tmuxctl jobs add`) |
+| Port panel | Slide-in panel on a host — the existing `ssh-auto-forward-android` table, absorbed |
+| Connection setup | SSH config import, key gen + push via paste/QR, biometric unlock for passphrases |
 
 Detailed mockups live in `mockups/` (TBD — see roadmap).

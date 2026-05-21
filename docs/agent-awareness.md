@@ -18,8 +18,8 @@ We may link from one to the other later ("search this conversation across all hi
 
 Two complementary heuristics, run together:
 
-1. **Cwd + recent file modification.** From the active pane's `pwd`, derive expected JSONL paths for each known agent. Pick the most-recently-modified file within the last few minutes.
-2. **Process scan.** `ps` on the pane's process tree. If `claude` / `codex` / `opencode` appears, confirm the detection.
+1. Cwd + recent file modification. From the active pane's `pwd`, derive expected JSONL paths for each known agent. Pick the most-recently-modified file within the last few minutes.
+2. Process scan. `ps` on the pane's process tree. If `claude` / `codex` / `opencode` appears, confirm the detection.
 
 If both miss → no Conversation tab. Silent.
 
@@ -90,7 +90,7 @@ Behaviours:
 
 - SSH `tail -f <path>` for JSONL files, stream parsed in Kotlin
 - For OpenCode SQLite: SFTP fetch on detection, then periodic re-fetch (poll every 5–10s)
-- Parsers live in a new shared module **`core-agents`** so they're unit-testable without an SSH connection
+- Parsers live in a new shared module `core-agents` so they're unit-testable without an SSH connection
 - Each parser produces a normalized `ConversationEvent` stream (user message, assistant message, tool call, tool result)
 - Conversation view consumes that stream — agnostic to which agent produced it
 

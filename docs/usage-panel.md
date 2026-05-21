@@ -4,7 +4,7 @@ Provider quota tracking for Claude Code, Codex, OpenCode, and other agents — s
 
 ## Key principle: zero credentials on the phone
 
-**PocketShell never holds Anthropic / OpenAI / GitHub credentials.** All usage data is fetched server-side over SSH by invoking an existing tool on the host (e.g. `heru usage --json`) and parsing the result. The phone is a viewer; the host is the source of truth.
+PocketShell never holds Anthropic / OpenAI / GitHub credentials. All usage data is fetched server-side over SSH by invoking an existing tool on the host (e.g. `heru usage --json`) and parsing the result. The phone is a viewer; the host is the source of truth.
 
 Consequences:
 - No OAuth flow in the app
@@ -16,8 +16,8 @@ Consequences:
 
 Two sibling tools already implement this concept:
 
-- **`heru usage`** — polls provider quota APIs (Anthropic OAuth, ChatGPT, GitHub Copilot). Normalizes to a common shape per provider. Has a `--json` flag.
-- **`litehive status`** — tracks local invocation success/failure counts per engine.
+- `heru usage` — polls provider quota APIs (Anthropic OAuth, ChatGPT, GitHub Copilot). Normalizes to a common shape per provider. Has a `--json` flag.
+- `litehive status` — tracks local invocation success/failure counts per engine.
 
 PocketShell delegates to whichever the user has installed. Same composition pattern as `tmuxctl` (server-side daemon, PocketShell is the mobile frontend).
 
@@ -34,9 +34,9 @@ Per provider, one card with:
 
 | Where | What |
 |---|---|
-| **Usage screen** | Full per-provider cards with both windows + details. Pull-to-refresh. |
-| **Dashboard** | Compact strip near top — one row per provider: name, status dot, percent of the most-constraining window |
-| **Session row badge** | Warning chip if the agent running in that session is blocked or near the limit |
+| Usage screen | Full per-provider cards with both windows + details. Pull-to-refresh. |
+| Dashboard | Compact strip near top — one row per provider: name, status dot, percent of the most-constraining window |
+| Session row badge | Warning chip if the agent running in that session is blocked or near the limit |
 
 ## Distribution model
 

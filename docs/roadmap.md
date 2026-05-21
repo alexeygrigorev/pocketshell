@@ -7,7 +7,7 @@ Rough sizing — wall-clock estimates assume one developer working steadily.
 Goal: a scaffold both apps can build on.
 
 - Set up the `shared/` repo (or folder) with Gradle module structure
-- Extract `core-ssh` from `ssh-auto-forward-android`, **swap JSch → sshj** during the move
+- Extract `core-ssh` from `ssh-auto-forward-android`, swap JSch → sshj during the move
 - Extract `core-portfwd`, `core-storage`
 - Scaffold empty `core-tmux`, `core-terminal`, `ui-kit`
 - Vendor Termux `terminal-emulator` + `terminal-view` into `core-terminal`
@@ -20,14 +20,14 @@ Goal: even *without* tmux awareness, the terminal experience must clear the Term
 
 - Build `ui-kit` core components (`HostCard`, `Breadcrumb`, `CommandChip`, `StatusDot`, `KeyBar`, `MicButton`)
 - Termius design tokens applied throughout
-- **Key bar** above keyboard (Esc/Tab/Ctrl/Alt/arrows — 8 slots, no chord palette per [D18](decisions.md))
-- **Voice input**: Whisper integration, prompt composer bottom sheet, inline dictation via mic in key bar
+- Key bar above keyboard (Esc/Tab/Ctrl/Alt/arrows — 8 slots, no chord palette per [D18](decisions.md))
+- Voice input: Whisper integration, prompt composer bottom sheet, inline dictation via mic in key bar
 - Command chips above keyboard, snippet library (per-host)
 - Smart selection (paths, URLs, errors → tap to copy)
 - Breadcrumb path bar (parses `pwd` from PTY)
 - Host management screens (reuse / adapt from `ssh-auto-forward-android`)
 
-**Checkpoint:** dogfood for a few days. Does it beat Termius for your workflow? If not, fix before continuing.
+Checkpoint: dogfood for a few days. Does it beat Termius for your workflow? If not, fix before continuing.
 
 ## Phase 2 — Tmux control mode (3–4 weeks)
 
@@ -45,8 +45,8 @@ Goal: the moment it stops being "another SSH client."
 - Recurring jobs (delegates to remote `tmuxctl jobs add/list/edit`)
 - Host bootstrap: detect `tmuxctl`, offer one-tap install, offer systemd user unit
 - Quick-send presets per session
-- **Agent awareness**: `core-agents` module with Claude Code / Codex / OpenCode parsers; conversation tab on the session view; hint chip when an agent is detected. See [agent-awareness.md](agent-awareness.md).
-- **Usage panel**: `core-usage` module wrapping `heru usage --json` over SSH; per-provider cards with short/long windows; dashboard widget; session-row blocked badges. See [usage-panel.md](usage-panel.md).
+- Agent awareness: `core-agents` module with Claude Code / Codex / OpenCode parsers; conversation tab on the session view; hint chip when an agent is detected. See [agent-awareness.md](agent-awareness.md).
+- Usage panel: `core-usage` module wrapping `heru usage --json` over SSH; per-provider cards with short/long windows; dashboard widget; session-row blocked badges. See [usage-panel.md](usage-panel.md).
 - Agent monitoring chips (build/deploy/training status surfaced on dashboard)
 
 ## Phase 4 — Polish (ongoing)

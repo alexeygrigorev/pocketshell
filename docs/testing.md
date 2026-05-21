@@ -2,8 +2,8 @@
 
 Two emulation surfaces let us test PocketShell end-to-end without touching real devices or real hosts:
 
-1. **Android emulator** — runs the app, validates UI/UX, exercises Compose interactions
-2. **Docker remote server** — emulates the SSH target, with tmux + agents + helper tools installed
+1. Android emulator — runs the app, validates UI/UX, exercises Compose interactions
+2. Docker remote server — emulates the SSH target, with tmux + agents + helper tools installed
 
 Together they cover the full feature surface without leaving the dev machine.
 
@@ -15,7 +15,7 @@ Standard Android Studio AVDs. Recommended set:
 
 | AVD | API | Why |
 |---|---|---|
-| **Pixel 7** | 34 (Android 14) | Matches design target (412 × 915 dp, same as mockups in `docs/mockups/`) |
+| Pixel 7 | 34 (Android 14) | Matches design target (412 × 915 dp, same as mockups in `docs/mockups/`) |
 | Pixel 7 | 26 (Android 8.0) | Minimum supported; spot-check before releases |
 
 ### Running
@@ -49,7 +49,7 @@ For visual changes:
 
 ## Docker remote server
 
-The remote-side target for SSH, tmux, port-forwarding, agent detection, and usage panel tests. Image is built **layered** so different phases pull in different surfaces:
+The remote-side target for SSH, tmux, port-forwarding, agent detection, and usage panel tests. Image is built layered so different phases pull in different surfaces:
 
 | Tag | Adds | Used by |
 |---|---|---|
@@ -82,7 +82,7 @@ RUN apk add --no-cache tmux python3 py3-pip \
 
 `Dockerfile.agents` adds the three coding agents and the helper tools. Two ways to populate:
 
-**Option A — install fresh in the container (CI default).** Pin versions. No credentials. Tests use fixtures.
+Option A — install fresh in the container (CI default). Pin versions. No credentials. Tests use fixtures.
 
 ```dockerfile
 FROM pocketshell-test:tmux
@@ -97,7 +97,7 @@ RUN curl -L https://opencode.ai/install | bash
 RUN pip install --break-system-packages heru agent-log-explorer
 ```
 
-**Option B — bind-mount your local install (local dev only — never CI).**
+Option B — bind-mount your local install (local dev only — never CI).
 
 ```bash
 docker run \
@@ -107,7 +107,7 @@ docker run \
   pocketshell-test:agents
 ```
 
-This mirrors your real setup including configured providers — fast for local debugging, **never use in CI** because credentials would leak.
+This mirrors your real setup including configured providers — fast for local debugging, never use in CI because credentials would leak.
 
 ### Fixture JSONLs for agent tests
 
@@ -172,7 +172,7 @@ Manual emulator smoke testing stays in the orchestrator's loop.
 
 ## Orchestrator's pre-merge QA checkpoint
 
-Before merging any PR, the orchestrator runs **at minimum**:
+Before merging any PR, the orchestrator runs at minimum:
 
 1. `./gradlew assembleDebug` — does it build?
 2. `./gradlew check` — do unit tests pass?

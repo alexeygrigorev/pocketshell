@@ -35,19 +35,19 @@ The app should assume users are running coding agents, automation agents, remote
 - Persistent monitoring: logs, running tasks, streaming output, build/deploy status — without re-typing commands
 - Session roles / tags: coding agent, deploy, monitoring, logs, shell, experiments
 - Quick actions: restart agent, send predefined commands, open logs, reconnect, copy output, share session snippets
-- **Agent-aware conversation view**: when Claude Code, Codex, or OpenCode is running in a pane, surface a clean conversation read of *this session* by tailing the agent's JSONL log — solves the "I can't scroll back to what the agent said" problem on mobile. See [agent-awareness.md](agent-awareness.md).
-- **Usage panel**: per-provider quota tracking via server-side tools (e.g. `heru usage --json`) invoked over SSH. Zero credentials on the phone. See [usage-panel.md](usage-panel.md).
+- Agent-aware conversation view: when Claude Code, Codex, or OpenCode is running in a pane, surface a clean conversation read of *this session* by tailing the agent's JSONL log — solves the "I can't scroll back to what the agent said" problem on mobile. See [agent-awareness.md](agent-awareness.md).
+- Usage panel: per-provider quota tracking via server-side tools (e.g. `heru usage --json`) invoked over SSH. Zero credentials on the phone. See [usage-panel.md](usage-panel.md).
 
 ### 4. Mobile-friendly terminal interaction (voice-first)
 
-Typing on phones is painful — reduce keyboard usage as much as possible. **Voice is a first-class input method**, not an afterthought: tap to navigate, voice to compose. See [input-methods.md](input-methods.md) for the full strategy.
+Typing on phones is painful — reduce keyboard usage as much as possible. Voice is a first-class input method, not an afterthought: tap to navigate, voice to compose. See [input-methods.md](input-methods.md) for the full strategy.
 
-- **Voice → text** for agent prompts (Whisper API, tap-to-toggle, bottom-sheet prompt composer with live transcription)
-- **Key bar** above the keyboard for Esc / Tab / Ctrl / Alt / arrows (the keys phones don't have)
-- **Chord palette** for tmux/shell sequences (`Ctrl+B D`, `Ctrl+C`, `Ctrl+R`) — one tap instead of fighting the keyboard
-- **Command chips** above keyboard (ls, cd, git status, tmux ls, clear) — context-aware and customizable
-- **Snippet library** (SSH commands, tmux workflows, deploy commands, agent startup scripts)
-- **Touch selection**: smart text selection, block selection, code detection, tap-to-copy paths/errors
+- Voice → text for agent prompts (Whisper API, tap-to-toggle, bottom-sheet prompt composer with live transcription)
+- Key bar above the keyboard for Esc / Tab / Ctrl / Alt / arrows (the keys phones don't have)
+- Chord palette for tmux/shell sequences (`Ctrl+B D`, `Ctrl+C`, `Ctrl+R`) — one tap instead of fighting the keyboard
+- Command chips above keyboard (ls, cd, git status, tmux ls, clear) — context-aware and customizable
+- Snippet library (SSH commands, tmux workflows, deploy commands, agent startup scripts)
+- Touch selection: smart text selection, block selection, code detection, tap-to-copy paths/errors
 
 ### 5. Session-centric home screen
 
@@ -73,12 +73,12 @@ Most SSH apps are desktop terminal emulators squeezed onto mobile — keyboard-h
 
 ## Positioning
 
-**Short:** A mobile-first SSH and tmux client designed for AI agent workflows.
+Short: A mobile-first SSH and tmux client designed for AI agent workflows.
 
-**Long:** A modern Android SSH client that makes remote terminals usable on mobile through touch-first navigation, persistent tmux sessions, and optimized workflows for AI agents and remote development.
+Long: A modern Android SSH client that makes remote terminals usable on mobile through touch-first navigation, persistent tmux sessions, and optimized workflows for AI agents and remote development.
 
 ## Inspiration & inputs
 
-- **tmuxctl** — the existing CLI workflow (recency-sorted sessions, attach-by-index, `:current`, recurring jobs). PocketShell should incorporate these patterns directly.
-- **ssh-auto-forward** — port-forwarding semantics (sibling folder).
-- **Termius** — the bar for "premium" terminal UX on Android. PocketShell should match its polish.
+- tmuxctl — the existing CLI workflow (recency-sorted sessions, attach-by-index, `:current`, recurring jobs). PocketShell should incorporate these patterns directly.
+- ssh-auto-forward — port-forwarding semantics (sibling folder).
+- Termius — the bar for "premium" terminal UX on Android. PocketShell should match its polish.

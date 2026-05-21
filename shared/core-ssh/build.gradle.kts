@@ -24,6 +24,19 @@ android {
         jvmTarget = "17"
     }
 
+    // Issue #41: integration tests (Testcontainers, Docker-driven) live in
+    // a sibling directory to the pure unit tests so they can be split out
+    // into a separate Gradle task. We attach the directory to the `test`
+    // source set here so AGP compiles them together against the same
+    // classpath, but the `integrationTest` task below restricts execution
+    // to the *IntegrationTest classes, and the standard unit-test tasks
+    // exclude them.
+    sourceSets {
+        getByName("test") {
+            java.srcDir("src/integrationTest/java")
+        }
+    }
+
     testOptions {
         // Unit tests run as real host-JVM tests (not Robolectric). They use
         // Testcontainers, which talks to the local Docker daemon, so they
@@ -49,6 +62,12 @@ android {
                     .orElse(System.getenv("DOCKER_API_VERSION") ?: "1.45")
                     .get()
                 test.systemProperty("api.version", apiVersion)
+
+                // Issue #41: keep the standard unit-test tasks fast and
+                // Docker-free by excluding the Testcontainers-backed
+                // integration tests. They run under the dedicated
+                // `integrationTest` task instead.
+                test.exclude("**/*IntegrationTest.class")
             }
         }
     }
@@ -67,10 +86,52 @@ dependencies {
     api(libs.kotlinx.coroutines.core)
 
     // Unit + integration tests run on the host JVM via the standard
-    // `testImplementation` configuration.
+    // `testImplementation` configuration. The integration-test source set
+    // is attached to `test` above, so the same configuration covers both.
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.testcontainers)
     // sshj needs a logger at test time too; reuse the nop binding.
     testRuntimeOnly(libs.slf4j.nop)
+}
+
+// Issue #41: a dedicated task for the Docker-driven integration tests.
+// Reuses the compiled output and classpath of the `testReleaseUnitTest`
+// task — same JVM, same dependencies — but only runs *IntegrationTest
+// classes and is *not* wired into `check`, so contributors without Docker
+// can still run `./gradlew check` locally. CI runs it explicitly via the
+// `integration` job in `.github/workflows/tests.yml`.
+project.afterEvaluate {
+    tasks.register<Test>("integrationTest") {
+        group = "verification"
+        description = "Runs Testcontainers-backed integration tests (requires Docker)."
+
+        // Reuse the same compiled test classes + classpath that AGP wires
+        // up for the release unit-test variant. We register the task
+        // inside `afterEvaluate` so the `testReleaseUnitTest` task exists
+        // at the point we read its `testClassesDirs` / `classpath` —
+        // AGP creates the variant Test tasks during its own
+        // afterEvaluate hook. Reading those FileCollections carries
+        // dependencies on the compile / process tasks (not on the
+        // `testReleaseUnitTest` task itself), so running
+        // `integrationTest` does NOT re-run the unit tests.
+        val unitTest = tasks.named<Test>("testReleaseUnitTest").get()
+        testClassesDirs = unitTest.testClassesDirs
+        classpath = unitTest.classpath
+
+        useJUnit()
+        include("**/*IntegrationTest.class")
+
+        testLogging {
+            events("passed", "skipped", "failed")
+            showStandardStreams = true
+        }
+
+        // Same Docker API pin as the unit-test config above — the
+        // integration tests are the actual consumer of this knob.
+        val apiVersion = providers.gradleProperty("api.version")
+            .orElse(System.getenv("DOCKER_API_VERSION") ?: "1.45")
+            .get()
+        systemProperty("api.version", apiVersion)
+    }
 }

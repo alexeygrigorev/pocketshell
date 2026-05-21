@@ -13,6 +13,7 @@ shared/                     (sibling repo or sibling folder, TBD)
   ├── core-tmux/            # NEW: tmux -CC control-mode client
   ├── core-terminal/        # NEW: vendored Termux terminal-view + Compose adapter
   ├── core-agents/          # NEW: agent detection + JSONL/SQLite parsers (Claude Code, Codex, OpenCode)
+  ├── core-usage/           # NEW: parses heru usage --json (or other server-side usage tools) over SSH
   ├── core-storage/         # Room entities, DAOs (host, key, snippet, job)
   └── ui-kit/               # NEW: Termius-style components (cards, chips, breadcrumbs, host row)
 ```

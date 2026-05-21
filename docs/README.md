@@ -8,6 +8,7 @@ Conceptual planning. Captured 2026-05-21, before any code is written.
 | [architecture.md](architecture.md) | Composition layout, tech stack, three load-bearing decisions |
 | [input-methods.md](input-methods.md) | Voice, key bar, chord palette, snippets — the alternative-to-typing strategy |
 | [agent-awareness.md](agent-awareness.md) | Detecting Claude Code / Codex / OpenCode in a pane and showing a clean conversation view |
+| [usage-panel.md](usage-panel.md) | Provider quota / usage tracking via server-side tools (heru) over SSH — zero credentials on the phone |
 | [design-language.md](design-language.md) | Termius-inspired visual tokens |
 | [roadmap.md](roadmap.md) | Phased build order with rough sizing |
 | [decisions.md](decisions.md) | Log of what's locked, what's still open |
@@ -21,3 +22,5 @@ Conceptual planning. Captured 2026-05-21, before any code is written.
 | `../../tmuxcli/` | Python CLI. PocketShell mirrors its semantics; recurring jobs run server-side via `tmuxctl jobs daemon` on each host. |
 | `../../ssh-auto-forward/` | Python TUI. Reference for `ss -tlnp` parsing and reconnect/backoff logic. |
 | `../../agent-log-explorer/` | Separate tool for browsing historical agent conversations. PocketShell does *current session* view directly; agent-log-explorer remains for *all history* search. |
+| `../../heru/` | Provider quota tool. PocketShell invokes `heru usage --json` over SSH to render the usage panel. No credentials in the app. |
+| `../../litehive/` | Per-engine local invocation counters. Alternative data source for the usage panel. |

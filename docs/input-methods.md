@@ -1,6 +1,6 @@
 # Input Methods
 
-The full alternative-to-typing strategy. PocketShell reduces keyboard reliance through five coordinated surfaces, each tuned for a different rhythm of input.
+The full alternative-to-typing strategy. PocketShell reduces keyboard reliance through four coordinated surfaces.
 
 ## Overview
 
@@ -8,11 +8,10 @@ The full alternative-to-typing strategy. PocketShell reduces keyboard reliance t
 |---|---|---|
 | **Prompt Composer** | Voice/text composing for agent prompts | Tap mic FAB on session view |
 | **Inline dictation** | Voice straight into the terminal at cursor | Tap mic icon in the key bar |
-| **Key bar** (tier 1) | Single special keys + sticky modifiers | Always visible above the system keyboard |
-| **Chord palette** (tier 2) | Named multi-key sequences | Long-press ⚡ in the key bar |
-| **Command chips / snippets** (tier 3) | Whole commands or prompt templates | Always-visible chip row when keyboard is down |
+| **Key bar** | Single special keys + sticky modifiers (Esc, Tab, Ctrl, Alt, arrows) | Always visible above the system keyboard |
+| **Command chips / snippets** | Whole commands or prompt templates | Always-visible chip row when keyboard is down |
 
-Each tier handles a different rhythm: tier 1 is for keys you press *while typing* (Esc to leave vim, Ctrl+C to break a process). Tier 2 is for sequences you do *between actions* (detach, new window). Tier 3 is for whole commands or prompts.
+For tmux operations (detach, switch sessions, etc.) PocketShell uses **native UI controls** rather than a chord palette — see [Quick navigation](#quick-navigation-replaces-chord-palette) below.
 
 ---
 
@@ -73,13 +72,13 @@ Used for: `git status`, file names mid-command, dictating an `ssh` target.
 
 ---
 
-## Key bar (tier 1)
+## Key bar
 
-**Always visible** above the system keyboard, only while the keyboard is up.
+**Always visible** above the system keyboard, only while the keyboard is up. Eight slots:
 
 ```
 ├─────────────────────────────────────────┤
-│ [Esc] [Tab] [Ctrl] [Alt] [<][^][v][>] ⚡│
+│ [Esc] [Tab] [Ctrl] [Alt] [<][^][v][>]   │
 ├─────────────────────────────────────────┤
 │  q w e r t y u i o p                    │
 │   a s d f g h j k l                     │  system keyboard
@@ -91,76 +90,35 @@ Interactions:
 - **Tap** a modifier (Ctrl/Alt) → next key sent with modifier; modifier auto-releases
 - **Double-tap** a modifier → sticky (stays on until tapped again or auto-releases after timeout)
 - **Tap** Esc/Tab/arrows → sends key immediately
-- **Long-press** ⚡ → opens chord palette
 
-Active modifiers light up in the accent colour. Bar height ~40dp.
+Active modifiers light up in the accent colour. Bar height ~40dp. For Ctrl+C, Ctrl+R, etc. — tap `Ctrl` then the letter (two taps).
 
 ---
 
-## Chord palette (tier 2)
+## Quick navigation (replaces chord palette)
 
-Grid of named multi-key sequences. Opens as a bottom sheet on long-press of ⚡.
+The original plan had a chord palette for tmux sequences (`Ctrl+B D` detach, `Ctrl+B S` sessions, etc.). Dropped from v1 because PocketShell's native UI already covers the common cases more smoothly than chords:
 
-```
-┌─────────────────────────────────────────┐
-│  Chords                          x      │
-├─────────────────────────────────────────┤
-│  tmux                                   │
-│  ┌────────┐ ┌────────┐ ┌────────┐       │
-│  │ Detach │ │New win │ │Sessions│       │
-│  └────────┘ └────────┘ └────────┘       │
-│  ┌────────┐ ┌────────┐ ┌────────┐       │
-│  │Copy mod│ │  Zoom  │ │Split | │       │
-│  └────────┘ └────────┘ └────────┘       │
-│                                         │
-│  shell                                  │
-│  ┌────────┐ ┌────────┐                  │
-│  │Ctrl+C  │ │Ctrl+R  │                  │
-│  └────────┘ └────────┘                  │
-│                                         │
-│  [ + Add chord ]                        │
-└─────────────────────────────────────────┘
-```
-
-Each chord tile records as a sequence (e.g. `Ctrl+B` then `d`) with configurable inter-key timing. Long-press a tile to edit, drag to reorder, swipe to delete.
-
-Default chord set:
-
-| Group | Chord | Sends |
-|---|---|---|
-| tmux | Detach | `Ctrl+B` `d` |
-| tmux | New window | `Ctrl+B` `c` |
-| tmux | Sessions | `Ctrl+B` `s` |
-| tmux | Copy mode | `Ctrl+B` `[` |
-| tmux | Zoom | `Ctrl+B` `z` |
-| tmux | Split vertical | `Ctrl+B` `%` |
-| tmux | Split horizontal | `Ctrl+B` `"` |
-| shell | Ctrl+C | `Ctrl+C` |
-| shell | Ctrl+R | `Ctrl+R` |
-
-Per-host overrides (e.g. custom tmux prefix if user remapped to `Ctrl+A`).
-
-### Synergy with tmux control mode
-
-Many tmux chords have *better* native PocketShell UI:
-
-| Chord | Native equivalent |
+| Action | Native UI |
 |---|---|
-| Detach | `x` on breadcrumb |
-| New window | `+` on window strip |
-| Next/prev window | Swipe up |
-| Sessions | Swipe down to dashboard |
-| Jump to window N | Tap window in strip |
+| Detach session | Tap the back arrow `‹` on the breadcrumb. Session keeps running server-side. |
+| Switch session | Tap the session name in the breadcrumb → dropdown of sessions on this host |
+| List sessions across hosts | Swipe down to dashboard |
+| New window | `+` button in window strip (tmux control mode) |
+| Next/prev window | Swipe within session |
+| Kill / rename | `⋮` menu on the breadcrumb |
 
-Chord palette stays for muscle memory + chords without UI equivalents (copy mode, zoom, custom user chords).
+For things genuinely without native UI (vim `Esc :wq`, less `q`, copy mode entry) → key bar modifiers handle them via two-tap sequences.
+
+A power-user chord palette may return as opt-in settings post-v1 if real demand appears. v1 stays simple.
 
 ---
 
-## Command chips / snippets (tier 3)
+## Command chips / snippets
 
 Already covered in [vision.md](vision.md) §4. Whole commands or prompt templates. Per-host library.
 
-Distinct from chords: chips send literal text; chords send key sequences with modifier timing.
+Distinct from key bar entries: chips send literal text strings; key bar sends key codes with modifier timing.
 
 ---
 
@@ -172,7 +130,7 @@ Distinct from chords: chips send literal text; chords send key sequences with mo
 ┌────────────────────────────┐
 │   terminal output          │
 ├────────────────────────────┤
-│ [Esc][Tab][Ctrl]...    [⚡]│  key bar (~40dp)
+│ [Esc][Tab][Ctrl]...        │  key bar (~40dp)
 ├────────────────────────────┤
 │  q w e r t y u i o p       │
 │   a s d f g h j k l        │  system keyboard
@@ -199,7 +157,6 @@ Distinct from chords: chips send literal text; chords send key sequences with mo
 Single "Input methods" settings screen with sub-pages:
 - **Voice**: Whisper API key, language, auto-stop silence threshold
 - **Key bar**: which keys appear, ordering
-- **Chord palette**: edit/add chords, per-host
 - **Snippets**: organize, share, per-host
 
 ---
@@ -208,6 +165,6 @@ Single "Input methods" settings screen with sub-pages:
 
 - Voice commands inside dictation ("new line", "period") — raw transcript only
 - Wake-word activation ("Hey shell") — too unreliable, too battery-hungry
-- Predictive context-aware chord suggestions (vim running → surface `:wq`) — nice, high effort, defer
+- Chord palette for tmux/shell sequences — see [Quick navigation](#quick-navigation-replaces-chord-palette). May return post-v1 as opt-in if demand appears.
 - Multilingual auto-detection — fixed locale per session, user-configurable
 - Self-hosted Whisper on user's own SSH host — on brand but adds setup complexity; deferred

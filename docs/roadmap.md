@@ -20,8 +20,7 @@ Goal: even *without* tmux awareness, the terminal experience must clear the Term
 
 - Build `ui-kit` core components (`HostCard`, `Breadcrumb`, `CommandChip`, `StatusDot`, `KeyBar`, `MicButton`)
 - Termius design tokens applied throughout
-- **Key bar** above keyboard (Esc/Tab/Ctrl/Alt/arrows + ⚡ chord trigger)
-- **Chord palette** with default shell chords (`Ctrl+C`, `Ctrl+R`); tmux chord defaults added in Phase 2
+- **Key bar** above keyboard (Esc/Tab/Ctrl/Alt/arrows — 8 slots, no chord palette per [D18](decisions.md))
 - **Voice input**: Whisper integration, prompt composer bottom sheet, inline dictation via mic in key bar
 - Command chips above keyboard, snippet library (per-host)
 - Smart selection (paths, URLs, errors → tap to copy)
@@ -47,6 +46,7 @@ Goal: the moment it stops being "another SSH client."
 - Host bootstrap: detect `tmuxctl`, offer one-tap install, offer systemd user unit
 - Quick-send presets per session
 - **Agent awareness**: `core-agents` module with Claude Code / Codex / OpenCode parsers; conversation tab on the session view; hint chip when an agent is detected. See [agent-awareness.md](agent-awareness.md).
+- **Usage panel**: `core-usage` module wrapping `heru usage --json` over SSH; per-provider cards with short/long windows; dashboard widget; session-row blocked badges. See [usage-panel.md](usage-panel.md).
 - Agent monitoring chips (build/deploy/training status surfaced on dashboard)
 
 ## Phase 4 — Polish (ongoing)

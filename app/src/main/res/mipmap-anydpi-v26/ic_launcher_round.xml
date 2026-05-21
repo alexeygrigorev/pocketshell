@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Round-mask variant of the adaptive launcher icon. Same artwork as
+    @mipmap/ic_launcher — the platform applies the round mask itself
+    on launchers that prefer circular icons. We keep a separate entry
+    so the Manifest's android:roundIcon attribute has a valid target
+    and OEM launchers that distinguish the two pick this one.
+-->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@drawable/ic_launcher_background" />
+    <foreground android:drawable="@drawable/ic_launcher_foreground" />
+</adaptive-icon>

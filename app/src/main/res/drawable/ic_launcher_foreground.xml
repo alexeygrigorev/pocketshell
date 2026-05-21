@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    PocketShell launcher foreground.
+
+    A shell prompt glyph: a chevron ">" followed by an underscore "_"
+    cursor block, drawn in the accent cyan (#22D3EE) from the design
+    tokens. Instantly reads as "terminal / shell" and is distinct from
+    the default Android icon.
+
+    Adaptive-icon canvas is 108x108. The OEM mask crops/scales aggres-
+    sively, so all artwork is kept inside the inner 66x66 safe zone
+    (viewport coords 21..87 on each axis). Strokes are bold enough to
+    render at mdpi (48px) without melting.
+
+    The composition "+_" spans x=26..82, centred horizontally on the
+    canvas (offset 4 units left of geometric centre so the chevron
+    tip and cursor block share visual weight).
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!--
+        Chevron ">".
+        Two filled quadrilaterals forming an angle bracket. Filled
+        polygons (not stroked paths) so the arm thickness stays
+        uniform under vector scaling. Arm thickness ~7 viewport units.
+
+        Tip of the chevron sits at (60, 54). Left ends are at
+        (26, 32)/(31, 28) upper and (26, 76)/(31, 80) lower.
+    -->
+    <path
+        android:fillColor="#22D3EE"
+        android:pathData="M26,32 L31,28 L60,54 L55,58 Z" />
+    <path
+        android:fillColor="#22D3EE"
+        android:pathData="M31,80 L26,76 L55,50 L60,54 Z" />
+
+    <!--
+        Underscore cursor block "_". A solid rectangle sitting on
+        the prompt baseline, to the right of the chevron. Aligned
+        with the lower leg's endpoint so the whole mark reads
+        as `>_`.
+    -->
+    <path
+        android:fillColor="#22D3EE"
+        android:pathData="M66,72 L82,72 L82,80 L66,80 Z" />
+</vector>

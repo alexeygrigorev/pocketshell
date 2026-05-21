@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    PocketShell launcher background.
+
+    Solid deep navy (#0D1117) per docs/design-language.md — never pure
+    black. The adaptive-icon system masks this to the OEM's preferred
+    shape (circle, squircle, rounded square, etc.), so a flat fill is
+    enough; no inner shapes here.
+
+    Drawn on a 108x108dp canvas; the inner 66dp circle is the safe zone
+    where the foreground glyph must live.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#0D1117"
+        android:pathData="M0,0h108v108h-108z" />
+</vector>

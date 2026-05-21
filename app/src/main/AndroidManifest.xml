@@ -1,6 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+        Required for the Phase 0 proof-of-life screen to open an SSH
+        connection to the configured host. Phase 1 will revisit this when
+        the host management UI lands — for now this single permission
+        covers the smoke test.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
     <application
         android:name=".App"
         android:allowBackup="true"

@@ -4,12 +4,21 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import com.pocketshell.core.terminal.bridge.SshTerminalBridge
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.launch
+import java.io.OutputStream
 
 /**
  * Compose-friendly state holder for [TerminalSurface].
@@ -41,16 +50,22 @@ import kotlinx.coroutines.flow.asSharedFlow
  * contract so this state holder can sit transparently between the View and
  * whatever produces the session.
  *
- * ## JNI deferral (cross-reference `VENDORED.md`)
+ * ## JNI handling (cross-reference `VENDORED.md`)
  *
- * Constructing a real [TerminalSession] is fine — its constructor does not
- * touch `libtermux.so`. The first call into JNI happens lazily inside
- * [TerminalSession.initializeEmulator], which fires when the view's first
- * layout pass triggers [TerminalSession.updateSize]. PocketShell does NOT
- * build the JNI in this issue (#7 and #8 both defer it; #9 owns the wiring),
- * so callers must avoid attaching a "real" [TerminalSession] until then.
- * The Compose adapter still compiles and lays out cleanly without a session
- * attached — the view renders as the default solid-black canvas.
+ * Issue #9 ships a stub `libtermux.so` (built from
+ * `shared/core-terminal/src/main/cpp/pocketshell_termux_stub.c`) so that the
+ * vendored `com.termux.terminal.JNI` static initializer no longer throws
+ * `UnsatisfiedLinkError`. The stub's `setPtyWindowSize` is a safe no-op,
+ * which is the only JNI entry point reached at runtime once a session is
+ * attached via [attachExternalProducer] — the bridge pre-populates
+ * `TerminalSession.mEmulator` so the JNI subprocess-spawning path
+ * (`initializeEmulator` → `JNI.createSubprocess`) is never taken.
+ *
+ * Callers that construct their own [TerminalSession] directly (without going
+ * through [SshTerminalBridge]) still must NOT call
+ * [TerminalSession.initializeEmulator] — the stub `createSubprocess`
+ * intentionally returns a bogus fd that would break the upstream input/output
+ * threads. Use [attachExternalProducer] for the supported path.
  *
  * @see TerminalSurface
  * @see rememberTerminalSurfaceState
@@ -154,5 +169,115 @@ class TerminalSurfaceState {
     internal suspend fun emitOutputForTesting(bytes: ByteArray): Boolean {
         _output.emit(bytes)
         return true
+    }
+
+    /**
+     * Bridge currently feeding bytes into the emulator. Created by
+     * [attachExternalProducer]; held so subsequent calls to [writeInput]
+     * route through the same session, and so [detachExternalProducer]
+     * (or composition disposal) can stop the drainer thread.
+     */
+    @Volatile
+    private var bridge: SshTerminalBridge? = null
+
+    /**
+     * Scope owning the producer-collection coroutine. Cancelled by
+     * [detachExternalProducer] or when the surface leaves the composition.
+     */
+    private var producerScope: CoroutineScope? = null
+
+    /**
+     * Attach a remote byte producer (typically the stdout of an SSH shell
+     * channel from `core-ssh`) to this state's terminal emulator, and
+     * optionally a stdin sink that the emulator's user-input writes are
+     * forwarded to.
+     *
+     * Internally builds a [SshTerminalBridge] which:
+     *
+     * - Constructs a real [TerminalSession] (no JNI subprocess — see the
+     *   bridge's doc).
+     * - Pre-installs a [com.termux.terminal.TerminalEmulator] on the session
+     *   so [com.termux.view.TerminalView]'s first layout pass does not call
+     *   into `JNI.createSubprocess`. A PocketShell-shipped stub
+     *   `libtermux.so` no-ops `JNI.setPtyWindowSize` so subsequent resizes
+     *   are safe too.
+     * - Starts a background drainer that forwards user input from the
+     *   session's outbound queue to [remoteStdin].
+     * - Launches a coroutine in [scope] that collects [stdout] and pumps
+     *   each byte array into the emulator.
+     *
+     * The [TerminalSurface] composable will pick up the bridge's
+     * [TerminalSession] from this state and attach it to the view, so the
+     * canvas redraws as bytes arrive.
+     *
+     * Replays / multiple attachments: calling [attachExternalProducer] a
+     * second time stops the previous bridge first, then starts a new one.
+     *
+     * @param scope the [CoroutineScope] in which the stdout-collection
+     *   coroutine runs. Pass the calling composable's scope (from
+     *   `rememberCoroutineScope()`) so cancellation follows composition
+     *   lifecycle. The returned [Job] is also a child of this scope.
+     * @param stdout the byte stream produced by the remote shell. Each
+     *   emission is appended to the emulator atomically.
+     * @param remoteStdin optional sink for user input typed into the
+     *   emulator. If `null`, the emulator still renders output but user
+     *   keystrokes are dropped at the bridge's input drainer.
+     * @return a [Job] that completes when the producer flow terminates or
+     *   the scope is cancelled.
+     */
+    public fun attachExternalProducer(
+        scope: CoroutineScope,
+        stdout: Flow<ByteArray>,
+        remoteStdin: OutputStream? = null,
+    ): Job {
+        // Tear down any existing bridge so we never have two producers
+        // racing on the same emulator.
+        detachExternalProducer()
+
+        val newBridge = SshTerminalBridge()
+        newBridge.setRemoteStdin(remoteStdin)
+        bridge = newBridge
+
+        // Bind the bridge's session to the View via the existing `attach`
+        // pathway. `TerminalView.attachSession` zeros its internal emulator
+        // reference and triggers a re-layout, at which point the View's
+        // `updateSize` resizes the bridge's pre-installed emulator to match
+        // the on-screen size.
+        attach(newBridge.session)
+
+        val collectorScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+        producerScope = collectorScope
+
+        return scope.launch {
+            try {
+                stdout.collect { bytes ->
+                    if (bytes.isNotEmpty()) {
+                        newBridge.feedBytes(bytes)
+                        _output.emit(bytes)
+                    }
+                }
+            } finally {
+                // If the producer flow completes naturally (SSH session
+                // closed), tear the bridge down so the View's references
+                // drop cleanly.
+                detachExternalProducer()
+            }
+        }
+    }
+
+    /**
+     * Stop the producer-collection coroutine and the bridge's input
+     * drainer. Safe to call multiple times; no-op when nothing is attached.
+     *
+     * The underlying [TerminalSession] reference is also detached from
+     * this state so the next [TerminalSurface] composition does not see a
+     * stale session.
+     */
+    public fun detachExternalProducer() {
+        producerScope?.cancel()
+        producerScope = null
+        bridge?.stop()
+        bridge = null
+        detach()
     }
 }

@@ -31,6 +31,32 @@ android {
         // PocketShell's min SDK (26) is higher than upstream Termux's, so all
         // upstream Android API calls work unchanged.
         minSdk = 26
+
+        // Issue #9: a stub `libtermux.so` ships in the AAR so the vendored
+        // `com.termux.terminal.JNI` static initializer (`System.loadLibrary`)
+        // does not throw `UnsatisfiedLinkError`. Limit the ABIs to the
+        // emulator-friendly set plus arm64; the stub is tiny (<10 KB per ABI)
+        // so the APK overhead is negligible. See `src/main/cpp/CMakeLists.txt`
+        // for the rationale.
+        externalNativeBuild {
+            cmake {
+                abiFilters("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+            }
+        }
+    }
+
+    // Wire CMake to build the stub `libtermux.so` from `src/main/cpp/`. The
+    // upstream `src/main/jni/` C source is left untouched on disk (refresh
+    // parity, see VENDORED.md) — we deliberately do NOT compile it. The
+    // PocketShell stub at `src/main/cpp/pocketshell_termux_stub.c` provides
+    // safe no-ops for the four `JNI.*` native methods so that
+    // `TerminalSession.updateSize` (which calls `JNI.setPtyWindowSize` on
+    // every layout change once an emulator is attached) does not crash.
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
 
     compileOptions {
@@ -43,11 +69,20 @@ android {
     }
 
     sourceSets {
-        // Exclude the upstream JNI C sources from the build — we do not yet
-        // ship `libtermux.so` (see VENDORED.md "JNI handling"). The files are
-        // retained on disk under `src/main/jni/` only as a refresh-tracking
-        // copy of upstream; they are NOT compiled into the AAR. Issue #9
-        // owns the eventual JNI build wiring.
+        // Exclude the upstream JNI C sources from the build. The upstream code
+        // at `src/main/jni/termux.c` spawns a *local* PTY subprocess — not
+        // what PocketShell needs (we render remote SSH streams). Issue #9
+        // replaces it with a stub `libtermux.so` built from
+        // `src/main/cpp/pocketshell_termux_stub.c` via `externalNativeBuild`
+        // (see the cmake block above and `src/main/cpp/CMakeLists.txt`).
+        //
+        // The upstream `src/main/jni/` tree is retained on disk only as a
+        // refresh-tracking copy of upstream (VENDORED.md "Refresh procedure")
+        // — these `srcDirs()` calls explicitly clear those two source-set
+        // entries so AGP never tries to compile them alongside the stub.
+        // `jniLibs { srcDirs() }` is also cleared so AGP only picks up the
+        // `.so` files produced by the cmake build, not any stray pre-built
+        // libraries that might be dropped under `src/main/jniLibs/`.
         named("main") {
             jni {
                 srcDirs()

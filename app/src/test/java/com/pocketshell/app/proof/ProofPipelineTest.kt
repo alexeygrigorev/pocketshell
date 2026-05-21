@@ -1,0 +1,294 @@
+package com.pocketshell.app.proof
+
+import android.os.Looper
+import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.core.ssh.SshConnection
+import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.terminal.ui.TerminalSurfaceState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.takeWhile
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
+import net.schmizz.sshj.DefaultConfig
+import net.schmizz.sshj.SSHClient
+import net.schmizz.sshj.transport.verification.PromiscuousVerifier
+import org.junit.AfterClass
+import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
+import org.junit.BeforeClass
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
+import org.robolectric.annotation.Config
+import org.testcontainers.DockerClientFactory
+import org.testcontainers.containers.GenericContainer
+import org.testcontainers.images.builder.ImageFromDockerfile
+import java.nio.file.Path
+import java.nio.file.Paths
+
+/**
+ * End-to-end smoke test for the Phase 0 byte pipeline.
+ *
+ * Two surfaces under test, one per acceptance criterion line in issue #9:
+ *
+ * 1. **SSH layer roundtrips real bytes** — spin up the `pocketshell-test:ssh`
+ *    Docker container, open an interactive shell via sshj, send
+ *    `echo phase0-echoed-back\n`, and confirm the marker comes back via
+ *    stdout.
+ * 2. **The complete pipeline reaches `TerminalSurfaceState.output`** —
+ *    construct a [TerminalSurfaceState], call [TerminalSurfaceState.attachExternalProducer]
+ *    with a fake byte flow carrying `phase0`, and confirm the marker appears
+ *    in the state's [TerminalSurfaceState.output] [kotlinx.coroutines.flow.SharedFlow].
+ *
+ * The two are split so the second can run without Docker (CI machines may
+ * not always have it). The first is skipped if Docker is unreachable, the
+ * second always runs.
+ *
+ * Robolectric supplies a Looper so the bridge's `TerminalSession` constructor
+ * (which instantiates a `Handler` against `Looper.myLooper()`) does not
+ * throw. Without that we would need a real Android device.
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(manifest = Config.NONE, sdk = [33])
+class ProofPipelineTest {
+
+    companion object {
+        private const val CONTAINER_SSH_PORT = 22
+
+        private val projectRoot: Path by lazy { findProjectRoot() }
+
+        @Volatile
+        private var container: GenericContainer<*>? = null
+
+        @BeforeClass
+        @JvmStatic
+        fun setUp() {
+            val dockerAvailable = runCatching {
+                DockerClientFactory.instance().isDockerAvailable
+            }.getOrDefault(false)
+            if (!dockerAvailable) {
+                // Don't abort the whole class — only the SSH-dependent test
+                // needs the container. The pipeline test is hermetic.
+                return
+            }
+
+            val dockerDir = projectRoot.resolve("tests/docker")
+            val image = ImageFromDockerfile("pocketshell-test-ssh", false)
+                .withDockerfile(dockerDir.resolve("Dockerfile.ssh"))
+            container = GenericContainer(image)
+                .withExposedPorts(CONTAINER_SSH_PORT)
+                .also { it.start() }
+        }
+
+        @AfterClass
+        @JvmStatic
+        fun tearDown() {
+            container?.stop()
+            container = null
+        }
+
+        private fun findProjectRoot(): Path {
+            var dir: Path? = Paths.get(System.getProperty("user.dir")).toAbsolutePath()
+            while (dir != null) {
+                if (dir.resolve("tests/docker/Dockerfile.ssh").toFile().exists()) {
+                    return dir
+                }
+                dir = dir.parent
+            }
+            error(
+                "Could not locate tests/docker/Dockerfile.ssh from user.dir=" +
+                    System.getProperty("user.dir"),
+            )
+        }
+    }
+
+    private val sshPort: Int
+        get() = container!!.getMappedPort(CONTAINER_SSH_PORT)
+
+    private val sshHost: String
+        get() = container!!.host
+
+    private val privateKeyText: String by lazy {
+        projectRoot.resolve("tests/docker/test_key").toFile().readText()
+    }
+
+    /**
+     * Verifies the core-ssh layer is reachable and authenticates the test
+     * user. Establishes that the rest of the test is not masking a
+     * configuration problem with the test fixture.
+     */
+    @Test
+    fun coreSshLayerAuthenticatesWithProofTestKey() {
+        assumeTrue("Docker not available; skipping SSH-dependent test", container != null)
+        runBlocking {
+            val result = SshConnection.connect(
+                host = sshHost,
+                port = sshPort,
+                user = "testuser",
+                key = SshKey.Pem(privateKeyText),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+                timeoutMs = 15_000,
+            )
+            assertTrue(
+                "expected SSH connect to succeed, got ${result.exceptionOrNull()}",
+                result.isSuccess,
+            )
+            result.getOrThrow().use { session ->
+                val exec = session.exec("echo phase0-via-exec")
+                assertTrue(
+                    "expected non-empty stdout, got: '${exec.stdout}'",
+                    exec.stdout.contains("phase0-via-exec"),
+                )
+            }
+        }
+    }
+
+    /**
+     * Opens an interactive shell against the container and confirms the
+     * literal marker `phase0-echoed-back` comes back via the channel's
+     * `inputStream`. This is the same primitive `ProofOfLifeScreen.openShell`
+     * uses, so a green here proves the Compose screen will see real shell
+     * output once it is on the emulator.
+     */
+    @Test
+    fun interactiveShellPipesEchoBackThroughStdout() {
+        assumeTrue("Docker not available; skipping SSH-dependent test", container != null)
+        runBlocking {
+            val handle = openInteractiveShell()
+            try {
+                withTimeout(10_000) {
+                    val received = StringBuilder()
+                    // Start the reader on a background dispatcher so the
+                    // write that follows can race ahead.
+                    val readerJob = launch(Dispatchers.IO) {
+                        val buf = ByteArray(4096)
+                        while (isActive()) {
+                            val n = handle.shell.inputStream.read(buf)
+                            if (n == -1) break
+                            if (n > 0) {
+                                synchronized(received) { received.append(String(buf, 0, n)) }
+                                if (synchronized(received) { received.contains("phase0-echoed-back") }) break
+                            }
+                        }
+                    }
+                    // Give the prompt a moment to settle, then drive it.
+                    delay(200)
+                    handle.shell.outputStream.write("echo phase0-echoed-back\n".toByteArray())
+                    handle.shell.outputStream.flush()
+                    readerJob.join()
+                    assertTrue(
+                        "expected `phase0-echoed-back` in shell stdout; got:\n$received",
+                        synchronized(received) { received.contains("phase0-echoed-back") },
+                    )
+                }
+            } finally {
+                runCatching { handle.shell.close() }
+                runCatching { handle.sessionChannel.close() }
+                runCatching { handle.client.disconnect() }
+            }
+        }
+    }
+
+    /**
+     * The acceptance-criterion test: byte pipeline reaches the
+     * [TerminalSurfaceState.output] flow.
+     *
+     * Spins up a [TerminalSurfaceState] (the same one the Compose surface
+     * uses), wires it to a hand-rolled byte flow that emits `"phase0"`, and
+     * asserts the bytes arrive on the state's output [SharedFlow]. Does
+     * not need Docker — the pipeline is fully synthetic.
+     */
+    @Test
+    fun attachExternalProducerEmitsBytesOnOutputFlow() = runBlocking {
+        val state = TerminalSurfaceState()
+        val source = MutableSharedFlow<ByteArray>(
+            replay = 0,
+            extraBufferCapacity = 8,
+        )
+        val collectorScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+        val received = StringBuilder()
+        val collected = Job()
+        collectorScope.launch {
+            state.output
+                .takeWhile { !received.contains("phase0") }
+                .collect { bytes ->
+                    received.append(String(bytes))
+                }
+            collected.complete()
+        }
+
+        // Use a separate scope for the producer pump so we can keep
+        // emitting until the collector has seen the marker.
+        val pumpScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = pumpScope,
+            stdout = source,
+            remoteStdin = null,
+        )
+
+        try {
+            withTimeout(5_000) {
+                // Idle the main looper periodically. The bridge's
+                // `feedBytes` posts MSG_NEW_INPUT messages to the
+                // session's main-thread handler; without idling them they
+                // accumulate but never execute, which would otherwise
+                // not affect this test (we listen to the output flow which
+                // emits synchronously inside `collect`). Idling is kept as
+                // defence in depth in case the bridge ever requires the
+                // round-trip through the handler before emitting.
+                val mainLooperShadow = shadowOf(Looper.getMainLooper())
+
+                // Emit a few times — the SharedFlow's collector may not be
+                // ready on the first emission; repeat until it lands.
+                repeat(20) {
+                    source.emit("phase0\n".toByteArray())
+                    mainLooperShadow.idle()
+                    if (received.contains("phase0")) return@repeat
+                    delay(50)
+                }
+                collected.join()
+            }
+            assertTrue(
+                "expected `phase0` to land on TerminalSurfaceState.output; got:\n$received",
+                received.contains("phase0"),
+            )
+        } finally {
+            producerJob.cancel()
+            pumpScope.cancel()
+            collectorScope.cancel()
+            state.detachExternalProducer()
+        }
+    }
+
+    private suspend fun openInteractiveShell(): SshShellHandle = withContext(Dispatchers.IO) {
+        val client = SSHClient(DefaultConfig())
+        client.addHostKeyVerifier(PromiscuousVerifier())
+        client.connectTimeout = 15_000
+        client.timeout = 15_000
+        client.connect(sshHost, sshPort)
+        val provider = client.loadKeys(privateKeyText, null, null)
+        client.authPublickey("testuser", provider)
+        val sessionChannel = client.startSession()
+        sessionChannel.allocateDefaultPTY()
+        val shell = sessionChannel.startShell()
+        SshShellHandle(client, sessionChannel, shell)
+    }
+
+    private fun isActive(): Boolean = !Thread.currentThread().isInterrupted
+
+    private data class SshShellHandle(
+        val client: SSHClient,
+        val sessionChannel: net.schmizz.sshj.connection.channel.direct.Session,
+        val shell: net.schmizz.sshj.connection.channel.direct.Session.Shell,
+    )
+}

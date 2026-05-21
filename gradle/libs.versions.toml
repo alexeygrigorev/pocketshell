@@ -1,0 +1,20 @@
+# Version catalog for PocketShell.
+#
+# Only the plugins/libraries needed for the multi-module scaffold (issue #1)
+# live here today. Module-specific deps (Compose, Hilt, sshj, Room, ...) land
+# alongside the modules that consume them, in later issues.
+#
+# Versions chosen to mirror ssh-auto-forward-android — keeps the migration
+# from JSch to sshj (D3) friction-free since toolchain versions match.
+
+[versions]
+agp = "8.9.2"
+kotlin = "2.1.21"
+
+[libraries]
+# (none yet — populated as modules land)
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }

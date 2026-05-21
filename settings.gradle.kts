@@ -27,7 +27,7 @@ rootProject.name = "pocketshell"
 // Issue #2 will uncomment :app.
 // Issue #3 will uncomment the :shared:core-* modules and :shared:ui-kit.
 
-// include(":app")
+include(":app")
 
 // include(":shared:core-ssh")
 // include(":shared:core-portfwd")

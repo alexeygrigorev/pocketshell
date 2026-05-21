@@ -211,4 +211,147 @@ class DefaultTerminalMatcherTest {
             errors.isEmpty(),
         )
     }
+
+    // -------------------------------------------------------------------
+    // Relative-path false positives — these MUST NOT be classified as Path.
+    //
+    // See `Detector.kt`'s file-level KDoc, "Known limitations" section.
+    // The relative-path regex requires either a directory-like prefix
+    // (`./`, `../`, `~/`) or a known file extension. Fractions, common
+    // shorthand, and unit ratios are not paths.
+    // -------------------------------------------------------------------
+
+    @Test
+    fun `rejects fraction like 5 over 2 as a relative path`() {
+        val text = "ratio is 5/2 for the test"
+        val paths = matcher.matches(text).filterIsInstance<TerminalMatch.Path>()
+        assertTrue("'5/2' should not match as a Path, got $paths", paths.isEmpty())
+    }
+
+    @Test
+    fun `rejects fraction 22 over 7 as a relative path`() {
+        val text = "pi is roughly 22/7"
+        val paths = matcher.matches(text).filterIsInstance<TerminalMatch.Path>()
+        assertTrue("'22/7' should not match as a Path, got $paths", paths.isEmpty())
+    }
+
+    @Test
+    fun `rejects shorthand n over a as a relative path`() {
+        val text = "status: n/a"
+        val paths = matcher.matches(text).filterIsInstance<TerminalMatch.Path>()
+        assertTrue("'n/a' should not match as a Path, got $paths", paths.isEmpty())
+    }
+
+    @Test
+    fun `rejects yes or no shorthand y over n as a relative path`() {
+        val text = "continue? y/n"
+        val paths = matcher.matches(text).filterIsInstance<TerminalMatch.Path>()
+        assertTrue("'y/n' should not match as a Path, got $paths", paths.isEmpty())
+    }
+
+    @Test
+    fun `rejects protocol shorthand TCP over IP as a relative path`() {
+        val text = "running over TCP/IP transport"
+        val paths = matcher.matches(text).filterIsInstance<TerminalMatch.Path>()
+        assertTrue("'TCP/IP' should not match as a Path, got $paths", paths.isEmpty())
+    }
+
+    @Test
+    fun `rejects unit ratio Bytes over sec as a relative path`() {
+        val text = "throughput 1234 Bytes/sec sustained"
+        val paths = matcher.matches(text).filterIsInstance<TerminalMatch.Path>()
+        assertTrue("'Bytes/sec' should not match as a Path, got $paths", paths.isEmpty())
+    }
+
+    @Test
+    fun `rejects recipe-style 1 over 2 cup as a relative path`() {
+        val text = "add 1/2 cup of flour"
+        val paths = matcher.matches(text).filterIsInstance<TerminalMatch.Path>()
+        assertTrue("'1/2' should not match as a Path, got $paths", paths.isEmpty())
+    }
+
+    // -------------------------------------------------------------------
+    // Relative-path positive shapes — directory-prefixed and
+    // extension-based forms both work.
+    // -------------------------------------------------------------------
+
+    @Test
+    fun `matches dot-slash relative path`() {
+        val text = "edit ./build.gradle for changes"
+        val paths = matcher.matches(text).filterIsInstance<TerminalMatch.Path>()
+        assertNotNull(
+            "expected ./build.gradle to match, got $paths",
+            paths.find { it.value == "./build.gradle" },
+        )
+    }
+
+    @Test
+    fun `matches dot-dot-slash relative path`() {
+        val text = "see ../README.md for context"
+        val paths = matcher.matches(text).filterIsInstance<TerminalMatch.Path>()
+        assertNotNull(
+            "expected ../README.md to match, got $paths",
+            paths.find { it.value == "../README.md" },
+        )
+    }
+
+    @Test
+    fun `matches tilde-prefixed home relative path`() {
+        val text = "look in ~/projects/foo today"
+        val paths = matcher.matches(text).filterIsInstance<TerminalMatch.Path>()
+        assertNotNull(
+            "expected ~/projects/foo to match, got $paths",
+            paths.find { it.value == "~/projects/foo" },
+        )
+    }
+
+    @Test
+    fun `matches dotted filename like build dot gradle dot kts`() {
+        val text = "open app/build.gradle.kts"
+        val paths = matcher.matches(text).filterIsInstance<TerminalMatch.Path>()
+        assertNotNull(
+            "expected app/build.gradle.kts to match, got $paths",
+            paths.find { it.value == "app/build.gradle.kts" },
+        )
+    }
+
+    // -------------------------------------------------------------------
+    // Snapshot windowing — see `Detector.kt`, MAX_SCAN_CHARS.
+    //
+    // When the input exceeds the bound, matches that fall in the leading
+    // (older) part of the text are dropped. The matcher MUST still find
+    // matches that fall in the trailing window.
+    // -------------------------------------------------------------------
+
+    @Test
+    fun `windows the input to MAX_SCAN_CHARS and drops older matches`() {
+        // Stuff a URL at the very beginning of the input. With a leading
+        // padding strictly larger than MAX_SCAN_CHARS, the URL falls
+        // outside the scan window and must NOT be reported. A second URL
+        // appended at the very end MUST still match.
+        val urlOutsideWindow = "https://outside-window.example.com/old"
+        val urlInsideWindow = "https://inside-window.example.com/new"
+        val padding = " ".repeat(DefaultTerminalMatcher.MAX_SCAN_CHARS + 100)
+        val text = "$urlOutsideWindow$padding$urlInsideWindow"
+
+        val urls = matcher.matches(text).filterIsInstance<TerminalMatch.Url>().map { it.value }
+        assertTrue(
+            "URL beyond MAX_SCAN_CHARS should be dropped, got $urls",
+            urls.none { it == urlOutsideWindow },
+        )
+        assertTrue(
+            "URL inside MAX_SCAN_CHARS should still match, got $urls",
+            urls.any { it == urlInsideWindow },
+        )
+    }
+
+    @Test
+    fun `MAX_SCAN_CHARS is a documented public constant`() {
+        // The bound MUST be exposed so external callers and the file's KDoc
+        // can reference it. Sanity-check it is in a sensible range — too
+        // small loses the visible screen; too large defeats the windowing.
+        val bound = DefaultTerminalMatcher.MAX_SCAN_CHARS
+        assertTrue("MAX_SCAN_CHARS too small ($bound)", bound >= 2_000)
+        assertTrue("MAX_SCAN_CHARS too large ($bound)", bound <= 64_000)
+    }
 }

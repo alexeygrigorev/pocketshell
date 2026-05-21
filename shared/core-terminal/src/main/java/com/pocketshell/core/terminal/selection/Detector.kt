@@ -1,8 +1,100 @@
 package com.pocketshell.core.terminal.selection
 
 /**
- * A region of text detected on the terminal surface that the UI can offer as a
- * tap target.
+ * Smart-selection detector for terminal text.
+ *
+ * This file ships PocketShell's default text-classifier for the terminal
+ * surface. It scans a flat string snapshot (the visible screen plus a slice of
+ * scrollback) and reports back a list of [TerminalMatch] regions that the UI
+ * may turn into tap targets — paths to copy, URLs to open, error lines to
+ * paste into a bug report.
+ *
+ * ## Supported match kinds
+ *
+ * - [TerminalMatch.Url] — `http://` / `https://` URLs. Trailing sentence
+ *   punctuation (`.`, `,`, `;`, `)`, `]`, ...) is stripped from the right edge.
+ *   Non-HTTP schemes (`ftp://`, `git@github.com:...`, `ssh://`, IPv6 literals)
+ *   are intentionally **not** matched — extend [TerminalMatcher] yourself if
+ *   you need them.
+ * - [TerminalMatch.Path] — absolute Unix paths (`/usr/local/bin/foo`) and
+ *   relative paths (`src/main/kotlin/Foo.kt`, `./build.gradle`,
+ *   `../README.md`, `~/projects/foo`). See "Known limitations" below for the
+ *   false-positive cases the relative-path regex deliberately rejects.
+ * - [TerminalMatch.Error] — stack-trace frames (Java/Kotlin `at
+ *   pkg.Class.method(File.kt:42)`, Python `File "x.py", line 7, in foo`) and
+ *   whole lines containing the keywords `Error`, `Exception`, `Traceback`,
+ *   `FATAL`, `FAILED`, `panic`.
+ *
+ * Windows paths (`C:\Users\...`), git SSH refs, JIRA tickets, and other
+ * domain-specific shapes are **out of scope** for the default — implement
+ * [TerminalMatcher] in your downstream module if you need them.
+ *
+ * ## Precedence
+ *
+ * Matches are produced left-to-right within each regex pass, and the passes
+ * run in this order. Earlier passes "claim" their byte range; later passes
+ * skip any candidate whose range overlaps an earlier claim. This avoids
+ * double-emitting (e.g. the path tail of a URL also becoming a Path match).
+ *
+ * 1. URLs — claim the full `https://host/path...` so the tail does not also
+ *    surface as a Path.
+ * 2. Absolute Unix paths — `/usr/local/bin/foo`, `/etc/hosts`. A bare `/` is
+ *    rejected.
+ * 3. Relative paths — must start with `./`, `../`, `~/`, or end in a known
+ *    file extension (see [DefaultTerminalMatcher.REL_PATH_EXTENSIONS]). See
+ *    "Known limitations" for what this excludes.
+ * 4. Stack-trace frames — Java/Kotlin `at pkg.Cls.m(File.kt:42)` and Python
+ *    `File "x.py", line N, in fn`. Reported as [TerminalMatch.Error].
+ * 5. Generic error keyword lines — the **whole containing line** is emitted
+ *    as [TerminalMatch.Error] so the copied text carries context.
+ *
+ * ## Snapshot windowing
+ *
+ * The matcher only scans the **last [DefaultTerminalMatcher.MAX_SCAN_CHARS]
+ * characters** of the input. Terminal transcripts can be megabytes (think
+ * `tail -f` on a busy log) and re-running every regex over the full buffer on
+ * every flow tick is an O(n) CPU draw per keystroke. The window is small
+ * enough to keep matching cheap and large enough to cover the visible screen
+ * plus a generous slice of scrollback. Callers that want to scan more should
+ * slice the input themselves before calling [TerminalMatcher.matches].
+ *
+ * ## Known limitations
+ *
+ * - **Relative-path false positives the regex deliberately rejects**: `5/2`,
+ *   `22/7`, `n/a`, `y/n`, `TCP/IP`, `Bytes/sec`, `1/2 cup`. These look like
+ *   paths but are fractions, common shorthand, or unit ratios. The regex
+ *   requires either a directory-like prefix (`./`, `../`, `~/`) or a known
+ *   file extension to consider a token a relative path.
+ * - **Snapshot bound**: only the last
+ *   [DefaultTerminalMatcher.MAX_SCAN_CHARS] characters are scanned (see
+ *   "Snapshot windowing").
+ * - **Hit-test in `SelectionOverlay`**: the overlay currently dispatches taps
+ *   to `matches.first()` and ignores the tap coordinate. Multi-match rows
+ *   misdirect taps to the leftmost match. A proper hit test needs glyph-grid
+ *   geometry from the underlying `TerminalView`, which is non-trivial; see
+ *   the KDoc on [SelectionOverlay] for the deferred work.
+ * - **Windows paths, `ftp://` / `ssh://` URLs, IPv6 hosts**: not surfaced.
+ * - **Paths with spaces**: not surfaced. (No way to disambiguate from prose.)
+ *
+ * ## Extending: adding a new match kind
+ *
+ * 1. Add a new `data class` to the [TerminalMatch] sealed hierarchy with the
+ *    string `value` and any extra fields you want the action layer to see.
+ * 2. Implement [TerminalMatcher] in your downstream module (do **not** modify
+ *    [DefaultTerminalMatcher] — keep its surface frozen so consumers can rely
+ *    on its behaviour). Compose it with `DefaultTerminalMatcher` by calling
+ *    both and merging the results, claiming earlier matches' byte ranges if
+ *    you need to avoid overlaps.
+ * 3. Teach [MatchActions] (or your downstream replacement) what to do on tap.
+ *    Add a `when` branch for the new kind — the sealed hierarchy makes the
+ *    compiler enforce exhaustiveness so you cannot forget.
+ * 4. Add unit tests in
+ *    `shared/core-terminal/src/test/java/com/pocketshell/core/terminal/selection/`
+ *    covering at least one positive case and one false-positive case the new
+ *    regex must reject.
+ *
+ * A region of text detected on the terminal surface that the UI can offer as
+ * a tap target.
  *
  * Variants:
  *
@@ -11,11 +103,11 @@ package com.pocketshell.core.terminal.selection
  * - [Url] — an `http(s)` URL. Tapping fires `Intent.ACTION_VIEW`.
  * - [Error] — a stack-trace frame, generic error keyword, or other text the
  *   user is likely to want to copy (paste into a bug report, search the web,
- *   …). Tapping copies the value to the clipboard.
+ *   ...). Tapping copies the value to the clipboard.
  *
  * The [value] of each variant is the literal substring the matcher extracted
  * from the terminal buffer, with no normalisation — the consumer decides what
- * to do with it (open in browser, copy as-is, prefix `cd `, …).
+ * to do with it (open in browser, copy as-is, prefix `cd `, ...).
  */
 sealed class TerminalMatch {
     abstract val value: String
@@ -64,44 +156,31 @@ interface TerminalMatcher {
  * exhaustive — the goal is "good enough to make tap-to-copy useful", not "a
  * complete grammar of every imaginable error format".
  *
- * Match precedence is deliberately ordered to avoid producing overlapping
- * matches:
- *
- * 1. URLs first — both http and https. Catches `https://example.com/x`
- *    cleanly so that the path-like tail is not also re-emitted as a
- *    [TerminalMatch.Path].
- * 2. Absolute Unix paths — `/usr/local/bin/foo`, `/etc/hosts`. A bare `/` on
- *    its own (with no following character) is rejected so we don't surface
- *    the root directory as a tap target.
- * 3. Relative paths — `src/main/kotlin/Foo.kt`. The pattern requires a
- *    word-character segment before the first `/` so we don't double-emit the
- *    tail of an absolute path or a URL.
- * 4. Stack-trace frames — `com.foo.Bar.baz(Bar.java:42)` or Python
- *    `traceback`-style `File "foo.py", line 42, in bar`. Surfaced as
- *    [TerminalMatch.Error] because the user almost always wants to copy the
- *    whole frame, not just the path inside it.
- * 5. Generic error keywords — `Error: …`, `Exception: …`, `Traceback (most
- *    recent call last):`. The full line containing the keyword is emitted so
- *    the copied text has context.
- *
- * The regexes are intentionally simple. Edge cases (paths with spaces,
- * Windows paths, IPv6 URLs) are out of scope for the default; downstream
- * callers wanting more can implement [TerminalMatcher] themselves.
- *
- * Trailing punctuation in URLs (`.`, `,`, `;`, `)`, `]`) is stripped: terminal
- * output frequently ends a sentence after a URL ("…see https://example.com.")
- * and the dot is almost never part of the URL.
+ * See the file-level KDoc above for supported kinds, precedence, snapshot
+ * bound, known limitations, and the extension recipe.
  */
 class DefaultTerminalMatcher : TerminalMatcher {
 
     override fun matches(text: String): List<TerminalMatch> {
         if (text.isEmpty()) return emptyList()
 
+        // Window the input. Terminal transcripts can be megabytes when the
+        // user is tailing a log; running every regex over the full buffer on
+        // every flow tick is wasted CPU. Keep the last MAX_SCAN_CHARS — that
+        // covers the visible screen and a generous slice of scrollback,
+        // which is what the user can actually see and tap on. Callers that
+        // need to scan further should slice the input themselves.
+        val scanned = if (text.length > MAX_SCAN_CHARS) {
+            text.substring(text.length - MAX_SCAN_CHARS)
+        } else {
+            text
+        }
+
         val results = mutableListOf<TerminalMatch>()
-        val claimed = BooleanArray(text.length)
+        val claimed = BooleanArray(scanned.length)
 
         // 1. URLs — match first so any path-like tail is consumed.
-        URL_PATTERN.findAll(text).forEach { match ->
+        URL_PATTERN.findAll(scanned).forEach { match ->
             val raw = match.value
             // Strip trailing sentence punctuation that almost never belongs
             // to the URL itself. We strip from the end of the matched string,
@@ -116,7 +195,7 @@ class DefaultTerminalMatcher : TerminalMatcher {
         }
 
         // 2. Absolute Unix paths.
-        ABS_PATH_PATTERN.findAll(text).forEach { match ->
+        ABS_PATH_PATTERN.findAll(scanned).forEach { match ->
             val raw = match.value
             // Reject the bare root `/` — it's never a useful tap target.
             if (raw == "/" || raw.length <= 1) return@forEach
@@ -127,7 +206,7 @@ class DefaultTerminalMatcher : TerminalMatcher {
         }
 
         // 3. Relative paths.
-        REL_PATH_PATTERN.findAll(text).forEach { match ->
+        REL_PATH_PATTERN.findAll(scanned).forEach { match ->
             val raw = match.value
             val start = match.range.first
             val end = match.range.last + 1
@@ -136,7 +215,7 @@ class DefaultTerminalMatcher : TerminalMatcher {
         }
 
         // 4. Stack-trace frames (Java-style and Python-style).
-        STACK_FRAME_PATTERN.findAll(text).forEach { match ->
+        STACK_FRAME_PATTERN.findAll(scanned).forEach { match ->
             val raw = match.value
             val start = match.range.first
             val end = match.range.last + 1
@@ -146,13 +225,13 @@ class DefaultTerminalMatcher : TerminalMatcher {
 
         // 5. Generic error keywords — emit the whole containing line so the
         //    copied text carries context.
-        ERROR_KEYWORD_PATTERN.findAll(text).forEach { match ->
-            val lineStart = text.lastIndexOf('\n', match.range.first).let {
+        ERROR_KEYWORD_PATTERN.findAll(scanned).forEach { match ->
+            val lineStart = scanned.lastIndexOf('\n', match.range.first).let {
                 if (it == -1) 0 else it + 1
             }
-            val lineEndCandidate = text.indexOf('\n', match.range.first)
-            val lineEnd = if (lineEndCandidate == -1) text.length else lineEndCandidate
-            val line = text.substring(lineStart, lineEnd).trim()
+            val lineEndCandidate = scanned.indexOf('\n', match.range.first)
+            val lineEnd = if (lineEndCandidate == -1) scanned.length else lineEndCandidate
+            val line = scanned.substring(lineStart, lineEnd).trim()
             if (line.isEmpty()) return@forEach
             if (!claim(claimed, lineStart, lineEnd)) return@forEach
             results += TerminalMatch.Error(line)
@@ -179,7 +258,39 @@ class DefaultTerminalMatcher : TerminalMatcher {
         return substring(0, end)
     }
 
-    private companion object {
+    companion object {
+        /**
+         * Maximum number of characters scanned per [matches] call. Terminal
+         * transcripts can be megabytes when the user is tailing a log; we
+         * window the input so the matcher's cost stays bounded. The window
+         * covers roughly the last ~200 lines at 80 columns (≈ 16k chars) but
+         * we cap a little tighter to keep the regex passes snappy on cheap
+         * phones. If [matches] is called with a longer string, only the
+         * trailing [MAX_SCAN_CHARS] are scanned and matches before that point
+         * are silently dropped.
+         */
+        const val MAX_SCAN_CHARS: Int = 8_000
+
+        /**
+         * File-extension allowlist used by [REL_PATH_PATTERN]. Anything not
+         * on this list does not trigger the extension-form match. Keep the
+         * list short and conservative — every entry trades a false-negative
+         * for a potential false-positive.
+         */
+        private val REL_PATH_EXTENSIONS: List<String> = listOf(
+            // Programming languages
+            "kt", "kts", "java", "py", "js", "jsx", "ts", "tsx", "go", "rs",
+            "c", "cc", "cpp", "h", "hpp", "rb", "php", "swift", "sh", "bash",
+            "zsh",
+            // Markup / data
+            "md", "txt", "rst", "json", "yml", "yaml", "toml", "xml", "html",
+            "htm", "css", "scss", "csv", "tsv",
+            // Build / config
+            "gradle", "properties", "lock", "cfg", "ini", "conf",
+            // Logs / misc
+            "log", "out", "err", "pid",
+        )
+
         /**
          * HTTP/HTTPS URL. Host: word chars, dots, dashes. Optional port,
          * path, query, fragment characters. Intentionally narrow — `ftp://`,
@@ -195,20 +306,50 @@ class DefaultTerminalMatcher : TerminalMatcher {
          * Characters allowed in the path body are conservative — letters,
          * digits, `.`, `_`, `-`, and additional path separators. Backslashes
          * are NOT allowed (we don't surface Windows paths today).
+         *
+         * The lookbehind excludes `\w`, `/`, `.` and `~` so we don't
+         * pick up the `/foo` tail of a relative path written as `./foo`,
+         * `../foo`, or `~/foo` — those are claimed by [REL_PATH_PATTERN].
          */
         private val ABS_PATH_PATTERN = Regex(
-            "(?<![\\w/])/[\\w][\\w./-]*"
+            "(?<![\\w/.~])/[\\w][\\w./-]*"
         )
 
         /**
-         * Relative path: a word-character segment, a single `/`, and a path
-         * tail. The leading word-character requirement keeps this from
+         * Relative path. To avoid false positives on fractions and
+         * shorthand like `5/2`, `n/a`, `TCP/IP`, `Bytes/sec`, the regex
+         * requires the token to be EITHER:
+         *
+         * - A directory-like prefix — `./`, `../`, or `~/` followed by a
+         *   path body (e.g. `./build.gradle`, `../README.md`,
+         *   `~/projects/foo`), OR
+         * - A path whose final segment ends in a known file extension from
+         *   [REL_PATH_EXTENSIONS] (e.g. `src/main/kotlin/Foo.kt`,
+         *   `app/build.gradle.kts`, `docs/vision.md`).
+         *
+         * The leading negative lookbehind `(?<![\w/.])` keeps this from
          * stealing the tails of absolute paths or URLs (which are
-         * higher-precedence and consume those bytes first).
+         * higher-precedence and consume those bytes first), and also
+         * prevents fragments inside larger tokens (`21/2`, `foo.bar/baz`)
+         * from matching.
+         *
+         * Both alternatives require at least one `/` somewhere — a bare word
+         * with an extension (`Foo.kt`) is not a relative path candidate here.
          */
-        private val REL_PATH_PATTERN = Regex(
-            "(?<![\\w/.])[\\w-]+/[\\w./-]+"
-        )
+        private val REL_PATH_PATTERN: Regex = run {
+            val ext = REL_PATH_EXTENSIONS.joinToString("|") { Regex.escape(it) }
+            Regex(
+                // Directory-prefix form: `./foo`, `../bar/baz`, `~/qux`.
+                "(?<![\\w/.])(?:\\.{1,2}|~)/[\\w./-]+" +
+                    "|" +
+                    // Extension form: one or more `seg/` parts followed by a
+                    // final segment that ends in a known extension. The
+                    // intermediate `[\\w.-]+` permits dotted filenames like
+                    // `build.gradle.kts`; regex backtracking lets the final
+                    // `\\.(?:ext)\\b` peel off the extension correctly.
+                    "(?<![\\w/.])(?:[\\w-]+/)+[\\w.-]+\\.(?:$ext)\\b"
+            )
+        }
 
         /**
          * Stack-trace frame. Matches:
@@ -245,7 +386,7 @@ class DefaultTerminalMatcher : TerminalMatcher {
          * `Exceptional` from triggering.
          *
          * `panic` (Go-style) is matched without requiring the trailing colon
-         * to be inside the keyword: Go panics print `panic: runtime error: …`
+         * to be inside the keyword: Go panics print `panic: runtime error: ...`
          * and we want any line starting with `panic` to surface.
          */
         private val ERROR_KEYWORD_PATTERN = Regex(

@@ -19,12 +19,28 @@ import androidx.compose.ui.layout.Layout
  * the host composable to [onTap] callbacks — tests and UI integration can
  * compose a real tap-target layout on top of this.
  *
- * The overlay fills its parent and consumes any tap that lands inside it,
- * routing to [onTap] with the single best-match candidate. Selection of the
- * "best" candidate is left to the caller: this composable takes a flat
- * [matches] list and currently treats the first item as the active match.
- * Once the surface measures glyph positions (issue follow-up), this contract
- * will tighten so that the hit-tested match is returned.
+ * ## Known limitation: no real hit-testing
+ *
+ * **TODO(#34):** The overlay currently dispatches every tap to
+ * `matches.first()` regardless of the tap coordinate. On a row with multiple
+ * matches (`open /etc/hosts then https://example.com` — Path + Url on one
+ * line), every tap will resolve to the leftmost match. The right fix is a
+ * proper hit test against each match's bounding rectangle on the glyph grid,
+ * but that requires:
+ *
+ * 1. Mapping each [TerminalMatch.value] back to its `(row, col)` extent in
+ *    the underlying `TerminalEmulator.screen` — the matcher currently
+ *    returns substrings, not coordinates.
+ * 2. Converting those grid cells to pixel rectangles via
+ *    `TerminalView`'s font metrics. The vendored view does not expose this
+ *    publicly today; either widen its API or copy the cell-size math here.
+ *
+ * Doing this correctly is a non-trivial cross-module change, so the
+ * limitation is documented here and on `Detector.kt`'s file KDoc instead of
+ * being silently shipped. Until it lands, callers that need precise tap
+ * routing should sort/filter [matches] themselves before passing them in
+ * (e.g. keep only the rightmost match per row, or only the match of the kind
+ * the user is currently interested in).
  *
  * Why no `Box`/`clickable`: those primitives live in
  * `androidx.compose.foundation`, which is not a declared dependency of this
@@ -35,7 +51,8 @@ import androidx.compose.ui.layout.Layout
  *   in which case the overlay still composes but is inert (no tap handler).
  * @param onTap invoked when the overlay is tapped, with the match that should
  *   be activated. Today the first element of [matches] is used; future
- *   revisions will hit-test the tap coordinate.
+ *   revisions will hit-test the tap coordinate — see the "Known limitation"
+ *   block above.
  * @param modifier the standard Compose modifier. Defaults to filling the
  *   parent so the overlay covers the same area as the terminal surface.
  */
@@ -62,6 +79,11 @@ fun SelectionOverlay(
                     // selection logic.
                     val pressed = down.changes.firstOrNull { it.pressed && it.changedToDown() }
                     if (pressed != null) {
+                        // TODO(#34): hit-test `pressed.position` against the
+                        // bounding rect of each match. Today we route to the
+                        // leftmost match unconditionally — see the KDoc on
+                        // SelectionOverlay's "Known limitation" section for
+                        // the reason this isn't fixed yet.
                         latest.matches.firstOrNull()?.let { latest.onTap(it) }
                     }
                 }

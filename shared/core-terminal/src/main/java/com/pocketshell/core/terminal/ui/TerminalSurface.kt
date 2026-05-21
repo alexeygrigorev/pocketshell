@@ -4,13 +4,14 @@ import android.graphics.Typeface
 import android.view.KeyEvent
 import android.view.MotionEvent
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.key.KeyEvent as ComposeKeyEvent
+import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.viewinterop.AndroidView
 import com.pocketshell.core.terminal.selection.SelectionOverlay
@@ -32,12 +33,30 @@ import kotlinx.coroutines.flow.flowOf
 val DefaultTerminalBackground: Color = Color(0xFF0D1117)
 
 /**
- * Default text size used by the embedded [TerminalView]. The vendored
- * upstream defaults to system text size, which is too small for the
- * Termius-like density we want. 14sp matches the "body" tier in
- * `docs/design-language.md`.
+ * Default text size used by the embedded [TerminalView], expressed in **raw
+ * device pixels** (not sp, not dp, not CSS px).
+ *
+ * Why raw pixels: the vendored [TerminalView.setTextSize] accepts an `int`
+ * and passes it straight to [android.graphics.Paint.setTextSize], whose
+ * `textSize` parameter is documented in pixels. There is no
+ * `TypedValue.applyDimension` density conversion anywhere in the upstream
+ * path, so whatever number we pass in here is the number of physical pixels
+ * the renderer hands to the [android.graphics.Paint] used to draw each
+ * glyph. Upstream Termux's javadoc on `setTextSize` says "density-independent
+ * pixels" but that is inaccurate for the code as it actually runs — confirmed
+ * by reading [com.termux.view.TerminalRenderer]'s constructor.
+ *
+ * Why 36: empirically, 36 raw pixels renders at roughly the "body" tier of
+ * `docs/design-language.md` on a Pixel 7-class screen (~420 dpi). The
+ * vendored default (system text size) would render too small for the
+ * Termius-like density we want. When PocketShell starts honouring per-device
+ * font scaling (post-#8), this constant becomes the *base* and a density /
+ * scale multiplier is applied at the call site.
+ *
+ * Suffixed `_RAW_PX` (not just `_PX`) to make the unit unambiguous in IDE
+ * autocomplete and search results.
  */
-private const val DEFAULT_TEXT_SIZE_PX: Int = 36
+private const val DEFAULT_TEXT_SIZE_RAW_PX: Int = 36
 
 /**
  * Hosts the vendored [TerminalView] inside a Compose tree via
@@ -62,6 +81,16 @@ private const val DEFAULT_TEXT_SIZE_PX: Int = 36
  * @param modifier Standard Compose modifier (size, padding, etc.). The
  *   surface defaults to filling its parent; the caller controls layout
  *   via this modifier.
+ * @param onKeyEvent Optional Compose-level key-event forwarder. When
+ *   non-`null`, this callback is invoked for every key event that the
+ *   Compose focus system routes to the surface (typically the design-
+ *   language key bar dispatching modifier-bar codes). Return `true` to
+ *   mark the event consumed; `false` lets it propagate to the underlying
+ *   [TerminalView]. The vendored [TerminalView] has its own
+ *   [android.view.View.dispatchKeyEvent] path; this slot exists so callers
+ *   can intercept at the Compose layer without reaching the View directly.
+ *   Defaults to `null`, which is equivalent to "don't consume — fall
+ *   through to the View".
  *
  * ## JNI deferral
  *
@@ -82,6 +111,7 @@ fun TerminalSurface(
     state: TerminalSurfaceState,
     modifier: Modifier = Modifier,
     matchListener: ((TerminalMatch) -> Unit)? = null,
+    onKeyEvent: ((ComposeKeyEvent) -> Boolean)? = null,
 ) {
     // Hoist the bridge so the same instance survives recompositions and we
     // do not leak listeners across configuration changes. AndroidView's
@@ -95,13 +125,26 @@ fun TerminalSurface(
         if (matchListener != null) state.flowOfMatches else remember { flowOf(emptyList()) }
     val matches by matchesFlow.collectAsState(initial = emptyList<TerminalMatch>())
 
+    // If the caller installed an onKeyEvent slot, chain it onto the
+    // user-supplied modifier so the Compose focus system routes key events
+    // through it before the embedded TerminalView gets a chance. We tack
+    // the slot on at the end (after the caller's chain) so caller-supplied
+    // focus / pointer modifiers run first. The slot defaults to `null`,
+    // in which case we leave the modifier untouched — no allocation, no
+    // KeyInputModifier added to the tree.
+    val keyAwareModifier = if (onKeyEvent != null) {
+        modifier.onKeyEvent { event -> onKeyEvent(event) }
+    } else {
+        modifier
+    }
+
     // Layer the vendored TerminalView under the optional SelectionOverlay.
     // We use `androidx.compose.ui.layout.Layout` rather than `Box` because
     // this module does not depend on `compose-foundation`. The Layout
     // measures both children with the incoming constraints and places them
     // at origin so they perfectly overlap.
     Layout(
-        modifier = modifier,
+        modifier = keyAwareModifier,
         content = {
             AndroidView(
                 factory = { context ->
@@ -111,7 +154,7 @@ fun TerminalSurface(
                         // JetBrains Mono when the system has it registered,
                         // system monospace as a graceful fallback.
                         setTypeface(Typeface.create("JetBrains Mono", Typeface.NORMAL))
-                        setTextSize(DEFAULT_TEXT_SIZE_PX)
+                        setTextSize(DEFAULT_TEXT_SIZE_RAW_PX)
                         // Honour the design-language background until the
                         // emulator takes over its own canvas. The vendored
                         // TerminalView is a raw `View`; it does not
@@ -165,17 +208,24 @@ fun TerminalSurface(
         }
     }
 
-    // Clean up the bridge when the composable leaves the composition. The
-    // TerminalView itself will be detached by AndroidView's own disposal;
-    // we just make sure our reference does not retain it after that.
-    DisposableEffect(state) {
-        onDispose {
-            // Detach the state's reference so a future re-composition with
-            // the same state starts clean. The owning TerminalSession is
-            // not stopped — its lifecycle belongs to whoever created it.
-            // (For #8 the state never has a session attached anyway.)
-        }
-    }
+    // Intentionally no `DisposableEffect` here. Resource ownership is
+    // delegated cleanly:
+    //
+    // - The vendored `TerminalView` is owned by `AndroidView`, which
+    //   detaches it from its parent on disposal (the standard interop
+    //   contract).
+    // - The optional external producer is launched in the *caller's*
+    //   scope via [TerminalSurfaceState.attachExternalProducer]; cancelling
+    //   that scope (e.g. when the host composable leaves the composition)
+    //   triggers the bridge's `finally { detachExternalProducer() }` path,
+    //   which stops the drainer thread and releases the session.
+    // - The `NoOpTerminalViewClient` is a plain object with no listeners
+    //   registered anywhere; nothing to detach.
+    //
+    // An earlier revision had an empty `DisposableEffect(state) { onDispose
+    // { } }` here as a TODO marker. It allocated a Compose slot per
+    // composition without doing any work and was removed in #31 once the
+    // ownership story above was verified.
 }
 
 /**

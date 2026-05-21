@@ -1,6 +1,11 @@
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
+    // Issue #8: the Compose adapter (TerminalSurface) lives in this module
+    // alongside the vendored Java sources. Enabling the Kotlin Compose
+    // compiler plugin here lets us host TerminalView via AndroidView interop
+    // without spawning a separate module just for the wrapper.
+    alias(libs.plugins.kotlin.compose)
 }
 
 // This module vendors Termux's `terminal-emulator` + `terminal-view` libraries
@@ -59,6 +64,13 @@ android {
         // vendored unit tests can run on the host JVM.
         unitTests.isReturnDefaultValues = true
     }
+
+    // Issue #8: the Compose adapter under `com.pocketshell.core.terminal.ui`
+    // needs the Compose compiler. The vendored Java sources do not use
+    // Compose; only the Kotlin adapter does.
+    buildFeatures {
+        compose = true
+    }
 }
 
 dependencies {
@@ -67,6 +79,23 @@ dependencies {
     // because the vendored sources use `@NonNull` / `@Nullable` annotations on
     // public signatures.
     api(libs.androidx.annotation)
+
+    // Compose adapter (issue #8). The BOM keeps the rest of the Compose
+    // artifacts aligned with the version chosen in the version catalog. The
+    // `compose-ui` dependency is `api` because `TerminalSurface` exposes
+    // `androidx.compose.ui.Modifier` on its public signature — downstream
+    // callers must see it on the classpath.
+    api(platform(libs.compose.bom))
+    api(libs.compose.ui)
+    implementation(libs.compose.ui.tooling.preview)
+    debugImplementation(libs.compose.ui.tooling)
+
+    // TerminalSurfaceState exposes `kotlinx.coroutines.flow.SharedFlow` on
+    // its public surface; declare the dep as `api` so downstream collectors
+    // get the type on their classpath without re-declaring it. Compose runs
+    // on coroutines so the artifact is present transitively, but we declare
+    // it explicitly because we rely on it as a public API.
+    api(libs.kotlinx.coroutines.core)
 
     // Vendored unit tests from Termux's `terminal-emulator/src/test`.
     testImplementation(libs.junit)

@@ -118,6 +118,40 @@ This module therefore:
   set `abiFilters` to whatever target ABIs we support. The upstream Android.mk
   is single-file and trivially buildable; no upstream patches needed.
 
+### Issue #8 outcome — pass-through, no session
+
+The Compose adapter (`com.pocketshell.core.terminal.ui.TerminalSurface`)
+shipped by #8 deliberately does **not** construct or attach a
+`TerminalSession`. Reasons:
+
+- `TerminalSession` is `final`, so the suggested "custom subclass" route
+  above is not actually open to us — Kotlin / Java cannot extend it.
+- Constructing a real `TerminalSession` and just declining to call
+  `initializeEmulator` is not enough either: `TerminalView.updateSize`
+  unconditionally forwards into `session.updateSize` once it gets a
+  non-zero size, which calls `initializeEmulator` and lands in JNI.
+
+So the #8 adapter:
+
+- Hosts a bare `TerminalView` via `AndroidView`.
+- Wires a no-op `TerminalViewClient` so the view does not NPE.
+- Leaves `TerminalSurfaceState.session` `null` by default.
+- Exposes `attach(TerminalSession)`, `writeInput(...)`, and an `output`
+  `SharedFlow` so #9 can plug in a real session source without changing
+  the public API.
+
+When #9 lands, it will either:
+
+- Compile the JNI back into the module (`externalNativeBuild` + `ndkBuild`,
+  per the bullet above) and construct a real `TerminalSession`, **or**
+- Vendor a fresh fork of `TerminalSession` (non-final) into our own
+  package that drives `TerminalEmulator` + `TerminalBuffer` from
+  SSH-attached PTY bytes, bypassing JNI entirely. The vendored
+  `TerminalSession` source stays byte-identical to upstream as
+  refresh-tracking parity; our fork lives under `com.pocketshell.core.terminal.*`.
+
+Either path keeps the #8 public API stable.
+
 ## Refresh procedure
 
 When a future Termux release fixes a bug or adds a CSI sequence we care about:

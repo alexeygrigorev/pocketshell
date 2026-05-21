@@ -1,12 +1,16 @@
-# Local convenience compose file for the SSH test target.
+# Local convenience compose file for the SSH + tmux test targets.
 #
 # Used for manual smoke testing per docs/testing.md:
-#   docker compose -f tests/docker/docker-compose.yml up -d
+#   docker compose -f tests/docker/docker-compose.yml up -d sshd
 #   ssh -i tests/docker/test_key -p 2222 -o StrictHostKeyChecking=no testuser@127.0.0.1
 #
-# The Testcontainers-based integration tests in `shared/core-ssh` build their
-# own image from Dockerfile.ssh and pick an ephemeral port — they don't use
-# this compose file.
+# Or to bring up the tmux-equipped variant on host port 2224:
+#   docker compose -f tests/docker/docker-compose.yml up -d --build tmux
+#   ssh -i tests/docker/test_key -p 2224 -o StrictHostKeyChecking=no testuser@127.0.0.1
+#
+# The Testcontainers-based integration tests in `shared/core-ssh` /
+# `shared/core-tmux` build their own images and pick ephemeral ports — they
+# don't use this compose file.
 services:
   sshd:
     build:
@@ -16,3 +20,17 @@ services:
     container_name: pocketshell-test-ssh
     ports:
       - "2222:22"
+
+  # `pocketshell-test:tmux` extends the base SSH image with tmux +
+  # tmuxctl. Host port 2224 keeps it distinct from `sshd`'s 2222 so
+  # both can run in parallel for manual testing.
+  tmux:
+    build:
+      context: .
+      dockerfile: Dockerfile.tmux
+    image: pocketshell-test:tmux
+    container_name: pocketshell-test-tmux
+    depends_on:
+      - sshd
+    ports:
+      - "2224:22"

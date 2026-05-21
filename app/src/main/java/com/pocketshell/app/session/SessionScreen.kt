@@ -1,7 +1,12 @@
 package com.pocketshell.app.session
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -30,15 +35,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.CommandChip
-import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.KeyBinding
@@ -75,6 +82,7 @@ public fun SessionScreen(
     user: String = SessionDefaults.USER,
     keyPath: String? = null,
     onBack: () -> Unit = {},
+    inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
 ) {
     LaunchedEffect(host, port, user, keyPath) {
         viewModel.connect(host, port, user, keyPath)
@@ -82,8 +90,38 @@ public fun SessionScreen(
 
     val status by viewModel.connectionStatus.collectAsState()
     val armed by viewModel.armedModifiers.collectAsState()
+    val dictationState by inlineDictationViewModel.uiState.collectAsState()
 
     var showMicSheet by remember { mutableStateOf(false) }
+
+    val context = LocalContext.current
+
+    // Wire the inline-dictation transcription stream to the terminal. The
+    // collector lives as long as the screen does — every emission writes
+    // its bytes directly to the live SSH PTY. The flow has `replay = 0`,
+    // so re-collecting on recomposition will not replay old bytes.
+    LaunchedEffect(inlineDictationViewModel) {
+        inlineDictationViewModel.transcriptions.collect { text ->
+            viewModel.terminalState.writeInput(text.toByteArray(Charsets.UTF_8))
+        }
+    }
+
+    // Runtime RECORD_AUDIO permission flow for the inline-dictation path.
+    // The composer (#15) owns its own launcher because the composer can be
+    // opened without the IME being up; the inline path mirrors the same
+    // gate so the user gets the system prompt on first tap of the key-bar
+    // mic too. Both launchers reuse the manifest-level `RECORD_AUDIO`
+    // declaration; only one prompt will ever fire because the OS
+    // remembers the user's grant per package.
+    val inlinePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            inlineDictationViewModel.onMicTap()
+        } else {
+            inlineDictationViewModel.surfacePermissionDenied()
+        }
+    }
 
     val isImeVisible = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
 
@@ -129,10 +167,42 @@ public fun SessionScreen(
                 ArmedModifierStrip(armed)
             }
 
+            // The inline-dictation error banner sits between the armed-
+            // modifier strip and the key bar so it is visible while the
+            // IME is up. Tapping anywhere on the bar clears it (the next
+            // mic tap also clears it via the FSM).
+            dictationState.error?.let { msg ->
+                InlineDictationErrorStrip(msg, onDismiss = inlineDictationViewModel::clearError)
+            }
+
             if (isImeVisible) {
-                KeyBar(
+                KeyBarWithMic(
                     keys = KeyBarLayout,
                     onKey = { binding -> viewModel.onKeyBarKey(binding.label) },
+                    micState = dictationState.recording,
+                    onMicTap = {
+                        // Same three-step gate as the prompt composer
+                        // (#15): permission → API-key → recorder.
+                        val granted = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.RECORD_AUDIO,
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (!granted) {
+                            inlinePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            return@KeyBarWithMic
+                        }
+                        if (!inlineDictationViewModel.hasApiKey()) {
+                            // Inline dictation does not own a key-entry
+                            // dialog (the issue is explicit about "no
+                            // sheet"). We route the user to the prompt
+                            // composer, which already hosts the one-field
+                            // dialog. Surfacing this as a banner avoids
+                            // the dead-end "tap mic, nothing happens".
+                            showMicSheet = true
+                            return@KeyBarWithMic
+                        }
+                        inlineDictationViewModel.onMicTap()
+                    },
                 )
             } else {
                 ChipRow(
@@ -222,6 +292,32 @@ private fun StatusLine(text: String) {
             .background(color = PocketShellColors.Surface)
             .padding(horizontal = 12.dp, vertical = 6.dp),
     )
+}
+
+/**
+ * Compact one-line error strip surfaced when the inline-dictation FSM
+ * reports a permission / API-key / Whisper failure. Tapping the strip
+ * dismisses the banner; the next mic tap also clears it via the
+ * ViewModel's `clearError()`. Visually distinct from the armed-modifier
+ * strip — accent-soft fill with an accent-dim top border, full-width.
+ */
+@Composable
+private fun InlineDictationErrorStrip(message: String, onDismiss: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.AccentSoft)
+            .border(width = 1.dp, color = PocketShellColors.AccentDim)
+            .clickable(onClick = onDismiss)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = message,
+            color = PocketShellColors.Accent,
+            fontSize = 11.sp,
+        )
+    }
 }
 
 /**

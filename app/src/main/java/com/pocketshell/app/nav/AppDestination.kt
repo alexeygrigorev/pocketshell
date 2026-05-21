@@ -46,4 +46,36 @@ sealed interface AppDestination {
         val username: String,
         val keyPath: String,
     ) : AppDestination
+
+    /**
+     * Open a live `tmux -CC` session — see [com.pocketshell.app.tmux.TmuxSessionScreen].
+     *
+     * Distinct from [Session] (which is plain-SSH per #18). Per
+     * [D5](../../../../../../../../docs/decisions.md) / [D6] tmux drives
+     * per-pane rendering with swipe navigation; the screen materialises
+     * one [com.pocketshell.app.tmux.TmuxPaneState] per tmux pane and binds
+     * each to its own [com.pocketshell.core.terminal.ui.TerminalSurface].
+     *
+     * Issue #45 only wires this destination; the host picker swap from
+     * [Session] → [TmuxSession] (so opening a host that has tmux installed
+     * lands here automatically) is the follow-up #48 lifecycle work.
+     *
+     * @property hostId persistent host identifier — same shape as
+     *   [Session.hostId]. Kept on the destination so future deep-link
+     *   restoration can re-resolve the host without re-opening the picker.
+     * @property hostname / [port] / [username] / [keyPath] resolved SSH
+     *   connection parameters; same fields as [Session].
+     * @property sessionName tmux session name to attach to (or create via
+     *   `new-session -A -s`). Today defaulted by the caller to
+     *   `"pocketshell"` to match
+     *   [com.pocketshell.core.tmux.TmuxClientFactory]'s default.
+     */
+    data class TmuxSession(
+        val hostId: Long,
+        val hostname: String,
+        val port: Int,
+        val username: String,
+        val keyPath: String,
+        val sessionName: String,
+    ) : AppDestination
 }

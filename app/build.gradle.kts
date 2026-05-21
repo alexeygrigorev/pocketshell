@@ -164,6 +164,14 @@ dependencies {
     // so no extra catalog wiring is needed here.
     implementation(project(":shared:core-voice"))
 
+    // Issue #45: tmux control-mode client (TmuxClient + TmuxClientFactory)
+    // for the per-pane Compose surface introduced under
+    // `com.pocketshell.app.tmux`. core-tmux declares its core-ssh dep as
+    // `implementation`; the app module already brings core-ssh on its own
+    // (above) so the SshSession the ViewModel hands to TmuxClientFactory
+    // resolves on the same classpath.
+    implementation(project(":shared:core-tmux"))
+
     // ProofPipelineTest connects to the `pocketshell-test:ssh` Docker
     // container the same way `core-ssh`'s integration test does, so the
     // app needs the same Testcontainers + JUnit + coroutines-test stack.

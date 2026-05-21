@@ -14,12 +14,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.hosts.AddEditHostScreen
 import com.pocketshell.app.hosts.HostListScreen
 import com.pocketshell.app.hosts.SshKeysScreen
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.session.SessionScreen
 import com.pocketshell.app.session.SessionViewModel
+import com.pocketshell.app.tmux.TmuxSessionScreen
+import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
 
@@ -139,6 +142,25 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
             // off the chip row + the composer's Snippets button. Both
             // need the persisted host id to scope the library.
             hostId = dest.hostId,
+            onBack = ::back,
+        )
+
+        // Issue #45: tmux control-mode session. The view model is
+        // obtained via `hiltViewModel()` — distinct from the
+        // activity-scoped `sessionViewModel` above so each navigation to
+        // a tmux destination spins up its own client (and tears it down
+        // when the user navigates away). Once the host bootstrap from
+        // #49 detects tmux on a host, the picker can route here in place
+        // of [AppDestination.Session]; today the picker still routes to
+        // plain SSH and this branch is reached only by future deep-link
+        // / explicit-route wiring.
+        is AppDestination.TmuxSession -> TmuxSessionScreen(
+            viewModel = hiltViewModel<TmuxSessionViewModel>(),
+            host = dest.hostname,
+            port = dest.port,
+            user = dest.username,
+            keyPath = dest.keyPath,
+            sessionName = dest.sessionName,
             onBack = ::back,
         )
     }

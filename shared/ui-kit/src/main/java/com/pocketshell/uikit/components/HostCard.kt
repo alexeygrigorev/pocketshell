@@ -16,6 +16,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -67,7 +68,7 @@ fun HostCard(
                 color = PocketShellColors.BorderSoft,
                 shape = RoundedCornerShape(14.dp),
             )
-            .clickable(onClick = onClick)
+            .clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -94,9 +95,8 @@ fun HostCard(
 
         Spacer(modifier = Modifier.width(12.dp))
 
-        // Name + subtitle. `weight(1f)` would be more idiomatic but
-        // `Row` weight requires `RowScope`; we use `weight(1f)` via
-        // the Row scope on Column directly below.
+        // Name + subtitle. Column takes the flex space between the
+        // avatar and the trailing status dot.
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = name,

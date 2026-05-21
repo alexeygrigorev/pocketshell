@@ -62,9 +62,19 @@ fun Breadcrumb(
 
         if (liveDot) {
             Spacer(modifier = Modifier.width(4.dp))
-            // The CSS uses 7px with a green glow; in Compose we draw an
-            // 8dp dot via the existing `StatusDot` so we don't duplicate
-            // the glow drawing logic.
+            // The CSS uses `.live-dot { width: 7px }`; on Android we
+            // reuse `StatusDot` (8dp) here on purpose:
+            // - 1dp delta is invisible at typical Pixel densities and
+            //   any browser-rasterised CSS pixel rounds to a half-step
+            //   anyway, so the mockup's 7px and Android's 8dp resolve
+            //   to the same on-screen footprint within Pixel 7's px
+            //   pitch.
+            // - Reusing `StatusDot` keeps a single source of truth for
+            //   the connected-state glow recipe — if we ever tune the
+            //   halo opacity, every consumer picks it up.
+            // - Bumping the breadcrumb to its own 6dp/7dp dot would
+            //   force duplicating the glow-rendering canvas just to
+            //   shave a pixel.
             StatusDot(status = ConnectionStatus.Connected)
             Spacer(modifier = Modifier.width(6.dp))
         } else {

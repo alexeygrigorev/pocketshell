@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -217,22 +219,42 @@ fun ComponentsPreview() {
                     }
                 }
 
-                Section("CommandChip") {
+                Section("CommandChip (plain + icon variant)") {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        // icon = null -> mono `.chip` style. We omit the
-                        // `icon-chip` variant from this preview because the
-                        // ui-kit doesn't bundle an icon set yet; the
-                        // component supports passing an `ImageVector` for
-                        // the accented variant when callers have one.
+                        // icon = null -> mono `.chip` style.
                         CommandChip(label = "git status", onClick = {})
                         CommandChip(label = "tmux ls", onClick = {})
                         CommandChip(label = "k logs", onClick = {})
                         CommandChip(label = "clear", onClick = {})
+                    }
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        // icon != null -> `.chip.icon-chip` style: accent
+                        // background, accent foreground, UI sans font.
+                        // `Icons.Filled.PlayArrow` stands in for the
+                        // mockup's `● dictate` glyph — we don't bundle a
+                        // custom icon set yet, but the visual recipe
+                        // (accent-tinted chip with leading mark) is what
+                        // we're checking here.
+                        CommandChip(
+                            label = "dictate",
+                            icon = Icons.Filled.PlayArrow,
+                            onClick = {},
+                        )
+                        CommandChip(
+                            label = "stop",
+                            icon = Icons.Filled.PlayArrow,
+                            onClick = {},
+                        )
                     }
                 }
 
@@ -396,6 +418,35 @@ fun CommandChipPreview() {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 CommandChip(label = "git status", onClick = {})
                 CommandChip(label = "tmux ls", onClick = {})
+            }
+        }
+    }
+}
+
+/**
+ * Tight preview for the icon-chip variant — exercises the
+ * `.chip.icon-chip` CSS branch (accent-soft background, accent-dim
+ * border, accent text, UI font, leading 14dp icon). `Icons.Filled.PlayArrow`
+ * is a stand-in glyph until PocketShell ships its own icon set; the
+ * structural recipe (accent-tinted chip with a leading mark) is what
+ * this preview verifies.
+ */
+@Preview(name = "CommandChip (icon variant)")
+@Composable
+fun CommandChipIconPreview() {
+    PocketShellTheme {
+        PreviewSurface {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CommandChip(
+                    label = "dictate",
+                    icon = Icons.Filled.PlayArrow,
+                    onClick = {},
+                )
+                CommandChip(
+                    label = "stop",
+                    icon = Icons.Filled.PlayArrow,
+                    onClick = {},
+                )
             }
         }
     }

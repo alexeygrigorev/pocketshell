@@ -23,6 +23,7 @@ import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -65,19 +66,68 @@ private enum class ModifierState { Off, OneShot, Locked }
  * - Second consecutive tap (a "double tap") flips the modifier to
  *   *locked*: it stays on until tapped a third time. The component
  *   detects double-tap by measuring the gap between consecutive taps
- *   on the same modifier — under 350ms = lock toggle, otherwise it's
- *   a fresh one-shot.
+ *   on the same modifier — under [DoubleTapWindowMs]ms = lock toggle,
+ *   otherwise it's a fresh one-shot.
  * - Tapping a non-modifier key fires the binding through [onKey] and
  *   clears any one-shot modifiers. Locked modifiers persist.
  * - Arrow keys (`KeyKind.Arrow`) are non-modifier and always one-shot;
  *   they fire through immediately and clear armed one-shot modifiers.
  *
- * The caller can inspect "is `Ctrl` currently armed?" by listening to
- * the [onKey] calls; the binding callback only fires on the *triggering*
- * key (the non-modifier tap), so the modifier state is purely a visual
- * affordance — the component does not synthesise a key event for the
- * modifier itself. (Wiring modifier-aware key events to the terminal
- * is the screen-level integration's job, not the ui-kit's.)
+ * ## Modifier-event contract for screen-level glue
+ *
+ * `KeyBar` emits exactly **one** [onKey] callback per non-modifier tap.
+ * Modifier taps never trigger [onKey] — they only mutate internal sticky
+ * state and recompose the affected key for the visual accent. The screen-
+ * level integration is therefore responsible for *its own* view of "what
+ * modifiers are currently armed" if it wants to decorate the synthesised
+ * terminal key event; the ui-kit does not surface modifier state.
+ *
+ * **Auto-clear timing:** one-shot modifiers clear immediately on the
+ * same tap that fires the triggering [onKey] — after the callback
+ * returns. The clear happens *inside* the same tap handler, not on a
+ * delay, so by the time control returns to the caller the bar already
+ * reflects the cleared state on the next recomposition. Locked modifiers
+ * never auto-clear; only an explicit tap on the same locked modifier
+ * resets it.
+ *
+ * **Order of events** when the user taps a sticky modifier and then a
+ * regular key inside the same gesture window:
+ *
+ * ```
+ * t=0ms  : user taps "Ctrl"
+ *          -> KeyBar arms Ctrl as one-shot, recomposes Ctrl slot active.
+ *          -> No onKey() callback. Caller sees nothing.
+ *
+ * t=120ms: user taps "C"
+ *          -> KeyBar fires onKey(KeyBinding("C", Regular)).
+ *          -> KeyBar then clears all one-shot modifiers (Ctrl -> Off).
+ *          -> Caller's onKey handler runs while Ctrl is still
+ *             conceptually "armed for this event" — but the modifier
+ *             state is invisible to the caller; if the caller wants to
+ *             decorate the key with Ctrl, it must observe modifier taps
+ *             via a separate UI surface (or mirror the FSM screen-side).
+ * ```
+ *
+ * Double-tap-to-lock followed by a regular tap:
+ *
+ * ```
+ * t=0ms  : user taps "Ctrl"     -> Off -> OneShot, no onKey()
+ * t=180ms: user taps "Ctrl"     -> OneShot -> Locked (within 350ms),
+ *                                  no onKey()
+ * t=900ms: user taps "X"        -> onKey(X), Ctrl stays Locked
+ * t=1500ms: user taps "Y"       -> onKey(Y), Ctrl stays Locked
+ * t=4000ms: user taps "Ctrl"    -> Locked -> Off (gap > 350ms but
+ *                                  Locked behaviour is "single tap
+ *                                  while armed disarms"), no onKey()
+ * ```
+ *
+ * In short: `onKey` fires only on regular / arrow taps; modifier state
+ * is private to the bar and is auto-cleared *after* the triggering
+ * [onKey] returns for one-shots, *never* for locked. If the screen-
+ * level glue needs to ship Ctrl/Alt key codes to the terminal, it must
+ * either receive that signal from an out-of-band source (the system
+ * keyboard, a separate hook) or extend [KeyBar] with a modifier-state
+ * callback — today the ui-kit deliberately keeps modifiers internal.
  */
 @Composable
 fun KeyBar(
@@ -205,7 +255,7 @@ private fun KeySlot(
                 border = BorderStroke(1.dp, borderColor),
                 shape = RoundedCornerShape(8.dp),
             )
-            .clickable(onClick = onTap)
+            .clickable(role = Role.Button, onClick = onTap)
             .padding(horizontal = 4.dp),
         contentAlignment = Alignment.Center,
     ) {

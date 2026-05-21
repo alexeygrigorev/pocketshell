@@ -16,7 +16,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -31,14 +33,23 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * Visual recipe (per the CSS):
  * - 56dp diameter, fully round (28dp radius)
  * - Accent (cyan) background, dark on-accent foreground glyph
- * - Soft accent-coloured drop shadow on the idle/recording states
+ * - Soft accent-coloured drop shadow on the idle/recording states,
+ *   approximating the CSS `box-shadow: 0 8px 26px rgba(34,211,238,0.45)`.
+ *   The shadow is rendered via `Modifier.shadow` with an accent-tinted
+ *   spot/ambient colour. Note: shadow tinting on API 26 falls back to a
+ *   black shadow (the spot/ambient colour parameters require API 28+),
+ *   which still gives the correct elevation cue. [MicButtonState.Disabled]
+ *   renders without a shadow because the disabled state has no visual
+ *   weight in the mockup.
  *
  * State behaviour:
- * - [MicButtonState.Idle] — accent fill, no animation. Tappable.
- * - [MicButtonState.Recording] — accent fill that pulses opacity
- *   (1.0 -> 0.55) on a 900ms cycle. Tappable to stop recording.
- * - [MicButtonState.Disabled] — surface-elev fill, muted glyph, not
- *   tappable (callback is wired but `clickable` is disabled).
+ * - [MicButtonState.Idle] — accent fill with drop shadow, no animation.
+ *   Tappable.
+ * - [MicButtonState.Recording] — accent fill with drop shadow that
+ *   pulses opacity (1.0 -> 0.55) on a 900ms cycle. Tappable to stop
+ *   recording.
+ * - [MicButtonState.Disabled] — surface-elev fill, muted glyph, no
+ *   shadow, not tappable (callback is wired but `clickable` is disabled).
  *
  * The glyph is a filled circle (`●`) sized to look like a microphone
  * icon's body. When PocketShell bundles a proper icon set the glyph
@@ -82,14 +93,31 @@ fun MicButton(
         1f
     }
 
+    // CSS uses `box-shadow: 0 8px 26px rgba(34,211,238,0.45)`. Compose
+    // expresses drop shadows via `Modifier.shadow(elevation, shape, ...)`.
+    // 8dp elevation reproduces the y-offset / spread reasonably on the
+    // platform shadow renderer, with the accent colour piped in as both
+    // ambient and spot tint (API 28+). Disabled state skips the shadow.
+    val shadowModifier: Modifier = if (state == MicButtonState.Disabled) {
+        Modifier
+    } else {
+        Modifier.shadow(
+            elevation = 8.dp,
+            shape = CircleShape,
+            ambientColor = PocketShellColors.Accent,
+            spotColor = PocketShellColors.Accent,
+        )
+    }
+
     Box(
         modifier = modifier
             .size(56.dp)
+            .then(shadowModifier)
             .background(
                 color = baseColor.copy(alpha = baseColor.alpha * pulseAlpha),
                 shape = CircleShape,
             )
-            .clickable(enabled = enabled, onClick = onClick),
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
         Text(

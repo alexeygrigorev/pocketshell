@@ -45,10 +45,6 @@ class AppDatabaseTest {
             ApplicationProvider.getApplicationContext(),
             AppDatabase::class.java,
         )
-            // Foreign-key checks aren't on by default for in-memory Room —
-            // enable them so the test catches bad references (e.g. inserting
-            // a HostEntity with a nonexistent keyId).
-            .setQueryCallback({ _, _ -> }, Runnable::run)
             .allowMainThreadQueries()
             .build()
     }

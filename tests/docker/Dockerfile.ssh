@@ -1,0 +1,27 @@
+# Base SSH test image for PocketShell (`pocketshell-test:ssh`).
+#
+# Mirrors the proven pattern in ../ssh-auto-forward/docker/, adapted to:
+# - use a non-root testuser (matches docs/testing.md examples)
+# - rely on an ed25519 key (matches the D3 reason-to-exist test)
+# - keep the surface minimal — only openssh, no extras
+#
+# Higher-tier images (`pocketshell-test:tmux`, `pocketshell-test:agents`) will
+# extend this one in later issues.
+FROM alpine:latest
+
+RUN apk add --no-cache openssh-server \
+    && ssh-keygen -A \
+    && adduser -D -s /bin/sh testuser \
+    && passwd -u testuser \
+    && mkdir -p /home/testuser/.ssh \
+    && chmod 700 /home/testuser/.ssh
+
+COPY sshd_config /etc/ssh/sshd_config
+COPY test_key.pub /home/testuser/.ssh/authorized_keys
+
+RUN chmod 600 /home/testuser/.ssh/authorized_keys \
+    && chown -R testuser:testuser /home/testuser/.ssh
+
+EXPOSE 22
+
+CMD ["/usr/sbin/sshd", "-D", "-e"]

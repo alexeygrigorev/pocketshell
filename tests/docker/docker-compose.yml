@@ -1,0 +1,18 @@
+# Local convenience compose file for the SSH test target.
+#
+# Used for manual smoke testing per docs/testing.md:
+#   docker compose -f tests/docker/docker-compose.yml up -d
+#   ssh -i tests/docker/test_key -p 2222 -o StrictHostKeyChecking=no testuser@127.0.0.1
+#
+# The Testcontainers-based integration tests in `shared/core-ssh` build their
+# own image from Dockerfile.ssh and pick an ephemeral port — they don't use
+# this compose file.
+services:
+  sshd:
+    build:
+      context: .
+      dockerfile: Dockerfile.ssh
+    image: pocketshell-test:ssh
+    container_name: pocketshell-test-ssh
+    ports:
+      - "2222:22"

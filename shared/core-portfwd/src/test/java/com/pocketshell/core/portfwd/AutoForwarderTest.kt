@@ -13,6 +13,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
@@ -230,6 +231,160 @@ class AutoForwarderTest {
         runCurrent()
     }
 
+    @Test
+    fun `failed port is retried after TTL elapses`() = runTest {
+        // Reject the first openLocalPortForward call, accept subsequent
+        // ones. That lands the port on failedPorts after the first scan.
+        val session = FakeSession()
+        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        session.failNextOpens(1)
+
+        // Drive our own clock so we can step it past the TTL without
+        // also stepping the coroutine virtual clock (which would fire
+        // more scan ticks than we want).
+        val now = AtomicLong(0L)
+        val ttl = 5_000L
+        val forwarder = AutoForwarder(
+            session,
+            smallConfig().copy(failedPortTtlMs = ttl),
+            clock = { now.get() },
+        )
+        val job = forwarder.start(this)
+        runCurrent()
+
+        // After the first scan the port should be on the deny-list, status FAILED.
+        val afterFail = forwarder.flowOfTunnels().first()
+        assertEquals(1, afterFail.size)
+        assertEquals(TunnelInfo.Status.FAILED, afterFail.single().status)
+        assertTrue("forward should NOT have been opened on the first scan", session.openForwards.isEmpty())
+
+        // Advance the scan-loop clock to the next tick but stay inside
+        // the TTL: the port must still be denied.
+        advanceTimeBy(1_100L)
+        runCurrent()
+        assertTrue(
+            "deny-list entry is still within TTL — must not retry",
+            session.openForwards.isEmpty(),
+        )
+        assertEquals(
+            TunnelInfo.Status.FAILED,
+            forwarder.flowOfTunnels().first().single().status,
+        )
+
+        // Step the wall clock past the TTL. Next scan should evict
+        // the entry and successfully open the forward.
+        now.set(ttl + 1)
+        advanceTimeBy(1_100L)
+        runCurrent()
+
+        val afterTtl = forwarder.flowOfTunnels().first()
+        assertEquals(1, afterTtl.size)
+        assertEquals(
+            "TTL elapsed — port must be retried and forwarded",
+            TunnelInfo.Status.FORWARDING,
+            afterTtl.single().status,
+        )
+        assertEquals(1, session.openForwards.size)
+
+        forwarder.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `failed port still denied within TTL`() = runTest {
+        // Hardcoded clock returns 0 forever so TTL never elapses.
+        val session = FakeSession()
+        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+        session.failAllOpens()
+
+        val forwarder = AutoForwarder(
+            session,
+            smallConfig().copy(failedPortTtlMs = 60_000L),
+            clock = { 0L },
+        )
+        val job = forwarder.start(this)
+        runCurrent()
+        // Advance several scan ticks; entry stays on the deny-list.
+        advanceTimeBy(5_500L)
+        runCurrent()
+
+        assertTrue(
+            "all opens must have failed; forward count is the number of *successful* opens",
+            session.openForwards.isEmpty(),
+        )
+        // openLocalPortForward was called at least once (first scan); the
+        // TTL guard then suppresses further attempts.
+        assertTrue(
+            "openLocalPortForward must have been called at least once (initial attempt)",
+            session.totalOpenAttempts.get() >= 1,
+        )
+        // ...but NOT once per scan tick — the TTL keeps it on the deny-list.
+        // Six ticks elapsed (1 initial + 5 from 5.5 s @ 1 s); the deny-list
+        // must hold so we see strictly fewer attempts than scans.
+        assertTrue(
+            "TTL must suppress retries — got ${session.totalOpenAttempts.get()} attempts",
+            session.totalOpenAttempts.get() < 6,
+        )
+
+        forwarder.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `allocator throws when localPortRange is exhausted`() = runTest {
+        // Local port range of size 2; we'll manually toggle three
+        // out-of-window ports so the third forces the allocator to walk
+        // the whole range and trip the fail-fast guard.
+        val session = FakeSession()
+        // No listening ports — we use togglePort to force forwards for
+        // out-of-window remote ports (22, 23, 25 are all < skipPortsBelow).
+        session.setListening("")
+
+        val forwarder = AutoForwarder(
+            session,
+            AutoForwardConfig(
+                scanIntervalSec = 1,
+                maxAutoPort = 5_000,
+                skipPortsBelow = 1024,
+                // Two-slot range. After two manual toggles every slot is
+                // taken, so the third must throw.
+                localPortRange = 3_500..3_501,
+            ),
+        )
+        val job = forwarder.start(this)
+        runCurrent()
+
+        forwarder.togglePort(22)
+        forwarder.togglePort(23)
+        // First two should have succeeded — each got its own slot.
+        assertEquals(2, session.openForwards.size)
+
+        // Third toggle — allocator must throw. AutoForwarder catches it
+        // inside forwardPortLocked and memos remote port 25 on
+        // failedPorts. From the outside we observe: no new forward
+        // opened, port 25 ends up in the FAILED set.
+        forwarder.togglePort(25)
+        runCurrent()
+
+        assertEquals(
+            "third manual toggle must not open a forward — range is exhausted",
+            2,
+            session.openForwards.size,
+        )
+        val snapshot = forwarder.flowOfTunnels().first()
+        val twentyFive = snapshot.singleOrNull { it.remotePort == 25 }
+        assertTrue(
+            "port 25 should appear in the snapshot as FAILED, got $snapshot",
+            twentyFive != null && twentyFive.status == TunnelInfo.Status.FAILED,
+        )
+
+        forwarder.stop()
+        job.cancel()
+        runCurrent()
+    }
+
     private fun smallConfig() = AutoForwardConfig(
         scanIntervalSec = 1,
         maxAutoPort = 5_000,
@@ -241,10 +396,23 @@ class AutoForwarderTest {
     private class FakeSession : SshSession {
         @Volatile private var output: String = ""
         val openForwards: MutableMap<Int, FakeForward> = mutableMapOf()
+        val totalOpenAttempts = AtomicInteger(0)
+        private val failuresRemaining = AtomicInteger(0)
+        private val failForever = AtomicBoolean(false)
         private val nextChannelId = AtomicInteger(0)
 
         fun setListening(ssOutput: String) {
             output = ssOutput
+        }
+
+        /** Make the next [n] openLocalPortForward calls throw. */
+        fun failNextOpens(n: Int) {
+            failuresRemaining.set(n)
+        }
+
+        /** Make every openLocalPortForward call throw. */
+        fun failAllOpens() {
+            failForever.set(true)
         }
 
         override val isConnected: Boolean = true
@@ -260,11 +428,20 @@ class AutoForwarderTest {
         }
         override fun tail(path: String, onLine: (String) -> Unit): Job =
             error("tail not used by AutoForwarder tests")
+        override fun startShell(): com.pocketshell.core.ssh.SshShell =
+            error("startShell not used by AutoForwarder tests")
         override fun openLocalPortForward(
             remoteHost: String,
             remotePort: Int,
             localPort: Int,
         ): SshPortForward {
+            totalOpenAttempts.incrementAndGet()
+            if (failForever.get()) {
+                throw RuntimeException("fake open failure (forever)")
+            }
+            if (failuresRemaining.getAndUpdate { if (it > 0) it - 1 else 0 } > 0) {
+                throw RuntimeException("fake open failure (countdown)")
+            }
             val f = FakeForward(remoteHost, remotePort, localPort, nextChannelId.incrementAndGet())
             openForwards[remotePort] = f
             return f

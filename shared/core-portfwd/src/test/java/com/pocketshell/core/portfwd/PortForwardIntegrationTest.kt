@@ -8,6 +8,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.test.runTest
 import org.junit.AfterClass
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.BeforeClass
@@ -156,6 +157,92 @@ class PortForwardIntegrationTest {
                 }
             }
         }
+    }
+
+    @Test
+    fun `concurrent close on the same forward is race-free and deterministic`() = runTest {
+        connect().use { session ->
+            val localPort = pickFreeLocalPort()
+            val forward = session.openLocalPortForward(
+                remoteHost = "127.0.0.1",
+                remotePort = 22,
+                localPort = localPort,
+            )
+            assertTrue(forward.isActive)
+
+            // Make sure at least one copy thread is alive by driving a
+            // real connection through the forward — that gets the
+            // bidirectional copiers running.
+            Socket().use { client ->
+                client.connect(InetSocketAddress("127.0.0.1", localPort), 5_000)
+                client.soTimeout = 5_000
+                val reader = BufferedReader(InputStreamReader(client.getInputStream()))
+                reader.readLine() // banner — proves the copy threads are pumping
+            }
+
+            // Fire several concurrent close() calls. Only one wins the
+            // compareAndSet inside close(); the rest must be no-op and
+            // return without throwing. After all of them return, the
+            // forward must be fully inactive.
+            val closers = (1..8).map {
+                Thread { forward.close() }.apply { isDaemon = true; start() }
+            }
+            closers.forEach { it.join(2_000) }
+            for (c in closers) {
+                assertFalse("closer thread #${c.name} did not finish in 2 s", c.isAlive)
+            }
+            assertFalse("forward must be inactive after concurrent close()", forward.isActive)
+        }
+    }
+
+    @Test
+    fun `close joins in-flight copy threads so no copy thread outlives the call`() = runTest {
+        connect().use { session ->
+            val localPort = pickFreeLocalPort()
+            val forward = session.openLocalPortForward(
+                remoteHost = "127.0.0.1",
+                remotePort = 22,
+                localPort = localPort,
+            )
+
+            // Open a real connection so the bidirectional copy threads
+            // are alive (otherwise there's nothing to join).
+            val client = Socket()
+            client.connect(InetSocketAddress("127.0.0.1", localPort), 5_000)
+            client.soTimeout = 5_000
+            val reader = BufferedReader(InputStreamReader(client.getInputStream()))
+            reader.readLine() // banner
+
+            // Snapshot the thread set this JVM knows about that are
+            // named after our forward, *before* close(). They should
+            // exist (we just exercised the copiers).
+            val before = currentForwardThreads(localPort)
+            assertTrue(
+                "expected at least one live copy thread for port $localPort, got $before",
+                before.isNotEmpty(),
+            )
+
+            forward.close()
+            client.close()
+
+            // After close() returns we must see no live copy threads
+            // for this forward. close() joins them with a per-thread
+            // budget, so this should be deterministic — not a sleep
+            // race.
+            val after = currentForwardThreads(localPort).filter { it.isAlive }
+            assertTrue(
+                "expected no live copy threads after close(), still alive: $after",
+                after.isEmpty(),
+            )
+        }
+    }
+
+    /** Find live threads named after this forward (l2r/r2l copy threads). */
+    private fun currentForwardThreads(localPort: Int): List<Thread> {
+        val all = arrayOfNulls<Thread>(Thread.activeCount() * 2 + 16)
+        val n = Thread.enumerate(all)
+        return (0 until n).mapNotNull { all[it] }
+            .filter { it.name.startsWith("ssh-portfwd-l2r-$localPort") || it.name.startsWith("ssh-portfwd-r2l-$localPort") }
     }
 
     @Test

@@ -30,4 +30,14 @@ public data class AutoForwardConfig(
      * next free port from this range.
      */
     public val localPortRange: IntRange = 3_000..3_999,
+    /**
+     * How long a remote port stays on the failed-attempts deny-list before
+     * the scanner is allowed to retry it. Without a TTL, a transient
+     * remote-side failure (channel briefly refused, ephemeral local port
+     * collision, ...) would suppress the port until the process restarts.
+     * 60 s is a sensible default: long enough that a flapping service
+     * doesn't get retried every tick, short enough that recovery is
+     * automatic on a human timescale.
+     */
+    public val failedPortTtlMs: Long = 60_000L,
 )

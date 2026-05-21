@@ -46,6 +46,12 @@ import kotlinx.coroutines.sync.withLock
 public class AutoForwarder(
     private val session: SshSession,
     private val config: AutoForwardConfig = AutoForwardConfig(),
+    // Wall clock for failed-port TTL bookkeeping. Injectable so unit tests
+    // can drive time deterministically alongside the coroutine
+    // `TestScope` virtual clock — `System.currentTimeMillis()` doesn't
+    // advance with `advanceTimeBy`, so we'd otherwise have no test seam
+    // for the TTL eviction logic.
+    private val clock: () -> Long = { System.currentTimeMillis() },
 ) {
 
     // We use a StateFlow so the UI can render the current set of tunnels
@@ -59,7 +65,10 @@ public class AutoForwarder(
     private val manualPorts = mutableSetOf<Int>()
     private val processNames = mutableMapOf<Int, String>()
     private val localPortMap = mutableMapOf<Int, Int>()
-    private val failedPorts = mutableSetOf<Int>()
+    // Remote port -> timestamp (from [clock]) when it landed on the
+    // deny-list. We evict entries older than [AutoForwardConfig.failedPortTtlMs]
+    // on each scan tick so transient failures don't stick around forever.
+    private val failedPorts = mutableMapOf<Int, Long>()
     // Byte counters from the previous scan tick, keyed by remote port.
     // Used to derive instantaneous throughput in TunnelInfo.speedBps.
     private val priorTotalBytes = mutableMapOf<Int, Long>()
@@ -156,6 +165,10 @@ public class AutoForwarder(
         val remotePortSet = remotePorts.map { it.port }.toSet()
 
         mutex.withLock {
+            // Evict TTL'd deny-list entries up front so the rest of the
+            // scan sees an accurate "is this port denied?" view.
+            evictExpiredFailedPortsLocked()
+
             // Update process-name cache for everything we just saw.
             remotePorts.forEach { rp ->
                 processNames[rp.port] = rp.processName
@@ -182,10 +195,22 @@ public class AutoForwarder(
             // Reset the failed-port memo for ports that have disappeared, so
             // a future "service restarted on the same port" attempt gets a
             // fresh try rather than being suppressed forever.
-            failedPorts.removeAll { it !in remotePortSet }
+            failedPorts.keys.removeAll { it !in remotePortSet }
 
             updateStateLocked()
         }
+    }
+
+    /**
+     * Drop any deny-list entries older than [AutoForwardConfig.failedPortTtlMs].
+     * Called from inside the scan loop while holding [mutex].
+     */
+    private fun evictExpiredFailedPortsLocked() {
+        if (failedPorts.isEmpty()) return
+        val now = clock()
+        val ttl = config.failedPortTtlMs
+        val expired = failedPorts.entries.filter { now - it.value > ttl }.map { it.key }
+        expired.forEach { failedPorts.remove(it) }
     }
 
     private fun shouldForwardPort(remotePort: Int): Boolean {
@@ -195,8 +220,13 @@ public class AutoForwarder(
 
     private fun forwardPortLocked(remotePort: Int) {
         if (remotePort in tunnels) return
-        val localPort = resolveLocalPortLocked(remotePort)
         try {
+            // resolveLocalPortLocked() throws when localPortRange is
+            // exhausted — that's a forward-creation failure too, so it
+            // belongs inside the same catch as the openLocalPortForward
+            // call. Without this widening, an exhausted range would
+            // crash the scan loop instead of being memoed in failedPorts.
+            val localPort = resolveLocalPortLocked(remotePort)
             // Forward 127.0.0.1:<remotePort> on the remote's side — the
             // standard "service bound to localhost on the dev box" case.
             // Matches the legacy ssh-auto-forward-android behaviour.
@@ -209,10 +239,14 @@ public class AutoForwarder(
             localPortMap[remotePort] = localPort
         } catch (_: Throwable) {
             // Forward couldn't be created (local port already in use,
-            // remote refused the channel, ...). Remember so we don't
-            // pummel the remote on every scan; the next disappearance of
-            // this remote port will clear the memo.
-            failedPorts.add(remotePort)
+            // remote refused the channel, allocator exhausted, ...).
+            // Remember so we don't pummel the remote on every scan; the
+            // next disappearance of this remote port will clear the
+            // memo. We also TTL the entry
+            // ([AutoForwardConfig.failedPortTtlMs]) so a transient
+            // failure isn't sticky across re-scans on a still-listening
+            // remote port.
+            failedPorts[remotePort] = clock()
         }
     }
 
@@ -248,12 +282,14 @@ public class AutoForwarder(
                 candidate = config.localPortRange.first
             }
             if (candidate == nextLocalPort) {
-                // Range fully exhausted; fall back to the very first slot
-                // (the caller will see a "local port already in use"
-                // failure and move on). This matches the legacy
-                // behaviour of just incrementing past the range, but
-                // safer because we never hand out values that overflow.
-                break
+                // Range fully exhausted — every slot is allocated. Fail
+                // fast with a clear message rather than silently handing
+                // out an already-used port (or, worse, looping forever).
+                // The caller (forwardPortLocked) catches Throwable and
+                // memos the remote port; this is the right shape.
+                val low = config.localPortRange.first
+                val high = config.localPortRange.last
+                throw RuntimeException("no free local ports in range $low..$high")
             }
         }
         nextLocalPort = candidate + 1
@@ -263,7 +299,13 @@ public class AutoForwarder(
     private fun updateStateLocked() {
         val intervalSec = config.scanIntervalSec.coerceAtLeast(1).toLong()
         val snapshot = mutableListOf<TunnelInfo>()
-        val knownPorts = (tunnels.keys + processNames.keys).distinct().sorted()
+        // Surface failed ports too — a manually-toggled port that
+        // couldn't be forwarded (e.g. range exhausted) still belongs in
+        // the snapshot with status FAILED so the UI can show the user
+        // why nothing happened. Without this, exhaustion is invisible.
+        val knownPorts = (tunnels.keys + processNames.keys + failedPorts.keys)
+            .distinct()
+            .sorted()
         for (port in knownPorts) {
             val tunnel = tunnels[port]
             val status = when {

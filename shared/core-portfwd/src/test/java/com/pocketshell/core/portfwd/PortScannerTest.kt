@@ -145,6 +145,8 @@ class PortScannerTest {
             remotePort: Int,
             localPort: Int,
         ): SshPortForward = error("openLocalPortForward not used by PortScanner tests")
+        override fun startShell(): com.pocketshell.core.ssh.SshShell =
+            error("startShell not used by PortScanner tests")
         override fun close() = Unit
     }
 }

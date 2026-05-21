@@ -1,0 +1,38 @@
+PocketShell — third-party licenses
+====================================
+
+This file acknowledges the third-party source code shipped inside the
+PocketShell APK. It is loaded at runtime by the in-app "Licenses" / "About"
+screen (TBD) and is also the canonical attribution required by the licenses
+of the included components.
+
+------------------------------------------------------------------------
+1. Termux terminal-emulator and terminal-view (vendored)
+------------------------------------------------------------------------
+
+Component:    Vendored in module `shared/core-terminal`
+Source:       https://github.com/termux/termux-app
+              (subprojects `terminal-emulator` and `terminal-view`)
+Pinned at:    Commit 30ebb2dee381d292ade0f2868cfde0f9f20b89fe (2026-05-21)
+License:      Apache License, Version 2.0
+              http://www.apache.org/licenses/LICENSE-2.0
+Derivation:   Termux's `terminal-emulator` / `terminal-view` themselves
+              descend from "Android Terminal Emulator"
+              (https://github.com/jackpal/Android-Terminal-Emulator),
+              also Apache License 2.0.
+
+Full license text:
+    shared/core-terminal/LICENSE.txt (in the source repo)
+
+Notice required by Section 4(d) of the Apache License 2.0:
+
+    Termux terminal-emulator and terminal-view
+    Copyright (c) the Termux contributors.
+    Originally derived from Android Terminal Emulator
+    Copyright (c) the Android Terminal Emulator contributors (Apache 2.0).
+
+Modifications by PocketShell:
+    See `shared/core-terminal/VENDORED.md` and (if present)
+    `shared/core-terminal/PATCHES.md`.
+
+------------------------------------------------------------------------

@@ -2,6 +2,17 @@
 
 PocketShell uses a three-actor process: orchestrator + implementer + reviewer. The orchestrator (Claude in the main thread) prepares issues, dispatches agents, and ensures the process is followed. Agents never talk to each other directly — they communicate through GitHub issue comments, with the orchestrator as messenger.
 
+## Named agent definitions
+
+Canonical role definitions live in [.claude/agents/](.claude/agents/):
+
+- [.claude/agents/implementer.md](.claude/agents/implementer.md) — the implementer's system prompt
+- [.claude/agents/reviewer.md](.claude/agents/reviewer.md) — the reviewer's system prompt
+
+When the harness recognises these names, the orchestrator launches them with `subagent_type: "implementer"` and `subagent_type: "reviewer"`. Until then, the orchestrator launches `general-purpose` agents with a brief that tells the agent to read its canonical role file first.
+
+The body of this `agents.md` describes how the orchestrator dispatches and coordinates them. The per-role workflow, hard rules, and comment formats live in the agent files themselves.
+
 ## Actors
 
 ### Orchestrator (main thread)

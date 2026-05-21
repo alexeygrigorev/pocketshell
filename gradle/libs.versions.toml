@@ -40,6 +40,16 @@ androidx-test-ext-junit = "1.2.1"
 # future refresh from upstream is a pure source copy.
 androidx-annotation = "1.9.0"
 
+# core-voice (issue #14). OkHttp is the HTTP client for the Whisper multipart
+# upload; mockwebserver lets us test the client against a fake OpenAI server
+# on the host JVM. 4.12.0 is the latest stable on the 4.x line — 5.x is still
+# alpha at the time of writing, so we stay on 4 for predictability.
+# security-crypto 1.1.0 (stable as of late 2024) provides
+# EncryptedSharedPreferences backed by Android Keystore for the user-supplied
+# OpenAI API key.
+okhttp = "4.12.0"
+androidx-security-crypto = "1.1.0"
+
 [libraries]
 core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
 activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
@@ -76,6 +86,11 @@ androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version
 
 # core-terminal (issue #7). Used by the vendored Termux sources.
 androidx-annotation = { group = "androidx.annotation", name = "annotation", version.ref = "androidx-annotation" }
+
+# core-voice (issue #14).
+okhttp = { group = "com.squareup.okhttp3", name = "okhttp", version.ref = "okhttp" }
+okhttp-mockwebserver = { group = "com.squareup.okhttp3", name = "mockwebserver", version.ref = "okhttp" }
+androidx-security-crypto = { group = "androidx.security", name = "security-crypto", version.ref = "androidx-security-crypto" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

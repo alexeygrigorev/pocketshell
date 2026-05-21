@@ -1,0 +1,549 @@
+package com.pocketshell.app.snippets
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.core.storage.entity.SnippetEntity
+import com.pocketshell.uikit.theme.JetBrainsMonoFamily
+import com.pocketshell.uikit.theme.PocketShellColors
+
+/**
+ * Snippet library management screen — full CRUD for the snippets of a
+ * single host. Reachable from [SnippetPickerSheet]'s "Manage" affordance
+ * (rendered there as a fullscreen `Dialog`), so the screen has a back
+ * affordance but is not currently part of the top-level navigation
+ * graph.
+ *
+ * Layout, top-to-bottom:
+ *
+ *  - **App bar** — back `‹` + title "Snippets".
+ *  - **Add button** — accent pill that opens the [SnippetEditorDialog].
+ *  - **Inline error banner** — surfaces DAO failures from the ViewModel.
+ *  - **Two grouped sections** — "Commands" and "Prompts". Empty groups
+ *    are collapsed so a brand-new library shows nothing but the empty
+ *    state.
+ *
+ * Each row carries `Edit` and `Delete` text buttons. Delete shows a
+ * confirmation dialog because the action is destructive and not undoable
+ * (no soft-delete flag on [SnippetEntity]).
+ *
+ * @param hostId the host whose library this screen renders. The ViewModel
+ *               binds to this id; passing 0 / a non-existent id surfaces
+ *               an empty list (no host -> no FK-valid snippets).
+ * @param onBack invoked on back-press / app-bar tap; the caller should
+ *               close the hosting Dialog or pop the nav route.
+ * @param viewModel injected via Hilt by default. Tests substitute a fake.
+ */
+@Composable
+public fun SnippetsScreen(
+    hostId: Long,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+    viewModel: SnippetsViewModel = hiltViewModel(),
+) {
+    LaunchedEffect(hostId) {
+        viewModel.bindHost(hostId)
+    }
+
+    val snippets by viewModel.snippets.collectAsState()
+    val error by viewModel.error.collectAsState()
+
+    var editorTarget: SnippetEntity? by remember { mutableStateOf(null) }
+    var showAddDialog by remember { mutableStateOf(false) }
+    var pendingDelete: SnippetEntity? by remember { mutableStateOf(null) }
+
+    BackHandler {
+        when {
+            pendingDelete != null -> pendingDelete = null
+            editorTarget != null -> editorTarget = null
+            showAddDialog -> showAddDialog = false
+            else -> onBack()
+        }
+    }
+
+    val commands = snippets.filter {
+        SnippetKind.fromStorage(it.kind) == SnippetKind.Command
+    }
+    val prompts = snippets.filter {
+        SnippetKind.fromStorage(it.kind) == SnippetKind.Prompt
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxSize()
+            .background(PocketShellColors.Background),
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            SnippetsAppBar(onBack = onBack)
+
+            // Add affordance — accent pill stretched wide enough to read
+            // as the primary action of the screen.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+            ) {
+                Button(
+                    onClick = { showAddDialog = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = PocketShellColors.Accent,
+                        contentColor = PocketShellColors.OnAccent,
+                    ),
+                ) {
+                    Text("Add snippet", fontWeight = FontWeight.SemiBold)
+                }
+            }
+
+            error?.let { msg ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(PocketShellColors.Surface)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = msg,
+                        color = PocketShellColors.Red,
+                        fontSize = 12.sp,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = viewModel::clearError) {
+                        Text("Dismiss", color = PocketShellColors.Accent, fontSize = 12.sp)
+                    }
+                }
+            }
+
+            if (snippets.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "No snippets yet",
+                            color = PocketShellColors.Text,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Tap Add to create a command or prompt template.",
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 13.sp,
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    if (commands.isNotEmpty()) {
+                        item(key = "section-commands") {
+                            SectionHeader(
+                                label = "Commands",
+                                count = commands.size,
+                            )
+                        }
+                        items(commands, key = { "cmd-${it.id}" }) { snippet ->
+                            SnippetRow(
+                                snippet = snippet,
+                                onEdit = { editorTarget = snippet },
+                                onDelete = { pendingDelete = snippet },
+                            )
+                        }
+                    }
+                    if (prompts.isNotEmpty()) {
+                        item(key = "section-prompts") {
+                            SectionHeader(
+                                label = "Prompts",
+                                count = prompts.size,
+                            )
+                        }
+                        items(prompts, key = { "prm-${it.id}" }) { snippet ->
+                            SnippetRow(
+                                snippet = snippet,
+                                onEdit = { editorTarget = snippet },
+                                onDelete = { pendingDelete = snippet },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showAddDialog) {
+        SnippetEditorDialog(
+            initial = null,
+            onDismiss = { showAddDialog = false },
+            onSave = { label, body, kind ->
+                viewModel.addSnippet(label = label, body = body, kind = kind)
+                showAddDialog = false
+            },
+        )
+    }
+
+    editorTarget?.let { target ->
+        SnippetEditorDialog(
+            initial = target,
+            onDismiss = { editorTarget = null },
+            onSave = { label, body, kind ->
+                viewModel.updateSnippet(
+                    target.copy(
+                        label = label,
+                        body = body,
+                        kind = kind.storageValue,
+                    ),
+                )
+                editorTarget = null
+            },
+        )
+    }
+
+    pendingDelete?.let { target ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("Delete this snippet?", color = PocketShellColors.Text) },
+            text = {
+                Text(
+                    text = "“${target.label}” will be removed permanently.",
+                    color = PocketShellColors.TextSecondary,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    viewModel.deleteSnippet(target)
+                    pendingDelete = null
+                }) {
+                    Text("Delete", color = PocketShellColors.Red)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) {
+                    Text("Cancel", color = PocketShellColors.Accent)
+                }
+            },
+            containerColor = PocketShellColors.Surface,
+        )
+    }
+}
+
+@Composable
+private fun SnippetsAppBar(onBack: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(60.dp)
+            .background(PocketShellColors.Background)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clickable(onClick = onBack),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "‹",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        Text(
+            text = "Snippets",
+            color = PocketShellColors.Text,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.padding(start = 4.dp),
+        )
+    }
+}
+
+/**
+ * Section header matching the dashboard's `.section-label` style:
+ * uppercase + letter-spaced + a small pill carrying the count.
+ */
+@Composable
+private fun SectionHeader(label: String, count: Int) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 10.dp, end = 10.dp, top = 12.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label.uppercase(),
+            color = PocketShellColors.TextMuted,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.8.sp,
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Box(
+            modifier = Modifier
+                .background(PocketShellColors.Surface, RoundedCornerShape(10.dp))
+                .padding(horizontal = 8.dp, vertical = 2.dp),
+        ) {
+            Text(
+                text = count.toString(),
+                color = PocketShellColors.TextSecondary,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Medium,
+            )
+        }
+    }
+}
+
+/**
+ * Single snippet row — mirrors the host-card visual treatment. Two
+ * trailing text buttons (Edit / Delete) carry the actions.
+ */
+@Composable
+private fun SnippetRow(
+    snippet: SnippetEntity,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    val kind = SnippetKind.fromStorage(snippet.kind)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface, RoundedCornerShape(14.dp))
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = RoundedCornerShape(14.dp),
+            )
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = snippet.label,
+                color = PocketShellColors.Text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            KindTag(kind)
+        }
+        Spacer(modifier = Modifier.height(6.dp))
+        Text(
+            text = snippet.body,
+            color = PocketShellColors.TextSecondary,
+            fontFamily = JetBrainsMonoFamily,
+            fontSize = 12.sp,
+            maxLines = 3,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            TextButton(onClick = onEdit) {
+                Text("Edit", color = PocketShellColors.Accent, fontSize = 13.sp)
+            }
+            TextButton(onClick = onDelete) {
+                Text("Delete", color = PocketShellColors.Red, fontSize = 13.sp)
+            }
+        }
+    }
+}
+
+/**
+ * Add / edit dialog. When [initial] is non-null the form is pre-populated
+ * from it and the dialog title flips to "Edit snippet". Validation lives
+ * upstream in the ViewModel — the dialog only enforces non-blank label /
+ * body locally so the Save button can be disabled while the form is
+ * incomplete.
+ */
+@Composable
+internal fun SnippetEditorDialog(
+    initial: SnippetEntity?,
+    onDismiss: () -> Unit,
+    onSave: (label: String, body: String, kind: SnippetKind) -> Unit,
+) {
+    var label by remember(initial) { mutableStateOf(initial?.label ?: "") }
+    var body by remember(initial) { mutableStateOf(initial?.body ?: "") }
+    var kind by remember(initial) {
+        mutableStateOf(
+            initial?.let { SnippetKind.fromStorage(it.kind) } ?: SnippetKind.Command,
+        )
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = if (initial == null) "Add snippet" else "Edit snippet",
+                color = PocketShellColors.Text,
+            )
+        },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = label,
+                    onValueChange = { label = it },
+                    label = { Text("Label") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                    colors = dialogFieldColors(),
+                )
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = body,
+                    onValueChange = { body = it },
+                    label = { Text("Body") },
+                    minLines = 3,
+                    maxLines = 6,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = dialogFieldColors(),
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "Kind",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    KindToggle(
+                        target = SnippetKind.Command,
+                        current = kind,
+                        onSelect = { kind = it },
+                    )
+                    KindToggle(
+                        target = SnippetKind.Prompt,
+                        current = kind,
+                        onSelect = { kind = it },
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onSave(label.trim(), body, kind)
+                },
+                enabled = label.isNotBlank() && body.isNotBlank(),
+            ) {
+                Text(
+                    text = "Save",
+                    color = if (label.isNotBlank() && body.isNotBlank()) {
+                        PocketShellColors.Accent
+                    } else {
+                        PocketShellColors.TextMuted
+                    },
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = PocketShellColors.TextSecondary)
+            }
+        },
+        containerColor = PocketShellColors.Surface,
+        titleContentColor = PocketShellColors.Text,
+        textContentColor = PocketShellColors.TextSecondary,
+    )
+}
+
+/**
+ * Pill toggle used in the editor dialog to pick between Command and
+ * Prompt. Pre-applies the accent treatment for the selected state.
+ */
+@Composable
+private fun KindToggle(
+    target: SnippetKind,
+    current: SnippetKind,
+    onSelect: (SnippetKind) -> Unit,
+) {
+    val selected = target == current
+    Box(
+        modifier = Modifier
+            .background(
+                color = if (selected) PocketShellColors.AccentSoft else PocketShellColors.Surface,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = if (selected) PocketShellColors.AccentDim else PocketShellColors.Border,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .clickable { onSelect(target) }
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    ) {
+        Text(
+            text = target.label,
+            color = if (selected) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+@Composable
+private fun dialogFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedTextColor = PocketShellColors.Text,
+    unfocusedTextColor = PocketShellColors.Text,
+    focusedBorderColor = PocketShellColors.Accent,
+    unfocusedBorderColor = PocketShellColors.Border,
+    focusedLabelColor = PocketShellColors.Accent,
+    unfocusedLabelColor = PocketShellColors.TextSecondary,
+    cursorColor = PocketShellColors.Accent,
+    focusedContainerColor = PocketShellColors.SurfaceElev,
+    unfocusedContainerColor = PocketShellColors.SurfaceElev,
+)

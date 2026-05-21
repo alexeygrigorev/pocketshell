@@ -43,6 +43,8 @@ import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
+import com.pocketshell.app.snippets.SnippetKind
+import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.CommandChip
@@ -81,6 +83,7 @@ public fun SessionScreen(
     port: Int = SessionDefaults.PORT,
     user: String = SessionDefaults.USER,
     keyPath: String? = null,
+    hostId: Long? = null,
     onBack: () -> Unit = {},
     inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
 ) {
@@ -93,6 +96,11 @@ public fun SessionScreen(
     val dictationState by inlineDictationViewModel.uiState.collectAsState()
 
     var showMicSheet by remember { mutableStateOf(false) }
+    // Issue #17: the chip-row "+" entry opens the snippet picker. The
+    // picker is only meaningful when we know which host's library to
+    // render — at the Phase 0 / proof-of-life entry point hostId is null
+    // and we hide the "+" chip rather than open an empty sheet.
+    var showSnippetPicker by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
 
@@ -209,6 +217,9 @@ public fun SessionScreen(
                     chips = DefaultChips,
                     onChipTap = viewModel::onChipTap,
                     onDictateTap = { showMicSheet = true },
+                    onAddSnippetTap = if (hostId != null) {
+                        { showSnippetPicker = true }
+                    } else null,
                 )
             }
         }
@@ -240,6 +251,28 @@ public fun SessionScreen(
                 val payload = if (withEnter) text + "\n" else text
                 viewModel.terminalState.writeInput(payload.toByteArray(Charsets.UTF_8))
                 showMicSheet = false
+            },
+            hostId = hostId,
+        )
+    }
+
+    if (showSnippetPicker && hostId != null) {
+        // Issue #17: chip-row entry to the snippet library. Picking a
+        // snippet writes its body to the terminal stdin. Commands get a
+        // trailing newline (Enter is implied — the user picked a "run
+        // this" shortcut); prompt templates are sent verbatim so the
+        // user can keep typing context before pressing Enter via the key
+        // bar / system keyboard.
+        SnippetPickerSheet(
+            hostId = hostId,
+            onDismiss = { showSnippetPicker = false },
+            onSnippetPicked = { snippet ->
+                val payload = when (SnippetKind.fromStorage(snippet.kind)) {
+                    SnippetKind.Command -> snippet.body + "\n"
+                    SnippetKind.Prompt -> snippet.body
+                }
+                viewModel.terminalState.writeInput(payload.toByteArray(Charsets.UTF_8))
+                showSnippetPicker = false
             },
         )
     }
@@ -350,12 +383,18 @@ private fun ArmedModifierStrip(armed: Set<SessionViewModel.Modifier>) {
  * `docs/input-methods.md` §"Screen real estate"). The first chip is the
  * `dictate` icon chip — tapping it opens the composer placeholder; the
  * rest write their literal text + `\n` into the terminal.
+ *
+ * Issue #17: a trailing `+` chip opens the snippet picker when a host
+ * is bound (see [onAddSnippetTap]). It is rendered with the accent
+ * `icon-chip` treatment to mirror the dictate entry's "actionable"
+ * visual weight.
  */
 @Composable
 private fun ChipRow(
     chips: List<String>,
     onChipTap: (String) -> Unit,
     onDictateTap: () -> Unit,
+    onAddSnippetTap: (() -> Unit)? = null,
 ) {
     val scrollState = rememberScrollState()
     Row(
@@ -378,6 +417,16 @@ private fun ChipRow(
             onClick = onDictateTap,
             icon = DictateDotIcon,
         )
+        if (onAddSnippetTap != null) {
+            // Issue #17: "+" icon-chip routes the user into the snippet
+            // picker. Reuses the accent `icon-chip` treatment so the
+            // affordance reads as an action, not a literal text payload.
+            CommandChip(
+                label = "+ snippet",
+                onClick = onAddSnippetTap,
+                icon = DictateDotIcon,
+            )
+        }
         chips.forEach { chip ->
             CommandChip(
                 label = chip,

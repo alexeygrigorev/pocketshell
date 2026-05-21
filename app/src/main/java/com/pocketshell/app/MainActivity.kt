@@ -135,6 +135,10 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
             port = dest.port,
             user = dest.username,
             keyPath = dest.keyPath,
+            // Issue #17: the session screen surfaces the snippet picker
+            // off the chip row + the composer's Snippets button. Both
+            // need the persisted host id to scope the library.
+            hostId = dest.hostId,
             onBack = ::back,
         )
     }

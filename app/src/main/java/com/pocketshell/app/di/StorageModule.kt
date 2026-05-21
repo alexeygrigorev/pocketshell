@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Room
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.dao.SnippetDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import dagger.Module
 import dagger.Provides
@@ -51,4 +52,8 @@ object StorageModule {
 
     @Provides
     fun provideSshKeyDao(db: AppDatabase): SshKeyDao = db.sshKeyDao()
+
+    // Issue #17: snippet library DAO consumed by SnippetsViewModel.
+    @Provides
+    fun provideSnippetDao(db: AppDatabase): SnippetDao = db.snippetDao()
 }

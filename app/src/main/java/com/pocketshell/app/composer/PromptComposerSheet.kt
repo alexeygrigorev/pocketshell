@@ -52,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -105,6 +106,7 @@ public fun PromptComposerSheet(
     onDismiss: () -> Unit,
     onSend: (text: String, withEnter: Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    hostId: Long? = null,
     viewModel: PromptComposerViewModel = hiltViewModel(),
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
 ) {
@@ -112,6 +114,11 @@ public fun PromptComposerSheet(
     val context = LocalContext.current
 
     var showApiKeyDialog by remember { mutableStateOf(false) }
+    // Issue #17: tracks whether the Snippets bottom sheet is currently
+    // open. Null host id means the caller doesn't yet have a persisted
+    // host (Phase 0 / proof-of-life entry point) — in that case the
+    // Snippets button stays inert.
+    var showSnippetPicker by remember { mutableStateOf(false) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -173,6 +180,30 @@ public fun PromptComposerSheet(
                     onDismiss()
                 }
             },
+            onSnippets = if (hostId != null) {
+                { showSnippetPicker = true }
+            } else null,
+        )
+    }
+
+    if (showSnippetPicker && hostId != null) {
+        // Issue #17: opens the snippet picker over the composer sheet.
+        // The chosen snippet's body is appended to the live draft so the
+        // user can review / edit before tapping Send. We never auto-fire
+        // the prompt — that would let a stray tap commit the wrong text.
+        SnippetPickerSheet(
+            hostId = hostId,
+            onDismiss = { showSnippetPicker = false },
+            onSnippetPicked = { snippet ->
+                val current = viewModel.uiState.value.draft
+                val separator = when {
+                    current.isEmpty() -> ""
+                    current.endsWith("\n") || current.endsWith(" ") -> ""
+                    else -> " "
+                }
+                viewModel.onDraftChange(current + separator + snippet.body)
+                showSnippetPicker = false
+            },
         )
     }
 
@@ -207,6 +238,7 @@ internal fun SheetContent(
     onMicTap: () -> Unit,
     onSend: (withEnter: Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    onSnippets: (() -> Unit)? = null,
 ) {
     Column(
         modifier = modifier
@@ -350,9 +382,12 @@ internal fun SheetContent(
             GhostButton(
                 label = "Snippets",
                 onClick = {
-                    // Placeholder — real snippets come from issue #17.
-                    // Tapping today is intentionally a no-op so the row's
-                    // visual proportion matches the mockup.
+                    // Issue #17 wired the snippet picker. When the sheet
+                    // is hosted from a context without a known host id
+                    // (e.g. a non-session entry point), [onSnippets] is
+                    // null and tapping the ghost button stays a no-op so
+                    // the row's visual proportion still matches the mockup.
+                    onSnippets?.invoke()
                 },
                 modifier = Modifier.weight(1f),
             )

@@ -6,8 +6,20 @@
         connection to the configured host. Phase 1 will revisit this when
         the host management UI lands — for now this single permission
         covers the smoke test.
+
+        INTERNET is also required by the voice prompt composer (issue #15)
+        for the multipart upload to OpenAI's Whisper endpoint.
     -->
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+        Issue #15: the prompt composer captures microphone audio for the
+        Whisper transcription round-trip. `RECORD_AUDIO` is declared at
+        manifest level (system-level gating) and additionally requested at
+        runtime — see `PromptComposerSheet` for the runtime prompt flow
+        via `rememberLauncherForActivityResult`.
+    -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:name=".App"

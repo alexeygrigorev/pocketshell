@@ -1,0 +1,420 @@
+package com.pocketshell.app.composer
+
+import android.Manifest
+import androidx.annotation.RequiresPermission
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.di.WhisperClientFactory
+import com.pocketshell.core.voice.AndroidKeystoreApiKeyStorage
+import com.pocketshell.core.voice.AudioRecorderException
+import com.pocketshell.core.voice.WhisperException
+import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import javax.inject.Inject
+
+/**
+ * Backs [PromptComposerSheet]: the voice + text composer for agent
+ * prompts. Owns the recording state machine, the live audio amplitude
+ * sampling loop, and the Whisper round-trip.
+ *
+ * ## State machine
+ *
+ * ```
+ *   Idle  ──tap mic──▶  Recording  ──tap mic / 5s silence──▶  Transcribing
+ *    ▲                                                              │
+ *    └──────────────  Whisper success / failure  ◀──────────────────┘
+ * ```
+ *
+ * - `Idle` is the initial state. The mic FAB shows the accent fill, no
+ *   pulse. Tapping it transitions to `Recording`.
+ * - `Recording` opens the mic via [AudioRecorder.start] and starts the
+ *   amplitude / silence-watchdog loop. Tapping the mic again, or 5s of
+ *   silence below [SILENCE_AMPLITUDE_THRESHOLD], transitions to
+ *   `Transcribing`.
+ * - `Transcribing` calls [com.pocketshell.core.voice.WhisperClient.transcribe]
+ *   on the captured WAV bytes. On success the transcription is appended
+ *   to the existing draft text (never replaces); on failure the error is
+ *   stashed in [UiState.error] for the screen to surface. Either way the
+ *   FSM lands back in `Idle`.
+ *
+ * ## Draft preservation
+ *
+ * The composer's text area is the source of truth for the user's prompt.
+ * [UiState.draft] survives sheet dismissal because the ViewModel is
+ * activity-scoped (the screen retrieves it via `hiltViewModel()` against
+ * the activity's `ViewModelStoreOwner`). When the user re-opens the sheet
+ * within the same activity instance, the draft is still there.
+ *
+ * ## Why the WhisperClient comes from a factory
+ *
+ * The user can update their API key at any time via the one-field
+ * settings dialog. Holding a single long-lived [com.pocketshell.core.voice.WhisperClient]
+ * snapshot would freeze the first key forever. The Hilt-provided
+ * [WhisperClientFactory] reloads from [AndroidKeystoreApiKeyStorage] on
+ * each call, so the next transcription always uses the most recent
+ * stored key.
+ *
+ * @see PromptComposerSheet
+ */
+@HiltViewModel
+public class PromptComposerViewModel @Inject constructor(
+    internal val audioRecorder: MicCapture,
+    internal val whisperClientFactory: WhisperClientFactory,
+    internal val apiKeyStorage: ApiKeyVault,
+) : ViewModel() {
+
+    private val _uiState: MutableStateFlow<UiState> = MutableStateFlow(UiState())
+
+    /**
+     * Current composer state — the screen `collectAsState`s this to drive
+     * the text area, the mic button state, the waveform amplitude, and
+     * the error banner.
+     */
+    public val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+
+    private var recordingJob: Job? = null
+    private var transcribeJob: Job? = null
+
+    // Test seam: defaults to wall-clock System.currentTimeMillis at
+    // production, but tests substitute a virtual clock so the 5s silence
+    // window is exercised deterministically.
+    internal var clock: () -> Long = { System.currentTimeMillis() }
+
+    // The amplitude loop's dispatcher. Production wires this to
+    // Dispatchers.Default (CPU-only sleep + amplitude poll). Tests
+    // substitute a virtual TestDispatcher so `delay` advances under
+    // `runTest`'s control without burning wall-clock time.
+    internal var samplerDispatcher: CoroutineDispatcher = Dispatchers.Default
+
+    /**
+     * Replace the draft text. Called when the user edits the text area
+     * directly (typing, deleting, pasting). The recording state is
+     * unaffected.
+     */
+    public fun onDraftChange(newText: String) {
+        _uiState.update { it.copy(draft = newText, error = null) }
+    }
+
+    /**
+     * Tap the mic button. Drives the FSM:
+     *
+     *  - `Idle` -> start recording (the caller must hold `RECORD_AUDIO`)
+     *  - `Recording` -> stop and transcribe
+     *  - `Transcribing` -> no-op (the user can't interrupt the round-trip;
+     *    if it hangs, dismissing the sheet cancels the coroutine)
+     *
+     * On any [AudioRecorderException] the FSM returns to `Idle` and the
+     * exception's message is exposed via [UiState.error].
+     */
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    public fun onMicTap() {
+        when (_uiState.value.recording) {
+            RecordingState.Idle -> startRecording()
+            RecordingState.Recording -> stopAndTranscribe()
+            RecordingState.Transcribing -> Unit // ignore — wait for Whisper
+        }
+    }
+
+    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+    private fun startRecording() {
+        // Guard: the user must have a stored API key before we burn cycles
+        // on a recording the upload can't consume. The screen surfaces the
+        // key entry dialog separately; here we just bail with an error so
+        // the user is not surprised by a successful recording that fails
+        // at upload time.
+        if (whisperClientFactory.create() == null) {
+            _uiState.update {
+                it.copy(error = "No OpenAI API key saved. Open settings to add one.")
+            }
+            return
+        }
+
+        try {
+            audioRecorder.start()
+        } catch (e: AudioRecorderException) {
+            _uiState.update {
+                it.copy(
+                    recording = RecordingState.Idle,
+                    error = e.message ?: "Microphone unavailable",
+                )
+            }
+            return
+        }
+
+        _uiState.update {
+            it.copy(
+                recording = RecordingState.Recording,
+                amplitude = 0f,
+                error = null,
+            )
+        }
+
+        recordingJob = viewModelScope.launch(samplerDispatcher) {
+            sampleAmplitudeAndAutoStopOnSilence()
+        }
+    }
+
+    /**
+     * Amplitude / silence-watchdog loop. Runs in `viewModelScope` on the
+     * sampler dispatcher. Polls [AudioRecorder.currentAmplitude] every
+     * [SAMPLE_INTERVAL_MS] and triggers auto-stop if [SILENCE_WINDOW_MS]
+     * elapse without the amplitude exceeding [SILENCE_AMPLITUDE_THRESHOLD].
+     *
+     * The silence clock resets every time we see amplitude above the
+     * threshold, so a brief pause mid-sentence doesn't cut the user off.
+     * It is *not* reset by user interactions (typing, scrolling) — only
+     * by the audio level itself, per the issue's "5s silence auto-stop
+     * (timer reset on amplitude change above a threshold)".
+     */
+    private suspend fun sampleAmplitudeAndAutoStopOnSilence() {
+        var lastLoudAtMs: Long = clock()
+        var triggerAutoStop = false
+        while (kotlinx.coroutines.currentCoroutineContext().isActive) {
+            val amp = audioRecorder.currentAmplitude()
+            _uiState.update { it.copy(amplitude = amp) }
+
+            if (amp >= SILENCE_AMPLITUDE_THRESHOLD) {
+                lastLoudAtMs = clock()
+            } else if (clock() - lastLoudAtMs >= SILENCE_WINDOW_MS) {
+                // Drop out of the loop *before* triggering the transcribe;
+                // `stopAndTranscribe()` will null `recordingJob` itself.
+                triggerAutoStop = true
+                break
+            }
+
+            delay(SAMPLE_INTERVAL_MS)
+        }
+        // Only auto-trigger transcribe if we hit the silence threshold
+        // (not if the loop exited because the user tapped the mic — in
+        // that case `stopAndTranscribe()` is what cancelled the job).
+        if (triggerAutoStop && _uiState.value.recording == RecordingState.Recording) {
+            stopAndTranscribe()
+        }
+    }
+
+    private fun stopAndTranscribe() {
+        recordingJob?.cancel()
+        recordingJob = null
+
+        val audio = try {
+            audioRecorder.stop()
+        } catch (e: AudioRecorderException) {
+            _uiState.update {
+                it.copy(
+                    recording = RecordingState.Idle,
+                    amplitude = 0f,
+                    error = e.message ?: "Microphone error",
+                )
+            }
+            return
+        }
+
+        if (audio.isEmpty()) {
+            // No bytes captured — never happens in practice because
+            // [AudioRecorder.stop] returns the WAV header even for a
+            // zero-PCM session, but guard anyway.
+            _uiState.update {
+                it.copy(recording = RecordingState.Idle, amplitude = 0f)
+            }
+            return
+        }
+
+        _uiState.update {
+            it.copy(recording = RecordingState.Transcribing, amplitude = 0f)
+        }
+
+        transcribeJob = viewModelScope.launch {
+            val client = whisperClientFactory.create()
+            if (client == null) {
+                _uiState.update {
+                    it.copy(
+                        recording = RecordingState.Idle,
+                        error = "No OpenAI API key saved. Open settings to add one.",
+                    )
+                }
+                return@launch
+            }
+            // WhisperClient implementations are responsible for jumping
+            // off the caller's dispatcher (OkHttpWhisperClient already
+            // wraps the call in `withContext(Dispatchers.IO)`), so we
+            // don't double-switch here. That also keeps the test scope's
+            // virtual scheduler in charge — wrapping with a real
+            // dispatcher would make `runTest`'s `advanceUntilIdle` hang.
+            val result = client.transcribe(audio)
+            result.fold(
+                onSuccess = { text ->
+                    _uiState.update {
+                        val sep = if (it.draft.isEmpty() || it.draft.endsWith(" ")) "" else " "
+                        it.copy(
+                            recording = RecordingState.Idle,
+                            draft = it.draft + sep + text,
+                            error = null,
+                        )
+                    }
+                },
+                onFailure = { t ->
+                    val msg = when (t) {
+                        is WhisperException.Auth -> "API key was rejected. Check your OpenAI key in settings."
+                        is WhisperException.RateLimited -> "Rate limited by OpenAI. Try again in a moment."
+                        is WhisperException.Server -> "OpenAI server error. Try again."
+                        is WhisperException.Transport -> "Network error: ${t.message}"
+                        is WhisperException.Parse -> "Unexpected response from Whisper."
+                        else -> t.message ?: "Transcription failed"
+                    }
+                    _uiState.update {
+                        it.copy(recording = RecordingState.Idle, error = msg)
+                    }
+                },
+            )
+        }
+    }
+
+    /**
+     * Clear any user-facing error banner. Called by the sheet when the
+     * user dismisses the error chip or starts a new recording.
+     */
+    public fun clearError() {
+        _uiState.update { it.copy(error = null) }
+    }
+
+    /**
+     * Called by the sheet when the runtime `RECORD_AUDIO` prompt comes
+     * back denied. Surfaces the message in [UiState.error] so the user
+     * sees why nothing happened.
+     */
+    public fun surfacePermissionDenied() {
+        _uiState.update {
+            it.copy(
+                recording = RecordingState.Idle,
+                error = "Microphone permission denied. Grant it in system settings to use voice input.",
+            )
+        }
+    }
+
+    /**
+     * Persist a new OpenAI API key. Called from the API key entry dialog
+     * once the user enters and saves a key. The plaintext is copied into
+     * [AndroidKeystoreApiKeyStorage] and the caller's [CharArray] is
+     * untouched — the caller is responsible for zeroing it after.
+     */
+    public fun saveApiKey(key: CharArray) {
+        apiKeyStorage.save(key)
+        _uiState.update { it.copy(error = null) }
+    }
+
+    /**
+     * Whether an API key is currently saved. The screen reads this when
+     * the mic FAB is tapped to decide between starting recording (key
+     * present) and opening the key entry dialog (key absent).
+     */
+    public fun hasApiKey(): Boolean {
+        val k = apiKeyStorage.load() ?: return false
+        // Zero our peek copy so plaintext doesn't linger.
+        java.util.Arrays.fill(k, ' ')
+        return true
+    }
+
+    override fun onCleared() {
+        recordingJob?.cancel()
+        transcribeJob?.cancel()
+        // If we were mid-recording, best-effort drop the mic. We swallow
+        // any AudioRecorderException because there's no UI to surface it
+        // to at this point in the lifecycle.
+        if (_uiState.value.recording == RecordingState.Recording) {
+            runCatching { audioRecorder.stop() }
+        }
+        super.onCleared()
+    }
+
+    /** Coarse-grained recording state — drives both the mic FAB and the waveform. */
+    public enum class RecordingState { Idle, Recording, Transcribing }
+
+    /**
+     * UI state surfaced to [PromptComposerSheet].
+     *
+     * @param draft the editable text-area contents.
+     * @param recording current state of the recording FSM.
+     * @param amplitude latest peak amplitude in `[0, 1]`. Drives the
+     *   waveform animation while [recording] is [RecordingState.Recording];
+     *   `0f` otherwise.
+     * @param error transient user-facing error message; `null` clears
+     *   the banner. The screen clears this on the next interaction.
+     */
+    public data class UiState(
+        val draft: String = "",
+        val recording: RecordingState = RecordingState.Idle,
+        val amplitude: Float = 0f,
+        val error: String? = null,
+    )
+
+    /**
+     * Thin abstraction over [com.pocketshell.core.voice.AndroidKeystoreApiKeyStorage]
+     * so the ViewModel can be unit-tested without the Android KeyStore.
+     *
+     * The interface mirrors the slice of `AndroidKeystoreApiKeyStorage`
+     * the ViewModel uses (`save` / `load` / `clear`). Production code
+     * injects a delegate from [com.pocketshell.app.di.VoiceModule]; tests
+     * supply a hand-rolled in-memory fake.
+     */
+    public interface ApiKeyVault {
+        public fun save(key: CharArray)
+        public fun load(): CharArray?
+        public fun clear()
+    }
+
+    /**
+     * Thin abstraction over [com.pocketshell.core.voice.AudioRecorder] so
+     * the ViewModel can be unit-tested without an Android microphone.
+     *
+     * The interface mirrors the slice of `AudioRecorder` the ViewModel
+     * actually uses (`start` / `stop` / `currentAmplitude`). Production
+     * code injects the [AudioRecorderMicCapture] delegate from
+     * [com.pocketshell.app.di.VoiceModule]; tests supply a hand-rolled
+     * fake that scripts amplitudes and captured byte arrays.
+     */
+    public interface MicCapture {
+        @RequiresPermission(Manifest.permission.RECORD_AUDIO)
+        @Throws(AudioRecorderException::class)
+        public fun start()
+
+        @Throws(AudioRecorderException::class)
+        public fun stop(): ByteArray
+
+        public fun currentAmplitude(): Float
+    }
+
+    public companion object {
+        /**
+         * Amplitudes at or above this threshold count as "speech" for the
+         * silence watchdog. 0.04 is empirically a good split between
+         * normal speech and room noise on a Pixel 7 — Whisper's
+         * pre-processing tolerates low-amplitude speech, but waiting for
+         * it would make the auto-stop feel laggy.
+         */
+        public const val SILENCE_AMPLITUDE_THRESHOLD: Float = 0.04f
+
+        /**
+         * Silence window — once this much time passes without amplitude
+         * crossing [SILENCE_AMPLITUDE_THRESHOLD], the recording is
+         * auto-stopped. Per D10: "auto-stop after 5s silence".
+         */
+        public const val SILENCE_WINDOW_MS: Long = 5_000L
+
+        /**
+         * Amplitude poll interval. 50ms is fast enough to drive a 20fps
+         * waveform without monopolising the dispatcher. Lower than this
+         * isn't perceptible to the user; higher makes the bar wiggle
+         * feel laggy.
+         */
+        public const val SAMPLE_INTERVAL_MS: Long = 50L
+    }
+}

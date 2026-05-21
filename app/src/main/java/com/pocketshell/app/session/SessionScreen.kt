@@ -16,10 +16,8 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -35,6 +33,7 @@ import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.uikit.components.Breadcrumb
@@ -66,6 +65,7 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * [SessionViewModel]. The composable is a thin renderer that wires its
  * callbacks to the ViewModel's intent functions.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 public fun SessionScreen(
     viewModel: SessionViewModel,
@@ -158,7 +158,20 @@ public fun SessionScreen(
     }
 
     if (showMicSheet) {
-        PlaceholderComposerDialog(onDismiss = { showMicSheet = false })
+        // Wires the issue #15 prompt composer. `onSend` is the contract
+        // the composer drives:
+        //  - `withEnter = false` -> write the prompt bytes only (Send)
+        //  - `withEnter = true`  -> write the prompt bytes + '\n' (Send + ↵)
+        // Either way we dismiss the sheet so the user lands back on the
+        // live terminal with their submission visible.
+        PromptComposerSheet(
+            onDismiss = { showMicSheet = false },
+            onSend = { text, withEnter ->
+                val payload = if (withEnter) text + "\n" else text
+                viewModel.terminalState.writeInput(payload.toByteArray(Charsets.UTF_8))
+                showMicSheet = false
+            },
+        )
     }
 }
 
@@ -277,34 +290,6 @@ private fun ChipRow(
         }
         Spacer(modifier = Modifier.width(4.dp))
     }
-}
-
-/**
- * Placeholder composer dialog. The real bottom-sheet composer lands with
- * issue #15 — `docs/input-methods.md` §"Prompt Composer". Here we just
- * confirm that the mic FAB / dictate chip wiring reaches a sink.
- */
-@Composable
-private fun PlaceholderComposerDialog(onDismiss: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Prompt composer") },
-        text = {
-            Text(
-                "The voice / text composer arrives with #15. " +
-                    "For now this confirms the mic affordance is wired through " +
-                    "from the session screen's FAB and the dictate chip.",
-            )
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Close")
-            }
-        },
-        containerColor = PocketShellColors.Surface,
-        titleContentColor = PocketShellColors.Text,
-        textContentColor = PocketShellColors.TextSecondary,
-    )
 }
 
 /**

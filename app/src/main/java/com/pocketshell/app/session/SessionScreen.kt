@@ -73,9 +73,11 @@ public fun SessionScreen(
     host: String = SessionDefaults.HOST,
     port: Int = SessionDefaults.PORT,
     user: String = SessionDefaults.USER,
+    keyPath: String? = null,
+    onBack: () -> Unit = {},
 ) {
-    LaunchedEffect(host, port, user) {
-        viewModel.connect(host, port, user)
+    LaunchedEffect(host, port, user, keyPath) {
+        viewModel.connect(host, port, user, keyPath)
     }
 
     val status by viewModel.connectionStatus.collectAsState()
@@ -97,8 +99,8 @@ public fun SessionScreen(
         ) {
             Breadcrumb(
                 crumbs = breadcrumbCrumbs(host, user),
-                onBack = { /* Detach intent — wiring lands with #18's host picker. */ },
-                onMore = { /* More menu — wiring lands with #18 / #23. */ },
+                onBack = onBack,
+                onMore = { /* More menu — wiring lands with #23. */ },
             )
 
             TabsRow()

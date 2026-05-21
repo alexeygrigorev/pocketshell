@@ -115,6 +115,14 @@ dependencies {
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)
 
+    // Issue #18: `hiltViewModel()` for Hilt-injected ViewModels in
+    // composables. Direct version string (not through the catalog) per
+    // the issue's "no new libs.versions.toml entries" constraint. The
+    // library tracks Compose / lifecycle versions in lock-step — 1.2.0
+    // is the stable release that supports Compose 1.6+ and Hilt 2.51+
+    // (we're on Compose BOM 2025.05.00 + Hilt 2.56.1).
+    implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
+
     // Phase 0 proof-of-life (issue #9): pull in the SSH layer and the
     // vendored Termux surface so the app can render a real remote shell.
     // `core-ssh` exposes its `sshj` dependency transitively (`api`); we
@@ -128,6 +136,12 @@ dependencies {
     // in `:shared:ui-kit` so future Phase 1 modules consume the same source
     // of truth. `MainActivity` consumes it via `PocketShellTheme`.
     implementation(project(":shared:ui-kit"))
+
+    // Issue #18: host management screens persist hosts and SSH keys via
+    // Room. `core-storage` already declares Room + coroutines `api`-style,
+    // so this single dependency brings the DAOs + entities + AppDatabase
+    // onto the classpath.
+    implementation(project(":shared:core-storage"))
 
     // ProofPipelineTest connects to the `pocketshell-test:ssh` Docker
     // container the same way `core-ssh`'s integration test does, so the
@@ -145,4 +159,9 @@ dependencies {
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.androidx.test.ext.junit)
+
+    // Issue #18: ViewModel tests stand up an in-memory Room database to
+    // exercise the host / key DAOs without an emulator. Mirrors
+    // `:shared:core-storage`'s own DAO tests.
+    testImplementation(libs.room.testing)
 }

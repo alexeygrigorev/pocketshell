@@ -127,19 +127,25 @@ public class SessionViewModel @Inject constructor(
     /**
      * Connect to the given host (idempotent — re-calling with the same
      * triple is a no-op while a connection is in flight or established).
-     * Hardcoded for #13; #18 will introduce the host picker that drives
-     * this from saved entries.
+     *
+     * When [keyPath] is non-null the SSH key is loaded from disk at that
+     * path — this is the route #18's host picker takes after resolving
+     * `HostEntity.keyId → SshKeyEntity.privateKeyPath`. When [keyPath]
+     * is null we fall back to the Phase 0 bundled raw-resource key,
+     * which keeps `ProofPipelineTest` and the default Phase 1 boot path
+     * working unchanged.
      */
     public fun connect(
         host: String,
         port: Int,
         user: String,
+        keyPath: String? = null,
     ) {
         if (connectJob?.isActive == true) return
         if (_connectionStatus.value is ConnectionStatus.Connected) return
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
         connectJob = viewModelScope.launch {
-            runConnect(host, port, user, viewModelScope)
+            runConnect(host, port, user, keyPath, viewModelScope)
         }
     }
 
@@ -147,10 +153,15 @@ public class SessionViewModel @Inject constructor(
         host: String,
         port: Int,
         user: String,
+        keyPath: String?,
         producerScope: CoroutineScope,
     ) {
         try {
-            val key = SshKey.Pem(readKeyFromRawResource(applicationContext))
+            val key: SshKey = if (keyPath != null) {
+                SshKey.Path(java.io.File(keyPath))
+            } else {
+                SshKey.Pem(readKeyFromRawResource(applicationContext))
+            }
             val sessionResult = SshConnection.connect(
                 host = host,
                 port = port,

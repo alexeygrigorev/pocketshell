@@ -8,7 +8,16 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import com.pocketshell.app.hosts.AddEditHostScreen
+import com.pocketshell.app.hosts.HostListScreen
+import com.pocketshell.app.hosts.SshKeysScreen
+import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.session.SessionScreen
 import com.pocketshell.app.session.SessionViewModel
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -17,23 +26,30 @@ import dagger.hilt.android.AndroidEntryPoint
 /**
  * Phase 1 entry point.
  *
- * Hosts a single destination — the [SessionScreen] — wired to a Hilt-scoped
- * [SessionViewModel]. The brief for #13 specifies a single-destination
- * `NavHost`, but `androidx.navigation:navigation-compose` is not on the
- * version catalog and the brief forbids new `libs.versions.toml` entries.
- * Since there is precisely one destination today, a direct composable
- * invocation is functionally identical to a `NavHost { composable("session") {...} }`
- * with no `navigate(...)` callers. #18's host picker is the first issue
- * that will actually need navigation — that issue can land the navigation
- * dependency along with the second destination.
+ * Hosts a hand-rolled state-based navigator (see
+ * [com.pocketshell.app.nav.AppDestination] for rationale on not pulling
+ * in `androidx.navigation:navigation-compose` — the brief for #18
+ * forbids new catalog entries and we have a small finite destination
+ * set). The current destination lives in a `mutableStateOf`, with a
+ * small back-stack as a list for the back gesture.
  *
- * The Phase 0 `ProofOfLifeScreen` is kept (it still owns the SSH→terminal
- * helper functions and the byte-pipeline integration test in
- * `app/src/test/`), but is no longer the launcher entry.
+ * Destinations:
+ *
+ * - [AppDestination.HostList] (landing) — list of saved SSH hosts.
+ * - [AppDestination.AddHost] / [AppDestination.EditHost] — host form.
+ * - [AppDestination.SshKeys] — SSH key list / add / delete.
+ * - [AppDestination.Session] — live SSH session for a selected host.
+ *
+ * The Phase 0 `ProofOfLifeScreen` is kept on disk (the
+ * `ProofPipelineTest` still imports its helper functions) but is no
+ * longer the launcher entry. The host picker landed here in #18 owns
+ * that role now.
  */
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
 
+    // SessionViewModel stays activity-scoped: we only have one live
+    // session at a time today; multi-pane lifecycle arrives with #22.
     private val sessionViewModel: SessionViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -45,12 +61,82 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    SessionScreen(
-                        viewModel = sessionViewModel,
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                    AppNavigator(sessionViewModel = sessionViewModel)
                 }
             }
         }
     }
 }
+
+/**
+ * Sealed-class destination state machine. The back-stack is a `List<AppDestination>`
+ * we push / pop; rendering branches on the head.
+ *
+ * Saveable: we don't persist the back stack across process death today.
+ * Phase 1 acceptance only requires that hosts + keys persist across app
+ * restarts; the back stack is volatile by design (cold-launch returns
+ * the user to `HostList`).
+ */
+@Composable
+private fun AppNavigator(sessionViewModel: SessionViewModel) {
+    // Volatile in-memory state. Cold-launch (process death) always lands
+    // on `HostList`; full saved-state restoration arrives when
+    // navigation-compose lands and brings its own saver machinery.
+    var current: AppDestination by remember {
+        mutableStateOf<AppDestination>(AppDestination.HostList)
+    }
+
+    val backStack = remember { mutableListOf<AppDestination>() }
+
+    fun navigate(dest: AppDestination) {
+        backStack += current
+        current = dest
+    }
+
+    fun back() {
+        current = backStack.removeLastOrNull() ?: AppDestination.HostList
+    }
+
+    when (val dest = current) {
+        AppDestination.HostList -> HostListScreen(
+            onAddHost = { navigate(AppDestination.AddHost) },
+            onEditHost = { id -> navigate(AppDestination.EditHost(id)) },
+            onManageKeys = { navigate(AppDestination.SshKeys) },
+            onOpenSession = { host, keyPath ->
+                navigate(
+                    AppDestination.Session(
+                        hostId = host.id,
+                        hostname = host.hostname,
+                        port = host.port,
+                        username = host.username,
+                        keyPath = keyPath,
+                    ),
+                )
+            },
+        )
+
+        AppDestination.AddHost -> AddEditHostScreen(
+            hostId = null,
+            onDone = ::back,
+            onManageKeys = { navigate(AppDestination.SshKeys) },
+        )
+
+        is AppDestination.EditHost -> AddEditHostScreen(
+            hostId = dest.hostId,
+            onDone = ::back,
+            onManageKeys = { navigate(AppDestination.SshKeys) },
+        )
+
+        AppDestination.SshKeys -> SshKeysScreen(onBack = ::back)
+
+        is AppDestination.Session -> SessionScreen(
+            viewModel = sessionViewModel,
+            host = dest.hostname,
+            port = dest.port,
+            user = dest.username,
+            keyPath = dest.keyPath,
+            onBack = ::back,
+        )
+    }
+}
+

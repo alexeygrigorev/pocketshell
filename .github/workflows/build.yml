@@ -3,11 +3,14 @@ name: Build
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
@@ -29,6 +32,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
+      - name: Generate version
+        id: version
+        run: |
+          TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
+          SHORT_SHA=$(echo ${{ github.sha }} | cut -c 1-7)
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG_VERSION="${{ github.ref_name }}"
+          else
+            TAG_VERSION="dev"
+          fi
+          VERSION="${TAG_VERSION}-${TIMESTAMP}-${SHORT_SHA}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
@@ -38,9 +54,22 @@ jobs:
       - name: Run checks
         run: ./gradlew check
 
+      - name: Rename APK
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mv app/build/outputs/apk/debug/app-debug.apk "app/build/outputs/apk/debug/pocketshell-${VERSION}-debug.apk"
+
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: app-debug.apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            app/build/outputs/apk/debug/*.apk
+          generate_release_notes: true

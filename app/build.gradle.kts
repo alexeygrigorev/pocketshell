@@ -124,6 +124,11 @@ dependencies {
     implementation(project(":shared:core-ssh"))
     implementation(project(":shared:core-terminal"))
 
+    // Issue #11: the design language (colour scheme, typography, shapes) lives
+    // in `:shared:ui-kit` so future Phase 1 modules consume the same source
+    // of truth. `MainActivity` consumes it via `PocketShellTheme`.
+    implementation(project(":shared:ui-kit"))
+
     // ProofPipelineTest connects to the `pocketshell-test:ssh` Docker
     // container the same way `core-ssh`'s integration test does, so the
     // app needs the same Testcontainers + JUnit + coroutines-test stack.

@@ -9,7 +9,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import com.pocketshell.app.proof.ProofOfLifeScreen
-import com.pocketshell.app.ui.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellTheme
 import dagger.hilt.android.AndroidEntryPoint
 
 /**

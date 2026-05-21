@@ -5,14 +5,21 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.viewinterop.AndroidView
+import com.pocketshell.core.terminal.selection.SelectionOverlay
+import com.pocketshell.core.terminal.selection.TerminalMatch
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
 import com.termux.view.TerminalViewClient
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 
 /**
  * Background colour applied to the [TerminalView]'s parent surface. Matches
@@ -74,58 +81,89 @@ private const val DEFAULT_TEXT_SIZE_PX: Int = 36
 fun TerminalSurface(
     state: TerminalSurfaceState,
     modifier: Modifier = Modifier,
+    matchListener: ((TerminalMatch) -> Unit)? = null,
 ) {
     // Hoist the bridge so the same instance survives recompositions and we
     // do not leak listeners across configuration changes. AndroidView's
     // factory runs once; update runs every recomposition.
     val viewClient = remember { NoOpTerminalViewClient() }
 
-    AndroidView(
-        factory = { context ->
-            TerminalView(context, /* attributes = */ null).apply {
-                setTerminalViewClient(viewClient)
-                // Match `docs/design-language.md`: monospace, JetBrains Mono
-                // when the system has it registered, system monospace as a
-                // graceful fallback. `Typeface.create` with a missing family
-                // silently falls back, so this is safe even on stock AOSP.
-                setTypeface(Typeface.create("JetBrains Mono", Typeface.NORMAL))
-                setTextSize(DEFAULT_TEXT_SIZE_PX)
-                // Honour the design-language background until the emulator
-                // takes over its own canvas. The vendored TerminalView is a
-                // raw `View`; it does not propagate Compose's
-                // `Modifier.background`, so we set it on the View directly.
-                setBackgroundColor(DefaultTerminalBackground.toArgb())
-                isFocusable = true
-                isFocusableInTouchMode = true
-            }
-        },
-        update = { view ->
-            val current = view.currentSession
-            val desired = state.session
-            // Attach / detach as the state's session reference changes.
-            // `attachSession` early-returns when given the same instance,
-            // so this is idempotent across recompositions.
-            if (desired !== current) {
-                if (desired != null) {
-                    view.attachSession(desired)
-                } else {
-                    // No public detach on TerminalView; clear the field via
-                    // an attach of an empty marker is not possible because
-                    // TerminalSession is `final` and we cannot construct a
-                    // sentinel without driving JNI. The view simply keeps
-                    // its last session reference until the next attach.
-                    // This is acceptable for #8 — #9 will always have a
-                    // fresh session on hand when changing sessions.
-                }
-            }
-        },
-        // The `TerminalView` paints its own canvas via `setBackgroundColor`
-        // above; we forward the caller's modifier unchanged so they can
-        // size / pad as needed without us redundantly stacking another
-        // background layer (which would require pulling in
-        // `androidx.compose.foundation` just for `Modifier.background`).
+    // Subscribe to the detector flow only when the caller actually wants
+    // match callbacks. The empty-flow fallback avoids spinning up a debounce
+    // coroutine when no overlay is being rendered.
+    val matchesFlow: Flow<List<TerminalMatch>> =
+        if (matchListener != null) state.flowOfMatches else remember { flowOf(emptyList()) }
+    val matches by matchesFlow.collectAsState(initial = emptyList<TerminalMatch>())
+
+    // Layer the vendored TerminalView under the optional SelectionOverlay.
+    // We use `androidx.compose.ui.layout.Layout` rather than `Box` because
+    // this module does not depend on `compose-foundation`. The Layout
+    // measures both children with the incoming constraints and places them
+    // at origin so they perfectly overlap.
+    Layout(
         modifier = modifier,
-    )
+        content = {
+            AndroidView(
+                factory = { context ->
+                    TerminalView(context, /* attributes = */ null).apply {
+                        setTerminalViewClient(viewClient)
+                        // Match `docs/design-language.md`: monospace,
+                        // JetBrains Mono when the system has it registered,
+                        // system monospace as a graceful fallback.
+                        setTypeface(Typeface.create("JetBrains Mono", Typeface.NORMAL))
+                        setTextSize(DEFAULT_TEXT_SIZE_PX)
+                        // Honour the design-language background until the
+                        // emulator takes over its own canvas. The vendored
+                        // TerminalView is a raw `View`; it does not
+                        // propagate Compose's `Modifier.background`, so we
+                        // set it on the View directly.
+                        setBackgroundColor(DefaultTerminalBackground.toArgb())
+                        isFocusable = true
+                        isFocusableInTouchMode = true
+                    }
+                },
+                update = { view ->
+                    val current = view.currentSession
+                    val desired = state.session
+                    // Attach / detach as the state's session reference
+                    // changes. `attachSession` early-returns when given the
+                    // same instance, so this is idempotent across
+                    // recompositions.
+                    if (desired !== current) {
+                        if (desired != null) {
+                            view.attachSession(desired)
+                        } else {
+                            // No public detach on TerminalView; clear the
+                            // field via an attach of an empty marker is not
+                            // possible because TerminalSession is `final`
+                            // and we cannot construct a sentinel without
+                            // driving JNI. The view simply keeps its last
+                            // session reference until the next attach. This
+                            // is acceptable for #8 — #9 will always have a
+                            // fresh session on hand when changing sessions.
+                        }
+                    }
+                },
+            )
+            if (matchListener != null) {
+                SelectionOverlay(
+                    matches = matches,
+                    onTap = matchListener,
+                )
+            }
+        },
+    ) { measurables, constraints ->
+        // Measure each child with the full incoming constraints and stack
+        // them at (0, 0). The first child is the AndroidView; subsequent
+        // children (the overlay, if present) are placed on top in source
+        // order, exactly as `Box` would do for centred / aligned children.
+        val placeables = measurables.map { it.measure(constraints) }
+        val width = placeables.maxOfOrNull { it.width } ?: constraints.minWidth
+        val height = placeables.maxOfOrNull { it.height } ?: constraints.minHeight
+        layout(width, height) {
+            placeables.forEach { it.place(0, 0) }
+        }
+    }
 
     // Clean up the bridge when the composable leaves the composition. The
     // TerminalView itself will be detached by AndroidView's own disposal;

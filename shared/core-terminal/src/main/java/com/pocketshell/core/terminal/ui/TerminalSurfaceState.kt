@@ -5,6 +5,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.pocketshell.core.terminal.bridge.SshTerminalBridge
+import com.pocketshell.core.terminal.selection.DefaultTerminalMatcher
+import com.pocketshell.core.terminal.selection.TerminalMatch
+import com.pocketshell.core.terminal.selection.TerminalMatcher
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineScope
@@ -15,8 +18,14 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.io.OutputStream
 
@@ -168,7 +177,109 @@ class TerminalSurfaceState {
      */
     internal suspend fun emitOutputForTesting(bytes: ByteArray): Boolean {
         _output.emit(bytes)
+        bufferTick.value = bufferTick.value + 1
         return true
+    }
+
+    /**
+     * Matcher used by [flowOfMatches] to extract tap-target candidates from
+     * the screen buffer. Defaults to the catch-all [DefaultTerminalMatcher];
+     * tests substitute fakes via [setMatcher] without rebuilding the state
+     * holder. The field is `@Volatile` because the flow runs on a background
+     * dispatcher and the caller may swap matchers at any time.
+     */
+    @Volatile
+    private var matcher: TerminalMatcher = DefaultTerminalMatcher()
+
+    /**
+     * Counter that ticks on every meaningful change to the visible screen
+     * (bytes appended via [attachExternalProducer] or pushed through
+     * [emitOutputForTesting]). [flowOfMatches] debounces collections of this
+     * tick to amortise matcher invocations across rapid output bursts.
+     *
+     * Using a counter rather than re-emitting the whole transcript keeps the
+     * tick allocation-free; the matcher pulls the text on demand when the
+     * debounce window closes.
+     */
+    private val bufferTick = MutableStateFlow(0L)
+
+    /**
+     * Read-only view of [bufferTick] for tests that want to observe ticks
+     * without subscribing to the (debounced, heavier-weight) [flowOfMatches].
+     */
+    internal val bufferTicks: StateFlow<Long> get() = bufferTick.asStateFlow()
+
+    /**
+     * Stream of [TerminalMatch] lists derived from the visible terminal
+     * transcript. Each emission reflects the most recent screen state at the
+     * moment the debounce window closed — intermediate burst emissions are
+     * coalesced.
+     *
+     * Cadence: [MATCH_DEBOUNCE_MS] of silence after the last output before a
+     * match pass runs. Tuned to be longer than a typical `printf`-burst
+     * (which fires many small writes in <10 ms) but short enough that a user
+     * who pauses for half a second sees fresh matches.
+     *
+     * Collectors get an immediate first emission (the tick StateFlow seeds
+     * with `0L`) so the UI does not have to wait for the first output to
+     * render an (empty) match list.
+     *
+     * The matcher runs on the collector's dispatcher; callers that find this
+     * too expensive can `.flowOn(Dispatchers.Default)` at their consumption
+     * site. We deliberately do not pin the dispatcher here — different
+     * surfaces (UI, automation, logging) have different ideal placements.
+     */
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
+    val flowOfMatches: Flow<List<TerminalMatch>> = bufferTick
+        .debounce(MATCH_DEBOUNCE_MS)
+        .map { snapshotMatches() }
+        .distinctUntilChanged()
+
+    /**
+     * Replace the active [TerminalMatcher]. The next [flowOfMatches] emission
+     * uses the new matcher; in-flight emissions complete with the matcher
+     * that was active when the debounce window closed (a benign race that
+     * does not corrupt state).
+     *
+     * Exposed primarily for tests; production code is expected to stick with
+     * [DefaultTerminalMatcher].
+     */
+    fun setMatcher(matcher: TerminalMatcher) {
+        this.matcher = matcher
+        // Force a re-run so collectors of [flowOfMatches] pick up the change
+        // without waiting for the next output byte.
+        bufferTick.value = bufferTick.value + 1
+    }
+
+    /**
+     * Pull the current visible-transcript text from the attached session and
+     * run the matcher across it. Returns an empty list when no session is
+     * attached or the session has no emulator yet (the View has not yet laid
+     * out, etc.).
+     *
+     * Visible for [emitMatchesForTesting] and for the debounced
+     * [flowOfMatches] map step.
+     */
+    internal fun snapshotMatches(): List<TerminalMatch> {
+        val emulator = _session?.emulator ?: return emptyList()
+        val text = try {
+            emulator.screen.transcriptText
+        } catch (_: Throwable) {
+            // The vendored emulator can throw `ArrayIndexOutOfBoundsException`
+            // mid-resize; treat that as "no matches this tick" rather than
+            // surfacing the crash to the UI thread.
+            return emptyList()
+        }
+        return matcher.matches(text)
+    }
+
+    /**
+     * Test-only seam: emit a synthetic buffer tick so collectors of
+     * [flowOfMatches] re-run the matcher without needing to push bytes
+     * through the bridge.
+     */
+    internal fun emitBufferTickForTesting() {
+        bufferTick.value = bufferTick.value + 1
     }
 
     /**
@@ -254,6 +365,10 @@ class TerminalSurfaceState {
                     if (bytes.isNotEmpty()) {
                         newBridge.feedBytes(bytes)
                         _output.emit(bytes)
+                        // Tick the buffer signal so debounced consumers of
+                        // [flowOfMatches] re-run the detector. Cheap: just a
+                        // counter increment.
+                        bufferTick.value = bufferTick.value + 1
                     }
                 }
             } finally {
@@ -279,5 +394,14 @@ class TerminalSurfaceState {
         bridge?.stop()
         bridge = null
         detach()
+    }
+
+    private companion object {
+        /**
+         * Debounce window for [flowOfMatches]. Tuned so a single `printf`
+         * burst (many small writes within ~50 ms) coalesces into one match
+         * pass, but a user who pauses for half a second sees fresh matches.
+         */
+        private const val MATCH_DEBOUNCE_MS = 250L
     }
 }

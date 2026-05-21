@@ -86,12 +86,20 @@ internal class RealSshSession(
         remotePort: Int,
         localPort: Int,
     ): SshPortForward {
-        // Implementation deliberately deferred to issue #5 (core-portfwd).
-        // We keep the signature here so SshSession's contract is stable
-        // ahead of #5 landing.
-        throw NotImplementedError(
-            "Local port forwarding is implemented by the core-portfwd module (issue #5).",
-        )
+        ensureConnected()
+        return try {
+            RealSshPortForward(
+                client = client,
+                remoteHost = remoteHost,
+                remotePort = remotePort,
+                localPort = localPort,
+            )
+        } catch (t: Throwable) {
+            throw SshException(
+                "Failed to open local port forward 127.0.0.1:$localPort -> $remoteHost:$remotePort: ${t.message}",
+                t,
+            )
+        }
     }
 
     override fun close() {

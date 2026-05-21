@@ -5,8 +5,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.yield
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.Session.Command
 import java.io.BufferedReader
@@ -70,9 +72,12 @@ internal class RealSshSession(
                 val quoted = path.replace("'", "'\\''")
                 val cmd = sessionChannel.exec("tail -F -n 0 '$quoted'")
                 BufferedReader(InputStreamReader(cmd.inputStream, Charsets.UTF_8)).use { reader ->
-                    while (isActive(this.coroutineContext[Job])) {
+                    while (isActive) {
                         val line = reader.readLine() ?: break
                         onLine(line)
+                        // Suspend per-line so a cancelled tail job exits
+                        // promptly even when the remote is gushing output.
+                        yield()
                     }
                 }
             } finally {
@@ -110,6 +115,4 @@ internal class RealSshSession(
     private fun ensureConnected() {
         if (!isConnected) throw SshException("SSH session is not connected")
     }
-
-    private fun isActive(job: Job?): Boolean = job?.isActive ?: true
 }

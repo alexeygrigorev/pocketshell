@@ -12,31 +12,16 @@ import java.io.IOException
 /**
  * Entry point for the `core-ssh` module.
  *
- * Holds the connect-and-authenticate logic in one place. The original
- * `ssh-auto-forward-android` had this as an instance class with a stored
- * config; we keep the same shape so the migration is a like-for-like swap,
- * but expose a stateless [connect] factory on the companion to match the
- * public API shape required by issue #4:
+ * Holds the connect-and-authenticate logic in one place. Exposes a stateless
+ * [connect] factory:
  *
  * ```
  * SshConnection.connect(host, port, user, key, passphrase): Result<SshSession>
  * ```
- *
- * Per [D3](../../../../../../../docs/decisions.md) we swap JSch for sshj
- * during the extraction. The JSch equivalents map as follows:
- *
- * - `JSch()` + `addIdentity(path)` → [SSHClient] + [SSHClient.loadKeys]
- * - `Session.connect()` → [SSHClient.connect] + [SSHClient.authPublickey]
- * - `Session.setConfig("StrictHostKeyChecking", "no")` → [KnownHostsPolicy.AcceptAll]
- * - `Session.openChannel("exec")` → [SSHClient.startSession] + `Session.exec`
- *   (wired in [RealSshSession.exec])
  */
 public object SshConnection {
 
-    /**
-     * Default TCP + auth timeouts, in milliseconds. Same as the previous
-     * `ssh-auto-forward-android` value to keep behavioural parity.
-     */
+    /** Default TCP + auth timeouts, in milliseconds. */
     internal const val DEFAULT_TIMEOUT_MS: Int = 30_000
 
     /** Default keep-alive interval in seconds. */
@@ -50,8 +35,7 @@ public object SshConnection {
      * [SshException] explaining the failure (DNS, transport, auth, ...).
      * Never throws — all paths land in `Result`.
      *
-     * The host key policy defaults to [KnownHostsPolicy.AcceptAll] for
-     * backwards compatibility with `ssh-auto-forward-android`. Production
+     * The host key policy defaults to [KnownHostsPolicy.AcceptAll]. Production
      * callers should pass [KnownHostsPolicy.KnownHostsFile] explicitly.
      */
     @JvmOverloads
@@ -105,8 +89,7 @@ public object SshConnection {
         // "BEGIN OPENSSH PRIVATE KEY", PKCS8, PuTTY) and pick the right
         // provider implementation. Doing it manually with OpenSSHKeyFile
         // works for legacy keys but trips on the v1 "OPENSSH PRIVATE KEY"
-        // format ed25519 uses by default — which is exactly the case the
-        // D3 swap-to-sshj acceptance criterion calls out.
+        // format ed25519 uses by default — so always go through loadKeys.
         val provider = when (key) {
             is SshKey.Path -> {
                 if (!key.file.exists()) {

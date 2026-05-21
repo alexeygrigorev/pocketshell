@@ -5,13 +5,11 @@ import java.io.File
 /**
  * Source of an SSH private key.
  *
- * The original `ssh-auto-forward-android` code only supported on-disk keys
- * via JSch's `addIdentity(path)` call. sshj's
- * [net.schmizz.sshj.userauth.keyprovider.KeyProvider] abstraction lets us
- * also accept in-memory PEM blobs (useful for tests and for "paste key"
- * import flows that never persist to disk). Both routes are auto-detected
- * by sshj — it picks the right reader for classic PEM, the newer
- * "OPENSSH PRIVATE KEY" format ed25519 uses by default, PKCS8, and PuTTY.
+ * Two supported shapes: on-disk path or in-memory PEM blob (useful for
+ * tests and for "paste key" import flows that never persist to disk).
+ * Both routes are auto-detected by sshj — it picks the right reader for
+ * classic PEM, the newer "OPENSSH PRIVATE KEY" format ed25519 uses by
+ * default, PKCS8, and PuTTY.
  */
 public sealed interface SshKey {
 

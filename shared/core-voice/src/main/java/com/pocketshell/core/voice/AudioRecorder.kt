@@ -46,45 +46,91 @@ public class AudioRecorder(context: Context) {
     @Volatile
     private var recording: Boolean = false
 
+    // Errors raised by the reader thread mid-capture. Surfaced by `stop()`
+    // so the caller doesn't have to install a thread-level handler.
+    @Volatile
+    private var captureError: AudioRecorderException? = null
+
     /**
      * Open the microphone and start capturing.
      *
      * Caller is responsible for holding [Manifest.permission.RECORD_AUDIO];
      * the annotation makes that explicit at the call site. Calling [start]
      * twice without an intervening [stop] is a no-op (returns immediately).
+     *
+     * Throws an [AudioRecorderException] subtype on failure — see the sealed
+     * hierarchy for the discriminated variants. The platform's raw
+     * `IllegalStateException` / `SecurityException` never escape this method.
      */
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     @SuppressLint("MissingPermission")
+    @Throws(AudioRecorderException::class)
     public fun start() {
         if (recording) return
 
         buffer.reset()
         lastAmplitude = 0f
+        captureError = null
 
         // `getMinBufferSize` is the smallest internal buffer AudioRecord
-        // will accept on this device. We double it so a brief reader-thread
-        // stall doesn't drop samples.
+        // will accept on this device. Negative returns are sentinel error
+        // codes (ERROR_BAD_VALUE = -2, ERROR = -1) indicating the requested
+        // config is unsupported — surface as NoDevice.
         val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE_HZ, CHANNEL, ENCODING)
-        require(minBuf > 0) { "AudioRecord.getMinBufferSize returned $minBuf (unsupported config)" }
+        if (minBuf <= 0) {
+            throw AudioRecorderException.NoDevice(
+                "AudioRecord.getMinBufferSize returned $minBuf (unsupported config or no input device)",
+            )
+        }
         val internalBufferBytes = minBuf * 2
 
-        val record = AudioRecord(
-            // VOICE_RECOGNITION applies a noise-suppression profile tuned for
-            // speech (vs MIC which is unfiltered). Whisper handles noise OK,
-            // but the pre-processing measurably helps quality on cheap mics.
-            MediaRecorder.AudioSource.VOICE_RECOGNITION,
-            SAMPLE_RATE_HZ,
-            CHANNEL,
-            ENCODING,
-            internalBufferBytes,
-        )
-        check(record.state == AudioRecord.STATE_INITIALIZED) {
-            "AudioRecord failed to initialise (state=${record.state})"
+        val record = try {
+            AudioRecord(
+                // VOICE_RECOGNITION applies a noise-suppression profile tuned for
+                // speech (vs MIC which is unfiltered). Whisper handles noise OK,
+                // but the pre-processing measurably helps quality on cheap mics.
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                SAMPLE_RATE_HZ,
+                CHANNEL,
+                ENCODING,
+                internalBufferBytes,
+            )
+        } catch (sec: SecurityException) {
+            throw AudioRecorderException.PermissionDenied(
+                sec.message ?: "RECORD_AUDIO permission denied",
+                sec,
+            )
+        } catch (iae: IllegalArgumentException) {
+            // AudioRecord constructor rejects an unsupported sample rate /
+            // channel / encoding combination with IAE.
+            throw AudioRecorderException.Initialization(
+                iae.message ?: "AudioRecord rejected configuration",
+                iae,
+            )
+        }
+
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            // We own the AudioRecord at this point but never started it; release
+            // the platform handle before throwing so we don't leak the mic.
+            runCatching { record.release() }
+            throw AudioRecorderException.Initialization(
+                "AudioRecord failed to initialise (state=${record.state})",
+            )
         }
 
         audioRecord = record
         recording = true
-        record.startRecording()
+        try {
+            record.startRecording()
+        } catch (ise: IllegalStateException) {
+            recording = false
+            audioRecord = null
+            runCatching { record.release() }
+            throw AudioRecorderException.Initialization(
+                ise.message ?: "AudioRecord.startRecording rejected (uninitialised)",
+                ise,
+            )
+        }
 
         captureThread = thread(start = true, name = "core-voice-capture") {
             val frame = ByteArray(internalBufferBytes)
@@ -93,6 +139,11 @@ public class AudioRecorder(context: Context) {
                 if (read > 0) {
                     buffer.write(frame, 0, read)
                     lastAmplitude = peakAmplitude(frame, read)
+                } else if (read < 0) {
+                    // Platform sentinel returned mid-capture. Stop the loop,
+                    // park the typed error for stop() to re-throw.
+                    captureError = mapAudioReadErrorCode(read)
+                    recording = false
                 }
             }
         }
@@ -102,9 +153,19 @@ public class AudioRecorder(context: Context) {
      * Stop recording and return the captured audio as a WAV file (PCM
      * 16-bit LE, mono, 16 kHz). Calling [stop] without a prior [start]
      * returns an empty `ByteArray`.
+     *
+     * Throws an [AudioRecorderException] if the reader thread observed a
+     * platform error mid-capture (e.g. the mic was unplugged). The platform's
+     * raw `IllegalStateException` from `AudioRecord.stop()` is swallowed —
+     * the only surfaced failure is the typed sealed type.
      */
+    @Throws(AudioRecorderException::class)
     public fun stop(): ByteArray {
-        if (!recording) return ByteArray(0)
+        // Capture the active flag *before* clearing it. We've explicitly seen
+        // `recording = false` set by the reader thread when it hit a sentinel
+        // error, but we still need to drain and release the AudioRecord.
+        val wasActive = recording || audioRecord != null
+        if (!wasActive) return ByteArray(0)
         recording = false
         captureThread?.join()
         captureThread = null
@@ -121,6 +182,12 @@ public class AudioRecorder(context: Context) {
 
         val pcm = buffer.toByteArray()
         buffer.reset()
+
+        captureError?.let { err ->
+            captureError = null
+            throw err
+        }
+
         return wrapInWav(pcm)
     }
 
@@ -209,4 +276,25 @@ internal fun buildWav(
     header.putInt(dataSize)
 
     return header.array() + pcm
+}
+
+/**
+ * Map a negative `AudioRecord.read` return code onto the right
+ * [AudioRecorderException] variant. Exposed at file scope (and `internal`) so
+ * the unit test can assert the classification table without driving an
+ * AudioRecord — which would require an Android microphone.
+ */
+internal fun mapAudioReadErrorCode(code: Int): AudioRecorderException = when (code) {
+    android.media.AudioRecord.ERROR_DEAD_OBJECT -> AudioRecorderException.NoDevice(
+        "AudioRecord.read returned ERROR_DEAD_OBJECT (input device gone)",
+    )
+    android.media.AudioRecord.ERROR_INVALID_OPERATION -> AudioRecorderException.Underrun(
+        "AudioRecord.read returned ERROR_INVALID_OPERATION (recorder not active)",
+    )
+    android.media.AudioRecord.ERROR_BAD_VALUE -> AudioRecorderException.Initialization(
+        "AudioRecord.read returned ERROR_BAD_VALUE",
+    )
+    else -> AudioRecorderException.Other(
+        "AudioRecord.read returned unexpected error code $code",
+    )
 }

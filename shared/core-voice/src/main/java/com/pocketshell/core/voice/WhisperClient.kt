@@ -51,17 +51,28 @@ public interface WhisperClient {
  * connection pool / custom interceptors can pass their own client.
  *
  * @param apiKey the user-supplied OpenAI API key (sent as
- *   `Authorization: Bearer ...`). Never logged.
+ *   `Authorization: Bearer ...`). Stored as a [CharArray] rather than a
+ *   [String] so the caller can zero the buffer once the client is no longer
+ *   needed (`Arrays.fill(array, ' ')`). The client makes a defensive copy
+ *   on construction — modifying the caller's array does not retroactively
+ *   change requests already in flight. The [String] used to build the
+ *   Authorization header lives only for the duration of a single `transcribe`
+ *   call. Never logged.
  * @param baseUrl override for self-hosted / proxied endpoints. Defaults to
  *   the official API.
  * @param client optional custom OkHttp client; the default has 15 s connect
  *   timeout, 60 s call timeout (cover long transcriptions).
  */
 public class OkHttpWhisperClient(
-    private val apiKey: String,
+    apiKey: CharArray,
     private val baseUrl: String = "https://api.openai.com/v1",
     private val client: OkHttpClient = defaultClient(),
 ) : WhisperClient {
+
+    // Defensive copy: callers who pass a `CharArray` typically want to zero it
+    // soon after construction. Holding our own copy lets that work without
+    // mutating in-flight headers.
+    private val apiKey: CharArray = apiKey.copyOf()
 
     override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> =
         withContext(Dispatchers.IO) {
@@ -80,9 +91,13 @@ public class OkHttpWhisperClient(
                 }
                 .build()
 
+            // Build the Authorization header value in a local StringBuilder so
+            // the plaintext key only materialises once, here, and the
+            // resulting String is unreferenced as soon as the Request is built.
+            val authHeader = StringBuilder("Bearer ").append(apiKey).toString()
             val request = Request.Builder()
                 .url(baseUrl.trimEnd('/') + "/audio/transcriptions")
-                .addHeader("Authorization", "Bearer $apiKey")
+                .addHeader("Authorization", authHeader)
                 .post(body)
                 .build()
 
@@ -94,6 +109,16 @@ public class OkHttpWhisperClient(
                             classifyHttpFailure(response.code, response.headers, responseBody),
                         )
                     }
+                    // Bound JSON nesting depth before scanning. A maliciously
+                    // deep payload (`{{{{...}}}}`) could otherwise pin the
+                    // parser thread on a pathological string scan; the cap
+                    // also rejects responses that obviously aren't the flat
+                    // `{"text": "..."}` shape OpenAI documents.
+                    try {
+                        assertJsonDepthBounded(responseBody, MAX_JSON_DEPTH)
+                    } catch (parse: WhisperException.Parse) {
+                        return@withContext Result.failure(parse)
+                    }
                     val text = extractTextField(responseBody)
                         ?: return@withContext Result.failure(
                             WhisperException.Parse(
@@ -104,9 +129,9 @@ public class OkHttpWhisperClient(
                 }
             } catch (io: IOException) {
                 // OkHttp's IOException covers DNS, connect, TLS, read/write
-                // timeouts, and cancellation. We wrap as Network so callers
+                // timeouts, and cancellation. We wrap as Transport so callers
                 // don't have to know about OkHttp's exception hierarchy.
-                Result.failure(WhisperException.Network(io.message ?: "Network failure", io))
+                Result.failure(WhisperException.Transport(io.message ?: "Transport failure", io))
             }
         }
 
@@ -147,9 +172,72 @@ internal fun classifyHttpFailure(
         message = "Whisper server error (HTTP $code): ${body.take(200)}",
         statusCode = code,
     )
-    else -> WhisperException.Network(
+    else -> WhisperException.Transport(
         "Whisper returned unexpected HTTP $code: ${body.take(200)}",
     )
+}
+
+/**
+ * Maximum JSON nesting depth we accept from the Whisper endpoint.
+ *
+ * Whisper's documented response is flat — a single object with a `text`
+ * field and optional metadata. 16 levels is enough headroom for any
+ * realistic future addition (segments-of-arrays-of-words is two levels)
+ * while shutting the door on pathological inputs that could either pin the
+ * scanner or, with a future JSON library swap, blow the stack.
+ */
+internal const val MAX_JSON_DEPTH: Int = 16
+
+/**
+ * Walk [json] once, tracking `{` / `[` nesting depth (ignoring braces inside
+ * string literals), and throw [WhisperException.Parse] if depth ever exceeds
+ * [maxDepth]. Treats input that opens-but-never-closes as in-bounds (the
+ * subsequent `extractTextField` scan will surface that as a parse failure
+ * for its own reasons).
+ *
+ * Exposed `internal` for direct testing.
+ */
+internal fun assertJsonDepthBounded(json: String, maxDepth: Int = MAX_JSON_DEPTH) {
+    var depth = 0
+    var i = 0
+    val n = json.length
+    while (i < n) {
+        val c = json[i]
+        when (c) {
+            '"' -> {
+                // Skip string literal content; quotes inside don't affect depth.
+                i++
+                while (i < n) {
+                    val s = json[i]
+                    if (s == '\\') {
+                        // Skip the escape and the following character (which
+                        // could itself be a `"` — we mustn't terminate on it).
+                        i += 2
+                        continue
+                    }
+                    if (s == '"') {
+                        i++
+                        break
+                    }
+                    i++
+                }
+                continue
+            }
+            '{', '[' -> {
+                depth++
+                if (depth > maxDepth) {
+                    throw WhisperException.Parse(
+                        "Whisper response exceeded JSON depth cap ($maxDepth)",
+                    )
+                }
+            }
+            '}', ']' -> {
+                if (depth > 0) depth--
+            }
+            else -> Unit
+        }
+        i++
+    }
 }
 
 /**

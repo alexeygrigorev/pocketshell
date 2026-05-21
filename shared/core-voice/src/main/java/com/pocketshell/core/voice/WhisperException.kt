@@ -9,8 +9,11 @@ package com.pocketshell.core.voice
  *   - [RateLimited] -> back off and retry (Whisper may also send a
  *     `Retry-After` header — we expose [retryAfterSeconds] when present)
  *   - [Server] -> transient OpenAI-side failure; retry with backoff is fine
- *   - [Network] -> wraps the underlying [java.io.IOException] (DNS, TLS,
- *     timeout, ...)
+ *   - [Transport] -> wraps the underlying [java.io.IOException] (DNS, TLS,
+ *     timeout, ...) plus any unexpected HTTP status we don't otherwise model.
+ *     Named "Transport" rather than "Network" so callers don't mistake it for
+ *     a peer of [Server] — it's the catch-all bucket for *anything* below
+ *     (or adjacent to) the HTTP layer.
  *   - [Parse] -> the response wasn't the JSON we expected. Usually means the
  *     endpoint or response format changed; surface a diagnostic message
  *     instead of pretending the transcription succeeded.
@@ -42,8 +45,8 @@ public sealed class WhisperException(
     public class Server(message: String, public val statusCode: Int, cause: Throwable? = null) :
         WhisperException(message, cause)
 
-    /** Anything else — IO failure, DNS, TLS, timeout, unexpected status. */
-    public class Network(message: String, cause: Throwable? = null) : WhisperException(message, cause)
+    /** Anything else — IO failure, DNS, TLS, timeout, unexpected HTTP status. */
+    public class Transport(message: String, cause: Throwable? = null) : WhisperException(message, cause)
 
     /** Response was 2xx but the body wasn't the expected `{"text": "..."}` JSON. */
     public class Parse(message: String, cause: Throwable? = null) : WhisperException(message, cause)

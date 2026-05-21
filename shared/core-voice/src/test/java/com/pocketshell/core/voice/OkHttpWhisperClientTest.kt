@@ -9,9 +9,11 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.Arrays
 import java.util.concurrent.TimeUnit
 
 /**
@@ -41,7 +43,7 @@ class OkHttpWhisperClientTest {
             .callTimeout(5, TimeUnit.SECONDS)
             .build()
         client = OkHttpWhisperClient(
-            apiKey = "sk-test-key",
+            apiKey = "sk-test-key".toCharArray(),
             baseUrl = server.url("/v1").toString(),
             client = http,
         )
@@ -170,7 +172,7 @@ class OkHttpWhisperClientTest {
     fun classifies_http_failures_at_unit_level() {
         // Direct unit assertion on the classifier — independent of MockWebServer.
         val headers = okhttp3.Headers.headersOf("Retry-After", "10")
-        assertTrue(classifyHttpFailure(400, okhttp3.Headers.headersOf(), "") is WhisperException.Network)
+        assertTrue(classifyHttpFailure(400, okhttp3.Headers.headersOf(), "") is WhisperException.Transport)
         assertTrue(classifyHttpFailure(401, okhttp3.Headers.headersOf(), "") is WhisperException.Auth)
         assertTrue(classifyHttpFailure(403, okhttp3.Headers.headersOf(), "") is WhisperException.Auth)
         val rate = classifyHttpFailure(429, headers, "")
@@ -180,6 +182,83 @@ class OkHttpWhisperClientTest {
         assertTrue(server is WhisperException.Server)
         assertEquals(500, (server as WhisperException.Server).statusCode)
         assertTrue(classifyHttpFailure(599, okhttp3.Headers.headersOf(), "") is WhisperException.Server)
+    }
+
+    @Test
+    fun deeply_nested_json_response_maps_to_parse() = runTest {
+        // 200 nested objects — well beyond MAX_JSON_DEPTH (16). The bounding
+        // pre-scan must reject this before extractTextField ever runs.
+        val deep = "{".repeat(200) + "\"text\":\"x\"" + "}".repeat(200)
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setBody(deep),
+        )
+
+        val result = client.transcribe(audioBytes("a"))
+
+        val ex = result.exceptionOrNull()
+        assertTrue(
+            "expected Parse, got ${ex?.let { it::class.simpleName }}",
+            ex is WhisperException.Parse,
+        )
+        assertTrue(
+            "Parse message should mention the depth cap, got: ${ex?.message}",
+            ex?.message?.contains("depth", ignoreCase = true) == true,
+        )
+    }
+
+    @Test
+    fun deeply_nested_arrays_also_blocked() {
+        // The depth-bounded scanner counts `[` the same as `{`; a deeply
+        // nested *array* alone must trip the cap too.
+        val deepArr = "[".repeat(MAX_JSON_DEPTH + 1) + "]".repeat(MAX_JSON_DEPTH + 1)
+        val thrown = assertThrows(WhisperException.Parse::class.java) {
+            assertJsonDepthBounded(deepArr, MAX_JSON_DEPTH)
+        }
+        assertTrue(thrown.message!!.contains("depth"))
+    }
+
+    @Test
+    fun depth_bounded_passes_normal_payload() {
+        // Whisper's documented response shape parses cleanly at any cap.
+        // Also exercise the string-skipping path: a brace inside a quoted
+        // value must not be counted.
+        assertJsonDepthBounded("""{"text":"a { b } c [ d ]"}""")
+        assertJsonDepthBounded(
+            """{"task":"transcribe","text":"x","segments":[{"id":0,"text":"a"}]}""",
+        )
+    }
+
+    @Test
+    fun depth_bounded_handles_escaped_quote_in_string() {
+        // `\"` inside a string literal must NOT terminate the string scan.
+        // Otherwise the parser would resume counting braces inside content.
+        assertJsonDepthBounded("""{"text":"she said \"hi\" "}""")
+    }
+
+    @Test
+    fun api_key_char_array_is_defensively_copied() = runTest {
+        // Construct with a CharArray, zero it, then send a request and verify
+        // the Authorization header is still correct. Proves the client kept
+        // its own copy.
+        val key = "sk-zero-me".toCharArray()
+        val zeroingClient = OkHttpWhisperClient(
+            apiKey = key,
+            baseUrl = server.url("/v1").toString(),
+            client = OkHttpClient.Builder()
+                .connectTimeout(2, TimeUnit.SECONDS)
+                .callTimeout(5, TimeUnit.SECONDS)
+                .build(),
+        )
+        Arrays.fill(key, ' ')
+
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"text":"ok"}"""))
+        val result = zeroingClient.transcribe(audioBytes("a"))
+        assertTrue("expected success, got $result", result.isSuccess)
+
+        val recorded = server.takeRequest()
+        assertEquals("Bearer sk-zero-me", recorded.getHeader("Authorization"))
     }
 
     @Test

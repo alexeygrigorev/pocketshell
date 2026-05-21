@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -15,6 +16,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
+import java.util.Arrays
 
 /**
  * Verifies [AndroidKeystoreApiKeyStorage] round-trips and — critically —
@@ -61,22 +63,22 @@ class ApiKeyStorageTest {
     @Test
     fun save_then_load_round_trips() {
         val storage = AndroidKeystoreApiKeyStorage(context, prefsFile)
-        storage.save("sk-secret-123")
-        assertEquals("sk-secret-123", storage.load())
+        storage.save("sk-secret-123".toCharArray())
+        assertArrayEquals("sk-secret-123".toCharArray(), storage.load())
     }
 
     @Test
     fun save_overwrites_existing_value() {
         val storage = AndroidKeystoreApiKeyStorage(context, prefsFile)
-        storage.save("first")
-        storage.save("second")
-        assertEquals("second", storage.load())
+        storage.save("first".toCharArray())
+        storage.save("second".toCharArray())
+        assertArrayEquals("second".toCharArray(), storage.load())
     }
 
     @Test
     fun clear_removes_the_key() {
         val storage = AndroidKeystoreApiKeyStorage(context, prefsFile)
-        storage.save("sk-bye")
+        storage.save("sk-bye".toCharArray())
         storage.clear()
         assertNull(storage.load())
     }
@@ -86,15 +88,40 @@ class ApiKeyStorageTest {
         // The first instance writes; the second instance — pointing at the
         // same file — must be able to read it. This is the user-visible
         // contract (config saved across app restarts).
-        AndroidKeystoreApiKeyStorage(context, prefsFile).save("sk-persistent")
+        AndroidKeystoreApiKeyStorage(context, prefsFile).save("sk-persistent".toCharArray())
         val reloaded = AndroidKeystoreApiKeyStorage(context, prefsFile)
-        assertEquals("sk-persistent", reloaded.load())
+        assertArrayEquals("sk-persistent".toCharArray(), reloaded.load())
+    }
+
+    @Test
+    fun caller_can_zero_their_array_after_save() {
+        // The point of the CharArray API: the caller owns the buffer and can
+        // wipe it once persisted. The persisted value must survive that wipe,
+        // which proves the storage made an independent copy.
+        val storage = AndroidKeystoreApiKeyStorage(context, prefsFile)
+        val key = "sk-zero-me".toCharArray()
+        storage.save(key)
+        Arrays.fill(key, ' ')
+        assertArrayEquals("sk-zero-me".toCharArray(), storage.load())
+    }
+
+    @Test
+    fun load_returns_a_fresh_array_that_callers_can_zero() {
+        // Each load() call must return an independent buffer — zeroing the
+        // first result must not poison the second.
+        val storage = AndroidKeystoreApiKeyStorage(context, prefsFile)
+        storage.save("sk-defensive-copy".toCharArray())
+        val first = storage.load()
+        assertNotNull(first)
+        Arrays.fill(first!!, ' ')
+        val second = storage.load()
+        assertArrayEquals("sk-defensive-copy".toCharArray(), second)
     }
 
     @Test
     fun on_disk_value_is_not_plaintext() {
         val plaintext = "sk-very-secret-bytes-abc123"
-        AndroidKeystoreApiKeyStorage(context, prefsFile).save(plaintext)
+        AndroidKeystoreApiKeyStorage(context, prefsFile).save(plaintext.toCharArray())
 
         val xml = sharedPrefsFile(prefsFile)
         assertNotNull("prefs file should exist after save", xml)

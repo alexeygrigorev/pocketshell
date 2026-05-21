@@ -1,0 +1,382 @@
+package com.pocketshell.app.session
+
+import android.content.Context
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.R
+import com.pocketshell.app.proof.SshShellHandle
+import com.pocketshell.app.proof.createStdoutFlow
+import com.pocketshell.app.proof.openShell
+import com.pocketshell.app.proof.readKeyFromRawResource
+import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.core.ssh.SshConnection
+import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.terminal.ui.TerminalSurfaceState
+import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import javax.inject.Inject
+
+/**
+ * Holds the live SSH session, the terminal surface state, and the sticky
+ * modifier state for the key bar.
+ *
+ * The class is Hilt-managed (`@HiltViewModel`) so the [MainActivity] can
+ * obtain it via the standard `ComponentActivity.viewModels()` extension once
+ * the activity is annotated `@AndroidEntryPoint` (it already is, since #9).
+ *
+ * ## Sticky modifier model (Ctrl / Alt)
+ *
+ * Per `docs/input-methods.md` §"Key bar" and the brief for issue #13:
+ *
+ * - Tap a modifier (`Ctrl` / `Alt`) → it arms for the next non-modifier key,
+ *   then auto-clears. ("One-shot" sticky.)
+ * - Tap an armed modifier again → disarms.
+ * - Tap a non-modifier (`Esc`, `Tab`, an arrow) while a modifier is armed →
+ *   the modifier wraps the key on the wire, then the modifier is cleared.
+ *
+ * The Compose `KeyBar` from `:shared:ui-kit` carries its own internal
+ * modifier state for the *visual* "active" treatment (accent fill). That
+ * state is intentionally not exposed via the public API — modifier taps do
+ * not fire the `onKey` callback inside the ui-kit. The brief calls out that
+ * "Sticky modifier state for the key bar" lives in the ViewModel, which
+ * means we must own a parallel model the ui-kit cannot drive directly.
+ *
+ * The workaround that keeps both the visual affordance and the functional
+ * wrapping working: declare `Ctrl` / `Alt` to the bar with
+ * [com.pocketshell.uikit.model.KeyKind.Regular] rather than
+ * [com.pocketshell.uikit.model.KeyKind.Modifier]. The bar then routes every
+ * tap through `onKey`, and the ViewModel runs its own sticky FSM. The
+ * accent-coloured "armed" treatment from the ui-kit's internal state machine
+ * is lost for Ctrl / Alt; the screen surfaces the armed flag in a small
+ * label above the bar instead.
+ *
+ * ## Key codes on the wire
+ *
+ * Per the brief for #13:
+ *
+ * - `Esc`  → `0x1B`
+ * - `Tab`  → `0x09`
+ * - `←`    → `ESC [ D`  (`0x1B 0x5B 0x44`)
+ * - `↑`    → `ESC [ A`  (`0x1B 0x5B 0x41`)
+ * - `↓`    → `ESC [ B`  (`0x1B 0x5B 0x42`)
+ * - `→`    → `ESC [ C`  (`0x1B 0x5B 0x43`)
+ *
+ * When a modifier is armed:
+ *
+ * - `Ctrl` + ASCII letter `a`..`z` / `A`..`Z` → `0x01`..`0x1A` (XON/XOFF range,
+ *   i.e. the standard terminal Ctrl-letter mapping; `Ctrl+C` → `0x03`).
+ * - `Ctrl` + non-letter (e.g. `Ctrl+Esc`) → only the unmodified bytes are
+ *   sent. The terminal does not have a canonical Ctrl-Esc encoding; we
+ *   defer to the unwrapped key rather than invent one.
+ * - `Alt`  + bytes → ESC (`0x1B`) prefix, then the unmodified bytes. This
+ *   matches xterm's "Meta sends Escape" default.
+ *
+ * The sticky state survives across key taps that are NOT on the key bar
+ * (e.g. system-keyboard letters do not pass through here), so a user tapping
+ * `Ctrl` on the bar and then `c` on the system keyboard does NOT produce
+ * `0x03` — that path requires intercepting the IME, which is out of scope
+ * for #13. Inside the key bar's own 8 slots the sticky logic is fully
+ * exercised: `Ctrl + ←` produces ESC[D wrapped with Ctrl (which we encode
+ * as ESC [ 1 ; 5 D — same as xterm's modifyCursorKeys=2 default for control
+ * arrow keys).
+ *
+ * @see com.pocketshell.uikit.components.KeyBar
+ * @see TerminalSurfaceState.writeInput
+ */
+@HiltViewModel
+public class SessionViewModel @Inject constructor(
+    @ApplicationContext private val applicationContext: Context,
+) : ViewModel() {
+
+    /**
+     * The terminal surface state hosted by the session screen. Created
+     * inside the ViewModel so the SSH producer can be torn down when the
+     * ViewModel is cleared, decoupled from the composable's recomposition
+     * lifecycle.
+     */
+    public val terminalState: TerminalSurfaceState = TerminalSurfaceState()
+
+    private val _connectionStatus: MutableStateFlow<ConnectionStatus> =
+        MutableStateFlow(ConnectionStatus.Idle)
+
+    /** Coarse-grained status the screen surfaces above the terminal. */
+    public val connectionStatus: StateFlow<ConnectionStatus> = _connectionStatus.asStateFlow()
+
+    private val _armedModifiers: MutableStateFlow<Set<Modifier>> = MutableStateFlow(emptySet())
+
+    /**
+     * Snapshot of modifiers currently armed (one-shot). Exposed so the
+     * screen can surface a small hint (e.g. "Ctrl armed") above the bar —
+     * the ui-kit's `KeyBar` cannot reflect it for `KeyKind.Regular` slots
+     * (see the class-level docs for the rationale).
+     */
+    public val armedModifiers: StateFlow<Set<Modifier>> = _armedModifiers.asStateFlow()
+
+    private var sessionRef: SshSession? = null
+    private var shellRef: SshShellHandle? = null
+    private var producerJob: Job? = null
+    private var connectJob: Job? = null
+
+    /**
+     * Connect to the given host (idempotent — re-calling with the same
+     * triple is a no-op while a connection is in flight or established).
+     * Hardcoded for #13; #18 will introduce the host picker that drives
+     * this from saved entries.
+     */
+    public fun connect(
+        host: String,
+        port: Int,
+        user: String,
+    ) {
+        if (connectJob?.isActive == true) return
+        if (_connectionStatus.value is ConnectionStatus.Connected) return
+        _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+        connectJob = viewModelScope.launch {
+            runConnect(host, port, user, viewModelScope)
+        }
+    }
+
+    private suspend fun runConnect(
+        host: String,
+        port: Int,
+        user: String,
+        producerScope: CoroutineScope,
+    ) {
+        try {
+            val key = SshKey.Pem(readKeyFromRawResource(applicationContext))
+            val sessionResult = SshConnection.connect(
+                host = host,
+                port = port,
+                user = user,
+                key = key,
+                knownHosts = KnownHostsPolicy.AcceptAll,
+            )
+            val session = sessionResult.getOrElse { e ->
+                _connectionStatus.value = ConnectionStatus.Failed("connect failed: ${e.message}")
+                return
+            }
+            sessionRef = session
+
+            val handle = openShell(host, port, user, key)
+            shellRef = handle
+
+            val outputFlow = createStdoutFlow(handle.shell)
+            producerJob = terminalState.attachExternalProducer(
+                scope = producerScope,
+                stdout = outputFlow,
+                remoteStdin = handle.shell.outputStream,
+            )
+
+            // Kick the shell to draw a prompt before any user input.
+            handle.shell.outputStream.write("\r".toByteArray())
+            handle.shell.outputStream.flush()
+
+            _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+        } catch (t: Throwable) {
+            _connectionStatus.value =
+                ConnectionStatus.Failed("error: ${t.javaClass.simpleName}: ${t.message}")
+        }
+    }
+
+    /**
+     * Handle a tap on the key bar.
+     *
+     * `Esc`, `Tab`, arrows and the modifier names (`Ctrl`, `Alt`) all flow
+     * through here — see the class-level docs on why even modifiers are
+     * routed via the regular `onKey` callback.
+     */
+    public fun onKeyBarKey(label: String) {
+        when (label) {
+            "Ctrl" -> toggleModifier(Modifier.Ctrl)
+            "Alt" -> toggleModifier(Modifier.Alt)
+            else -> {
+                val unmodified: ByteArray = unmodifiedBytesFor(label) ?: return
+                val modified = applyArmedModifiers(unmodified, label)
+                terminalState.writeInput(modified)
+                clearOneShotModifiers()
+            }
+        }
+    }
+
+    /**
+     * Public seam for tests + the on-screen "modifier armed" hint. Used by
+     * [onKeyBarKey] for the `Ctrl` / `Alt` labels and exposed so the screen
+     * can show a small chip while a modifier is armed.
+     */
+    internal fun toggleModifier(modifier: Modifier) {
+        val current = _armedModifiers.value
+        _armedModifiers.value = if (modifier in current) current - modifier else current + modifier
+    }
+
+    /**
+     * Write a literal command chip's text + `\n` into the terminal. The
+     * payload mirrors what would arrive from the system keyboard if the
+     * user typed the command and pressed Enter — terminals echo it back,
+     * so the visual confirmation comes for free.
+     */
+    public fun onChipTap(text: String) {
+        if (text.isEmpty()) return
+        val payload = (text + "\n").toByteArray(Charsets.UTF_8)
+        terminalState.writeInput(payload)
+    }
+
+    /**
+     * Translate a key-bar slot label into the bytes the unmodified key
+     * sends on the wire. Returns `null` for unknown labels — callers
+     * should silently swallow those (a future bar might add a slot the
+     * ViewModel has not been taught about).
+     *
+     * Visible to the test seam so the byte-code mapping is exercised in
+     * isolation from the modifier sticky FSM.
+     */
+    internal fun unmodifiedBytesFor(label: String): ByteArray? = when (label) {
+        "Esc" -> byteArrayOf(0x1B)
+        "Tab" -> byteArrayOf(0x09)
+        // Mock-style arrows from `docs/mockups/session.html` and
+        // `docs/input-methods.md`. `‹›` are left/right; `⌃⌄` are up/down
+        // (see `.key.arrow` styling in `docs/mockups/styles.css`).
+        "‹", "Left" -> byteArrayOf(0x1B, '['.code.toByte(), 'D'.code.toByte())
+        "⌃", "Up" -> byteArrayOf(0x1B, '['.code.toByte(), 'A'.code.toByte())
+        "⌄", "Down" -> byteArrayOf(0x1B, '['.code.toByte(), 'B'.code.toByte())
+        "›", "Right" -> byteArrayOf(0x1B, '['.code.toByte(), 'C'.code.toByte())
+        else -> null
+    }
+
+    /**
+     * Apply the currently-armed modifiers to a raw key payload. Public via
+     * `internal` for unit tests; production callers go through
+     * [onKeyBarKey].
+     *
+     * `label` is passed so we can detect the "Ctrl + ASCII letter" path
+     * (which collapses to the single 0x01..0x1A control byte) versus
+     * "Ctrl + Esc/Tab/arrow" (which falls back to the raw unmodified
+     * bytes — see the class-level docs).
+     */
+    internal fun applyArmedModifiers(unmodified: ByteArray, label: String): ByteArray {
+        val armed = _armedModifiers.value
+        if (armed.isEmpty()) return unmodified
+
+        var bytes = unmodified
+
+        if (Modifier.Ctrl in armed) {
+            bytes = applyCtrl(bytes, label)
+        }
+        if (Modifier.Alt in armed) {
+            // xterm-style "Meta sends Escape": prefix the bytes with ESC.
+            bytes = byteArrayOf(0x1B, *bytes)
+        }
+        return bytes
+    }
+
+    private fun applyCtrl(bytes: ByteArray, label: String): ByteArray {
+        // Single-byte ASCII letter? -> classic Ctrl-letter (0x01..0x1A).
+        // The key bar does not own letter keys, so this branch is exercised
+        // only by the test seam (which passes 'c' / 'C' / similar through
+        // [unmodifiedBytesForTest]); inside the live screen Ctrl is paired
+        // with Esc / Tab / arrows from the bar.
+        if (bytes.size == 1) {
+            val b = bytes[0].toInt() and 0x7F
+            when (b.toChar()) {
+                in 'a'..'z' -> return byteArrayOf((b - 'a'.code + 1).toByte())
+                in 'A'..'Z' -> return byteArrayOf((b - 'A'.code + 1).toByte())
+            }
+        }
+        // Ctrl + arrow → xterm modifyCursorKeys=2 format: ESC [ 1 ; 5 <X>
+        if (bytes.size == 3 && bytes[0] == 0x1B.toByte() && bytes[1] == '['.code.toByte()) {
+            val finalByte = bytes[2]
+            return byteArrayOf(
+                0x1B,
+                '['.code.toByte(),
+                '1'.code.toByte(),
+                ';'.code.toByte(),
+                '5'.code.toByte(),
+                finalByte,
+            )
+        }
+        // Otherwise we have no canonical encoding; pass through unmodified.
+        return bytes
+    }
+
+    private fun clearOneShotModifiers() {
+        if (_armedModifiers.value.isNotEmpty()) {
+            _armedModifiers.value = emptySet()
+        }
+    }
+
+    /**
+     * Test seam: synthesise the unmodified bytes for an arbitrary ASCII
+     * letter the way the bar would if it had a letter slot. Production
+     * code routes through [onKeyBarKey], which never reaches a letter
+     * branch (the bar only owns Esc/Tab/arrows + the Ctrl/Alt labels).
+     *
+     * The brief calls out "Ctrl + C → 0x03" as the canonical test case;
+     * since the key bar never sends literal `c`, the test feeds the byte
+     * directly via this seam and asserts the ViewModel wraps it correctly.
+     */
+    internal fun unmodifiedBytesForTest(letter: Char): ByteArray = byteArrayOf(letter.code.toByte())
+
+    /**
+     * Test seam: write a key directly with sticky modifiers applied, the
+     * same way [onKeyBarKey] does for bar labels but with a caller-supplied
+     * unmodified byte payload. Returns the bytes that would land on the
+     * wire (the [terminalState] is not attached in unit tests, so the
+     * write itself is a no-op).
+     */
+    internal fun writeKeyWithModifiersForTest(
+        unmodified: ByteArray,
+        label: String,
+    ): ByteArray {
+        val modified = applyArmedModifiers(unmodified, label)
+        terminalState.writeInput(modified)
+        clearOneShotModifiers()
+        return modified
+    }
+
+    override fun onCleared() {
+        producerJob?.cancel()
+        terminalState.detachExternalProducer()
+        runCatching { shellRef?.shell?.close() }
+        runCatching { shellRef?.sessionChannel?.close() }
+        runCatching { shellRef?.client?.disconnect() }
+        runCatching { sessionRef?.close() }
+        sessionRef = null
+        shellRef = null
+        producerJob = null
+        super.onCleared()
+    }
+
+    /**
+     * Sticky modifier identities. Kept here (not in the ui-kit) because
+     * the wire encoding is the ViewModel's responsibility — the ui-kit
+     * deliberately stays purely visual.
+     */
+    public enum class Modifier { Ctrl, Alt }
+
+    /** Coarse-grained connection state surfaced in the breadcrumb's live dot. */
+    public sealed interface ConnectionStatus {
+        public object Idle : ConnectionStatus
+        public data class Connecting(val host: String, val port: Int, val user: String) :
+            ConnectionStatus
+        public data class Connected(val host: String, val port: Int, val user: String) :
+            ConnectionStatus
+        public data class Failed(val message: String) : ConnectionStatus
+    }
+}
+
+/**
+ * Default host parameters for the Phase 1 hardcoded landing — same values
+ * as the Phase 0 proof-of-life screen used. `#18` introduces the saved-host
+ * picker that drives these from storage.
+ */
+public object SessionDefaults {
+    public const val HOST: String = "10.0.2.2"
+    public const val PORT: Int = 2222
+    public const val USER: String = "testuser"
+}

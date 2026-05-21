@@ -1,5 +1,6 @@
 package com.pocketshell.app.hosts
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
@@ -24,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -74,6 +77,29 @@ fun AddEditHostScreen(
         if (state.saved) onDone()
     }
 
+    // Issue #38 item 3: intercept system-back so unsaved edits aren't
+    // dropped silently. A "discard?" dialog only shows when the form is
+    // actually dirty; the clean-form path falls straight through to the
+    // navigation callback. `pendingDiscard` mirrors the back-press into
+    // dialog visibility — `DiscardChangesDialog` confirms or cancels.
+    var pendingDiscard by remember { mutableStateOf(false) }
+    BackHandler {
+        if (viewModel.isDirty()) {
+            pendingDiscard = true
+        } else {
+            onDone()
+        }
+    }
+    if (pendingDiscard) {
+        DiscardChangesDialog(
+            onConfirm = {
+                pendingDiscard = false
+                onDone()
+            },
+            onDismiss = { pendingDiscard = false },
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -82,7 +108,13 @@ fun AddEditHostScreen(
         Column(modifier = Modifier.fillMaxSize()) {
             FormAppBar(
                 title = if (hostId == null) "Add host" else "Edit host",
-                onBack = onDone,
+                onBack = {
+                    if (viewModel.isDirty()) {
+                        pendingDiscard = true
+                    } else {
+                        onDone()
+                    }
+                },
             )
 
             Column(
@@ -318,4 +350,39 @@ private fun KeySelector(
             }
         }
     }
+}
+
+/**
+ * Confirmation dialog shown when the user attempts to back out of the
+ * form with unsaved edits (issue #38 item 3). Wording is deliberately
+ * plain — "Discard changes?" with explicit Discard / Keep editing
+ * buttons rather than a save-then-leave option, since saving requires
+ * passing validation which the user may not have completed.
+ */
+@Composable
+private fun DiscardChangesDialog(
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Discard changes?", color = PocketShellColors.Text) },
+        text = {
+            Text(
+                text = "You have unsaved edits. Leave the form anyway?",
+                color = PocketShellColors.TextSecondary,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("Discard", color = PocketShellColors.Red)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Keep editing", color = PocketShellColors.Accent)
+            }
+        },
+        containerColor = PocketShellColors.Surface,
+    )
 }

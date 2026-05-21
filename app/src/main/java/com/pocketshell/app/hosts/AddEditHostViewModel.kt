@@ -66,6 +66,29 @@ class AddEditHostViewModel @Inject constructor(
     private var editingHostId: Long? = null
 
     /**
+     * Baseline form snapshot used by [isDirty] to detect unsaved changes.
+     * For Add this is the empty default; for Edit it's the loaded
+     * host's values. Only the user-editable fields are compared — the
+     * transient `error` / `saved` flags are excluded so they don't
+     * register as user edits.
+     */
+    private var baseline: HostFormState = HostFormState()
+
+    /**
+     * `true` when the user has typed something the baseline doesn't
+     * contain. Drives the BackHandler confirmation dialog (issue #38
+     * item 3) so unsaved edits aren't dropped on a system-back.
+     */
+    fun isDirty(): Boolean {
+        val s = _state.value
+        return s.name != baseline.name ||
+            s.hostname != baseline.hostname ||
+            s.port != baseline.port ||
+            s.username != baseline.username ||
+            s.selectedKeyId != baseline.selectedKeyId
+    }
+
+    /**
      * Load an existing host into the form. Idempotent — calling twice
      * with the same id is a no-op the second time.
      */
@@ -74,7 +97,7 @@ class AddEditHostViewModel @Inject constructor(
         editingHostId = hostId
         viewModelScope.launch {
             val host = hostDao.getById(hostId) ?: return@launch
-            _state.value = _state.value.copy(
+            val loaded = _state.value.copy(
                 name = host.name,
                 hostname = host.hostname,
                 port = host.port.toString(),
@@ -82,6 +105,10 @@ class AddEditHostViewModel @Inject constructor(
                 selectedKeyId = host.keyId,
                 error = null,
             )
+            _state.value = loaded
+            // Capture the loaded form as the dirty-state baseline so a
+            // user that opens-then-immediately-backs out is not prompted.
+            baseline = loaded.copy(error = null, saved = false)
         }
     }
 

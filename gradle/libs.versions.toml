@@ -18,6 +18,14 @@ core-ktx = "1.16.0"
 activity-compose = "1.10.1"
 material = "1.12.0"
 
+# hilt-navigation-compose (issue #18 follow-up #38). Provides
+# `hiltViewModel()` for composables. Tracks Compose / lifecycle versions in
+# lock-step — 1.2.0 is the stable release that supports Compose 1.6+ and
+# Hilt 2.51+ (we're on Compose BOM 2025.05.00 + Hilt 2.56.1). Catalogised
+# here so future bumps land in one place rather than as a direct version
+# string in `app/build.gradle.kts`.
+androidx-hilt-navigation-compose = "1.2.0"
+
 # core-ssh (issue #4). sshj replaces JSch per D3.
 sshj = "0.40.0"
 slf4j = "2.0.17"
@@ -66,6 +74,7 @@ lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-ru
 
 hilt-android = { group = "com.google.dagger", name = "hilt-android", version.ref = "hilt" }
 hilt-compiler = { group = "com.google.dagger", name = "hilt-compiler", version.ref = "hilt" }
+androidx-hilt-navigation-compose = { group = "androidx.hilt", name = "hilt-navigation-compose", version.ref = "androidx-hilt-navigation-compose" }
 
 # core-ssh (issue #4).
 sshj = { group = "com.hierynomus", name = "sshj", version.ref = "sshj" }

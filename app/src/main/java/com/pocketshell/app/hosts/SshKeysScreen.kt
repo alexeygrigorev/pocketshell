@@ -1,5 +1,6 @@
 package com.pocketshell.app.hosts
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -69,6 +70,23 @@ fun SshKeysScreen(
     val context = LocalContext.current
 
     var pendingDelete: SshKeyEntity? by remember { mutableStateOf(null) }
+
+    // Issue #38 item 3: intercept system-back. SshKeysScreen has no
+    // form-style unsaved state — every add / delete commits immediately
+    // through the DAO — so the handler unconditionally delegates to
+    // `onBack`. The interception itself matters: without a BackHandler
+    // the system back bypasses any per-screen logic (e.g. dismissing
+    // the pending-delete dialog) the screen might layer on later. If a
+    // delete-confirmation is showing we close it first instead of
+    // popping the whole screen, mirroring how the dialog's Cancel
+    // button behaves.
+    BackHandler {
+        if (pendingDelete != null) {
+            pendingDelete = null
+        } else {
+            onBack()
+        }
+    }
 
     // SAF launcher for "Import key". Uses GetContent rather than
     // OpenDocument because the user often picks from Downloads / Drive

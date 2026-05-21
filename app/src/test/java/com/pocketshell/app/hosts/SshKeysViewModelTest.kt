@@ -106,4 +106,78 @@ class SshKeysViewModelTest {
         assertEquals(0, db.sshKeyDao().getAll().first().size)
         assertTrue("on-disk file removed", !keyFile.exists())
     }
+
+    /**
+     * Issue #38 item 4: a successful operation must drop any stale
+     * `error` left over from a previous failure so the banner does not
+     * persist across the recovery. We prime the error via the
+     * `importKey` SAF path with an unreadable URI (returns `null`
+     * stream → friendly error message), then call `generateKey` which
+     * must clear `error` back to `null` on success.
+     */
+    @Test
+    fun generateKey_clearsLingeringError() = runBlocking {
+        val vm = SshKeysViewModel(db.sshKeyDao())
+
+        // Prime: a SAF URI the resolver cannot open → ViewModel sets
+        // the user-facing "Could not open the selected file" error.
+        vm.importKey(context, android.net.Uri.parse("content://no.such.provider/x"))
+        withTimeout(5_000) { vm.error.first { it != null } }
+        assertTrue("error must be primed", vm.error.value != null)
+
+        // Act: a successful generate runs the persist path → on
+        // success the new code clears `_error.value = null`.
+        vm.generateKey(context)
+        withTimeout(15_000) { vm.keys.first { it.isNotEmpty() } }
+        assertEquals(null, vm.error.value)
+    }
+
+    /**
+     * Issue #38 item 5: file delete must happen BEFORE the DB row
+     * delete. If the file delete fails, the row must stay so the user
+     * can retry. We force a failure by handing `deleteKey` a path
+     * inside a directory we mark read-only, then assert the row is
+     * still present afterward.
+     */
+    @Test
+    fun deleteKey_keepsRow_whenFileDeleteFails() = runBlocking {
+        val vm = SshKeysViewModel(db.sshKeyDao())
+
+        // Seed a key whose private-key path points at a file inside a
+        // directory we'll mark non-writable. `File.delete()` returns
+        // false in that case — our new code converts that to an
+        // IOException, which aborts before the DAO delete.
+        val lockedDir = File(context.filesDir, "locked-keys").apply {
+            mkdirs()
+        }
+        val keyFile = File(lockedDir, "victim").apply {
+            writeText("not-a-real-key")
+        }
+        // Strip the parent directory's write bit so `File.delete()`
+        // returns false. On the host JVM this is honoured by both Unix
+        // and Robolectric's fs shim.
+        val originallyWritable = lockedDir.canWrite()
+        assertTrue("setup precondition", lockedDir.setWritable(false))
+        try {
+            val keyId = db.sshKeyDao().insert(
+                SshKeyEntity(name = "victim", privateKeyPath = keyFile.absolutePath),
+            )
+            val seeded = db.sshKeyDao().getById(keyId)!!
+
+            vm.deleteKey(seeded)
+
+            // Wait for the error to surface (the delete launches into
+            // viewModelScope; the failure flows through the catch).
+            withTimeout(5_000) {
+                vm.error.first { it != null }
+            }
+
+            // Critical assertion: the DB row is intact because the
+            // file-delete failure aborted before `sshKeyDao.delete()`.
+            assertEquals(1, db.sshKeyDao().getAll().first().size)
+        } finally {
+            // Restore the writable bit so tearDown / other tests work.
+            lockedDir.setWritable(originallyWritable || true)
+        }
+    }
 }

@@ -134,12 +134,9 @@ dependencies {
     ksp(libs.hilt.compiler)
 
     // Issue #18: `hiltViewModel()` for Hilt-injected ViewModels in
-    // composables. Direct version string (not through the catalog) per
-    // the issue's "no new libs.versions.toml entries" constraint. The
-    // library tracks Compose / lifecycle versions in lock-step — 1.2.0
-    // is the stable release that supports Compose 1.6+ and Hilt 2.51+
-    // (we're on Compose BOM 2025.05.00 + Hilt 2.56.1).
-    implementation("androidx.hilt:hilt-navigation-compose:1.2.0")
+    // composables. Catalogised under `libs.versions.toml` per follow-up
+    // #38 — bumps now live alongside the rest of the AndroidX pins.
+    implementation(libs.androidx.hilt.navigation.compose)
 
     // Phase 0 proof-of-life (issue #9): pull in the SSH layer and the
     // vendored Termux surface so the app can render a real remote shell.

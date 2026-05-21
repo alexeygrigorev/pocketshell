@@ -112,6 +112,42 @@ class AddEditHostViewModelTest {
     }
 
     @Test
+    fun isDirty_falseOnFreshAddForm_trueAfterEdit() = runTest {
+        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        // A pristine Add form should not be dirty — the BackHandler in
+        // AddEditHostScreen relies on this to navigate back without
+        // prompting (issue #38 item 3).
+        assertEquals(false, vm.isDirty())
+
+        vm.updateState { it.copy(name = "anything") }
+        assertEquals(true, vm.isDirty())
+    }
+
+    @Test
+    fun isDirty_falseAfterLoadHost_trueAfterUserEdit() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),
+        )
+        val hostId = db.hostDao().insert(
+            com.pocketshell.core.storage.entity.HostEntity(
+                name = "host",
+                hostname = "h.example",
+                port = 22,
+                username = "u",
+                keyId = keyId,
+            ),
+        )
+        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        vm.loadHost(hostId)
+        // Right after a load the baseline matches the form, so the
+        // BackHandler should fall straight through to onDone().
+        assertEquals(false, vm.isDirty())
+
+        vm.updateState { it.copy(hostname = "h2.example") }
+        assertEquals(true, vm.isDirty())
+    }
+
+    @Test
     fun loadHost_hydratesFormState() = runTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),

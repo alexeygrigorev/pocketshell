@@ -2,11 +2,9 @@ package com.pocketshell.app.hosts
 
 import android.content.Intent
 import android.net.Uri
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -31,6 +29,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -57,8 +56,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
  * - **App bar** — title "PocketShell" + a "Keys" affordance.
  * - **Section label** — uppercase "Hosts <count>" with a small chip.
  * - **Host cards** — each a `ui-kit` [HostCard]. Tapping invokes the
- *   `onOpenSession` callback with the resolved key path; long-press
- *   routes to `onEditHost`.
+ *   `onOpenSession` callback with the resolved key path.
  * - **FAB** — bottom-right `+` opening `AddEditHostScreen`.
  *
  * Empty-state copy is intentionally terse — the FAB carries the action.
@@ -68,12 +66,18 @@ import kotlinx.coroutines.flow.MutableSharedFlow
  * screen. This keeps the list a pure read surface; the
  * [SessionViewModel][com.pocketshell.app.session.SessionViewModel]
  * runs the connect under its own Hilt scope.
+ *
+ * `onEditHost` is retained on the public signature because the nav
+ * graph (`MainActivity`) still routes to the edit screen by host id —
+ * see issue #38 for the removal of the long-press affordance that used
+ * to invoke it. Once a non-clobbering long-press hook lands on
+ * `HostCard` (`ui-kit`) the wire-up returns; until then the parameter
+ * is intentionally unused at this call site.
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun HostListScreen(
     onAddHost: () -> Unit,
-    onEditHost: (Long) -> Unit,
+    @Suppress("UNUSED_PARAMETER") onEditHost: (Long) -> Unit,
     onManageKeys: () -> Unit,
     onOpenSession: (HostEntity, keyPath: String) -> Unit,
     modifier: Modifier = Modifier,
@@ -98,12 +102,20 @@ fun HostListScreen(
     // originates from the main thread. The request is funneled through a
     // SharedFlow consumed by a LaunchedEffect — keeps suspending work out
     // of the click handler.
+    //
+    // Issue #38 item 2: keyed on `Unit` (not `hosts`) so the collector is
+    // installed exactly once and is NOT recreated on every emission of the
+    // hosts flow. `hosts` and `onOpenSession` are pulled in via
+    // `rememberUpdatedState` so the collector body always sees the latest
+    // values without forcing a new subscription on each change.
     val tapRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
-    LaunchedEffect(hosts) {
+    val currentHosts by rememberUpdatedState(hosts)
+    val currentOpenSession by rememberUpdatedState(onOpenSession)
+    LaunchedEffect(Unit) {
         tapRequests.collect { hostId ->
-            val host = hosts.find { it.id == hostId } ?: return@collect
+            val host = currentHosts.find { it.id == hostId } ?: return@collect
             val key = viewModel.keyFor(host.keyId) ?: return@collect
-            onOpenSession(host, key.privateKeyPath)
+            currentOpenSession(host, key.privateKeyPath)
         }
     }
 
@@ -151,16 +163,17 @@ fun HostListScreen(
                             // Live "connected" dots return when session-state
                             // plumbing lands (#22).
                             status = HostStatus.Disconnected,
-                            // HostCard's own onClick handles the tap → open
-                            // session path. Long-press to edit is layered
-                            // outside via the Modifier below.
                             onClick = { tapRequests.tryEmit(host.id) },
-                            modifier = Modifier
-                                .padding(horizontal = 12.dp)
-                                .combinedClickable(
-                                    onClick = { tapRequests.tryEmit(host.id) },
-                                    onLongClick = { onEditHost(host.id) },
-                                ),
+                            // Issue #38 item 1: only `HostCard`'s own
+                            // `.clickable` handles taps. Wrapping it in an
+                            // outer `combinedClickable` here used to layer
+                            // a long-press hook on top, but the inner
+                            // clickable always consumed the gesture first
+                            // so the long-press never fired in practice.
+                            // Until `HostCard` exposes a long-press
+                            // callback we route edit via the nav graph
+                            // alone (see `MainActivity`).
+                            modifier = Modifier.padding(horizontal = 12.dp),
                         )
                     }
                 }

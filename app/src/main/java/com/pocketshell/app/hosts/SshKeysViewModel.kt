@@ -66,7 +66,8 @@ class SshKeysViewModel @Inject constructor(
     /**
      * Import a private key from a SAF [Uri]. Reads the content into memory,
      * verifies the PEM header looks like a private key, persists to disk +
-     * DB. Errors surface via [error].
+     * DB. Errors surface via [error]; a successful import clears any
+     * lingering error from a previous failed attempt (issue #38).
      */
     fun importKey(context: Context, uri: Uri) {
         viewModelScope.launch {
@@ -89,6 +90,10 @@ class SshKeysViewModel @Inject constructor(
 
                 val fileName = resolveDisplayName(context, uri) ?: "imported-key"
                 persistKey(context, name = fileName, content = trimmed)
+                // Successful add: explicitly drop any stale error the
+                // banner might still be carrying from a prior failure
+                // (issue #38 item 4).
+                _error.value = null
             } catch (t: Throwable) {
                 _error.value = "Failed to import key: ${t.message}"
             }
@@ -102,6 +107,9 @@ class SshKeysViewModel @Inject constructor(
      * Naming: `generated-<timestamp>` keeps the list readable when the user
      * generates several in a row. Renaming will land with a future polish
      * pass — the entity has a `name` field so swapping is trivial.
+     *
+     * On success any lingering [error] from a previous failed operation
+     * is cleared (issue #38 item 4).
      */
     fun generateKey(context: Context) {
         viewModelScope.launch {
@@ -109,6 +117,7 @@ class SshKeysViewModel @Inject constructor(
                 val pem = withContext(Dispatchers.IO) { generateRsaPrivateKeyPem() }
                 val name = "generated-${System.currentTimeMillis()}"
                 persistKey(context, name = name, content = pem)
+                _error.value = null
             } catch (t: Throwable) {
                 _error.value = "Failed to generate key: ${t.message}"
             }
@@ -119,13 +128,33 @@ class SshKeysViewModel @Inject constructor(
      * Delete the given key. Hosts that reference it cascade-delete via the
      * FK constraint declared on [com.pocketshell.core.storage.entity.HostEntity];
      * the user is warned in [SshKeysScreen]'s confirmation dialog.
+     *
+     * Order matters (issue #38 item 5): the on-disk file is removed FIRST,
+     * then the DB row. If the file delete fails the row stays so the user
+     * can retry from the same UI surface — the alternative (DB-first) would
+     * orphan the file silently and lose the row pointer to it. A successful
+     * delete also clears any stale [error] banner.
      */
     fun deleteKey(key: SshKeyEntity) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
-                runCatching { File(key.privateKeyPath).delete() }
+            try {
+                withContext(Dispatchers.IO) {
+                    // Best-effort: a missing file is fine (already-deleted
+                    // race), a permission-denied is not — `runCatching`
+                    // would mask the latter, so we let `delete()` return
+                    // its boolean and only fail on the existence-check.
+                    val file = File(key.privateKeyPath)
+                    if (file.exists() && !file.delete()) {
+                        throw java.io.IOException(
+                            "Could not delete key file: ${file.absolutePath}",
+                        )
+                    }
+                }
+                sshKeyDao.delete(key)
+                _error.value = null
+            } catch (t: Throwable) {
+                _error.value = "Failed to delete key: ${t.message}"
             }
-            sshKeyDao.delete(key)
         }
     }
 

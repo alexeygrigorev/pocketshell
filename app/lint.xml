@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<lint>
+    <!--
+        proof_test_key is the SSH test keypair from tests/docker/. It ships in
+        raw/ resources so the proof-of-life pipeline test can connect to the
+        local Testcontainers SSH image without any host-management UI. This is
+        a debug-only fixture; it will leave raw/ resources entirely once #18's
+        host manager + saved hosts replace the hardcoded proof path. Tracked
+        in #37 and #33 (item 4).
+    -->
+    <issue id="PackagedPrivateKey">
+        <ignore path="src/main/res/raw/proof_test_key" />
+    </issue>
+</lint>

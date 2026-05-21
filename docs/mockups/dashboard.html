@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=412, initial-scale=1.0" />
+  <title>PocketShell · Dashboard</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="standalone">
+  <div class="frame">
+    <div class="statusbar">
+      <span>9:41</span>
+      <span class="right">5G · 87%</span>
+    </div>
+
+    <div class="appbar">
+      <div class="title">PocketShell</div>
+      <div class="icon-btn">⌕</div>
+      <div class="icon-btn">⚙</div>
+    </div>
+
+    <div class="content">
+      <div class="section-label">Hosts <span class="count">3 connected</span></div>
+
+      <div class="host-row">
+        <div class="avatar">H</div>
+        <div class="info">
+          <div class="name">hetzner</div>
+          <div class="sub">alex@65.108.42.11</div>
+        </div>
+        <div class="status-dot connected"></div>
+      </div>
+
+      <div class="host-row">
+        <div class="avatar">G</div>
+        <div class="info">
+          <div class="name">gpu-box</div>
+          <div class="sub">alex@10.0.0.42</div>
+        </div>
+        <div class="status-dot connected"></div>
+      </div>
+
+      <div class="host-row">
+        <div class="avatar">H</div>
+        <div class="info">
+          <div class="name">homelab</div>
+          <div class="sub">alex@homelab.local</div>
+        </div>
+        <div class="status-dot connected"></div>
+      </div>
+
+      <div class="host-row">
+        <div class="avatar">P</div>
+        <div class="info">
+          <div class="name">prod</div>
+          <div class="sub">deploy@prod.acme.io</div>
+        </div>
+        <div class="status-dot"></div>
+      </div>
+
+      <div class="section-label">Sessions <span class="count">4 active</span></div>
+
+      <div class="session-row">
+        <div class="badge">A</div>
+        <div class="body">
+          <div class="top">
+            <div>
+              <span class="sess-name">agent-main</span>
+              <span class="sess-host"> · hetzner</span>
+            </div>
+            <span class="time">2m</span>
+          </div>
+          <div class="preview">I'll check the deploy logs and find what...</div>
+          <div class="tags">
+            <span class="tag agent">claude code</span>
+            <span class="tag">scheduled</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="session-row">
+        <div class="badge">T</div>
+        <div class="body">
+          <div class="top">
+            <div>
+              <span class="sess-name">training</span>
+              <span class="sess-host"> · gpu-box</span>
+            </div>
+            <span class="time">8m</span>
+          </div>
+          <div class="preview">epoch 14/50  loss=0.232  val=0.847</div>
+          <div class="tags">
+            <span class="tag ml">ml</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="session-row">
+        <div class="badge">D</div>
+        <div class="body">
+          <div class="top">
+            <div>
+              <span class="sess-name">deploy-watch</span>
+              <span class="sess-host"> · hetzner</span>
+            </div>
+            <span class="time">14m</span>
+          </div>
+          <div class="preview">waiting for CI to finish build #2031...</div>
+          <div class="tags">
+            <span class="tag deploy">deploy</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="session-row">
+        <div class="badge">C</div>
+        <div class="body">
+          <div class="top">
+            <div>
+              <span class="sess-name">codex</span>
+              <span class="sess-host"> · homelab</span>
+            </div>
+            <span class="time">1h</span>
+          </div>
+          <div class="preview">$ idle</div>
+          <div class="tags">
+            <span class="tag agent">codex</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="section-label">Scheduled <span class="count">2 jobs</span></div>
+
+      <div class="job-row">
+        <div class="icon busy">●</div>
+        <div class="label">Check status &amp; continue</div>
+        <div class="meta">every 15m · 7m</div>
+      </div>
+
+      <div class="job-row">
+        <div class="icon ok">✓</div>
+        <div class="label">Progress poll · training</div>
+        <div class="meta">every 30m · 24m</div>
+      </div>
+
+      <div style="height: 90px"></div>
+    </div>
+
+    <div class="fab">+</div>
+  </div>
+</body>
+</html>

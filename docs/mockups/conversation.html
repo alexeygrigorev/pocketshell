@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=412, initial-scale=1.0" />
+  <title>PocketShell · Conversation</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="standalone">
+  <div class="frame">
+    <div class="statusbar">
+      <span>9:43</span>
+      <span class="right">5G · 87%</span>
+    </div>
+
+    <div class="breadcrumb">
+      <div class="back">‹</div>
+      <span class="live-dot"></span>
+      <span class="crumb">hetzner</span>
+      <span class="crumb-sep">›</span>
+      <span class="crumb current">agent-main</span>
+      <div class="more">⋮</div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab">Terminal</div>
+      <div class="tab active">Conversation <span class="tab-dot"></span></div>
+    </div>
+
+    <div class="content">
+      <div class="conv">
+        <div class="msg">
+          <div class="msg-head">
+            <span class="role user">USER</span>
+            <span class="time">· 4m ago</span>
+          </div>
+          <div class="msg-body">
+            check the deploy log and tell me what failed in the last run
+          </div>
+        </div>
+
+        <div class="msg">
+          <div class="msg-head">
+            <span class="role assist">ASSISTANT</span>
+            <span class="time">· 3m ago</span>
+          </div>
+          <div class="msg-body">
+            I'll check the deploy logs.
+            <div class="tool-call">
+              <span class="chev">›</span>
+              <span class="tool-name">Bash</span>
+              <span class="tool-cmd">kubectl logs -n prod deploy-7d9</span>
+            </div>
+            The deploy failed because the database migration timed out at step&nbsp;4. The query <code>ALTER TABLE users ADD COLUMN...</code> took longer than the 30s limit.
+          </div>
+        </div>
+
+        <div class="msg">
+          <div class="msg-head">
+            <span class="role user">USER</span>
+            <span class="time">· 1m ago</span>
+          </div>
+          <div class="msg-body">
+            show me the migration
+          </div>
+        </div>
+
+        <div class="msg">
+          <div class="msg-head">
+            <span class="role assist">ASSISTANT</span>
+            <span class="time">· streaming</span>
+          </div>
+          <div class="msg-body">
+            Here's the migration that timed out:
+            <div class="tool-call">
+              <span class="chev">›</span>
+              <span class="tool-name">Read</span>
+              <span class="tool-cmd">migrations/0042_add_users.sql</span>
+            </div>
+            The migration adds three new columns to a 50M-row <code>users</code> table without batching<span class="streaming-cursor"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="conv-bottom-bar">
+      <div class="search-input">⌕  Search in conversation...</div>
+      <div class="btn-icon">⌃</div>
+    </div>
+  </div>
+</body>
+</html>

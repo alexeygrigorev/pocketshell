@@ -11,6 +11,7 @@ Conceptual planning. Captured 2026-05-21, before any code is written.
 | [design-language.md](design-language.md) | Termius-inspired visual tokens |
 | [roadmap.md](roadmap.md) | Phased build order with rough sizing |
 | [decisions.md](decisions.md) | Log of what's locked, what's still open |
+| [mockups/](mockups/) | Static HTML mockups, Pixel 7 viewport — open `mockups/index.html` in a browser |
 
 ## Related projects
 

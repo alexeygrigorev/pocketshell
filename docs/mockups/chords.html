@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=412, initial-scale=1.0" />
+  <title>PocketShell · Chord Palette</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="standalone">
+  <div class="frame">
+    <div class="statusbar">
+      <span>9:44</span>
+      <span class="right">5G · 87%</span>
+    </div>
+
+    <div class="breadcrumb">
+      <div class="back">‹</div>
+      <span class="live-dot"></span>
+      <span class="crumb">hetzner</span>
+      <span class="crumb-sep">›</span>
+      <span class="crumb current">agent-main</span>
+      <div class="more">⋮</div>
+    </div>
+
+    <div class="terminal" style="filter: brightness(0.35);">
+      <div class="ln"><span class="prompt">alex@hetzner</span>:<span class="accent">~</span>$ vim deploy.yml</div>
+      <div class="ln"><span class="dim">-- INSERT --</span></div>
+      <div class="ln"></div>
+      <div class="ln">  replicas: 3</div>
+      <div class="ln">  image: api:v2.1</div>
+      <div class="ln"></div>
+    </div>
+
+    <div class="dim-layer"></div>
+
+    <div class="sheet">
+      <div class="sheet-grabber"></div>
+      <div class="sheet-header">
+        <div class="sheet-title">Chords</div>
+        <div class="sheet-close">×</div>
+      </div>
+
+      <div class="chord-group">
+        <div class="chord-group-label">tmux</div>
+        <div class="chord-grid">
+          <div class="chord-tile"><div class="name">Detach</div><div class="seq">^B d</div></div>
+          <div class="chord-tile"><div class="name">New win</div><div class="seq">^B c</div></div>
+          <div class="chord-tile"><div class="name">Sessions</div><div class="seq">^B s</div></div>
+          <div class="chord-tile"><div class="name">Copy mode</div><div class="seq">^B [</div></div>
+          <div class="chord-tile"><div class="name">Zoom</div><div class="seq">^B z</div></div>
+          <div class="chord-tile"><div class="name">Split |</div><div class="seq">^B %</div></div>
+        </div>
+      </div>
+
+      <div class="chord-group">
+        <div class="chord-group-label">shell</div>
+        <div class="chord-grid">
+          <div class="chord-tile"><div class="name">Cancel</div><div class="seq">^C</div></div>
+          <div class="chord-tile"><div class="name">History</div><div class="seq">^R</div></div>
+          <div class="chord-tile"><div class="name">EOF</div><div class="seq">^D</div></div>
+        </div>
+      </div>
+
+      <div class="chord-add">+ Add chord</div>
+    </div>
+  </div>
+</body>
+</html>

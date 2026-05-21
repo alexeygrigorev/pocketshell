@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=412, initial-scale=1.0" />
+  <title>PocketShell · Session</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="standalone">
+  <div class="frame">
+    <div class="statusbar">
+      <span>9:42</span>
+      <span class="right">5G · 87%</span>
+    </div>
+
+    <div class="breadcrumb">
+      <div class="back">‹</div>
+      <span class="live-dot"></span>
+      <span class="crumb">hetzner</span>
+      <span class="crumb-sep">›</span>
+      <span class="crumb current">agent-main</span>
+      <span class="crumb-sep">›</span>
+      <span class="crumb">pane 1</span>
+      <div class="more">⋮</div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active">Terminal</div>
+      <div class="tab">Conversation <span class="tab-dot"></span></div>
+    </div>
+
+    <div class="terminal">
+      <div class="ln"><span class="prompt">alex@hetzner</span>:<span class="accent">~/git/pocketshell</span>$ claude</div>
+      <div class="ln"><span class="dim">╭─ Claude Code v1.x ──────────────╮</span></div>
+      <div class="ln"><span class="dim">│ /home/alex/git/pocketshell      │</span></div>
+      <div class="ln"><span class="dim">╰─────────────────────────────────╯</span></div>
+      <div class="ln"></div>
+
+      <div class="hint-chip">
+        <div class="hint-body">
+          <div class="label">Claude Code session detected</div>
+          <div class="sub">Tap to see full conversation  ›</div>
+        </div>
+        <span class="hint-x">×</span>
+      </div>
+
+      <div class="ln"><span class="accent">›</span> check the deploy log and tell me</div>
+      <div class="ln">  what failed in the last run</div>
+      <div class="ln"></div>
+      <div class="ln"><span class="dim">⏺</span> I'll check the deploy logs.</div>
+      <div class="ln"></div>
+      <div class="term-toolbox">
+        <div class="ln"><span class="keyword">Bash</span> <span class="dim">(kubectl logs -n prod deploy)</span></div>
+        <div class="ln"><span class="dim">└─ </span><span class="ok">ran in 1.2s</span></div>
+      </div>
+      <div class="ln"></div>
+      <div class="ln">The deploy failed because the database</div>
+      <div class="ln">migration timed out at step 4. The query</div>
+      <div class="ln"><span class="string">"ALTER TABLE users ADD COLUMN..."</span></div>
+      <div class="ln">took longer than the 30s limit.</div>
+      <div class="ln"></div>
+      <div class="ln"><span class="accent">›</span> <span class="cursor"></span></div>
+    </div>
+
+    <div class="chip-row">
+      <div class="chip icon-chip">● dictate</div>
+      <div class="chip">git status</div>
+      <div class="chip">tmux ls</div>
+      <div class="chip">k logs</div>
+      <div class="chip">clear</div>
+    </div>
+
+    <div class="keybar">
+      <div class="key">Esc</div>
+      <div class="key">Tab</div>
+      <div class="key">Ctrl</div>
+      <div class="key">Alt</div>
+      <div class="key arrow">‹</div>
+      <div class="key arrow">⌃</div>
+      <div class="key arrow">⌄</div>
+      <div class="key arrow">›</div>
+      <div class="key lightning">⚡</div>
+    </div>
+
+    <div class="keyboard">
+      <div class="kbrow">
+        <div class="kbkey">q</div><div class="kbkey">w</div><div class="kbkey">e</div>
+        <div class="kbkey">r</div><div class="kbkey">t</div><div class="kbkey">y</div>
+        <div class="kbkey">u</div><div class="kbkey">i</div><div class="kbkey">o</div>
+        <div class="kbkey">p</div>
+      </div>
+      <div class="kbrow">
+        <div class="kbkey">a</div><div class="kbkey">s</div><div class="kbkey">d</div>
+        <div class="kbkey">f</div><div class="kbkey">g</div><div class="kbkey">h</div>
+        <div class="kbkey">j</div><div class="kbkey">k</div><div class="kbkey">l</div>
+      </div>
+      <div class="kbrow">
+        <div class="kbkey wide">⇧</div>
+        <div class="kbkey">z</div><div class="kbkey">x</div><div class="kbkey">c</div>
+        <div class="kbkey">v</div><div class="kbkey">b</div><div class="kbkey">n</div>
+        <div class="kbkey">m</div>
+        <div class="kbkey wide">⌫</div>
+      </div>
+      <div class="kbrow">
+        <div class="kbkey wide">?123</div>
+        <div class="kbkey">,</div>
+        <div class="kbkey spacebar">&nbsp;</div>
+        <div class="kbkey">.</div>
+        <div class="kbkey wide">↵</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=412, initial-scale=1.0" />
+  <title>PocketShell · Prompt Composer</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="standalone">
+  <div class="frame">
+    <div class="statusbar">
+      <span>9:42</span>
+      <span class="right">5G · 87%</span>
+    </div>
+
+    <div class="breadcrumb">
+      <div class="back">‹</div>
+      <span class="live-dot"></span>
+      <span class="crumb">hetzner</span>
+      <span class="crumb-sep">›</span>
+      <span class="crumb current">agent-main</span>
+      <div class="more">⋮</div>
+    </div>
+
+    <div class="tabs">
+      <div class="tab active">Terminal</div>
+      <div class="tab">Conversation <span class="tab-dot"></span></div>
+    </div>
+
+    <div class="terminal" style="filter: brightness(0.35);">
+      <div class="ln"><span class="prompt">alex@hetzner</span>:<span class="accent">~/git/pocketshell</span>$ claude</div>
+      <div class="ln"></div>
+      <div class="ln"><span class="dim">⏺</span> I'll check the deploy logs.</div>
+      <div class="ln"></div>
+      <div class="ln">The deploy failed because the database</div>
+      <div class="ln">migration timed out at step 4. The query</div>
+      <div class="ln"><span class="string">"ALTER TABLE users ADD COLUMN..."</span></div>
+      <div class="ln">took longer than the 30s limit.</div>
+      <div class="ln"></div>
+      <div class="ln"><span class="accent">›</span> </div>
+    </div>
+
+    <div class="dim-layer"></div>
+
+    <div class="sheet">
+      <div class="sheet-grabber"></div>
+      <div class="sheet-header">
+        <div class="sheet-title">Prompt Composer</div>
+        <div class="sheet-close">×</div>
+      </div>
+
+      <div class="composer-text">
+        check the deploy log and tell me what failed in the last run<span class="typing-cursor"></span>
+      </div>
+
+      <div class="composer-mic-row">
+        <div class="mic-btn">●</div>
+        <div class="waveform">
+          <div class="bar" style="height:6px"></div>
+          <div class="bar" style="height:10px"></div>
+          <div class="bar" style="height:14px"></div>
+          <div class="bar" style="height:18px"></div>
+          <div class="bar" style="height:22px"></div>
+          <div class="bar" style="height:16px"></div>
+          <div class="bar" style="height:10px"></div>
+          <div class="bar" style="height:8px"></div>
+          <div class="bar" style="height:14px"></div>
+          <div class="bar" style="height:20px"></div>
+          <div class="bar" style="height:24px"></div>
+          <div class="bar" style="height:26px"></div>
+          <div class="bar" style="height:22px"></div>
+          <div class="bar" style="height:16px"></div>
+          <div class="bar" style="height:12px"></div>
+          <div class="bar" style="height:16px"></div>
+          <div class="bar" style="height:20px"></div>
+          <div class="bar" style="height:24px"></div>
+          <div class="bar" style="height:28px"></div>
+          <div class="bar" style="height:24px"></div>
+          <div class="bar" style="height:18px"></div>
+          <div class="bar" style="height:12px"></div>
+          <div class="bar" style="height:8px"></div>
+          <div class="bar" style="height:10px"></div>
+          <div class="bar" style="height:16px"></div>
+          <div class="bar" style="height:20px"></div>
+          <div class="bar" style="height:14px"></div>
+          <div class="bar" style="height:10px"></div>
+          <div class="bar" style="height:6px"></div>
+          <div class="bar" style="height:4px"></div>
+        </div>
+        <div class="listening-label">Listening</div>
+      </div>
+
+      <div class="composer-actions">
+        <button class="btn ghost">Snippets</button>
+        <button class="btn">Send</button>
+        <button class="btn primary">Send + ↵</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

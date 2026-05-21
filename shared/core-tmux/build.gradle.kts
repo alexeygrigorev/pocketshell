@@ -19,4 +19,25 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    testOptions {
+        unitTests {
+            all { test ->
+                test.testLogging {
+                    events("passed", "skipped", "failed")
+                    showStandardStreams = true
+                }
+            }
+        }
+    }
+}
+
+dependencies {
+    // Coroutines power `ControlEventStream`, which wraps a `Flow<String>` of
+    // raw tmux control-mode lines into a `Flow<ControlEvent>`. Exposed via
+    // `api` because `Flow` types appear on the module's public surface.
+    api(libs.kotlinx.coroutines.core)
+
+    testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
 }

@@ -6,6 +6,22 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+// sshj pulls in BouncyCastle (bcpkix-jdk18on, bcprov-jdk18on,
+// bcutil-jdk18on) and jspecify, all of which ship duplicate Java
+// resources. The app APK and androidTest APK are packaged separately, so both
+// components need the same exclusions.
+val duplicateJavaResourceExcludes = listOf(
+    "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
+    "META-INF/INDEX.LIST",
+    "META-INF/DEPENDENCIES",
+    "META-INF/LICENSE",
+    "META-INF/LICENSE.txt",
+    "META-INF/license.txt",
+    "META-INF/NOTICE",
+    "META-INF/NOTICE.txt",
+    "META-INF/notice.txt",
+)
+
 android {
     namespace = "com.pocketshell.app"
     compileSdk = 35
@@ -72,24 +88,10 @@ android {
 
     packaging {
         resources {
-            // sshj pulls in BouncyCastle (bcpkix-jdk18on, bcprov-jdk18on,
-            // bcutil-jdk18on) and jspecify, all of which ship a copy of
-            // `META-INF/versions/9/OSGI-INF/MANIFEST.MF`. AGP's default
-            // packaging merger refuses duplicates here — picking any one is
-            // safe since OSGI manifests are descriptive, not behavioural,
-            // for our (non-OSGI) use. Same goes for any duplicate
-            // `META-INF/INDEX.LIST` entries that BC sometimes carries.
-            excludes += listOf(
-                "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
-                "META-INF/INDEX.LIST",
-                "META-INF/DEPENDENCIES",
-                "META-INF/LICENSE",
-                "META-INF/LICENSE.txt",
-                "META-INF/license.txt",
-                "META-INF/NOTICE",
-                "META-INF/NOTICE.txt",
-                "META-INF/notice.txt",
-            )
+            // AGP's default packaging merger refuses duplicates here.
+            // Excluding them is safe because these metadata files are not
+            // used by PocketShell at runtime.
+            excludes += duplicateJavaResourceExcludes
         }
     }
 
@@ -217,4 +219,12 @@ dependencies {
     androidTestImplementation(libs.junit)
     androidTestImplementation(libs.kotlinx.coroutines.test)
     androidTestRuntimeOnly(libs.slf4j.nop)
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.androidTest?.packaging?.resources?.excludes?.addAll(
+            duplicateJavaResourceExcludes
+        )
+    }
 }

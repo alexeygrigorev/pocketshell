@@ -7,7 +7,9 @@ import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import net.schmizz.sshj.userauth.keyprovider.KeyProvider
 import net.schmizz.sshj.userauth.password.PasswordUtils
+import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.io.IOException
+import java.security.Security
 
 /**
  * Entry point for the `core-ssh` module.
@@ -50,7 +52,7 @@ public object SshConnection {
         timeoutMs: Int = DEFAULT_TIMEOUT_MS,
         keepAliveSeconds: Int = DEFAULT_KEEP_ALIVE_SECONDS,
     ): Result<SshSession> = withContext(Dispatchers.IO) {
-        val client = SSHClient(DefaultConfig())
+        val client = SSHClient(createSshConfig())
         try {
             applyKnownHostsPolicy(client, knownHosts)
             client.connectTimeout = timeoutMs
@@ -66,6 +68,27 @@ public object SshConnection {
             // Best-effort cleanup on the partially-initialised client.
             runCatching { client.disconnect() }
             Result.failure(wrap(e, host, port, user))
+        }
+    }
+
+    private fun createSshConfig(): DefaultConfig {
+        ensureBouncyCastleProvider()
+        return DefaultConfig()
+    }
+
+    private fun ensureBouncyCastleProvider() {
+        synchronized(Security::class.java) {
+            val provider = Security.getProvider(BouncyCastleProvider.PROVIDER_NAME)
+            if (provider?.javaClass?.name == BouncyCastleProvider::class.java.name) {
+                return
+            }
+
+            // Android ships a stripped provider named "BC" that can miss
+            // algorithms sshj negotiates with OpenSSH, notably X25519/EC.
+            // Replace it with the bundled BouncyCastle provider before
+            // sshj builds its algorithm list.
+            Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME)
+            Security.insertProviderAt(BouncyCastleProvider(), 1)
         }
     }
 

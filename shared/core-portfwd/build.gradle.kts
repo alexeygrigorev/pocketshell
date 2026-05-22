@@ -3,6 +3,18 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+val duplicateJavaResourceExcludes = listOf(
+    "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
+    "META-INF/INDEX.LIST",
+    "META-INF/DEPENDENCIES",
+    "META-INF/LICENSE",
+    "META-INF/LICENSE.txt",
+    "META-INF/license.txt",
+    "META-INF/NOTICE",
+    "META-INF/NOTICE.txt",
+    "META-INF/notice.txt",
+)
+
 android {
     namespace = "com.pocketshell.core.portfwd"
     compileSdk = 35
@@ -62,6 +74,14 @@ android {
                 test.exclude("**/*IntegrationTest.class")
             }
         }
+    }
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.androidTest?.packaging?.resources?.excludes?.addAll(
+            duplicateJavaResourceExcludes
+        )
     }
 }
 

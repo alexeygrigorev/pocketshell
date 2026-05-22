@@ -93,6 +93,13 @@ class EmulatorDockerSshSmokeTest {
                 )
 
                 val repository = AgentConversationRepository()
+                val refreshClaudeFixture = session.exec(
+                    "touch /home/testuser/.claude/projects/-workspace-pocketshell/pocketshell-claude.jsonl",
+                )
+                assertTrue(
+                    "expected to refresh seeded Claude JSONL mtime, got stderr='${refreshClaudeFixture.stderr}'",
+                    refreshClaudeFixture.exitCode == 0,
+                )
                 val claudeCandidates = session.exec(repository.detectionCommand("/workspace/pocketshell"))
                 assertTrue(
                     "expected PocketShell Claude detection command to find seeded JSONL, got '${claudeCandidates.stdout}'",

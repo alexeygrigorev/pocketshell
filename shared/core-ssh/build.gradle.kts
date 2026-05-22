@@ -3,6 +3,18 @@ plugins {
     alias(libs.plugins.kotlin.android)
 }
 
+val duplicateJavaResourceExcludes = listOf(
+    "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
+    "META-INF/INDEX.LIST",
+    "META-INF/DEPENDENCIES",
+    "META-INF/LICENSE",
+    "META-INF/LICENSE.txt",
+    "META-INF/license.txt",
+    "META-INF/NOTICE",
+    "META-INF/NOTICE.txt",
+    "META-INF/notice.txt",
+)
+
 android {
     namespace = "com.pocketshell.core.ssh"
     compileSdk = 35
@@ -73,11 +85,20 @@ android {
     }
 }
 
+androidComponents {
+    onVariants { variant ->
+        variant.androidTest?.packaging?.resources?.excludes?.addAll(
+            duplicateJavaResourceExcludes
+        )
+    }
+}
+
 dependencies {
     // sshj is the SSH client (replaces JSch per D3). It requires an slf4j
     // backend at runtime; slf4j-nop is the no-op binding so we don't pull in
     // logback or log4j on Android.
     api(libs.sshj)
+    implementation("org.bouncycastle:bcprov-jdk18on:1.80.2")
     runtimeOnly(libs.slf4j.nop)
 
     // Coroutines are part of the public surface (SshSession.tail returns

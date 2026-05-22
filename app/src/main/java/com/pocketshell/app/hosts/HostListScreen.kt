@@ -40,6 +40,9 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.bootstrap.HostBootstrapSheet
 import com.pocketshell.app.release.ReleaseInfo
+import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.sessions.SessionsDashboardViewModel
+import com.pocketshell.app.sessions.SessionsSection
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.model.HostStatus
@@ -84,8 +87,12 @@ fun HostListScreen(
     onOpenSession: (HostEntity, keyPath: String) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: HostListViewModel = hiltViewModel(),
+    sessionsViewModel: SessionsDashboardViewModel = hiltViewModel(),
+    onOpenTmuxSession: (ActiveTmuxClients.Entry, sessionName: String) -> Unit =
+        { _, _ -> },
 ) {
     val hosts by viewModel.hosts.collectAsState()
+    val sessions by sessionsViewModel.sessions.collectAsState()
     val updateInfo by viewModel.updateAvailable.collectAsState()
     val bootstrapState by viewModel.bootstrapState.collectAsState()
     val bootstrapHostName by viewModel.bootstrapHostName.collectAsState()
@@ -161,6 +168,24 @@ fun HostListScreen(
                             Intent(Intent.ACTION_VIEW, Uri.parse(info.apkUrl)),
                         )
                     },
+                )
+            }
+
+            // Issue #46: cross-host session dashboard. Render the
+            // Sessions section ABOVE the Hosts section per the mockup
+            // at `docs/mockups/dashboard.html`, but only when there is
+            // at least one live tmux session on at least one connected
+            // host. Empty → the chrome (label + rows) collapses
+            // entirely so the host list keeps the visual hierarchy of
+            // an "empty workspace" landing.
+            if (sessions.isNotEmpty()) {
+                SectionLabel(
+                    label = "Sessions",
+                    count = sessionsCountLabel(sessions.size),
+                )
+                SessionsSection(
+                    viewModel = sessionsViewModel,
+                    onOpenTmuxSession = onOpenTmuxSession,
                 )
             }
 
@@ -424,6 +449,15 @@ private fun SectionLabel(label: String, count: String) {
         }
     }
 }
+
+/**
+ * Pluralised count chip for the Sessions section label — matches the
+ * mockup's "4 active" / "1 active" wording. Singular vs plural is the
+ * only variation; zero is unreachable here because the section is
+ * gated on `sessions.isNotEmpty()` upstream.
+ */
+private fun sessionsCountLabel(count: Int): String =
+    if (count == 1) "1 active" else "$count active"
 
 /**
  * Empty-state when no hosts are saved. Single line + a hint to use the FAB.

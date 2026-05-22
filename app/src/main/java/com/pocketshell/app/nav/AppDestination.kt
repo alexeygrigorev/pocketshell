@@ -63,6 +63,8 @@ sealed interface AppDestination {
      * @property hostId persistent host identifier — same shape as
      *   [Session.hostId]. Kept on the destination so future deep-link
      *   restoration can re-resolve the host without re-opening the picker.
+     * @property hostName user-facing saved-host label used by the dashboard
+     *   registry and session rows.
      * @property hostname / [port] / [username] / [keyPath] resolved SSH
      *   connection parameters; same fields as [Session].
      * @property sessionName tmux session name to attach to (or create via
@@ -72,6 +74,7 @@ sealed interface AppDestination {
      */
     data class TmuxSession(
         val hostId: Long,
+        val hostName: String,
         val hostname: String,
         val port: Int,
         val username: String,

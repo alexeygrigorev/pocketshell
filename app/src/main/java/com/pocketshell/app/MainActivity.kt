@@ -116,6 +116,19 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
                     ),
                 )
             },
+            onOpenTmuxSession = { entry, sessionName ->
+                navigate(
+                    AppDestination.TmuxSession(
+                        hostId = entry.hostId,
+                        hostName = entry.hostName,
+                        hostname = entry.hostname,
+                        port = entry.port,
+                        username = entry.username,
+                        keyPath = entry.keyPath,
+                        sessionName = sessionName,
+                    ),
+                )
+            },
         )
 
         AppDestination.AddHost -> AddEditHostScreen(
@@ -156,6 +169,8 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
         // / explicit-route wiring.
         is AppDestination.TmuxSession -> TmuxSessionScreen(
             viewModel = hiltViewModel<TmuxSessionViewModel>(),
+            hostId = dest.hostId,
+            hostName = dest.hostName,
             host = dest.hostname,
             port = dest.port,
             user = dest.username,
@@ -165,4 +180,3 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
         )
     }
 }
-

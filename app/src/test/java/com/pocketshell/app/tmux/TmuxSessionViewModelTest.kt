@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import com.pocketshell.app.hosts.MainDispatcherRule
+import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.protocol.ControlEvent
@@ -18,6 +19,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -46,8 +48,11 @@ class TmuxSessionViewModelTest {
 
     private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    private fun newVm(): TmuxSessionViewModel = TmuxSessionViewModel(
+    private fun newVm(
+        registry: ActiveTmuxClients = ActiveTmuxClients(),
+    ): TmuxSessionViewModel = TmuxSessionViewModel(
         tmuxClientFactory = TmuxClientFactory(factoryScope),
+        activeTmuxClients = registry,
     )
 
     @After
@@ -527,5 +532,47 @@ class TmuxSessionViewModelTest {
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Idle)
         vm.attachClientForTest(FakeTmuxClient())
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
+    @Test
+    fun replacingClientClosesOldClientAndUpdatesRegistry() {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry = registry)
+        val oldClient = FakeTmuxClient()
+        val newClient = FakeTmuxClient()
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "old",
+            client = oldClient,
+        )
+        assertSame(oldClient, registry.clients.value[1L]?.client)
+
+        vm.replaceClientForTest(
+            hostId = 2L,
+            hostName = "bravo",
+            host = "bravo.example",
+            port = 2222,
+            user = "root",
+            keyPath = "/keys/b",
+            sessionName = "new",
+            client = newClient,
+        )
+
+        assertTrue(oldClient.closed)
+        assertNull(registry.clients.value[1L])
+        val entry = registry.clients.value[2L]
+        assertNotNull(entry)
+        assertSame(newClient, entry?.client)
+        assertEquals("bravo", entry?.hostName)
+        assertEquals("bravo.example", entry?.hostname)
+        assertEquals(2222, entry?.port)
+        assertEquals("root", entry?.username)
+        assertEquals("/keys/b", entry?.keyPath)
     }
 }

@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -11,6 +12,7 @@ import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -74,6 +76,7 @@ import javax.inject.Inject
 @HiltViewModel
 public class TmuxSessionViewModel @Inject constructor(
     private val tmuxClientFactory: TmuxClientFactory,
+    private val activeTmuxClients: ActiveTmuxClients,
 ) : ViewModel() {
 
     private val _panes: MutableStateFlow<List<TmuxPaneState>> =
@@ -101,6 +104,9 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private var sessionRef: SshSession? = null
     private var clientRef: TmuxClient? = null
+    private var registeredHostId: Long? = null
+    private var activeTarget: ConnectionTarget? = null
+    private var connectingTarget: ConnectionTarget? = null
     private var connectJob: Job? = null
     private var eventsJob: Job? = null
 
@@ -131,39 +137,43 @@ public class TmuxSessionViewModel @Inject constructor(
      * Open the SSH transport, spawn `tmux -CC` against [sessionName], and
      * begin maintaining [panes].
      *
-     * Idempotent — re-entering with a live connection in flight is a
-     * no-op. [keyPath] is the resolved absolute path of the user's
-     * private key on disk, the same way [com.pocketshell.app.session.SessionViewModel]
+     * Idempotent for the same destination. If the hand-rolled navigator
+     * reuses this ViewModel for a different host/session tuple, we tear
+     * down the old control channel before opening the new one so a
+     * dashboard row tap actually attaches to the requested tmux session.
+     * [keyPath] is the resolved absolute path of the user's private key
+     * on disk, the same way [com.pocketshell.app.session.SessionViewModel]
      * consumes it from the host picker.
      */
     public fun connect(
+        hostId: Long,
+        hostName: String,
         host: String,
         port: Int,
         user: String,
         keyPath: String,
         sessionName: String,
     ) {
-        if (connectJob?.isActive == true) return
-        if (_connectionStatus.value is ConnectionStatus.Connected) return
+        val target = ConnectionTarget(hostId, hostName, host, port, user, keyPath, sessionName)
+        if (connectJob?.isActive == true && connectingTarget == target) return
+        if (_connectionStatus.value is ConnectionStatus.Connected && activeTarget == target) return
+
+        connectJob?.cancel()
+        closeCurrentConnection()
+        connectingTarget = target
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
         connectJob = viewModelScope.launch {
-            runConnect(host, port, user, keyPath, sessionName)
+            runConnect(target)
         }
     }
 
-    private suspend fun runConnect(
-        host: String,
-        port: Int,
-        user: String,
-        keyPath: String,
-        sessionName: String,
-    ) {
+    private suspend fun runConnect(target: ConnectionTarget) {
         try {
-            val key: SshKey = SshKey.Path(File(keyPath))
+            val key: SshKey = SshKey.Path(File(target.keyPath))
             val sessionResult = SshConnection.connect(
-                host = host,
-                port = port,
-                user = user,
+                host = target.host,
+                port = target.port,
+                user = target.user,
                 key = key,
                 knownHosts = KnownHostsPolicy.AcceptAll,
             )
@@ -174,9 +184,19 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             sessionRef = session
 
-            val client = tmuxClientFactory.create(session, sessionName = sessionName)
+            val client = tmuxClientFactory.create(session, sessionName = target.sessionName)
             attachClient(client)
             client.connect()
+            activeTmuxClients.register(
+                hostId = target.hostId,
+                hostName = target.hostName,
+                hostname = target.host,
+                port = target.port,
+                username = target.user,
+                keyPath = target.keyPath,
+                client = client,
+            )
+            registeredHostId = target.hostId
 
             // Bootstrap the pane list once tmux has had a moment to settle.
             // We don't strictly need this — the opening %window-add event
@@ -185,8 +205,16 @@ public class TmuxSessionViewModel @Inject constructor(
             // missed the original %window-add for.
             reconcilePanes()
 
-            _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+            activeTarget = target
+            connectingTarget = null
+            _connectionStatus.value = ConnectionStatus.Connected(
+                target.host,
+                target.port,
+                target.user,
+            )
         } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            connectingTarget = null
             _connectionStatus.value = ConnectionStatus.Failed(
                 "error: ${t.javaClass.simpleName}: ${t.message}",
             )
@@ -225,6 +253,33 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun attachClientForTest(client: TmuxClient) {
         attachClient(client)
         _connectionStatus.value = ConnectionStatus.Connected("test", 0, "test")
+    }
+
+    internal fun replaceClientForTest(
+        hostId: Long,
+        hostName: String,
+        host: String,
+        port: Int,
+        user: String,
+        keyPath: String,
+        sessionName: String,
+        client: TmuxClient,
+    ) {
+        val target = ConnectionTarget(hostId, hostName, host, port, user, keyPath, sessionName)
+        closeCurrentConnection()
+        attachClient(client)
+        activeTmuxClients.register(
+            hostId = hostId,
+            hostName = hostName,
+            hostname = host,
+            port = port,
+            username = user,
+            keyPath = keyPath,
+            client = client,
+        )
+        registeredHostId = hostId
+        activeTarget = target
+        _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
     }
 
     /**
@@ -430,10 +485,19 @@ public class TmuxSessionViewModel @Inject constructor(
         input.replace("'", "'\\''")
 
     override fun onCleared() {
-        eventsJob?.cancel()
-        eventsJob = null
         connectJob?.cancel()
         connectJob = null
+        closeCurrentConnection()
+        // bridgeScope is parented to viewModelScope, so its SupervisorJob
+        // tears down automatically when viewModelScope cancels post-super
+        // call. Explicit cancellation here is redundant — leaving it to
+        // the framework keeps the teardown path single-sourced.
+        super.onCleared()
+    }
+
+    private fun closeCurrentConnection() {
+        eventsJob?.cancel()
+        eventsJob = null
         for ((_, job) in paneProducerJobs) {
             job.cancel()
         }
@@ -445,13 +509,12 @@ public class TmuxSessionViewModel @Inject constructor(
         _panes.value = emptyList()
         runCatching { clientRef?.close() }
         clientRef = null
+        registeredHostId?.let { activeTmuxClients.unregister(it) }
+        registeredHostId = null
         runCatching { sessionRef?.close() }
         sessionRef = null
-        // bridgeScope is parented to viewModelScope, so its SupervisorJob
-        // tears down automatically when viewModelScope cancels post-super
-        // call. Explicit cancellation here is redundant — leaving it to
-        // the framework keeps the teardown path single-sourced.
-        super.onCleared()
+        activeTarget = null
+        connectingTarget = null
     }
 
     /**
@@ -490,6 +553,16 @@ public class TmuxSessionViewModel @Inject constructor(
         val paneIndex: Int,
     )
 
+    private data class ConnectionTarget(
+        val hostId: Long,
+        val hostName: String,
+        val host: String,
+        val port: Int,
+        val user: String,
+        val keyPath: String,
+        val sessionName: String,
+    )
+
     /** Coarse-grained connection state. Mirrors `SessionViewModel.ConnectionStatus`. */
     public sealed interface ConnectionStatus {
         public object Idle : ConnectionStatus
@@ -500,4 +573,3 @@ public class TmuxSessionViewModel @Inject constructor(
         public data class Failed(val message: String) : ConnectionStatus
     }
 }
-

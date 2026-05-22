@@ -55,4 +55,11 @@ internal object TmuxModule {
     fun provideTmuxClientFactory(
         @TmuxApplicationScope scope: CoroutineScope,
     ): TmuxClientFactory = TmuxClientFactory(scope)
+
+    // Issue #46 / cross-host session dashboard: the
+    // [com.pocketshell.app.sessions.ActiveTmuxClients] registry is
+    // `@Inject constructor()`-able + `@Singleton`, so Hilt discovers
+    // and shares the instance app-wide without an explicit
+    // `@Provides` binding here. Kept as a comment so the next reader
+    // wiring something into the tmux graph knows where to look for it.
 }

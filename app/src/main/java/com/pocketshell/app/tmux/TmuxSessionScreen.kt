@@ -61,6 +61,8 @@ import com.pocketshell.uikit.theme.PocketShellColors
 @Composable
 public fun TmuxSessionScreen(
     viewModel: TmuxSessionViewModel,
+    hostId: Long,
+    hostName: String,
     host: String,
     port: Int,
     user: String,
@@ -69,8 +71,8 @@ public fun TmuxSessionScreen(
     modifier: Modifier = Modifier,
     onBack: () -> Unit = {},
 ) {
-    LaunchedEffect(host, port, user, keyPath, sessionName) {
-        viewModel.connect(host, port, user, keyPath, sessionName)
+    LaunchedEffect(hostId, hostName, host, port, user, keyPath, sessionName) {
+        viewModel.connect(hostId, hostName, host, port, user, keyPath, sessionName)
     }
 
     val panes by viewModel.panes.collectAsState()

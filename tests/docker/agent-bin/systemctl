@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "--user" ] && [ "${2:-}" = "is-active" ] && [ "${3:-}" = "tmuxctl-jobs.service" ]; then
+  printf 'active\n'
+  exit 0
+fi
+
+if [ "${1:-}" = "--user" ] && [ "${2:-}" = "is-enabled" ] && [ "${3:-}" = "tmuxctl-jobs.service" ]; then
+  printf 'enabled\n'
+  exit 0
+fi
+
+printf 'systemctl fixture supports tmuxctl-jobs.service status only\n' >&2
+exit 3

@@ -1,0 +1,3 @@
+{"id":"codex-user-1","timestamp":"2026-05-22T10:01:00Z","item":{"type":"user_message","message":"add a smoke test"}}
+{"id":"codex-call-1","timestamp":"2026-05-22T10:01:01Z","item":{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"./gradlew test\"}"}}
+{"id":"codex-result-1","timestamp":"2026-05-22T10:01:02Z","item":{"type":"function_call_output","call_id":"codex-call-1","output":"BUILD SUCCESSFUL"}}

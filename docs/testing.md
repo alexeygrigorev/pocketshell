@@ -36,6 +36,16 @@ Compose UI tests on the emulator via `./gradlew connectedDebugAndroidTest`. Use:
 - `createAndroidComposeRule<MainActivity>()` for screen-level tests
 - Espresso interop where needed
 
+The connected test suite also includes a local end-to-end SSH + agent smoke
+test. Start the deterministic agent Docker target first, then run the connected
+debug tests on an already-running emulator:
+
+```bash
+docker compose -f tests/docker/docker-compose.yml up -d --build agents
+./gradlew connectedDebugAndroidTest
+docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
+```
+
 ### Manual visual validation (orchestrator's loop)
 
 For visual changes:
@@ -78,49 +88,41 @@ RUN apk add --no-cache tmux python3 py3-pip \
  && pip install --break-system-packages tmuxctl
 ```
 
-### Adding the agent CLIs
+### Agent target
 
-`Dockerfile.agents` adds the three coding agents and the helper tools. Two ways to populate:
+`Dockerfile.agents` is the local deterministic target for emulator smoke tests.
+It does not install real provider CLIs and never needs live API credentials.
+Instead it ships stable shims for:
 
-Option A — install fresh in the container (CI default). Pin versions. No credentials. Tests use fixtures.
+- `claude`, `codex`, `opencode` — credential-free version stubs
+- `heru usage --json` — normalized multi-provider usage JSON
+- `agent-log-explorer detect --cwd <path>` — stable agent-candidate rows
+- `tmuxctl jobs list/add/edit/remove` — stable recurring-job command shapes
+- `uv tool install <package>` — bootstrap installer shim
+- `systemctl --user is-active/is-enabled tmuxctl-jobs.service` — systemd-like status shim
 
-```dockerfile
-FROM pocketshell-test:tmux
-# Claude Code via npm
-RUN apk add --no-cache nodejs npm \
- && npm install -g @anthropic-ai/claude-code
-# Codex CLI
-RUN pip install --break-system-packages openai-codex
-# OpenCode
-RUN curl -L https://opencode.ai/install | bash
-# Helper tools PocketShell delegates to
-RUN pip install --break-system-packages heru agent-log-explorer
-```
-
-Option B — bind-mount your local install (local dev only — never CI).
+Run it on the host SSH port used by the Android emulator smoke:
 
 ```bash
-docker run \
-  -v "$HOME/.claude:/root/.claude:ro" \
-  -v "$HOME/.codex:/root/.codex:ro" \
-  -v "$HOME/.local/share/opencode:/root/.local/share/opencode:ro" \
-  pocketshell-test:agents
+docker compose -f tests/docker/docker-compose.yml up -d --build agents
+ssh -i tests/docker/test_key -p 2222 -o StrictHostKeyChecking=no testuser@127.0.0.1 \
+  'for tool in heru agent-log-explorer tmuxctl uv; do command -v "$tool"; done && heru usage --json && tmuxctl jobs list --session codex'
 ```
 
-This mirrors your real setup including configured providers — fast for local debugging, never use in CI because credentials would leak.
+The `agents` and `sshd` compose services both map host port 2222. Run one at a
+time.
 
 ### Fixture JSONLs for agent tests
 
-For `core-agents` tests we need representative JSONL files that match real Claude Code / Codex output, committed at `tests/fixtures/agent-jsonl/`.
+The agent target seeds `testuser`'s home with recent deterministic fixtures on
+container start:
 
-Generation recipe:
+- `$HOME/.claude/projects/-workspace-pocketshell/pocketshell-claude.jsonl`
+- `$HOME/.codex/sessions/2026/05/22/pocketshell-codex.jsonl`
+- `$HOME/.local/share/opencode/pocketshell-rows.jsonl`
 
-1. Run the CLI once in the Docker container against a trivial prompt
-2. Capture the resulting JSONL
-3. Sanitize: replace sensitive paths, session IDs, credentials with `<REDACTED>`
-4. Commit as fixture
-
-Fixtures are the source of truth for parser tests — they must not require live API calls.
+The Claude path is deliberately shaped so PocketShell's exact runtime detection
+command for cwd `/workspace/pocketshell` finds it via `find ... -mmin -5`.
 
 ---
 
@@ -131,9 +133,9 @@ Fixtures are the source of truth for parser tests — they must not require live
 | Unit (pure Kotlin) | `*/src/test/` | Parsers, data classes, business logic with mocked I/O |
 | Integration — SSH | `*/src/test/` via Testcontainers | `core-ssh` against `pocketshell-test:ssh` |
 | Integration — tmux | `*/src/test/` via Testcontainers | `tmux -CC` parser + events against `pocketshell-test:tmux` |
-| Integration — agents | `*/src/test/` | JSONL parsers against fixtures + tail behaviour against running agents in container |
-| Integration — usage | `*/src/test/` | `core-usage` parses real `heru usage --json` output |
-| Instrumented UI | `app/src/androidTest/` on emulator | Compose screen tests, navigation, full user flows |
+| Integration — agents | `*/src/test/` | JSONL parsers and deterministic Docker command fixture contracts |
+| Integration — usage | `*/src/test/` | `core-usage` parses deterministic `heru usage --json` output |
+| Instrumented UI / smoke | `app/src/androidTest/` on emulator | Compose screen tests, navigation, local emulator-to-Docker agent smoke |
 | Manual smoke | Emulator + Docker | Each PR before merge — orchestrator validates with eyes |
 
 ---
@@ -156,17 +158,49 @@ adb shell
 $ nc -zv 10.0.2.2 2222
 ```
 
+### Local emulator + agent smoke
+
+1. Start an emulator.
+2. Start the deterministic agent target:
+
+```bash
+docker compose -f tests/docker/docker-compose.yml up -d --build agents
+```
+
+3. Confirm host-side SSH and command fixtures:
+
+```bash
+ssh -i tests/docker/test_key -p 2222 -o StrictHostKeyChecking=no testuser@127.0.0.1 \
+  'for tool in heru agent-log-explorer tmuxctl; do command -v "$tool"; done && heru usage --json && tmuxctl jobs list --session codex'
+```
+
+4. Run the connected Android smoke:
+
+```bash
+./gradlew connectedDebugAndroidTest
+```
+
+The smoke test authenticates with `tests/docker/test_key`, connects to
+`10.0.2.2:2222`, asserts the helper commands are on PATH, parses
+`heru usage --json`, runs `tmuxctl jobs list`, checks `agent-log-explorer`, and
+uses PocketShell's Claude JSONL detection/read path over SSH.
+
 ---
 
-## CI matrix (eventual)
+## CI matrix
 
 GitHub Actions runs:
 
 1. `./gradlew check` — unit tests
-2. `docker compose up -d` → `./gradlew :shared:core-ssh:test` (Testcontainers picks up the running container)
-3. (Later) `./gradlew connectedDebugAndroidTest` on a Firebase Test Lab emulator
+2. `./gradlew :shared:core-ssh:integrationTest :shared:core-portfwd:integrationTest` — Docker-backed JVM integration tests via Testcontainers
 
-Manual emulator smoke testing stays in the orchestrator's loop.
+CI emulator coverage is deferred. For now, run the emulator + Docker agent
+smoke locally:
+
+```bash
+docker compose -f tests/docker/docker-compose.yml up -d --build agents
+./gradlew connectedDebugAndroidTest
+```
 
 ---
 

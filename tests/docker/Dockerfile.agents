@@ -1,0 +1,35 @@
+# Agent-capable local test image for PocketShell.
+#
+# This image is intentionally deterministic: it exposes the command names
+# PocketShell probes without installing real provider CLIs or requiring API
+# credentials. Use it for local emulator + Docker smoke tests only.
+FROM alpine:latest
+
+RUN apk add --no-cache openssh-server tmux procps \
+    && ssh-keygen -A \
+    && adduser -D -s /bin/sh testuser \
+    && passwd -u testuser \
+    && mkdir -p /home/testuser/.ssh \
+    && chmod 700 /home/testuser/.ssh
+
+COPY sshd_config /etc/ssh/sshd_config
+COPY test_key.pub /home/testuser/.ssh/authorized_keys
+COPY agent-bin/ /usr/local/bin/
+COPY agent-fixtures/ /opt/pocketshell-agent-fixtures/
+COPY agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
+
+RUN chmod 600 /home/testuser/.ssh/authorized_keys \
+    && chmod +x /usr/local/bin/claude \
+        /usr/local/bin/codex \
+        /usr/local/bin/opencode \
+        /usr/local/bin/heru \
+        /usr/local/bin/agent-log-explorer \
+        /usr/local/bin/tmuxctl \
+        /usr/local/bin/uv \
+        /usr/local/bin/systemctl \
+        /usr/local/bin/pocketshell-agent-entrypoint \
+    && chown -R testuser:testuser /home/testuser/.ssh
+
+EXPOSE 22
+
+CMD ["/usr/local/bin/pocketshell-agent-entrypoint"]

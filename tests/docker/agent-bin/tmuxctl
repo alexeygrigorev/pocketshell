@@ -1,0 +1,28 @@
+#!/bin/sh
+set -eu
+
+fixture_dir="${POCKETSHELL_AGENT_FIXTURE_DIR:-/opt/pocketshell-agent-fixtures}"
+
+if [ "${1:-}" = "jobs" ]; then
+  case "${2:-}" in
+    list)
+      cat "${fixture_dir}/tmuxctl-jobs-list.txt"
+      exit 0
+      ;;
+    add)
+      printf 'Created job 4\n'
+      exit 0
+      ;;
+    edit)
+      printf 'Updated job %s\n' "${3:-}"
+      exit 0
+      ;;
+    remove)
+      printf 'Removed job %s\n' "${3:-}"
+      exit 0
+      ;;
+  esac
+fi
+
+printf 'tmuxctl fixture supports: jobs list/add/edit/remove\n' >&2
+exit 64

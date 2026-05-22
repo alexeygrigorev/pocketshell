@@ -1,0 +1,21 @@
+[
+  {
+    "provider": "claude",
+    "status": "ok",
+    "windows": [
+      { "name": "daily", "used": 1200, "limit": 5000, "unit": "tokens" }
+    ]
+  },
+  {
+    "provider": "codex",
+    "status": "limited",
+    "windows": [
+      { "name": "weekly", "used": 75, "limit": 100, "unit": "percent" }
+    ]
+  },
+  {
+    "provider": "opencode",
+    "status": "unknown",
+    "windows": []
+  }
+]

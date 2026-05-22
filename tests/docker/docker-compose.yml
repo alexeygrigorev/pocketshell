@@ -34,3 +34,15 @@ services:
       - sshd
     ports:
       - "2224:22"
+
+  # Deterministic local target for emulator smoke tests. It exposes the
+  # same SSH port as `sshd`; run one or the other, not both:
+  #   docker compose -f tests/docker/docker-compose.yml up -d --build agents
+  agents:
+    build:
+      context: .
+      dockerfile: Dockerfile.agents
+    image: pocketshell-test:agents
+    container_name: pocketshell-test-agents
+    ports:
+      - "2222:22"

@@ -120,6 +120,8 @@ Parallelism is issue-scoped, not role-skipping:
 - Reviewers may run in parallel for different issues.
 - A reviewer finding for issue A goes back to an implementer assigned to issue A, even if issue B is also active.
 - Do not mix fixes for multiple reviewed issues into one unreviewed coordinator patch.
+- Launch agents asynchronously. The orchestrator must not start agents in a blocking mode when there is useful coordinator work available, such as refining issues, reading surrounding code, preparing reviewer briefs, or checking unrelated backlog status.
+- Waiting on an agent is only appropriate when the next required process step depends on that specific agent result and there is no other useful non-overlapping work to do.
 
 Parallel work is safe when issues touch different modules or paths and neither depends on another's unmerged work.
 

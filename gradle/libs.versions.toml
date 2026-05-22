@@ -43,6 +43,7 @@ room = "2.7.1"
 robolectric = "4.14.1"
 androidx-test-core = "1.6.1"
 androidx-test-ext-junit = "1.2.1"
+androidx-test-runner = "1.6.2"
 
 # core-terminal (issue #7). Termux's vendored sources reference
 # `androidx.annotation.NonNull` / `@Nullable` on public APIs. Version mirrors
@@ -96,6 +97,7 @@ room-testing = { group = "androidx.room", name = "room-testing", version.ref = "
 robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
 androidx-test-core = { group = "androidx.test", name = "core", version.ref = "androidx-test-core" }
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidx-test-ext-junit" }
+androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidx-test-runner" }
 
 # core-terminal (issue #7). Used by the vendored Termux sources.
 androidx-annotation = { group = "androidx.annotation", name = "annotation", version.ref = "androidx-annotation" }

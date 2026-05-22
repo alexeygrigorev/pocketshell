@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "tool" ] && [ "${2:-}" = "install" ] && [ -n "${3:-}" ]; then
+  printf 'installed fixture tool %s\n' "$3"
+  exit 0
+fi
+
+printf 'uv fixture supports: tool install <package>\n' >&2
+exit 64

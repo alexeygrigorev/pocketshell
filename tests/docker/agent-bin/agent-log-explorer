@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+fixture_dir="${POCKETSHELL_AGENT_FIXTURE_DIR:-/opt/pocketshell-agent-fixtures}"
+
+if [ "${1:-}" = "detect" ]; then
+  cat "${fixture_dir}/agent-detections.psv"
+  exit 0
+fi
+
+printf 'agent-log-explorer fixture supports: detect --cwd <path>\n' >&2
+exit 64

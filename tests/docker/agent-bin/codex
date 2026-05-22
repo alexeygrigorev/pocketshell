@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+  --version)
+    printf 'Codex fixture 0.0.0\n'
+    ;;
+  *)
+    printf 'Codex fixture: live provider calls are disabled in PocketShell tests.\n'
+    ;;
+esac

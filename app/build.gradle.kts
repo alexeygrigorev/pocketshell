@@ -32,6 +32,7 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -61,6 +62,12 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    sourceSets {
+        getByName("androidTest") {
+            assets.srcDir(rootProject.file("tests/docker"))
+        }
     }
 
     packaging {
@@ -203,4 +210,11 @@ dependencies {
     // exercise the host / key DAOs without an emulator. Mirrors
     // `:shared:core-storage`'s own DAO tests.
     testImplementation(libs.room.testing)
+
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.junit)
+    androidTestImplementation(libs.kotlinx.coroutines.test)
+    androidTestRuntimeOnly(libs.slf4j.nop)
 }

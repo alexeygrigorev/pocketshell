@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+  --version)
+    printf 'Claude Code fixture 0.0.0\n'
+    ;;
+  *)
+    printf 'Claude Code fixture: live provider calls are disabled in PocketShell tests.\n'
+    ;;
+esac

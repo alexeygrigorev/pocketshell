@@ -14,7 +14,6 @@ import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -380,7 +379,7 @@ class HostListViewModelTest {
             }
         """.trimIndent()
 
-        viewModel.importSharedHostPayload(payload)
+        viewModel.importSharedHostPayload(payload).join()
 
         val rows = db.hostDao().getAll().first()
         assertEquals(1, rows.size)
@@ -411,7 +410,7 @@ class HostListViewModelTest {
             }
         """.trimIndent()
 
-        viewModel.importSharedHostPayload(payload)
+        viewModel.importSharedHostPayload(payload).join()
 
         assertEquals(0, db.hostDao().getAll().first().size)
         assertEquals(
@@ -448,9 +447,8 @@ class HostListViewModelTest {
             ),
         )
 
-        viewModel.importSharedHostPayload(payload)
+        viewModel.importSharedHostPayload(payload).join()
 
-        withTimeout(5_000) { db.sshKeyDao().getAll().first { it.isNotEmpty() } }
         val keys = db.sshKeyDao().getAll().first()
         val hosts = db.hostDao().getAll().first()
         assertEquals(1, keys.size)
@@ -490,9 +488,8 @@ class HostListViewModelTest {
             ),
         )
 
-        viewModel.importSharedHostPayload(payload)
+        viewModel.importSharedHostPayload(payload).join()
 
-        withTimeout(5_000) { db.sshKeyDao().getAll().first { it.isNotEmpty() } }
         val keys = db.sshKeyDao().getAll().first()
         assertEquals(1, keys.size)
         assertEquals("encrypted-key", keys[0].name)
@@ -522,7 +519,7 @@ class HostListViewModelTest {
             ),
         )
 
-        viewModel.importSharedHostPayload(payload)
+        viewModel.importSharedHostPayload(payload).join()
 
         val hosts = db.hostDao().getAll().first()
         assertEquals(1, hosts.size)

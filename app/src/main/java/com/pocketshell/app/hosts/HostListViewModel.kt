@@ -21,6 +21,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -156,19 +157,21 @@ class HostListViewModel @Inject constructor(
         _shareMessage.value = null
     }
 
-    fun importSharedHostPayload(payload: String) {
-        viewModelScope.launch {
-            val sshImport = SshImportPayloadCodec.decode(payload)
-            if (sshImport.isSuccess) {
-                importSshHost(sshImport.getOrThrow())
-                return@launch
-            }
-            if (payload.contains(SshImportPayloadCodec.Type)) {
-                _shareMessage.value = sshImport.exceptionOrNull()?.message ?: "Could not read SSH import payload"
-                return@launch
-            }
-            importLegacySharedHost(payload)
+    fun importSharedHostPayload(payload: String): Job = viewModelScope.launch {
+        importSharedHostPayloadInternal(payload)
+    }
+
+    private suspend fun importSharedHostPayloadInternal(payload: String) {
+        val sshImport = SshImportPayloadCodec.decode(payload)
+        if (sshImport.isSuccess) {
+            importSshHost(sshImport.getOrThrow())
+            return
         }
+        if (payload.contains(SshImportPayloadCodec.Type)) {
+            _shareMessage.value = sshImport.exceptionOrNull()?.message ?: "Could not read SSH import payload"
+            return
+        }
+        importLegacySharedHost(payload)
     }
 
     private suspend fun importSshHost(config: SshImportConfig) {
@@ -246,7 +249,7 @@ class HostListViewModel @Inject constructor(
                 _shareMessage.value = "Could not read shared host"
                 return@launch
             }
-            importSharedHostPayload(payload)
+            importSharedHostPayloadInternal(payload)
         }
     }
 

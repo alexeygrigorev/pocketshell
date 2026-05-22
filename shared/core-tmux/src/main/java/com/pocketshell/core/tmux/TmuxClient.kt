@@ -226,7 +226,7 @@ internal class RealTmuxClient(
         // a new one — the right behaviour for "reattach across phone
         // reconnects" which is the whole point of running tmux remotely.
         try {
-            val command = "tmux -CC new-session -A -s $sessionName\n"
+            val command = "tmux -CC new-session -A -s '${escapeSingleQuoted(sessionName)}'\n"
             withContext(Dispatchers.IO) {
                 sh.stdin.write(command.toByteArray(Charsets.UTF_8))
                 sh.stdin.flush()
@@ -422,6 +422,9 @@ internal class RealTmuxClient(
 
     private companion object {
         private const val DEFAULT_SESSION_NAME = "pocketshell"
+
+        private fun escapeSingleQuoted(input: String): String =
+            input.replace("'", "'\\''")
 
         /**
          * Buffer slack in the event bus so a brief subscriber stall

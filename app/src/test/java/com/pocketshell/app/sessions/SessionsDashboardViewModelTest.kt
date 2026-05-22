@@ -437,4 +437,39 @@ class SessionsDashboardViewModelTest {
         assertEquals(5L, rows[0].hostId)
         assertEquals("five", rows[0].hostName)
     }
+
+    @Test
+    fun lifecycleActionsIssueTmuxCommandsAndRefresh() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            repeat(3) {
+                responses.addLast(
+                    CommandResponse(
+                        number = it.toLong(),
+                        output = emptyList(),
+                        isError = false,
+                    ),
+                )
+            }
+        }
+        val h = host(9L, "nine")
+        val entry = ActiveTmuxClients.Entry(
+            hostId = h.id,
+            hostName = h.name,
+            hostname = h.hostname,
+            port = h.port,
+            username = h.username,
+            keyPath = "/k",
+            client = client,
+        )
+
+        vm.createSession(entry, "next")
+        vm.renameSession(entry, "next", "renamed")
+        vm.killSession(entry, "renamed")
+        runCurrent()
+
+        assertTrue(client.sentCommands.contains("new-session -d -s 'next'"))
+        assertTrue(client.sentCommands.contains("rename-session -t 'next' 'renamed'"))
+        assertTrue(client.sentCommands.contains("kill-session -t 'renamed'"))
+    }
 }

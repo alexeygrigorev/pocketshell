@@ -427,6 +427,62 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun lifecycleCommandsTargetActiveSessionAndWindow() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        vm.createSession("next")
+        vm.renameCurrentSession("renamed")
+        vm.newWindow()
+        vm.selectWindow("@2")
+        vm.renameWindow("@2", "logs")
+        vm.killWindow("@2")
+        vm.killCurrentSession()
+        advanceUntilIdle()
+
+        assertTrue(client.sentCommands.contains("new-session -d -s 'next'"))
+        assertTrue(client.sentCommands.contains("rename-session -t 'work' 'renamed'"))
+        assertTrue(client.sentCommands.contains("new-window -t 'work'"))
+        assertTrue(client.sentCommands.contains("select-window -t @2"))
+        assertTrue(client.sentCommands.contains("rename-window -t @2 'logs'"))
+        assertTrue(client.sentCommands.contains("kill-window -t @2"))
+        assertTrue(client.sentCommands.contains("kill-session -t 'work'"))
+    }
+
+    @Test
+    fun lifecycleCommandsIgnoreBlankNames() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        vm.createSession(" ")
+        vm.renameCurrentSession("")
+        vm.renameWindow("@2", " ")
+        advanceUntilIdle()
+
+        assertTrue(client.sentCommands.isEmpty())
+    }
+
+    @Test
     fun escapeSingleQuotedRoundTripsBytesWithoutQuotes() {
         val vm = newVm()
         assertEquals("hello world", vm.escapeSingleQuoted("hello world"))

@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
+import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
 
@@ -42,7 +43,7 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * Both `OneShot` and `Locked` render with the active (accent-soft)
  * visual; only `Locked` survives the next non-modifier tap.
  */
-private enum class ModifierState { Off, OneShot, Locked }
+private typealias ModifierState = KeyModifierState
 
 /**
  * Bottom-of-screen key strip — the 8-slot row above the system
@@ -124,21 +125,21 @@ private enum class ModifierState { Off, OneShot, Locked }
  * In short: `onKey` fires only on regular / arrow taps; modifier state
  * is private to the bar and is auto-cleared *after* the triggering
  * [onKey] returns for one-shots, *never* for locked. If the screen-
- * level glue needs to ship Ctrl/Alt key codes to the terminal, it must
- * either receive that signal from an out-of-band source (the system
- * keyboard, a separate hook) or extend [KeyBar] with a modifier-state
- * callback — today the ui-kit deliberately keeps modifiers internal.
+ * level glue needs to ship Ctrl/Alt key codes to the terminal, mirror
+ * modifier changes from [onModifierStateChange].
  */
 @Composable
 fun KeyBar(
     keys: List<KeyBinding>,
     onKey: (KeyBinding) -> Unit,
     modifier: Modifier = Modifier,
+    modifierStates: Map<String, KeyModifierState>? = null,
+    onModifierStateChange: (KeyBinding, KeyModifierState) -> Unit = { _, _ -> },
 ) {
     // Per-key modifier state, indexed by the binding's `label` (the
     // bar's "ID" of a key). A `SnapshotStateMap` so Compose sees state
     // changes and recomposes the affected key.
-    val modifierStates: SnapshotStateMap<String, ModifierState> = remember { androidx.compose.runtime.mutableStateMapOf() }
+    val internalModifierStates: SnapshotStateMap<String, ModifierState> = remember { androidx.compose.runtime.mutableStateMapOf() }
 
     // Tracks the last tap time per modifier label, used to detect the
     // "consecutive taps under 350ms" double-tap gesture.
@@ -154,7 +155,9 @@ fun KeyBar(
     ) {
         keys.forEach { binding ->
             val state: ModifierState = if (binding.kind == KeyKind.Modifier) {
-                modifierStates[binding.label] ?: ModifierState.Off
+                modifierStates?.get(binding.label)
+                    ?: internalModifierStates[binding.label]
+                    ?: ModifierState.Off
             } else {
                 ModifierState.Off
             }
@@ -172,8 +175,10 @@ fun KeyBar(
                             val previous = lastTapMillis[binding.label] ?: 0L
                             val isDoubleTap = (now - previous) <= DoubleTapWindowMs
 
-                            val current = modifierStates[binding.label] ?: ModifierState.Off
-                            modifierStates[binding.label] = when {
+                            val current = modifierStates?.get(binding.label)
+                                ?: internalModifierStates[binding.label]
+                                ?: ModifierState.Off
+                            val next = when {
                                 // Double-tap on a one-shot promotes it to locked.
                                 isDoubleTap && current == ModifierState.OneShot -> ModifierState.Locked
                                 // Double-tap on locked toggles off.
@@ -183,7 +188,9 @@ fun KeyBar(
                                 // Single tap on already-armed (one-shot or locked) clears.
                                 else -> ModifierState.Off
                             }
+                            internalModifierStates[binding.label] = next
                             lastTapMillis[binding.label] = now
+                            onModifierStateChange(binding, next)
                             // We deliberately do NOT call onKey() for
                             // modifiers — modifiers don't "fire" by
                             // themselves; they decorate the next key.
@@ -193,7 +200,12 @@ fun KeyBar(
                             // Fire the binding, then clear all one-shot
                             // modifiers (locked modifiers persist).
                             onKey(binding)
-                            clearOneShotModifiers(modifierStates)
+                            clearOneShotModifiers(
+                                externalStates = modifierStates,
+                                internalStates = internalModifierStates,
+                                keys = keys,
+                                onModifierStateChange = onModifierStateChange,
+                            )
                         }
                     }
                 },
@@ -205,8 +217,23 @@ fun KeyBar(
     // drop any stale modifier state so we don't accumulate ghosts.
     LaunchedEffect(keys) {
         val labels = keys.map { it.label }.toSet()
-        modifierStates.keys.retainAll(labels)
+        val bindingsByLabel = keys.associateBy { it.label }
+        val staleInternal = internalModifierStates.keys - labels
+        staleInternal.forEach { label ->
+            val binding = bindingsByLabel[label] ?: KeyBinding(label = label, kind = KeyKind.Modifier)
+            onModifierStateChange(binding, ModifierState.Off)
+        }
+        internalModifierStates.keys.retainAll(labels)
         lastTapMillis.keys.retainAll(labels)
+    }
+
+    LaunchedEffect(keys, modifierStates) {
+        val external = modifierStates ?: return@LaunchedEffect
+        val labels = keys.map { it.label }.toSet()
+        val staleActive = external.filterKeys { it !in labels }.filterValues { it != ModifierState.Off }
+        staleActive.keys.forEach { label ->
+            onModifierStateChange(KeyBinding(label = label, kind = KeyKind.Modifier), ModifierState.Off)
+        }
     }
 }
 
@@ -271,9 +298,21 @@ private fun KeySlot(
     }
 }
 
-private fun clearOneShotModifiers(states: SnapshotStateMap<String, ModifierState>) {
-    val toClear: List<String> = states.entries.filter { it.value == ModifierState.OneShot }.map { it.key }
-    toClear.forEach { states[it] = ModifierState.Off }
+private fun clearOneShotModifiers(
+    externalStates: Map<String, ModifierState>?,
+    internalStates: SnapshotStateMap<String, ModifierState>,
+    keys: List<KeyBinding>,
+    onModifierStateChange: (KeyBinding, KeyModifierState) -> Unit,
+) {
+    val bindingsByLabel = keys.associateBy { it.label }
+    val activeStates = externalStates ?: internalStates
+    val toClear: List<String> = activeStates.entries.filter { it.value == ModifierState.OneShot }.map { it.key }
+    toClear.forEach { label ->
+        internalStates[label] = ModifierState.Off
+        bindingsByLabel[label]?.let { binding ->
+            onModifierStateChange(binding, ModifierState.Off)
+        }
+    }
 }
 
 /**

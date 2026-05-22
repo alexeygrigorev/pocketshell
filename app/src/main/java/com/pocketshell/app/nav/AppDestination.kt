@@ -47,6 +47,12 @@ sealed interface AppDestination {
         val keyPath: String,
     ) : AppDestination
 
+    /** Per-host auto-forward panel backed by `core-portfwd`. */
+    data class PortForwardPanel(
+        val hostId: Long,
+        val keyPath: String,
+    ) : AppDestination
+
     /**
      * Open a live `tmux -CC` session — see [com.pocketshell.app.tmux.TmuxSessionScreen].
      *

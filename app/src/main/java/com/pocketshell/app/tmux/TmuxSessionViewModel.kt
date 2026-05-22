@@ -14,6 +14,7 @@ import com.pocketshell.core.tmux.protocol.ControlEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -237,7 +238,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // Cancel any previous subscription before re-binding (idempotency
         // for tests that swap clients on the same ViewModel instance).
         eventsJob?.cancel()
-        eventsJob = bridgeScope.launch {
+        eventsJob = bridgeScope.launch(start = CoroutineStart.UNDISPATCHED) {
             client.events.collect { event ->
                 onControlEvent(event)
             }
@@ -442,6 +443,56 @@ public class TmuxSessionViewModel @Inject constructor(
         bridgeScope.launch {
             runCatching {
                 client.sendCommand("send-keys -t $paneId $key")
+            }
+        }
+    }
+
+    public fun createSession(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        sendLifecycleCommand("new-session -d -s '${escapeSingleQuoted(trimmed)}'")
+    }
+
+    public fun renameCurrentSession(newName: String) {
+        val target = activeTarget?.sessionName ?: return
+        val trimmed = newName.trim()
+        if (trimmed.isEmpty()) return
+        sendLifecycleCommand(
+            "rename-session -t '${escapeSingleQuoted(target)}' '${escapeSingleQuoted(trimmed)}'",
+        )
+    }
+
+    public fun killCurrentSession() {
+        val target = activeTarget?.sessionName ?: return
+        sendLifecycleCommand("kill-session -t '${escapeSingleQuoted(target)}'")
+    }
+
+    public fun newWindow() {
+        val target = activeTarget?.sessionName ?: return
+        sendLifecycleCommand("new-window -t '${escapeSingleQuoted(target)}'")
+    }
+
+    public fun selectWindow(windowId: String) {
+        if (windowId.isBlank()) return
+        sendLifecycleCommand("select-window -t $windowId")
+    }
+
+    public fun renameWindow(windowId: String, newName: String) {
+        val trimmed = newName.trim()
+        if (windowId.isBlank() || trimmed.isEmpty()) return
+        sendLifecycleCommand("rename-window -t $windowId '${escapeSingleQuoted(trimmed)}'")
+    }
+
+    public fun killWindow(windowId: String) {
+        if (windowId.isBlank()) return
+        sendLifecycleCommand("kill-window -t $windowId")
+    }
+
+    private fun sendLifecycleCommand(command: String) {
+        val client = clientRef ?: return
+        bridgeScope.launch {
+            runCatching {
+                client.sendCommand(command)
             }
         }
     }

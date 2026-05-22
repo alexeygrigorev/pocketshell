@@ -68,8 +68,8 @@ class TmuxClientTest {
             }
             val written = shell.stdinAsString()
             assertTrue(
-                "expected `tmux -CC new-session -A -s pocketshell\\n`, got `$written`",
-                written == "tmux -CC new-session -A -s pocketshell\n",
+                "expected `tmux -CC new-session -A -s 'pocketshell'\\n`, got `$written`",
+                written == "tmux -CC new-session -A -s 'pocketshell'\n",
             )
         } finally {
             client.close()
@@ -87,7 +87,26 @@ class TmuxClientTest {
                 while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
             }
             assertEquals(
-                "tmux -CC new-session -A -s deploy\n",
+                "tmux -CC new-session -A -s 'deploy'\n",
+                shell.stdinAsString(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `connect shell-quotes custom session name`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, sessionName = "deploy test's")
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            assertEquals(
+                "tmux -CC new-session -A -s 'deploy test'\\''s'\n",
                 shell.stdinAsString(),
             )
         } finally {

@@ -85,6 +85,7 @@ fun HostListScreen(
     @Suppress("UNUSED_PARAMETER") onEditHost: (Long) -> Unit,
     onManageKeys: () -> Unit,
     onOpenSession: (HostEntity, keyPath: String) -> Unit,
+    onOpenPortForwardPanel: (HostEntity, keyPath: String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
     viewModel: HostListViewModel = hiltViewModel(),
     sessionsViewModel: SessionsDashboardViewModel = hiltViewModel(),
@@ -127,13 +128,22 @@ fun HostListScreen(
     // navigation collector watches that StateFlow and fires
     // `onOpenSession` only once `ready == true`.
     val tapRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
+    val portPanelRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
     val currentHosts by rememberUpdatedState(hosts)
     val currentOpenSession by rememberUpdatedState(onOpenSession)
+    val currentOpenPortForwardPanel by rememberUpdatedState(onOpenPortForwardPanel)
     LaunchedEffect(Unit) {
         tapRequests.collect { hostId ->
             val host = currentHosts.find { it.id == hostId } ?: return@collect
             val key = viewModel.keyFor(host.keyId) ?: return@collect
             viewModel.bootstrapHost(host, key.privateKeyPath)
+        }
+    }
+    LaunchedEffect(Unit) {
+        portPanelRequests.collect { hostId ->
+            val host = currentHosts.find { it.id == hostId } ?: return@collect
+            val key = viewModel.keyFor(host.keyId) ?: return@collect
+            currentOpenPortForwardPanel(host, key.privateKeyPath)
         }
     }
 
@@ -203,26 +213,35 @@ fun HostListScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(hosts, key = { it.id }) { host ->
-                        HostCard(
-                            name = host.name,
-                            subtitle = "${host.username}@${host.hostname}:${host.port}",
-                            // Phase 1 does not track live connection state
-                            // here — the host list is a static snapshot.
-                            // Live "connected" dots return when session-state
-                            // plumbing lands (#22).
-                            status = HostStatus.Disconnected,
-                            onClick = { tapRequests.tryEmit(host.id) },
-                            // Issue #38 item 1: only `HostCard`'s own
-                            // `.clickable` handles taps. Wrapping it in an
-                            // outer `combinedClickable` here used to layer
-                            // a long-press hook on top, but the inner
-                            // clickable always consumed the gesture first
-                            // so the long-press never fired in practice.
-                            // Until `HostCard` exposes a long-press
-                            // callback we route edit via the nav graph
-                            // alone (see `MainActivity`).
-                            modifier = Modifier.padding(horizontal = 12.dp),
-                        )
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            HostCard(
+                                name = host.name,
+                                subtitle = "${host.username}@${host.hostname}:${host.port}",
+                                // Phase 1 does not track live connection state
+                                // here — the host list is a static snapshot.
+                                // Live "connected" dots return when session-state
+                                // plumbing lands (#22).
+                                status = HostStatus.Disconnected,
+                                onClick = { tapRequests.tryEmit(host.id) },
+                                // Issue #38 item 1: only `HostCard`'s own
+                                // `.clickable` handles taps. Wrapping it in an
+                                // outer `combinedClickable` here used to layer
+                                // a long-press hook on top, but the inner
+                                // clickable always consumed the gesture first
+                                // so the long-press never fired in practice.
+                                // Until `HostCard` exposes a long-press
+                                // callback we route edit via the nav graph
+                                // alone (see `MainActivity`).
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            HostPortButton(onClick = { portPanelRequests.tryEmit(host.id) })
+                        }
                     }
                 }
             }
@@ -405,6 +424,33 @@ private fun AppBarIconButton(label: String, onClick: () -> Unit) {
     ) {
         Text(
             text = label,
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+@Composable
+private fun HostPortButton(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .height(48.dp)
+            .background(
+                color = PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(10.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = RoundedCornerShape(10.dp),
+            )
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "Ports",
             color = PocketShellColors.TextSecondary,
             fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold,

@@ -31,3 +31,12 @@ enum class KeyKind {
     Arrow,
     Regular,
 }
+
+/**
+ * Sticky state for a modifier key in the key bar.
+ */
+enum class KeyModifierState {
+    Off,
+    OneShot,
+    Locked,
+}

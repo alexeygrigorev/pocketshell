@@ -13,6 +13,7 @@ import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
+import com.pocketshell.uikit.model.KeyModifierState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -37,25 +38,16 @@ import javax.inject.Inject
  *
  * - Tap a modifier (`Ctrl` / `Alt`) → it arms for the next non-modifier key,
  *   then auto-clears. ("One-shot" sticky.)
- * - Tap an armed modifier again → disarms.
+ * - Double-tap a modifier in the key bar → it locks until tapped again.
  * - Tap a non-modifier (`Esc`, `Tab`, an arrow) while a modifier is armed →
- *   the modifier wraps the key on the wire, then the modifier is cleared.
+ *   the modifier wraps the key on the wire. One-shot modifiers clear after
+ *   the key; locked modifiers remain active.
  *
  * The Compose `KeyBar` from `:shared:ui-kit` carries its own internal
  * modifier state for the *visual* "active" treatment (accent fill). That
- * state is intentionally not exposed via the public API — modifier taps do
- * not fire the `onKey` callback inside the ui-kit. The brief calls out that
- * "Sticky modifier state for the key bar" lives in the ViewModel, which
- * means we must own a parallel model the ui-kit cannot drive directly.
- *
- * The workaround that keeps both the visual affordance and the functional
- * wrapping working: declare `Ctrl` / `Alt` to the bar with
- * [com.pocketshell.uikit.model.KeyKind.Regular] rather than
- * [com.pocketshell.uikit.model.KeyKind.Modifier]. The bar then routes every
- * tap through `onKey`, and the ViewModel runs its own sticky FSM. The
- * accent-coloured "armed" treatment from the ui-kit's internal state machine
- * is lost for Ctrl / Alt; the screen surfaces the armed flag in a small
- * label above the bar instead.
+ * state is reported back to the screen through `onModifierStateChange`.
+ * The ViewModel mirrors it so the terminal writer and the key-bar visuals
+ * agree on one-shot versus locked modifier behavior.
  *
  * ## Key codes on the wire
  *
@@ -109,15 +101,18 @@ public class SessionViewModel @Inject constructor(
     /** Coarse-grained status the screen surfaces above the terminal. */
     public val connectionStatus: StateFlow<ConnectionStatus> = _connectionStatus.asStateFlow()
 
+    private val _modifierStates: MutableStateFlow<Map<Modifier, KeyModifierState>> =
+        MutableStateFlow(emptyMap())
+
     private val _armedModifiers: MutableStateFlow<Set<Modifier>> = MutableStateFlow(emptySet())
 
     /**
-     * Snapshot of modifiers currently armed (one-shot). Exposed so the
-     * screen can surface a small hint (e.g. "Ctrl armed") above the bar —
-     * the ui-kit's `KeyBar` cannot reflect it for `KeyKind.Regular` slots
-     * (see the class-level docs for the rationale).
+     * Snapshot of modifiers currently active, whether one-shot or locked.
      */
     public val armedModifiers: StateFlow<Set<Modifier>> = _armedModifiers.asStateFlow()
+
+    /** Sticky state for active modifiers, mirrored from the ui-kit key bar. */
+    public val modifierStates: StateFlow<Map<Modifier, KeyModifierState>> = _modifierStates.asStateFlow()
 
     private var sessionRef: SshSession? = null
     private var shellRef: SshShellHandle? = null
@@ -200,8 +195,9 @@ public class SessionViewModel @Inject constructor(
      * Handle a tap on the key bar.
      *
      * `Esc`, `Tab`, arrows and the modifier names (`Ctrl`, `Alt`) all flow
-     * through here — see the class-level docs on why even modifiers are
-     * routed via the regular `onKey` callback.
+     * through here. Modern callers should route modifier taps through
+     * [onKeyBarModifierState] so the ui-kit visuals can own double-tap
+     * detection; the modifier cases here remain for legacy/test callers.
      */
     public fun onKeyBarKey(label: String) {
         when (label) {
@@ -222,8 +218,23 @@ public class SessionViewModel @Inject constructor(
      * can show a small chip while a modifier is armed.
      */
     internal fun toggleModifier(modifier: Modifier) {
-        val current = _armedModifiers.value
-        _armedModifiers.value = if (modifier in current) current - modifier else current + modifier
+        val current = _modifierStates.value[modifier] ?: KeyModifierState.Off
+        val next = if (current == KeyModifierState.Off) {
+            KeyModifierState.OneShot
+        } else {
+            KeyModifierState.Off
+        }
+        setModifierState(modifier, next)
+    }
+
+    /**
+     * Mirror modifier state changes from the ui-kit [KeyBar]. The ui-kit
+     * performs the 350ms double-tap detection so its active/locked visual
+     * state and this terminal-wire state transition together.
+     */
+    public fun onKeyBarModifierState(label: String, state: KeyModifierState) {
+        val modifier = modifierForLabel(label) ?: return
+        setModifierState(modifier, state)
     }
 
     /**
@@ -271,15 +282,15 @@ public class SessionViewModel @Inject constructor(
      * bytes — see the class-level docs).
      */
     internal fun applyArmedModifiers(unmodified: ByteArray, label: String): ByteArray {
-        val armed = _armedModifiers.value
-        if (armed.isEmpty()) return unmodified
+        val states = _modifierStates.value
+        if (states.isEmpty()) return unmodified
 
         var bytes = unmodified
 
-        if (Modifier.Ctrl in armed) {
+        if (states[Modifier.Ctrl] != null) {
             bytes = applyCtrl(bytes, label)
         }
-        if (Modifier.Alt in armed) {
+        if (states[Modifier.Alt] != null) {
             // xterm-style "Meta sends Escape": prefix the bytes with ESC.
             bytes = byteArrayOf(0x1B, *bytes)
         }
@@ -316,9 +327,25 @@ public class SessionViewModel @Inject constructor(
     }
 
     private fun clearOneShotModifiers() {
-        if (_armedModifiers.value.isNotEmpty()) {
-            _armedModifiers.value = emptySet()
-        }
+        val next = _modifierStates.value.filterValues { it == KeyModifierState.Locked }
+        if (next != _modifierStates.value) setModifierStates(next)
+    }
+
+    private fun setModifierState(modifier: Modifier, state: KeyModifierState) {
+        val current = _modifierStates.value
+        val next = if (state == KeyModifierState.Off) current - modifier else current + (modifier to state)
+        setModifierStates(next)
+    }
+
+    private fun setModifierStates(states: Map<Modifier, KeyModifierState>) {
+        _modifierStates.value = states
+        _armedModifiers.value = states.keys
+    }
+
+    private fun modifierForLabel(label: String): Modifier? = when (label) {
+        "Ctrl" -> Modifier.Ctrl
+        "Alt" -> Modifier.Alt
+        else -> null
     }
 
     /**

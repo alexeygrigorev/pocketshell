@@ -33,6 +33,7 @@ import com.pocketshell.core.voice.AudioRecorderException
 import com.pocketshell.core.voice.WhisperException
 import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.model.KeyBinding
+import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.theme.PocketShellColors
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
@@ -404,6 +405,8 @@ public class InlineDictationViewModel @Inject constructor(
 public fun KeyBarWithMic(
     keys: List<KeyBinding>,
     onKey: (KeyBinding) -> Unit,
+    modifierStates: Map<String, KeyModifierState>? = null,
+    onModifierStateChange: (KeyBinding, KeyModifierState) -> Unit = { _, _ -> },
     micState: InlineDictationViewModel.RecordingState,
     onMicTap: () -> Unit,
     modifier: Modifier = Modifier,
@@ -427,7 +430,12 @@ public fun KeyBarWithMic(
         // visual on the 8-key side. We pass `weight(1f)` so the KeyBar
         // claims the remaining row width after the mic slot is laid out.
         Box(modifier = Modifier.weight(1f)) {
-            KeyBar(keys = keys, onKey = onKey)
+            KeyBar(
+                keys = keys,
+                onKey = onKey,
+                modifierStates = modifierStates,
+                onModifierStateChange = onModifierStateChange,
+            )
         }
         InlineMicSlot(
             state = micState,

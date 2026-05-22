@@ -2,6 +2,7 @@ package com.pocketshell.app.session
 
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.session.SessionViewModel.Modifier
+import com.pocketshell.uikit.model.KeyModifierState
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -17,7 +18,7 @@ import org.robolectric.annotation.Config
  *
  * 1. The bar's unmodified key-code mapping (Esc, Tab, arrows).
  * 2. The sticky modifier FSM (one-shot arm → wrap-next → auto-clear,
- *    second tap → disarm).
+ *    locked modifiers persist until the key bar reports them off).
  *
  * The tests exercise the ViewModel via its `internal` test seams rather
  * than constructing a full Compose tree: the ui-kit `KeyBar` is already
@@ -72,22 +73,36 @@ class SessionViewModelTest {
         val vm = newVm()
         assertTrue(vm.armedModifiers.value.isEmpty())
 
-        vm.onKeyBarKey("Ctrl")
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
         assertEquals(setOf(Modifier.Ctrl), vm.armedModifiers.value)
+        assertEquals(KeyModifierState.OneShot, vm.modifierStates.value[Modifier.Ctrl])
     }
 
     @Test
-    fun secondCtrlTapDisarmsModifier() {
+    fun keyBarOffStateDisarmsModifier() {
         val vm = newVm()
-        vm.onKeyBarKey("Ctrl")
-        vm.onKeyBarKey("Ctrl")
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.Off)
         assertTrue(vm.armedModifiers.value.isEmpty())
+        assertTrue(vm.modifierStates.value.isEmpty())
+    }
+
+    @Test
+    fun ctrlLockPersistsAfterFiringNonModifierKey() {
+        val vm = newVm()
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.Locked)
+        assertEquals(setOf(Modifier.Ctrl), vm.armedModifiers.value)
+
+        vm.onKeyBarKey("‹")
+
+        assertEquals(setOf(Modifier.Ctrl), vm.armedModifiers.value)
+        assertEquals(KeyModifierState.Locked, vm.modifierStates.value[Modifier.Ctrl])
     }
 
     @Test
     fun ctrlPlusCWrapsToAsciiControlByte() {
         val vm = newVm()
-        vm.onKeyBarKey("Ctrl")
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
 
         // The brief's canonical case: Ctrl + 'c' → 0x03. The key bar does
         // not own letter slots in v1 (letters come from the system IME),
@@ -104,7 +119,7 @@ class SessionViewModelTest {
     @Test
     fun ctrlPlusUppercaseCAlsoMapsTo0x03() {
         val vm = newVm()
-        vm.onKeyBarKey("Ctrl")
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
         val out = vm.writeKeyWithModifiersForTest(
             unmodified = vm.unmodifiedBytesForTest('C'),
             label = "C",
@@ -115,7 +130,7 @@ class SessionViewModelTest {
     @Test
     fun ctrlPlusAMapsTo0x01() {
         val vm = newVm()
-        vm.onKeyBarKey("Ctrl")
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
         val out = vm.writeKeyWithModifiersForTest(
             unmodified = vm.unmodifiedBytesForTest('a'),
             label = "a",
@@ -126,7 +141,7 @@ class SessionViewModelTest {
     @Test
     fun ctrlPlusArrowProducesXtermModifyCursorKeys() {
         val vm = newVm()
-        vm.onKeyBarKey("Ctrl")
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
         val out = vm.writeKeyWithModifiersForTest(
             unmodified = vm.unmodifiedBytesFor("‹")!!,
             label = "‹",
@@ -148,7 +163,7 @@ class SessionViewModelTest {
     @Test
     fun altPlusLetterPrefixesWithEsc() {
         val vm = newVm()
-        vm.onKeyBarKey("Alt")
+        vm.onKeyBarModifierState("Alt", KeyModifierState.OneShot)
         // Alt + 'f' → ESC, 'f' (xterm "Meta sends Escape").
         val out = vm.writeKeyWithModifiersForTest(
             unmodified = vm.unmodifiedBytesForTest('f'),
@@ -173,7 +188,7 @@ class SessionViewModelTest {
     @Test
     fun ctrlAutoClearedAfterFiringNonModifierKey() {
         val vm = newVm()
-        vm.onKeyBarKey("Ctrl")
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
         assertEquals(setOf(Modifier.Ctrl), vm.armedModifiers.value)
         // Fire an arrow through the bar — the public surface. Ctrl
         // should clear afterwards.
@@ -184,8 +199,8 @@ class SessionViewModelTest {
     @Test
     fun ctrlPlusAltStacksBothPrefixes() {
         val vm = newVm()
-        vm.onKeyBarKey("Ctrl")
-        vm.onKeyBarKey("Alt")
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
+        vm.onKeyBarModifierState("Alt", KeyModifierState.OneShot)
         assertEquals(setOf(Modifier.Ctrl, Modifier.Alt), vm.armedModifiers.value)
 
         // Ctrl+Alt+'c' → ESC, 0x03 (Ctrl wraps first, then Alt prefixes ESC).

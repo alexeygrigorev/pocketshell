@@ -2,7 +2,7 @@ package com.pocketshell.uikit.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -45,6 +46,7 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * The card chrome (surface, border-soft, 14dp radius, 16dp h / 14dp v
  * padding) matches `.session-row` directly.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SessionRow(
     badge: String,
@@ -55,6 +57,7 @@ fun SessionRow(
     tags: List<Tag>,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
+    onLongClick: (() -> Unit)? = null,
 ) {
     Row(
         modifier = modifier
@@ -65,7 +68,11 @@ fun SessionRow(
                 color = PocketShellColors.BorderSoft,
                 shape = RoundedCornerShape(14.dp),
             )
-            .clickable(role = Role.Button, onClick = onClick)
+            .combinedClickable(
+                role = Role.Button,
+                onClick = onClick,
+                onLongClick = onLongClick,
+            )
             .padding(horizontal = 16.dp, vertical = 14.dp),
         // `flex-start` in the CSS: the badge sits at the top, not the
         // middle of the multi-line body.

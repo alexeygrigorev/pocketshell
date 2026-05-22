@@ -145,6 +145,7 @@ dependencies {
     // `SSHClient` directly from `ProofOfLifeScreen`, so we also need its
     // types on the compile classpath.
     implementation(project(":shared:core-ssh"))
+    implementation(project(":shared:core-portfwd"))
     implementation(project(":shared:core-terminal"))
 
     // Issue #11: the design language (colour scheme, typography, shapes) lives
@@ -172,9 +173,15 @@ dependencies {
     // resolves on the same classpath.
     implementation(project(":shared:core-tmux"))
 
+    // Issue #24: usage panel parses normalized server-side usage JSON.
+    // The app never stores provider credentials; it only renders records
+    // returned by SSH-executed commands such as `heru usage --json`.
+    implementation(project(":shared:core-usage"))
+
     // ProofPipelineTest connects to the `pocketshell-test:ssh` Docker
     // container the same way `core-ssh`'s integration test does, so the
     // app needs the same Testcontainers + JUnit + coroutines-test stack.
+    testImplementation("org.json:json:20240303")
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.testcontainers)

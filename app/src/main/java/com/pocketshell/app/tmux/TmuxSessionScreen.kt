@@ -1,6 +1,9 @@
 package com.pocketshell.app.tmux
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,14 +15,23 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -32,6 +44,7 @@ import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.theme.PocketShellColors
+import kotlinx.coroutines.launch
 
 /**
  * Phase 2 session screen for `tmux -CC` hosts — the per-pane equivalent of
@@ -70,6 +83,8 @@ public fun TmuxSessionScreen(
     sessionName: String,
     modifier: Modifier = Modifier,
     onBack: () -> Unit = {},
+    onOpenTmuxSession: (sessionName: String) -> Unit = {},
+    onReplaceTmuxSession: (sessionName: String) -> Unit = {},
 ) {
     LaunchedEffect(hostId, hostName, host, port, user, keyPath, sessionName) {
         viewModel.connect(hostId, hostName, host, port, user, keyPath, sessionName)
@@ -85,8 +100,24 @@ public fun TmuxSessionScreen(
     ) > 0
 
     val currentPane = panes.getOrNull(pagerState.currentPage)
+    val currentWindowId = currentPane?.windowId
+    val windows = remember(panes) {
+        panes
+            .distinctBy { it.windowId }
+            .map { pane -> WindowSummary(windowId = pane.windowId, title = pane.windowId) }
+    }
     val crumbs = remember(host, sessionName, currentPane) {
         breadcrumbCrumbs(host, sessionName, currentPane)
+    }
+    val scope = rememberCoroutineScope()
+    var moreExpanded by remember { mutableStateOf(false) }
+    var windowMenuFor by remember { mutableStateOf<WindowSummary?>(null) }
+    var dialogMode by remember { mutableStateOf<TmuxDialogMode?>(null) }
+    var dialogText by remember { mutableStateOf("") }
+
+    fun openTextDialog(mode: TmuxDialogMode, initialText: String = "") {
+        dialogMode = mode
+        dialogText = initialText
     }
 
     Box(
@@ -99,17 +130,64 @@ public fun TmuxSessionScreen(
                 .fillMaxSize()
                 .imePadding(),
         ) {
-            Breadcrumb(
-                crumbs = crumbs,
-                onBack = onBack,
-                onMore = { /* More menu — wiring lands with #48 / #23. */ },
-            )
+            Box(modifier = Modifier.fillMaxWidth()) {
+                Breadcrumb(
+                    crumbs = crumbs,
+                    onBack = onBack,
+                    onMore = { moreExpanded = true },
+                )
+                TmuxMoreMenu(
+                    expanded = moreExpanded,
+                    currentWindowId = currentWindowId,
+                    onDismiss = { moreExpanded = false },
+                    onCreateSession = {
+                        moreExpanded = false
+                        openTextDialog(TmuxDialogMode.CreateSession)
+                    },
+                    onRenameSession = {
+                        moreExpanded = false
+                        openTextDialog(TmuxDialogMode.RenameSession, sessionName)
+                    },
+                    onKillSession = {
+                        moreExpanded = false
+                        dialogMode = TmuxDialogMode.KillSession
+                    },
+                    onNewWindow = {
+                        moreExpanded = false
+                        viewModel.newWindow()
+                    },
+                    onRenameWindow = {
+                        moreExpanded = false
+                        openTextDialog(TmuxDialogMode.RenameWindow, currentWindowId.orEmpty())
+                    },
+                    onKillWindow = {
+                        moreExpanded = false
+                        dialogMode = TmuxDialogMode.KillWindow
+                    },
+                )
+            }
 
             (status as? ConnectionStatus.Connecting)?.let {
                 StatusLine("connecting to ${it.user}@${it.host}:${it.port} (tmux $sessionName)")
             }
             (status as? ConnectionStatus.Failed)?.let {
                 StatusLine(it.message)
+            }
+
+            if (windows.isNotEmpty()) {
+                WindowStrip(
+                    windows = windows,
+                    currentWindowId = currentWindowId,
+                    onSelectWindow = { window ->
+                        viewModel.selectWindow(window.windowId)
+                        val page = panes.indexOfFirst { it.windowId == window.windowId }
+                        if (page >= 0) {
+                            scope.launch { pagerState.animateScrollToPage(page) }
+                        }
+                    },
+                    onOpenWindowMenu = { windowMenuFor = it },
+                    onNewWindow = viewModel::newWindow,
+                )
             }
 
             // Per [D6]: render exactly one pane at a time. The
@@ -155,7 +233,75 @@ public fun TmuxSessionScreen(
                 )
             }
         }
+
+        windowMenuFor?.let { window ->
+            WindowContextMenu(
+                window = window,
+                onDismiss = { windowMenuFor = null },
+                onRename = {
+                    windowMenuFor = null
+                    openTextDialog(TmuxDialogMode.RenameWindow, window.windowId)
+                },
+                onKill = {
+                    windowMenuFor = null
+                    dialogMode = TmuxDialogMode.KillWindowFor(window.windowId)
+                },
+            )
+        }
+
+        dialogMode?.let { mode ->
+            TmuxLifecycleDialog(
+                mode = mode,
+                sessionName = sessionName,
+                currentWindowId = currentWindowId,
+                text = dialogText,
+                onTextChange = { dialogText = it },
+                onDismiss = { dialogMode = null },
+                onConfirm = {
+                    when (val currentMode = mode) {
+                        TmuxDialogMode.CreateSession -> {
+                            val name = dialogText.trim()
+                            viewModel.createSession(name)
+                            if (name.isNotEmpty()) onOpenTmuxSession(name)
+                        }
+                        TmuxDialogMode.RenameSession -> {
+                            val name = dialogText.trim()
+                            viewModel.renameCurrentSession(name)
+                            if (name.isNotEmpty()) onReplaceTmuxSession(name)
+                        }
+                        TmuxDialogMode.KillSession -> {
+                            viewModel.killCurrentSession()
+                            onBack()
+                        }
+                        TmuxDialogMode.RenameWindow -> {
+                            viewModel.renameWindow(currentWindowId.orEmpty(), dialogText)
+                        }
+                        TmuxDialogMode.KillWindow -> {
+                            viewModel.killWindow(currentWindowId.orEmpty())
+                        }
+                        is TmuxDialogMode.KillWindowFor -> {
+                            viewModel.killWindow(currentMode.windowId)
+                        }
+                    }
+                    dialogMode = null
+                },
+            )
+        }
     }
+}
+
+private data class WindowSummary(
+    val windowId: String,
+    val title: String,
+)
+
+private sealed interface TmuxDialogMode {
+    data object CreateSession : TmuxDialogMode
+    data object RenameSession : TmuxDialogMode
+    data object KillSession : TmuxDialogMode
+    data object RenameWindow : TmuxDialogMode
+    data object KillWindow : TmuxDialogMode
+    data class KillWindowFor(val windowId: String) : TmuxDialogMode
 }
 
 /**
@@ -209,6 +355,176 @@ private fun EmptyPanesPlaceholder() {
             fontSize = 13.sp,
         )
     }
+}
+
+@Composable
+private fun TmuxMoreMenu(
+    expanded: Boolean,
+    currentWindowId: String?,
+    onDismiss: () -> Unit,
+    onCreateSession: () -> Unit,
+    onRenameSession: () -> Unit,
+    onKillSession: () -> Unit,
+    onNewWindow: () -> Unit,
+    onRenameWindow: () -> Unit,
+    onKillWindow: () -> Unit,
+) {
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = Alignment.TopEnd,
+    ) {
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = onDismiss,
+        ) {
+            DropdownMenuItem(text = { Text("New session") }, onClick = onCreateSession)
+            DropdownMenuItem(text = { Text("Rename session") }, onClick = onRenameSession)
+            DropdownMenuItem(text = { Text("Kill session") }, onClick = onKillSession)
+            DropdownMenuItem(text = { Text("New window") }, onClick = onNewWindow)
+            DropdownMenuItem(
+                text = { Text("Rename window") },
+                onClick = onRenameWindow,
+                enabled = currentWindowId != null,
+            )
+            DropdownMenuItem(
+                text = { Text("Kill window") },
+                onClick = onKillWindow,
+                enabled = currentWindowId != null,
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun WindowStrip(
+    windows: List<WindowSummary>,
+    currentWindowId: String?,
+    onSelectWindow: (WindowSummary) -> Unit,
+    onOpenWindowMenu: (WindowSummary) -> Unit,
+    onNewWindow: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        windows.forEach { window ->
+            val selected = window.windowId == currentWindowId
+            Text(
+                text = window.title,
+                color = if (selected) PocketShellColors.Background else PocketShellColors.Text,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .background(
+                        color = if (selected) {
+                            PocketShellColors.Accent
+                        } else {
+                            PocketShellColors.SurfaceElev
+                        },
+                    )
+                    .combinedClickable(
+                        role = androidx.compose.ui.semantics.Role.Tab,
+                        onClick = { onSelectWindow(window) },
+                        onLongClick = { onOpenWindowMenu(window) },
+                    )
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
+            )
+        }
+        TextButton(onClick = onNewWindow) {
+            Text("+")
+        }
+    }
+}
+
+@Composable
+private fun WindowContextMenu(
+    window: WindowSummary,
+    onDismiss: () -> Unit,
+    onRename: () -> Unit,
+    onKill: () -> Unit,
+) {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.TopEnd,
+    ) {
+        DropdownMenu(
+            expanded = true,
+            onDismissRequest = onDismiss,
+        ) {
+            DropdownMenuItem(text = { Text("Rename ${window.windowId}") }, onClick = onRename)
+            DropdownMenuItem(text = { Text("Kill ${window.windowId}") }, onClick = onKill)
+        }
+    }
+}
+
+@Composable
+private fun TmuxLifecycleDialog(
+    mode: TmuxDialogMode,
+    sessionName: String,
+    currentWindowId: String?,
+    text: String,
+    onTextChange: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val title = when (mode) {
+        TmuxDialogMode.CreateSession -> "New session"
+        TmuxDialogMode.RenameSession -> "Rename session"
+        TmuxDialogMode.KillSession -> "Kill session"
+        TmuxDialogMode.RenameWindow -> "Rename window"
+        TmuxDialogMode.KillWindow -> "Kill window"
+        is TmuxDialogMode.KillWindowFor -> "Kill window"
+    }
+    val confirm = when (mode) {
+        TmuxDialogMode.KillSession,
+        TmuxDialogMode.KillWindow,
+        is TmuxDialogMode.KillWindowFor,
+        -> "Kill"
+        else -> "Save"
+    }
+    val isTextMode = mode == TmuxDialogMode.CreateSession ||
+        mode == TmuxDialogMode.RenameSession ||
+        mode == TmuxDialogMode.RenameWindow
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            if (isTextMode) {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = onTextChange,
+                    singleLine = true,
+                    label = { Text(if (mode == TmuxDialogMode.RenameWindow) "Window name" else "Session name") },
+                )
+            } else {
+                val target = when (mode) {
+                    TmuxDialogMode.KillSession -> sessionName
+                    TmuxDialogMode.KillWindow -> currentWindowId.orEmpty()
+                    is TmuxDialogMode.KillWindowFor -> mode.windowId
+                    else -> ""
+                }
+                Text("This will close $target.")
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onConfirm,
+                enabled = !isTextMode || text.trim().isNotEmpty(),
+            ) {
+                Text(confirm)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
 }
 
 @Composable

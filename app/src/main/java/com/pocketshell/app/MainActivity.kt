@@ -19,6 +19,7 @@ import com.pocketshell.app.hosts.AddEditHostScreen
 import com.pocketshell.app.hosts.HostListScreen
 import com.pocketshell.app.hosts.SshKeysScreen
 import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.app.portfwd.PortForwardPanelScreen
 import com.pocketshell.app.session.SessionScreen
 import com.pocketshell.app.session.SessionViewModel
 import com.pocketshell.app.tmux.TmuxSessionScreen
@@ -96,6 +97,10 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
         current = dest
     }
 
+    fun replace(dest: AppDestination) {
+        current = dest
+    }
+
     fun back() {
         current = backStack.removeLastOrNull() ?: AppDestination.HostList
     }
@@ -115,6 +120,9 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
                         keyPath = keyPath,
                     ),
                 )
+            },
+            onOpenPortForwardPanel = { host, keyPath ->
+                navigate(AppDestination.PortForwardPanel(hostId = host.id, keyPath = keyPath))
             },
             onOpenTmuxSession = { entry, sessionName ->
                 navigate(
@@ -158,6 +166,12 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
             onBack = ::back,
         )
 
+        is AppDestination.PortForwardPanel -> PortForwardPanelScreen(
+            hostId = dest.hostId,
+            keyPath = dest.keyPath,
+            onBack = ::back,
+        )
+
         // Issue #45: tmux control-mode session. The view model is
         // obtained via `hiltViewModel()` — distinct from the
         // activity-scoped `sessionViewModel` above so each navigation to
@@ -177,6 +191,14 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
             keyPath = dest.keyPath,
             sessionName = dest.sessionName,
             onBack = ::back,
+            onOpenTmuxSession = { sessionName ->
+                navigate(
+                    dest.copy(sessionName = sessionName),
+                )
+            },
+            onReplaceTmuxSession = { sessionName ->
+                replace(dest.copy(sessionName = sessionName))
+            },
         )
     }
 }

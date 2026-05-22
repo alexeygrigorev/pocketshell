@@ -36,7 +36,6 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -49,9 +48,11 @@ import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.CommandChip
 import com.pocketshell.uikit.components.MicButton
+import com.pocketshell.uikit.components.Tabs
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
+import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
 
@@ -63,8 +64,7 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * 1. **Breadcrumb** (ui-kit's `Breadcrumb`) — back arrow signals "detach",
  *    `host > session > pane` chain, `⋮` for the (future) more menu.
  * 2. **Tabs row** — `Terminal` is the only tab in Phase 1 (Conversation
- *    is hidden until Phase 3 / #23). Rendered inline here rather than
- *    pulling in a `Tabs` ui-kit component for one entry.
+ *    is hidden until Phase 3 / #23).
  * 3. **`TerminalSurface`** filling the remaining vertical space.
  * 4. **Input strip** — either the [KeyBar] (when the IME is showing) or
  *    the [CommandChip] row (when it is hidden), plus the mic FAB anchored
@@ -92,8 +92,11 @@ public fun SessionScreen(
     }
 
     val status by viewModel.connectionStatus.collectAsState()
-    val armed by viewModel.armedModifiers.collectAsState()
+    val modifierStates by viewModel.modifierStates.collectAsState()
     val dictationState by inlineDictationViewModel.uiState.collectAsState()
+    val keyBarModifierStates = remember(modifierStates) {
+        modifierStates.mapKeys { (modifier, _) -> modifier.keyBarLabel }
+    }
 
     var showMicSheet by remember { mutableStateOf(false) }
     // Issue #17: the chip-row "+" entry opens the snippet picker. The
@@ -149,7 +152,11 @@ public fun SessionScreen(
                 onMore = { /* More menu — wiring lands with #23. */ },
             )
 
-            TabsRow()
+            Tabs(
+                labels = SessionTabs,
+                selectedIndex = 0,
+                onSelected = { /* Terminal is the only tab until #23. */ },
+            )
 
             // Optional one-line status above the terminal until the
             // breadcrumb's live dot covers it post-#18.
@@ -171,8 +178,8 @@ public fun SessionScreen(
                 )
             }
 
-            if (armed.isNotEmpty()) {
-                ArmedModifierStrip(armed)
+            if (modifierStates.isNotEmpty()) {
+                ArmedModifierStrip(modifierStates)
             }
 
             // The inline-dictation error banner sits between the armed-
@@ -187,6 +194,10 @@ public fun SessionScreen(
                 KeyBarWithMic(
                     keys = KeyBarLayout,
                     onKey = { binding -> viewModel.onKeyBarKey(binding.label) },
+                    modifierStates = keyBarModifierStates,
+                    onModifierStateChange = { binding, state ->
+                        viewModel.onKeyBarModifierState(binding.label, state)
+                    },
                     micState = dictationState.recording,
                     onMicTap = {
                         // Same three-step gate as the prompt composer
@@ -289,31 +300,6 @@ private fun breadcrumbCrumbs(host: String, user: String): List<Crumb> = listOf(
     Crumb(label = "pane 1", isCurrent = false, onClick = { /* pane switcher — Phase 2 */ }),
 )
 
-/**
- * Inline tabs row. Only `Terminal` is active in Phase 1; `Conversation`
- * is hidden entirely until #23 wires the agent-awareness side panel
- * (`docs/agent-awareness.md`). Once Tabs exists in the ui-kit (a future
- * issue), this gets swapped for it.
- */
-@Composable
-private fun TabsRow() {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.Background)
-            .border(width = 1.dp, color = PocketShellColors.Border)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = "Terminal",
-            color = PocketShellColors.Accent,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-        )
-    }
-}
-
 @Composable
 private fun StatusLine(text: String) {
     Text(
@@ -355,14 +341,14 @@ private fun InlineDictationErrorStrip(message: String, onDismiss: () -> Unit) {
 
 /**
  * Small accent strip surfaced while one or more sticky modifiers are
- * armed. The ui-kit `KeyBar` does not visually surface armed state for
- * `KeyKind.Regular` slots (see the [SessionViewModel] class-level docs on
- * why we register Ctrl / Alt as `Regular`), so this strip keeps the user
- * informed that the next bar tap will be wrapped.
+ * active. It gives a textual hint alongside the key bar's active-key
+ * treatment, especially for the locked state.
  */
 @Composable
-private fun ArmedModifierStrip(armed: Set<SessionViewModel.Modifier>) {
-    val label = armed.joinToString(" + ") { it.name }
+private fun ArmedModifierStrip(states: Map<SessionViewModel.Modifier, KeyModifierState>) {
+    val label = states.entries.joinToString(" + ") { (modifier, state) ->
+        if (state == KeyModifierState.Locked) "${modifier.name} locked" else "${modifier.name} armed"
+    }
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -371,7 +357,7 @@ private fun ArmedModifierStrip(armed: Set<SessionViewModel.Modifier>) {
         contentAlignment = Alignment.CenterStart,
     ) {
         Text(
-            text = "$label armed — tap a bar key to send it wrapped",
+            text = "$label - tap a bar key to send it wrapped",
             color = PocketShellColors.Accent,
             fontSize = 11.sp,
         )
@@ -442,16 +428,15 @@ private fun ChipRow(
  *
  * - Esc, Tab, Ctrl, Alt, then four arrows.
  *
- * `Ctrl` and `Alt` are declared as `Regular` (rather than `Modifier`) so
- * the ui-kit forwards their taps through `onKey`. The [SessionViewModel]
- * owns the sticky FSM — see its class-level documentation for the
- * rationale.
+ * `Ctrl` and `Alt` are declared as `Modifier` so the ui-kit can render
+ * one-shot and locked states while the screen mirrors those transitions
+ * into [SessionViewModel].
  */
 private val KeyBarLayout: List<KeyBinding> = listOf(
     KeyBinding(label = "Esc", kind = KeyKind.Regular),
     KeyBinding(label = "Tab", kind = KeyKind.Regular),
-    KeyBinding(label = "Ctrl", kind = KeyKind.Regular),
-    KeyBinding(label = "Alt", kind = KeyKind.Regular),
+    KeyBinding(label = "Ctrl", kind = KeyKind.Modifier),
+    KeyBinding(label = "Alt", kind = KeyKind.Modifier),
     KeyBinding(label = "‹", kind = KeyKind.Arrow),
     KeyBinding(label = "⌃", kind = KeyKind.Arrow),
     KeyBinding(label = "⌄", kind = KeyKind.Arrow),
@@ -506,3 +491,11 @@ private val DefaultChips: List<String> = listOf(
     "k logs",
     "clear",
 )
+
+private val SessionViewModel.Modifier.keyBarLabel: String
+    get() = when (this) {
+        SessionViewModel.Modifier.Ctrl -> "Ctrl"
+        SessionViewModel.Modifier.Alt -> "Alt"
+    }
+
+private val SessionTabs: List<String> = listOf("Terminal")

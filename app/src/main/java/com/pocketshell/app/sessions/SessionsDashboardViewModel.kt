@@ -251,6 +251,43 @@ class SessionsDashboardViewModel @Inject constructor(
     fun entryFor(hostId: Long): ActiveTmuxClients.Entry? =
         activeClients.clients.value[hostId]
 
+    fun createSession(entry: ActiveTmuxClients.Entry, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            runCatching {
+                entry.client.sendCommand("new-session -d -s '${escapeSingleQuoted(trimmed)}'")
+            }
+            refreshEntry(entry)
+        }
+    }
+
+    fun renameSession(entry: ActiveTmuxClients.Entry, oldName: String, newName: String) {
+        val oldTrimmed = oldName.trim()
+        val newTrimmed = newName.trim()
+        if (oldTrimmed.isEmpty() || newTrimmed.isEmpty()) return
+        viewModelScope.launch {
+            runCatching {
+                entry.client.sendCommand(
+                    "rename-session -t '${escapeSingleQuoted(oldTrimmed)}' " +
+                        "'${escapeSingleQuoted(newTrimmed)}'",
+                )
+            }
+            refreshEntry(entry)
+        }
+    }
+
+    fun killSession(entry: ActiveTmuxClients.Entry, name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return
+        viewModelScope.launch {
+            runCatching {
+                entry.client.sendCommand("kill-session -t '${escapeSingleQuoted(trimmed)}'")
+            }
+            refreshEntry(entry)
+        }
+    }
+
     /**
      * Parse one row of
      * `list-sessions -F "#{session_name}::#{session_activity}::#{session_attached}"`.
@@ -300,6 +337,10 @@ class SessionsDashboardViewModel @Inject constructor(
         fetchSessions(entry) ?: emptyList()
 
     internal suspend fun refreshEntryForTest(entry: ActiveTmuxClients.Entry) {
+        refreshEntry(entry)
+    }
+
+    private suspend fun refreshEntry(entry: ActiveTmuxClients.Entry) {
         val rows = fetchSessions(entry) ?: return
         perHostSnapshots[entry.hostId] = rows
         emitAggregate()
@@ -336,3 +377,6 @@ class SessionsDashboardViewModel @Inject constructor(
             "list-sessions -F '#{session_name}::#{session_activity}::#{session_attached}'"
     }
 }
+
+private fun escapeSingleQuoted(input: String): String =
+    input.replace("'", "'\\''")

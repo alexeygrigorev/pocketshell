@@ -191,16 +191,12 @@ uses PocketShell's Claude JSONL detection/read path over SSH.
 
 GitHub Actions runs:
 
-1. `./gradlew check` — unit tests
+1. `./gradlew test --stacktrace` — unit tests
 2. `./gradlew :shared:core-ssh:integrationTest :shared:core-portfwd:integrationTest` — Docker-backed JVM integration tests via Testcontainers
-
-CI emulator coverage is deferred. For now, run the emulator + Docker agent
-smoke locally:
-
-```bash
-docker compose -f tests/docker/docker-compose.yml up -d --build agents
-./gradlew connectedDebugAndroidTest
-```
+3. Local emulator + Docker agent smoke after the fast gates pass:
+   - starts `tests/docker`'s `agents` target on host port 2222
+   - runs `./gradlew connectedDebugAndroidTest` on an Android emulator
+   - uploads Android test reports and Docker logs as workflow artifacts
 
 ---
 

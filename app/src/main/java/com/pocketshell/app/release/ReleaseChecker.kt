@@ -114,10 +114,12 @@ open class ReleaseChecker {
      * comparison semantics — see issue #40's acceptance criteria.
      */
     internal fun isNewer(current: String, remote: String): Boolean {
-        val currentTag = current.substringBefore("-")
-        val remoteTag = remote.removePrefix("v")
-        val currentNums = currentTag.removePrefix("v").split(".").mapNotNull { it.toIntOrNull() }
+        val currentTag = current.trim().substringBefore("-").removePrefix("v")
+        val remoteTag = remote.trim().substringBefore("-").removePrefix("v")
+        val currentNums = currentTag.split(".").mapNotNull { it.toIntOrNull() }
         val remoteNums = remoteTag.split(".").mapNotNull { it.toIntOrNull() }
+
+        if (currentNums.isEmpty() || remoteNums.isEmpty()) return false
 
         for (i in 0 until maxOf(currentNums.size, remoteNums.size)) {
             val c = currentNums.getOrElse(i) { 0 }

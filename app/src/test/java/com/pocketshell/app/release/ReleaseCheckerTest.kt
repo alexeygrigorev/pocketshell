@@ -51,6 +51,12 @@ class ReleaseCheckerTest {
     }
 
     @Test
+    fun isNewer_returnsFalse_forEqualVersionsWithDifferentVPrefixes() {
+        assertFalse(checker.isNewer("0.2.0", "v0.2.0"))
+        assertFalse(checker.isNewer("v0.2.0", "0.2.0"))
+    }
+
+    @Test
     fun isNewer_stripsLocalQualifierSuffix() {
         // Debug builds sometimes carry a `-debug` qualifier; the remote
         // tag is plain semver. The comparison should drop the qualifier
@@ -67,5 +73,11 @@ class ReleaseCheckerTest {
     @Test
     fun isNewer_returnsFalse_forMajorRegression() {
         assertFalse(checker.isNewer("v1.0.0", "v0.9.9"))
+    }
+
+    @Test
+    fun isNewer_returnsFalse_forUnknownLocalVersion() {
+        assertFalse(checker.isNewer("", "v0.2.0"))
+        assertFalse(checker.isNewer("unknown", "v0.2.0"))
     }
 }

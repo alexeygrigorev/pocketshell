@@ -210,6 +210,10 @@ class HostListViewModel @Inject constructor(
     fun checkForUpdates() {
         viewModelScope.launch {
             val currentVersion = currentVersionName()
+            if (currentVersion == null) {
+                _updateAvailable.value = null
+                return@launch
+            }
             _updateAvailable.value = releaseChecker.check(currentVersion)
         }
     }
@@ -499,18 +503,18 @@ class HostListViewModel @Inject constructor(
     }
 
     /**
-     * Resolve the installed `versionName` from `PackageManager`. Falls
-     * back to a sentinel string if the read fails — the [ReleaseChecker]
-     * will then treat any real release as "newer than 0.0.0" and surface
-     * the banner, which is the right default for a debug-build edge case.
+     * Resolve the installed `versionName` from `PackageManager`. Returns
+     * `null` if the read fails so the app does not surface a misleading
+     * update banner for an unknown local version.
      */
-    private fun currentVersionName(): String = try {
+    private fun currentVersionName(): String? = try {
         applicationContext.packageManager
             .getPackageInfo(applicationContext.packageName, 0)
             .versionName
-            ?: "0.0.0"
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
     } catch (_: Exception) {
-        "0.0.0"
+        null
     }
 
     /**

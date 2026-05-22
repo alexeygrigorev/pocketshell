@@ -1,6 +1,10 @@
 package com.pocketshell.app.hosts
 
 import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.bootstrap.HostBootstrapper
@@ -19,6 +23,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
@@ -46,9 +51,24 @@ class HostListViewModelTest {
     private lateinit var db: AppDatabase
     private lateinit var context: Context
 
+    private class BrokenPackageContext(base: Context) : ContextWrapper(base) {
+        override fun getPackageManager(): PackageManager {
+            throw IllegalStateException("package version unavailable")
+        }
+    }
+
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
+        shadowOf(context.packageManager).installPackage(
+            PackageInfo().apply {
+                packageName = context.packageName
+                versionName = "0.2.0"
+                applicationInfo = ApplicationInfo().apply {
+                    packageName = context.packageName
+                }
+            },
+        )
         db = Room.inMemoryDatabaseBuilder(
             context,
             AppDatabase::class.java,
@@ -83,9 +103,12 @@ class HostListViewModelTest {
     ) : ReleaseChecker() {
         var callCount: Int = 0
             private set
+        var lastCurrentVersion: String? = null
+            private set
 
         override suspend fun check(currentVersion: String): ReleaseInfo? {
             callCount += 1
+            lastCurrentVersion = currentVersion
             return result
         }
     }
@@ -213,6 +236,33 @@ class HostListViewModelTest {
 
         viewModel.checkForUpdates()
         assertEquals(3, fake.callCount)
+    }
+
+    @Test
+    fun checkForUpdates_skipsChecker_whenInstalledVersionCannotBeDetermined() = runTest {
+        val fake = FakeReleaseChecker(
+            result = ReleaseInfo(
+                tagName = "v0.2.0",
+                htmlUrl = "https://github.com/alexeygrigorev/pocketshell/releases/tag/v0.2.0",
+                apkUrl = "https://example.com/pocketshell-0.2.0-debug.apk",
+            ),
+        )
+        val viewModel = HostListViewModel(
+            applicationContext = BrokenPackageContext(context),
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = fake,
+            bootstrapper = HostBootstrapper(),
+        )
+
+        assertEquals(0, fake.callCount)
+        assertNull(fake.lastCurrentVersion)
+        assertNull(viewModel.updateAvailable.value)
+
+        viewModel.checkForUpdates()
+
+        assertEquals(0, fake.callCount)
+        assertNull(viewModel.updateAvailable.value)
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.pocketshell.app.systemsurfaces
 
+import android.annotation.SuppressLint
 import android.app.PendingIntent
 import android.content.Intent
 import android.os.Build
@@ -36,9 +37,14 @@ class ForwardingTileService : TileService() {
                 ),
             )
         } else {
-            @Suppress("DEPRECATION")
-            startActivityAndCollapse(intent)
+            startActivityAndCollapseLegacy(intent)
         }
+    }
+
+    @SuppressLint("StartActivityAndCollapseDeprecated")
+    @Suppress("DEPRECATION")
+    private fun startActivityAndCollapseLegacy(intent: Intent) {
+        startActivityAndCollapse(intent)
     }
 
     companion object {

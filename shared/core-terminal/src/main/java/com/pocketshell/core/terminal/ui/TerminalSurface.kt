@@ -148,22 +148,7 @@ fun TerminalSurface(
         content = {
             AndroidView(
                 factory = { context ->
-                    TerminalView(context, /* attributes = */ null).apply {
-                        setTerminalViewClient(viewClient)
-                        // Match `docs/design-language.md`: monospace,
-                        // JetBrains Mono when the system has it registered,
-                        // system monospace as a graceful fallback.
-                        setTypeface(Typeface.create("JetBrains Mono", Typeface.NORMAL))
-                        setTextSize(DEFAULT_TEXT_SIZE_RAW_PX)
-                        // Honour the design-language background until the
-                        // emulator takes over its own canvas. The vendored
-                        // TerminalView is a raw `View`; it does not
-                        // propagate Compose's `Modifier.background`, so we
-                        // set it on the View directly.
-                        setBackgroundColor(DefaultTerminalBackground.toArgb())
-                        isFocusable = true
-                        isFocusableInTouchMode = true
-                    }
+                    TerminalView(context, /* attributes = */ null).applyPocketShellDefaults(viewClient)
                 },
                 update = { view ->
                     val current = view.currentSession
@@ -248,6 +233,18 @@ fun TerminalSurface(
 @Composable
 fun rememberTerminalSurfaceState(): TerminalSurfaceState =
     remember { TerminalSurfaceState() }
+
+internal fun TerminalView.applyPocketShellDefaults(viewClient: TerminalViewClient): TerminalView {
+    setTerminalViewClient(viewClient)
+    // Termux's setTypeface reads mRenderer.mTextSize, so text size must create
+    // the renderer before we swap in the app typeface.
+    setTextSize(DEFAULT_TEXT_SIZE_RAW_PX)
+    setTypeface(Typeface.create("JetBrains Mono", Typeface.NORMAL))
+    setBackgroundColor(DefaultTerminalBackground.toArgb())
+    isFocusable = true
+    isFocusableInTouchMode = true
+    return this
+}
 
 /**
  * Minimal [TerminalViewClient] that satisfies the contract without doing

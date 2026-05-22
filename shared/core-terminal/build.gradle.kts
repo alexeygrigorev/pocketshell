@@ -134,4 +134,6 @@ dependencies {
 
     // Vendored unit tests from Termux's `terminal-emulator/src/test`.
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
 }

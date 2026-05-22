@@ -197,9 +197,9 @@ public class SessionViewModel @Inject constructor(
                 remoteStdin = handle.shell.outputStream,
             )
 
-            // Kick the shell to draw a prompt before any user input.
-            handle.shell.outputStream.write("\r".toByteArray())
-            handle.shell.outputStream.flush()
+            // Kick the shell through the terminal bridge so sshj network I/O
+            // stays on the bridge's background input-drainer thread.
+            terminalState.writeInput("\r".toByteArray())
 
             _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
             startAgentDetection(session)

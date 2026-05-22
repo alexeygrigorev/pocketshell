@@ -8,15 +8,16 @@ import java.io.File
 import javax.inject.Inject
 
 interface PortForwardConnector {
-    suspend fun connect(host: HostEntity, keyPath: String): Result<SshSession>
+    suspend fun connect(host: HostEntity, keyPath: String, passphrase: CharArray?): Result<SshSession>
 }
 
 class DefaultPortForwardConnector @Inject constructor() : PortForwardConnector {
-    override suspend fun connect(host: HostEntity, keyPath: String): Result<SshSession> =
+    override suspend fun connect(host: HostEntity, keyPath: String, passphrase: CharArray?): Result<SshSession> =
         SshConnection.connect(
             host = host.hostname,
             port = host.port,
             user = host.username,
             key = SshKey.Path(File(keyPath)),
+            passphrase = passphrase?.copyOf(),
         )
 }

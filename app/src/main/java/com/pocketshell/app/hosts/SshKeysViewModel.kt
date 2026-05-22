@@ -89,7 +89,12 @@ class SshKeysViewModel @Inject constructor(
                 }
 
                 val fileName = resolveDisplayName(context, uri) ?: "imported-key"
-                persistKey(context, name = fileName, content = trimmed)
+                persistKey(
+                    context = context,
+                    name = fileName,
+                    content = trimmed,
+                    hasPassphrase = hasPrivateKeyPassphrase(trimmed),
+                )
                 // Successful add: explicitly drop any stale error the
                 // banner might still be carrying from a prior failure
                 // (issue #38 item 4).
@@ -116,7 +121,7 @@ class SshKeysViewModel @Inject constructor(
             try {
                 val pem = withContext(Dispatchers.IO) { generateRsaPrivateKeyPem() }
                 val name = "generated-${System.currentTimeMillis()}"
-                persistKey(context, name = name, content = pem)
+                persistKey(context, name = name, content = pem, hasPassphrase = false)
                 _error.value = null
             } catch (t: Throwable) {
                 _error.value = "Failed to generate key: ${t.message}"
@@ -162,7 +167,12 @@ class SshKeysViewModel @Inject constructor(
      * Common path for both import + generate: write the content to a stable
      * location under `filesDir/ssh-keys/` and insert a DB row.
      */
-    private suspend fun persistKey(context: Context, name: String, content: String) {
+    private suspend fun persistKey(
+        context: Context,
+        name: String,
+        content: String,
+        hasPassphrase: Boolean,
+    ) {
         val safeName = if (name.contains("/")) name.substringAfterLast("/") else name
         val keyDir = File(context.filesDir, "ssh-keys")
         withContext(Dispatchers.IO) {
@@ -189,7 +199,7 @@ class SshKeysViewModel @Inject constructor(
                 SshKeyEntity(
                     name = target.name,
                     privateKeyPath = target.absolutePath,
-                    hasPassphrase = false,
+                    hasPassphrase = hasPassphrase,
                 ),
             )
         }
@@ -226,5 +236,45 @@ class SshKeysViewModel @Inject constructor(
             appendLine()
             appendLine("-----END PRIVATE KEY-----")
         }
+    }
+
+    internal fun hasPrivateKeyPassphrase(content: String): Boolean {
+        val lines = content.lineSequence().map { it.trim() }.toList()
+        return lines.any { it == "Proc-Type: 4,ENCRYPTED" } ||
+            lines.any { it.startsWith("DEK-Info:", ignoreCase = true) } ||
+            lines.any { it == "-----BEGIN ENCRYPTED PRIVATE KEY-----" } ||
+            hasEncryptedOpenSshPrivateKey(lines)
+    }
+
+    private fun hasEncryptedOpenSshPrivateKey(lines: List<String>): Boolean {
+        val begin = lines.indexOf("-----BEGIN OPENSSH PRIVATE KEY-----")
+        val end = lines.indexOf("-----END OPENSSH PRIVATE KEY-----")
+        if (begin < 0 || end <= begin) return false
+        val body = lines.subList(begin + 1, end).joinToString("")
+        val decoded = runCatching {
+            java.util.Base64.getMimeDecoder().decode(body)
+        }.getOrNull() ?: return false
+        val magic = "openssh-key-v1\u0000".toByteArray(Charsets.US_ASCII)
+        if (decoded.size < magic.size || !decoded.copyOfRange(0, magic.size).contentEquals(magic)) {
+            return false
+        }
+        var offset = magic.size
+        val cipherName = readOpenSshString(decoded, offset) ?: return false
+        offset = cipherName.nextOffset
+        val kdfName = readOpenSshString(decoded, offset) ?: return false
+        return cipherName.value != "none" || kdfName.value != "none"
+    }
+
+    private data class OpenSshString(val value: String, val nextOffset: Int)
+
+    private fun readOpenSshString(bytes: ByteArray, offset: Int): OpenSshString? {
+        if (offset + 4 > bytes.size) return null
+        val length = java.nio.ByteBuffer.wrap(bytes, offset, 4).int
+        if (length < 0 || offset + 4 + length > bytes.size) return null
+        val start = offset + 4
+        return OpenSshString(
+            value = String(bytes, start, length, Charsets.US_ASCII),
+            nextOffset = start + length,
+        )
     }
 }

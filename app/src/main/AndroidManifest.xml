@@ -21,6 +21,9 @@
     -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <application
         android:name=".App"
         android:allowBackup="true"
@@ -39,6 +42,40 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <receiver
+            android:name=".systemsurfaces.ActiveSessionsWidgetProvider"
+            android:exported="true"
+            android:label="@string/widget_active_sessions_title">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/active_sessions_widget_info" />
+        </receiver>
+
+        <service
+            android:name=".systemsurfaces.ForwardingTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_qs_forwarding"
+            android:label="@string/qs_forwarding_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <receiver
+            android:name=".systemsurfaces.BootCompletedReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

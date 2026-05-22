@@ -2,6 +2,9 @@ package com.pocketshell.app.hosts
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -21,29 +24,40 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.fragment.app.FragmentActivity
 import com.pocketshell.app.bootstrap.HostBootstrapSheet
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.SessionsDashboardViewModel
 import com.pocketshell.app.sessions.SessionsSection
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.model.HostStatus
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -84,8 +98,9 @@ fun HostListScreen(
     onAddHost: () -> Unit,
     @Suppress("UNUSED_PARAMETER") onEditHost: (Long) -> Unit,
     onManageKeys: () -> Unit,
-    onOpenSession: (HostEntity, keyPath: String) -> Unit,
-    onOpenPortForwardPanel: (HostEntity, keyPath: String) -> Unit = { _, _ -> },
+    onOpenCrashReports: () -> Unit,
+    onOpenSession: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit,
+    onOpenPortForwardPanel: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier,
     viewModel: HostListViewModel = hiltViewModel(),
     sessionsViewModel: SessionsDashboardViewModel = hiltViewModel(),
@@ -98,7 +113,13 @@ fun HostListScreen(
     val bootstrapState by viewModel.bootstrapState.collectAsState()
     val bootstrapHostName by viewModel.bootstrapHostName.collectAsState()
     val pendingNavigation by viewModel.pendingNavigation.collectAsState()
+    val sharePayload by viewModel.sharePayload.collectAsState()
+    val shareMessage by viewModel.shareMessage.collectAsState()
     val context = LocalContext.current
+    val activity = context as? FragmentActivity
+    val hostSharePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri -> uri?.let { viewModel.importSharedHostUri(it) } }
 
     // Read the installed `versionName` once and cache it for the lifetime
     // of this composable — `versionName` is a build-time constant for the
@@ -132,18 +153,65 @@ fun HostListScreen(
     val currentHosts by rememberUpdatedState(hosts)
     val currentOpenSession by rememberUpdatedState(onOpenSession)
     val currentOpenPortForwardPanel by rememberUpdatedState(onOpenPortForwardPanel)
+    var pendingPassphrase by remember { mutableStateOf<PendingPassphraseRequest?>(null) }
+    var passphraseText by remember { mutableStateOf("") }
+    var passphraseUnlockError by remember { mutableStateOf<String?>(null) }
+
+    fun continueWithPassphrase(
+        host: HostEntity,
+        key: SshKeyEntity,
+        action: PendingPassphraseAction,
+        passphrase: CharArray?,
+    ) {
+        when (action) {
+            PendingPassphraseAction.OpenSession -> viewModel.bootstrapHost(
+                host = host,
+                keyPath = key.privateKeyPath,
+                passphrase = passphrase,
+            )
+            PendingPassphraseAction.OpenPorts -> currentOpenPortForwardPanel(
+                host,
+                key.privateKeyPath,
+                passphrase,
+            )
+        }
+    }
+
+    fun requestProtectedConnection(host: HostEntity, key: SshKeyEntity, action: PendingPassphraseAction) {
+        if (!key.hasPassphrase) {
+            continueWithPassphrase(host, key, action, passphrase = null)
+            return
+        }
+        val showPrompt = {
+            passphraseText = ""
+            passphraseUnlockError = null
+            pendingPassphrase = PendingPassphraseRequest(host, key, action)
+        }
+        if (!isSshKeyUnlockRequired(context)) {
+            showPrompt()
+            return
+        }
+        launchSshKeyUnlock(
+            activity = activity,
+            title = "Unlock SSH key passphrase",
+            subtitle = "Confirm it is you before entering this key's passphrase",
+            onSuccess = showPrompt,
+            onError = { passphraseUnlockError = it },
+        )
+    }
+
     LaunchedEffect(Unit) {
         tapRequests.collect { hostId ->
             val host = currentHosts.find { it.id == hostId } ?: return@collect
             val key = viewModel.keyFor(host.keyId) ?: return@collect
-            viewModel.bootstrapHost(host, key.privateKeyPath)
+            requestProtectedConnection(host, key, PendingPassphraseAction.OpenSession)
         }
     }
     LaunchedEffect(Unit) {
         portPanelRequests.collect { hostId ->
             val host = currentHosts.find { it.id == hostId } ?: return@collect
             val key = viewModel.keyFor(host.keyId) ?: return@collect
-            currentOpenPortForwardPanel(host, key.privateKeyPath)
+            requestProtectedConnection(host, key, PendingPassphraseAction.OpenPorts)
         }
     }
 
@@ -154,7 +222,7 @@ fun HostListScreen(
     LaunchedEffect(pendingNavigation) {
         val pending = pendingNavigation
         if (pending != null && pending.ready) {
-            currentOpenSession(pending.host, pending.keyPath)
+            currentOpenSession(pending.host, pending.keyPath, pending.passphrase)
             viewModel.consumePendingNavigation()
         }
     }
@@ -165,7 +233,11 @@ fun HostListScreen(
             .background(PocketShellColors.Background),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            HostsAppBar(onKeysClick = onManageKeys)
+            HostsAppBar(
+                onKeysClick = onManageKeys,
+                onCrashReportsClick = onOpenCrashReports,
+                onImportHostClick = { hostSharePicker.launch("*/*") },
+            )
 
             // Issue #40: surface the upgrade prompt at the top so the
             // user sees it before the host list, but only when the
@@ -179,6 +251,10 @@ fun HostListScreen(
                         )
                     },
                 )
+            }
+
+            shareMessage?.let { msg ->
+                ShareMessageBanner(message = msg, onDismiss = viewModel::clearShareMessage)
             }
 
             // Issue #46: cross-host session dashboard. Render the
@@ -241,6 +317,8 @@ fun HostListScreen(
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             HostPortButton(onClick = { portPanelRequests.tryEmit(host.id) })
+                            Spacer(modifier = Modifier.width(8.dp))
+                            HostShareButton(onClick = { viewModel.createSharePayload(host) })
                         }
                     }
                 }
@@ -285,8 +363,62 @@ fun HostListScreen(
                 onDismiss = { viewModel.dismissBootstrapAndOpen() },
             )
         }
+
+        sharePayload?.let { share ->
+            HostShareDialog(
+                share = share,
+                onDismiss = viewModel::dismissSharePayload,
+                onShare = {
+                    context.startActivity(
+                        Intent.createChooser(
+                            Intent(Intent.ACTION_SEND)
+                                .setType("text/plain")
+                                .putExtra(Intent.EXTRA_TEXT, share.payload),
+                            "Share host",
+                        ),
+                    )
+                },
+            )
+        }
+
+        pendingPassphrase?.let { request ->
+            SshPassphraseDialog(
+                keyName = request.key.name,
+                unlockError = passphraseUnlockError,
+                passphrase = passphraseText,
+                onPassphraseChange = { passphraseText = it },
+                onDismiss = {
+                    pendingPassphrase = null
+                    passphraseText = ""
+                    passphraseUnlockError = null
+                },
+                onConnect = {
+                    val passphrase = passphraseText.toCharArray()
+                    pendingPassphrase = null
+                    passphraseText = ""
+                    passphraseUnlockError = null
+                    continueWithPassphrase(
+                        request.host,
+                        request.key,
+                        request.action,
+                        passphrase,
+                    )
+                },
+            )
+        }
     }
 }
+
+private enum class PendingPassphraseAction {
+    OpenSession,
+    OpenPorts,
+}
+
+private data class PendingPassphraseRequest(
+    val host: HostEntity,
+    val key: SshKeyEntity,
+    val action: PendingPassphraseAction,
+)
 
 /**
  * Top-of-screen banner advertising a newer GitHub Release. Tapping
@@ -387,7 +519,11 @@ private fun VersionFooter(versionName: String) {
  * gestures at is not in scope for this issue.
  */
 @Composable
-private fun HostsAppBar(onKeysClick: () -> Unit) {
+private fun HostsAppBar(
+    onKeysClick: () -> Unit,
+    onCrashReportsClick: () -> Unit,
+    onImportHostClick: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -406,6 +542,10 @@ private fun HostsAppBar(onKeysClick: () -> Unit) {
             modifier = Modifier.weight(1f),
         )
 
+        AppBarIconButton(label = "Crashes", onClick = onCrashReportsClick)
+        Spacer(modifier = Modifier.width(8.dp))
+        AppBarIconButton(label = "Import", onClick = onImportHostClick)
+        Spacer(modifier = Modifier.width(8.dp))
         AppBarIconButton(label = "Keys", onClick = onKeysClick)
     }
 }
@@ -420,7 +560,8 @@ private fun HostsAppBar(onKeysClick: () -> Unit) {
 private fun AppBarIconButton(label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(40.dp)
+            .height(40.dp)
+            .width(64.dp)
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
@@ -453,6 +594,148 @@ private fun HostPortButton(onClick: () -> Unit) {
     ) {
         Text(
             text = "Ports",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+@Composable
+private fun ShareMessageBanner(message: String, onDismiss: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = message,
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onDismiss) {
+            Text("Dismiss", color = PocketShellColors.Accent, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+private fun HostShareDialog(
+    share: HostListViewModel.HostSharePayload,
+    onDismiss: () -> Unit,
+    onShare: () -> Unit,
+) {
+    val qr = remember(share.payload) { HostQrCode.encode(share.payload, sizePx = 640) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Share ${share.hostName}", color = PocketShellColors.Text) },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Image(
+                    bitmap = qr.asImageBitmap(),
+                    contentDescription = "Host share QR code",
+                    modifier = Modifier.size(220.dp),
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "Private keys and passphrases are never included. Import requires a local key with the same name.",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onShare) {
+                Text("Share text", color = PocketShellColors.Accent)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = PocketShellColors.TextSecondary)
+            }
+        },
+        containerColor = PocketShellColors.Surface,
+    )
+}
+
+@Composable
+private fun SshPassphraseDialog(
+    keyName: String,
+    unlockError: String?,
+    passphrase: String,
+    onPassphraseChange: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onConnect: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("SSH key passphrase", color = PocketShellColors.Text) },
+        text = {
+            Column {
+                Text(
+                    text = "Enter the passphrase for $keyName. It is used for this connection and is not saved.",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 12.sp,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = passphrase,
+                    onValueChange = onPassphraseChange,
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    label = { Text("Passphrase") },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                unlockError?.let {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(text = it, color = PocketShellColors.Red, fontSize = 12.sp)
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onConnect,
+                enabled = passphrase.isNotEmpty(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = PocketShellColors.Accent,
+                    contentColor = PocketShellColors.OnAccent,
+                ),
+            ) {
+                Text("Connect")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = PocketShellColors.TextSecondary)
+            }
+        },
+        containerColor = PocketShellColors.Surface,
+    )
+}
+
+@Composable
+private fun HostShareButton(onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .height(48.dp)
+            .background(
+                color = PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(10.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = RoundedCornerShape(10.dp),
+            )
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "Share",
             color = PocketShellColors.TextSecondary,
             fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold,

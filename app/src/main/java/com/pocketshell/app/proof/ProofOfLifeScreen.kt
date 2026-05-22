@@ -193,14 +193,28 @@ internal suspend fun openShell(
     port: Int,
     user: String,
     key: SshKey,
+    passphrase: CharArray? = null,
 ): SshShellHandle = withContext(Dispatchers.IO) {
     val client = SSHClient(DefaultConfig())
     client.addHostKeyVerifier(PromiscuousVerifier())
     client.connect(host, port)
 
     val keyProvider = when (key) {
-        is SshKey.Path -> client.loadKeys(key.file.absolutePath)
-        is SshKey.Pem -> client.loadKeys(key.content, null, null)
+        is SshKey.Path -> if (passphrase != null) {
+            client.loadKeys(
+                key.file.absolutePath,
+                net.schmizz.sshj.userauth.password.PasswordUtils.createOneOff(passphrase.copyOf()),
+            )
+        } else {
+            client.loadKeys(key.file.absolutePath)
+        }
+        is SshKey.Pem -> client.loadKeys(
+            key.content,
+            null,
+            passphrase?.let {
+                net.schmizz.sshj.userauth.password.PasswordUtils.createOneOff(it.copyOf())
+            },
+        )
     }
     client.authPublickey(user, keyProvider)
 

@@ -41,9 +41,10 @@ public class RecurringJobsViewModel @Inject constructor(
         port: Int,
         username: String,
         keyPath: String,
+        passphrase: CharArray?,
         sessionName: String,
     ) {
-        val next = Target(hostName, hostname, port, username, keyPath, sessionName)
+        val next = Target(hostName, hostname, port, username, keyPath, passphrase, sessionName)
         if (next == target) return
         target = next
         session?.let { runCatching { it.close() } }
@@ -153,6 +154,7 @@ public class RecurringJobsViewModel @Inject constructor(
         val port: Int,
         val username: String,
         val keyPath: String,
+        val passphrase: CharArray?,
         val sessionName: String,
     )
 
@@ -167,6 +169,7 @@ public class RecurringJobsViewModel @Inject constructor(
                 port = target.port,
                 user = target.username,
                 key = SshKey.Path(File(target.keyPath)),
+                passphrase = target.passphrase?.copyOf(),
                 knownHosts = KnownHostsPolicy.AcceptAll,
             )
     }

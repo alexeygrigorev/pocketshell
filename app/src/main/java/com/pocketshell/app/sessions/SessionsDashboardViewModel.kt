@@ -1,8 +1,12 @@
 package com.pocketshell.app.sessions
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.systemsurfaces.ActiveSessionsWidgetProvider
+import com.pocketshell.app.systemsurfaces.SystemSurfaceStateStore
 import com.pocketshell.core.tmux.TmuxClient
+import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
@@ -72,6 +76,7 @@ import javax.inject.Inject
 @HiltViewModel
 class SessionsDashboardViewModel @Inject constructor(
     private val activeClients: ActiveTmuxClients,
+    @ApplicationContext private val appContext: Context? = null,
 ) : ViewModel() {
 
     /** Override hook for tests — see [SessionsDashboardViewModelTest]. */
@@ -209,6 +214,13 @@ class SessionsDashboardViewModel @Inject constructor(
                 .thenBy { it.sessionName },
         )
         _sessions.value = sorted
+        persistActiveSessionCount(sorted.size)
+    }
+
+    private fun persistActiveSessionCount(count: Int) {
+        val context = appContext ?: return
+        SystemSurfaceStateStore(context).setActiveSessionCount(count)
+        ActiveSessionsWidgetProvider.updateAll(context)
     }
 
     override fun onCleared() {

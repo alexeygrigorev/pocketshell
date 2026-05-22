@@ -166,9 +166,8 @@ private fun SetupActions(
 ) {
     val report = state.report ?: return
     val missingTools = report.missingTools
-    val needsDaemon = report.daemon !is TmuxctlDaemonStatus.Running ||
-        (report.daemon as? TmuxctlDaemonStatus.Running)?.enabled != true
-    if (missingTools.isEmpty() && !needsDaemon) return
+    val needsDaemon = report.needsTmuxctlDaemonSetup()
+    if (!report.hasBootstrapSheetRows()) return
 
     Spacer(modifier = Modifier.height(16.dp))
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -195,7 +194,23 @@ private fun SetupActions(
                 )
             }
         }
+        when (val mosh = report.mosh) {
+            is MoshStatus.Unsupported -> SetupInfoRow(
+                title = "Mosh",
+                detail = mosh.reason,
+            )
+        }
     }
+}
+
+internal fun HostBootstrapReport.hasBootstrapSheetRows(): Boolean =
+    missingTools.isNotEmpty() ||
+        needsTmuxctlDaemonSetup() ||
+        mosh is MoshStatus.Unsupported
+
+internal fun HostBootstrapReport.needsTmuxctlDaemonSetup(): Boolean {
+    val daemonStatus = daemon
+    return daemonStatus !is TmuxctlDaemonStatus.Running || !daemonStatus.enabled
 }
 
 @Composable

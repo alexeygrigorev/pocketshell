@@ -1,6 +1,7 @@
 package com.pocketshell.app.hosts
 
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.bootstrap.HostBootstrapSheetState
@@ -26,6 +27,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 
@@ -100,6 +102,12 @@ class HostListViewModel @Inject constructor(
     private val _bootstrapHostName = MutableStateFlow<String>("")
     val bootstrapHostName: StateFlow<String> = _bootstrapHostName.asStateFlow()
 
+    private val _sharePayload = MutableStateFlow<HostSharePayload?>(null)
+    val sharePayload: StateFlow<HostSharePayload?> = _sharePayload.asStateFlow()
+
+    private val _shareMessage = MutableStateFlow<String?>(null)
+    val shareMessage: StateFlow<String?> = _shareMessage.asStateFlow()
+
     /**
      * The host + key path we'd navigate to once the bootstrap flow
      * resolves. The screen consumes this via [consumePendingNavigation].
@@ -124,6 +132,73 @@ class HostListViewModel @Inject constructor(
      * site has a defined behaviour for the race anyway).
      */
     suspend fun keyFor(keyId: Long): SshKeyEntity? = sshKeyDao.getById(keyId)
+
+    fun createSharePayload(host: HostEntity) {
+        viewModelScope.launch {
+            val key = sshKeyDao.getById(host.keyId)
+            if (key == null) {
+                _shareMessage.value = "Cannot share ${host.name}: its SSH key is missing"
+                return@launch
+            }
+            _sharePayload.value = HostSharePayload(
+                hostName = host.name,
+                payload = HostShareCodec.encode(host, key),
+            )
+            _shareMessage.value = null
+        }
+    }
+
+    fun dismissSharePayload() {
+        _sharePayload.value = null
+    }
+
+    fun clearShareMessage() {
+        _shareMessage.value = null
+    }
+
+    fun importSharedHostPayload(payload: String) {
+        viewModelScope.launch {
+            val config = HostShareCodec.decode(payload).getOrElse { error ->
+                _shareMessage.value = error.message ?: "Could not read shared host"
+                return@launch
+            }
+            val key = sshKeyDao.getByName(config.keyName)
+            if (key == null) {
+                _shareMessage.value = "Import the SSH key named ${config.keyName} before importing this host"
+                return@launch
+            }
+            hostDao.insert(
+                HostEntity(
+                    name = config.name,
+                    hostname = config.hostname,
+                    port = config.port,
+                    username = config.username,
+                    keyId = key.id,
+                    enabled = false,
+                ),
+            )
+            _shareMessage.value = "Imported ${config.name}"
+        }
+    }
+
+    fun importSharedHostUri(uri: Uri) {
+        viewModelScope.launch {
+            val payload = withContext(kotlinx.coroutines.Dispatchers.IO) {
+                HostQrCode.decode(applicationContext, uri).getOrElse {
+                    runCatching {
+                        applicationContext.contentResolver.openInputStream(uri)?.use { stream ->
+                            stream.bufferedReader(Charsets.UTF_8).readText()
+                        }
+                    }.getOrNull()
+                }
+            }
+            if (payload == null) {
+                _shareMessage.value = "Could not read shared host"
+                return@launch
+            }
+            importSharedHostPayload(payload)
+        }
+    }
 
     /**
      * Re-run the GitHub-Releases check. Called from `init {}` on
@@ -151,7 +226,7 @@ class HostListViewModel @Inject constructor(
      * once the bootstrap resolves (immediately on cache hit, or after
      * the user taps Skip / Continue on the sheet).
      */
-    fun bootstrapHost(host: HostEntity, keyPath: String) {
+    fun bootstrapHost(host: HostEntity, keyPath: String, passphrase: CharArray? = null) {
         // Cache: a fresh tmux result skips only the tmux probe. Server
         // tools and daemon readiness are intentionally checked on every
         // connect because the old cache records only tmux.
@@ -164,16 +239,16 @@ class HostListViewModel @Inject constructor(
         _bootstrapHostName.value = host.name
         // Pending stays at ready=false until the probe (and any sheet
         // interaction) resolves.
-        _pendingNavigation.value = PendingNavigation(host, keyPath, ready = false)
+        _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = false)
         bootstrapTargetHost = host
 
         viewModelScope.launch {
-            val session = openSession(host, keyPath)
+            val session = openSession(host, keyPath, passphrase)
             if (session == null) {
                 // Couldn't connect → don't block navigation. The session
                 // screen will surface the same connect failure with its
                 // own retry UX, which is the right place to handle it.
-                _pendingNavigation.value = PendingNavigation(host, keyPath, ready = true)
+                _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
                 return@launch
             }
             bootstrapSession = session
@@ -184,7 +259,7 @@ class HostListViewModel @Inject constructor(
                     val report = bootstrapper.checkServerSetup(session)
                     if (report.isReady) {
                         closeBootstrapSession()
-                        _pendingNavigation.value = PendingNavigation(host, keyPath, ready = true)
+                        _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
                     } else {
                         _bootstrapState.value = HostBootstrapSheetState.Prompt(
                             needsTmux = false,
@@ -205,7 +280,7 @@ class HostListViewModel @Inject constructor(
                 is TmuxStatus.Unknown -> {
                     // Can't prove missing → continue, don't pester the user.
                     closeBootstrapSession()
-                    _pendingNavigation.value = PendingNavigation(host, keyPath, ready = true)
+                    _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
                     @Suppress("UNUSED_VARIABLE") val reason = status.reason
                 }
             }
@@ -387,7 +462,7 @@ class HostListViewModel @Inject constructor(
         _bootstrapHostName.value = ""
     }
 
-    private suspend fun openSession(host: HostEntity, keyPath: String): SshSession? {
+    private suspend fun openSession(host: HostEntity, keyPath: String, passphrase: CharArray?): SshSession? {
         val file = File(keyPath)
         if (!file.exists()) return null
         return SshConnection.connect(
@@ -395,6 +470,7 @@ class HostListViewModel @Inject constructor(
             port = host.port,
             user = host.username,
             key = SshKey.Path(file),
+            passphrase = passphrase?.copyOf(),
             knownHosts = KnownHostsPolicy.AcceptAll,
         ).getOrNull()
     }
@@ -445,7 +521,13 @@ class HostListViewModel @Inject constructor(
     public data class PendingNavigation(
         val host: HostEntity,
         val keyPath: String,
+        val passphrase: CharArray?,
         val ready: Boolean = false,
+    )
+
+    data class HostSharePayload(
+        val hostName: String,
+        val payload: String,
     )
 
     private companion object {

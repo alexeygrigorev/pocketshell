@@ -72,10 +72,18 @@ public sealed interface TmuxctlDaemonStatus {
     public data class Unavailable(val reason: String) : TmuxctlDaemonStatus
 }
 
+public sealed interface MoshStatus {
+    public data class Unsupported(val reason: String) : MoshStatus
+}
+
+public const val MOSH_UNSUPPORTED_REASON: String =
+    "Mosh is deferred. PocketShell currently uses SSH over TCP via sshj; real Mosh support needs UDP transport and a mosh-server binary on the host."
+
 public data class HostBootstrapReport(
     val tools: Map<BootstrapTool, ToolStatus>,
     val installer: PythonToolInstaller?,
     val daemon: TmuxctlDaemonStatus,
+    val mosh: MoshStatus = MoshStatus.Unsupported(MOSH_UNSUPPORTED_REASON),
 ) {
     public val missingTools: List<BootstrapTool>
         get() = BootstrapTool.entries.filter { tools[it] is ToolStatus.Missing }
@@ -159,6 +167,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             tools = tools,
             installer = installer,
             daemon = daemon,
+            mosh = MoshStatus.Unsupported(MOSH_UNSUPPORTED_REASON),
         )
     }
 

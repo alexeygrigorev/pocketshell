@@ -256,6 +256,22 @@ class HostBootstrapperTest {
         assertTrue(report.isReady)
         assertEquals(PythonToolInstaller.Uv, report.installer)
         assertTrue(report.daemon is TmuxctlDaemonStatus.Running)
+        assertEquals(MoshStatus.Unsupported(MOSH_UNSUPPORTED_REASON), report.mosh)
+        assertTrue(session.recorded.none { it.contains("mosh", ignoreCase = true) })
+    }
+
+    @Test
+    fun bootstrapSheetRows_includeMoshInfo_whenServerSetupIsReady() {
+        val report = HostBootstrapReport(
+            tools = BootstrapTool.entries.associateWith {
+                ToolStatus.Installed("/home/u/.local/bin/${it.binaryName}")
+            },
+            installer = PythonToolInstaller.Uv,
+            daemon = TmuxctlDaemonStatus.Running(enabled = true),
+        )
+
+        assertTrue(report.isReady)
+        assertTrue(report.hasBootstrapSheetRows())
     }
 
     @Test

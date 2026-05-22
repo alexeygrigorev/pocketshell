@@ -93,13 +93,14 @@ public fun SessionScreen(
     port: Int = SessionDefaults.PORT,
     user: String = SessionDefaults.USER,
     keyPath: String? = null,
+    passphrase: CharArray? = null,
     hostId: Long? = null,
     onBack: () -> Unit = {},
     onOpenJobs: () -> Unit = {},
     inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
 ) {
-    LaunchedEffect(host, port, user, keyPath) {
-        viewModel.connect(host, port, user, keyPath)
+    LaunchedEffect(host, port, user, keyPath, passphrase) {
+        viewModel.connect(host, port, user, keyPath, passphrase)
     }
 
     val status by viewModel.connectionStatus.collectAsState()

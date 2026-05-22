@@ -303,4 +303,67 @@ class HostListViewModelTest {
         // showing yet (we haven't observed a Missing yet).
         assertNull(viewModel.bootstrapState.value)
     }
+
+    @Test
+    fun importSharedHostPayload_insertsHost_whenMatchingKeyExists() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "shared-key", privateKeyPath = "/tmp/shared-key"),
+        )
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+        )
+        val payload = """
+            {
+              "type": "pocketshell.host.v1",
+              "name": "shared",
+              "hostname": "shared.example.com",
+              "port": 2222,
+              "username": "ubuntu",
+              "keyName": "shared-key"
+            }
+        """.trimIndent()
+
+        viewModel.importSharedHostPayload(payload)
+
+        val rows = db.hostDao().getAll().first()
+        assertEquals(1, rows.size)
+        assertEquals("shared", rows[0].name)
+        assertEquals("shared.example.com", rows[0].hostname)
+        assertEquals(2222, rows[0].port)
+        assertEquals("ubuntu", rows[0].username)
+        assertEquals(keyId, rows[0].keyId)
+        assertEquals("Imported shared", viewModel.shareMessage.value)
+    }
+
+    @Test
+    fun importSharedHostPayload_reportsMissingKey() = runTest {
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+        )
+        val payload = """
+            {
+              "type": "pocketshell.host.v1",
+              "name": "shared",
+              "hostname": "shared.example.com",
+              "username": "ubuntu",
+              "keyName": "missing-key"
+            }
+        """.trimIndent()
+
+        viewModel.importSharedHostPayload(payload)
+
+        assertEquals(0, db.hostDao().getAll().first().size)
+        assertEquals(
+            "Import the SSH key named missing-key before importing this host",
+            viewModel.shareMessage.value,
+        )
+    }
 }

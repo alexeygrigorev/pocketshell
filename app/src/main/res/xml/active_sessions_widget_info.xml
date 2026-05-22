@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/widget_active_sessions_description"
+    android:initialLayout="@layout/widget_active_sessions"
+    android:minWidth="160dp"
+    android:minHeight="80dp"
+    android:previewLayout="@layout/widget_active_sessions"
+    android:resizeMode="horizontal|vertical"
+    android:targetCellWidth="2"
+    android:targetCellHeight="1"
+    android:updatePeriodMillis="0"
+    android:widgetCategory="home_screen" />

@@ -51,6 +51,7 @@ import com.pocketshell.uikit.theme.PocketShellColors
 fun PortForwardPanelScreen(
     hostId: Long,
     keyPath: String?,
+    passphrase: CharArray? = null,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: PortForwardPanelViewModel = hiltViewModel(),
@@ -69,8 +70,8 @@ fun PortForwardPanelScreen(
         onDispose { viewModel.leavePanel() }
     }
 
-    LaunchedEffect(hostId, keyPath) {
-        viewModel.load(hostId, keyPath)
+    LaunchedEffect(hostId, keyPath, passphrase) {
+        viewModel.load(hostId, keyPath, passphrase)
     }
 
     Box(

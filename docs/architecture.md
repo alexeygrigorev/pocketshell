@@ -36,6 +36,7 @@ Migration approach: swap JSch → sshj *during* the extraction. Doing it later, 
 | SSH | sshj (not JSch) | Actively maintained, ed25519, modern KEX. JSch is effectively abandoned. |
 | Terminal emulator | Vendored Termux `terminal-emulator` + `terminal-view` | Battle-tested xterm-256color. Writing a VT emulator from scratch is a 6-month detour. |
 | Tmux integration | `tmux -CC` control mode | Structured protocol — see "Three load-bearing decisions" below. |
+| Mosh | Deferred / unsupported | No fake Mosh mode. Real support requires UDP transport plus `mosh-server` on the remote host; current app capability surfaces mark it unavailable. |
 | Storage | Room (SQLite) | Standard. Already in use in `ssh-auto-forward-android`. |
 | DI | Hilt | Standard. Already in use. |
 | Background | Foreground service | Required to keep SSH connections alive; existing app already has this. |
@@ -59,6 +60,8 @@ Alternative (run `tmux attach` inside a normal SSH PTY and screen-scrape) is wha
 ### 2. SSH library: sshj (not JSch)
 
 JSch is unmaintained and has weak modern crypto defaults. sshj supports ed25519, modern KEX, agent forwarding, and is actively maintained. Alternative would be vendoring an OpenSSH native binary, which is overkill unless we want Mosh later.
+
+Mosh is explicitly not implemented in the current transport stack. The bootstrap capability report exposes it as unsupported so the app does not imply that flaky-network Mosh behavior is available through sshj. When this moves out of deferment, it needs a real UDP path and a `mosh-server` strategy rather than wrapping SSH sessions with a different label.
 
 ### 3. Per-pane terminal rendering, not tiled tmux
 

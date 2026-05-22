@@ -59,6 +59,8 @@ Goal: the moment it stops being "another SSH client."
 - Auto-start on boot
 - Crash reporting
 
+Phase 4 closure note: Mosh remains intentionally unsupported, not partially implemented. Current capability/status surfaces should keep reporting Mosh as unavailable until PocketShell has a real UDP transport path and a defined `mosh-server` installation/discovery strategy.
+
 ## Out of scope (for now)
 
 - Windows / desktop targets

@@ -35,6 +35,7 @@ class RecurringJobsViewModelTest {
             port = 22,
             username = "alexey",
             keyPath = "/tmp/key",
+            passphrase = null,
             sessionName = "agent main",
         )
         advanceUntilIdle()
@@ -60,6 +61,7 @@ class RecurringJobsViewModelTest {
             port = 22,
             username = "alexey",
             keyPath = "/tmp/key",
+            passphrase = null,
             sessionName = "codex",
         )
         advanceUntilIdle()
@@ -85,6 +87,7 @@ class RecurringJobsViewModelTest {
             port = 22,
             username = "alexey",
             keyPath = "/tmp/key",
+            passphrase = null,
             sessionName = "codex",
         )
         advanceUntilIdle()

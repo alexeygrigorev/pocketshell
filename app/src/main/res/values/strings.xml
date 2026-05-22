@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">PocketShell</string>
+    <string name="widget_active_sessions_title">PocketShell Sessions</string>
+    <string name="widget_active_sessions_description">Shows the latest active tmux session count.</string>
+    <string name="widget_active_sessions_empty">0 active sessions</string>
+    <string name="qs_forwarding_tile_label">PocketShell Forwarding</string>
 </resources>

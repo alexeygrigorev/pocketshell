@@ -3,6 +3,8 @@ package com.pocketshell.app.hosts
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -41,6 +43,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.fragment.app.FragmentActivity
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
@@ -70,6 +74,8 @@ fun SshKeysScreen(
     val context = LocalContext.current
 
     var pendingDelete: SshKeyEntity? by remember { mutableStateOf(null) }
+    var unlocked by remember { mutableStateOf(!isKeyUnlockRequired(context)) }
+    var unlockError: String? by remember { mutableStateOf(null) }
 
     // Issue #38 item 3: intercept system-back. SshKeysScreen has no
     // form-style unsaved state — every add / delete commits immediately
@@ -104,6 +110,23 @@ fun SshKeysScreen(
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             KeysAppBar(onBack = onBack)
+
+            if (!unlocked) {
+                KeyUnlockPanel(
+                    error = unlockError,
+                    onUnlock = {
+                        launchSshKeyUnlock(
+                            activity = context as? FragmentActivity,
+                            onSuccess = {
+                                unlockError = null
+                                unlocked = true
+                            },
+                            onError = { unlockError = it },
+                        )
+                    },
+                )
+                return@Column
+            }
 
             Row(
                 modifier = Modifier
@@ -250,6 +273,91 @@ private fun KeysAppBar(onBack: () -> Unit) {
     }
 }
 
+@Composable
+private fun KeyUnlockPanel(error: String?, onUnlock: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp, vertical = 28.dp),
+        horizontalAlignment = Alignment.Start,
+    ) {
+        Text(
+            text = "Unlock key management",
+            color = PocketShellColors.Text,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = "Device unlock gates adding, deleting, and viewing key paths. PocketShell does not store SSH key passphrases yet.",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 13.sp,
+        )
+        Spacer(modifier = Modifier.height(16.dp))
+        Button(
+            onClick = onUnlock,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = PocketShellColors.Accent,
+                contentColor = PocketShellColors.OnAccent,
+            ),
+        ) {
+            Text("Unlock")
+        }
+        error?.let {
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(text = it, color = PocketShellColors.Red, fontSize = 12.sp)
+        }
+    }
+}
+
+private fun isKeyUnlockRequired(context: android.content.Context): Boolean {
+    val authenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG or
+        BiometricManager.Authenticators.DEVICE_CREDENTIAL
+    return BiometricManager.from(context).canAuthenticate(authenticators) ==
+        BiometricManager.BIOMETRIC_SUCCESS
+}
+
+internal fun isSshKeyUnlockRequired(context: android.content.Context): Boolean = isKeyUnlockRequired(context)
+
+internal fun launchSshKeyUnlock(
+    activity: FragmentActivity?,
+    title: String = "Unlock SSH key management",
+    subtitle: String = "Confirm it is you before managing local private keys",
+    onSuccess: () -> Unit,
+    onError: (String) -> Unit,
+) {
+    if (activity == null) {
+        onError("Device unlock is unavailable from this screen")
+        return
+    }
+    val authenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG or
+        BiometricManager.Authenticators.DEVICE_CREDENTIAL
+    val prompt = BiometricPrompt(
+        activity,
+        ContextCompat.getMainExecutor(activity),
+        object : BiometricPrompt.AuthenticationCallback() {
+            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                onSuccess()
+            }
+
+            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                onError(errString.toString())
+            }
+
+            override fun onAuthenticationFailed() {
+                onError("Unlock failed")
+            }
+        },
+    )
+    prompt.authenticate(
+        BiometricPrompt.PromptInfo.Builder()
+            .setTitle(title)
+            .setSubtitle(subtitle)
+            .setAllowedAuthenticators(authenticators)
+            .build(),
+    )
+}
+
 /**
  * A single key card. Mirrors the host-row shape from `docs/mockups/styles.css`:
  * surface background, 14dp corner radius, 1dp soft border. Trailing
@@ -307,6 +415,14 @@ private fun KeyRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            if (key.hasPassphrase) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Passphrase-protected; passphrase is not stored",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 11.sp,
+                )
+            }
         }
         Spacer(modifier = Modifier.width(12.dp))
         TextButton(onClick = onDeleteRequest) {

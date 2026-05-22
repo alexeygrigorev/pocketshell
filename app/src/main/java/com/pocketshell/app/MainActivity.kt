@@ -1,7 +1,7 @@
 package com.pocketshell.app
 
+import android.content.Intent
 import android.os.Bundle
-import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -16,6 +17,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.fragment.app.FragmentActivity
+import com.pocketshell.app.crash.CrashReportsScreen
 import com.pocketshell.app.hosts.AddEditHostScreen
 import com.pocketshell.app.hosts.HostListScreen
 import com.pocketshell.app.hosts.SshKeysScreen
@@ -25,6 +28,8 @@ import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.portfwd.PortForwardPanelScreen
 import com.pocketshell.app.session.SessionScreen
 import com.pocketshell.app.session.SessionViewModel
+import com.pocketshell.app.systemsurfaces.ForwardingChooserScreen
+import com.pocketshell.app.systemsurfaces.ForwardingTileService
 import com.pocketshell.app.tmux.TmuxSessionScreen
 import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -53,14 +58,16 @@ import dagger.hilt.android.AndroidEntryPoint
  * that role now.
  */
 @AndroidEntryPoint
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
 
     // SessionViewModel stays activity-scoped: we only have one live
     // session at a time today; multi-pane lifecycle arrives with #22.
     private val sessionViewModel: SessionViewModel by viewModels()
+    private var requestedDestination by mutableStateOf<AppDestination>(AppDestination.HostList)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestedDestination = initialDestinationFromIntent(intent)
         enableEdgeToEdge()
         setContent {
             PocketShellTheme {
@@ -68,10 +75,19 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
-                    AppNavigator(sessionViewModel = sessionViewModel)
+                    AppNavigator(
+                        sessionViewModel = sessionViewModel,
+                        requestedDestination = requestedDestination,
+                    )
                 }
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        requestedDestination = initialDestinationFromIntent(intent)
     }
 }
 
@@ -85,15 +101,25 @@ class MainActivity : ComponentActivity() {
  * the user to `HostList`).
  */
 @Composable
-private fun AppNavigator(sessionViewModel: SessionViewModel) {
+private fun AppNavigator(
+    sessionViewModel: SessionViewModel,
+    requestedDestination: AppDestination,
+) {
     // Volatile in-memory state. Cold-launch (process death) always lands
     // on `HostList`; full saved-state restoration arrives when
     // navigation-compose lands and brings its own saver machinery.
     var current: AppDestination by remember {
-        mutableStateOf<AppDestination>(AppDestination.HostList)
+        mutableStateOf(requestedDestination)
     }
 
     val backStack = remember { mutableListOf<AppDestination>() }
+
+    LaunchedEffect(requestedDestination) {
+        if (requestedDestination == AppDestination.PortForwardChooser && current != requestedDestination) {
+            backStack += current
+            current = requestedDestination
+        }
+    }
 
     fun navigate(dest: AppDestination) {
         backStack += current
@@ -113,7 +139,8 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
             onAddHost = { navigate(AppDestination.AddHost) },
             onEditHost = { id -> navigate(AppDestination.EditHost(id)) },
             onManageKeys = { navigate(AppDestination.SshKeys) },
-            onOpenSession = { host, keyPath ->
+            onOpenCrashReports = { navigate(AppDestination.CrashReports) },
+            onOpenSession = { host, keyPath, passphrase ->
                 navigate(
                     AppDestination.Session(
                         hostId = host.id,
@@ -122,11 +149,12 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
                         port = host.port,
                         username = host.username,
                         keyPath = keyPath,
+                        passphrase = passphrase,
                     ),
                 )
             },
-            onOpenPortForwardPanel = { host, keyPath ->
-                navigate(AppDestination.PortForwardPanel(hostId = host.id, keyPath = keyPath))
+            onOpenPortForwardPanel = { host, keyPath, passphrase ->
+                navigate(AppDestination.PortForwardPanel(hostId = host.id, keyPath = keyPath, passphrase = passphrase))
             },
             onOpenTmuxSession = { entry, sessionName ->
                 navigate(
@@ -137,6 +165,7 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
                         port = entry.port,
                         username = entry.username,
                         keyPath = entry.keyPath,
+                        passphrase = null,
                         sessionName = sessionName,
                     ),
                 )
@@ -157,12 +186,28 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
 
         AppDestination.SshKeys -> SshKeysScreen(onBack = ::back)
 
+        AppDestination.CrashReports -> CrashReportsScreen(onBack = ::back)
+
+        AppDestination.PortForwardChooser -> ForwardingChooserScreen(
+            onBack = ::back,
+            onOpenPortForwardPanel = { host, keyPath, passphrase ->
+                navigate(
+                    AppDestination.PortForwardPanel(
+                        hostId = host.id,
+                        keyPath = keyPath,
+                        passphrase = passphrase,
+                    ),
+                )
+            },
+        )
+
         is AppDestination.Session -> SessionScreen(
             viewModel = sessionViewModel,
             host = dest.hostname,
             port = dest.port,
             user = dest.username,
             keyPath = dest.keyPath,
+            passphrase = dest.passphrase,
             // Issue #17: the session screen surfaces the snippet picker
             // off the chip row + the composer's Snippets button. Both
             // need the persisted host id to scope the library.
@@ -176,6 +221,7 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
                         port = dest.port,
                         username = dest.username,
                         keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
                         sessionName = DefaultTmuxSessionName,
                     ),
                 )
@@ -185,6 +231,7 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
         is AppDestination.PortForwardPanel -> PortForwardPanelScreen(
             hostId = dest.hostId,
             keyPath = dest.keyPath,
+            passphrase = dest.passphrase,
             onBack = ::back,
         )
 
@@ -197,6 +244,7 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
                     port = dest.port,
                     username = dest.username,
                     keyPath = dest.keyPath,
+                    passphrase = dest.passphrase,
                     sessionName = dest.sessionName,
                 )
             }
@@ -228,6 +276,7 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
             port = dest.port,
             user = dest.username,
             keyPath = dest.keyPath,
+            passphrase = dest.passphrase,
             sessionName = dest.sessionName,
             onBack = ::back,
             onOpenTmuxSession = { sessionName ->
@@ -246,6 +295,7 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
                     port = entry.port,
                     username = entry.username,
                     keyPath = entry.keyPath,
+                    passphrase = null,
                     sessionName = sessionName,
                 )
                 when {
@@ -262,6 +312,7 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
                         port = dest.port,
                         username = dest.username,
                         keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
                         sessionName = dest.sessionName,
                     ),
                 )
@@ -269,5 +320,12 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
         )
     }
 }
+
+internal fun initialDestinationFromIntent(intent: Intent?): AppDestination =
+    if (intent?.getBooleanExtra(ForwardingTileService.EXTRA_OPEN_PORT_FORWARDING, false) == true) {
+        AppDestination.PortForwardChooser
+    } else {
+        AppDestination.HostList
+    }
 
 private const val DefaultTmuxSessionName = "pocketshell"

@@ -149,12 +149,13 @@ public class SessionViewModel @Inject constructor(
         port: Int,
         user: String,
         keyPath: String? = null,
+        passphrase: CharArray? = null,
     ) {
         if (connectJob?.isActive == true) return
         if (_connectionStatus.value is ConnectionStatus.Connected) return
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
         connectJob = viewModelScope.launch {
-            runConnect(host, port, user, keyPath, viewModelScope)
+            runConnect(host, port, user, keyPath, passphrase, viewModelScope)
         }
     }
 
@@ -163,6 +164,7 @@ public class SessionViewModel @Inject constructor(
         port: Int,
         user: String,
         keyPath: String?,
+        passphrase: CharArray?,
         producerScope: CoroutineScope,
     ) {
         try {
@@ -176,6 +178,7 @@ public class SessionViewModel @Inject constructor(
                 port = port,
                 user = user,
                 key = key,
+                passphrase = passphrase?.copyOf(),
                 knownHosts = KnownHostsPolicy.AcceptAll,
             )
             val session = sessionResult.getOrElse { e ->
@@ -184,7 +187,7 @@ public class SessionViewModel @Inject constructor(
             }
             sessionRef = session
 
-            val handle = openShell(host, port, user, key)
+            val handle = openShell(host, port, user, key, passphrase?.copyOf())
             shellRef = handle
 
             val outputFlow = createStdoutFlow(handle.shell)

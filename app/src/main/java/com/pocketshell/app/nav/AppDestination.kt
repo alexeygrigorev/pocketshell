@@ -31,6 +31,12 @@ sealed interface AppDestination {
     /** Manage SSH keys (add / list / delete). */
     data object SshKeys : AppDestination
 
+    /** Local, user-shared-only crash reports captured after uncaught exceptions. */
+    data object CrashReports : AppDestination
+
+    /** Host chooser opened from Android system forwarding surfaces such as the QS tile. */
+    data object PortForwardChooser : AppDestination
+
     /**
      * Open a live session for the host identified by [hostId].
      *
@@ -46,12 +52,14 @@ sealed interface AppDestination {
         val port: Int,
         val username: String,
         val keyPath: String,
+        val passphrase: CharArray?,
     ) : AppDestination
 
     /** Per-host auto-forward panel backed by `core-portfwd`. */
     data class PortForwardPanel(
         val hostId: Long,
         val keyPath: String,
+        val passphrase: CharArray?,
     ) : AppDestination
 
     /**
@@ -86,6 +94,7 @@ sealed interface AppDestination {
         val port: Int,
         val username: String,
         val keyPath: String,
+        val passphrase: CharArray?,
         val sessionName: String,
     ) : AppDestination
 
@@ -96,6 +105,7 @@ sealed interface AppDestination {
         val port: Int,
         val username: String,
         val keyPath: String,
+        val passphrase: CharArray?,
         val sessionName: String,
     ) : AppDestination
 }

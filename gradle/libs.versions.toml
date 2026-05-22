@@ -17,6 +17,8 @@ lifecycle = "2.9.0"
 core-ktx = "1.16.0"
 activity-compose = "1.10.1"
 material = "1.12.0"
+androidx-biometric = "1.1.0"
+zxing = "3.5.3"
 
 # hilt-navigation-compose (issue #18 follow-up #38). Provides
 # `hiltViewModel()` for composables. Tracks Compose / lifecycle versions in
@@ -62,6 +64,8 @@ androidx-security-crypto = "1.1.0"
 core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "core-ktx" }
 activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity-compose" }
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
+androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "androidx-biometric" }
+zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
 
 compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "compose-bom" }
 compose-ui = { group = "androidx.compose.ui", name = "ui" }

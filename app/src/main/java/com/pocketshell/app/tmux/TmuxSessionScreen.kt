@@ -112,6 +112,7 @@ public fun TmuxSessionScreen(
     port: Int,
     user: String,
     keyPath: String,
+    passphrase: CharArray? = null,
     sessionName: String,
     modifier: Modifier = Modifier,
     onBack: () -> Unit = {},
@@ -120,8 +121,8 @@ public fun TmuxSessionScreen(
     onOpenTmuxSessionFromSheet: (ActiveTmuxClients.Entry, sessionName: String) -> Unit = { _, _ -> },
     onOpenJobs: () -> Unit = {},
 ) {
-    LaunchedEffect(hostId, hostName, host, port, user, keyPath, sessionName) {
-        viewModel.connect(hostId, hostName, host, port, user, keyPath, sessionName)
+    LaunchedEffect(hostId, hostName, host, port, user, keyPath, passphrase, sessionName) {
+        viewModel.connect(hostId, hostName, host, port, user, keyPath, passphrase, sessionName)
     }
 
     val panes by viewModel.panes.collectAsState()

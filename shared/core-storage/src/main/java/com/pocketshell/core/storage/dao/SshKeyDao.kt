@@ -16,6 +16,9 @@ interface SshKeyDao {
     @Query("SELECT * FROM ssh_keys WHERE id = :id")
     suspend fun getById(id: Long): SshKeyEntity?
 
+    @Query("SELECT * FROM ssh_keys WHERE name = :name LIMIT 1")
+    suspend fun getByName(name: String): SshKeyEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(key: SshKeyEntity): Long
 

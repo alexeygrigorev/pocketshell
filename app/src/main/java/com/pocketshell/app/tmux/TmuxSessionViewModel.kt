@@ -168,9 +168,10 @@ public class TmuxSessionViewModel @Inject constructor(
         port: Int,
         user: String,
         keyPath: String,
+        passphrase: CharArray?,
         sessionName: String,
     ) {
-        val target = ConnectionTarget(hostId, hostName, host, port, user, keyPath, sessionName)
+        val target = ConnectionTarget(hostId, hostName, host, port, user, keyPath, passphrase, sessionName)
         if (connectJob?.isActive == true && connectingTarget == target) return
         if (_connectionStatus.value is ConnectionStatus.Connected && activeTarget == target) return
 
@@ -191,6 +192,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 port = target.port,
                 user = target.user,
                 key = key,
+                passphrase = target.passphrase?.copyOf(),
                 knownHosts = KnownHostsPolicy.AcceptAll,
             )
             val session = sessionResult.getOrElse { e ->
@@ -281,7 +283,7 @@ public class TmuxSessionViewModel @Inject constructor(
         sessionName: String,
         client: TmuxClient,
     ) {
-        val target = ConnectionTarget(hostId, hostName, host, port, user, keyPath, sessionName)
+        val target = ConnectionTarget(hostId, hostName, host, port, user, keyPath, null, sessionName)
         closeCurrentConnection()
         attachClient(client)
         activeTmuxClients.register(
@@ -732,6 +734,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val port: Int,
         val user: String,
         val keyPath: String,
+        val passphrase: CharArray?,
         val sessionName: String,
     )
 

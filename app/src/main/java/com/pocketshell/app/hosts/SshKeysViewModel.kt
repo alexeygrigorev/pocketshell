@@ -16,8 +16,6 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
-import java.util.UUID
 import javax.inject.Inject
 
 /**
@@ -41,7 +39,7 @@ import javax.inject.Inject
  *   of the box; Ed25519 requires BouncyCastle's provider, which is
  *   shaded by sshj but not on the default Android security stack.
  *
- * Both paths flow through [persistKey] so the on-disk layout and DB row
+ * Both paths flow through [SshKeyStorage.persistKey] so the on-disk layout and DB row
  * shape stay symmetrical.
  */
 @HiltViewModel
@@ -82,18 +80,19 @@ class SshKeysViewModel @Inject constructor(
                 }
 
                 val trimmed = content.trim()
-                if (!trimmed.contains("PRIVATE KEY") || !trimmed.startsWith("-----BEGIN")) {
+                if (!SshKeyStorage.looksLikePrivateKey(trimmed)) {
                     _error.value = "File does not look like an SSH private key " +
                         "(missing the -----BEGIN ... PRIVATE KEY----- header)"
                     return@launch
                 }
 
                 val fileName = resolveDisplayName(context, uri) ?: "imported-key"
-                persistKey(
+                SshKeyStorage.persistKey(
                     context = context,
+                    sshKeyDao = sshKeyDao,
                     name = fileName,
                     content = trimmed,
-                    hasPassphrase = hasPrivateKeyPassphrase(trimmed),
+                    hasPassphrase = SshKeyStorage.hasPrivateKeyPassphrase(trimmed),
                 )
                 // Successful add: explicitly drop any stale error the
                 // banner might still be carrying from a prior failure
@@ -121,7 +120,13 @@ class SshKeysViewModel @Inject constructor(
             try {
                 val pem = withContext(Dispatchers.IO) { generateRsaPrivateKeyPem() }
                 val name = "generated-${System.currentTimeMillis()}"
-                persistKey(context, name = name, content = pem, hasPassphrase = false)
+                SshKeyStorage.persistKey(
+                    context = context,
+                    sshKeyDao = sshKeyDao,
+                    name = name,
+                    content = pem,
+                    hasPassphrase = false,
+                )
                 _error.value = null
             } catch (t: Throwable) {
                 _error.value = "Failed to generate key: ${t.message}"
@@ -148,7 +153,7 @@ class SshKeysViewModel @Inject constructor(
                     // race), a permission-denied is not — `runCatching`
                     // would mask the latter, so we let `delete()` return
                     // its boolean and only fail on the existence-check.
-                    val file = File(key.privateKeyPath)
+                    val file = java.io.File(key.privateKeyPath)
                     if (file.exists() && !file.delete()) {
                         throw java.io.IOException(
                             "Could not delete key file: ${file.absolutePath}",
@@ -160,48 +165,6 @@ class SshKeysViewModel @Inject constructor(
             } catch (t: Throwable) {
                 _error.value = "Failed to delete key: ${t.message}"
             }
-        }
-    }
-
-    /**
-     * Common path for both import + generate: write the content to a stable
-     * location under `filesDir/ssh-keys/` and insert a DB row.
-     */
-    private suspend fun persistKey(
-        context: Context,
-        name: String,
-        content: String,
-        hasPassphrase: Boolean,
-    ) {
-        val safeName = if (name.contains("/")) name.substringAfterLast("/") else name
-        val keyDir = File(context.filesDir, "ssh-keys")
-        withContext(Dispatchers.IO) {
-            keyDir.mkdirs()
-            // Avoid collisions if the user imports two keys with the same
-            // filename: append a short UUID suffix when the target file
-            // already exists.
-            val target = if (File(keyDir, safeName).exists()) {
-                File(keyDir, "$safeName-${UUID.randomUUID().toString().take(8)}")
-            } else {
-                File(keyDir, safeName)
-            }
-            target.writeText(content, Charsets.UTF_8)
-            // Best-effort chmod 600 — Android's app sandbox already keeps
-            // other apps out, but the explicit mode makes the intent clear
-            // and matches what `ssh` would refuse to read otherwise.
-            runCatching {
-                target.setReadable(false, false)
-                target.setReadable(true, true)
-                target.setWritable(false, false)
-                target.setWritable(true, true)
-            }
-            sshKeyDao.insert(
-                SshKeyEntity(
-                    name = target.name,
-                    privateKeyPath = target.absolutePath,
-                    hasPassphrase = hasPassphrase,
-                ),
-            )
         }
     }
 
@@ -238,43 +201,6 @@ class SshKeysViewModel @Inject constructor(
         }
     }
 
-    internal fun hasPrivateKeyPassphrase(content: String): Boolean {
-        val lines = content.lineSequence().map { it.trim() }.toList()
-        return lines.any { it == "Proc-Type: 4,ENCRYPTED" } ||
-            lines.any { it.startsWith("DEK-Info:", ignoreCase = true) } ||
-            lines.any { it == "-----BEGIN ENCRYPTED PRIVATE KEY-----" } ||
-            hasEncryptedOpenSshPrivateKey(lines)
-    }
-
-    private fun hasEncryptedOpenSshPrivateKey(lines: List<String>): Boolean {
-        val begin = lines.indexOf("-----BEGIN OPENSSH PRIVATE KEY-----")
-        val end = lines.indexOf("-----END OPENSSH PRIVATE KEY-----")
-        if (begin < 0 || end <= begin) return false
-        val body = lines.subList(begin + 1, end).joinToString("")
-        val decoded = runCatching {
-            java.util.Base64.getMimeDecoder().decode(body)
-        }.getOrNull() ?: return false
-        val magic = "openssh-key-v1\u0000".toByteArray(Charsets.US_ASCII)
-        if (decoded.size < magic.size || !decoded.copyOfRange(0, magic.size).contentEquals(magic)) {
-            return false
-        }
-        var offset = magic.size
-        val cipherName = readOpenSshString(decoded, offset) ?: return false
-        offset = cipherName.nextOffset
-        val kdfName = readOpenSshString(decoded, offset) ?: return false
-        return cipherName.value != "none" || kdfName.value != "none"
-    }
-
-    private data class OpenSshString(val value: String, val nextOffset: Int)
-
-    private fun readOpenSshString(bytes: ByteArray, offset: Int): OpenSshString? {
-        if (offset + 4 > bytes.size) return null
-        val length = java.nio.ByteBuffer.wrap(bytes, offset, 4).int
-        if (length < 0 || offset + 4 + length > bytes.size) return null
-        val start = offset + 4
-        return OpenSshString(
-            value = String(bytes, start, length, Charsets.US_ASCII),
-            nextOffset = start + length,
-        )
-    }
+    internal fun hasPrivateKeyPassphrase(content: String): Boolean =
+        SshKeyStorage.hasPrivateKeyPassphrase(content)
 }

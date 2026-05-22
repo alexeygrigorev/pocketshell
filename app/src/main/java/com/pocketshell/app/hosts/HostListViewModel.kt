@@ -158,27 +158,77 @@ class HostListViewModel @Inject constructor(
 
     fun importSharedHostPayload(payload: String) {
         viewModelScope.launch {
-            val config = HostShareCodec.decode(payload).getOrElse { error ->
-                _shareMessage.value = error.message ?: "Could not read shared host"
+            val sshImport = SshImportPayloadCodec.decode(payload)
+            if (sshImport.isSuccess) {
+                importSshHost(sshImport.getOrThrow())
                 return@launch
             }
-            val key = sshKeyDao.getByName(config.keyName)
-            if (key == null) {
-                _shareMessage.value = "Import the SSH key named ${config.keyName} before importing this host"
+            if (payload.contains(SshImportPayloadCodec.Type)) {
+                _shareMessage.value = sshImport.exceptionOrNull()?.message ?: "Could not read SSH import payload"
                 return@launch
             }
-            hostDao.insert(
-                HostEntity(
-                    name = config.name,
-                    hostname = config.hostname,
-                    port = config.port,
-                    username = config.username,
-                    keyId = key.id,
-                    enabled = false,
-                ),
-            )
-            _shareMessage.value = "Imported ${config.name}"
+            importLegacySharedHost(payload)
         }
+    }
+
+    private suspend fun importSshHost(config: SshImportConfig) {
+        val key = when (val auth = config.auth) {
+            is SshImportAuth.PrivateKey -> {
+                try {
+                    SshKeyStorage.persistKey(
+                        context = applicationContext,
+                        sshKeyDao = sshKeyDao,
+                        name = auth.name,
+                        content = auth.privateKeyPem,
+                    )
+                } catch (t: Throwable) {
+                    _shareMessage.value = "Could not import SSH key: ${t.message}"
+                    return
+                }
+            }
+
+            is SshImportAuth.KeyReference -> {
+                sshKeyDao.getByName(auth.name) ?: run {
+                    _shareMessage.value = "Import the SSH key named ${auth.name} before importing this host"
+                    return
+                }
+            }
+        }
+
+        hostDao.insert(
+            HostEntity(
+                name = config.name,
+                hostname = config.host,
+                port = config.port,
+                username = config.username,
+                keyId = key.id,
+                enabled = false,
+            ),
+        )
+        _shareMessage.value = "Imported ${config.name}"
+    }
+
+    private suspend fun importLegacySharedHost(payload: String) {
+        val config = HostShareCodec.decode(payload).getOrElse { error ->
+            _shareMessage.value = error.message ?: "Could not read shared host"
+            return
+        }
+        val key = sshKeyDao.getByName(config.keyName)
+        if (key == null) {
+            _shareMessage.value = "Import the SSH key named ${config.keyName} before importing this host"
+            return
+        }
+        hostDao.insert(
+            HostEntity(
+                name = config.name,
+                hostname = config.hostname,
+                port = config.port,
+                username = config.username,
+                keyId = key.id,
+                enabled = false,
+            ),
+        )
+        _shareMessage.value = "Imported ${config.name}"
     }
 
     fun importSharedHostUri(uri: Uri) {

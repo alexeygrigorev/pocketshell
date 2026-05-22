@@ -7,6 +7,7 @@ Conceptual planning. Captured 2026-05-21, before any code is written.
 | [vision.md](vision.md) | Original product brief — the why and the desired UX |
 | [architecture.md](architecture.md) | Composition layout, tech stack, three load-bearing decisions |
 | [input-methods.md](input-methods.md) | Voice, key bar, chord palette, snippets — the alternative-to-typing strategy |
+| [ssh-qr-import.md](ssh-qr-import.md) | Versioned SSH host import payload and helper commands for QR generation |
 | [agent-awareness.md](agent-awareness.md) | Detecting Claude Code in a tmux pane and showing a clean conversation view; Codex/OpenCode parsers are present but runtime-disabled |
 | [usage-panel.md](usage-panel.md) | Provider quota / usage tracking via server-side tools (heru) over SSH — zero credentials on the phone |
 | [design-language.md](design-language.md) | Termius-inspired visual tokens |

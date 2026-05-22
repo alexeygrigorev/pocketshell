@@ -14,11 +14,13 @@ import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -26,6 +28,7 @@ import org.junit.runner.RunWith
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.File
 
 /**
  * Unit tests for [HostListViewModel] against an in-memory Room database.
@@ -415,5 +418,129 @@ class HostListViewModelTest {
             "Import the SSH key named missing-key before importing this host",
             viewModel.shareMessage.value,
         )
+    }
+
+    @Test
+    fun importSharedHostPayload_insertsHostAndKey_forSshImportPrivateKeyPayload() = runTest {
+        File(context.filesDir, "ssh-keys").deleteRecursively()
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+        )
+        val payload = SshImportPayloadCodec.encode(
+            SshImportConfig(
+                name = "qr-prod",
+                host = "qr.example.com",
+                port = 2200,
+                username = "ubuntu",
+                auth = SshImportAuth.PrivateKey(
+                    name = "qr-key",
+                    privateKeyPem = """
+                        -----BEGIN OPENSSH PRIVATE KEY-----
+                        abc
+                        -----END OPENSSH PRIVATE KEY-----
+                    """.trimIndent(),
+                    passphraseRequired = false,
+                ),
+            ),
+        )
+
+        viewModel.importSharedHostPayload(payload)
+
+        withTimeout(5_000) { db.sshKeyDao().getAll().first { it.isNotEmpty() } }
+        val keys = db.sshKeyDao().getAll().first()
+        val hosts = db.hostDao().getAll().first()
+        assertEquals(1, keys.size)
+        assertEquals("qr-key", keys[0].name)
+        assertEquals(false, keys[0].hasPassphrase)
+        assertTrue(File(keys[0].privateKeyPath).exists())
+        assertEquals(1, hosts.size)
+        assertEquals("qr-prod", hosts[0].name)
+        assertEquals("qr.example.com", hosts[0].hostname)
+        assertEquals(2200, hosts[0].port)
+        assertEquals("ubuntu", hosts[0].username)
+        assertEquals(keys[0].id, hosts[0].keyId)
+        assertEquals("Imported qr-prod", viewModel.shareMessage.value)
+    }
+
+    @Test
+    fun importSharedHostPayload_derivesPassphraseRequirementFromEncryptedOpenSshKey() = runTest {
+        File(context.filesDir, "ssh-keys").deleteRecursively()
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+        )
+        val payload = SshImportPayloadCodec.encode(
+            SshImportConfig(
+                name = "encrypted-prod",
+                host = "encrypted.example.com",
+                port = 22,
+                username = "ubuntu",
+                auth = SshImportAuth.PrivateKey(
+                    name = "encrypted-key",
+                    privateKeyPem = EncryptedOpenSshPrivateKey,
+                    passphraseRequired = false,
+                ),
+            ),
+        )
+
+        viewModel.importSharedHostPayload(payload)
+
+        withTimeout(5_000) { db.sshKeyDao().getAll().first { it.isNotEmpty() } }
+        val keys = db.sshKeyDao().getAll().first()
+        assertEquals(1, keys.size)
+        assertEquals("encrypted-key", keys[0].name)
+        assertEquals(true, keys[0].hasPassphrase)
+        assertEquals("Imported encrypted-prod", viewModel.shareMessage.value)
+    }
+
+    @Test
+    fun importSharedHostPayload_usesExistingKey_forSshImportKeyReferencePayload() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "existing-key", privateKeyPath = "/tmp/existing-key"),
+        )
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+        )
+        val payload = SshImportPayloadCodec.encode(
+            SshImportConfig(
+                name = "qr-ref",
+                host = "ref.example.com",
+                port = 22,
+                username = "alexey",
+                auth = SshImportAuth.KeyReference("existing-key"),
+            ),
+        )
+
+        viewModel.importSharedHostPayload(payload)
+
+        val hosts = db.hostDao().getAll().first()
+        assertEquals(1, hosts.size)
+        assertEquals("qr-ref", hosts[0].name)
+        assertEquals(keyId, hosts[0].keyId)
+        assertEquals(1, db.sshKeyDao().getAll().first().size)
+    }
+
+    private companion object {
+        val EncryptedOpenSshPrivateKey = """
+            -----BEGIN OPENSSH PRIVATE KEY-----
+            b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABDy65Wy4J
+            GIiPmAlfzxEptmAAAAGAAAAAEAAAAzAAAAC3NzaC1lZDI1NTE5AAAAIFz+4rPsOPrrK7I/
+            hz3T8H4UpgIdLal/ADv4OhvewZ+xAAAAkPodwX8olqflsAful+M/4T4BtLAaULs9Oc3GVb
+            uy664Ebtmwo+/HhJmloTIoVs0STzeFeHAK4xkEq6Ut303sIER2av1O0qHUjyOMGPPZop1V
+            4Sd/bBQJu/Q14nSsiSRJaHBN2SBpyFSul2/ZLU5xYhs7dzmCTbXH+BM1cP6ZE5byxA8jeW
+            gH19i7Bcv1CK6+Pg==
+            -----END OPENSSH PRIVATE KEY-----
+        """.trimIndent()
     }
 }

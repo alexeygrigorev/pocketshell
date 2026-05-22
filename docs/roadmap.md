@@ -45,7 +45,7 @@ Goal: the moment it stops being "another SSH client."
 - Recurring jobs (delegates to remote `tmuxctl jobs add/list/edit`)
 - Host bootstrap: detect `tmuxctl`, offer one-tap install, offer systemd user unit
 - Quick-send presets per session
-- Agent awareness: `core-agents` module with Claude Code / Codex / OpenCode parsers; conversation tab on the session view; hint chip when an agent is detected. See [agent-awareness.md](agent-awareness.md).
+- Agent awareness: `core-agents` module with Claude Code / Codex / OpenCode parsers; runtime detection enabled for Claude Code from tmux pane cwd only, with Codex/OpenCode disabled until safe correlation exists; conversation tab on the session view; hint chip when an agent is detected. See [agent-awareness.md](agent-awareness.md).
 - Usage panel: `core-usage` module wrapping `heru usage --json` over SSH; per-provider cards with short/long windows; dashboard widget; session-row blocked badges. See [usage-panel.md](usage-panel.md).
 - Agent monitoring chips (build/deploy/training status surfaced on dashboard)
 

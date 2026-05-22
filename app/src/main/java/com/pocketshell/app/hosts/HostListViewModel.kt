@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.bootstrap.HostBootstrapSheetState
 import com.pocketshell.app.bootstrap.HostBootstrapper
 import com.pocketshell.app.bootstrap.InstallResult
+import com.pocketshell.app.bootstrap.BootstrapTool
 import com.pocketshell.app.bootstrap.TmuxStatus
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
@@ -151,14 +152,10 @@ class HostListViewModel @Inject constructor(
      * the user taps Skip / Continue on the sheet).
      */
     fun bootstrapHost(host: HostEntity, keyPath: String) {
-        // Cache: hit within 24h with tmux present → fast path. The
-        // navigation collector only fires `onOpenSession` once
-        // `ready == true`, so the cache hit must mark itself ready
-        // immediately.
-        if (host.tmuxInstalled == true && host.isBootstrapFresh()) {
-            _pendingNavigation.value = PendingNavigation(host, keyPath, ready = true)
-            return
-        }
+        // Cache: a fresh tmux result skips only the tmux probe. Server
+        // tools and daemon readiness are intentionally checked on every
+        // connect because the old cache records only tmux.
+        val skipTmuxProbe = host.tmuxInstalled == true && host.isBootstrapFresh()
 
         // Probe (re-probe if stale or unknown). For a previously-missing
         // host we still want to re-check because the user may have fixed
@@ -181,16 +178,28 @@ class HostListViewModel @Inject constructor(
             }
             bootstrapSession = session
 
-            when (val status = bootstrapper.checkTmux(session)) {
+            when (val status = if (skipTmuxProbe) TmuxStatus.Installed else bootstrapper.checkTmux(session)) {
                 TmuxStatus.Installed -> {
                     persistResult(host, installed = true)
-                    closeBootstrapSession()
-                    _pendingNavigation.value = PendingNavigation(host, keyPath, ready = true)
+                    val report = bootstrapper.checkServerSetup(session)
+                    if (report.isReady) {
+                        closeBootstrapSession()
+                        _pendingNavigation.value = PendingNavigation(host, keyPath, ready = true)
+                    } else {
+                        _bootstrapState.value = HostBootstrapSheetState.Prompt(
+                            needsTmux = false,
+                            report = report,
+                        )
+                    }
                 }
 
                 TmuxStatus.Missing -> {
                     persistResult(host, installed = false)
-                    _bootstrapState.value = HostBootstrapSheetState.Prompt
+                    val report = bootstrapper.checkServerSetup(session)
+                    _bootstrapState.value = HostBootstrapSheetState.Prompt(
+                        needsTmux = true,
+                        report = report,
+                    )
                 }
 
                 is TmuxStatus.Unknown -> {
@@ -229,11 +238,42 @@ class HostListViewModel @Inject constructor(
             )
             return
         }
+        val prompt = _bootstrapState.value as? HostBootstrapSheetState.Prompt
         _bootstrapState.value = HostBootstrapSheetState.Installing
         viewModelScope.launch {
-            when (val result = bootstrapper.installTmux(session)) {
+            val tmuxResult = if (prompt?.needsTmux == true) {
+                bootstrapper.installTmux(session)
+            } else {
+                InstallResult.Success
+            }
+
+            when (tmuxResult) {
+                InstallResult.Success -> Unit
+
+                is InstallResult.Failed -> {
+                    _bootstrapState.value = HostBootstrapSheetState.Failed(
+                        message = tmuxResult.stderr.ifBlank { "exit ${tmuxResult.exitCode}" },
+                    )
+                    return@launch
+                }
+
+                is InstallResult.UnsupportedOs -> {
+                    val osPart = tmuxResult.osId?.let { " (detected: $it)" } ?: ""
+                    _bootstrapState.value = HostBootstrapSheetState.Failed(
+                        message = "PocketShell doesn't have a tmux installer for this host's OS$osPart. Install tmux manually and reconnect.",
+                    )
+                    return@launch
+                }
+
+                is InstallResult.Error -> {
+                    _bootstrapState.value = HostBootstrapSheetState.Failed(message = tmuxResult.reason)
+                    return@launch
+                }
+            }
+
+            persistResult(host, installed = true)
+            when (val result = bootstrapper.installServerSetup(session, prompt?.report ?: bootstrapper.checkServerSetup(session))) {
                 InstallResult.Success -> {
-                    persistResult(host, installed = true)
                     _bootstrapState.value = HostBootstrapSheetState.Success
                 }
 
@@ -244,15 +284,73 @@ class HostListViewModel @Inject constructor(
                 }
 
                 is InstallResult.UnsupportedOs -> {
-                    val osPart = result.osId?.let { " (detected: $it)" } ?: ""
                     _bootstrapState.value = HostBootstrapSheetState.Failed(
-                        message = "PocketShell doesn't have a tmux installer for this host's OS$osPart. Install tmux manually and reconnect.",
+                        message = "PocketShell doesn't have a server-tool installer for this host. Install uv or pipx and reconnect.",
                     )
                 }
 
                 is InstallResult.Error -> {
                     _bootstrapState.value = HostBootstrapSheetState.Failed(message = result.reason)
                 }
+            }
+        }
+    }
+
+    fun installBootstrapTool(tool: BootstrapTool) {
+        val session = bootstrapSession
+        val prompt = _bootstrapState.value as? HostBootstrapSheetState.Prompt
+        if (session == null || prompt?.report == null) {
+            _bootstrapState.value = HostBootstrapSheetState.Failed(
+                message = "Connection closed before install could start. Tap the host again to retry.",
+            )
+            return
+        }
+        val installer = prompt.report.installer
+        if (installer == null) {
+            _bootstrapState.value = HostBootstrapSheetState.Failed(
+                message = "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install tmuxctl, heru, and agent-log-explorer.",
+            )
+            return
+        }
+        _bootstrapState.value = HostBootstrapSheetState.Installing
+        viewModelScope.launch {
+            when (val result = bootstrapper.installServerTool(session, installer, tool)) {
+                InstallResult.Success -> refreshServerSetupPrompt(session, needsTmux = prompt.needsTmux)
+                is InstallResult.Failed -> _bootstrapState.value = HostBootstrapSheetState.Failed(
+                    message = result.stderr.ifBlank { "exit ${result.exitCode}" },
+                )
+
+                is InstallResult.UnsupportedOs -> _bootstrapState.value = HostBootstrapSheetState.Failed(
+                    message = "PocketShell doesn't have a server-tool installer for this host. Install uv or pipx and reconnect.",
+                )
+
+                is InstallResult.Error -> _bootstrapState.value = HostBootstrapSheetState.Failed(message = result.reason)
+            }
+        }
+    }
+
+    fun setupBootstrapDaemon() {
+        val session = bootstrapSession
+        val prompt = _bootstrapState.value as? HostBootstrapSheetState.Prompt
+        if (session == null || prompt == null) {
+            _bootstrapState.value = HostBootstrapSheetState.Failed(
+                message = "Connection closed before setup could start. Tap the host again to retry.",
+            )
+            return
+        }
+        _bootstrapState.value = HostBootstrapSheetState.Installing
+        viewModelScope.launch {
+            when (val result = bootstrapper.installTmuxctlDaemon(session)) {
+                InstallResult.Success -> refreshServerSetupPrompt(session, needsTmux = prompt.needsTmux)
+                is InstallResult.Failed -> _bootstrapState.value = HostBootstrapSheetState.Failed(
+                    message = result.stderr.ifBlank { "exit ${result.exitCode}" },
+                )
+
+                is InstallResult.UnsupportedOs -> _bootstrapState.value = HostBootstrapSheetState.Failed(
+                    message = "PocketShell couldn't enable the tmuxctl jobs daemon on this host.",
+                )
+
+                is InstallResult.Error -> _bootstrapState.value = HostBootstrapSheetState.Failed(message = result.reason)
             }
         }
     }
@@ -267,6 +365,15 @@ class HostListViewModel @Inject constructor(
         _bootstrapState.value = null
         val pending = _pendingNavigation.value ?: return
         _pendingNavigation.value = pending.copy(ready = true)
+    }
+
+    private suspend fun refreshServerSetupPrompt(session: SshSession, needsTmux: Boolean) {
+        val report = bootstrapper.checkServerSetup(session)
+        _bootstrapState.value = if (!needsTmux && report.isReady) {
+            HostBootstrapSheetState.Success
+        } else {
+            HostBootstrapSheetState.Prompt(needsTmux = needsTmux, report = report)
+        }
     }
 
     /**

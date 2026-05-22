@@ -2,7 +2,17 @@ package com.pocketshell.app.session
 
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.session.SessionViewModel.Modifier
+import com.pocketshell.core.agents.AgentDetection
+import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.agents.ConversationEvent
+import com.pocketshell.core.agents.ConversationRole
+import com.pocketshell.core.ssh.ExecResult
+import com.pocketshell.core.ssh.SshPortForward
+import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.uikit.model.KeyModifierState
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -221,5 +231,107 @@ class SessionViewModelTest {
         // guard at least.
         vm.onChipTap("")
         // No exception means the empty-string guard worked.
+    }
+
+    @Test
+    fun agentConversationKeepsLatestBoundedDistinctEvents() {
+        val vm = newVm()
+        val events = (0..510).map { index ->
+            ConversationEvent.Message(
+                id = "event-$index",
+                agent = AgentKind.ClaudeCode,
+                role = ConversationRole.Assistant,
+                text = "message $index",
+            )
+        } + ConversationEvent.Message(
+            id = "event-510",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.Assistant,
+            text = "message 510 replacement",
+        )
+
+        vm.startAgentConversationForTest(
+            detection = AgentDetection(
+                agent = AgentKind.ClaudeCode,
+                sourcePath = "/tmp/claude.jsonl",
+                sessionId = "claude",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+            initialEvents = events,
+        )
+
+        val state = vm.agentConversation.value
+        assertEquals(500, state.events.size)
+        assertEquals("event-11", state.events.first().id)
+        assertEquals("message 510 replacement", (state.events.last() as ConversationEvent.Message).text)
+    }
+
+    @Test
+    fun nonTmuxAgentDetectionDoesNotUseFreshExecCwd() = runTest {
+        val session = FakeSshSession()
+        val detection = AgentConversationRepository().detect(session)
+
+        assertNull(detection)
+        assertTrue(session.recordedExecCommands.isEmpty())
+    }
+
+    @Test
+    fun runtimeDetectionCommandDoesNotProbeOpenCodeGlobalDatabase() {
+        val command = AgentConversationRepository().detectionCommand("/home/alexey/git/pocketshell")
+
+        assertTrue("OpenCode runtime detection must stay disabled", "opencode" !in command)
+        assertTrue("SQLite export path must stay out of runtime detection", "sqlite3" !in command)
+    }
+
+    @Test
+    fun runtimeDetectionCommandDoesNotProbeCodexSessionLogs() {
+        val command = AgentConversationRepository().detectionCommand("/home/alexey/git/pocketshell")
+
+        assertTrue("Codex runtime detection must stay disabled", "codex" !in command)
+        assertTrue("Codex session logs must not be scanned", ".codex/sessions" !in command)
+        assertTrue("Codex detection must not use free-text cwd grep", "grep -F" !in command)
+    }
+
+    @Test
+    fun runtimeDetectionRejectsCodexCandidatesFromRemoteOutput() = runTest {
+        val session = FakeSshSession(
+            execStdout = "codex|10000|/home/alexey/git/pocketshell|/home/alexey/.codex/sessions/other.jsonl\n",
+        )
+        val detection = AgentConversationRepository().detect(
+            session = session,
+            cwd = "/home/alexey/git/pocketshell",
+            processHints = listOf("123 codex"),
+        )
+
+        assertNull(detection)
+    }
+
+    private class FakeSshSession(
+        private val execStdout: String = "/wrong/fresh/exec/cwd\n",
+    ) : SshSession {
+        val recordedExecCommands = mutableListOf<String>()
+
+        override val isConnected: Boolean = true
+
+        override suspend fun exec(command: String): ExecResult {
+            recordedExecCommands += command
+            return ExecResult(stdout = execStdout, stderr = "", exitCode = 0)
+        }
+
+        override fun tail(path: String, onLine: (String) -> Unit): Job = Job()
+
+        override fun openLocalPortForward(
+            remoteHost: String,
+            remotePort: Int,
+            localPort: Int,
+        ): SshPortForward {
+            throw NotImplementedError()
+        }
+
+        override fun startShell(): SshShell {
+            throw NotImplementedError()
+        }
+
+        override fun close() = Unit
     }
 }

@@ -11,6 +11,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -20,9 +21,15 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -36,6 +43,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -44,6 +52,8 @@ import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
+import com.pocketshell.core.agents.ConversationEvent
+import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.CommandChip
@@ -85,6 +95,7 @@ public fun SessionScreen(
     keyPath: String? = null,
     hostId: Long? = null,
     onBack: () -> Unit = {},
+    onOpenJobs: () -> Unit = {},
     inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
 ) {
     LaunchedEffect(host, port, user, keyPath) {
@@ -93,12 +104,14 @@ public fun SessionScreen(
 
     val status by viewModel.connectionStatus.collectAsState()
     val modifierStates by viewModel.modifierStates.collectAsState()
+    val agentConversation by viewModel.agentConversation.collectAsState()
     val dictationState by inlineDictationViewModel.uiState.collectAsState()
     val keyBarModifierStates = remember(modifierStates) {
         modifierStates.mapKeys { (modifier, _) -> modifier.keyBarLabel }
     }
 
     var showMicSheet by remember { mutableStateOf(false) }
+    var showMoreMenu by remember { mutableStateOf(false) }
     // Issue #17: the chip-row "+" entry opens the snippet picker. The
     // picker is only meaningful when we know which host's library to
     // render — at the Phase 0 / proof-of-life entry point hostId is null
@@ -149,13 +162,20 @@ public fun SessionScreen(
             Breadcrumb(
                 crumbs = breadcrumbCrumbs(host, user),
                 onBack = onBack,
-                onMore = { /* More menu — wiring lands with #23. */ },
+                onMore = { showMoreMenu = true },
             )
 
+            val tabs = if (agentConversation.detection != null) {
+                listOf("Terminal", "Conversation")
+            } else {
+                listOf("Terminal")
+            }
             Tabs(
-                labels = SessionTabs,
-                selectedIndex = 0,
-                onSelected = { /* Terminal is the only tab until #23. */ },
+                labels = tabs,
+                selectedIndex = if (agentConversation.selectedTab == SessionTab.Conversation) 1 else 0,
+                onSelected = { index ->
+                    viewModel.selectSessionTab(if (index == 1) SessionTab.Conversation else SessionTab.Terminal)
+                },
             )
 
             // Optional one-line status above the terminal until the
@@ -172,10 +192,28 @@ public fun SessionScreen(
             // up against either the IME or the system nav, whichever is
             // present.
             Box(modifier = Modifier.weight(1f)) {
-                TerminalSurface(
-                    state = viewModel.terminalState,
-                    modifier = Modifier.fillMaxSize(),
-                )
+                if (agentConversation.selectedTab == SessionTab.Conversation && agentConversation.detection != null) {
+                    ConversationPane(
+                        events = agentConversation.events,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                } else {
+                    TerminalSurface(
+                        state = viewModel.terminalState,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    val detection = agentConversation.detection
+                    if (agentConversation.hintVisible && detection != null) {
+                        AgentHintChip(
+                            label = "${detection.agent.displayName} session detected",
+                            onOpen = { viewModel.selectSessionTab(SessionTab.Conversation) },
+                            onDismiss = viewModel::dismissAgentHint,
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(12.dp),
+                        )
+                    }
+                }
             }
 
             if (modifierStates.isNotEmpty()) {
@@ -235,6 +273,15 @@ public fun SessionScreen(
             }
         }
 
+        SessionMoreMenu(
+            expanded = showMoreMenu,
+            onDismiss = { showMoreMenu = false },
+            onOpenJobs = {
+                showMoreMenu = false
+                onOpenJobs()
+            },
+        )
+
         // Bottom-right mic FAB. Always visible (per `docs/input-methods.md`
         // §"Screen real estate" → keyboard down) — the keyboard-up path
         // surfaces the dictate icon-chip via the chip row instead.
@@ -289,6 +336,25 @@ public fun SessionScreen(
     }
 }
 
+@Composable
+private fun SessionMoreMenu(
+    expanded: Boolean,
+    onDismiss: () -> Unit,
+    onOpenJobs: () -> Unit,
+) {
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = Alignment.TopEnd,
+    ) {
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = onDismiss,
+        ) {
+            DropdownMenuItem(text = { Text("Recurring jobs") }, onClick = onOpenJobs)
+        }
+    }
+}
+
 /**
  * Build the breadcrumb segments. v1 has a flat `host > session > pane`
  * triplet; #18 / Phase 2 fill in real session + pane names once tmux
@@ -299,6 +365,138 @@ private fun breadcrumbCrumbs(host: String, user: String): List<Crumb> = listOf(
     Crumb(label = "$user@$host", isCurrent = true, onClick = { /* current — no-op */ }),
     Crumb(label = "pane 1", isCurrent = false, onClick = { /* pane switcher — Phase 2 */ }),
 )
+
+@Composable
+private fun AgentHintChip(
+    label: String,
+    onOpen: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .border(width = 1.dp, color = PocketShellColors.AccentDim)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .clickable(onClick = onOpen),
+        ) {
+            Text(
+                text = label,
+                color = PocketShellColors.Text,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                text = "Tap to see full conversation >",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 11.sp,
+            )
+        }
+        TextButton(onClick = onDismiss) {
+            Text("X")
+        }
+    }
+}
+
+@Composable
+private fun ConversationPane(
+    events: List<ConversationEvent>,
+    modifier: Modifier = Modifier,
+) {
+    var query by remember { mutableStateOf("") }
+    val filteredEvents = remember(events, query) {
+        val q = query.trim()
+        if (q.isBlank()) events else events.filter { it.searchText().contains(q, ignoreCase = true) }
+    }
+    Column(
+        modifier = modifier
+            .background(color = PocketShellColors.Background)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            placeholder = { Text("Search in conversation") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            contentPadding = PaddingValues(vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            if (filteredEvents.isEmpty()) {
+                item {
+                    Text(
+                        text = if (events.isEmpty()) "No conversation events yet." else "No matching events.",
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 13.sp,
+                    )
+                }
+            }
+            items(filteredEvents, key = { it.id }) { event ->
+                ConversationEventRow(event)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConversationEventRow(event: ConversationEvent) {
+    var expanded by remember(event.id) { mutableStateOf(false) }
+    val title = when (event) {
+        is ConversationEvent.Message -> when (event.role) {
+            ConversationRole.User -> "USER"
+            ConversationRole.Assistant -> if (event.streaming) "ASSISTANT - streaming" else "ASSISTANT"
+        }
+        is ConversationEvent.ToolCall -> "Tool: ${event.name}"
+        is ConversationEvent.ToolResult -> if (event.isError) "Tool result - error" else "Tool result"
+    }
+    val body = when (event) {
+        is ConversationEvent.Message -> event.text
+        is ConversationEvent.ToolCall -> event.input
+        is ConversationEvent.ToolResult -> event.output
+    }
+    val isTool = event is ConversationEvent.ToolCall || event is ConversationEvent.ToolResult
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .border(width = 1.dp, color = PocketShellColors.Border)
+            .clickable(enabled = isTool) { expanded = !expanded }
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = if (isTool && !expanded) "$title (collapsed)" else title,
+            color = if (isTool) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        if (!isTool || expanded) {
+            Text(
+                text = body,
+                color = PocketShellColors.Text,
+                fontSize = 13.sp,
+            )
+        }
+    }
+}
+
+private fun ConversationEvent.searchText(): String = when (this) {
+    is ConversationEvent.Message -> text
+    is ConversationEvent.ToolCall -> "$name $input"
+    is ConversationEvent.ToolResult -> output
+}
 
 @Composable
 private fun StatusLine(text: String) {
@@ -497,5 +695,3 @@ private val SessionViewModel.Modifier.keyBarLabel: String
         SessionViewModel.Modifier.Ctrl -> "Ctrl"
         SessionViewModel.Modifier.Alt -> "Alt"
     }
-
-private val SessionTabs: List<String> = listOf("Terminal")

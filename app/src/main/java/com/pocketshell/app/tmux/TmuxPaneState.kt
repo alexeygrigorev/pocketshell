@@ -45,5 +45,7 @@ public data class TmuxPaneState(
     val windowId: String,
     val sessionId: String,
     val title: String,
+    val cwd: String = "",
+    val currentCommand: String = "",
     val terminalState: TerminalSurfaceState,
 )

@@ -41,6 +41,16 @@ public interface SshSession : AutoCloseable {
     public fun tail(path: String, onLine: (String) -> Unit): Job
 
     /**
+     * Stream new lines from [path], starting after [fromLineExclusive].
+     * A value of 0 starts at the beginning; null-equivalent callers should
+     * use [tail]. This lets callers take a line-count snapshot before an
+     * initial read and then follow from that exact boundary without the
+     * `read file` + `tail -n 0` race.
+     */
+    public fun tail(path: String, fromLineExclusive: Long, onLine: (String) -> Unit): Job =
+        tail(path, onLine)
+
+    /**
      * Open a local-to-remote port forward: traffic to `127.0.0.1:[localPort]`
      * on the *client* machine is tunnelled through this SSH session to
      * `[remoteHost]:[remotePort]`, resolved from the SSH server's side.

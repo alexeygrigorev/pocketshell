@@ -35,7 +35,7 @@ The app should assume users are running coding agents, automation agents, remote
 - Persistent monitoring: logs, running tasks, streaming output, build/deploy status — without re-typing commands
 - Session roles / tags: coding agent, deploy, monitoring, logs, shell, experiments
 - Quick actions: restart agent, send predefined commands, open logs, reconnect, copy output, share session snippets
-- Agent-aware conversation view: when Claude Code, Codex, or OpenCode is running in a pane, surface a clean conversation read of *this session* by tailing the agent's JSONL log — solves the "I can't scroll back to what the agent said" problem on mobile. See [agent-awareness.md](agent-awareness.md).
+- Agent-aware conversation view: when Claude Code is safely detected from a tmux pane, surface a clean conversation read of *this session* by tailing the agent's JSONL log. Codex and OpenCode parsers are present, but runtime detection stays disabled until safe pane/session correlation exists. See [agent-awareness.md](agent-awareness.md).
 - Usage panel: per-provider quota tracking via server-side tools (e.g. `heru usage --json`) invoked over SSH. Zero credentials on the phone. See [usage-panel.md](usage-panel.md).
 
 ### 4. Mobile-friendly terminal interaction (voice-first)

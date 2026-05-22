@@ -43,6 +43,53 @@ public sealed interface InstallResult {
     public data class Error(val reason: String) : InstallResult
 }
 
+public enum class BootstrapTool(
+    public val binaryName: String,
+    public val packageName: String = binaryName,
+) {
+    Tmuxctl(binaryName = "tmuxctl"),
+    Heru(binaryName = "heru"),
+    AgentLogExplorer(binaryName = "agent-log-explorer"),
+}
+
+public enum class PythonToolInstaller(
+    public val binaryName: String,
+) {
+    Uv("uv"),
+    Pipx("pipx"),
+}
+
+public sealed interface ToolStatus {
+    public data class Installed(val path: String) : ToolStatus
+    public data object Missing : ToolStatus
+    public data class Unknown(val reason: String) : ToolStatus
+}
+
+public sealed interface TmuxctlDaemonStatus {
+    public data class Running(val enabled: Boolean) : TmuxctlDaemonStatus
+    public data class InstalledStopped(val enabled: Boolean) : TmuxctlDaemonStatus
+    public data object Missing : TmuxctlDaemonStatus
+    public data class Unavailable(val reason: String) : TmuxctlDaemonStatus
+}
+
+public data class HostBootstrapReport(
+    val tools: Map<BootstrapTool, ToolStatus>,
+    val installer: PythonToolInstaller?,
+    val daemon: TmuxctlDaemonStatus,
+) {
+    public val missingTools: List<BootstrapTool>
+        get() = BootstrapTool.entries.filter { tools[it] is ToolStatus.Missing }
+
+    public val unknownTools: List<BootstrapTool>
+        get() = BootstrapTool.entries.filter { tools[it] is ToolStatus.Unknown }
+
+    public val isReady: Boolean
+        get() = missingTools.isEmpty() &&
+            unknownTools.isEmpty() &&
+            daemon is TmuxctlDaemonStatus.Running &&
+            daemon.enabled
+}
+
 /**
  * Detects whether `tmux` is installed on a remote host and offers a
  * best-effort one-tap install.
@@ -97,6 +144,117 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     } catch (t: Throwable) {
         TmuxStatus.Unknown("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
     }
+
+    public suspend fun checkServerSetup(session: SshSession): HostBootstrapReport {
+        val tools = BootstrapTool.entries.associateWith { tool ->
+            checkTool(session, tool.binaryName)
+        }
+        val installer = detectPythonToolInstaller(session)
+        val daemon = if (tools[BootstrapTool.Tmuxctl] is ToolStatus.Installed) {
+            checkTmuxctlDaemon(session)
+        } else {
+            TmuxctlDaemonStatus.Missing
+        }
+        return HostBootstrapReport(
+            tools = tools,
+            installer = installer,
+            daemon = daemon,
+        )
+    }
+
+    public suspend fun installServerSetup(
+        session: SshSession,
+        report: HostBootstrapReport? = null,
+    ): InstallResult {
+        val currentReport = report ?: checkServerSetup(session)
+        if (currentReport.unknownTools.isNotEmpty()) {
+            val unknown = currentReport.unknownTools.joinToString { it.binaryName }
+            return InstallResult.Error("Could not detect required host tools: $unknown. Reconnect and try again.")
+        }
+        val missingTools = currentReport.missingTools
+        if (missingTools.isNotEmpty()) {
+            val installer = currentReport.installer ?: return InstallResult.Error(
+                "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install tmuxctl, heru, and agent-log-explorer.",
+            )
+            for (tool in missingTools) {
+                val result = installServerTool(session, installer, tool)
+                if (result !is InstallResult.Success) return result
+            }
+        }
+
+        val afterTools = checkServerSetup(session)
+        val daemon = afterTools.daemon
+        if (daemon is TmuxctlDaemonStatus.Unavailable) {
+            return InstallResult.Error(daemon.reason)
+        }
+        if (daemon !is TmuxctlDaemonStatus.Running || !daemon.enabled) {
+            return installTmuxctlUserDaemon(session)
+        }
+        return InstallResult.Success
+    }
+
+    internal suspend fun checkTool(session: SshSession, binaryName: String): ToolStatus = try {
+        val result = session.exec(pathAwareCommand("command -v ${shellQuote(binaryName)}"))
+        when {
+            result.exitCode == 0 && result.stdout.isNotBlank() -> ToolStatus.Installed(result.stdout.trim())
+            result.exitCode != 0 -> ToolStatus.Missing
+            else -> ToolStatus.Missing
+        }
+    } catch (e: SshException) {
+        ToolStatus.Unknown(e.message ?: e.javaClass.simpleName)
+    } catch (t: Throwable) {
+        ToolStatus.Unknown("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
+    }
+
+    internal suspend fun detectPythonToolInstaller(session: SshSession): PythonToolInstaller? {
+        PythonToolInstaller.entries.forEach { installer ->
+            if (checkTool(session, installer.binaryName) is ToolStatus.Installed) {
+                return installer
+            }
+        }
+        return null
+    }
+
+    internal suspend fun checkTmuxctlDaemon(session: SshSession): TmuxctlDaemonStatus {
+        if (checkTool(session, "systemctl") !is ToolStatus.Installed) {
+            return TmuxctlDaemonStatus.Unavailable("systemctl is not installed on this host")
+        }
+
+        val active = try {
+            session.exec("systemctl --user is-active tmuxctl-jobs.service")
+        } catch (t: Throwable) {
+            return TmuxctlDaemonStatus.Unavailable(
+                "failed to query systemd user service: ${t.javaClass.simpleName}: ${t.message ?: "unknown error"}",
+            )
+        }
+        if (active.exitCode != 0 && active.looksLikeUnavailableSystemdUser()) {
+            return TmuxctlDaemonStatus.Unavailable(active.combinedOutput().ifBlank { "systemd user services are unavailable on this host" })
+        }
+        val enabled = try {
+            session.exec("systemctl --user is-enabled tmuxctl-jobs.service")
+        } catch (_: Throwable) {
+            ExecResult("", "", 1)
+        }
+        if (enabled.exitCode != 0 && enabled.looksLikeUnavailableSystemdUser()) {
+            return TmuxctlDaemonStatus.Unavailable(enabled.combinedOutput().ifBlank { "systemd user services are unavailable on this host" })
+        }
+        val isEnabled = enabled.exitCode == 0 && enabled.stdout.trim() == "enabled"
+        return when {
+            active.exitCode == 0 && active.stdout.trim() == "active" -> TmuxctlDaemonStatus.Running(isEnabled)
+            active.stdout.trim() == "inactive" || active.stdout.trim() == "failed" -> {
+                TmuxctlDaemonStatus.InstalledStopped(isEnabled)
+            }
+            else -> TmuxctlDaemonStatus.Missing
+        }
+    }
+
+    public suspend fun installServerTool(
+        session: SshSession,
+        installer: PythonToolInstaller,
+        tool: BootstrapTool,
+    ): InstallResult = runPythonToolInstall(session, installer, tool)
+
+    public suspend fun installTmuxctlDaemon(session: SshSession): InstallResult = installTmuxctlUserDaemon(session)
 
     /**
      * Detect the host's OS family and run the matching package-manager
@@ -207,6 +365,47 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         InstallResult.Error("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
     }
 
+    private suspend fun runPythonToolInstall(
+        session: SshSession,
+        installer: PythonToolInstaller,
+        tool: BootstrapTool,
+    ): InstallResult {
+        val command = when (installer) {
+            PythonToolInstaller.Uv -> "uv tool install ${tool.packageName}"
+            PythonToolInstaller.Pipx -> "pipx install ${tool.packageName}"
+        }
+        return runInstall(session, pathAwareCommand(command), needsRoot = false)
+    }
+
+    private suspend fun installTmuxctlUserDaemon(session: SshSession): InstallResult {
+        val tmuxctl = when (val status = checkTool(session, "tmuxctl")) {
+            is ToolStatus.Installed -> status.path
+            ToolStatus.Missing -> return InstallResult.Error("tmuxctl is not installed; install it before enabling the jobs daemon.")
+            is ToolStatus.Unknown -> return InstallResult.Error("could not locate tmuxctl: ${status.reason}")
+        }
+        if (checkTool(session, "systemctl") !is ToolStatus.Installed) {
+            return InstallResult.Error("systemctl is not installed on this host; enable tmuxctl jobs daemon manually.")
+        }
+        val command = buildString {
+            append("mkdir -p ~/.config/systemd/user && ")
+            append("cat > ~/.config/systemd/user/tmuxctl-jobs.service <<'EOF'\n")
+            append("[Unit]\n")
+            append("Description=tmuxctl jobs daemon\n")
+            append("After=default.target\n\n")
+            append("[Service]\n")
+            append("Type=simple\n")
+            append("ExecStart=${systemdExecArg(tmuxctl)} jobs daemon\n")
+            append("Restart=on-failure\n")
+            append("RestartSec=5s\n\n")
+            append("[Install]\n")
+            append("WantedBy=default.target\n")
+            append("EOF\n")
+            append("systemctl --user daemon-reload && ")
+            append("systemctl --user enable --now tmuxctl-jobs.service")
+        }
+        return runInstall(session, command, needsRoot = false)
+    }
+
     private suspend fun runningAsRoot(session: SshSession): Boolean = try {
         val r = session.exec("id -u")
         r.exitCode == 0 && r.stdout.trim() == "0"
@@ -224,4 +423,28 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         val command: String,
         val needsRoot: Boolean,
     )
+
+    private fun pathAwareCommand(command: String): String =
+        "PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH\"; $command"
+
+    private fun shellQuote(value: String): String =
+        "'" + value.replace("'", "'\"'\"'") + "'"
+
+    private fun systemdExecArg(value: String): String =
+        "\"" + value
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("%", "%%") + "\""
+
+    private fun ExecResult.combinedOutput(): String =
+        listOf(stdout.trim(), stderr.trim()).filter { it.isNotBlank() }.joinToString("\n")
+
+    private fun ExecResult.looksLikeUnavailableSystemdUser(): Boolean {
+        val output = combinedOutput().lowercase()
+        return output.contains("failed to connect to bus") ||
+            output.contains("no medium found") ||
+            output.contains("not been booted with systemd") ||
+            output.contains("system has not been booted") ||
+            output.contains("transport endpoint is not connected")
+    }
 }

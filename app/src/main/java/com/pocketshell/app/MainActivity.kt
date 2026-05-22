@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -18,6 +19,8 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.hosts.AddEditHostScreen
 import com.pocketshell.app.hosts.HostListScreen
 import com.pocketshell.app.hosts.SshKeysScreen
+import com.pocketshell.app.jobs.RecurringJobsScreen
+import com.pocketshell.app.jobs.RecurringJobsViewModel
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.portfwd.PortForwardPanelScreen
 import com.pocketshell.app.session.SessionScreen
@@ -114,6 +117,7 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
                 navigate(
                     AppDestination.Session(
                         hostId = host.id,
+                        hostName = host.name,
                         hostname = host.hostname,
                         port = host.port,
                         username = host.username,
@@ -164,6 +168,18 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
             // need the persisted host id to scope the library.
             hostId = dest.hostId,
             onBack = ::back,
+            onOpenJobs = {
+                navigate(
+                    AppDestination.RecurringJobs(
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        sessionName = DefaultTmuxSessionName,
+                    ),
+                )
+            },
         )
 
         is AppDestination.PortForwardPanel -> PortForwardPanelScreen(
@@ -171,6 +187,29 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
             keyPath = dest.keyPath,
             onBack = ::back,
         )
+
+        is AppDestination.RecurringJobs -> {
+            val jobsViewModel = hiltViewModel<RecurringJobsViewModel>()
+            androidx.compose.runtime.LaunchedEffect(dest) {
+                jobsViewModel.load(
+                    hostName = dest.hostName,
+                    hostname = dest.hostname,
+                    port = dest.port,
+                    username = dest.username,
+                    keyPath = dest.keyPath,
+                    sessionName = dest.sessionName,
+                )
+            }
+            val state by jobsViewModel.state.collectAsState()
+            RecurringJobsScreen(
+                state = state,
+                onBack = ::back,
+                onRefresh = jobsViewModel::refresh,
+                onAdd = jobsViewModel::add,
+                onEdit = jobsViewModel::edit,
+                onRemove = jobsViewModel::remove,
+            )
+        }
 
         // Issue #45: tmux control-mode session. The view model is
         // obtained via `hiltViewModel()` — distinct from the
@@ -199,6 +238,36 @@ private fun AppNavigator(sessionViewModel: SessionViewModel) {
             onReplaceTmuxSession = { sessionName ->
                 replace(dest.copy(sessionName = sessionName))
             },
+            onOpenTmuxSessionFromSheet = { entry, sessionName ->
+                val next = AppDestination.TmuxSession(
+                    hostId = entry.hostId,
+                    hostName = entry.hostName,
+                    hostname = entry.hostname,
+                    port = entry.port,
+                    username = entry.username,
+                    keyPath = entry.keyPath,
+                    sessionName = sessionName,
+                )
+                when {
+                    next == dest -> Unit
+                    next.hostId == dest.hostId -> replace(next)
+                    else -> navigate(next)
+                }
+            },
+            onOpenJobs = {
+                navigate(
+                    AppDestination.RecurringJobs(
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        sessionName = dest.sessionName,
+                    ),
+                )
+            },
         )
     }
 }
+
+private const val DefaultTmuxSessionName = "pocketshell"

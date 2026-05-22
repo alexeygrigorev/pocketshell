@@ -279,6 +279,8 @@ fun HostListScreen(
                 state = state,
                 hostName = bootstrapHostName,
                 onInstall = { viewModel.installTmuxOnPendingHost() },
+                onInstallTool = { tool -> viewModel.installBootstrapTool(tool) },
+                onSetupDaemon = { viewModel.setupBootstrapDaemon() },
                 onSkip = { viewModel.dismissBootstrapAndOpen() },
                 onDismiss = { viewModel.dismissBootstrapAndOpen() },
             )

@@ -17,6 +17,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
@@ -212,6 +213,54 @@ class TmuxSessionViewModelTest {
         assertTrue(
             "expected a list-panes command, got ${client.sentCommands}",
             client.sentCommands.any { it.startsWith("list-panes") },
+        )
+    }
+
+    @Test
+    fun reconcileScopesPanesAndWindowSummariesToActiveSession() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf(
+                    "%0\t@0\t\$0\twork\tshell\t0",
+                    "%1\t@1\t\$0\twork\teditor\t0",
+                    "%2\t@2\t\$1\tother\tlogs\t0",
+                    "%3\t@3\t\$1\tother\tbuild\t0",
+                ),
+                isError = false,
+            ),
+        )
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        client.emittedEvents.emit(
+            ControlEvent.WindowAdd(sessionId = "\$0", windowId = "@0", name = ""),
+        )
+        advanceUntilIdle()
+
+        val command = client.sentCommands.single { it.startsWith("list-panes") }
+        assertTrue(command.startsWith("list-panes -t 'work' -F "))
+        assertFalse(command.contains(" -a "))
+
+        val panes = vm.panes.value
+        assertEquals(listOf("%0", "%1"), panes.map { it.paneId })
+        assertEquals(listOf("@0", "@1"), panes.map { it.windowId })
+        assertEquals(
+            listOf(
+                WindowSummary(windowId = "@0", title = "@0"),
+                WindowSummary(windowId = "@1", title = "@1"),
+            ),
+            panes.toWindowSummaries(),
         )
     }
 

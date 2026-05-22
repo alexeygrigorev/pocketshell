@@ -147,6 +147,7 @@ dependencies {
     implementation(project(":shared:core-ssh"))
     implementation(project(":shared:core-portfwd"))
     implementation(project(":shared:core-terminal"))
+    implementation(project(":shared:core-agents"))
 
     // Issue #11: the design language (colour scheme, typography, shapes) lives
     // in `:shared:ui-kit` so future Phase 1 modules consume the same source

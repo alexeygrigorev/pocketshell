@@ -2,7 +2,13 @@ package com.pocketshell.app.tmux
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.session.AgentConversationRepository
+import com.pocketshell.app.session.AgentConversationUiState
+import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.core.agents.AgentDetection
+import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -48,7 +54,7 @@ import javax.inject.Inject
  *    don't miss the opening events tmux fires on session attach.
  * 2. As [ControlEvent.WindowAdd] / [ControlEvent.WindowClose] /
  *    [ControlEvent.LayoutChange] arrive, we re-enumerate panes via
- *    `list-panes -a` and reconcile [_panes]. New rows get a fresh
+ *    `list-panes -t <session>` and reconcile [_panes]. New rows get a fresh
  *    [TerminalSurfaceState] wired to the pane's filtered output flow;
  *    closed rows are dropped (the bridge tears down with the state
  *    holder).
@@ -96,6 +102,12 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public val panes: StateFlow<List<TmuxPaneState>> = _panes.asStateFlow()
 
+    private val _agentConversations: MutableStateFlow<Map<String, AgentConversationUiState>> =
+        MutableStateFlow(emptyMap())
+
+    public val agentConversations: StateFlow<Map<String, AgentConversationUiState>> =
+        _agentConversations.asStateFlow()
+
     private val _connectionStatus: MutableStateFlow<ConnectionStatus> =
         MutableStateFlow(ConnectionStatus.Idle)
 
@@ -110,6 +122,9 @@ public class TmuxSessionViewModel @Inject constructor(
     private var connectingTarget: ConnectionTarget? = null
     private var connectJob: Job? = null
     private var eventsJob: Job? = null
+    private val agentRepository: AgentConversationRepository = AgentConversationRepository()
+    private val paneAgentJobs: MutableMap<String, Job> = ConcurrentHashMap()
+    private val paneAgentInputs: MutableMap<String, Pair<String, String>> = ConcurrentHashMap()
 
     // Bridge scope: a child of viewModelScope (parented via the
     // viewModelScope's Job) but with its own SupervisorJob so that a
@@ -198,6 +213,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 client = client,
             )
             registeredHostId = target.hostId
+            activeTarget = target
 
             // Bootstrap the pane list once tmux has had a moment to settle.
             // We don't strictly need this — the opening %window-add event
@@ -206,7 +222,6 @@ public class TmuxSessionViewModel @Inject constructor(
             // missed the original %window-add for.
             reconcilePanes()
 
-            activeTarget = target
             connectingTarget = null
             _connectionStatus.value = ConnectionStatus.Connected(
                 target.host,
@@ -288,8 +303,8 @@ public class TmuxSessionViewModel @Inject constructor(
      *
      * Per the issue body the structural events of interest are
      * [ControlEvent.WindowAdd] / [ControlEvent.WindowClose] /
-     * [ControlEvent.LayoutChange]: each one triggers a `list-panes -a`
-     * round-trip that re-derives the pane list authoritatively. We do not
+     * [ControlEvent.LayoutChange]: each one triggers a session-scoped
+     * `list-panes` round-trip that re-derives the pane list authoritatively. We do not
      * try to mutate [_panes] in-place from event payloads — see the
      * class-level docs for the rationale on why a round-trip is the
      * right call here.
@@ -307,8 +322,8 @@ public class TmuxSessionViewModel @Inject constructor(
     /**
      * Ask tmux for the current pane set and reconcile [_panes].
      *
-     * Format string matches the order of the [TmuxPaneState] fields:
-     * `<pane-id> <window-id> <session-id> <title>`. We pick the
+     * Format string carries pane/window/session metadata plus command
+     * context: `<pane-id> <window-id> <session-id> <session-name> ...`. We pick the
      * non-printable `\t` as the field separator because pane titles can
      * contain spaces but cannot contain literal tabs (tmux strips them).
      *
@@ -318,13 +333,20 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private suspend fun reconcilePanes() {
         val client = clientRef ?: return
+        val target = activeTarget
         val response = runCatching {
             client.sendCommand(
                 // pane_index is appended last so we can sort within a
                 // window. tmux can change index order on layout-rotate
                 // commands, so we re-read it on every reconcile.
-                "list-panes -a -F " +
-                    "'#{pane_id}\t#{window_id}\t#{session_id}\t#{pane_title}\t#{pane_index}'",
+                buildString {
+                    append("list-panes ")
+                    if (target != null) {
+                        append("-t '${escapeSingleQuoted(target.sessionName)}' ")
+                    }
+                    append("-F ")
+                    append("'#{pane_id}\t#{window_id}\t#{session_id}\t#{session_name}\t#{pane_title}\t#{pane_index}\t#{pane_current_path}\t#{pane_current_command}'")
+                },
             )
         }.getOrNull() ?: return
         if (response.isError) return
@@ -345,7 +367,9 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private fun applyParsedPanes(parsed: List<ParsedPane>) {
         val client = clientRef
+        val target = activeTarget
         val sorted = parsed
+            .filter { pane -> target == null || pane.sessionName == target.sessionName }
             .sortedWith(compareBy({ it.windowId }, { it.paneIndex }, { it.paneId }))
 
         val nextById: MutableMap<String, TmuxPaneState> = LinkedHashMap()
@@ -359,6 +383,8 @@ public class TmuxSessionViewModel @Inject constructor(
                     windowId = p.windowId,
                     sessionId = p.sessionId,
                     title = p.title,
+                    cwd = p.cwd,
+                    currentCommand = p.currentCommand,
                 )
             } else {
                 val state = TerminalSurfaceState()
@@ -384,10 +410,13 @@ public class TmuxSessionViewModel @Inject constructor(
                     windowId = p.windowId,
                     sessionId = p.sessionId,
                     title = p.title,
+                    cwd = p.cwd,
+                    currentCommand = p.currentCommand,
                     terminalState = state,
                 )
             }
             nextById[p.paneId] = row
+            startAgentDetectionForPane(row)
         }
 
         // Tear down panes that disappeared. Cancel the producer + detach
@@ -396,11 +425,89 @@ public class TmuxSessionViewModel @Inject constructor(
         val gonePaneIds = paneRows.keys - nextById.keys
         for (paneId in gonePaneIds) {
             paneProducerJobs.remove(paneId)?.cancel()
+            paneAgentJobs.remove(paneId)?.cancel()
+            paneAgentInputs.remove(paneId)
             paneRows[paneId]?.terminalState?.detachExternalProducer()
             paneRows.remove(paneId)
         }
+        _agentConversations.value = _agentConversations.value.filterKeys { it in nextById.keys }
         paneRows.putAll(nextById)
         _panes.value = nextById.values.toList()
+    }
+
+    private fun startAgentDetectionForPane(pane: TmuxPaneState) {
+        val session = sessionRef ?: return
+        val cwd = pane.cwd.takeIf { it.isNotBlank() } ?: return
+        val command = pane.currentCommand
+        val input = cwd to command
+        if (paneAgentInputs[pane.paneId] == input && paneAgentJobs[pane.paneId]?.isActive == true) return
+        paneAgentJobs.remove(pane.paneId)?.cancel()
+        paneAgentInputs[pane.paneId] = input
+        paneAgentJobs[pane.paneId] = bridgeScope.launch {
+            val detection = runCatching {
+                agentRepository.detect(session, cwd, processHints = listOf(command))
+            }.getOrNull() ?: return@launch
+            startAgentConversationForPane(session, pane.paneId, detection)
+        }
+    }
+
+    private suspend fun startAgentConversationForPane(
+        session: SshSession,
+        paneId: String,
+        detection: AgentDetection,
+    ) {
+        val lineCount = runCatching { agentRepository.lineCount(session, detection) }.getOrDefault(0L)
+        val initialEvents = runCatching {
+            agentRepository.readInitialEvents(session, detection)
+        }.getOrDefault(emptyList())
+        setAgentConversation(
+            paneId,
+            AgentConversationUiState(
+                detection = detection,
+                events = boundedDistinctEvents(initialEvents),
+                selectedTab = SessionTab.Terminal,
+                hintVisible = true,
+            ),
+        )
+        val followJob = if (detection.agent == AgentKind.OpenCode) {
+            bridgeScope.launch {
+                while (true) {
+                    kotlinx.coroutines.delay(5_000)
+                    val events = runCatching {
+                        agentRepository.pollOpenCodeEvents(session, detection)
+                    }.getOrDefault(emptyList())
+                    appendAgentEvents(paneId, events)
+                }
+            }
+        } else {
+            agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
+                appendAgentEvents(paneId, listOf(event))
+            }
+        }
+        if (followJob != null) {
+            paneAgentJobs[paneId] = followJob
+        }
+    }
+
+    public fun selectSessionTab(paneId: String, tab: SessionTab) {
+        val current = _agentConversations.value[paneId] ?: return
+        if (tab == SessionTab.Conversation && current.detection == null) return
+        setAgentConversation(paneId, current.copy(selectedTab = tab, hintVisible = false))
+    }
+
+    public fun dismissAgentHint(paneId: String) {
+        val current = _agentConversations.value[paneId] ?: return
+        setAgentConversation(paneId, current.copy(hintVisible = false))
+    }
+
+    private fun appendAgentEvents(paneId: String, events: List<ConversationEvent>) {
+        if (events.isEmpty()) return
+        val current = _agentConversations.value[paneId] ?: return
+        setAgentConversation(paneId, current.copy(events = boundedDistinctEvents(current.events + events)))
+    }
+
+    private fun setAgentConversation(paneId: String, state: AgentConversationUiState) {
+        _agentConversations.value = _agentConversations.value + (paneId to state)
     }
 
     /**
@@ -552,6 +659,12 @@ public class TmuxSessionViewModel @Inject constructor(
         for ((_, job) in paneProducerJobs) {
             job.cancel()
         }
+        for ((_, job) in paneAgentJobs) {
+            job.cancel()
+        }
+        paneAgentJobs.clear()
+        paneAgentInputs.clear()
+        _agentConversations.value = emptyMap()
         paneProducerJobs.clear()
         for ((_, row) in paneRows) {
             runCatching { row.terminalState.detachExternalProducer() }
@@ -569,7 +682,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Parse one row from `list-panes -a -F ...` output into a
+     * Parse one row from `list-panes -F ...` output into a
      * [ParsedPane]. Returns null if the row is malformed — we tolerate a
      * trailing blank line or a tmux version that surfaces fewer fields
      * than the format string requested.
@@ -580,14 +693,19 @@ public class TmuxSessionViewModel @Inject constructor(
         val paneId = parts[0].takeIf { it.startsWith("%") } ?: return null
         val windowId = parts[1].takeIf { it.startsWith("@") } ?: return null
         val sessionId = parts[2].takeIf { it.startsWith("$") } ?: return null
-        val title = parts[3]
-        val paneIndex = parts[4].trim().toIntOrNull() ?: 0
+        val hasSessionName = parts.size >= 6
+        val sessionName = if (hasSessionName) parts[3] else ""
+        val title = if (hasSessionName) parts[4] else parts[3]
+        val paneIndex = parts[if (hasSessionName) 5 else 4].trim().toIntOrNull() ?: 0
         return ParsedPane(
             paneId = paneId,
             windowId = windowId,
             sessionId = sessionId,
             title = title,
             paneIndex = paneIndex,
+            cwd = parts.getOrNull(if (hasSessionName) 6 else 5).orEmpty(),
+            currentCommand = parts.getOrNull(if (hasSessionName) 7 else 6).orEmpty(),
+            sessionName = sessionName,
         )
     }
 
@@ -602,6 +720,9 @@ public class TmuxSessionViewModel @Inject constructor(
         val sessionId: String,
         val title: String,
         val paneIndex: Int,
+        val cwd: String = "",
+        val currentCommand: String = "",
+        val sessionName: String = "",
     )
 
     private data class ConnectionTarget(
@@ -624,3 +745,18 @@ public class TmuxSessionViewModel @Inject constructor(
         public data class Failed(val message: String) : ConnectionStatus
     }
 }
+
+private fun boundedDistinctEvents(events: List<ConversationEvent>): List<ConversationEvent> {
+    val byId = LinkedHashMap<String, ConversationEvent>()
+    for (event in events.takeLast(MaxAgentEvents * 2)) {
+        byId[event.id] = event
+    }
+    val distinct = byId.values.toList()
+    return if (distinct.size <= MaxAgentEvents) {
+        distinct
+    } else {
+        distinct.subList(distinct.size - MaxAgentEvents, distinct.size)
+    }
+}
+
+private const val MaxAgentEvents: Int = 500

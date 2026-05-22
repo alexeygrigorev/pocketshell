@@ -11,7 +11,7 @@ Conceptual planning is complete. Implementation in progress, tracked as GitHub i
 - [docs/roadmap.md](docs/roadmap.md) — phased build (0–4) with sizing
 - [docs/decisions.md](docs/decisions.md) — locked design decisions, open questions, rejected alternatives
 - [docs/input-methods.md](docs/input-methods.md) — voice (Whisper) + key bar + snippets
-- [docs/agent-awareness.md](docs/agent-awareness.md) — Claude Code / Codex / OpenCode detection + conversation view
+- [docs/agent-awareness.md](docs/agent-awareness.md) — Claude Code runtime detection + Codex/OpenCode parser status + conversation view
 - [docs/usage-panel.md](docs/usage-panel.md) — provider quota via server-side `heru`
 - [docs/testing.md](docs/testing.md) — Android emulator + Docker remote-server test environment
 - [docs/mockups/index.html](docs/mockups/index.html) — Pixel 7 mockups (open in a browser; serve at `python3 -m http.server --directory docs/mockups`)
@@ -25,6 +25,6 @@ https://github.com/alexeygrigorev/pocketshell/milestones — phase progress.
 
 Work is delegated to sub-agents via the `Agent` tool. The orchestrator (this main thread) plans, briefs, parallelises, verifies, and merges. Sub-agents do focused implementation work for one issue at a time and never see the orchestrator's conversation.
 
-The full process — briefing, parallelisation rules, verification checklist, QA against emulator + Docker — is below.
+The full process — implementer/reviewer loop, briefing, parallelisation rules, verification checklist, QA against emulator + Docker — lives in [process.md](process.md). Agent role pointers live in [agents.md](agents.md).
 
-@agents.md
+@process.md

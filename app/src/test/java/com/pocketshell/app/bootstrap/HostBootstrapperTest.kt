@@ -237,6 +237,167 @@ class HostBootstrapperTest {
         assertNull((result as InstallResult.UnsupportedOs).osId)
     }
 
+    @Test
+    fun checkServerSetup_reportsReady_whenToolsAndDaemonArePresent() = runTest {
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
+                pathAware("command -v 'heru'") to ExecResult("/home/u/.local/bin/heru\n", "", 0),
+                pathAware("command -v 'agent-log-explorer'") to ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0),
+                pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
+                pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
+                "systemctl --user is-active tmuxctl-jobs.service" to ExecResult("active\n", "", 0),
+                "systemctl --user is-enabled tmuxctl-jobs.service" to ExecResult("enabled\n", "", 0),
+            ),
+        )
+
+        val report = bootstrapper.checkServerSetup(session)
+
+        assertTrue(report.isReady)
+        assertEquals(PythonToolInstaller.Uv, report.installer)
+        assertTrue(report.daemon is TmuxctlDaemonStatus.Running)
+    }
+
+    @Test
+    fun checkServerSetup_prefersUvButFallsBackToPipx() = runTest {
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'tmuxctl'") to ExecResult("", "", 1),
+                pathAware("command -v 'heru'") to ExecResult("", "", 1),
+                pathAware("command -v 'agent-log-explorer'") to ExecResult("", "", 1),
+                pathAware("command -v 'uv'") to ExecResult("", "", 1),
+                pathAware("command -v 'pipx'") to ExecResult("/usr/bin/pipx\n", "", 0),
+            ),
+        )
+
+        val report = bootstrapper.checkServerSetup(session)
+
+        assertEquals(PythonToolInstaller.Pipx, report.installer)
+        assertEquals(BootstrapTool.entries, report.missingTools)
+        assertTrue(report.daemon is TmuxctlDaemonStatus.Missing)
+    }
+
+    @Test
+    fun installServerSetup_usesUvToolForMissingTools_thenInstallsSystemdUserUnit() = runTest {
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'tmuxctl'") to ExecResult("", "", 1),
+                pathAware("command -v 'heru'") to ExecResult("", "", 1),
+                pathAware("command -v 'agent-log-explorer'") to ExecResult("", "", 1),
+                pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
+                pathAware("uv tool install tmuxctl") to ExecResult("installed tmuxctl\n", "", 0),
+                pathAware("uv tool install heru") to ExecResult("installed heru\n", "", 0),
+                pathAware("uv tool install agent-log-explorer") to ExecResult("installed agent-log-explorer\n", "", 0),
+            ),
+            dynamic = { command ->
+                when (command) {
+                    pathAware("command -v 'tmuxctl'") -> ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0)
+                    pathAware("command -v 'heru'") -> ExecResult("/home/u/.local/bin/heru\n", "", 0)
+                    pathAware("command -v 'agent-log-explorer'") -> ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0)
+                    pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
+                    "systemctl --user is-active tmuxctl-jobs.service" -> ExecResult("inactive\n", "", 3)
+                    "systemctl --user is-enabled tmuxctl-jobs.service" -> ExecResult("disabled\n", "", 1)
+                    else -> if (command.contains("systemctl --user enable --now tmuxctl-jobs.service")) {
+                        ExecResult("", "", 0)
+                    } else {
+                        null
+                    }
+                }
+            },
+        )
+        val report = HostBootstrapReport(
+            tools = BootstrapTool.entries.associateWith { ToolStatus.Missing },
+            installer = PythonToolInstaller.Uv,
+            daemon = TmuxctlDaemonStatus.Missing,
+        )
+
+        val result = bootstrapper.installServerSetup(session, report)
+
+        assertEquals(InstallResult.Success, result)
+        assertTrue(session.recorded.contains(pathAware("uv tool install tmuxctl")))
+        assertTrue(session.recorded.contains(pathAware("uv tool install heru")))
+        assertTrue(session.recorded.contains(pathAware("uv tool install agent-log-explorer")))
+        assertTrue(session.recorded.any { it.contains("ExecStart=\"/home/u/.local/bin/tmuxctl\" jobs daemon") })
+        assertTrue(session.recorded.any { it.contains("systemctl --user enable --now tmuxctl-jobs.service") })
+    }
+
+    @Test
+    fun installServerTool_usesPipxWithPathAwareLookup() = runTest {
+        val session = FakeSshSession(
+            mapOf(pathAware("pipx install heru") to ExecResult("installed heru\n", "", 0)),
+        )
+
+        val result = bootstrapper.installServerTool(session, PythonToolInstaller.Pipx, BootstrapTool.Heru)
+
+        assertEquals(InstallResult.Success, result)
+        assertEquals(listOf(pathAware("pipx install heru")), session.recorded)
+    }
+
+    @Test
+    fun checkServerSetup_reportsUnavailable_whenSystemdUserBusIsUnavailable() = runTest {
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
+                pathAware("command -v 'heru'") to ExecResult("/home/u/.local/bin/heru\n", "", 0),
+                pathAware("command -v 'agent-log-explorer'") to ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0),
+                pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
+                pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
+                "systemctl --user is-active tmuxctl-jobs.service" to
+                    ExecResult("", "Failed to connect to bus: No medium found\n", 1),
+            ),
+        )
+
+        val report = bootstrapper.checkServerSetup(session)
+
+        assertTrue(report.daemon is TmuxctlDaemonStatus.Unavailable)
+        assertTrue((report.daemon as TmuxctlDaemonStatus.Unavailable).reason.contains("No medium"))
+    }
+
+    @Test
+    fun installServerSetup_enablesDaemon_whenRunningButDisabled() = runTest {
+        val session = FakeSshSession(
+            dynamic = { command ->
+                when (command) {
+                    pathAware("command -v 'tmuxctl'") -> ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0)
+                    pathAware("command -v 'heru'") -> ExecResult("/home/u/.local/bin/heru\n", "", 0)
+                    pathAware("command -v 'agent-log-explorer'") -> ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0)
+                    pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
+                    pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
+                    "systemctl --user is-active tmuxctl-jobs.service" -> ExecResult("active\n", "", 0)
+                    "systemctl --user is-enabled tmuxctl-jobs.service" -> ExecResult("disabled\n", "", 1)
+                    else -> if (command.contains("systemctl --user enable --now tmuxctl-jobs.service")) {
+                        ExecResult("", "", 0)
+                    } else {
+                        null
+                    }
+                }
+            },
+        )
+        val report = HostBootstrapReport(
+            tools = BootstrapTool.entries.associateWith { ToolStatus.Installed("/home/u/.local/bin/${it.binaryName}") },
+            installer = PythonToolInstaller.Uv,
+            daemon = TmuxctlDaemonStatus.Running(enabled = false),
+        )
+
+        val result = bootstrapper.installServerSetup(session, report)
+
+        assertEquals(InstallResult.Success, result)
+        assertTrue(session.recorded.any { it.contains("systemctl --user enable --now tmuxctl-jobs.service") })
+    }
+
+    @Test
+    fun installServerSetup_failsWhenPythonToolInstallerIsMissing() = runTest {
+        val report = HostBootstrapReport(
+            tools = BootstrapTool.entries.associateWith { ToolStatus.Missing },
+            installer = null,
+            daemon = TmuxctlDaemonStatus.Missing,
+        )
+        val result = bootstrapper.installServerSetup(FakeSshSession(), report)
+
+        assertTrue(result is InstallResult.Error)
+        assertTrue((result as InstallResult.Error).reason.contains("uv or pipx"))
+    }
+
     /**
      * Test-only fake. Records commands and returns canned results. Throws
      * for transport-failure tests when `throwOnExec` is non-null.
@@ -244,6 +405,7 @@ class HostBootstrapperTest {
     private class FakeSshSession(
         private val canned: Map<String, ExecResult> = emptyMap(),
         private val throwOnExec: Throwable? = null,
+        private val dynamic: ((String) -> ExecResult?)? = null,
     ) : SshSession {
         val recorded: MutableList<String> = mutableListOf()
 
@@ -252,7 +414,9 @@ class HostBootstrapperTest {
         override suspend fun exec(command: String): ExecResult {
             recorded += command
             throwOnExec?.let { throw it }
-            return canned[command] ?: ExecResult("", "command not stubbed: $command", 127)
+            return dynamic?.invoke(command)
+                ?: canned[command]
+                ?: ExecResult("", "command not stubbed: $command", 127)
         }
 
         override fun tail(path: String, onLine: (String) -> Unit): Job =
@@ -268,4 +432,7 @@ class HostBootstrapperTest {
 
         override fun close() = Unit
     }
+
+    private fun pathAware(command: String): String =
+        "PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH\"; $command"
 }

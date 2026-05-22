@@ -54,7 +54,10 @@ import com.pocketshell.uikit.theme.PocketShellColors
  *   chooses to retry by reconnecting).
  */
 public sealed interface HostBootstrapSheetState {
-    public data object Prompt : HostBootstrapSheetState
+    public data class Prompt(
+        val needsTmux: Boolean = false,
+        val report: HostBootstrapReport? = null,
+    ) : HostBootstrapSheetState
     public data object Installing : HostBootstrapSheetState
     public data object Success : HostBootstrapSheetState
     public data class Failed(val message: String) : HostBootstrapSheetState
@@ -87,6 +90,8 @@ public fun HostBootstrapSheet(
     state: HostBootstrapSheetState,
     hostName: String,
     onInstall: () -> Unit,
+    onInstallTool: (BootstrapTool) -> Unit = { onInstall() },
+    onSetupDaemon: () -> Unit = onInstall,
     onSkip: () -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
@@ -100,9 +105,12 @@ public fun HostBootstrapSheet(
         modifier = modifier,
     ) {
         when (state) {
-            HostBootstrapSheetState.Prompt -> PromptContent(
+            is HostBootstrapSheetState.Prompt -> PromptContent(
                 hostName = hostName,
+                state = state,
                 onInstall = onInstall,
+                onInstallTool = onInstallTool,
+                onSetupDaemon = onSetupDaemon,
                 onSkip = onSkip,
             )
 
@@ -125,28 +133,116 @@ public fun HostBootstrapSheet(
 @Composable
 private fun PromptContent(
     hostName: String,
+    state: HostBootstrapSheetState.Prompt,
     onInstall: () -> Unit,
+    onInstallTool: (BootstrapTool) -> Unit,
+    onSetupDaemon: () -> Unit,
     onSkip: () -> Unit,
 ) {
     SheetColumn {
-        SheetTitle(text = "tmux is not installed")
-        SheetSubtitle(text = "$hostName · install tmux now? PocketShell needs it for sessions, windows, and panes.")
+        SheetTitle(text = "Host setup needed")
+        SheetSubtitle(text = "$hostName · ${bootstrapPromptText(state)}")
+        SetupActions(
+            state = state,
+            onInstallTool = onInstallTool,
+            onSetupDaemon = onSetupDaemon,
+        )
         Spacer(modifier = Modifier.height(20.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             SecondaryButton(label = "Skip", onClick = onSkip, modifier = Modifier.weight(1f))
-            PrimaryButton(label = "Install", onClick = onInstall, modifier = Modifier.weight(1f))
+            PrimaryButton(label = "Install all", onClick = onInstall, modifier = Modifier.weight(1f))
         }
+    }
+}
+
+@Composable
+private fun SetupActions(
+    state: HostBootstrapSheetState.Prompt,
+    onInstallTool: (BootstrapTool) -> Unit,
+    onSetupDaemon: () -> Unit,
+) {
+    val report = state.report ?: return
+    val missingTools = report.missingTools
+    val needsDaemon = report.daemon !is TmuxctlDaemonStatus.Running ||
+        (report.daemon as? TmuxctlDaemonStatus.Running)?.enabled != true
+    if (missingTools.isEmpty() && !needsDaemon) return
+
+    Spacer(modifier = Modifier.height(16.dp))
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        missingTools.forEach { tool ->
+            SetupActionRow(
+                title = tool.binaryName,
+                detail = installCommand(report.installer, tool),
+                actionLabel = "Install",
+                onClick = { onInstallTool(tool) },
+            )
+        }
+        if (needsDaemon) {
+            when (val daemon = report.daemon) {
+                is TmuxctlDaemonStatus.Unavailable -> SetupInfoRow(
+                    title = "tmuxctl jobs daemon",
+                    detail = daemon.reason,
+                )
+
+                else -> SetupActionRow(
+                    title = "tmuxctl jobs daemon",
+                    detail = "systemctl --user enable --now tmuxctl-jobs.service",
+                    actionLabel = "Enable",
+                    onClick = onSetupDaemon,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SetupActionRow(
+    title: String,
+    detail: String,
+    actionLabel: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
+            .border(1.dp, PocketShellColors.Border, RoundedCornerShape(8.dp))
+            .padding(10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(text = title, color = PocketShellColors.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(modifier = Modifier.height(3.dp))
+            Text(text = detail, color = PocketShellColors.TextSecondary, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+        }
+        SecondaryButton(label = actionLabel, onClick = onClick)
+    }
+}
+
+@Composable
+private fun SetupInfoRow(title: String, detail: String) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
+            .border(1.dp, PocketShellColors.Border, RoundedCornerShape(8.dp))
+            .padding(10.dp),
+    ) {
+        Text(text = title, color = PocketShellColors.Text, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(modifier = Modifier.height(3.dp))
+        Text(text = detail, color = PocketShellColors.TextSecondary, fontSize = 11.sp)
     }
 }
 
 @Composable
 private fun InstallingContent(hostName: String) {
     SheetColumn {
-        SheetTitle(text = "Installing tmux…")
-        SheetSubtitle(text = "$hostName · running the package manager. This can take a few seconds on a fresh host.")
+        SheetTitle(text = "Setting up host…")
+        SheetSubtitle(text = "$hostName · running installer and systemd commands. This can take a few seconds on a fresh host.")
         Spacer(modifier = Modifier.height(20.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -170,8 +266,8 @@ private fun InstallingContent(hostName: String) {
 @Composable
 private fun SuccessContent(hostName: String, onContinue: () -> Unit) {
     SheetColumn {
-        SheetTitle(text = "tmux installed")
-        SheetSubtitle(text = "$hostName · ready for sessions. PocketShell will skip this check for 24 hours.")
+        SheetTitle(text = "Host ready")
+        SheetSubtitle(text = "$hostName · server tools are installed and the tmuxctl user daemon is enabled.")
         Spacer(modifier = Modifier.height(20.dp))
         Row(modifier = Modifier.fillMaxWidth()) {
             Spacer(modifier = Modifier.weight(1f))
@@ -217,6 +313,37 @@ private fun FailedContent(hostName: String, message: String, onClose: () -> Unit
             SecondaryButton(label = "Close", onClick = onClose)
         }
     }
+}
+
+private fun bootstrapPromptText(state: HostBootstrapSheetState.Prompt): String {
+    val parts = mutableListOf<String>()
+    if (state.needsTmux) {
+        parts += "tmux"
+    }
+    val report = state.report
+    report?.missingTools
+        ?.mapTo(parts) { it.binaryName }
+    if (report?.daemon !is TmuxctlDaemonStatus.Running) {
+        parts += "tmuxctl jobs daemon"
+    }
+
+    val missing = parts.distinct().joinToString()
+    val installer = when (report?.installer) {
+        PythonToolInstaller.Uv -> "uv tool"
+        PythonToolInstaller.Pipx -> "pipx"
+        null -> "uv tool or pipx"
+    }
+    return if (missing.isBlank()) {
+        "finish server-side setup now?"
+    } else {
+        "install or enable $missing now? PocketShell uses $installer for Python tools."
+    }
+}
+
+private fun installCommand(installer: PythonToolInstaller?, tool: BootstrapTool): String = when (installer) {
+    PythonToolInstaller.Uv -> "uv tool install ${tool.packageName}"
+    PythonToolInstaller.Pipx -> "pipx install ${tool.packageName}"
+    null -> "uv tool install ${tool.packageName} or pipx install ${tool.packageName}"
 }
 
 @Composable

@@ -41,6 +41,7 @@ sealed interface AppDestination {
      */
     data class Session(
         val hostId: Long,
+        val hostName: String,
         val hostname: String,
         val port: Int,
         val username: String,
@@ -80,6 +81,16 @@ sealed interface AppDestination {
      */
     data class TmuxSession(
         val hostId: Long,
+        val hostName: String,
+        val hostname: String,
+        val port: Int,
+        val username: String,
+        val keyPath: String,
+        val sessionName: String,
+    ) : AppDestination
+
+    /** Per-session recurring jobs backed by the host's `tmuxctl jobs` CLI. */
+    data class RecurringJobs(
         val hostName: String,
         val hostname: String,
         val port: Int,

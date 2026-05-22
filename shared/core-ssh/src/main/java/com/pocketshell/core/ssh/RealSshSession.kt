@@ -5,6 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -54,24 +55,38 @@ internal class RealSshSession(
         }
     }
 
-    override fun tail(path: String, onLine: (String) -> Unit): Job {
+    override fun tail(path: String, onLine: (String) -> Unit): Job =
+        tail(path, fromLineExclusive = -1, onLine = onLine)
+
+    override fun tail(path: String, fromLineExclusive: Long, onLine: (String) -> Unit): Job {
         ensureConnected()
         // Each tail owns its own exec channel — running `tail -F` keeps the
         // channel open for the lifetime of the job. Cancelling the job
         // closes the channel via `Command.close()` which signals the remote
         // tail to exit.
         return scope.launch {
+            val coroutineJob = currentCoroutineContext()[Job]
             val sessionChannel = try {
                 client.startSession()
             } catch (t: Throwable) {
                 throw SshException("Failed to start tail session for `$path`: ${t.message}", t)
             }
+            var cmd: Command? = null
+            val cancelHandle = coroutineJob?.invokeOnCompletion {
+                runCatching { cmd?.close() }
+                runCatching { sessionChannel.close() }
+            }
             try {
                 // -F follows by name, surviving rotation. Quote the path so
                 // weird filenames don't break the shell parsing.
                 val quoted = path.replace("'", "'\\''")
-                val cmd = sessionChannel.exec("tail -F -n 0 '$quoted'")
-                BufferedReader(InputStreamReader(cmd.inputStream, Charsets.UTF_8)).use { reader ->
+                val lineArg = if (fromLineExclusive >= 0) {
+                    "-n +${fromLineExclusive + 1}"
+                } else {
+                    "-n 0"
+                }
+                cmd = sessionChannel.exec("tail -F $lineArg '$quoted'")
+                BufferedReader(InputStreamReader(cmd!!.inputStream, Charsets.UTF_8)).use { reader ->
                     while (isActive) {
                         val line = reader.readLine() ?: break
                         onLine(line)
@@ -81,6 +96,8 @@ internal class RealSshSession(
                     }
                 }
             } finally {
+                cancelHandle?.dispose()
+                runCatching { cmd?.close() }
                 runCatching { sessionChannel.close() }
             }
         }

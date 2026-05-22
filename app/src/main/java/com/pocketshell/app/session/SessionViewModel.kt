@@ -12,6 +12,8 @@ import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.agents.AgentDetection
+import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.uikit.model.KeyModifierState
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -114,10 +116,22 @@ public class SessionViewModel @Inject constructor(
     /** Sticky state for active modifiers, mirrored from the ui-kit key bar. */
     public val modifierStates: StateFlow<Map<Modifier, KeyModifierState>> = _modifierStates.asStateFlow()
 
+    private val agentRepository: AgentConversationRepository = AgentConversationRepository()
+
+    private val _agentConversation: MutableStateFlow<AgentConversationUiState> =
+        MutableStateFlow(AgentConversationUiState())
+
+    public val agentConversation: StateFlow<AgentConversationUiState> =
+        _agentConversation.asStateFlow()
+
+    private val dismissedAgentHints: MutableSet<String> = mutableSetOf()
+
     private var sessionRef: SshSession? = null
     private var shellRef: SshShellHandle? = null
     private var producerJob: Job? = null
     private var connectJob: Job? = null
+    private var agentDetectJob: Job? = null
+    private var agentTailJob: Job? = null
 
     /**
      * Connect to the given host (idempotent — re-calling with the same
@@ -185,10 +199,97 @@ public class SessionViewModel @Inject constructor(
             handle.shell.outputStream.flush()
 
             _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+            startAgentDetection(session)
         } catch (t: Throwable) {
             _connectionStatus.value =
                 ConnectionStatus.Failed("error: ${t.javaClass.simpleName}: ${t.message}")
         }
+    }
+
+    private fun startAgentDetection(session: SshSession) {
+        agentDetectJob?.cancel()
+        agentTailJob?.cancel()
+        _agentConversation.value = AgentConversationUiState()
+        agentDetectJob = viewModelScope.launch {
+            val detection = runCatching { agentRepository.detect(session) }.getOrNull() ?: return@launch
+            startAgentConversation(session, detection)
+        }
+    }
+
+    internal fun startAgentConversationForTest(
+        detection: AgentDetection,
+        initialEvents: List<ConversationEvent>,
+    ) {
+        _agentConversation.value = AgentConversationUiState(
+            detection = detection,
+            events = boundedDistinctEvents(initialEvents),
+            selectedTab = SessionTab.Terminal,
+            hintVisible = true,
+        )
+    }
+
+    private suspend fun startAgentConversation(
+        session: SshSession,
+        detection: AgentDetection,
+    ) {
+            val hintKey = detection.sessionId ?: detection.sourcePath
+            val lineCount = runCatching { agentRepository.lineCount(session, detection) }.getOrDefault(0L)
+            val initialEvents = runCatching {
+                agentRepository.readInitialEvents(session, detection)
+            }.getOrDefault(emptyList())
+            _agentConversation.value = AgentConversationUiState(
+                detection = detection,
+                events = boundedDistinctEvents(initialEvents),
+                selectedTab = SessionTab.Terminal,
+                hintVisible = hintKey !in dismissedAgentHints,
+            )
+            agentTailJob = if (detection.agent == com.pocketshell.core.agents.AgentKind.OpenCode) {
+                viewModelScope.launch {
+                    while (true) {
+                        kotlinx.coroutines.delay(5_000)
+                        val events = runCatching {
+                            agentRepository.pollOpenCodeEvents(session, detection)
+                        }.getOrDefault(emptyList())
+                        if (events.isNotEmpty()) appendAgentEvents(events)
+                    }
+                }
+            } else {
+                agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
+                    appendAgentEvents(listOf(event))
+                }
+            }
+    }
+
+    private fun appendAgentEvents(events: List<ConversationEvent>) {
+        if (events.isEmpty()) return
+        val current = _agentConversation.value
+        _agentConversation.value = current.copy(events = boundedDistinctEvents(current.events + events))
+    }
+
+    private fun boundedDistinctEvents(events: List<ConversationEvent>): List<ConversationEvent> {
+        val byId = LinkedHashMap<String, ConversationEvent>()
+        for (event in events.takeLast(MaxAgentEvents * 2)) {
+            byId[event.id] = event
+        }
+        val distinct = byId.values.toList()
+        return if (distinct.size <= MaxAgentEvents) {
+            distinct
+        } else {
+            distinct.subList(distinct.size - MaxAgentEvents, distinct.size)
+        }
+    }
+
+    public fun selectSessionTab(tab: SessionTab) {
+        val current = _agentConversation.value
+        if (tab == SessionTab.Conversation && current.detection == null) return
+        _agentConversation.value = current.copy(selectedTab = tab, hintVisible = false)
+    }
+
+    public fun dismissAgentHint() {
+        val current = _agentConversation.value
+        val detection = current.detection ?: return
+        dismissedAgentHints += detection.sessionId ?: detection.sourcePath
+        _agentConversation.value = current.copy(hintVisible = false)
     }
 
     /**
@@ -378,6 +479,8 @@ public class SessionViewModel @Inject constructor(
     }
 
     override fun onCleared() {
+        agentDetectJob?.cancel()
+        agentTailJob?.cancel()
         producerJob?.cancel()
         terminalState.detachExternalProducer()
         runCatching { shellRef?.shell?.close() }
@@ -407,6 +510,17 @@ public class SessionViewModel @Inject constructor(
         public data class Failed(val message: String) : ConnectionStatus
     }
 }
+
+public enum class SessionTab { Terminal, Conversation }
+
+public data class AgentConversationUiState(
+    val detection: AgentDetection? = null,
+    val events: List<ConversationEvent> = emptyList(),
+    val selectedTab: SessionTab = SessionTab.Terminal,
+    val hintVisible: Boolean = false,
+)
+
+private const val MaxAgentEvents: Int = 500
 
 /**
  * Default host parameters for the Phase 1 hardcoded landing — same values

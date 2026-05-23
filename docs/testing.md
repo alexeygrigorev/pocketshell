@@ -273,7 +273,8 @@ docker compose -f tests/docker/docker-compose.yml up -d --build \
   bootstrap-uv-install \
   bootstrap-unsupported \
   bootstrap-daemon-disabled \
-  bootstrap-user-local-path
+  bootstrap-user-local-path \
+  bootstrap-fish-user-local-path
 ```
 
 Run the whole opt-in suite on an already-running emulator:
@@ -301,6 +302,7 @@ Scenario-to-service mapping:
 | `unsupported` | `bootstrap-unsupported` | `2232` |
 | `daemon-disabled` | `bootstrap-daemon-disabled` | `2233` |
 | `user-local-path` | `bootstrap-user-local-path` | `2234` |
+| `fish-user-local-path` | `bootstrap-fish-user-local-path` | `2235` |
 
 Cleanup:
 

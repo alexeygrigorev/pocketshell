@@ -23,12 +23,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 
@@ -125,6 +127,8 @@ public class TmuxSessionViewModel @Inject constructor(
     private val agentRepository: AgentConversationRepository = AgentConversationRepository()
     private val paneAgentJobs: MutableMap<String, Job> = ConcurrentHashMap()
     private val paneAgentInputs: MutableMap<String, Pair<String, String>> = ConcurrentHashMap()
+    private val paneInputChannels: MutableMap<String, Channel<ByteArray>> = ConcurrentHashMap()
+    private val paneInputJobs: MutableMap<String, Job> = ConcurrentHashMap()
 
     // Bridge scope: a child of viewModelScope (parented via the
     // viewModelScope's Job) but with its own SupervisorJob so that a
@@ -398,12 +402,9 @@ public class TmuxSessionViewModel @Inject constructor(
                     val job = state.attachExternalProducer(
                         scope = bridgeScope,
                         stdout = client.outputFor(p.paneId).map { it.data },
-                        // No remote stdin here — user keystrokes route
-                        // back to tmux via `send-keys -t %N <bytes>`
-                        // from [writeInputToPane], not via a per-pane PTY
-                        // stream. tmux -CC does not surface a writable
-                        // per-pane fd to the client at all.
-                        remoteStdin = null,
+                        // tmux -CC has no per-pane PTY fd, so the terminal's
+                        // input queue is bridged to tmux `send-keys`.
+                        remoteStdin = inputSinkForPane(p.paneId),
                     )
                     paneProducerJobs[p.paneId] = job
                 }
@@ -429,6 +430,8 @@ public class TmuxSessionViewModel @Inject constructor(
             paneProducerJobs.remove(paneId)?.cancel()
             paneAgentJobs.remove(paneId)?.cancel()
             paneAgentInputs.remove(paneId)
+            paneInputJobs.remove(paneId)?.cancel()
+            paneInputChannels.remove(paneId)?.close()
             paneRows[paneId]?.terminalState?.detachExternalProducer()
             paneRows.remove(paneId)
         }
@@ -531,13 +534,93 @@ public class TmuxSessionViewModel @Inject constructor(
     public fun writeInputToPane(paneId: String, bytes: ByteArray) {
         if (bytes.isEmpty()) return
         val client = clientRef ?: return
-        val literal = String(bytes, Charsets.UTF_8)
-        val escaped = escapeSingleQuoted(literal)
         bridgeScope.launch {
             runCatching {
-                client.sendCommand("send-keys -t $paneId '$escaped'")
+                sendInputBytesToPane(client, paneId, bytes)
             }
         }
+    }
+
+    private fun inputSinkForPane(paneId: String): OutputStream {
+        val channel = paneInputChannels.getOrPut(paneId) {
+            Channel<ByteArray>(Channel.UNLIMITED).also { newChannel ->
+                paneInputJobs[paneId] = bridgeScope.launch {
+                    for (bytes in newChannel) {
+                        val client = clientRef ?: continue
+                        runCatching { sendInputBytesToPane(client, paneId, bytes) }
+                    }
+                }
+            }
+        }
+        return TmuxPaneInputStream(channel)
+    }
+
+    private suspend fun sendInputBytesToPane(
+        client: TmuxClient,
+        paneId: String,
+        bytes: ByteArray,
+    ) {
+        for (token in inputTokens(bytes)) {
+            when (token) {
+                is TmuxInputToken.Literal -> {
+                    if (token.text.isNotEmpty()) {
+                        client.sendCommand("send-keys -l -t $paneId '${escapeSingleQuoted(token.text)}'")
+                    }
+                }
+                is TmuxInputToken.NamedKey -> {
+                    client.sendCommand("send-keys -t $paneId ${token.name}")
+                }
+            }
+        }
+    }
+
+    private fun inputTokens(bytes: ByteArray): List<TmuxInputToken> {
+        val text = String(bytes, Charsets.UTF_8)
+        val tokens = mutableListOf<TmuxInputToken>()
+        val literal = StringBuilder()
+
+        fun flushLiteral() {
+            if (literal.isNotEmpty()) {
+                tokens += TmuxInputToken.Literal(literal.toString())
+                literal.clear()
+            }
+        }
+
+        var index = 0
+        while (index < text.length) {
+            val ch = text[index]
+            when (ch) {
+                '\r', '\n' -> {
+                    flushLiteral()
+                    tokens += TmuxInputToken.NamedKey("Enter")
+                    if (ch == '\r' && text.getOrNull(index + 1) == '\n') index += 1
+                }
+                '\t' -> {
+                    flushLiteral()
+                    tokens += TmuxInputToken.NamedKey("Tab")
+                }
+                '\b', '\u007f' -> {
+                    flushLiteral()
+                    tokens += TmuxInputToken.NamedKey("BSpace")
+                }
+                '\u001b' -> {
+                    flushLiteral()
+                    val mapped = when {
+                        text.startsWith("\u001b[A", index) -> "Up" to 2
+                        text.startsWith("\u001b[B", index) -> "Down" to 2
+                        text.startsWith("\u001b[C", index) -> "Right" to 2
+                        text.startsWith("\u001b[D", index) -> "Left" to 2
+                        else -> "Escape" to 0
+                    }
+                    tokens += TmuxInputToken.NamedKey(mapped.first)
+                    index += mapped.second
+                }
+                else -> literal.append(ch)
+            }
+            index += 1
+        }
+        flushLiteral()
+        return tokens
     }
 
     /**
@@ -664,8 +747,16 @@ public class TmuxSessionViewModel @Inject constructor(
         for ((_, job) in paneAgentJobs) {
             job.cancel()
         }
+        for ((_, job) in paneInputJobs) {
+            job.cancel()
+        }
+        for ((_, channel) in paneInputChannels) {
+            channel.close()
+        }
         paneAgentJobs.clear()
         paneAgentInputs.clear()
+        paneInputJobs.clear()
+        paneInputChannels.clear()
         _agentConversations.value = emptyMap()
         paneProducerJobs.clear()
         for ((_, row) in paneRows) {
@@ -737,6 +828,25 @@ public class TmuxSessionViewModel @Inject constructor(
         val passphrase: CharArray?,
         val sessionName: String,
     )
+
+    private sealed interface TmuxInputToken {
+        data class Literal(val text: String) : TmuxInputToken
+        data class NamedKey(val name: String) : TmuxInputToken
+    }
+
+    private class TmuxPaneInputStream(
+        private val channel: Channel<ByteArray>,
+    ) : OutputStream() {
+        override fun write(b: Int) {
+            write(byteArrayOf(b.toByte()))
+        }
+
+        override fun write(buffer: ByteArray, offset: Int, length: Int) {
+            if (length <= 0) return
+            val copy = buffer.copyOfRange(offset, offset + length)
+            channel.trySend(copy)
+        }
+    }
 
     /** Coarse-grained connection state. Mirrors `SessionViewModel.ConnectionStatus`. */
     public sealed interface ConnectionStatus {

@@ -15,6 +15,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.TestScope
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -397,11 +398,10 @@ class TmuxSessionViewModelTest {
         vm.writeInputToPane("%0", "ls\n".toByteArray(Charsets.UTF_8))
         advanceUntilIdle()
 
-        val cmd = client.sentCommands.singleOrNull { it.startsWith("send-keys") }
-        assertNotNull("expected one send-keys call, got ${client.sentCommands}", cmd)
-        // Pane ID + literal payload in single quotes.
-        assertTrue(cmd!!.contains("-t %0"))
-        assertTrue(cmd.contains("'ls\n'"))
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals(sent.toString(), 2, sent.size)
+        assertEquals("send-keys -l -t %0 'ls'", sent[0])
+        assertEquals("send-keys -t %0 Enter", sent[1])
     }
 
     @Test
@@ -418,8 +418,27 @@ class TmuxSessionViewModelTest {
         val cmd = client.sentCommands.single { it.startsWith("send-keys") }
         assertTrue(
             "expected POSIX-shell-style escape in $cmd",
-            cmd.contains("'it'\\''s'"),
+            cmd == "send-keys -l -t %2 'it'\\''s'",
         )
+    }
+
+    @Test
+    fun terminalStateInputRoutesThroughTmuxSendKeys() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+        )
+        advanceUntilIdle()
+
+        vm.panes.value.single().terminalState.writeInput("echo ok\r".toByteArray(Charsets.UTF_8))
+        waitForSentCommandCount(client, expectedCount = 2)
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals("send-keys -l -t %0 'echo ok'", sent[0])
+        assertEquals("send-keys -t %0 Enter", sent[1])
     }
 
     @Test
@@ -461,6 +480,21 @@ class TmuxSessionViewModelTest {
         assertTrue(sent[5].endsWith("Right"))
         // All addressed to the right pane.
         assertTrue(sent.all { it.contains("-t %0") })
+    }
+
+    private fun TestScope.waitForSentCommandCount(client: FakeTmuxClient, expectedCount: Int) {
+        repeat(100) {
+            advanceUntilIdle()
+            if (client.sentCommands.count { command -> command.startsWith("send-keys") } >= expectedCount) {
+                return
+            }
+            Thread.sleep(10)
+        }
+        advanceUntilIdle()
+        assertTrue(
+            "expected at least $expectedCount send-keys commands, got ${client.sentCommands}",
+            client.sentCommands.count { it.startsWith("send-keys") } >= expectedCount,
+        )
     }
 
     @Test

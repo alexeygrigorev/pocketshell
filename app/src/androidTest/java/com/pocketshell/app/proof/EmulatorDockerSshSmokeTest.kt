@@ -1,15 +1,18 @@
 package com.pocketshell.app.proof
 
+import android.graphics.Bitmap
+import android.graphics.Rect
+import android.os.SystemClock
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
-import androidx.compose.ui.test.hasSetTextAction
+import android.view.inputmethod.EditorInfo
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTextInput
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -38,6 +41,8 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.json.JSONArray
+import java.io.File
+import java.io.FileOutputStream
 
 /**
  * Connected Android smoke test for the emulator-to-host-Docker path.
@@ -174,9 +179,11 @@ class EmulatorDockerSshSmokeTest {
         val marker = "psdogfood${System.currentTimeMillis()}"
         val tmpDir = "/tmp/pocketshell-$marker"
         val sessionName = "pocketshell-$marker"
+        val existingTmuxSessionName = "claude-main"
         val shellReadyMarker = "shell-ready-$marker"
         val shellVisibleMarker = "shell-visible-$marker"
         val tmuxVisibleMarker = "tmux-visible-$marker"
+        val completedMarker = "issue78-complete-$marker"
 
         var hostRowTag = ""
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
@@ -224,6 +231,13 @@ class EmulatorDockerSshSmokeTest {
             setupCheck.isSuccess,
         )
         cleanupRemoteDogfoodArtifacts(key, tmpDir, sessionName)
+        prepareRemoteDogfoodScript(
+            key = key,
+            tmpDir = tmpDir,
+            shellVisibleMarker = shellVisibleMarker,
+            tmuxVisibleMarker = tmuxVisibleMarker,
+            completedMarker = completedMarker,
+        )
 
         try {
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
@@ -237,56 +251,41 @@ class EmulatorDockerSshSmokeTest {
             compose.onNodeWithText(DEFAULT_HOST, substring = true, useUnmergedTree = true).assertExists()
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
             compose.waitUntil(timeoutMillis = 20_000) {
-                compose.onAllNodesWithText("Continue with SSH").fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodesWithText(existingTmuxSessionName).fetchSemanticsNodes().isNotEmpty()
             }
-            compose.onNodeWithText("Continue with SSH").performClick()
+            val attachTapAt = SystemClock.elapsedRealtime()
+            compose.onNodeWithText(existingTmuxSessionName).performClick()
             compose.onNodeWithText("Terminal").assertExists()
-            compose.onNodeWithText("tmux ls").assertExists()
             waitForSessionConnectUiToSettle()
             waitForTerminalSessionAttached()
+            val terminalReadyMs = waitForTerminalUsableByMarker(
+                command = "printf \"${shellReadyMarker}\\n\"",
+                marker = shellReadyMarker,
+                startedAt = attachTapAt,
+            )
+            Log.i(LOG_TAG, "existing tmux picker attach to terminal ready: ${terminalReadyMs}ms")
+            println("ISSUE78_TIMING picker_tap_to_terminal_usable_ms=$terminalReadyMs")
+            assertTrue(
+                "expected existing tmux session to reach an attached terminal within " +
+                    "${MAX_ATTACH_READY_MS}ms, got ${terminalReadyMs}ms",
+                terminalReadyMs <= MAX_ATTACH_READY_MS,
+            )
 
-            sendCommandViaComposer(
-                """
-                m=${shellQuote(marker)}
-                printf '%s\n' "shell-ready-${'$'}m"
-                """.trimIndent().replace("\n", "; "),
-            )
-            waitForTerminalTranscript(
-                description = "shell readiness marker",
-            ) { transcript ->
-                shellReadyMarker in transcript
-            }
-
-            sendCommandViaComposer(
-                """
-                m=${shellQuote(marker)}
-                tmp="/tmp/pocketshell-${'$'}m"
-                shell="shell-visible-${'$'}m"
-                mkdir -p "${'$'}tmp" && printf '%s\n' "${'$'}shell" | tee "${'$'}tmp/shell-output.txt"
-                """.trimIndent().replace("\n", "; "),
-            )
-            sendCommandViaComposer(
-                """
-                m=${shellQuote(marker)}
-                tmp="/tmp/pocketshell-${'$'}m"
-                session="pocketshell-${'$'}m"
-                tmux_marker="tmux-visible-${'$'}m"
-                mkdir -p "${'$'}tmp"
-                cd "${'$'}tmp"
-                pwd | tee pwd.txt
-                command -v tmux | tee tmux-bin.txt
-                tmux new-session -d -s "${'$'}session" 2>/dev/null || tmux has-session -t "${'$'}session"
-                tmux has-session -t "${'$'}session" && printf '%s\n' "${'$'}tmux_marker" | tee tmux.txt
-                """.trimIndent().replace("\n", "; "),
-            )
+            val commandStartAt = SystemClock.elapsedRealtime()
+            sendCommandViaTerminalInput("sh $tmpDir/run.sh")
 
             waitForTerminalTranscript(
-                description = "visible shell, pwd, and tmux output",
+                description = "visible completed shell, pwd, tmux, and completion output",
             ) { transcript ->
                 shellVisibleMarker in transcript &&
                     tmpDir in transcript &&
-                    tmuxVisibleMarker in transcript
+                    existingTmuxSessionName in transcript &&
+                    tmuxVisibleMarker in transcript &&
+                    completedMarker in transcript
             }
+            val commandVisibleMs = SystemClock.elapsedRealtime() - commandStartAt
+            Log.i(LOG_TAG, "existing tmux terminal input to visible output: ${commandVisibleMs}ms")
+            println("ISSUE78_TIMING send_command_to_visible_output_ms=$commandVisibleMs")
 
             withTimeout(15_000) {
                 var verified = false
@@ -305,8 +304,8 @@ class EmulatorDockerSshSmokeTest {
                             test -d ${shellQuote(tmpDir)} &&
                             test "$(cat ${shellQuote("$tmpDir/pwd.txt")})" = ${shellQuote(tmpDir)} &&
                             test -s ${shellQuote("$tmpDir/tmux-bin.txt")} &&
-                            test "$(cat ${shellQuote("$tmpDir/tmux.txt")})" = ${shellQuote(tmuxVisibleMarker)} &&
-                            tmux has-session -t ${shellQuote(sessionName)}
+                            test "$(cat ${shellQuote("$tmpDir/tmux-session.txt")})" = ${shellQuote(existingTmuxSessionName)} &&
+                            test "$(cat ${shellQuote("$tmpDir/tmux.txt")})" = ${shellQuote(tmuxVisibleMarker)}
                             """.trimIndent().replace("\n", " "),
                         )
                     }
@@ -314,9 +313,33 @@ class EmulatorDockerSshSmokeTest {
                     if (!verified) delay(250)
                 }
             }
+            waitForTerminalTranscript(
+                description = "completed output still visible at screenshot capture",
+                timeoutMillis = 5_000,
+            ) { transcript ->
+                shellVisibleMarker in transcript &&
+                    existingTmuxSessionName in transcript &&
+                    tmuxVisibleMarker in transcript &&
+                    completedMarker in transcript
+            }
+            val transcriptEvidence = writeTerminalTranscript("issue78-existing-tmux-transcript.txt")
+            val screenshotEvidence = captureTerminalScreenshot("issue78-existing-tmux-output.png")
+            writeIssue78Metrics(
+                listOf(
+                    "picker_tap_to_terminal_usable_ms=$terminalReadyMs",
+                    "send_command_to_visible_output_ms=$commandVisibleMs",
+                    "tmux_session=$existingTmuxSessionName",
+                    "marker=$marker",
+                    "completed_marker=$completedMarker",
+                    "visible_terminal_foreground_pixels=${screenshotEvidence.foregroundPixels}",
+                    "screenshot=${screenshotEvidence.file.absolutePath}",
+                    "transcript=${transcriptEvidence.absolutePath}",
+                ),
+            )
         } finally {
             cleanupRemoteDogfoodArtifacts(key, tmpDir, sessionName)
         }
+        Unit
     }
 
     private fun waitForSessionConnectUiToSettle() {
@@ -333,34 +356,84 @@ class EmulatorDockerSshSmokeTest {
             launchedActivity?.let { scenario ->
                 var attached = false
                 scenario.onActivity { activity ->
-                    attached = activity.window.decorView.findTerminalView()?.currentSession != null
+                    val terminalView = activity.window.decorView.findTerminalView()
+                    attached = terminalView?.currentSession != null && terminalView.mEmulator != null
                 }
                 attached
             } ?: false
         }
     }
 
-    private fun sendCommandViaComposer(command: String) {
-        compose.onNodeWithText("dictate").performClick()
-        compose.onNodeWithText("Prompt Composer").assertExists()
-        compose.onNode(hasSetTextAction()).performTextInput(command)
-        compose.onNodeWithText("Send + ↵").performClick()
+    private fun sendCommandViaTerminalInput(command: String) {
+        val text = if (command.endsWith("\n")) command else "$command\n"
+        var committed = false
+        launchedActivity?.onActivity { activity ->
+            val terminalView = activity.window.decorView.findTerminalView() ?: return@onActivity
+            terminalView.requestFocus()
+            val connection = terminalView.onCreateInputConnection(EditorInfo())
+            committed = connection?.commitText(text, 1) == true
+        }
+        assertTrue("expected terminal input connection to commit `$command`", committed)
+    }
+
+    private fun waitForTerminalUsableByMarker(
+        command: String,
+        marker: String,
+        startedAt: Long,
+    ): Long {
+        val deadline = SystemClock.elapsedRealtime() + MAX_ATTACH_READY_MS
+        var attempts = 0
+        while (SystemClock.elapsedRealtime() < deadline) {
+            attempts += 1
+            sendCommandViaTerminalInput(command)
+            if (terminalTranscriptMatches(timeoutMillis = 2_500) { transcript ->
+                    marker in transcript
+                }
+            ) {
+                return SystemClock.elapsedRealtime() - startedAt
+            }
+            SystemClock.sleep(250)
+        }
+        val snapshot = terminalTranscriptSnapshot()
+        assertTrue(
+            "expected terminal to echo readiness marker `$marker` within " +
+                "${MAX_ATTACH_READY_MS}ms after $attempts attempts, got:\n$snapshot",
+            false,
+        )
+        return SystemClock.elapsedRealtime() - startedAt
     }
 
     private fun waitForTerminalTranscript(
         description: String,
+        timeoutMillis: Long = 15_000,
         predicate: (String) -> Boolean,
     ) {
         var lastSnapshot = ""
-        compose.waitUntil(timeoutMillis = 15_000) {
+        val satisfied = runCatching {
+            compose.waitUntil(timeoutMillis = timeoutMillis) {
+                lastSnapshot = terminalTranscriptSnapshot()
+                predicate(lastSnapshot)
+            }
+            true
+        }.getOrDefault(false)
+        if (!satisfied) {
             lastSnapshot = terminalTranscriptSnapshot()
-            predicate(lastSnapshot)
         }
         assertTrue(
             "expected terminal transcript to contain $description, got:\n$lastSnapshot",
             predicate(lastSnapshot),
         )
     }
+
+    private fun terminalTranscriptMatches(
+        timeoutMillis: Long,
+        predicate: (String) -> Boolean,
+    ): Boolean = runCatching {
+        compose.waitUntil(timeoutMillis = timeoutMillis) {
+            predicate(terminalTranscriptSnapshot())
+        }
+        true
+    }.getOrDefault(false)
 
     private fun terminalTranscriptSnapshot(): String {
         var snapshot = ""
@@ -424,10 +497,176 @@ class EmulatorDockerSshSmokeTest {
         )
     }
 
+    private suspend fun prepareRemoteDogfoodScript(
+        key: String,
+        tmpDir: String,
+        shellVisibleMarker: String,
+        tmuxVisibleMarker: String,
+        completedMarker: String,
+    ) {
+        val script = """
+            #!/bin/sh
+            set -eu
+            cd $tmpDir
+            printf '%s\n' $shellVisibleMarker > shell-output.txt
+            pwd > pwd.txt
+            command -v tmux > tmux-bin.txt
+            tmux display-message -p '#S' > tmux-session.txt
+            printf '%s\n' $tmuxVisibleMarker > tmux.txt
+            cat shell-output.txt
+            cat pwd.txt
+            cat tmux-bin.txt
+            cat tmux-session.txt
+            cat tmux.txt
+            printf '%s\n' $completedMarker
+        """.trimIndent()
+        val setupCommand = "mkdir -p ${shellQuote(tmpDir)}\n" +
+            "cat > ${shellQuote("$tmpDir/run.sh")} <<'POCKETSHELL_ISSUE78_SCRIPT'\n" +
+            "$script\n" +
+            "POCKETSHELL_ISSUE78_SCRIPT\n" +
+            "chmod +x ${shellQuote("$tmpDir/run.sh")}"
+        val prepared = withTimeout(20_000) {
+            SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+                timeoutMs = 15_000,
+            ).mapCatching { session ->
+                session.use { it.exec(setupCommand) }
+            }
+        }
+        val result = prepared.getOrNull()
+        assertTrue(
+            "expected remote issue #78 script setup to succeed, got ${prepared.exceptionOrNull()} " +
+                "stdout='${result?.stdout}' stderr='${result?.stderr}'",
+            result?.exitCode == 0,
+        )
+    }
+
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
 
+    private fun captureTerminalScreenshot(fileName: String): TerminalScreenshotEvidence {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        forceTerminalScreenUpdated()
+        SystemClock.sleep(300)
+        val terminalBounds = terminalViewScreenBounds()
+        val bitmap = instrumentation.uiAutomation.takeScreenshot()
+        val foregroundPixels = countVisibleTerminalForeground(bitmap, terminalBounds)
+        val directory = issue78ArtifactDirectory()
+        val output = File(directory, fileName)
+        FileOutputStream(output).use { stream ->
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
+        }
+        bitmap.recycle()
+        assertTrue(
+            "expected emulator screenshot to show visible terminal output in $fileName; " +
+                "foregroundPixels=$foregroundPixels bounds=$terminalBounds",
+            foregroundPixels >= MIN_TERMINAL_FOREGROUND_PIXELS,
+        )
+        Log.i(LOG_TAG, "terminal screenshot=${output.absolutePath}")
+        Log.i(LOG_TAG, "terminal visible foreground pixels=$foregroundPixels bounds=$terminalBounds")
+        println("ISSUE78_SCREENSHOT ${output.absolutePath}")
+        println("ISSUE78_VISIBLE_FOREGROUND_PIXELS $foregroundPixels")
+        return TerminalScreenshotEvidence(output, foregroundPixels)
+    }
+
+    private fun forceTerminalScreenUpdated() {
+        launchedActivity?.onActivity { activity ->
+            val terminalView = activity.window.decorView.findTerminalView()
+            terminalView?.onScreenUpdated()
+            terminalView?.invalidate()
+        }
+    }
+
+    private fun terminalViewScreenBounds(): Rect {
+        var bounds: Rect? = null
+        launchedActivity?.onActivity { activity ->
+            val terminalView = activity.window.decorView.findTerminalView()
+                ?: return@onActivity
+            val location = IntArray(2)
+            terminalView.getLocationOnScreen(location)
+            bounds = Rect(
+                location[0],
+                location[1],
+                location[0] + terminalView.width,
+                location[1] + terminalView.height,
+            )
+        }
+        return requireNotNull(bounds) {
+            "expected a TerminalView before capturing visual evidence"
+        }
+    }
+
+    private fun countVisibleTerminalForeground(bitmap: Bitmap, bounds: Rect): Int {
+        val left = bounds.left.coerceIn(0, bitmap.width)
+        val top = bounds.top.coerceIn(0, bitmap.height)
+        val right = bounds.right.coerceIn(left, bitmap.width)
+        val bottom = bounds.bottom.coerceIn(top, bitmap.height)
+        var foregroundPixels = 0
+        for (y in top until bottom) {
+            for (x in left until right) {
+                val pixel = bitmap.getPixel(x, y)
+                val red = (pixel shr 16) and 0xFF
+                val green = (pixel shr 8) and 0xFF
+                val blue = pixel and 0xFF
+                val max = maxOf(red, green, blue)
+                val min = minOf(red, green, blue)
+                val luminance = (red * 299 + green * 587 + blue * 114) / 1000
+                if (luminance > 145 || (luminance > 60 && max - min > 50)) {
+                    foregroundPixels += 1
+                }
+            }
+        }
+        return foregroundPixels
+    }
+
+    private fun writeIssue78Metrics(lines: List<String>): File {
+        val output = File(issue78ArtifactDirectory(), "issue78-timings.txt")
+        output.writeText(lines.joinToString(separator = "\n", postfix = "\n"))
+        Log.i(LOG_TAG, "timing artifact=${output.absolutePath}")
+        println("ISSUE78_TIMINGS ${output.absolutePath}")
+        return output
+    }
+
+    private fun writeTerminalTranscript(fileName: String): File {
+        val output = File(issue78ArtifactDirectory(), fileName)
+        val transcript = terminalTranscriptSnapshot()
+        output.writeText(transcript)
+        assertTrue(
+            "expected terminal transcript artifact to contain completed issue #78 output",
+            transcript.contains("issue78-complete-"),
+        )
+        Log.i(LOG_TAG, "terminal transcript=${output.absolutePath}")
+        println("ISSUE78_TRANSCRIPT ${output.absolutePath}")
+        return output
+    }
+
+    private fun issue78ArtifactDirectory(): File {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val mediaRoot = instrumentation.targetContext.externalMediaDirs
+            .firstOrNull { it != null }
+            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val directory = File(mediaRoot, "additional_test_output/$ISSUE78_DEVICE_DIR_NAME")
+        check(directory.exists() || directory.mkdirs()) {
+            "Could not create issue78 artifact directory: ${directory.absolutePath}"
+        }
+        return directory
+    }
+
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
+        const val LOG_TAG: String = "PocketShellDogfood"
+        const val ISSUE78_DEVICE_DIR_NAME: String = "issue78-phone-dogfood"
+        const val MAX_ATTACH_READY_MS: Long = 15_000L
+        const val MIN_TERMINAL_FOREGROUND_PIXELS: Int = 2_000
     }
+
+    private data class TerminalScreenshotEvidence(
+        val file: File,
+        val foregroundPixels: Int,
+    )
 }

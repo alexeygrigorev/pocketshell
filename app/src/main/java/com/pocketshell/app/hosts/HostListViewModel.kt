@@ -284,9 +284,11 @@ class HostListViewModel @Inject constructor(
      * the user taps Skip / Continue on the sheet).
      */
     fun bootstrapHost(host: HostEntity, keyPath: String, passphrase: CharArray? = null) {
-        // Cache: a fresh tmux result skips only the tmux probe. Server
-        // tools and daemon readiness are intentionally checked on every
-        // connect because the old cache records only tmux.
+        // Cache: a fresh tmux result skips the bootstrap SSH probe. The
+        // session picker can discover tmuxctl/tmux on its own and fall back
+        // cleanly, so blocking every host tap on server-tool checks makes the
+        // phone path pay for setup work before the user has even picked a
+        // session.
         val skipTmuxProbe = host.tmuxInstalled == true && host.isBootstrapFresh()
 
         // Probe (re-probe if stale or unknown). For a previously-missing
@@ -299,6 +301,12 @@ class HostListViewModel @Inject constructor(
         _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = false)
         bootstrapTargetHost = host
 
+        if (skipTmuxProbe) {
+            _bootstrapState.value = null
+            _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
+            return
+        }
+
         viewModelScope.launch {
             val session = openSession(host, keyPath, passphrase)
             if (session == null) {
@@ -310,7 +318,7 @@ class HostListViewModel @Inject constructor(
             }
             bootstrapSession = session
 
-            when (val status = if (skipTmuxProbe) TmuxStatus.Installed else bootstrapper.checkTmux(session)) {
+            when (val status = bootstrapper.checkTmux(session)) {
                 TmuxStatus.Installed -> {
                     persistResult(host, installed = true)
                     val report = bootstrapper.checkServerSetup(session)

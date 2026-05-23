@@ -1,6 +1,7 @@
 package com.pocketshell.core.terminal.ui
 
 import android.text.InputType
+import android.view.View
 import android.view.inputmethod.EditorInfo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -39,13 +40,17 @@ class TerminalSurfaceInputInstrumentedTest {
             stdout = stdout,
             remoteStdin = remoteStdin,
         )
-        val view = TerminalView(context, null)
         val client = PocketShellTerminalViewClient()
 
         try {
             instrumentation.runOnMainSync {
+                val view = TerminalView(context, null)
                 view.applyPocketShellDefaults(client)
                 view.attachSession(requireNotNull(state.session))
+                val widthSpec = View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY)
+                val heightSpec = View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+                view.measure(widthSpec, heightSpec)
+                view.layout(0, 0, view.measuredWidth, view.measuredHeight)
 
                 client.onSingleTapUp(null)
                 assertTrue("terminal tap should focus the TerminalView", view.isFocused)

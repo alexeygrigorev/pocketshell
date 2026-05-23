@@ -37,11 +37,11 @@ jobs:
           TIMESTAMP=$(date +'%Y%m%d-%H%M%S')
           SHORT_SHA=$(echo ${{ github.sha }} | cut -c 1-7)
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            TAG_VERSION="${{ github.ref_name }}"
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#v}"
           else
-            TAG_VERSION="dev"
+            VERSION="dev-${TIMESTAMP}-${SHORT_SHA}"
           fi
-          VERSION="${TAG_VERSION}-${TIMESTAMP}-${SHORT_SHA}"
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
 
       - name: Make gradlew executable
@@ -58,7 +58,7 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug.apk
+          name: pocketshell-${{ steps.version.outputs.version }}-debug.apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
 

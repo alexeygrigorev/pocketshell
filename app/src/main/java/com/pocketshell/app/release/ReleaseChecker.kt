@@ -47,11 +47,13 @@ data class ReleaseInfo(
  *   is a courtesy; we never want a transient network blip to surface
  *   an error to the user.
  *
- * The check picks the asset whose filename ends with `-debug.apk` —
- * that's the only artifact #39 publishes (release builds are not signed
- * for distribution yet).
+ * The check picks the exact dotted-version debug APK asset, e.g.
+ * `pocketshell-0.2.1-debug.apk`, so a tagged release points the browser
+ * at the stable downloadable filename rather than a CI artifact name.
  */
-open class ReleaseChecker {
+open class ReleaseChecker(
+    private val latestReleaseUrl: String = API_URL,
+) {
     companion object {
         private const val REPO = "alexeygrigorev/pocketshell"
         private const val API_URL = "https://api.github.com/repos/$REPO/releases/latest"
@@ -69,7 +71,7 @@ open class ReleaseChecker {
      */
     open suspend fun check(currentVersion: String): ReleaseInfo? = withContext(Dispatchers.IO) {
         try {
-            val conn = (URL(API_URL).openConnection() as HttpURLConnection).apply {
+            val conn = (URL(latestReleaseUrl).openConnection() as HttpURLConnection).apply {
                 connectTimeout = TIMEOUT_MS
                 readTimeout = TIMEOUT_MS
                 setRequestProperty("Accept", "application/vnd.github+json")
@@ -78,55 +80,74 @@ open class ReleaseChecker {
 
             if (conn.responseCode != 200) return@withContext null
 
-            val body = conn.inputStream.bufferedReader().readText()
-            val json = JSONObject(body)
-            val tagName = json.getString("tag_name")
-
-            if (!isNewer(currentVersion, tagName)) return@withContext null
-
-            val htmlUrl = json.getString("html_url")
-            val assets = json.optJSONArray("assets") ?: return@withContext null
-
-            var apkUrl = ""
-            for (i in 0 until assets.length()) {
-                val asset = assets.getJSONObject(i)
-                val name = asset.getString("name")
-                if (name.endsWith("-debug.apk")) {
-                    apkUrl = asset.getString("browser_download_url")
-                    break
-                }
-            }
-
-            if (apkUrl.isEmpty()) return@withContext null
-
-            ReleaseInfo(tagName, htmlUrl, apkUrl)
+            parseRelease(conn.inputStream.bufferedReader().readText(), currentVersion)
         } catch (_: Exception) {
             null
         }
     }
 
+    internal fun parseRelease(body: String, currentVersion: String): ReleaseInfo? {
+        val json = JSONObject(body)
+        val tagName = json.getString("tag_name")
+        val remoteVersion = ParsedVersion.from(tagName) ?: return null
+
+        if (!isNewer(currentVersion, tagName)) return null
+
+        val htmlUrl = json.getString("html_url")
+        val assets = json.optJSONArray("assets") ?: return null
+        val expectedApkName = "pocketshell-${remoteVersion.toDottedString()}-debug.apk"
+
+        for (i in 0 until assets.length()) {
+            val asset = assets.getJSONObject(i)
+            if (asset.getString("name") == expectedApkName) {
+                return ReleaseInfo(tagName, htmlUrl, asset.getString("browser_download_url"))
+            }
+        }
+
+        return null
+    }
+
     /**
-     * Semver-ish comparison. Strips any leading `v` prefix and a
-     * trailing `-<qualifier>` (e.g. `0.1.0-debug`) from the local
-     * version, then compares each dot-separated number in turn.
+     * Semver-ish comparison. Accepts an optional leading `v`, optional
+     * missing minor/patch components (treated as zero), and trailing
+     * pre-release/build qualifiers (e.g. `0.1.0-debug`), then compares
+     * major/minor/patch as numbers.
      *
      * Visible (rather than `private`) so the unit tests can pin the
      * comparison semantics — see issue #40's acceptance criteria.
      */
     internal fun isNewer(current: String, remote: String): Boolean {
-        val currentTag = current.trim().substringBefore("-").removePrefix("v")
-        val remoteTag = remote.trim().substringBefore("-").removePrefix("v")
-        val currentNums = currentTag.split(".").mapNotNull { it.toIntOrNull() }
-        val remoteNums = remoteTag.split(".").mapNotNull { it.toIntOrNull() }
+        val currentVersion = ParsedVersion.from(current) ?: return false
+        val remoteVersion = ParsedVersion.from(remote) ?: return false
+        return remoteVersion.compareTo(currentVersion) > 0
+    }
 
-        if (currentNums.isEmpty() || remoteNums.isEmpty()) return false
+    internal fun renderDottedVersionLabel(versionName: String): String {
+        val parsed = ParsedVersion.from(versionName)
+        return "v${parsed?.toDottedString() ?: versionName.trim().removePrefix("v")}"
+    }
 
-        for (i in 0 until maxOf(currentNums.size, remoteNums.size)) {
-            val c = currentNums.getOrElse(i) { 0 }
-            val r = remoteNums.getOrElse(i) { 0 }
-            if (r > c) return true
-            if (r < c) return false
+    private data class ParsedVersion(
+        val major: Int,
+        val minor: Int,
+        val patch: Int,
+    ) : Comparable<ParsedVersion> {
+        override fun compareTo(other: ParsedVersion): Int =
+            compareValuesBy(this, other, ParsedVersion::major, ParsedVersion::minor, ParsedVersion::patch)
+
+        fun toDottedString(): String = "$major.$minor.$patch"
+
+        companion object {
+            private val VERSION_PATTERN = Regex("""^[vV]?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?$""")
+
+            fun from(raw: String): ParsedVersion? {
+                val match = VERSION_PATTERN.matchEntire(raw.trim()) ?: return null
+                return ParsedVersion(
+                    major = match.groupValues[1].toIntOrNull() ?: return null,
+                    minor = match.groupValues[2].takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 0,
+                    patch = match.groupValues[3].takeIf { it.isNotEmpty() }?.toIntOrNull() ?: 0,
+                )
+            }
         }
-        return false
     }
 }

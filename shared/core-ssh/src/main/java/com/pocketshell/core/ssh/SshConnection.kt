@@ -71,6 +71,14 @@ public object SshConnection {
         }
     }
 
+    /**
+     * Create an [SSHClient] with the same Android-compatible crypto provider
+     * setup used by [connect]. Callers that need sshj primitives outside the
+     * public [SshSession] surface still get the core transport fixes.
+     */
+    @JvmStatic
+    public fun createClient(): SSHClient = SSHClient(createSshConfig())
+
     private fun createSshConfig(): DefaultConfig {
         ensureBouncyCastleProvider()
         return DefaultConfig()

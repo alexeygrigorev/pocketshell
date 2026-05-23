@@ -44,6 +44,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -51,6 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.fragment.app.FragmentActivity
+import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.bootstrap.HostBootstrapSheet
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -327,7 +329,9 @@ fun HostListScreen(
                                 // Until `HostCard` exposes a long-press
                                 // callback we route edit via the nav graph
                                 // alone (see `MainActivity`).
-                                modifier = Modifier.weight(1f),
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag(HOST_ROW_TAG_PREFIX + host.id),
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             HostPortButton(onClick = { portPanelRequests.tryEmit(host.id) })
@@ -447,6 +451,8 @@ private data class PendingPassphraseRequest(
     val action: PendingPassphraseAction,
 )
 
+internal const val HOST_ROW_TAG_PREFIX = "host:row:"
+
 /**
  * Top-of-screen banner advertising a newer GitHub Release. Tapping
  * "Update" fires `Intent.ACTION_VIEW` against the APK download URL —
@@ -530,7 +536,7 @@ private fun VersionFooter(versionName: String) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = "v$versionName",
+            text = ReleaseChecker().renderDottedVersionLabel(versionName),
             color = PocketShellColors.TextMuted,
             fontSize = 11.sp,
             fontWeight = FontWeight.Medium,

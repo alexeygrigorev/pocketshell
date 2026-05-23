@@ -478,7 +478,7 @@ public fun TmuxSessionScreen(
 }
 
 @Composable
-private fun TmuxSessionDrawer(
+internal fun TmuxSessionDrawer(
     visible: Boolean,
     state: HostTmuxSessionPickerState,
     hostName: String,

@@ -5,6 +5,8 @@ import android.view.ViewGroup
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
@@ -13,6 +15,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.core.agents.AgentDetection
@@ -23,6 +26,8 @@ import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.migrations.MIGRATION_1_2
+import com.pocketshell.core.storage.migrations.MIGRATION_2_3
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.delay
@@ -167,18 +172,25 @@ class EmulatorDockerSshSmokeTest {
         val marker = "psdogfood${System.currentTimeMillis()}"
         val tmpDir = "/tmp/pocketshell-$marker"
         val sessionName = "pocketshell-$marker"
+        val shellVisibleMarker = "shell-visible-$marker"
         val tmuxVisibleMarker = "tmux-visible-$marker"
 
-        appContext.deleteDatabase(DATABASE_NAME)
-        val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME).build()
+        var hostRowTag = ""
+        val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+            .fallbackToDestructiveMigration(dropAllTables = false)
+            .build()
         try {
+            // Do not delete the DB file here: a warm instrumentation process can
+            // already hold Hilt's singleton Room instance open against it.
+            db.clearAllTables()
             val storedKey = SshKeyStorage.persistKey(
                 context = appContext,
                 sshKeyDao = db.sshKeyDao(),
-                name = "dogfood-test-key",
+                name = "dogfood-test-key-$marker",
                 content = key,
             )
-            db.hostDao().insert(
+            val hostId = db.hostDao().insert(
                 HostEntity(
                     name = "Dogfood Docker",
                     hostname = DEFAULT_HOST,
@@ -189,6 +201,7 @@ class EmulatorDockerSshSmokeTest {
                     lastBootstrapAt = System.currentTimeMillis(),
                 ),
             )
+            hostRowTag = HOST_ROW_TAG_PREFIX + hostId
         } finally {
             db.close()
         }
@@ -211,14 +224,25 @@ class EmulatorDockerSshSmokeTest {
 
         try {
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-            compose.onNodeWithText("Dogfood Docker").performClick()
-            compose.onNodeWithText(DEFAULT_HOST).assertExists()
+            compose.waitUntil(timeoutMillis = 10_000) {
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).assertExists()
+            compose.onNodeWithText("Dogfood Docker", useUnmergedTree = true).assertExists()
+            compose.onNodeWithText(DEFAULT_HOST, substring = true, useUnmergedTree = true).assertExists()
+            compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+            compose.waitUntil(timeoutMillis = 20_000) {
+                compose.onAllNodesWithText("Continue with SSH").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Continue with SSH").performClick()
             compose.onNodeWithText("Terminal").assertExists()
             compose.onNodeWithText("tmux ls").assertExists()
             waitForSessionConnectUiToSettle()
 
             sendCommandViaComposer(
-                "mkdir -p ${shellQuote(tmpDir)} && ls -1 /workspace | tee ${shellQuote("$tmpDir/workspace-ls-before-mkdir.txt")}",
+                "mkdir -p ${shellQuote(tmpDir)} && printf '%s\\n' ${shellQuote(shellVisibleMarker)} | tee ${shellQuote("$tmpDir/shell-output.txt")}",
             )
             sendCommandViaComposer(
                 """
@@ -226,17 +250,17 @@ class EmulatorDockerSshSmokeTest {
                 mkdir -p "${'$'}tmp"
                 cd "${'$'}tmp"
                 pwd | tee pwd.txt
-                ls -1 /workspace | tee workspace-ls.txt
+                command -v tmux | tee tmux-bin.txt
                 tmux new-session -d -s ${shellQuote(sessionName)} 2>/dev/null || tmux has-session -t ${shellQuote(sessionName)}
                 tmux has-session -t ${shellQuote(sessionName)} && printf '%s\n' ${shellQuote(tmuxVisibleMarker)} | tee tmux.txt
                 """.trimIndent().replace("\n", "; "),
             )
 
             waitForTerminalTranscript(
-                description = "visible ls, pwd, and tmux output",
+                description = "visible shell, pwd, and tmux output",
             ) { transcript ->
                 val lines = transcript.lineSequence().map { it.trim() }.toSet()
-                "app" in lines && tmpDir in lines && tmuxVisibleMarker in lines
+                shellVisibleMarker in lines && tmpDir in lines && tmuxVisibleMarker in lines
             }
 
             withTimeout(15_000) {
@@ -252,10 +276,10 @@ class EmulatorDockerSshSmokeTest {
                     ).getOrThrow().use { session ->
                         session.exec(
                             """
-                            test -s ${shellQuote("$tmpDir/workspace-ls-before-mkdir.txt")} &&
+                            test "$(cat ${shellQuote("$tmpDir/shell-output.txt")})" = ${shellQuote(shellVisibleMarker)} &&
                             test -d ${shellQuote(tmpDir)} &&
                             test "$(cat ${shellQuote("$tmpDir/pwd.txt")})" = ${shellQuote(tmpDir)} &&
-                            test -s ${shellQuote("$tmpDir/workspace-ls.txt")} &&
+                            test -s ${shellQuote("$tmpDir/tmux-bin.txt")} &&
                             test "$(cat ${shellQuote("$tmpDir/tmux.txt")})" = ${shellQuote(tmuxVisibleMarker)} &&
                             tmux has-session -t ${shellQuote(sessionName)}
                             """.trimIndent().replace("\n", " "),
@@ -340,7 +364,7 @@ class EmulatorDockerSshSmokeTest {
         ).mapCatching { session ->
             session.use {
                 it.exec(
-                    "rm -rf ${shellQuote(tmpDir)} ${shellQuote("$tmpDir-ls-before-mkdir")}; " +
+                    "rm -rf ${shellQuote(tmpDir)}; " +
                         "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true",
                 )
             }

@@ -15,14 +15,18 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.OkHttpClient
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.io.ByteArrayOutputStream
+import java.io.OutputStream
+import java.net.InetAddress
+import java.util.concurrent.TimeUnit
 
 /**
  * Emulator-side fake endpoint coverage for issue #66.
@@ -39,7 +43,7 @@ class VoiceCommandPlannerE2eTest {
     @Before
     fun setUp() {
         server = MockWebServer()
-        server.start()
+        server.start(InetAddress.getByName(LOOPBACK_HOST), 0)
     }
 
     @After
@@ -77,14 +81,20 @@ class VoiceCommandPlannerE2eTest {
             config = CommandPlannerConfig(
                 apiKey = "sk-e2e-test".toCharArray(),
                 model = "planner-e2e-model",
-                baseUrl = server.url("/v1").toString(),
+                baseUrl = "http://$LOOPBACK_HOST:${server.port}/v1",
             ),
+            client = OkHttpClient.Builder()
+                .connectTimeout(2, TimeUnit.SECONDS)
+                .readTimeout(2, TimeUnit.SECONDS)
+                .writeTimeout(2, TimeUnit.SECONDS)
+                .callTimeout(5, TimeUnit.SECONDS)
+                .build(),
         )
         val viewModel = SessionViewModel(
             applicationContext = InstrumentationRegistry.getInstrumentation().targetContext,
             commandPlannerClientFactory = CommandPlannerClientFactory { planner },
         )
-        val stdin = ByteArrayOutputStream()
+        val stdin = RecordingOutputStream()
         val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
         val producerJob = viewModel.terminalState.attachExternalProducer(
@@ -95,15 +105,11 @@ class VoiceCommandPlannerE2eTest {
 
         try {
             viewModel.planVoiceCommand("show git status")
-            withTimeout(10_000) {
-                while (viewModel.voiceCommandReview.value.pendingPlan == null) {
-                    delay(100)
-                }
-            }
+            waitForReviewableCommand(viewModel)
             viewModel.approvePendingVoiceCommand(withEnter = true)
 
             withTimeout(5_000) {
-                while (stdin.toString(Charsets.UTF_8.name()) != "git status --short\r") {
+                while (stdin.snapshot() != "git status --short\r") {
                     delay(50)
                 }
             }
@@ -119,5 +125,44 @@ class VoiceCommandPlannerE2eTest {
             producerScope.cancel()
             viewModel.terminalState.detachExternalProducer()
         }
+    }
+
+    private suspend fun waitForReviewableCommand(viewModel: SessionViewModel) {
+        withTimeout(10_000) {
+            while (true) {
+                val review = viewModel.voiceCommandReview.value
+                if (review.pendingPlan != null) return@withTimeout
+                if (review.error != null) {
+                    fail("Command planner failed before producing a reviewable command: ${review.error}")
+                }
+                delay(50)
+            }
+        }
+    }
+
+    private class RecordingOutputStream : OutputStream() {
+        private val bytes = mutableListOf<Byte>()
+
+        override fun write(b: Int) {
+            synchronized(bytes) {
+                bytes += b.toByte()
+            }
+        }
+
+        override fun write(buffer: ByteArray, offset: Int, length: Int) {
+            synchronized(bytes) {
+                for (index in offset until offset + length) {
+                    bytes += buffer[index]
+                }
+            }
+        }
+
+        fun snapshot(): String = synchronized(bytes) {
+            bytes.toByteArray().toString(Charsets.UTF_8)
+        }
+    }
+
+    private companion object {
+        const val LOOPBACK_HOST = "127.0.0.1"
     }
 }

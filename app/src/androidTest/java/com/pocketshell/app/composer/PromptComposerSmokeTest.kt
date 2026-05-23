@@ -48,13 +48,14 @@ class PromptComposerSmokeTest {
 
     @Test
     fun recordingAndTranscribingStatesAreVisible() {
-        renderComposer(
+        var state by mutableStateOf(
             PromptComposerViewModel.UiState(
                 draft = "check deploy logs",
                 recording = PromptComposerViewModel.RecordingState.Recording,
                 amplitude = 0.8f,
             ),
         )
+        renderComposer { state }
 
         compose.onNodeWithTag(COMPOSER_STATUS_TAG)
             .assertExists()
@@ -63,13 +64,13 @@ class PromptComposerSmokeTest {
         compose.onNodeWithTag(COMPOSER_WAVEFORM_TAG)
             .assert(hasContentDescription("Prompt composer recording waveform"))
 
-        renderComposer(
-            PromptComposerViewModel.UiState(
+        compose.runOnIdle {
+            state = PromptComposerViewModel.UiState(
                 draft = "check deploy logs",
                 recording = PromptComposerViewModel.RecordingState.Transcribing,
                 amplitude = 0f,
-            ),
-        )
+            )
+        }
 
         compose.onNodeWithText("TRANSCRIBING")
             .assertExists()
@@ -150,11 +151,11 @@ class PromptComposerSmokeTest {
         }
     }
 
-    private fun renderComposer(state: PromptComposerViewModel.UiState) {
+    private fun renderComposer(state: () -> PromptComposerViewModel.UiState) {
         compose.setContent {
             PocketShellTheme {
                 SheetContent(
-                    state = state,
+                    state = state(),
                     onClose = {},
                     onDraftChange = {},
                     onMicTap = {},

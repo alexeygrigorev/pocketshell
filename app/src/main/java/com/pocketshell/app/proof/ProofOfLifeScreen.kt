@@ -31,7 +31,6 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
@@ -195,7 +194,7 @@ internal suspend fun openShell(
     key: SshKey,
     passphrase: CharArray? = null,
 ): SshShellHandle = withContext(Dispatchers.IO) {
-    val client = SSHClient(DefaultConfig())
+    val client = SshConnection.createClient()
     client.addHostKeyVerifier(PromiscuousVerifier())
     client.connect(host, port)
 

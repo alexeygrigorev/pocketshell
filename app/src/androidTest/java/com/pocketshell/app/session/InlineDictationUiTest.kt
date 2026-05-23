@@ -1,6 +1,7 @@
 package com.pocketshell.app.session
 
 import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasNoClickAction
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -35,8 +36,8 @@ class InlineDictationUiTest {
 
         compose.onNodeWithTag(INLINE_DICTATION_MIC_SLOT_TAG)
             .assert(hasContentDescription("Inline dictation recording waveform"))
-        compose.onNodeWithTag(INLINE_DICTATION_WAVEFORM_TAG)
-            .assertExists()
+        compose.onNodeWithTag(INLINE_DICTATION_WAVEFORM_TAG, useUnmergedTree = true)
+            .assertIsDisplayed()
     }
 
     @Test

@@ -4,17 +4,25 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.R
+import com.pocketshell.app.di.CommandPlannerClientFactory
 import com.pocketshell.app.proof.SshShellHandle
 import com.pocketshell.app.proof.createStdoutFlow
 import com.pocketshell.app.proof.openShell
 import com.pocketshell.app.proof.readKeyFromRawResource
+import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.ConversationEvent
+import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
+import com.pocketshell.core.voice.CommandPlan
+import com.pocketshell.core.voice.CommandPlannerException
+import com.pocketshell.core.voice.CommandPlannerRequest
+import com.pocketshell.core.voice.CommandPlannerSafetyConstraints
+import com.pocketshell.core.voice.CommandPlannerSessionMetadata
 import com.pocketshell.uikit.model.KeyModifierState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -87,6 +95,7 @@ import javax.inject.Inject
 @HiltViewModel
 public class SessionViewModel @Inject constructor(
     @ApplicationContext private val applicationContext: Context,
+    private val commandPlannerClientFactory: CommandPlannerClientFactory = CommandPlannerClientFactory { null },
 ) : ViewModel() {
 
     /**
@@ -124,6 +133,12 @@ public class SessionViewModel @Inject constructor(
     public val agentConversation: StateFlow<AgentConversationUiState> =
         _agentConversation.asStateFlow()
 
+    private val _voiceCommandReview: MutableStateFlow<VoiceCommandReviewUiState> =
+        MutableStateFlow(VoiceCommandReviewUiState())
+
+    public val voiceCommandReview: StateFlow<VoiceCommandReviewUiState> =
+        _voiceCommandReview.asStateFlow()
+
     private val dismissedAgentHints: MutableSet<String> = mutableSetOf()
 
     private var sessionRef: SshSession? = null
@@ -132,6 +147,7 @@ public class SessionViewModel @Inject constructor(
     private var connectJob: Job? = null
     private var agentDetectJob: Job? = null
     private var agentTailJob: Job? = null
+    private var commandPlannerJob: Job? = null
 
     /**
      * Connect to the given host (idempotent — re-calling with the same
@@ -199,7 +215,7 @@ public class SessionViewModel @Inject constructor(
 
             // Kick the shell through the terminal bridge so sshj network I/O
             // stays on the bridge's background input-drainer thread.
-            terminalState.writeInput("\r".toByteArray())
+            sendTerminalInput("\r".toByteArray())
 
             _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
             startAgentDetection(session)
@@ -310,7 +326,7 @@ public class SessionViewModel @Inject constructor(
             else -> {
                 val unmodified: ByteArray = unmodifiedBytesFor(label) ?: return
                 val modified = applyArmedModifiers(unmodified, label)
-                terminalState.writeInput(modified)
+                sendTerminalInput(modified)
                 clearOneShotModifiers()
             }
         }
@@ -342,15 +358,123 @@ public class SessionViewModel @Inject constructor(
     }
 
     /**
-     * Write a literal command chip's text + `\n` into the terminal. The
+     * Write a literal command chip's text + Enter into the terminal. The
      * payload mirrors what would arrive from the system keyboard if the
      * user typed the command and pressed Enter — terminals echo it back,
      * so the visual confirmation comes for free.
      */
     public fun onChipTap(text: String) {
-        if (text.isEmpty()) return
-        val payload = (text + "\n").toByteArray(Charsets.UTF_8)
-        terminalState.writeInput(payload)
+        sendText(text, withEnter = true)
+    }
+
+    /**
+     * Route a picked snippet through the same terminal input bridge as the
+     * key bar and command chips.
+     *
+     * Command snippets execute immediately by appending the same carriage
+     * return byte Termux emits for keyboard Enter. Prompt snippets paste only
+     * so the user can continue editing before pressing Enter manually.
+     */
+    public fun onSnippetPicked(snippet: SnippetEntity) {
+        when (SnippetKind.fromStorage(snippet.kind)) {
+            SnippetKind.Command -> sendText(snippet.body, withEnter = true)
+            SnippetKind.Prompt -> sendText(snippet.body, withEnter = false)
+        }
+    }
+
+    /**
+     * Voice Command-mode transcript entry point. Prompt-mode dictation keeps
+     * using [sendText] directly; Command mode comes here so generated shell
+     * commands are planned, validated, and held for explicit review.
+     */
+    public fun planVoiceCommand(transcript: String) {
+        val cleaned = transcript.trim()
+        if (cleaned.isEmpty()) return
+        if (commandPlannerJob?.isActive == true) return
+
+        val client = commandPlannerClientFactory.create()
+        if (client == null) {
+            _voiceCommandReview.value = VoiceCommandReviewUiState(
+                error = "No OpenAI API key saved. Open the composer to add one.",
+            )
+            return
+        }
+
+        _voiceCommandReview.value = VoiceCommandReviewUiState(isPlanning = true, transcript = cleaned)
+        commandPlannerJob = viewModelScope.launch {
+            val result = client.plan(
+                CommandPlannerRequest(
+                    transcript = cleaned,
+                    session = commandPlannerSessionMetadata(),
+                    safety = CommandPlannerSafetyConstraints(
+                        requireReviewBeforeExecution = true,
+                        allowAutoSend = false,
+                    ),
+                ),
+            )
+            _voiceCommandReview.value = result.fold(
+                onSuccess = { plan ->
+                    VoiceCommandReviewUiState(
+                        transcript = cleaned,
+                        pendingPlan = plan,
+                    )
+                },
+                onFailure = { error ->
+                    VoiceCommandReviewUiState(
+                        transcript = cleaned,
+                        error = commandPlannerMessage(error),
+                    )
+                },
+            )
+        }
+    }
+
+    public fun approvePendingVoiceCommand(withEnter: Boolean) {
+        val plan = _voiceCommandReview.value.pendingPlan ?: return
+        sendText(plan.commands.joinToString("\n") { it.command }, withEnter = withEnter)
+        _voiceCommandReview.value = VoiceCommandReviewUiState()
+    }
+
+    public fun dismissVoiceCommandReview() {
+        commandPlannerJob?.cancel()
+        _voiceCommandReview.value = VoiceCommandReviewUiState()
+    }
+
+    /**
+     * Shared text-entry path for composer, chips, snippets, and tests. This
+     * intentionally funnels through [TerminalSurfaceState.writeInput], which
+     * writes into the attached Termux [com.termux.terminal.TerminalSession]
+     * and lets the SSH terminal bridge drain bytes to the remote stdin.
+     */
+    public fun sendText(text: String, withEnter: Boolean) {
+        if (text.isEmpty() && !withEnter) return
+        val payload = if (withEnter) text + "\r" else text
+        sendTerminalInput(payload.toByteArray(Charsets.UTF_8))
+    }
+
+    private fun sendTerminalInput(bytes: ByteArray) {
+        terminalState.writeInput(bytes)
+    }
+
+    private fun commandPlannerSessionMetadata(): CommandPlannerSessionMetadata {
+        val connected = _connectionStatus.value as? ConnectionStatus.Connected
+        return CommandPlannerSessionMetadata(
+            hostLabel = connected?.host ?: SessionDefaults.HOST,
+            username = connected?.user ?: SessionDefaults.USER,
+            currentDirectory = null,
+            projectRoots = emptyList(),
+            shellType = null,
+        )
+    }
+
+    private fun commandPlannerMessage(error: Throwable): String = when (error) {
+        is CommandPlannerException.Rejected -> "Command planner rejected this request: ${error.message}"
+        is CommandPlannerException.Auth -> "Command planner credentials were rejected."
+        is CommandPlannerException.RateLimited -> "Command planner is rate limited. Try again later."
+        is CommandPlannerException.Server -> "Command planner service failed. Try again later."
+        is CommandPlannerException.Parse -> "Command planner returned an invalid response."
+        is CommandPlannerException.Transport -> "Command planner could not be reached."
+        else -> error.message ?: "Command planner failed."
     }
 
     /**
@@ -476,7 +600,7 @@ public class SessionViewModel @Inject constructor(
         label: String,
     ): ByteArray {
         val modified = applyArmedModifiers(unmodified, label)
-        terminalState.writeInput(modified)
+        sendTerminalInput(modified)
         clearOneShotModifiers()
         return modified
     }
@@ -484,6 +608,7 @@ public class SessionViewModel @Inject constructor(
     override fun onCleared() {
         agentDetectJob?.cancel()
         agentTailJob?.cancel()
+        commandPlannerJob?.cancel()
         producerJob?.cancel()
         terminalState.detachExternalProducer()
         runCatching { shellRef?.shell?.close() }
@@ -521,6 +646,13 @@ public data class AgentConversationUiState(
     val events: List<ConversationEvent> = emptyList(),
     val selectedTab: SessionTab = SessionTab.Terminal,
     val hintVisible: Boolean = false,
+)
+
+public data class VoiceCommandReviewUiState(
+    val isPlanning: Boolean = false,
+    val transcript: String? = null,
+    val pendingPlan: CommandPlan? = null,
+    val error: String? = null,
 )
 
 private const val MaxAgentEvents: Int = 500

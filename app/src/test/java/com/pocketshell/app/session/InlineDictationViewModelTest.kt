@@ -2,11 +2,13 @@ package com.pocketshell.app.session
 
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.di.WhisperClientFactory
+import com.pocketshell.app.session.InlineDictationViewModel.DictationMode
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.session.InlineDictationViewModel.RecordingState
 import com.pocketshell.core.voice.AudioRecorderException
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
@@ -137,8 +139,20 @@ class InlineDictationViewModelTest {
     fun initialStateIsIdleWithNoError() {
         val vm = newVm()
         val state = vm.uiState.value
+        assertEquals(DictationMode.Prompt, state.mode)
         assertEquals(RecordingState.Idle, state.recording)
+        assertEquals(0f, state.amplitude, 0.0001f)
         assertNull(state.error)
+    }
+
+    @Test
+    fun selectModeUpdatesUiState() {
+        val vm = newVm()
+        vm.selectMode(DictationMode.Command)
+        assertEquals(DictationMode.Command, vm.uiState.value.mode)
+
+        vm.selectMode(DictationMode.Prompt)
+        assertEquals(DictationMode.Prompt, vm.uiState.value.mode)
     }
 
     // -- FSM transitions ----------------------------------------------------
@@ -155,6 +169,82 @@ class InlineDictationViewModelTest {
         // dangling silence-watchdog coroutine.
         vm.onMicTap()
         advanceUntilIdle()
+    }
+
+    @Test
+    fun recordingPollsAmplitudeIntoUiStateAndClearsOnStop() = runTest {
+        val mic = FakeMicCapture(amplitudes = listOf(0.2f, 0.75f, 0.35f))
+        val vm = newVm(
+            mic = mic,
+            whisper = fakeWhisperClient { Result.success("git status") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        vm.onMicTap()
+        runCurrent()
+
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+        assertEquals(0.2f, vm.uiState.value.amplitude, 0.0001f)
+
+        advanceTimeBy(InlineDictationViewModel.SAMPLE_INTERVAL_MS)
+        runCurrent()
+        assertEquals(0.75f, vm.uiState.value.amplitude, 0.0001f)
+
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals(0f, vm.uiState.value.amplitude, 0.0001f)
+    }
+
+    @Test
+    fun samplerDoesNotPublishAmplitudeAfterStopTransition() = runTest {
+        val transcript = CompletableDeferred<Result<String>>()
+        lateinit var vm: InlineDictationViewModel
+        val mic = object : PromptComposerViewModel.MicCapture {
+            var startCount = 0
+            var stopCount = 0
+            var stopFromSampler = false
+
+            override fun start() {
+                startCount++
+            }
+
+            override fun stop(): ByteArray {
+                stopCount++
+                return ByteArray(44) { 0 }
+            }
+
+            override fun currentAmplitude(): Float {
+                if (!stopFromSampler) {
+                    stopFromSampler = true
+                    vm.onMicTap()
+                }
+                return 0.92f
+            }
+        }
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                return transcript.await()
+            }
+        }
+        vm = newVm(
+            mic = mic,
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        vm.onMicTap()
+        runCurrent()
+
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+        assertEquals(0f, vm.uiState.value.amplitude, 0.0001f)
+        assertEquals(1, mic.stopCount)
+
+        transcript.complete(Result.success("git status"))
+        advanceUntilIdle()
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals(0f, vm.uiState.value.amplitude, 0.0001f)
     }
 
     @Test
@@ -184,6 +274,101 @@ class InlineDictationViewModelTest {
 
         assertEquals(RecordingState.Idle, vm.uiState.value.recording)
         assertEquals(1, mic.stopCount)
+        assertEquals(listOf("git status"), received)
+        collector.join()
+    }
+
+    @Test
+    fun selectedModeSurvivesRecordingAndTranscription() = runTest {
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = fakeWhisperClient { Result.success("git status") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val collector = launch { vm.transcriptions.first() }
+        runCurrent()
+
+        vm.selectMode(DictationMode.Command)
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(DictationMode.Command, vm.uiState.value.mode)
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(DictationMode.Command, vm.uiState.value.mode)
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        collector.join()
+    }
+
+    @Test
+    fun selectedModeSurvivesWhileTranscribing() = runTest {
+        val parkedWhisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                kotlinx.coroutines.awaitCancellation()
+            }
+        }
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = parkedWhisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        vm.selectMode(DictationMode.Command)
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        runCurrent()
+
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+        assertEquals(DictationMode.Command, vm.uiState.value.mode)
+    }
+
+    @Test
+    fun stopShowsProcessingUntilTranscriptionCompletesAndBlocksDuplicateTap() = runTest {
+        val transcript = CompletableDeferred<Result<String>>()
+        val mic = FakeMicCapture(amplitudes = listOf(0.6f, 0.6f, 0.6f))
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                return transcript.await()
+            }
+        }
+        val vm = newVm(
+            mic = mic,
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        val received = mutableListOf<String>()
+        val collector = launch {
+            received += vm.transcriptions.first()
+        }
+        runCurrent()
+
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+        assertEquals(0f, vm.uiState.value.amplitude, 0.0001f)
+
+        val startsBefore = mic.startCount
+        val stopsBefore = mic.stopCount
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(startsBefore, mic.startCount)
+        assertEquals(stopsBefore, mic.stopCount)
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+
+        transcript.complete(Result.success("git status"))
+        advanceUntilIdle()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals(0f, vm.uiState.value.amplitude, 0.0001f)
+        assertNull(vm.uiState.value.error)
         assertEquals(listOf("git status"), received)
         collector.join()
     }

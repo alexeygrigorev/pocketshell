@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+  --version)
+    printf 'agent-log-explorer bootstrap fixture 0.0.0\n'
+    ;;
+  detect)
+    printf 'claude|fixture|process|/home/testuser/.claude/projects/-workspace-pocketshell/pocketshell-claude.jsonl\n'
+    ;;
+  *)
+    printf 'agent-log-explorer bootstrap fixture supports --version and detect\n' >&2
+    exit 64
+    ;;
+esac

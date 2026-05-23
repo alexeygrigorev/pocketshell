@@ -1,8 +1,10 @@
 package com.pocketshell.core.terminal.ui
 
+import android.content.Context
 import android.graphics.Typeface
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.inputmethod.InputMethodManager
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -46,17 +48,16 @@ val DefaultTerminalBackground: Color = Color(0xFF0D1117)
  * pixels" but that is inaccurate for the code as it actually runs — confirmed
  * by reading [com.termux.view.TerminalRenderer]'s constructor.
  *
- * Why 36: empirically, 36 raw pixels renders at roughly the "body" tier of
- * `docs/design-language.md` on a Pixel 7-class screen (~420 dpi). The
- * vendored default (system text size) would render too small for the
- * Termius-like density we want. When PocketShell starts honouring per-device
- * font scaling (post-#8), this constant becomes the *base* and a density /
- * scale multiplier is applied at the call site.
+ * Why 30: the real-phone report for #72 showed that 36 px was too coarse for
+ * a Pixel-style viewport: common `ls` output wrapped early and the prompt
+ * consumed too much of the terminal area. 30 px keeps the Termius-like mobile
+ * density readable while giving the emulator enough columns for paths and
+ * multi-column command output.
  *
  * Suffixed `_RAW_PX` (not just `_PX`) to make the unit unambiguous in IDE
  * autocomplete and search results.
  */
-private const val DEFAULT_TEXT_SIZE_RAW_PX: Int = 36
+internal const val DEFAULT_TEXT_SIZE_RAW_PX: Int = 30
 
 /**
  * Hosts the vendored [TerminalView] inside a Compose tree via
@@ -116,7 +117,7 @@ fun TerminalSurface(
     // Hoist the bridge so the same instance survives recompositions and we
     // do not leak listeners across configuration changes. AndroidView's
     // factory runs once; update runs every recomposition.
-    val viewClient = remember { NoOpTerminalViewClient() }
+    val viewClient = remember { PocketShellTerminalViewClient() }
 
     // Subscribe to the detector flow only when the caller actually wants
     // match callbacks. The empty-flow fallback avoids spinning up a debounce
@@ -236,6 +237,9 @@ fun rememberTerminalSurfaceState(): TerminalSurfaceState =
 
 internal fun TerminalView.applyPocketShellDefaults(viewClient: TerminalViewClient): TerminalView {
     setTerminalViewClient(viewClient)
+    if (viewClient is PocketShellTerminalViewClient) {
+        viewClient.bind(this)
+    }
     // Termux's setTypeface reads mRenderer.mTextSize, so text size must create
     // the renderer before we swap in the app typeface.
     setTextSize(DEFAULT_TEXT_SIZE_RAW_PX)
@@ -247,22 +251,30 @@ internal fun TerminalView.applyPocketShellDefaults(viewClient: TerminalViewClien
 }
 
 /**
- * Minimal [TerminalViewClient] that satisfies the contract without doing
- * anything interesting. The vendored [TerminalView] de-references its
- * client unconditionally during input, measurement, and IME handling — a
- * `null` client would NPE the first time the view is touched.
+ * [TerminalViewClient] used by PocketShell's embedded terminal.
  *
- * This default is intentionally conservative: it refuses control-key
- * mapping, does not eat key events, and forwards key codes back to the
- * View's superclass implementations via the `false` return values. Issue
- * #9's real wiring will replace this with a client that knows about the
- * SSH-attached session and the design-language key bar.
+ * The vendored [TerminalView] owns text and hardware-key routing once the IME
+ * is open, but it delegates the "single tap" action to its client. Upstream
+ * Termux's app client uses that callback to summon the soft keyboard; without
+ * the same bridge here PocketShell could render a connected terminal while
+ * leaving phone users with no way to type into it.
  */
-private class NoOpTerminalViewClient : TerminalViewClient {
+internal class PocketShellTerminalViewClient : TerminalViewClient {
+    private var terminalView: TerminalView? = null
+
+    fun bind(view: TerminalView) {
+        terminalView = view
+    }
+
     override fun onScale(scale: Float): Float = 1f
-    override fun onSingleTapUp(e: MotionEvent?) = Unit
+    override fun onSingleTapUp(e: MotionEvent?) {
+        val view = terminalView ?: return
+        view.requestFocus()
+        val inputMethodManager = view.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        inputMethodManager?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+    }
     override fun shouldBackButtonBeMappedToEscape(): Boolean = false
-    override fun shouldEnforceCharBasedInput(): Boolean = false
+    override fun shouldEnforceCharBasedInput(): Boolean = true
     override fun shouldUseCtrlSpaceWorkaround(): Boolean = false
     override fun isTerminalViewSelected(): Boolean = true
     override fun copyModeChanged(copyMode: Boolean) = Unit

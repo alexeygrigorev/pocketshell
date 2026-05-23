@@ -1,7 +1,9 @@
 package com.pocketshell.app.session
 
 import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.app.di.CommandPlannerClientFactory
 import com.pocketshell.app.session.SessionViewModel.Modifier
+import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
@@ -10,9 +12,25 @@ import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import com.pocketshell.core.voice.CommandPlan
+import com.pocketshell.core.voice.CommandPlannerClient
+import com.pocketshell.core.voice.CommandPlannerException
+import com.pocketshell.core.voice.CommandPlannerRequest
+import com.pocketshell.core.voice.PlannedCommand
 import com.pocketshell.uikit.model.KeyModifierState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
+import java.io.ByteArrayOutputStream
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -42,10 +60,14 @@ import org.robolectric.annotation.Config
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
+@OptIn(ExperimentalCoroutinesApi::class)
 class SessionViewModelTest {
 
-    private fun newVm(): SessionViewModel = SessionViewModel(
+    private fun newVm(
+        commandPlannerClientFactory: CommandPlannerClientFactory = CommandPlannerClientFactory { null },
+    ): SessionViewModel = SessionViewModel(
         applicationContext = ApplicationProvider.getApplicationContext(),
+        commandPlannerClientFactory = commandPlannerClientFactory,
     )
 
     // -- Unmodified byte mapping --------------------------------------------
@@ -223,14 +245,178 @@ class SessionViewModelTest {
     }
 
     @Test
-    fun onChipTapAppendsNewline() {
+    fun onChipTapAcceptsEmptyString() {
         val vm = newVm()
         // We cannot observe terminalState.writeInput without attaching a
         // session — but [SessionViewModel.onChipTap] is a thin wrapper
-        // around `terminalState.writeInput(text + "\n")`. Verify the empty
+        // around `terminalState.writeInput(text + "\r")`. Verify the empty
         // guard at least.
         vm.onChipTap("")
         // No exception means the empty-string guard worked.
+    }
+
+    @Test
+    fun commandSnippetWritesBodyWithKeyboardEnterThroughTerminalBridge() = runBlocking {
+        val vm = newVm()
+        val stdin = ByteArrayOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerJob = vm.terminalState.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = stdin,
+        )
+
+        try {
+            vm.onSnippetPicked(
+                SnippetEntity(
+                    id = 1,
+                    hostId = 1,
+                    label = "marker",
+                    body = "printf marker",
+                    kind = "command",
+                ),
+            )
+
+            waitForStdin(stdin, "printf marker\r")
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            vm.terminalState.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun promptSnippetPastesBodyWithoutEnterThroughTerminalBridge() = runBlocking {
+        val vm = newVm()
+        val stdin = ByteArrayOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerJob = vm.terminalState.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = stdin,
+        )
+
+        try {
+            vm.onSnippetPicked(
+                SnippetEntity(
+                    id = 2,
+                    hostId = 1,
+                    label = "prompt",
+                    body = "explain this diff",
+                    kind = "prompt",
+                ),
+            )
+
+            waitForStdin(stdin, "explain this diff")
+            assertEquals("explain this diff", stdin.toString(Charsets.UTF_8.name()))
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            vm.terminalState.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun voiceCommandTranscriptCallsPlannerAndShowsPendingReview() = runTest {
+        val planner = FakeCommandPlannerClient(
+            result = Result.success(CommandPlan(listOf(PlannedCommand("git status --short")))),
+        )
+        val vm = newVm(commandPlannerClientFactory = CommandPlannerClientFactory { planner })
+
+        vm.planVoiceCommand(" show git status ")
+        advanceUntilIdle()
+
+        assertEquals("show git status", planner.requests.single().transcript)
+        assertEquals(SessionDefaults.HOST, planner.requests.single().session.hostLabel)
+        assertEquals(SessionDefaults.USER, planner.requests.single().session.username)
+        assertTrue(planner.requests.single().safety.requireReviewBeforeExecution)
+        assertEquals(false, planner.requests.single().safety.allowAutoSend)
+        val state = vm.voiceCommandReview.value
+        assertEquals(false, state.isPlanning)
+        assertNull(state.error)
+        assertEquals("git status --short", state.pendingPlan!!.commands.single().command)
+    }
+
+    @Test
+    fun voiceCommandPlannerFailureShowsVisibleErrorState() = runTest {
+        val planner = FakeCommandPlannerClient(
+            result = Result.failure(CommandPlannerException.Rejected("unsafe command")),
+        )
+        val vm = newVm(commandPlannerClientFactory = CommandPlannerClientFactory { planner })
+
+        vm.planVoiceCommand("delete everything")
+        advanceUntilIdle()
+
+        val state = vm.voiceCommandReview.value
+        assertNull(state.pendingPlan)
+        assertTrue(state.error!!.contains("rejected"))
+        assertTrue(state.error!!.contains("unsafe command"))
+    }
+
+    @Test
+    fun approvingPlannedCommandInsertsWithoutEnterThroughTerminalBridge() = runBlocking {
+        val vm = newVm(
+            commandPlannerClientFactory = CommandPlannerClientFactory {
+                FakeCommandPlannerClient(
+                    result = Result.success(CommandPlan(listOf(PlannedCommand("git status")))),
+                )
+            },
+        )
+        val stdin = ByteArrayOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerJob = vm.terminalState.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = stdin,
+        )
+
+        try {
+            vm.planVoiceCommand("git status")
+            waitUntil { vm.voiceCommandReview.value.pendingPlan != null }
+            vm.approvePendingVoiceCommand(withEnter = false)
+
+            waitForStdin(stdin, "git status")
+            assertNull(vm.voiceCommandReview.value.pendingPlan)
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            vm.terminalState.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun approvingPlannedCommandRunsWithKeyboardEnterThroughTerminalBridge() = runBlocking {
+        val vm = newVm(
+            commandPlannerClientFactory = CommandPlannerClientFactory {
+                FakeCommandPlannerClient(
+                    result = Result.success(CommandPlan(listOf(PlannedCommand("git status")))),
+                )
+            },
+        )
+        val stdin = ByteArrayOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerJob = vm.terminalState.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = stdin,
+        )
+
+        try {
+            vm.planVoiceCommand("git status")
+            waitUntil { vm.voiceCommandReview.value.pendingPlan != null }
+            vm.approvePendingVoiceCommand(withEnter = true)
+
+            waitForStdin(stdin, "git status\r")
+            assertNull(vm.voiceCommandReview.value.pendingPlan)
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            vm.terminalState.detachExternalProducer()
+        }
     }
 
     @Test
@@ -333,5 +519,32 @@ class SessionViewModelTest {
         }
 
         override fun close() = Unit
+    }
+
+    private class FakeCommandPlannerClient(
+        private val result: Result<CommandPlan>,
+    ) : CommandPlannerClient {
+        val requests = mutableListOf<CommandPlannerRequest>()
+
+        override suspend fun plan(request: CommandPlannerRequest): Result<CommandPlan> {
+            requests += request
+            return result
+        }
+    }
+
+    private suspend fun waitForStdin(stdin: ByteArrayOutputStream, expected: String) {
+        withTimeout(5_000) {
+            while (stdin.toString(Charsets.UTF_8.name()) != expected) {
+                delay(25)
+            }
+        }
+    }
+
+    private suspend fun waitUntil(predicate: () -> Boolean) {
+        withTimeout(5_000) {
+            while (!predicate()) {
+                delay(25)
+            }
+        }
     }
 }

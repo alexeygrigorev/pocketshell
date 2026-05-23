@@ -70,6 +70,7 @@ public sealed interface TmuxctlDaemonStatus {
     public data class InstalledStopped(val enabled: Boolean) : TmuxctlDaemonStatus
     public data object Missing : TmuxctlDaemonStatus
     public data class Unavailable(val reason: String) : TmuxctlDaemonStatus
+    public data class Unknown(val reason: String) : TmuxctlDaemonStatus
 }
 
 public sealed interface MoshStatus {
@@ -137,7 +138,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
      * but still exits 0.
      */
     public suspend fun checkTmux(session: SshSession): TmuxStatus = try {
-        val result = session.exec("command -v tmux")
+        val result = session.exec(pathAwareCommand("command -v tmux"))
         when {
             result.exitCode == 0 && result.stdout.isNotBlank() -> TmuxStatus.Installed
             // Non-zero exit is the POSIX "command not found" signal.
@@ -175,7 +176,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         session: SshSession,
         report: HostBootstrapReport? = null,
     ): InstallResult {
-        val currentReport = report ?: checkServerSetup(session)
+        val currentReport = freshenReport(session, report)
         if (currentReport.unknownTools.isNotEmpty()) {
             val unknown = currentReport.unknownTools.joinToString { it.binaryName }
             return InstallResult.Error("Could not detect required host tools: $unknown. Reconnect and try again.")
@@ -196,10 +197,23 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         if (daemon is TmuxctlDaemonStatus.Unavailable) {
             return InstallResult.Error(daemon.reason)
         }
+        if (daemon is TmuxctlDaemonStatus.Unknown) {
+            return InstallResult.Error(daemon.reason)
+        }
         if (daemon !is TmuxctlDaemonStatus.Running || !daemon.enabled) {
             return installTmuxctlUserDaemon(session)
         }
         return InstallResult.Success
+    }
+
+    private suspend fun freshenReport(
+        session: SshSession,
+        report: HostBootstrapReport?,
+    ): HostBootstrapReport {
+        if (report == null || report.missingTools.isNotEmpty() || report.unknownTools.isNotEmpty()) {
+            return checkServerSetup(session)
+        }
+        return report
     }
 
     internal suspend fun checkTool(session: SshSession, binaryName: String): ToolStatus = try {
@@ -225,14 +239,16 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     }
 
     internal suspend fun checkTmuxctlDaemon(session: SshSession): TmuxctlDaemonStatus {
-        if (checkTool(session, "systemctl") !is ToolStatus.Installed) {
-            return TmuxctlDaemonStatus.Unavailable("systemctl is not installed on this host")
+        when (val systemctl = checkTool(session, "systemctl")) {
+            is ToolStatus.Installed -> Unit
+            ToolStatus.Missing -> return TmuxctlDaemonStatus.Unavailable("systemctl is not installed on this host")
+            is ToolStatus.Unknown -> return TmuxctlDaemonStatus.Unknown("could not locate systemctl: ${systemctl.reason}")
         }
 
         val active = try {
             session.exec("systemctl --user is-active tmuxctl-jobs.service")
         } catch (t: Throwable) {
-            return TmuxctlDaemonStatus.Unavailable(
+            return TmuxctlDaemonStatus.Unknown(
                 "failed to query systemd user service: ${t.javaClass.simpleName}: ${t.message ?: "unknown error"}",
             )
         }
@@ -242,7 +258,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         val enabled = try {
             session.exec("systemctl --user is-enabled tmuxctl-jobs.service")
         } catch (_: Throwable) {
-            ExecResult("", "", 1)
+            return TmuxctlDaemonStatus.Unknown("failed to query whether tmuxctl-jobs.service is enabled")
         }
         if (enabled.exitCode != 0 && enabled.looksLikeUnavailableSystemdUser()) {
             return TmuxctlDaemonStatus.Unavailable(enabled.combinedOutput().ifBlank { "systemd user services are unavailable on this host" })
@@ -434,7 +450,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     )
 
     private fun pathAwareCommand(command: String): String =
-        "PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH\"; $command"
+        "PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; $command"
 
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"

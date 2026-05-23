@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "--version" ]; then
+  printf 'tmuxctl bootstrap fixture 0.0.0\n'
+  exit 0
+fi
+
+if [ "${1:-}" = "jobs" ] && [ "${2:-}" = "daemon" ]; then
+  printf 'tmuxctl jobs daemon fixture\n'
+  exit 0
+fi
+
+if [ "${1:-}" = "jobs" ] && [ "${2:-}" = "list" ]; then
+  printf 'id\tsession\tschedule\tenabled\n'
+  exit 0
+fi
+
+printf 'tmuxctl bootstrap fixture supports --version, jobs daemon, and jobs list\n' >&2
+exit 64

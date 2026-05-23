@@ -183,7 +183,98 @@ ssh -i tests/docker/test_key -p 2222 -o StrictHostKeyChecking=no testuser@127.0.
 The smoke test authenticates with `tests/docker/test_key`, connects to
 `10.0.2.2:2222`, asserts the helper commands are on PATH, parses
 `heru usage --json`, runs `tmuxctl jobs list`, checks `agent-log-explorer`, and
-uses PocketShell's Claude JSONL detection/read path over SSH.
+uses PocketShell's Claude JSONL detection/read path over SSH. It also seeds a
+deterministic saved host in the debug app, opens it through the real host-list
+UI, sends dogfood shell commands through the prompt composer, verifies visible
+terminal transcript output for `ls`, `pwd`, and tmux, verifies the remote
+artifacts, and cleans up the remote temp directory and tmux session.
+
+### Opt-in end-to-end scenario suites
+
+Some workflows need real app UI plus multiple remote-host states, but are too
+slow and stateful for every PR. These live as opt-in scenario suites: automated,
+repeatable, and documented, but run manually before releases or while
+investigating regressions.
+
+Scenario suites should follow these rules:
+
+- Use Docker host profiles/containers, never real hosts or private keys.
+- Drive the Android app through emulator UI when the behavior is user-facing.
+- Support running one scenario by name and running the full suite.
+- Keep fast CI green without requiring the full suite on every push.
+- Clean up remote files, tmux sessions, and containers after each scenario.
+- Record the exact command for each scenario in this document.
+
+The first suite is host setup/bootstrap. It should cover at least:
+
+- `ready`: all tools and the daemon are already available; no install prompt.
+- `uv-install`: tools are missing but `uv` is available; install succeeds.
+- `unsupported`: tools are missing and no installer is available; clear manual
+  setup state.
+- `daemon-disabled`: tools are present but the jobs daemon is disabled; only
+  daemon enablement is offered.
+- `user-local-path`: tools are installed under user-local directories that are
+  absent from a default non-login SSH `PATH`; detection still succeeds.
+
+The false-positive setup bug is tracked in #70. The reusable opt-in scenario
+suite is tracked in #71.
+
+### Host setup/bootstrap scenario suite
+
+The bootstrap suite is implemented as opt-in Android instrumentation tests
+against five deterministic Docker SSH hosts. It seeds a disposable host in the
+app database, launches PocketShell, taps the host row, and asserts the visible
+setup sheet/action state for each profile. Direct SSH inside the suite is
+limited to pre/post scenario reset and post-action probes. It is skipped unless
+the instrumentation argument is set, so normal `connectedDebugAndroidTest` runs
+do not need these containers.
+
+Start all bootstrap host profiles:
+
+```bash
+docker compose -f tests/docker/docker-compose.yml up -d --build \
+  bootstrap-ready \
+  bootstrap-uv-install \
+  bootstrap-unsupported \
+  bootstrap-daemon-disabled \
+  bootstrap-user-local-path
+```
+
+Run the whole opt-in suite on an already-running emulator:
+
+```bash
+./gradlew :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.pocketshellBootstrapScenarios=true \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest
+```
+
+Run one scenario by name:
+
+```bash
+./gradlew :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.pocketshellBootstrapScenarios=true \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest#uvInstall
+```
+
+Scenario-to-service mapping:
+
+| Scenario | Service | Host port |
+|---|---|---|
+| `ready` | `bootstrap-ready` | `2230` |
+| `uv-install` | `bootstrap-uv-install` | `2231` |
+| `unsupported` | `bootstrap-unsupported` | `2232` |
+| `daemon-disabled` | `bootstrap-daemon-disabled` | `2233` |
+| `user-local-path` | `bootstrap-user-local-path` | `2234` |
+
+Cleanup:
+
+```bash
+docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
+```
+
+The mutable `uv-install` and `daemon-disabled` scenarios reset their remote
+state before and after each test, so running a single scenario repeatedly
+against the same containers starts from the documented pristine profile.
 
 ---
 

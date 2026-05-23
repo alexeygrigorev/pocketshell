@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "tool" ] && [ "${2:-}" = "install" ] && [ -n "${3:-}" ]; then
+  package="$3"
+  target_dir="${HOME}/.local/bin"
+  source_dir="${POCKETSHELL_BOOTSTRAP_BIN_DIR:-/opt/pocketshell-bootstrap-bin}"
+  install -d "$target_dir"
+  cp "${source_dir}/${package}" "${target_dir}/${package}"
+  chmod +x "${target_dir}/${package}"
+  printf 'installed fixture tool %s\n' "$package"
+  exit 0
+fi
+
+printf 'uv bootstrap fixture supports: tool install <package>\n' >&2
+exit 64

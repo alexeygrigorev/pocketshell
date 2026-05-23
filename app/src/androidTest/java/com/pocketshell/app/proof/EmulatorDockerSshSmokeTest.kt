@@ -1,7 +1,19 @@
 package com.pocketshell.app.proof
 
+import android.view.View
+import android.view.ViewGroup
+import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
+import androidx.room.Room
+import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.MainActivity
+import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
@@ -9,9 +21,15 @@ import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.storage.AppDatabase
+import com.pocketshell.core.storage.entity.HostEntity
+import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withTimeout
+import org.junit.After
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.json.JSONArray
@@ -28,6 +46,17 @@ import org.json.JSONArray
  */
 @RunWith(AndroidJUnit4::class)
 class EmulatorDockerSshSmokeTest {
+
+    @get:Rule
+    val compose = createEmptyComposeRule()
+
+    private var launchedActivity: ActivityScenario<MainActivity>? = null
+
+    @After
+    fun closeLaunchedActivity() {
+        launchedActivity?.close()
+        launchedActivity = null
+    }
 
     @Test
     fun debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias() = runBlocking {
@@ -124,5 +153,208 @@ class EmulatorDockerSshSmokeTest {
                 )
             }
         }
+    }
+
+    @Test
+    fun dogfoodJourneyOpensAppSessionAndRunsShellAndTmuxCommands() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val appContext = instrumentation.targetContext
+        val key = instrumentation.context
+            .assets
+            .open("test_key")
+            .bufferedReader()
+            .use { it.readText() }
+        val marker = "psdogfood${System.currentTimeMillis()}"
+        val tmpDir = "/tmp/pocketshell-$marker"
+        val sessionName = "pocketshell-$marker"
+        val tmuxVisibleMarker = "tmux-visible-$marker"
+
+        appContext.deleteDatabase(DATABASE_NAME)
+        val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME).build()
+        try {
+            val storedKey = SshKeyStorage.persistKey(
+                context = appContext,
+                sshKeyDao = db.sshKeyDao(),
+                name = "dogfood-test-key",
+                content = key,
+            )
+            db.hostDao().insert(
+                HostEntity(
+                    name = "Dogfood Docker",
+                    hostname = DEFAULT_HOST,
+                    port = DEFAULT_PORT,
+                    username = DEFAULT_USER,
+                    keyId = storedKey.id,
+                    tmuxInstalled = true,
+                    lastBootstrapAt = System.currentTimeMillis(),
+                ),
+            )
+        } finally {
+            db.close()
+        }
+
+        val setupCheck = withTimeout(20_000) {
+            SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+                timeoutMs = 15_000,
+            )
+        }
+        assertTrue(
+            "expected SSH connection to Docker target before launching app, got ${setupCheck.exceptionOrNull()}",
+            setupCheck.isSuccess,
+        )
+        cleanupRemoteDogfoodArtifacts(key, tmpDir, sessionName)
+
+        try {
+            launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+            compose.onNodeWithText("Dogfood Docker").performClick()
+            compose.onNodeWithText(DEFAULT_HOST).assertExists()
+            compose.onNodeWithText("Terminal").assertExists()
+            compose.onNodeWithText("tmux ls").assertExists()
+            waitForSessionConnectUiToSettle()
+
+            sendCommandViaComposer(
+                "mkdir -p ${shellQuote(tmpDir)} && ls -1 /workspace | tee ${shellQuote("$tmpDir/workspace-ls-before-mkdir.txt")}",
+            )
+            sendCommandViaComposer(
+                """
+                tmp=${shellQuote(tmpDir)}
+                mkdir -p "${'$'}tmp"
+                cd "${'$'}tmp"
+                pwd | tee pwd.txt
+                ls -1 /workspace | tee workspace-ls.txt
+                tmux new-session -d -s ${shellQuote(sessionName)} 2>/dev/null || tmux has-session -t ${shellQuote(sessionName)}
+                tmux has-session -t ${shellQuote(sessionName)} && printf '%s\n' ${shellQuote(tmuxVisibleMarker)} | tee tmux.txt
+                """.trimIndent().replace("\n", "; "),
+            )
+
+            waitForTerminalTranscript(
+                description = "visible ls, pwd, and tmux output",
+            ) { transcript ->
+                val lines = transcript.lineSequence().map { it.trim() }.toSet()
+                "app" in lines && tmpDir in lines && tmuxVisibleMarker in lines
+            }
+
+            withTimeout(15_000) {
+                var verified = false
+                while (!verified) {
+                    val result = SshConnection.connect(
+                        host = DEFAULT_HOST,
+                        port = DEFAULT_PORT,
+                        user = DEFAULT_USER,
+                        key = SshKey.Pem(key),
+                        knownHosts = KnownHostsPolicy.AcceptAll,
+                        timeoutMs = 15_000,
+                    ).getOrThrow().use { session ->
+                        session.exec(
+                            """
+                            test -s ${shellQuote("$tmpDir/workspace-ls-before-mkdir.txt")} &&
+                            test -d ${shellQuote(tmpDir)} &&
+                            test "$(cat ${shellQuote("$tmpDir/pwd.txt")})" = ${shellQuote(tmpDir)} &&
+                            test -s ${shellQuote("$tmpDir/workspace-ls.txt")} &&
+                            test "$(cat ${shellQuote("$tmpDir/tmux.txt")})" = ${shellQuote(tmuxVisibleMarker)} &&
+                            tmux has-session -t ${shellQuote(sessionName)}
+                            """.trimIndent().replace("\n", " "),
+                        )
+                    }
+                    verified = result.exitCode == 0
+                    if (!verified) delay(250)
+                }
+            }
+        } finally {
+            cleanupRemoteDogfoodArtifacts(key, tmpDir, sessionName)
+        }
+    }
+
+    private fun waitForSessionConnectUiToSettle() {
+        compose.waitUntil(timeoutMillis = 20_000) {
+            compose.onAllNodesWithText(
+                "connecting to $DEFAULT_USER@$DEFAULT_HOST:$DEFAULT_PORT",
+                substring = false,
+            ).fetchSemanticsNodes().isEmpty()
+        }
+    }
+
+    private fun sendCommandViaComposer(command: String) {
+        compose.onNodeWithText("dictate").performClick()
+        compose.onNodeWithText("Prompt Composer").assertExists()
+        compose.onNode(hasSetTextAction()).performTextInput(command)
+        compose.onNodeWithText("Send + ↵").performClick()
+    }
+
+    private fun waitForTerminalTranscript(
+        description: String,
+        predicate: (String) -> Boolean,
+    ) {
+        var lastSnapshot = ""
+        compose.waitUntil(timeoutMillis = 15_000) {
+            lastSnapshot = terminalTranscriptSnapshot()
+            predicate(lastSnapshot)
+        }
+        assertTrue(
+            "expected terminal transcript to contain $description, got:\n$lastSnapshot",
+            predicate(lastSnapshot),
+        )
+    }
+
+    private fun terminalTranscriptSnapshot(): String {
+        var snapshot = ""
+        launchedActivity?.onActivity { activity ->
+            val terminalView = activity.window.decorView.findTerminalView()
+            snapshot = terminalView
+                ?.currentSession
+                ?.emulator
+                ?.screen
+                ?.transcriptText
+                .orEmpty()
+        }
+        return snapshot
+    }
+
+    private fun View.findTerminalView(): TerminalView? {
+        if (this is TerminalView) return this
+        if (this !is ViewGroup) return null
+        for (index in 0 until childCount) {
+            val match = getChildAt(index).findTerminalView()
+            if (match != null) return match
+        }
+        return null
+    }
+
+    private suspend fun cleanupRemoteDogfoodArtifacts(
+        key: String,
+        tmpDir: String,
+        sessionName: String,
+    ) {
+        val cleanupResult = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use {
+                it.exec(
+                    "rm -rf ${shellQuote(tmpDir)} ${shellQuote("$tmpDir-ls-before-mkdir")}; " +
+                        "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true",
+                )
+            }
+        }
+        assertTrue(
+            "expected dogfood cleanup to succeed, got ${cleanupResult.exceptionOrNull()}",
+            cleanupResult.getOrNull()?.exitCode == 0,
+        )
+    }
+
+    private fun shellQuote(value: String): String =
+        "'" + value.replace("'", "'\"'\"'") + "'"
+
+    private companion object {
+        const val DATABASE_NAME: String = "pocketshell.db"
     }
 }

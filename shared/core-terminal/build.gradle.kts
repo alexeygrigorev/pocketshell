@@ -31,6 +31,7 @@ android {
         // PocketShell's min SDK (26) is higher than upstream Termux's, so all
         // upstream Android API calls work unchanged.
         minSdk = 26
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Issue #9: a stub `libtermux.so` ships in the AAR so the vendored
         // `com.termux.terminal.JNI` static initializer (`System.loadLibrary`)
@@ -136,4 +137,9 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
+
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.ext.junit)
+    androidTestImplementation(libs.junit)
 }

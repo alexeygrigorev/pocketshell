@@ -2,6 +2,9 @@ package com.pocketshell.app.session
 
 import android.Manifest
 import androidx.annotation.RequiresPermission
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -14,14 +17,19 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -187,6 +195,11 @@ public class InlineDictationViewModel @Inject constructor(
         }
     }
 
+    /** Select how inline voice dictation should interpret captured speech. */
+    public fun selectMode(mode: DictationMode) {
+        _uiState.update { it.copy(mode = mode) }
+    }
+
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun startRecording() {
         // Guard: refuse to record if no API key is stored. The screen
@@ -214,6 +227,7 @@ public class InlineDictationViewModel @Inject constructor(
         _uiState.update {
             it.copy(
                 recording = RecordingState.Recording,
+                amplitude = 0f,
                 error = null,
             )
         }
@@ -236,6 +250,16 @@ public class InlineDictationViewModel @Inject constructor(
         var triggerAutoStop = false
         while (kotlinx.coroutines.currentCoroutineContext().isActive) {
             val amp = audioRecorder.currentAmplitude()
+            _uiState.update {
+                if (it.recording == RecordingState.Recording) {
+                    it.copy(amplitude = amp)
+                } else {
+                    it.copy(amplitude = 0f)
+                }
+            }
+            if (_uiState.value.recording != RecordingState.Recording) {
+                break
+            }
             if (amp >= SILENCE_AMPLITUDE_THRESHOLD) {
                 lastLoudAtMs = clock()
             } else if (clock() - lastLoudAtMs >= SILENCE_WINDOW_MS) {
@@ -259,6 +283,7 @@ public class InlineDictationViewModel @Inject constructor(
             _uiState.update {
                 it.copy(
                     recording = RecordingState.Idle,
+                    amplitude = 0f,
                     error = e.message ?: "Microphone error",
                 )
             }
@@ -266,11 +291,11 @@ public class InlineDictationViewModel @Inject constructor(
         }
 
         if (audio.isEmpty()) {
-            _uiState.update { it.copy(recording = RecordingState.Idle) }
+            _uiState.update { it.copy(recording = RecordingState.Idle, amplitude = 0f) }
             return
         }
 
-        _uiState.update { it.copy(recording = RecordingState.Transcribing) }
+        _uiState.update { it.copy(recording = RecordingState.Transcribing, amplitude = 0f) }
 
         transcribeJob = viewModelScope.launch {
             val client = whisperClientFactory.create()
@@ -278,6 +303,7 @@ public class InlineDictationViewModel @Inject constructor(
                 _uiState.update {
                     it.copy(
                         recording = RecordingState.Idle,
+                        amplitude = 0f,
                         error = "No OpenAI API key saved. Open the composer to add one.",
                     )
                 }
@@ -291,7 +317,7 @@ public class InlineDictationViewModel @Inject constructor(
                     // space-or-newline is a footgun on the shell side.
                     val trimmed = text.trim()
                     _uiState.update {
-                        it.copy(recording = RecordingState.Idle, error = null)
+                        it.copy(recording = RecordingState.Idle, amplitude = 0f, error = null)
                     }
                     if (trimmed.isNotEmpty()) {
                         _transcriptions.emit(trimmed)
@@ -307,7 +333,7 @@ public class InlineDictationViewModel @Inject constructor(
                         else -> t.message ?: "Transcription failed"
                     }
                     _uiState.update {
-                        it.copy(recording = RecordingState.Idle, error = msg)
+                        it.copy(recording = RecordingState.Idle, amplitude = 0f, error = msg)
                     }
                 },
             )
@@ -327,6 +353,7 @@ public class InlineDictationViewModel @Inject constructor(
         _uiState.update {
             it.copy(
                 recording = RecordingState.Idle,
+                amplitude = 0f,
                 error = "Microphone permission denied. Grant it in system settings to use voice input.",
             )
         }
@@ -351,17 +378,28 @@ public class InlineDictationViewModel @Inject constructor(
     /** Coarse-grained recording state — drives the mic-slot visual treatment. */
     public enum class RecordingState { Idle, Recording, Transcribing }
 
+    /** User-visible inline dictation mode. Command is UI/state-only for now. */
+    public enum class DictationMode { Prompt, Command }
+
     /**
      * UI state surfaced to [KeyBarWithMic].
      *
+     * @param mode selected voice interpretation mode. Prompt currently
+     *   preserves the existing inline transcription behavior; Command is
+     *   stored and displayed but does not plan shell commands yet.
      * @param recording the FSM phase — picks the slot's colour and the
      *   spinner visibility.
+     * @param amplitude latest peak amplitude in `[0, 1]`. Drives the
+     *   inline mic-slot bars while [recording] is [RecordingState.Recording];
+     *   `0f` otherwise.
      * @param error transient user-facing error message; `null` clears
      *   the banner. The screen clears this on the next interaction or
      *   recording start.
      */
     public data class UiState(
+        val mode: DictationMode = DictationMode.Prompt,
         val recording: RecordingState = RecordingState.Idle,
+        val amplitude: Float = 0f,
         val error: String? = null,
     )
 
@@ -408,41 +446,112 @@ public fun KeyBarWithMic(
     modifierStates: Map<String, KeyModifierState>? = null,
     onModifierStateChange: (KeyBinding, KeyModifierState) -> Unit = { _, _ -> },
     micState: InlineDictationViewModel.RecordingState,
+    micAmplitude: Float = 0f,
+    dictationMode: InlineDictationViewModel.DictationMode,
+    onDictationModeSelected: (InlineDictationViewModel.DictationMode) -> Unit,
     onMicTap: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
+    androidx.compose.foundation.layout.Column(
         modifier = modifier
             .fillMaxWidth()
             .background(color = PocketShellColors.Surface)
             .border(border = BorderStroke(1.dp, PocketShellColors.Border))
             .padding(horizontal = 8.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // Hand the KeyBar the available space minus the mic slot. We let
-        // KeyBar own its own background / border so the bar's seam looks
-        // identical to the bare KeyBar — the wrapper's outer container
-        // just gives us a place to anchor the trailing mic slot.
-        //
-        // KeyBar's outer Row already calls fillMaxWidth() + draws its own
-        // surface; nesting it under our outer surface gets us the same
-        // visual on the 8-key side. We pass `weight(1f)` so the KeyBar
-        // claims the remaining row width after the mic slot is laid out.
-        Box(modifier = Modifier.weight(1f)) {
-            KeyBar(
-                keys = keys,
-                onKey = onKey,
-                modifierStates = modifierStates,
-                onModifierStateChange = onModifierStateChange,
+        InlineDictationModeSelector(
+            selectedMode = dictationMode,
+            onModeSelected = onDictationModeSelected,
+        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(5.dp),
+        ) {
+            // Hand the KeyBar the available space minus the mic slot. We let
+            // KeyBar own its own background / border so the bar's seam looks
+            // identical to the bare KeyBar — the wrapper's outer container
+            // just gives us a place to anchor the trailing mic slot.
+            //
+            // KeyBar's outer Row already calls fillMaxWidth() + draws its own
+            // surface; nesting it under our outer surface gets us the same
+            // visual on the 8-key side. We pass `weight(1f)` so the KeyBar
+            // claims the remaining row width after the mic slot is laid out.
+            Box(modifier = Modifier.weight(1f)) {
+                KeyBar(
+                    keys = keys,
+                    onKey = onKey,
+                    modifierStates = modifierStates,
+                    onModifierStateChange = onModifierStateChange,
+                )
+            }
+            InlineMicSlot(
+                state = micState,
+                amplitude = micAmplitude,
+                onTap = onMicTap,
             )
         }
-        InlineMicSlot(
-            state = micState,
-            onTap = onMicTap,
-        )
     }
 }
+
+@Composable
+private fun InlineDictationModeSelector(
+    selectedMode: InlineDictationViewModel.DictationMode,
+    onModeSelected: (InlineDictationViewModel.DictationMode) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(32.dp)
+            .background(color = PocketShellColors.SurfaceElev, shape = RoundedCornerShape(8.dp))
+            .border(
+                border = BorderStroke(1.dp, PocketShellColors.Border),
+                shape = RoundedCornerShape(8.dp),
+            )
+            .padding(2.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        InlineDictationViewModel.DictationMode.entries.forEach { mode ->
+            val selected = mode == selectedMode
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(28.dp)
+                    .background(
+                        color = if (selected) PocketShellColors.AccentSoft else Color.Transparent,
+                        shape = RoundedCornerShape(6.dp),
+                    )
+                    .border(
+                        border = BorderStroke(
+                            width = 1.dp,
+                            color = if (selected) PocketShellColors.AccentDim else Color.Transparent,
+                        ),
+                        shape = RoundedCornerShape(6.dp),
+                    )
+                    .selectable(
+                        selected = selected,
+                        role = Role.RadioButton,
+                        onClick = { onModeSelected(mode) },
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = mode.label,
+                    color = if (selected) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                )
+            }
+        }
+    }
+}
+
+private val InlineDictationViewModel.DictationMode.label: String
+    get() = when (this) {
+        InlineDictationViewModel.DictationMode.Prompt -> "Prompt"
+        InlineDictationViewModel.DictationMode.Command -> "Command"
+    }
 
 /**
  * The trailing mic slot in [KeyBarWithMic]. Pulled out as a private
@@ -458,6 +567,7 @@ public fun KeyBarWithMic(
 @Composable
 private fun InlineMicSlot(
     state: InlineDictationViewModel.RecordingState,
+    amplitude: Float,
     onTap: () -> Unit,
 ) {
     val (bg: Color, border: Color, glyph: Color) = when (state) {
@@ -489,6 +599,14 @@ private fun InlineMicSlot(
         modifier = Modifier
             .width(56.dp)
             .height(38.dp)
+            .testTag(INLINE_DICTATION_MIC_SLOT_TAG)
+            .semantics {
+                contentDescription = when (state) {
+                    InlineDictationViewModel.RecordingState.Idle -> "Inline dictation idle"
+                    InlineDictationViewModel.RecordingState.Recording -> "Inline dictation recording waveform"
+                    InlineDictationViewModel.RecordingState.Transcribing -> "Inline dictation transcribing"
+                }
+            }
             .background(color = bg, shape = RoundedCornerShape(8.dp))
             .border(
                 border = BorderStroke(1.dp, border),
@@ -505,10 +623,14 @@ private fun InlineMicSlot(
     ) {
         if (state == InlineDictationViewModel.RecordingState.Transcribing) {
             CircularProgressIndicator(
-                modifier = Modifier.size(16.dp),
+                modifier = Modifier
+                    .size(16.dp)
+                    .testTag(INLINE_DICTATION_TRANSCRIBING_TAG),
                 color = PocketShellColors.Accent,
                 strokeWidth = 2.dp,
             )
+        } else if (state == InlineDictationViewModel.RecordingState.Recording) {
+            InlineMicWaveform(amplitude = amplitude)
         } else {
             // Filled-dot glyph — same approach as the chip row's dictate
             // icon. Reads as a microphone body without dragging in
@@ -522,3 +644,43 @@ private fun InlineMicSlot(
         }
     }
 }
+
+@Composable
+private fun InlineMicWaveform(amplitude: Float) {
+    val smoothed by animateFloatAsState(
+        targetValue = amplitude.coerceIn(0f, 1f),
+        animationSpec = tween(durationMillis = 80, easing = LinearEasing),
+        label = "inline-mic-waveform-smooth",
+    )
+    Row(
+        modifier = Modifier.testTag(INLINE_DICTATION_WAVEFORM_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        for (i in 0 until INLINE_WAVEFORM_BARS) {
+            val h = inlineWaveformBarHeightDp(i, smoothed)
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .height(h.dp)
+                    .background(
+                        color = PocketShellColors.Accent,
+                        shape = RoundedCornerShape(2.dp),
+                    ),
+            )
+        }
+    }
+}
+
+internal fun inlineWaveformBarHeightDp(index: Int, amplitude: Float): Float {
+    val centred = (index - (INLINE_WAVEFORM_BARS - 1) / 2f) / ((INLINE_WAVEFORM_BARS - 1) / 2f)
+    val envelope = 1f - centred * centred
+    val maxHeight = 8f + envelope * 18f
+    return (4f + amplitude.coerceIn(0f, 1f) * maxHeight).coerceIn(4f, 26f)
+}
+
+private const val INLINE_WAVEFORM_BARS: Int = 8
+
+internal const val INLINE_DICTATION_MIC_SLOT_TAG: String = "inline-dictation-mic-slot"
+internal const val INLINE_DICTATION_WAVEFORM_TAG: String = "inline-dictation-waveform"
+internal const val INLINE_DICTATION_TRANSCRIBING_TAG: String = "inline-dictation-transcribing"

@@ -47,6 +47,8 @@ dependencies {
     // Coroutines are part of the public surface — `transcribe()` is `suspend`.
     api(libs.kotlinx.coroutines.core)
 
+    implementation("org.json:json:20240303")
+
     // EncryptedSharedPreferences is an implementation detail of
     // AndroidKeystoreApiKeyStorage; callers only see save/load/clear, so this
     // can stay on `implementation`.

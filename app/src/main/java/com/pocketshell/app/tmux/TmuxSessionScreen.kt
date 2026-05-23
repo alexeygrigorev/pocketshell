@@ -25,8 +25,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.PaddingValues
@@ -173,6 +175,8 @@ public fun TmuxSessionScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
                 .imePadding(),
         ) {
             Box(
@@ -282,6 +286,7 @@ public fun TmuxSessionScreen(
                 } else {
                     HorizontalPager(
                         state = pagerState,
+                        key = { pageIndex -> panes[pageIndex].paneId },
                         modifier = Modifier.fillMaxSize(),
                     ) { pageIndex ->
                         val pane = panes[pageIndex]

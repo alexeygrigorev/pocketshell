@@ -46,3 +46,58 @@ services:
     container_name: pocketshell-test-agents
     ports:
       - "2222:22"
+
+  bootstrap-ready:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: ready
+    image: pocketshell-test:bootstrap-ready
+    container_name: pocketshell-test-bootstrap-ready
+    ports:
+      - "2230:22"
+
+  bootstrap-uv-install:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: uv-install
+    image: pocketshell-test:bootstrap-uv-install
+    container_name: pocketshell-test-bootstrap-uv-install
+    ports:
+      - "2231:22"
+
+  bootstrap-unsupported:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: unsupported
+    image: pocketshell-test:bootstrap-unsupported
+    container_name: pocketshell-test-bootstrap-unsupported
+    ports:
+      - "2232:22"
+
+  bootstrap-daemon-disabled:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: daemon-disabled
+    image: pocketshell-test:bootstrap-daemon-disabled
+    container_name: pocketshell-test-bootstrap-daemon-disabled
+    ports:
+      - "2233:22"
+
+  bootstrap-user-local-path:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: user-local-path
+    image: pocketshell-test:bootstrap-user-local-path
+    container_name: pocketshell-test-bootstrap-user-local-path
+    ports:
+      - "2234:22"

@@ -28,6 +28,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -62,6 +63,14 @@ public sealed interface HostBootstrapSheetState {
     public data object Success : HostBootstrapSheetState
     public data class Failed(val message: String) : HostBootstrapSheetState
 }
+
+public const val HOST_BOOTSTRAP_SHEET_TAG: String = "host-bootstrap-sheet"
+public const val HOST_BOOTSTRAP_INSTALL_ALL_TAG: String = "host-bootstrap-install-all"
+public const val HOST_BOOTSTRAP_SKIP_TAG: String = "host-bootstrap-skip"
+public const val HOST_BOOTSTRAP_CONTINUE_TAG: String = "host-bootstrap-continue"
+public const val HOST_BOOTSTRAP_CLOSE_TAG: String = "host-bootstrap-close"
+public const val HOST_BOOTSTRAP_INSTALLING_TAG: String = "host-bootstrap-installing"
+public const val HOST_BOOTSTRAP_ROW_TAG_PREFIX: String = "host-bootstrap-row-"
 
 /**
  * Compose modal that surfaces on host connect when `tmux` is missing.
@@ -102,7 +111,7 @@ public fun HostBootstrapSheet(
         sheetState = sheetState,
         containerColor = PocketShellColors.Surface,
         contentColor = PocketShellColors.Text,
-        modifier = modifier,
+        modifier = modifier.testTag(HOST_BOOTSTRAP_SHEET_TAG),
     ) {
         when (state) {
             is HostBootstrapSheetState.Prompt -> PromptContent(
@@ -148,12 +157,35 @@ private fun PromptContent(
             onSetupDaemon = onSetupDaemon,
         )
         Spacer(modifier = Modifier.height(20.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            SecondaryButton(label = "Skip", onClick = onSkip, modifier = Modifier.weight(1f))
-            PrimaryButton(label = "Install all", onClick = onInstall, modifier = Modifier.weight(1f))
+        if (state.hasActionableSetup()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                SecondaryButton(
+                    label = "Skip",
+                    onClick = onSkip,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(HOST_BOOTSTRAP_SKIP_TAG),
+                )
+                PrimaryButton(
+                    label = "Install all",
+                    onClick = onInstall,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(HOST_BOOTSTRAP_INSTALL_ALL_TAG),
+                )
+            }
+        } else {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Spacer(modifier = Modifier.weight(1f))
+                PrimaryButton(
+                    label = "Continue",
+                    onClick = onSkip,
+                    modifier = Modifier.testTag(HOST_BOOTSTRAP_CONTINUE_TAG),
+                )
+            }
         }
     }
 }
@@ -186,6 +218,11 @@ private fun SetupActions(
                     detail = daemon.reason,
                 )
 
+                is TmuxctlDaemonStatus.Unknown -> SetupInfoRow(
+                    title = "tmuxctl jobs daemon",
+                    detail = daemon.reason,
+                )
+
                 else -> SetupActionRow(
                     title = "tmuxctl jobs daemon",
                     detail = "systemctl --user enable --now tmuxctl-jobs.service",
@@ -208,9 +245,21 @@ internal fun HostBootstrapReport.hasBootstrapSheetRows(): Boolean =
         needsTmuxctlDaemonSetup() ||
         mosh is MoshStatus.Unsupported
 
+internal fun HostBootstrapSheetState.Prompt.hasActionableSetup(): Boolean =
+    needsTmux ||
+        report?.missingTools?.isNotEmpty() == true ||
+        report?.needsTmuxctlDaemonAction() == true
+
 internal fun HostBootstrapReport.needsTmuxctlDaemonSetup(): Boolean {
     val daemonStatus = daemon
     return daemonStatus !is TmuxctlDaemonStatus.Running || !daemonStatus.enabled
+}
+
+internal fun HostBootstrapReport.needsTmuxctlDaemonAction(): Boolean {
+    val daemonStatus = daemon
+    return daemonStatus is TmuxctlDaemonStatus.Missing ||
+        daemonStatus is TmuxctlDaemonStatus.InstalledStopped ||
+        daemonStatus is TmuxctlDaemonStatus.Running && !daemonStatus.enabled
 }
 
 @Composable
@@ -222,6 +271,7 @@ private fun SetupActionRow(
 ) {
     Row(
         modifier = Modifier
+            .testTag(HOST_BOOTSTRAP_ROW_TAG_PREFIX + title)
             .fillMaxWidth()
             .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
             .border(1.dp, PocketShellColors.Border, RoundedCornerShape(8.dp))
@@ -242,6 +292,7 @@ private fun SetupActionRow(
 private fun SetupInfoRow(title: String, detail: String) {
     Column(
         modifier = Modifier
+            .testTag(HOST_BOOTSTRAP_ROW_TAG_PREFIX + title)
             .fillMaxWidth()
             .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
             .border(1.dp, PocketShellColors.Border, RoundedCornerShape(8.dp))
@@ -266,7 +317,9 @@ private fun InstallingContent(hostName: String) {
             CircularProgressIndicator(
                 color = PocketShellColors.Accent,
                 strokeWidth = 2.dp,
-                modifier = Modifier.padding(start = 4.dp),
+                modifier = Modifier
+                    .padding(start = 4.dp)
+                    .testTag(HOST_BOOTSTRAP_INSTALLING_TAG),
             )
             Spacer(modifier = Modifier.width(12.dp))
             Text(
@@ -286,7 +339,11 @@ private fun SuccessContent(hostName: String, onContinue: () -> Unit) {
         Spacer(modifier = Modifier.height(20.dp))
         Row(modifier = Modifier.fillMaxWidth()) {
             Spacer(modifier = Modifier.weight(1f))
-            PrimaryButton(label = "Continue", onClick = onContinue)
+            PrimaryButton(
+                label = "Continue",
+                onClick = onContinue,
+                modifier = Modifier.testTag(HOST_BOOTSTRAP_CONTINUE_TAG),
+            )
         }
     }
 }
@@ -325,7 +382,11 @@ private fun FailedContent(hostName: String, message: String, onClose: () -> Unit
             Spacer(modifier = Modifier.weight(1f))
             // AlertDialog button styling, but reuse our SecondaryButton
             // so the visual matches the rest of the sheet.
-            SecondaryButton(label = "Close", onClick = onClose)
+            SecondaryButton(
+                label = "Close",
+                onClick = onClose,
+                modifier = Modifier.testTag(HOST_BOOTSTRAP_CLOSE_TAG),
+            )
         }
     }
 }
@@ -338,7 +399,7 @@ private fun bootstrapPromptText(state: HostBootstrapSheetState.Prompt): String {
     val report = state.report
     report?.missingTools
         ?.mapTo(parts) { it.binaryName }
-    if (report?.daemon !is TmuxctlDaemonStatus.Running) {
+    if (report != null && report.needsTmuxctlDaemonAction()) {
         parts += "tmuxctl jobs daemon"
     }
 

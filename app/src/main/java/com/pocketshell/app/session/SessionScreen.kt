@@ -19,7 +19,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -50,7 +52,6 @@ import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
-import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
@@ -106,6 +107,7 @@ public fun SessionScreen(
     val status by viewModel.connectionStatus.collectAsState()
     val modifierStates by viewModel.modifierStates.collectAsState()
     val agentConversation by viewModel.agentConversation.collectAsState()
+    val voiceCommandReview by viewModel.voiceCommandReview.collectAsState()
     val dictationState by inlineDictationViewModel.uiState.collectAsState()
     val keyBarModifierStates = remember(modifierStates) {
         modifierStates.mapKeys { (modifier, _) -> modifier.keyBarLabel }
@@ -125,9 +127,12 @@ public fun SessionScreen(
     // collector lives as long as the screen does — every emission writes
     // its bytes directly to the live SSH PTY. The flow has `replay = 0`,
     // so re-collecting on recomposition will not replay old bytes.
-    LaunchedEffect(inlineDictationViewModel) {
+    LaunchedEffect(inlineDictationViewModel, dictationState.mode) {
         inlineDictationViewModel.transcriptions.collect { text ->
-            viewModel.terminalState.writeInput(text.toByteArray(Charsets.UTF_8))
+            when (dictationState.mode) {
+                InlineDictationViewModel.DictationMode.Prompt -> viewModel.sendText(text, withEnter = false)
+                InlineDictationViewModel.DictationMode.Command -> viewModel.planVoiceCommand(text)
+            }
         }
     }
 
@@ -158,6 +163,8 @@ public fun SessionScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
                 .imePadding(),
         ) {
             Breadcrumb(
@@ -228,6 +235,12 @@ public fun SessionScreen(
             dictationState.error?.let { msg ->
                 InlineDictationErrorStrip(msg, onDismiss = inlineDictationViewModel::clearError)
             }
+            VoiceCommandReviewStrip(
+                state = voiceCommandReview,
+                onInsert = { viewModel.approvePendingVoiceCommand(withEnter = false) },
+                onRun = { viewModel.approvePendingVoiceCommand(withEnter = true) },
+                onDismiss = viewModel::dismissVoiceCommandReview,
+            )
 
             if (isImeVisible) {
                 KeyBarWithMic(
@@ -238,6 +251,9 @@ public fun SessionScreen(
                         viewModel.onKeyBarModifierState(binding.label, state)
                     },
                     micState = dictationState.recording,
+                    micAmplitude = dictationState.amplitude,
+                    dictationMode = dictationState.mode,
+                    onDictationModeSelected = inlineDictationViewModel::selectMode,
                     onMicTap = {
                         // Same three-step gate as the prompt composer
                         // (#15): permission → API-key → recorder.
@@ -263,7 +279,7 @@ public fun SessionScreen(
                     },
                 )
             } else {
-                ChipRow(
+                BottomChipControls(
                     chips = DefaultChips,
                     onChipTap = viewModel::onChipTap,
                     onDictateTap = { showMicSheet = true },
@@ -283,32 +299,19 @@ public fun SessionScreen(
             },
         )
 
-        // Bottom-right mic FAB. Always visible (per `docs/input-methods.md`
-        // §"Screen real estate" → keyboard down) — the keyboard-up path
-        // surfaces the dictate icon-chip via the chip row instead.
-        if (!isImeVisible) {
-            MicButton(
-                state = MicButtonState.Idle,
-                onClick = { showMicSheet = true },
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = 24.dp),
-            )
-        }
     }
 
     if (showMicSheet) {
         // Wires the issue #15 prompt composer. `onSend` is the contract
         // the composer drives:
         //  - `withEnter = false` -> write the prompt bytes only (Send)
-        //  - `withEnter = true`  -> write the prompt bytes + '\n' (Send + ↵)
+        //  - `withEnter = true`  -> write the prompt bytes + Enter (Send + ↵)
         // Either way we dismiss the sheet so the user lands back on the
         // live terminal with their submission visible.
         PromptComposerSheet(
             onDismiss = { showMicSheet = false },
             onSend = { text, withEnter ->
-                val payload = if (withEnter) text + "\n" else text
-                viewModel.terminalState.writeInput(payload.toByteArray(Charsets.UTF_8))
+                viewModel.sendText(text, withEnter)
                 showMicSheet = false
             },
             hostId = hostId,
@@ -317,20 +320,14 @@ public fun SessionScreen(
 
     if (showSnippetPicker && hostId != null) {
         // Issue #17: chip-row entry to the snippet library. Picking a
-        // snippet writes its body to the terminal stdin. Commands get a
-        // trailing newline (Enter is implied — the user picked a "run
-        // this" shortcut); prompt templates are sent verbatim so the
-        // user can keep typing context before pressing Enter via the key
-        // bar / system keyboard.
+        // snippet routes through the ViewModel's terminal input path.
+        // Commands send Enter explicitly; prompt templates paste only so the
+        // user can keep typing context before pressing Enter manually.
         SnippetPickerSheet(
             hostId = hostId,
             onDismiss = { showSnippetPicker = false },
             onSnippetPicked = { snippet ->
-                val payload = when (SnippetKind.fromStorage(snippet.kind)) {
-                    SnippetKind.Command -> snippet.body + "\n"
-                    SnippetKind.Prompt -> snippet.body
-                }
-                viewModel.terminalState.writeInput(payload.toByteArray(Charsets.UTF_8))
+                viewModel.onSnippetPicked(snippet)
                 showSnippetPicker = false
             },
         )
@@ -538,6 +535,62 @@ private fun InlineDictationErrorStrip(message: String, onDismiss: () -> Unit) {
     }
 }
 
+@Composable
+private fun VoiceCommandReviewStrip(
+    state: VoiceCommandReviewUiState,
+    onInsert: () -> Unit,
+    onRun: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val plan = state.pendingPlan
+    if (!state.isPlanning && state.error == null && plan == null) return
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .border(width = 1.dp, color = PocketShellColors.AccentDim)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = when {
+                state.isPlanning -> "Planning command..."
+                state.error != null -> state.error
+                else -> "Review planned command"
+            },
+            color = if (state.error != null) PocketShellColors.Accent else PocketShellColors.Text,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        if (plan != null) {
+            Text(
+                text = plan.commands.joinToString("\n") { it.command },
+                color = PocketShellColors.Text,
+                fontSize = 12.sp,
+            )
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onInsert) {
+                    Text("Insert")
+                }
+                TextButton(onClick = onRun) {
+                    Text("Run")
+                }
+                TextButton(onClick = onDismiss) {
+                    Text("Dismiss")
+                }
+            }
+        } else if (state.error != null) {
+            TextButton(onClick = onDismiss) {
+                Text("Dismiss")
+            }
+        }
+    }
+}
+
 /**
  * Small accent strip surfaced while one or more sticky modifiers are
  * active. It gives a textual hint alongside the key bar's active-key
@@ -580,15 +633,16 @@ private fun ChipRow(
     onChipTap: (String) -> Unit,
     onDictateTap: () -> Unit,
     onAddSnippetTap: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
 ) {
     val scrollState = rememberScrollState()
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .background(color = PocketShellColors.Surface)
             .border(width = 1.dp, color = PocketShellColors.Border)
             .horizontalScroll(scrollState)
-            .padding(horizontal = 8.dp, vertical = 8.dp),
+            .padding(start = 8.dp, top = 8.dp, end = 80.dp, bottom = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -619,6 +673,30 @@ private fun ChipRow(
             )
         }
         Spacer(modifier = Modifier.width(4.dp))
+    }
+}
+
+@Composable
+private fun BottomChipControls(
+    chips: List<String>,
+    onChipTap: (String) -> Unit,
+    onDictateTap: () -> Unit,
+    onAddSnippetTap: (() -> Unit)? = null,
+) {
+    Box(modifier = Modifier.fillMaxWidth()) {
+        ChipRow(
+            chips = chips,
+            onChipTap = onChipTap,
+            onDictateTap = onDictateTap,
+            onAddSnippetTap = onAddSnippetTap,
+        )
+        MicButton(
+            state = MicButtonState.Idle,
+            onClick = onDictateTap,
+            modifier = Modifier
+                .align(Alignment.CenterEnd)
+                .padding(end = 12.dp),
+        )
     }
 }
 

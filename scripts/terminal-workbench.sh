@@ -176,8 +176,17 @@ if [[ -d "$RUN_DIR/artifacts/terminal-lab" ]]; then
     printf 'device_artifact_dir=%s\n' "$DEVICE_ARTIFACT_DIR"
     printf '\nPulled artifacts:\n'
     find "$RUN_DIR/artifacts/terminal-lab" -maxdepth 1 -type f -printf '%f\t%k KB\n' | sort
-    printf '\nScreenshots:\n'
-    find "$RUN_DIR/artifacts/terminal-lab" -maxdepth 1 -type f -name '*.png' -printf '%f\n' | sort
+    printf '\nAuthoritative terminal viewport renders:\n'
+    find "$RUN_DIR/artifacts/terminal-lab" -maxdepth 1 -type f -name '*-viewport.png' -printf '%f\n' | sort
+    printf '\nAdvisory full-device/window screenshots:\n'
+    find "$RUN_DIR/artifacts/terminal-lab" -maxdepth 1 -type f -name '*.png' ! -name '*-viewport.png' -printf '%f\n' | sort
+    printf '\nCapture summaries:\n'
+    find "$RUN_DIR/artifacts/terminal-lab" -maxdepth 1 -type f -name '*-summary.txt' -print0 |
+      sort -z |
+      while IFS= read -r -d '' summary_file; do
+        printf '\n--- %s ---\n' "$(basename "$summary_file")"
+        sed -n '/^capture_policy:/,/^visible_terminal:/p' "$summary_file" | sed '$d'
+      done
   } > "$RUN_DIR/artifact-summary.txt"
 fi
 

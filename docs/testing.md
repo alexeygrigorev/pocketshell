@@ -46,14 +46,16 @@ docker compose -f tests/docker/docker-compose.yml up -d --build agents
 docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
 ```
 
-### Manual visual validation (orchestrator's loop)
+### Manual visual validation (issue evidence)
 
 For visual changes:
 
-1. Make the change
+1. Make the change for the scoped issue
 2. `./gradlew installDebug`
 3. Compare side-by-side with `docs/mockups/<screen>.html` open in Chrome at 412 × 915
-4. Screenshot for the PR: `adb shell screencap -p > /tmp/screen.png && adb pull /tmp/screen.png`
+4. Capture issue evidence: `adb shell screencap -p > /tmp/screen.png && adb pull /tmp/screen.png`
+5. Post the command, screenshot path, and observed result in the implementer or
+   reviewer issue comment
 
 ---
 
@@ -136,7 +138,7 @@ command for cwd `/workspace/pocketshell` finds it via `find ... -mmin -5`.
 | Integration — agents | `*/src/test/` | JSONL parsers and deterministic Docker command fixture contracts |
 | Integration — usage | `*/src/test/` | `core-usage` parses deterministic `heru usage --json` output |
 | Instrumented UI / smoke | `app/src/androidTest/` on emulator | Compose screen tests, navigation, local emulator-to-Docker agent smoke |
-| Manual smoke | Emulator + Docker | Each PR before merge — orchestrator validates with eyes |
+| Manual smoke | Emulator + Docker | Issue-based implementer/reviewer flow, with reviewer emulator evidence before approval |
 
 ---
 
@@ -221,6 +223,13 @@ when iterating on harness behavior:
 BUILD_APKS=0 scripts/phone-dogfood.sh terminal-lab
 ```
 
+For terminal reviewer approval, use the stricter terminal workbench commands in
+[docker-emulator-runbook.md](docker-emulator-runbook.md#standard-commands) and
+the artifact rejection checklist in [process.md](../process.md#terminal-artifact-review).
+Direct terminal viewport renders plus visible terminal text are authoritative;
+full-device screenshots are advisory for terminal content unless the run summary
+proves they are reliable.
+
 The host setup matrix is available through the same harness. It starts the
 bootstrap Docker services on ports `2230` through `2235`, drives the emulator UI
 for each profile, and stores per-profile screenshots, UI assertion output,
@@ -260,7 +269,8 @@ scripts/pre-release-confidence-gate.sh
 ```
 
 For an actual release tag, the confidence gate is only the first step. Run the
-guarded emulator-only release validation from clean pushed `main`:
+guarded emulator-only release validation from clean pushed `main`, after
+confirming `HEAD == origin/main`:
 
 ```bash
 scripts/release-emulator-validation.sh
@@ -281,6 +291,14 @@ scripts/push-release-tag.sh --visual-audit-inspected <tag> build/release-emulato
 Use `--visual-audit-inspected` only after reviewing the visual-audit
 screenshots. Physical phone testing is final user acceptance only; it does not
 replace the emulator/Docker release blockers above.
+
+The same validation can be run manually from GitHub Actions when local emulator
+capacity is unavailable: Actions -> Release Emulator Validation -> Run
+workflow. Select `main` or the already-reviewed release branch, optionally set
+`run_id`, wait for the job summary, download
+`release-emulator-validation-<run-id>`, and inspect the visual-audit screenshots
+before using the artifact as release evidence. This workflow produces evidence
+only; it does not push the tag and does not relax the stable-main tag rule.
 
 This combines the normal compile/unit check, deterministic Docker `agents`
 target verification, explicit-path emulator readiness checks, focused connected
@@ -452,13 +470,20 @@ GitHub Actions runs:
 
 ---
 
-## Orchestrator's pre-merge QA checkpoint
+## Orchestrator's final issue QA checkpoint
 
-Before merging any PR, the orchestrator runs at minimum:
+After reviewer `APPROVED` and before committing or pushing an approved issue,
+the orchestrator runs at minimum:
 
 1. `./gradlew assembleDebug` — does it build?
 2. `./gradlew check` — do unit tests pass?
 3. For UI changes: install on emulator, eyeball against the matching mockup
 4. For SSH / tmux / agent / usage changes: run the relevant Testcontainers integration test
+5. For user-facing Android, terminal/input, SSH/tmux/agent, setup, or
+   release-gate changes: verify the reviewer supplied emulator evidence with
+   commands, logs/screenshots, Docker involvement when relevant, and observed
+   results
 
-See [agents.md](../agents.md) for the full verification checklist.
+See [process.md](../process.md#verification-checklist) for the full
+verification checklist. [agents.md](../agents.md) is only the quick local agent
+rule sheet.

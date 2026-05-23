@@ -1,6 +1,29 @@
 # Agent Roles
 
-PocketShell uses the agent workflow defined in [process.md](process.md).
+PocketShell uses the agent workflow defined in [process.md](process.md). That
+file is the source of truth; this file is only the quick local checklist.
+
+## Process Quick Rules
+
+- Work from GitHub issues. Implementers and reviewers report through issue
+  comments; the orchestrator relays between them.
+- Keep agents asynchronous when possible. Do not block on one agent while useful
+  non-overlapping coordinator work is available.
+- Implementers edit and test, then report changed files and verification. They
+  do not commit, push, close issues, or edit outside scope.
+- Reviewers inspect the latest issue evidence and working-tree diff, run the
+  relevant checks, and post exactly `APPROVED` or `CHANGES REQUESTED`. They do
+  not edit code.
+- User-facing Android, terminal, SSH, tmux, agent, setup, and release-gate work
+  needs reviewer emulator evidence. Terminal reviewers must inspect the
+  authoritative viewport screenshots, visible terminal text, timings, and
+  Docker/emulator logs required by [process.md](process.md#terminal-artifact-review).
+- Commit only after reviewer `APPROVED` and the orchestrator's final
+  verification checklist in [process.md](process.md). Prefer one small commit
+  per approved issue or tightly coupled approved batch.
+- Release tags come only after the version bump is committed to `main`, pushed,
+  and confirmed with `HEAD == origin/main`; tags label stable reviewed `main`
+  commits.
 
 ## Local Android Tooling
 

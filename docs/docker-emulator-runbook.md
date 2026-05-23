@@ -218,6 +218,55 @@ logs, and crash diagnostics under `build/phone-dogfood/<run-id>/`.
 output under
 `build/phone-dogfood/<run-id>/device-artifacts/dogfood-visual-pass/`.
 
+Run the deterministic terminal reviewer workbench:
+
+```bash
+scripts/terminal-workbench.sh
+```
+
+Use a stable run ID when the artifact path will be cited in an issue comment:
+
+```bash
+RUN_ID=issue-<number>-review scripts/terminal-workbench.sh
+```
+
+The deterministic workbench starts or verifies the emulator, starts the Docker
+`agents` service on host port `2222`, waits for SSH readiness, runs
+`TerminalLabDockerTest#terminalWorkbenchKeepsDockerShellOpenForVisualIteration`,
+and writes:
+
+- `build/terminal-workbench/<run-id>/artifacts/terminal-lab/*-viewport.png`
+  direct terminal viewport renders. These are authoritative for terminal
+  content.
+- `build/terminal-workbench/<run-id>/artifacts/terminal-lab/*-visible-terminal.txt`
+  visible terminal text from the terminal emulator.
+- `build/terminal-workbench/<run-id>/artifacts/terminal-lab/*-summary.txt` and
+  `build/terminal-workbench/<run-id>/artifact-summary.txt` with capture policy,
+  viewport hashes, visible-character counts, and advisory full-device/window
+  screenshot status.
+- `build/terminal-workbench/<run-id>/artifacts/terminal-lab/timings.txt`.
+- `build/terminal-workbench/<run-id>/07-run-workbench.log`,
+  `docker-ssh-readiness.log`, `docker-agents.log`, `logcat.txt`, and
+  `final-screen.png`.
+
+Full-device or final-screen screenshots are advisory for terminal content unless
+the summary proves they agree with the direct `*-viewport.png` render and
+visible terminal text. Reviewers should reject stale, blank, contradictory, or
+missing authoritative viewport/text/timing/log artifacts.
+
+Run the real-agent CLI workbench only when the issue needs real provider CLI
+rendering rather than deterministic shims:
+
+```bash
+REAL_AGENTS=1 scripts/terminal-workbench.sh
+```
+
+This switches to `tests/docker/real-agent/compose.yml`, starts the
+`real-agents` service, uses SSH port `2240`, and runs
+`TerminalLabDockerTest#terminalWorkbenchCapturesRealAgentCliScreens`. The same
+artifact authority rules apply: direct `*-viewport.png` terminal renders and
+visible terminal text are authoritative; full-device screenshots are advisory.
+
 For release tagging, use the guarded emulator-only wrapper from clean pushed
 `main`:
 

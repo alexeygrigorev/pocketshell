@@ -78,6 +78,10 @@ Does:
 - For user-facing journeys, reproduces the actual workflow and inspects the
   resulting screenshots/logs/timings. A passing assertion is not enough if the
   visible app state would still be unusable to the user.
+- For terminal, SSH, tmux, and agent journeys, bases approval on authoritative
+  terminal viewport artifacts, visible terminal text, timing files, and
+  Docker/emulator logs from the same run. Full-device screenshots are advisory
+  for terminal content unless the capture path is proven reliable for that run.
 - Checks each acceptance criterion explicitly
 - Looks for bugs, missing tests, dead code, scope creep, security issues, style drift, version mismatches, and ignored docs
 - Posts exactly one of:
@@ -96,8 +100,10 @@ Does not:
 GitHub Issues are the contract. Every artifact lives there:
 
 - Issue body: scope, acceptance criteria, doc links, non-goals
-- Implementer comments: status reports
-- Reviewer comments: `APPROVED` or `CHANGES REQUESTED`
+- Implementer comments: changed files, verification commands/results, artifact
+  paths, judgment calls, and open questions
+- Reviewer comments: `APPROVED` or `CHANGES REQUESTED`, with the command,
+  artifact, and emulator evidence used for approval when the issue requires it
 - Orchestrator comments: relays, decisions, commit links
 
 Agents do not talk to each other directly. The orchestrator is always the messenger so the audit trail stays complete.
@@ -107,7 +113,8 @@ Agents do not talk to each other directly. The orchestrator is always the messen
 1. Orchestrator refines the issue. Acceptance criteria must be specific and verifiable.
 2. Orchestrator launches an implementer agent with a self-contained brief.
 3. Implementer edits code/tests, runs verification, and posts a status comment.
-4. Orchestrator launches a reviewer with the issue number and implementer status.
+4. Orchestrator launches a reviewer with the issue number, implementer status,
+   and any artifact paths or logs the implementer produced.
 5. Reviewer runs verification and posts `APPROVED` or `CHANGES REQUESTED`.
 6. If `CHANGES REQUESTED`:
    - Orchestrator launches a fresh implementer with the review comment verbatim.
@@ -153,8 +160,9 @@ Reviewer briefs include:
 - Instruction to run emulator validation for any user-facing Android flow,
   terminal/input behavior, SSH/tmux/agent workflow, screenshot/UI audit, or
   release-gate issue
-- Instruction to inspect artifacts and reject stale, missing, contradictory, or
-  non-reproducible screenshots/logs/timing evidence
+- Instruction to inspect authoritative artifacts and reject stale, blank,
+  missing, contradictory, or non-reproducible terminal viewport screenshots,
+  visible terminal text, logs, or timing evidence
 - Instruction to verify every acceptance criterion
 - Required deliverable: one review comment with `APPROVED` or `CHANGES REQUESTED`
 - Hard rule: do not edit code, commit, push, or close
@@ -197,6 +205,12 @@ After reviewer approval, the orchestrator runs:
 - [ ] Interactive user journeys include artifact evidence: screenshots, logcat
   or app logs, and timing for the relevant transition when responsiveness is
   part of the issue
+- [ ] Terminal reviews inspect authoritative terminal viewport screenshots,
+  visible terminal transcript text, timing files, Docker logs, emulator logcat,
+  and instrumentation output from the same run
+- [ ] Terminal full-device screenshots are treated as advisory unless the
+  artifact summary proves they agree with the authoritative terminal viewport
+  capture for that run
 
 If any verification check fails, do not commit. Send the failure back to an implementer unless it is outside the reviewed implementation scope, such as rerunning a flaky command or fixing process docs.
 
@@ -233,6 +247,73 @@ work, the reviewer must see input reach the terminal and output appear in the
 app UI. For performance-sensitive work, the reviewer must include timing
 evidence.
 
+## Terminal Artifact Review
+
+Terminal, SSH, tmux, and agent reviews are artifact-driven. The reviewer must
+inspect the artifact bundle, not just the test result line, before approving.
+The authoritative terminal evidence is:
+
+- Direct terminal viewport screenshots named `*-viewport.png`
+- Visible terminal text artifacts such as `*-visible-terminal.txt`
+- Capture summaries such as `*-summary.txt` and `artifact-summary.txt`
+- Timing files such as `timings.txt` or scenario-specific timing logs
+- Instrumentation output, emulator logcat, Docker compose logs, and Docker SSH
+  readiness logs from the same run directory
+
+Full-device screenshots, final emulator screen captures, and window-level
+captures are diagnostic only for terminal content unless the run's summary
+shows that they agree with the direct terminal viewport render and visible
+terminal text. A blank or contradictory full-device screenshot does not
+invalidate a passing authoritative viewport capture by itself, but it must be
+called out. A blank or contradictory authoritative viewport capture is a review
+failure.
+
+Reviewers must reject or request changes when any of these are true:
+
+- The artifact bundle is missing authoritative `*-viewport.png` terminal
+  screenshots for the exercised workflow.
+- The authoritative viewport screenshots are blank, header-only, stale, or do
+  not show the expected shell/tmux/agent output.
+- The visible terminal text files are missing, empty, stale, or contradict the
+  viewport screenshots.
+- Timing files are missing for workflows that claim responsiveness,
+  stabilization, or hold/debug timing behavior.
+- Docker logs, Docker SSH readiness logs, emulator logcat, or instrumentation
+  output are missing, from another run, or contradict the claimed result.
+- Artifact names, timestamps, run IDs, command logs, or summaries show evidence
+  from different runs mixed together.
+- Full-device screenshots are used as the only proof of terminal content.
+- A passing assertion is contradicted by visible terminal text, authoritative
+  viewport screenshots, or logs.
+
+Exact local terminal workbench commands:
+
+```bash
+scripts/terminal-workbench.sh
+```
+
+Use that deterministic workbench for normal reviewer checks. It starts or
+verifies the local emulator, starts the deterministic Docker `agents` service on
+host port `2222`, runs the terminal workbench instrumentation, pulls artifacts
+under `build/terminal-workbench/<run-id>/artifacts/terminal-lab/`, and writes
+`build/terminal-workbench/<run-id>/artifact-summary.txt`.
+
+For a stable rerun ID that is easy to cite in an issue comment:
+
+```bash
+RUN_ID=issue-<number>-review scripts/terminal-workbench.sh
+```
+
+For real-agent CLI workbench evidence, run:
+
+```bash
+REAL_AGENTS=1 scripts/terminal-workbench.sh
+```
+
+This uses `tests/docker/real-agent/compose.yml`, the `real-agents` service, and
+SSH port `2240`. Treat it as a reviewer workbench for real CLI rendering and
+not as the default deterministic smoke path.
+
 Full setup: [docs/testing.md](docs/testing.md)
 
 Evaluator runbook for local Docker profiles, port conflicts, Android SDK paths,
@@ -257,9 +338,10 @@ Release build steps:
    - `versionName` must equal the tag without the leading `v`.
    - `versionCode` must increase monotonically.
 3. Run the normal verification gate before committing the version bump.
-4. Commit the version bump on `main` and push `main` first.
-5. From clean `main`, with `HEAD` equal to `origin/main`, run the emulator-only
-   release validation:
+4. Commit the version bump on `main` and push `main` first. Confirm the
+   checkout is clean and `HEAD` equals `origin/main` before creating or pushing
+   any tag.
+5. From that stable pushed `main`, run the emulator-only release validation:
    - `scripts/pre-release-confidence-gate.sh`
    - `scripts/phone-dogfood.sh terminal-lab`
    - `scripts/phone-dogfood.sh tmux-existing-session`
@@ -270,6 +352,24 @@ Release build steps:
 7. Push the matching tag with the guarded tag helper, for example
    `scripts/push-release-tag.sh --visual-audit-inspected v0.2.1 build/release-emulator-validation/<run-id>/summary.md`.
 8. Watch the tag-triggered Build workflow and verify the uploaded APK artifact.
+
+Manual Release Emulator Validation can also be run from GitHub Actions when a
+local emulator is unavailable:
+
+1. Open Actions -> Release Emulator Validation -> Run workflow.
+2. Select `main` or the already-reviewed release branch and optionally provide
+   a `run_id`.
+3. Wait for the workflow to finish, then read the job summary.
+4. Download the `release-emulator-validation-<run-id>` artifact.
+5. Inspect the visual-audit screenshots before treating the run as release
+   evidence.
+6. Attach or link the summary and artifact directories in the release issue and
+   tag notes.
+
+The manual workflow is validation evidence only. It does not create or push the
+release tag, does not replace the guarded tag helper, and does not weaken the
+stable-main rule: the tag still must point at a reviewed commit already pushed
+to `main`.
 
 The release issue and tag notes must attach or link all emulator-only evidence
 directories:
@@ -284,7 +384,9 @@ Release tags must come from stable `main`. Do not create release commits from a
 detached HEAD, a tag checkout, or a temporary worktree that is not first pushed
 back to `main`. Do not rebase local work from a tag or treat a tag as the
 source branch for release work. Tags are labels on already-reviewed `main`
-commits; they are not development branches.
+commits; they are not development branches. Before pushing a release tag,
+verify `git status` is clean and `git rev-parse HEAD` matches
+`git rev-parse origin/main`.
 
 Physical phone testing is final user acceptance only. Do not use a phone pass
 to discover or waive basic release blockers that the emulator/Docker validation

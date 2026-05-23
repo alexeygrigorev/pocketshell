@@ -75,6 +75,9 @@ Does:
 - For mobile, UI, terminal, SSH, tmux, agent, setup, and release-gate issues,
   runs the relevant emulator check too; code inspection alone is not enough for
   approval
+- For user-facing journeys, reproduces the actual workflow and inspects the
+  resulting screenshots/logs/timings. A passing assertion is not enough if the
+  visible app state would still be unusable to the user.
 - Checks each acceptance criterion explicitly
 - Looks for bugs, missing tests, dead code, scope creep, security issues, style drift, version mismatches, and ignored docs
 - Posts exactly one of:
@@ -150,6 +153,8 @@ Reviewer briefs include:
 - Instruction to run emulator validation for any user-facing Android flow,
   terminal/input behavior, SSH/tmux/agent workflow, screenshot/UI audit, or
   release-gate issue
+- Instruction to inspect artifacts and reject stale, missing, contradictory, or
+  non-reproducible screenshots/logs/timing evidence
 - Instruction to verify every acceptance criterion
 - Required deliverable: one review comment with `APPROVED` or `CHANGES REQUESTED`
 - Hard rule: do not edit code, commit, push, or close
@@ -189,6 +194,9 @@ After reviewer approval, the orchestrator runs:
   mockup, with screenshots when the issue is visual
 - [ ] Terminal/input, SSH, tmux, agent, setup, and usage changes run the
   relevant emulator + Docker connected checks
+- [ ] Interactive user journeys include artifact evidence: screenshots, logcat
+  or app logs, and timing for the relevant transition when responsiveness is
+  part of the issue
 
 If any verification check fails, do not commit. Send the failure back to an implementer unless it is outside the reviewed implementation scope, such as rerunning a flaky command or fixing process docs.
 
@@ -217,6 +225,13 @@ Reviewer approval for a user-facing Android flow must include emulator evidence:
 the command run, whether Docker was involved, and the observed result. If the
 emulator cannot be run, the reviewer must return `CHANGES REQUESTED` or clearly
 mark the issue as blocked; it must not be approved as done.
+
+Reviewer approval must be based on a reproduced user journey. Reject the change
+when artifacts are stale, missing, from a different run, contradicted by the
+visible screenshot, or do not prove the workflow is usable. For terminal/tmux
+work, the reviewer must see input reach the terminal and output appear in the
+app UI. For performance-sensitive work, the reviewer must include timing
+evidence.
 
 Full setup: [docs/testing.md](docs/testing.md)
 

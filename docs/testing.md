@@ -221,6 +221,16 @@ when iterating on harness behavior:
 BUILD_APKS=0 scripts/phone-dogfood.sh terminal-lab
 ```
 
+The host setup matrix is available through the same harness. It starts the
+bootstrap Docker services on ports `2230` through `2235`, drives the emulator UI
+for each profile, and stores per-profile screenshots, UI assertion output,
+remote probes, timings, logcat, Docker logs, and crash diagnostics:
+
+```bash
+scripts/phone-dogfood.sh setup-detection
+scripts/phone-dogfood.sh setup-detection:uv-install
+```
+
 For release visual review without a physical phone, run:
 
 ```bash

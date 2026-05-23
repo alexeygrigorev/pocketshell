@@ -1,5 +1,7 @@
 package com.pocketshell.app.bootstrap
 
+import android.graphics.Bitmap
+import android.os.SystemClock
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -25,6 +27,8 @@ import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
+import java.io.FileOutputStream
 
 /**
  * Opt-in end-to-end bootstrap/setup scenarios against deterministic Docker
@@ -49,9 +53,14 @@ class HostBootstrapScenarioSuiteTest {
     @Test
     fun ready() = scenario("ready") {
         launchSeededHost()
+        capture("01-host-list")
         tapSeededHost()
 
         waitForReadyNavigation()
+        capture("02-ready-navigation")
+        assertRemote("ready profile should expose all server tools and an enabled daemon") {
+            installedToolsAndEnabledDaemonCommand()
+        }
     }
 
     @Test
@@ -62,16 +71,17 @@ class HostBootstrapScenarioSuiteTest {
         waitForBootstrapSheet()
         compose.onNodeWithText("Host setup needed").assertExists()
         assertSetupRows("tmuxctl", "heru", "agent-log-explorer")
+        capture("02-setup-needed")
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALL_ALL_TAG).assertExists().performClick()
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALLING_TAG).assertExists()
+        capture("03-installing")
         compose.waitUntil(timeoutMillis = 20_000) {
             compose.onAllNodesWithText("Host ready").fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithText("Host ready").assertExists()
+        capture("04-host-ready")
         assertRemote("uv install should leave all server tools available") {
-            "PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; " +
-                "command -v tmuxctl heru agent-log-explorer >/dev/null && " +
-                "systemctl --user is-enabled tmuxctl-jobs.service >/dev/null"
+            installedToolsAndEnabledDaemonCommand()
         }
     }
 
@@ -84,6 +94,7 @@ class HostBootstrapScenarioSuiteTest {
         compose.onNodeWithText("Host setup needed").assertExists()
         assertSetupRows("tmuxctl", "heru", "agent-log-explorer")
         compose.onNodeWithText("uv tool install tmuxctl or pipx install tmuxctl").assertExists()
+        capture("02-unsupported-manual-setup")
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALL_ALL_TAG).assertExists().performClick()
         compose.waitUntil(timeoutMillis = 20_000) {
             compose.onAllNodesWithText("Install failed").fetchSemanticsNodes().isNotEmpty()
@@ -91,6 +102,14 @@ class HostBootstrapScenarioSuiteTest {
         compose.onNodeWithText("Install failed").assertExists()
         compose.onNodeWithText("Install uv or pipx", substring = true).assertExists()
         compose.onNodeWithTag(HOST_BOOTSTRAP_CLOSE_TAG).assertExists()
+        capture("03-install-failed")
+        assertRemote("unsupported profile should still lack automatic installers and tools") {
+            "! command -v tmuxctl >/dev/null 2>&1 && " +
+                "! command -v heru >/dev/null 2>&1 && " +
+                "! command -v agent-log-explorer >/dev/null 2>&1 && " +
+                "! command -v uv >/dev/null 2>&1 && " +
+                "! command -v pipx >/dev/null 2>&1"
+        }
     }
 
     @Test
@@ -101,12 +120,15 @@ class HostBootstrapScenarioSuiteTest {
         waitForBootstrapSheet()
         compose.onNodeWithText("Host setup needed").assertExists()
         compose.onNodeWithTag(HOST_BOOTSTRAP_ROW_TAG_PREFIX + "tmuxctl jobs daemon").assertExists()
+        capture("02-daemon-disabled")
         compose.onNodeWithText("Enable").assertExists().performClick()
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALLING_TAG).assertExists()
+        capture("03-enabling-daemon")
         compose.waitUntil(timeoutMillis = 20_000) {
             compose.onAllNodesWithText("Host ready").fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithText("Host ready").assertExists()
+        capture("04-host-ready")
         assertRemote("daemon-disabled scenario should enable the fixture daemon") {
             "systemctl --user is-enabled tmuxctl-jobs.service >/dev/null"
         }
@@ -118,6 +140,10 @@ class HostBootstrapScenarioSuiteTest {
         tapSeededHost()
 
         waitForReadyNavigation()
+        capture("02-ready-navigation")
+        assertRemote("user-local-path profile should expose all server tools through expanded PATH") {
+            installedToolsAndEnabledDaemonCommand()
+        }
     }
 
     @Test
@@ -126,6 +152,10 @@ class HostBootstrapScenarioSuiteTest {
         tapSeededHost()
 
         waitForReadyNavigation()
+        capture("02-ready-navigation")
+        assertRemote("fish-user-local-path profile should expose all server tools through login PATH handling") {
+            installedToolsAndEnabledDaemonCommand()
+        }
     }
 
     private fun scenario(name: String, block: ScenarioContext.() -> Unit) = runBlocking {
@@ -133,12 +163,15 @@ class HostBootstrapScenarioSuiteTest {
         val definition = requireNotNull(SCENARIOS[name]) { "unknown bootstrap scenario: $name" }
         val key = testKey()
         val context = ScenarioContext(name = name, definition = definition, key = key)
+        val scenarioStartMs = SystemClock.elapsedRealtime()
         withTimeout(60_000) {
             context.resetRemote()
             try {
                 context.seedAppDatabase()
                 context.block()
             } finally {
+                context.recordTiming("scenario_elapsed_ms", SystemClock.elapsedRealtime() - scenarioStartMs)
+                context.writeTimings()
                 context.cleanupAppDatabase()
                 context.resetRemote()
             }
@@ -153,6 +186,7 @@ class HostBootstrapScenarioSuiteTest {
         private val hostName = "Bootstrap ${definition.label} ${System.nanoTime()}"
         private var hostId: Long? = null
         private var keyId: Long? = null
+        private val timings = mutableListOf<String>()
 
         fun seedAppDatabase() {
             val appContext = InstrumentationRegistry.getInstrumentation().targetContext
@@ -195,11 +229,13 @@ class HostBootstrapScenarioSuiteTest {
         }
 
         fun launchSeededHost() {
+            val startMs = SystemClock.elapsedRealtime()
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
             compose.waitUntil(timeoutMillis = 10_000) {
                 compose.onAllNodesWithText(hostName).fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText(hostName).assertExists()
+            recordTiming("host_list_visible_ms", SystemClock.elapsedRealtime() - startMs)
         }
 
         fun tapSeededHost() {
@@ -217,14 +253,38 @@ class HostBootstrapScenarioSuiteTest {
         }
 
         fun assertRemote(description: String, command: () -> String) = runBlocking {
+            val startMs = SystemClock.elapsedRealtime()
             val probe = connect().mapCatching { session ->
                 session.use { it.exec(command()) }
             }
+            val elapsedMs = SystemClock.elapsedRealtime() - startMs
+            recordTiming("remote_probe_ms", elapsedMs)
+            BootstrapScenarioArtifacts.writeProbe(
+                scenario = name,
+                description = description,
+                elapsedMs = elapsedMs,
+                exitCode = probe.getOrNull()?.exitCode,
+                stdout = probe.getOrNull()?.stdout,
+                stderr = probe.getOrNull()?.stderr,
+                error = probe.exceptionOrNull()?.toString(),
+            )
             assertTrue(
                 "expected $description, got ${probe.exceptionOrNull()} stdout='${probe.getOrNull()?.stdout}' stderr='${probe.getOrNull()?.stderr}'",
                 probe.getOrNull()?.exitCode == 0,
             )
         }
+
+        fun capture(name: String): File =
+            BootstrapScenarioArtifacts.capture(name = "$name.png", scenario = this.name)
+
+        fun recordTiming(name: String, value: Long) {
+            val line = "SETUP_DETECTION_TIMING $name=$value"
+            timings += line
+            println(line)
+        }
+
+        fun writeTimings(): File =
+            BootstrapScenarioArtifacts.writeTimings(scenario = name, lines = timings)
 
         private suspend fun connect() = SshConnection.connect(
             host = DEFAULT_HOST,
@@ -235,6 +295,11 @@ class HostBootstrapScenarioSuiteTest {
             timeoutMs = 15_000,
         )
     }
+
+    private fun installedToolsAndEnabledDaemonCommand(): String =
+        "/bin/sh -lc 'PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; " +
+            "command -v tmuxctl heru agent-log-explorer >/dev/null && " +
+            "systemctl --user is-enabled tmuxctl-jobs.service >/dev/null'"
 
     private fun waitForBootstrapSheet() {
         compose.waitUntil(timeoutMillis = 20_000) {
@@ -322,5 +387,69 @@ class HostBootstrapScenarioSuiteTest {
                 resetCommand = "printf 'active enabled\\n' > $STATE_FILE",
             ),
         )
+    }
+}
+
+private object BootstrapScenarioArtifacts {
+    private const val DEVICE_DIR_NAME: String = "setup-detection"
+
+    fun capture(name: String, scenario: String): File {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(300)
+        val bitmap = instrumentation.uiAutomation.takeScreenshot()
+        val file = artifactFile(scenario = scenario, name = name)
+        FileOutputStream(file).use { output ->
+            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+                "Could not write setup-detection screenshot: ${file.absolutePath}"
+            }
+        }
+        bitmap.recycle()
+        println("SETUP_DETECTION_SCREENSHOT ${file.absolutePath}")
+        return file
+    }
+
+    fun writeTimings(scenario: String, lines: List<String>): File {
+        val file = artifactFile(scenario = scenario, name = "timings.txt")
+        file.writeText(lines.joinToString(separator = "\n", postfix = "\n"))
+        println("SETUP_DETECTION_TIMINGS ${file.absolutePath}")
+        return file
+    }
+
+    fun writeProbe(
+        scenario: String,
+        description: String,
+        elapsedMs: Long,
+        exitCode: Int?,
+        stdout: String?,
+        stderr: String?,
+        error: String?,
+    ): File {
+        val file = artifactFile(scenario = scenario, name = "remote-probes.txt")
+        file.appendText(
+            buildString {
+                appendLine("description=$description")
+                appendLine("elapsed_ms=$elapsedMs")
+                appendLine("exit_code=${exitCode ?: -1}")
+                if (error != null) appendLine("error=$error")
+                appendLine("stdout=${stdout.orEmpty().trim()}")
+                appendLine("stderr=${stderr.orEmpty().trim()}")
+                appendLine()
+            },
+        )
+        println("SETUP_DETECTION_REMOTE_PROBE ${file.absolutePath}")
+        return file
+    }
+
+    private fun artifactFile(scenario: String, name: String): File {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val mediaRoot = instrumentation.targetContext.externalMediaDirs
+            .firstOrNull { it != null }
+            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val directory = File(mediaRoot, "additional_test_output/$DEVICE_DIR_NAME/$scenario")
+        check(directory.exists() || directory.mkdirs()) {
+            "Could not create setup-detection artifact directory: ${directory.absolutePath}"
+        }
+        return File(directory, name)
     }
 }

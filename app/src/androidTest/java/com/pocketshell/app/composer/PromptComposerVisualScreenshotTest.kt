@@ -1,0 +1,97 @@
+package com.pocketshell.app.composer
+
+import android.os.Build
+import androidx.activity.ComponentActivity
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithText
+import androidx.core.view.WindowCompat
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.app.proof.DogfoodScreenshotArtifacts
+import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellTheme
+import org.junit.Rule
+import org.junit.Test
+import org.junit.runner.RunWith
+
+@RunWith(AndroidJUnit4::class)
+class PromptComposerVisualScreenshotTest {
+
+    @get:Rule
+    val compose = createAndroidComposeRule<ComponentActivity>()
+
+    @Test
+    fun capturesRecordingAndTranscribingStates() {
+        var state by mutableStateOf(
+            PromptComposerViewModel.UiState(
+                draft = "check the deploy log and tell me what failed",
+                recording = PromptComposerViewModel.RecordingState.Idle,
+                amplitude = 0.8f,
+            ),
+        )
+        renderComposer { state }
+
+        compose.runOnIdle {
+            state = state.copy(recording = PromptComposerViewModel.RecordingState.Recording)
+        }
+        compose.onNodeWithText("LISTENING").assertExists()
+        compose.waitForIdle()
+        DogfoodScreenshotArtifacts.capture("06-composer-recording")
+
+        compose.runOnIdle {
+            state = state.copy(
+                recording = PromptComposerViewModel.RecordingState.Transcribing,
+                amplitude = 0f,
+            )
+        }
+        compose.onNodeWithText("TRANSCRIBING").assertExists()
+        compose.waitForIdle()
+        DogfoodScreenshotArtifacts.capture("07-composer-transcribing")
+    }
+
+    private fun renderComposer(state: () -> PromptComposerViewModel.UiState) {
+        compose.activityRule.scenario.onActivity { activity ->
+            val dark = PocketShellColors.Background.toArgb()
+            activity.window.decorView.setBackgroundColor(dark)
+            @Suppress("DEPRECATION")
+            activity.window.statusBarColor = dark
+            @Suppress("DEPRECATION")
+            activity.window.navigationBarColor = dark
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                activity.window.isNavigationBarContrastEnforced = false
+            }
+            WindowCompat.getInsetsController(activity.window, activity.window.decorView).apply {
+                isAppearanceLightStatusBars = false
+                isAppearanceLightNavigationBars = false
+            }
+        }
+        compose.setContent {
+            PocketShellTheme {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Surface)
+                        .statusBarsPadding()
+                        .navigationBarsPadding(),
+                ) {
+                    SheetContent(
+                        state = state(),
+                        onClose = {},
+                        onDraftChange = {},
+                        onMicTap = {},
+                        onSend = {},
+                    )
+                }
+            }
+        }
+    }
+}

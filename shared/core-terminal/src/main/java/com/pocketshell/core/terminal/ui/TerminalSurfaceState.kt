@@ -9,6 +9,7 @@ import com.pocketshell.core.terminal.selection.DefaultTerminalMatcher
 import com.pocketshell.core.terminal.selection.TerminalMatch
 import com.pocketshell.core.terminal.selection.TerminalMatcher
 import com.termux.terminal.TerminalSession
+import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -124,6 +125,45 @@ class TerminalSurfaceState {
      * stay on the public surface ([writeInput], [output]).
      */
     internal val session: TerminalSession? get() = _session
+
+    /**
+     * Monotonic signal used by [TerminalSurface] to invalidate the embedded
+     * [TerminalView] when the emulator changes. The transcript can update
+     * without a Compose state change, so the Termux session callback must
+     * explicitly poke the Android view.
+     */
+    internal var renderTick: Long by mutableStateOf(0L)
+        private set
+
+    private val sessionClient = object : TerminalSessionClient {
+        override fun onTextChanged(changedSession: TerminalSession) {
+            renderTick += 1
+        }
+
+        override fun onTitleChanged(changedSession: TerminalSession) = Unit
+        override fun onSessionFinished(finishedSession: TerminalSession) = Unit
+        override fun onCopyTextToClipboard(session: TerminalSession, text: String) = Unit
+        override fun onPasteTextFromClipboard(session: TerminalSession?) = Unit
+        override fun onBell(session: TerminalSession) = Unit
+
+        override fun onColorsChanged(session: TerminalSession) {
+            renderTick += 1
+        }
+
+        override fun onTerminalCursorStateChange(state: Boolean) {
+            renderTick += 1
+        }
+
+        override fun setTerminalShellPid(session: TerminalSession, pid: Int) = Unit
+        override fun getTerminalCursorStyle(): Int? = null
+        override fun logError(tag: String?, message: String?) = Unit
+        override fun logWarn(tag: String?, message: String?) = Unit
+        override fun logInfo(tag: String?, message: String?) = Unit
+        override fun logDebug(tag: String?, message: String?) = Unit
+        override fun logVerbose(tag: String?, message: String?) = Unit
+        override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) = Unit
+        override fun logStackTrace(tag: String?, e: Exception?) = Unit
+    }
 
     /**
      * Bind a live [TerminalSession] to this state holder. The next
@@ -345,7 +385,7 @@ class TerminalSurfaceState {
         // racing on the same emulator.
         detachExternalProducer()
 
-        val newBridge = SshTerminalBridge()
+        val newBridge = SshTerminalBridge(client = sessionClient)
         newBridge.setRemoteStdin(remoteStdin)
         bridge = newBridge
 

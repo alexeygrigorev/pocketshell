@@ -1,5 +1,6 @@
 package com.pocketshell.core.terminal.ui
 
+import android.os.Looper
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -13,6 +14,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import java.io.OutputStream
 
 @RunWith(RobolectricTestRunner::class)
@@ -66,6 +68,39 @@ class TerminalSurfaceStateInputRoutingTest {
             delay(50)
 
             assertEquals("", remoteStdin.snapshot())
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun externalProducerOutputTicksRenderSignalForTerminalViewInvalidation() = runBlocking {
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = RecordingOutputStream(),
+        )
+
+        try {
+            val initialTick = state.renderTick
+
+            stdout.emit("hello from remote\n".toByteArray(Charsets.UTF_8))
+
+            withTimeout(2_000) {
+                while (state.renderTick == initialTick) {
+                    shadowOf(Looper.getMainLooper()).idle()
+                    delay(10)
+                }
+            }
+            assertTrue(
+                "remote output must tick renderTick so TerminalSurface calls TerminalView.onScreenUpdated()",
+                state.renderTick > initialTick,
+            )
         } finally {
             producerJob.cancel()
             producerScope.cancel()

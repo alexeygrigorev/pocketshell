@@ -43,6 +43,11 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".terminal.TerminalLabActivity"
+            android:exported="false"
+            android:theme="@style/Theme.PocketShell" />
+
         <receiver
             android:name=".systemsurfaces.ActiveSessionsWidgetProvider"
             android:exported="true"

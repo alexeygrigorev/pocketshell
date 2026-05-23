@@ -18,6 +18,7 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.viewinterop.AndroidView
 import com.pocketshell.core.terminal.selection.SelectionOverlay
 import com.pocketshell.core.terminal.selection.TerminalMatch
+import com.termux.terminal.TerminalSessionClient
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
 import com.termux.view.TerminalViewClient
@@ -125,6 +126,7 @@ fun TerminalSurface(
     val matchesFlow: Flow<List<TerminalMatch>> =
         if (matchListener != null) state.flowOfMatches else remember { flowOf(emptyList()) }
     val matches by matchesFlow.collectAsState(initial = emptyList<TerminalMatch>())
+    val renderTick = state.renderTick
 
     // If the caller installed an onKeyEvent slot, chain it onto the
     // user-supplied modifier so the Compose focus system routes key events
@@ -158,19 +160,22 @@ fun TerminalSurface(
                     // changes. `attachSession` early-returns when given the
                     // same instance, so this is idempotent across
                     // recompositions.
-                    if (desired !== current) {
-                        if (desired != null) {
+                    if (desired != null) {
+                        if (desired !== current) {
                             view.attachSession(desired)
-                        } else {
-                            // No public detach on TerminalView; clear the
-                            // field via an attach of an empty marker is not
-                            // possible because TerminalSession is `final`
-                            // and we cannot construct a sentinel without
-                            // driving JNI. The view simply keeps its last
-                            // session reference until the next attach. This
-                            // is acceptable for #8 — #9 will always have a
-                            // fresh session on hand when changing sessions.
                         }
+                    } else if (desired !== current) {
+                        // No public detach on TerminalView; clear the
+                        // field via an attach of an empty marker is not
+                        // possible because TerminalSession is `final`
+                        // and we cannot construct a sentinel without
+                        // driving JNI. The view simply keeps its last
+                        // session reference until the next attach. This
+                        // is acceptable for #8 — #9 will always have a
+                        // fresh session on hand when changing sessions.
+                    }
+                    if (desired != null && view.currentSession === desired && renderTick > 0L) {
+                        view.onScreenUpdated()
                     }
                 },
             )
@@ -259,13 +264,29 @@ internal fun TerminalView.applyPocketShellDefaults(viewClient: TerminalViewClien
  * the same bridge here PocketShell could render a connected terminal while
  * leaving phone users with no way to type into it.
  */
-internal class PocketShellTerminalViewClient : TerminalViewClient {
+internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessionClient {
     private var terminalView: TerminalView? = null
 
     fun bind(view: TerminalView) {
         terminalView = view
     }
 
+    override fun onTextChanged(changedSession: TerminalSession) {
+        terminalView?.onScreenUpdated()
+    }
+
+    override fun onTitleChanged(changedSession: TerminalSession) = Unit
+    override fun onSessionFinished(finishedSession: TerminalSession) = Unit
+    override fun onCopyTextToClipboard(session: TerminalSession, text: String?) = Unit
+    override fun onPasteTextFromClipboard(session: TerminalSession?) = Unit
+    override fun onBell(session: TerminalSession) = Unit
+    override fun onColorsChanged(session: TerminalSession) {
+        terminalView?.onScreenUpdated()
+    }
+
+    override fun onTerminalCursorStateChange(state: Boolean) = Unit
+    override fun setTerminalShellPid(session: TerminalSession, pid: Int) = Unit
+    override fun getTerminalCursorStyle(): Int? = null
     override fun onScale(scale: Float): Float = 1f
     override fun onSingleTapUp(e: MotionEvent?) {
         val view = terminalView ?: return

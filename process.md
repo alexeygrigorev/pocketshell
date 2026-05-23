@@ -258,9 +258,17 @@ Release build steps:
    - `versionCode` must increase monotonically.
 3. Run the normal verification gate before committing the version bump, and
    confirm the Tests workflow is green for the commit being tagged.
-4. Commit and push the version bump.
-5. Create and push the matching tag, for example `v0.2.1`.
-6. Watch the tag-triggered Build workflow and verify the uploaded APK artifact.
+4. Commit the version bump on `main` and push `main` first.
+5. Confirm `origin/main` points at the pushed version-bump commit.
+6. Create the matching tag on that exact `origin/main` commit, for example
+   `v0.2.1`, and push the tag.
+7. Watch the tag-triggered Build workflow and verify the uploaded APK artifact.
+
+Release tags must come from stable `main`. Do not create release commits from a
+detached HEAD, a tag checkout, or a temporary worktree that is not first pushed
+back to `main`. Do not rebase local work from a tag or treat a tag as the
+source branch for release work. Tags are labels on already-reviewed `main`
+commits; they are not development branches.
 
 Never tag a release when the APK metadata still reports the previous release
 version. That creates a self-update loop where the installed app offers the same

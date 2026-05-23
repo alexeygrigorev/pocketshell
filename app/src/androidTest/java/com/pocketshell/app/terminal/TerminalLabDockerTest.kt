@@ -194,13 +194,22 @@ class TerminalLabDockerTest {
 
     private fun captureAndAssertTerminalInk(name: String, minInkPixels: Int) {
         val bounds = terminalViewBounds()
-        val screenshot = TerminalLabArtifacts.capture(name)
+        var screenshot: File? = null
+        var inkPixels = 0
+        val deadline = SystemClock.elapsedRealtime() + 10_000
+        do {
+            screenshot = TerminalLabArtifacts.capture(name)
+            inkPixels = TerminalLabArtifacts.countBrightPixels(screenshot, bounds)
+            if (inkPixels >= minInkPixels) break
+            SystemClock.sleep(250)
+        } while (SystemClock.elapsedRealtime() < deadline)
+
         TerminalLabArtifacts.writeText("$name-visible-terminal.txt", visibleTerminalText())
-        val inkPixels = TerminalLabArtifacts.countBrightPixels(screenshot, bounds)
         recordTiming("visible_ink_${name}_px", inkPixels.toLong())
+        val finalScreenshot = checkNotNull(screenshot) { "terminal screenshot was not captured" }
         assertTrue(
             "expected terminal viewport in $name screenshot to contain shell output ink; " +
-                "brightPixels=$inkPixels min=$minInkPixels bounds=$bounds screenshot=${screenshot.absolutePath}",
+                "brightPixels=$inkPixels min=$minInkPixels bounds=$bounds screenshot=${finalScreenshot.absolutePath}",
             inkPixels >= minInkPixels,
         )
     }

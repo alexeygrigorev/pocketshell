@@ -72,6 +72,9 @@ Does:
 
 - Reads the implementer's latest status comment and the working-tree diff
 - Runs the relevant build and tests
+- For mobile, UI, terminal, SSH, tmux, agent, setup, and release-gate issues,
+  runs the relevant emulator check too; code inspection alone is not enough for
+  approval
 - Checks each acceptance criterion explicitly
 - Looks for bugs, missing tests, dead code, scope creep, security issues, style drift, version mismatches, and ignored docs
 - Posts exactly one of:
@@ -144,6 +147,9 @@ Reviewer briefs include:
 - Issue number and URL
 - Implementer's latest status comment
 - Instruction to run build and tests
+- Instruction to run emulator validation for any user-facing Android flow,
+  terminal/input behavior, SSH/tmux/agent workflow, screenshot/UI audit, or
+  release-gate issue
 - Instruction to verify every acceptance criterion
 - Required deliverable: one review comment with `APPROVED` or `CHANGES REQUESTED`
 - Hard rule: do not edit code, commit, push, or close
@@ -179,10 +185,24 @@ After reviewer approval, the orchestrator runs:
 - [ ] Tests pass for touched code
 - [ ] No secrets or generated build outputs are staged
 - [ ] Acceptance criteria are demonstrably met
-- [ ] UI changes are checked against the relevant mockup when practical
-- [ ] SSH, tmux, agent, and usage changes run the relevant Docker/Testcontainers checks when practical
+- [ ] UI changes are checked on the Android emulator against the relevant
+  mockup, with screenshots when the issue is visual
+- [ ] Terminal/input, SSH, tmux, agent, setup, and usage changes run the
+  relevant emulator + Docker connected checks
 
 If any verification check fails, do not commit. Send the failure back to an implementer unless it is outside the reviewed implementation scope, such as rerunning a flaky command or fixing process docs.
+
+## Commit Cadence
+
+After an issue is reviewer-approved and the orchestrator verification checklist
+passes, commit and push that finished task before moving on to unrelated work.
+Prefer one small commit per approved issue or tightly coupled issue group so
+rollback remains practical.
+
+Do not batch approved work together with unapproved in-flight work. If files
+overlap between approved and unapproved issues, either wait for the overlapping
+issue to finish review or split the staged hunks carefully so the commit
+contains only reviewed changes.
 
 ## Quality Assurance
 
@@ -193,7 +213,16 @@ Two emulation surfaces are first-class:
 
 The orchestrator runs final QA. Sub-agents may write tests, but approval and merge still depend on orchestrator verification.
 
+Reviewer approval for a user-facing Android flow must include emulator evidence:
+the command run, whether Docker was involved, and the observed result. If the
+emulator cannot be run, the reviewer must return `CHANGES REQUESTED` or clearly
+mark the issue as blocked; it must not be approved as done.
+
 Full setup: [docs/testing.md](docs/testing.md)
+
+Evaluator runbook for local Docker profiles, port conflicts, Android SDK paths,
+emulator startup, and connected test commands:
+[docs/docker-emulator-runbook.md](docs/docker-emulator-runbook.md).
 
 ## Release Builds
 

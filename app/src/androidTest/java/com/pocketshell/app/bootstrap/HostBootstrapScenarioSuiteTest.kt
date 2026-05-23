@@ -51,9 +51,7 @@ class HostBootstrapScenarioSuiteTest {
         launchSeededHost()
         tapSeededHost()
 
-        waitForNoBootstrapSheet()
-        compose.onNodeWithText("Terminal").assertExists()
-        compose.onNodeWithText("$DEFAULT_USER@$DEFAULT_HOST:${definition.port}").assertExists()
+        waitForReadyNavigation()
     }
 
     @Test
@@ -71,7 +69,8 @@ class HostBootstrapScenarioSuiteTest {
         }
         compose.onNodeWithText("Host ready").assertExists()
         assertRemote("uv install should leave all server tools available") {
-            "command -v tmuxctl heru agent-log-explorer >/dev/null && " +
+            "PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; " +
+                "command -v tmuxctl heru agent-log-explorer >/dev/null && " +
                 "systemctl --user is-enabled tmuxctl-jobs.service >/dev/null"
         }
     }
@@ -118,9 +117,7 @@ class HostBootstrapScenarioSuiteTest {
         launchSeededHost()
         tapSeededHost()
 
-        waitForNoBootstrapSheet()
-        compose.onNodeWithText("Terminal").assertExists()
-        compose.onNodeWithText("$DEFAULT_USER@$DEFAULT_HOST:${definition.port}").assertExists()
+        waitForReadyNavigation()
     }
 
     private fun scenario(name: String, block: ScenarioContext.() -> Unit) = runBlocking {
@@ -238,11 +235,12 @@ class HostBootstrapScenarioSuiteTest {
         compose.onNodeWithTag(HOST_BOOTSTRAP_SHEET_TAG).assertExists()
     }
 
-    private fun waitForNoBootstrapSheet() {
+    private fun waitForReadyNavigation() {
         compose.waitUntil(timeoutMillis = 20_000) {
-            compose.onAllNodesWithText("Terminal").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithText("Tmux sessions").fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag(HOST_BOOTSTRAP_SHEET_TAG).assertDoesNotExist()
+        compose.onNodeWithText("Tmux sessions").assertExists()
     }
 
     private fun assertSetupRows(vararg rows: String) {

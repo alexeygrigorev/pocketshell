@@ -247,6 +247,7 @@ internal fun SheetContent(
     Column(
         modifier = modifier
             .fillMaxWidth()
+            .background(PocketShellColors.Surface)
             .padding(horizontal = 18.dp)
             .padding(bottom = 26.dp),
     ) {

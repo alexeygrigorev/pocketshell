@@ -1,11 +1,14 @@
 package com.pocketshell.app
 
 import android.content.Intent
+import android.os.Build
 import android.os.Bundle
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -16,6 +19,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.core.view.WindowCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.fragment.app.FragmentActivity
 import com.pocketshell.app.crash.CrashReportsScreen
@@ -68,11 +72,33 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedDestination = initialDestinationFromIntent(intent)
-        enableEdgeToEdge()
+        window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(DarkSystemBarColor))
+        window.decorView.setBackgroundColor(DarkSystemBarColor)
+        @Suppress("DEPRECATION")
+        window.statusBarColor = DarkSystemBarColor
+        @Suppress("DEPRECATION")
+        window.navigationBarColor = DarkSystemBarColor
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(DarkSystemBarColor),
+            navigationBarStyle = SystemBarStyle.dark(DarkSystemBarColor),
+        )
+        @Suppress("DEPRECATION")
+        window.statusBarColor = DarkSystemBarColor
+        @Suppress("DEPRECATION")
+        window.navigationBarColor = DarkSystemBarColor
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
         setContent {
             PocketShellTheme {
                 Surface(
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .safeDrawingPadding(),
                     color = MaterialTheme.colorScheme.background,
                 ) {
                     AppNavigator(
@@ -90,6 +116,8 @@ class MainActivity : FragmentActivity() {
         requestedDestination = initialDestinationFromIntent(intent)
     }
 }
+
+private val DarkSystemBarColor: Int = android.graphics.Color.rgb(13, 17, 23)
 
 /**
  * Sealed-class destination state machine. The back-stack is a `List<AppDestination>`

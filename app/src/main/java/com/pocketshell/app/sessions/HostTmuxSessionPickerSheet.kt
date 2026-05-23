@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -39,10 +40,15 @@ fun HostTmuxSessionPickerSheet(
     if (state is HostTmuxSessionPickerState.Idle) return
     var showCreateDialog by remember { mutableStateOf(false) }
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = PocketShellColors.Surface,
+        contentColor = PocketShellColors.Text,
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .navigationBarsPadding()
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
@@ -67,11 +73,11 @@ fun HostTmuxSessionPickerSheet(
                     TextButton(onClick = { showCreateDialog = true }) {
                         Text("+ New session")
                     }
-                    state.rows.forEach { row ->
-                        HostTmuxSessionRowView(row = row, onClick = { onAttach(state.request, row.name) })
-                    }
                     TextButton(onClick = { onRawSsh(state.request) }) {
                         Text("Continue with SSH")
+                    }
+                    state.rows.forEach { row ->
+                        HostTmuxSessionRowView(row = row, onClick = { onAttach(state.request, row.name) })
                     }
                 }
                 is HostTmuxSessionPickerState.Fallback -> {

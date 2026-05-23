@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+old_tty="$(stty -g)"
+buffer=""
+last=""
+mode="normal"
+
+cleanup() {
+  stty "$old_tty" 2>/dev/null || true
+  printf '\033[?25h\033[0m\033[2J\033[H'
+  printf 'TUI_EXIT_PROMPT$ '
+  exit 0
+}
+
+render() {
+  printf '\033[?25l\033[2J\033[H'
+  printf 'PocketShell interactive TUI smoke\n'
+  printf 'mode:%s\n' "$mode"
+  printf 'draft:%s\n' "$buffer"
+  printf 'last:%s\n' "$last"
+  printf 'controls: type edit enter arrows ctrl-c\n'
+}
+
+trap cleanup INT TERM
+stty -echo -icanon -icrnl min 1 time 0
+render
+
+while true; do
+  IFS= read -r -s -n 1 ch || cleanup
+  case "$ch" in
+    "")
+      last="$buffer"
+      buffer=""
+      ;;
+    $'\177'|$'\b')
+      buffer="${buffer%?}"
+      ;;
+    $'\r'|$'\n')
+      last="$buffer"
+      buffer=""
+      ;;
+    $'\033')
+      IFS= read -r -s -n 1 prefix || cleanup
+      if [[ "$prefix" == "[" ]]; then
+        IFS= read -r -s -n 1 code || cleanup
+        case "$code" in
+          A) mode="up" ;;
+          B) mode="down" ;;
+          C) mode="right" ;;
+          D) mode="left" ;;
+          *) mode="escape-$code" ;;
+        esac
+      else
+        mode="escape"
+      fi
+      ;;
+    *)
+      buffer+="$ch"
+      ;;
+  esac
+  render
+done

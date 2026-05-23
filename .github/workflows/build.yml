@@ -50,9 +50,6 @@ jobs:
       - name: Assemble debug APK
         run: ./gradlew assembleDebug --stacktrace
 
-      - name: Run checks
-        run: ./gradlew check
-
       - name: Rename APK
         run: |
           VERSION="${{ steps.version.outputs.version }}"

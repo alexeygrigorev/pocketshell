@@ -200,13 +200,20 @@ Full setup: [docs/testing.md](docs/testing.md)
 APK release builds are created by pushing a version tag, not by relying on an
 ad-hoc workflow-dispatch build for the final artifact.
 
+The Build workflow is intentionally packaging-only so releases are fast. It
+assembles the APK, uploads the artifact, and creates the GitHub Release. It does
+not run the full test suite. Unit, Docker integration, and emulator smoke checks
+belong to the separate Tests workflow and the orchestrator's pre-tag
+verification gate.
+
 Release build steps:
 
 1. Pick the next semantic version after the latest GitHub Release/tag.
 2. Update Android metadata before tagging:
    - `versionName` must equal the tag without the leading `v`.
    - `versionCode` must increase monotonically.
-3. Run the normal verification gate before committing the version bump.
+3. Run the normal verification gate before committing the version bump, and
+   confirm the Tests workflow is green for the commit being tagged.
 4. Commit and push the version bump.
 5. Create and push the matching tag, for example `v0.2.1`.
 6. Watch the tag-triggered Build workflow and verify the uploaded APK artifact.

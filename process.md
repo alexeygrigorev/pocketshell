@@ -195,6 +195,26 @@ The orchestrator runs final QA. Sub-agents may write tests, but approval and mer
 
 Full setup: [docs/testing.md](docs/testing.md)
 
+## Release Builds
+
+APK release builds are created by pushing a version tag, not by relying on an
+ad-hoc workflow-dispatch build for the final artifact.
+
+Release build steps:
+
+1. Pick the next semantic version after the latest GitHub Release/tag.
+2. Update Android metadata before tagging:
+   - `versionName` must equal the tag without the leading `v`.
+   - `versionCode` must increase monotonically.
+3. Run the normal verification gate before committing the version bump.
+4. Commit and push the version bump.
+5. Create and push the matching tag, for example `v0.2.1`.
+6. Watch the tag-triggered Build workflow and verify the uploaded APK artifact.
+
+Never tag a release when the APK metadata still reports the previous release
+version. That creates a self-update loop where the installed app offers the same
+release as an update.
+
 ## Commit Conventions
 
 - Imperative mood, scoped prefix when useful

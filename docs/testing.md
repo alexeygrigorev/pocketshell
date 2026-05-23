@@ -189,6 +189,42 @@ UI, sends dogfood shell commands through the prompt composer, verifies visible
 terminal transcript output for `ls`, `pwd`, and tmux, verifies the remote
 artifacts, and cleans up the remote temp directory and tmux session.
 
+### Local phone dogfood reproduction
+
+For fast visual feedback without installing an APK on a physical phone, run the
+local phone-dogfood harness against an already-booted emulator:
+
+```bash
+scripts/phone-dogfood.sh terminal-lab
+```
+
+The harness verifies the explicit SDK paths from `agents.md`, fails clearly if
+no booted emulator is connected, starts/verifies the Docker `agents` SSH
+fixture, builds and installs the debug app/test APKs, runs only the selected
+scenario, and writes one artifact bundle under
+`build/phone-dogfood/<run-id>/`.
+By default it uses `build/phone-dogfood/gradle-home` as an isolated
+`GRADLE_USER_HOME`, disables the Gradle build cache and parallel execution for
+the APK build, and removes the app module's generated build output directory so
+stale KSP/Hilt/Javac transaction state cannot be reused. Set
+`PHONE_DOGFOOD_CLEAN_GENERATED=0` only when investigating those generated
+outputs directly.
+
+The first supported scenario is `terminal-lab`. It opens the isolated terminal
+lab activity, connects from the emulator to Docker SSH, sends commands through
+the terminal input path, captures named screenshots, records transition timing,
+and collects bounded logcat, instrumentation output, Docker logs, command
+timings, and crash diagnostics. Use `BUILD_APKS=0` to reuse existing debug APKs
+when iterating on harness behavior:
+
+```bash
+BUILD_APKS=0 scripts/phone-dogfood.sh terminal-lab
+```
+
+This differs from CI and the pre-release confidence gate: it is a local
+reproduction loop for one dogfood journey and reviewer-visible artifacts. It
+does not replace unit tests, connected CI, or the slower release gate.
+
 ### Opt-in end-to-end scenario suites
 
 Some workflows need real app UI plus multiple remote-host states, but are too

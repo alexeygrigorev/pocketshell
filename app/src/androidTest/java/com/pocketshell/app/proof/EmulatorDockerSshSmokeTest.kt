@@ -71,6 +71,7 @@ class EmulatorDockerSshSmokeTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
+        waitForSshFixtureReady(SshKey.Pem(key))
 
         withTimeout(20_000) {
             val connection = SshConnection.connect(
@@ -169,9 +170,11 @@ class EmulatorDockerSshSmokeTest {
             .open("test_key")
             .bufferedReader()
             .use { it.readText() }
+        waitForSshFixtureReady(SshKey.Pem(key))
         val marker = "psdogfood${System.currentTimeMillis()}"
         val tmpDir = "/tmp/pocketshell-$marker"
         val sessionName = "pocketshell-$marker"
+        val shellReadyMarker = "shell-ready-$marker"
         val shellVisibleMarker = "shell-visible-$marker"
         val tmuxVisibleMarker = "tmux-visible-$marker"
 
@@ -240,27 +243,49 @@ class EmulatorDockerSshSmokeTest {
             compose.onNodeWithText("Terminal").assertExists()
             compose.onNodeWithText("tmux ls").assertExists()
             waitForSessionConnectUiToSettle()
+            waitForTerminalSessionAttached()
 
             sendCommandViaComposer(
-                "mkdir -p ${shellQuote(tmpDir)} && printf '%s\\n' ${shellQuote(shellVisibleMarker)} | tee ${shellQuote("$tmpDir/shell-output.txt")}",
+                """
+                m=${shellQuote(marker)}
+                printf '%s\n' "shell-ready-${'$'}m"
+                """.trimIndent().replace("\n", "; "),
+            )
+            waitForTerminalTranscript(
+                description = "shell readiness marker",
+            ) { transcript ->
+                shellReadyMarker in transcript
+            }
+
+            sendCommandViaComposer(
+                """
+                m=${shellQuote(marker)}
+                tmp="/tmp/pocketshell-${'$'}m"
+                shell="shell-visible-${'$'}m"
+                mkdir -p "${'$'}tmp" && printf '%s\n' "${'$'}shell" | tee "${'$'}tmp/shell-output.txt"
+                """.trimIndent().replace("\n", "; "),
             )
             sendCommandViaComposer(
                 """
-                tmp=${shellQuote(tmpDir)}
+                m=${shellQuote(marker)}
+                tmp="/tmp/pocketshell-${'$'}m"
+                session="pocketshell-${'$'}m"
+                tmux_marker="tmux-visible-${'$'}m"
                 mkdir -p "${'$'}tmp"
                 cd "${'$'}tmp"
                 pwd | tee pwd.txt
                 command -v tmux | tee tmux-bin.txt
-                tmux new-session -d -s ${shellQuote(sessionName)} 2>/dev/null || tmux has-session -t ${shellQuote(sessionName)}
-                tmux has-session -t ${shellQuote(sessionName)} && printf '%s\n' ${shellQuote(tmuxVisibleMarker)} | tee tmux.txt
+                tmux new-session -d -s "${'$'}session" 2>/dev/null || tmux has-session -t "${'$'}session"
+                tmux has-session -t "${'$'}session" && printf '%s\n' "${'$'}tmux_marker" | tee tmux.txt
                 """.trimIndent().replace("\n", "; "),
             )
 
             waitForTerminalTranscript(
                 description = "visible shell, pwd, and tmux output",
             ) { transcript ->
-                val lines = transcript.lineSequence().map { it.trim() }.toSet()
-                shellVisibleMarker in lines && tmpDir in lines && tmuxVisibleMarker in lines
+                shellVisibleMarker in transcript &&
+                    tmpDir in transcript &&
+                    tmuxVisibleMarker in transcript
             }
 
             withTimeout(15_000) {
@@ -300,6 +325,18 @@ class EmulatorDockerSshSmokeTest {
                 "connecting to $DEFAULT_USER@$DEFAULT_HOST:$DEFAULT_PORT",
                 substring = false,
             ).fetchSemanticsNodes().isEmpty()
+        }
+    }
+
+    private fun waitForTerminalSessionAttached() {
+        compose.waitUntil(timeoutMillis = 20_000) {
+            launchedActivity?.let { scenario ->
+                var attached = false
+                scenario.onActivity { activity ->
+                    attached = activity.window.decorView.findTerminalView()?.currentSession != null
+                }
+                attached
+            } ?: false
         }
     }
 
@@ -354,24 +391,36 @@ class EmulatorDockerSshSmokeTest {
         tmpDir: String,
         sessionName: String,
     ) {
-        val cleanupResult = SshConnection.connect(
-            host = DEFAULT_HOST,
-            port = DEFAULT_PORT,
-            user = DEFAULT_USER,
-            key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-            timeoutMs = 15_000,
-        ).mapCatching { session ->
-            session.use {
-                it.exec(
-                    "rm -rf ${shellQuote(tmpDir)}; " +
-                        "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true",
-                )
+        var lastError = "cleanup did not run"
+        val cleaned = runCatching {
+            withTimeout(20_000) {
+                while (true) {
+                    val cleanupResult = SshConnection.connect(
+                        host = DEFAULT_HOST,
+                        port = DEFAULT_PORT,
+                        user = DEFAULT_USER,
+                        key = SshKey.Pem(key),
+                        knownHosts = KnownHostsPolicy.AcceptAll,
+                        timeoutMs = 15_000,
+                    ).mapCatching { session ->
+                        session.use {
+                            it.exec(
+                                "rm -rf ${shellQuote(tmpDir)}; " +
+                                    "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true",
+                            )
+                        }
+                    }
+                    val result = cleanupResult.getOrNull()
+                    if (result?.exitCode == 0) return@withTimeout
+                    lastError = cleanupResult.exceptionOrNull()?.toString()
+                        ?: "exit=${result?.exitCode} stderr=${result?.stderr}"
+                    delay(500)
+                }
             }
-        }
+        }.isSuccess
         assertTrue(
-            "expected dogfood cleanup to succeed, got ${cleanupResult.exceptionOrNull()}",
-            cleanupResult.getOrNull()?.exitCode == 0,
+            "expected dogfood cleanup to succeed, got $lastError",
+            cleaned,
         )
     }
 

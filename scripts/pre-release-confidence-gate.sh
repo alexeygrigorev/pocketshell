@@ -80,6 +80,140 @@ if [[ "$GATE_ISOLATED_WORKTREE" != "0" && -z "${POCKETSHELL_GATE_ISOLATED_COPY:-
   exec "$isolated_root/scripts/pre-release-confidence-gate.sh" "$@"
 fi
 
+SUMMARY_PATH="$RUN_DIR/summary.txt"
+SUMMARY_WRITTEN=0
+GATE_RESULT="FAIL"
+GATE_RESULT_MESSAGE="FAIL"
+FAILURE_MESSAGE=""
+FAILING_STEP=""
+FAILING_LOG_PATH=""
+FAILURE_DIAGNOSTICS_PATH=""
+FAILURE_LOGCAT_PATH=""
+EMULATOR_SERIAL="unknown"
+APP_DOGFOOD_INSTALL_STATUS="not_run"
+FINAL_INSTALL_STATUS="not_run"
+STEP_NAMES=()
+STEP_STATUSES=()
+STEP_LOGS=()
+STEP_COMMANDS=()
+FOCUSED_SELECTORS=("${APP_DOGFOOD_TESTS[@]}")
+FOCUSED_STATUSES=()
+FOCUSED_LOGS=()
+FOCUSED_DIAGNOSTICS=()
+FOCUSED_LOGCATS=()
+
+for _selector in "${FOCUSED_SELECTORS[@]}"; do
+  FOCUSED_STATUSES+=("not_run")
+  FOCUSED_LOGS+=("")
+  FOCUSED_DIAGNOSTICS+=("")
+  FOCUSED_LOGCATS+=("")
+done
+unset _selector
+
+commit_sha() {
+  local git_root="${POCKETSHELL_GATE_SOURCE_ROOT:-$ROOT_DIR}"
+  git -C "$git_root" rev-parse HEAD 2>/dev/null || printf 'unknown'
+}
+
+update_emulator_serial() {
+  if [[ -x "$ADB" ]]; then
+    EMULATOR_SERIAL="$("$ADB" get-serialno 2>/dev/null | tr -d '\r' || true)"
+    [[ -n "$EMULATOR_SERIAL" ]] || EMULATOR_SERIAL="unknown"
+  fi
+}
+
+set_focused_status() {
+  local selector="$1"
+  local status="$2"
+  local log_file="${3:-}"
+  local diagnostics_file="${4:-}"
+  local logcat_file="${5:-}"
+
+  local i
+  for i in "${!FOCUSED_SELECTORS[@]}"; do
+    if [[ "${FOCUSED_SELECTORS[$i]}" == "$selector" ]]; then
+      FOCUSED_STATUSES[$i]="$status"
+      [[ -n "$log_file" ]] && FOCUSED_LOGS[$i]="$log_file"
+      [[ -n "$diagnostics_file" ]] && FOCUSED_DIAGNOSTICS[$i]="$diagnostics_file"
+      [[ -n "$logcat_file" ]] && FOCUSED_LOGCATS[$i]="$logcat_file"
+      return 0
+    fi
+  done
+}
+
+write_summary() {
+  local exit_status="${1:-0}"
+  if [[ "$SUMMARY_WRITTEN" == "1" ]]; then
+    return 0
+  fi
+  SUMMARY_WRITTEN=1
+
+  update_emulator_serial
+  mkdir -p "$RUN_DIR"
+
+  if [[ "$exit_status" -eq 0 && "$GATE_RESULT" == "PASS" ]]; then
+    GATE_RESULT_MESSAGE="PASS: pre-release confidence gate completed"
+  elif [[ "$GATE_RESULT" != "PASS" ]]; then
+    GATE_RESULT="FAIL"
+    GATE_RESULT_MESSAGE="FAIL"
+  fi
+
+  {
+    printf 'PocketShell pre-release confidence gate summary\n'
+    printf 'Generated: %s\n' "$(date -Is)"
+    printf 'Result: %s\n' "$GATE_RESULT_MESSAGE"
+    printf 'Exit status: %s\n' "$exit_status"
+    printf 'Commit SHA: %s\n' "$(commit_sha)"
+    printf 'Run ID: %s\n' "$RUN_ID"
+    printf 'Run directory: %s\n' "$RUN_DIR"
+    if [[ -n "${POCKETSHELL_GATE_SOURCE_ROOT:-}" ]]; then
+      printf 'Source workspace: %s\n' "$POCKETSHELL_GATE_SOURCE_ROOT"
+      printf 'Isolated worktree: %s\n' "$ROOT_DIR"
+    fi
+    printf 'APK path: %s\n' "$APK_PATH"
+    printf 'Test APK path: %s\n' "$TEST_APK_PATH"
+    printf 'Emulator serial: %s\n' "$EMULATOR_SERIAL"
+    printf 'Docker compose file: %s\n' "$COMPOSE_FILE"
+    printf 'Docker profile/service: agents\n'
+    printf 'Docker SSH target: 127.0.0.1:2222\n'
+    printf 'Focused app APK install status: %s\n' "$APP_DOGFOOD_INSTALL_STATUS"
+    printf 'Final install status: %s\n' "$FINAL_INSTALL_STATUS"
+    if [[ "$GATE_RESULT" != "PASS" ]]; then
+      printf 'Failing step: %s\n' "${FAILING_STEP:-unknown}"
+      printf 'Failure message: %s\n' "${FAILURE_MESSAGE:-unknown}"
+      printf 'Failing step log: %s\n' "${FAILING_LOG_PATH:-unknown}"
+      printf 'Failure diagnostics: %s\n' "${FAILURE_DIAGNOSTICS_PATH:-unknown}"
+      printf 'Failure logcat: %s\n' "${FAILURE_LOGCAT_PATH:-unknown}"
+    fi
+
+    printf '\nSteps:\n'
+    local i
+    for i in "${!STEP_NAMES[@]}"; do
+      printf -- '- name: %s\n' "${STEP_NAMES[$i]}"
+      printf '  status: %s\n' "${STEP_STATUSES[$i]}"
+      printf '  log: %s\n' "${STEP_LOGS[$i]}"
+      printf '  command: %s\n' "${STEP_COMMANDS[$i]}"
+    done
+
+    printf '\nFocused selectors:\n'
+    for i in "${!FOCUSED_SELECTORS[@]}"; do
+      printf -- '- selector: %s\n' "${FOCUSED_SELECTORS[$i]}"
+      printf '  status: %s\n' "${FOCUSED_STATUSES[$i]}"
+      [[ -n "${FOCUSED_LOGS[$i]}" ]] && printf '  log: %s\n' "${FOCUSED_LOGS[$i]}"
+      [[ -n "${FOCUSED_DIAGNOSTICS[$i]}" ]] && printf '  diagnostics: %s\n' "${FOCUSED_DIAGNOSTICS[$i]}"
+      [[ -n "${FOCUSED_LOGCATS[$i]}" ]] && printf '  logcat: %s\n' "${FOCUSED_LOGCATS[$i]}"
+    done
+  } > "$SUMMARY_PATH"
+}
+
+on_exit() {
+  local exit_status="$?"
+  set +e
+  write_summary "$exit_status"
+}
+
+trap on_exit EXIT
+
 log_path_for() {
   local name="$1"
   printf '%s/%02d-%s.log' "$RUN_DIR" "$STEP_INDEX" "$name"
@@ -92,12 +226,27 @@ run_step() {
   STEP_INDEX=$((STEP_INDEX + 1))
   local log_file
   log_file="$(log_path_for "$name")"
+  local command_string=""
+  local arg
+  local quoted_arg
+  for arg in "$@"; do
+    printf -v quoted_arg '%q' "$arg"
+    command_string+=" $quoted_arg"
+  done
+  command_string="${command_string# }"
+
+  STEP_NAMES+=("$name")
+  STEP_STATUSES+=("running")
+  STEP_LOGS+=("$log_file")
+  STEP_COMMANDS+=("$command_string")
+  local step_array_index=$((${#STEP_NAMES[@]} - 1))
 
   printf '\n[%02d] %s\n' "$STEP_INDEX" "$name"
   printf 'Command:'
   printf ' %q' "$@"
   printf '\nLog: %s\n' "$log_file"
 
+  set +e
   {
     printf '[%s] %s\n' "$(date -Is)" "$name"
     printf 'Command:'
@@ -105,6 +254,35 @@ run_step() {
     printf '\n\n'
     "$@"
   } 2>&1 | tee "$log_file"
+  local status=$?
+  set -e
+
+  if [[ "$status" -eq 0 ]]; then
+    STEP_STATUSES[$step_array_index]="passed"
+    case "$name" in
+      install-app-dogfood-apks)
+        APP_DOGFOOD_INSTALL_STATUS="passed"
+        ;;
+      install-debug-apk)
+        FINAL_INSTALL_STATUS="passed"
+        ;;
+    esac
+  else
+    STEP_STATUSES[$step_array_index]="failed"
+    FAILING_STEP="$name"
+    FAILING_LOG_PATH="$log_file"
+    FAILURE_MESSAGE="step '$name' failed with status $status"
+    case "$name" in
+      install-app-dogfood-apks)
+        APP_DOGFOOD_INSTALL_STATUS="failed"
+        ;;
+      install-debug-apk)
+        FINAL_INSTALL_STATUS="failed"
+        ;;
+    esac
+  fi
+
+  return "$status"
 }
 
 run_bash_step() {
@@ -114,6 +292,8 @@ run_bash_step() {
 }
 
 fail() {
+  FAILURE_MESSAGE="$1"
+  [[ -n "$FAILING_STEP" ]] || FAILING_STEP="preflight"
   printf '\nFAIL: %s\nLogs: %s\n' "$1" "$RUN_DIR" >&2
   exit 1
 }
@@ -425,6 +605,7 @@ run_bash_step "docker-agents-ssh-sanity" \
 
 run_bash_step "emulator-readiness" \
   "'$ADB' devices && for i in {1..90}; do state=\$('$ADB' shell getprop sys.boot_completed 2>/dev/null | tr -d '\r'); if [ \"\$state\" = 1 ]; then exit 0; fi; sleep 2; done; '$ADB' devices; exit 1"
+update_emulator_serial
 
 run_step "connected-terminal-input" \
   ./gradlew $GRADLE_FLAGS :shared:core-terminal:connectedDebugAndroidTest --stacktrace
@@ -437,14 +618,27 @@ run_step "build-app-test-apks" \
 run_bash_step "reset-app-packages-before-app-dogfood" "$(reset_app_packages_script)"
 run_bash_step "install-app-dogfood-apks" "$(install_app_dogfood_apks_script)"
 
-for app_dogfood_selector in "${APP_DOGFOOD_TESTS[@]}"; do
+for app_dogfood_index in "${!APP_DOGFOOD_TESTS[@]}"; do
+  app_dogfood_selector="${APP_DOGFOOD_TESTS[$app_dogfood_index]}"
   app_dogfood_safe_name="$(safe_step_name "$app_dogfood_selector")"
-  run_bash_step "quiesce-app-dogfood-processes-$app_dogfood_safe_name" "$(quiesce_app_dogfood_processes_script)"
+  set_focused_status "$app_dogfood_selector" "pending"
+  if ! run_bash_step "quiesce-app-dogfood-processes-$app_dogfood_safe_name" "$(quiesce_app_dogfood_processes_script)"; then
+    set_focused_status "$app_dogfood_selector" "blocked"
+    exit 1
+  fi
 
   app_dogfood_step_index=$((STEP_INDEX + 1))
   app_dogfood_diagnostics_file="$(printf '%s/%02d-connected-app-dogfood-%s-diagnostics.log' "$RUN_DIR" "$app_dogfood_step_index" "$app_dogfood_safe_name")"
   app_dogfood_full_logcat_file="$(printf '%s/%02d-connected-app-dogfood-%s-full-logcat.log' "$RUN_DIR" "$app_dogfood_step_index" "$app_dogfood_safe_name")"
-  run_bash_step "connected-app-dogfood-$app_dogfood_safe_name" "$(run_app_dogfood_script "$app_dogfood_selector" "$app_dogfood_diagnostics_file" "$app_dogfood_full_logcat_file")"
+  set_focused_status "$app_dogfood_selector" "running" "" "$app_dogfood_diagnostics_file" "$app_dogfood_full_logcat_file"
+  if run_bash_step "connected-app-dogfood-$app_dogfood_safe_name" "$(run_app_dogfood_script "$app_dogfood_selector" "$app_dogfood_diagnostics_file" "$app_dogfood_full_logcat_file")"; then
+    set_focused_status "$app_dogfood_selector" "passed" "$RUN_DIR/$(printf '%02d-connected-app-dogfood-%s.log' "$app_dogfood_step_index" "$app_dogfood_safe_name")" "$app_dogfood_diagnostics_file" "$app_dogfood_full_logcat_file"
+  else
+    set_focused_status "$app_dogfood_selector" "failed" "$RUN_DIR/$(printf '%02d-connected-app-dogfood-%s.log' "$app_dogfood_step_index" "$app_dogfood_safe_name")" "$app_dogfood_diagnostics_file" "$app_dogfood_full_logcat_file"
+    FAILURE_DIAGNOSTICS_PATH="$app_dogfood_diagnostics_file"
+    FAILURE_LOGCAT_PATH="$app_dogfood_full_logcat_file"
+    exit 1
+  fi
 done
 
 run_step "build-debug-apk" ./gradlew $GRADLE_FLAGS :app:assembleDebug --stacktrace
@@ -452,6 +646,8 @@ run_step "build-debug-apk" ./gradlew $GRADLE_FLAGS :app:assembleDebug --stacktra
 
 run_step "install-debug-apk" "$ADB" install -r "$APK_PATH"
 
+GATE_RESULT="PASS"
+GATE_RESULT_MESSAGE="PASS: pre-release confidence gate completed"
 printf '\nPASS: pre-release confidence gate completed\n'
 printf 'Logs: %s\n' "$RUN_DIR"
 printf 'APK: %s\n' "$APK_PATH"

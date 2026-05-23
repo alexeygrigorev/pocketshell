@@ -221,6 +221,21 @@ when iterating on harness behavior:
 BUILD_APKS=0 scripts/phone-dogfood.sh terminal-lab
 ```
 
+For release visual review without a physical phone, run:
+
+```bash
+scripts/phone-dogfood.sh visual-audit
+```
+
+This runs the Docker-backed visual screenshot instrumentation and the composer
+state renderer, then writes reviewer-facing PNGs under
+`build/phone-dogfood/<run-id>/screenshots/visual-audit/`. The normalized set is
+`01-host-list.png`, `02-host-setup-session-picker.png`,
+`03-terminal-session-input-controls.png`, `04-snippets.png`,
+`05-composer-draft.png`, `06-composer-recording.png`, and
+`07-composer-transcribing.png`; raw pulled device output remains under
+`build/phone-dogfood/<run-id>/device-artifacts/dogfood-visual-pass/`.
+
 This differs from CI and the pre-release confidence gate: it is a local
 reproduction loop for one dogfood journey and reviewer-visible artifacts. It
 does not replace unit tests, connected CI, or the slower release gate.
@@ -233,6 +248,29 @@ the repository root:
 ```bash
 scripts/pre-release-confidence-gate.sh
 ```
+
+For an actual release tag, the confidence gate is only the first step. Run the
+guarded emulator-only release validation from clean pushed `main`:
+
+```bash
+scripts/release-emulator-validation.sh
+```
+
+That wrapper requires `HEAD == origin/main`, then runs the confidence gate,
+`scripts/phone-dogfood.sh terminal-lab`,
+`scripts/phone-dogfood.sh tmux-existing-session`,
+`scripts/phone-dogfood.sh setup-detection`, and visual-audit screenshot
+capture. It writes `build/release-emulator-validation/<run-id>/summary.md`
+with the artifact directories that must be attached or linked in the issue and
+tag notes. Push the tag only through:
+
+```bash
+scripts/push-release-tag.sh --visual-audit-inspected <tag> build/release-emulator-validation/<run-id>/summary.md
+```
+
+Use `--visual-audit-inspected` only after reviewing the visual-audit
+screenshots. Physical phone testing is final user acceptance only; it does not
+replace the emulator/Docker release blockers above.
 
 This combines the normal compile/unit check, deterministic Docker `agents`
 target verification, explicit-path emulator readiness checks, focused connected
@@ -258,6 +296,13 @@ excluding `.git`, `.gradle`, and `build` directories. That keeps shared
 `app/build` output from unrelated local work out of the release gate while still
 testing the current source files. Set `GATE_ISOLATED_WORKTREE=0` only when the
 checkout is otherwise idle.
+Every run also writes
+`build/pre-release-confidence-gate/<run-id>/summary.txt`, including the commit,
+run directory, APK path, emulator serial when available, Docker target,
+step-by-step status/log paths, focused selector status, final install status,
+and the final pass/fail result. On failures, start review from that summary:
+it names the failing step and, for focused instrumentation failures, the
+diagnostics and bounded logcat artifact paths.
 
 The focused app dogfood selectors run through direct
 `adb shell am instrument -e class <selector>` invocations after one app/test

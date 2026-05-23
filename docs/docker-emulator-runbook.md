@@ -202,14 +202,17 @@ emulator:
 
 ```bash
 scripts/phone-dogfood.sh terminal-lab
+scripts/phone-dogfood.sh visual-audit
 ```
 
 The harness starts/verifies the Docker `agents` target, checks emulator boot
 state with the explicit `adb` path, runs only the selected scenario, and writes
 screenshots, timings, logcat, instrumentation output, Docker logs, command
-logs, and crash diagnostics under `build/phone-dogfood/<run-id>/`. The first
-supported scenario is `terminal-lab`; `tmux-existing-session`,
-`setup-detection`, and `visual-audit` are planned follow-ups.
+logs, and crash diagnostics under `build/phone-dogfood/<run-id>/`.
+`visual-audit` writes normalized reviewer screenshots under
+`build/phone-dogfood/<run-id>/screenshots/visual-audit/` and raw pulled device
+output under
+`build/phone-dogfood/<run-id>/device-artifacts/dogfood-visual-pass/`.
 
 ## APK Dogfood Pre-Release Gate
 
@@ -229,6 +232,12 @@ The gate uses the explicit SDK paths documented in [agents.md](../agents.md):
 It writes timestamped output under
 `build/pre-release-confidence-gate/<run-id>/`. Each step gets its own log file
 and the script exits at the first failed step with the log directory printed.
+Each pass or fail also persists
+`build/pre-release-confidence-gate/<run-id>/summary.txt` with the commit SHA,
+run directory, APK path, emulator serial when available, Docker target,
+step statuses/log paths, focused selector statuses, final install status, and
+the final result. On failure, use the summary first because it records the
+failing step and focused instrumentation diagnostics/logcat paths when present.
 Unless `GRADLE_USER_HOME` is already set, the gate uses
 `build/pre-release-confidence-gate/gradle-home` for its Gradle cache and daemon
 registry. This isolates the release gate from unrelated local Gradle daemon

@@ -203,12 +203,16 @@ emulator:
 ```bash
 scripts/phone-dogfood.sh terminal-lab
 scripts/phone-dogfood.sh visual-audit
+scripts/phone-dogfood.sh setup-detection
+scripts/phone-dogfood.sh setup-detection:ready
 ```
 
 The harness starts/verifies the Docker `agents` target, checks emulator boot
 state with the explicit `adb` path, runs only the selected scenario, and writes
 screenshots, timings, logcat, instrumentation output, Docker logs, command
 logs, and crash diagnostics under `build/phone-dogfood/<run-id>/`.
+`setup-detection` starts the `bootstrap-*` services on ports `2230` through
+`2235`; use `setup-detection:<profile>` to run one profile.
 `visual-audit` writes normalized reviewer screenshots under
 `build/phone-dogfood/<run-id>/screenshots/visual-audit/` and raw pulled device
 output under

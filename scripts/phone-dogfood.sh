@@ -39,6 +39,60 @@ TERMINAL_LAB_SCREENSHOTS=(
   "03-long-path-git-status.png"
   "04-backspace-repeat.png"
 )
+VISUAL_AUDIT_MAIN_TEST_CLASS="com.pocketshell.app.proof.DogfoodVisualScreenshotTest"
+VISUAL_AUDIT_COMPOSER_TEST_CLASS="com.pocketshell.app.composer.PromptComposerVisualScreenshotTest"
+VISUAL_AUDIT_DEVICE_DIR="$DEVICE_OUTPUT_DIR/dogfood-visual-pass"
+VISUAL_AUDIT_SCREENSHOTS=(
+  "01-host-list.png"
+  "02-host-setup-session-picker.png"
+  "03-terminal-session-input-controls.png"
+  "04-snippets.png"
+  "05-composer-draft.png"
+  "06-composer-recording.png"
+  "07-composer-transcribing.png"
+)
+TMUX_EXISTING_SESSION_TEST_SELECTOR="com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#dogfoodJourneyOpensAppSessionAndRunsShellAndTmuxCommands"
+TMUX_EXISTING_SESSION_DEVICE_DIR="$DEVICE_OUTPUT_DIR/issue78-phone-dogfood"
+TMUX_EXISTING_SESSION_REMOTE_NAME="claude-main"
+TMUX_EXISTING_SESSION_SCREENSHOT="existing-tmux-output.png"
+TMUX_EXISTING_SESSION_TRANSCRIPT="existing-tmux-output-visible-terminal.txt"
+TMUX_EXISTING_SESSION_TIMINGS="tmux-existing-session.txt"
+TMUX_EXISTING_SESSION_MIN_FOREGROUND_PIXELS="${TMUX_EXISTING_SESSION_MIN_FOREGROUND_PIXELS:-2000}"
+
+SETUP_DETECTION_TEST_CLASS="com.pocketshell.app.bootstrap.HostBootstrapScenarioSuiteTest"
+SETUP_DETECTION_DEVICE_DIR="$DEVICE_OUTPUT_DIR/setup-detection"
+SETUP_DETECTION_PROFILES=(
+  "ready"
+  "uv-install"
+  "unsupported"
+  "daemon-disabled"
+  "user-local-path"
+  "fish-user-local-path"
+)
+declare -A SETUP_DETECTION_SERVICES=(
+  ["ready"]="bootstrap-ready"
+  ["uv-install"]="bootstrap-uv-install"
+  ["unsupported"]="bootstrap-unsupported"
+  ["daemon-disabled"]="bootstrap-daemon-disabled"
+  ["user-local-path"]="bootstrap-user-local-path"
+  ["fish-user-local-path"]="bootstrap-fish-user-local-path"
+)
+declare -A SETUP_DETECTION_PORTS=(
+  ["ready"]="2230"
+  ["uv-install"]="2231"
+  ["unsupported"]="2232"
+  ["daemon-disabled"]="2233"
+  ["user-local-path"]="2234"
+  ["fish-user-local-path"]="2235"
+)
+declare -A SETUP_DETECTION_METHODS=(
+  ["ready"]="ready"
+  ["uv-install"]="uvInstall"
+  ["unsupported"]="unsupported"
+  ["daemon-disabled"]="daemonDisabled"
+  ["user-local-path"]="userLocalPath"
+  ["fish-user-local-path"]="fishUserLocalPath"
+)
 
 if [[ -n "${ADB_SERIAL:-}" && -z "${ANDROID_SERIAL:-}" ]]; then
   export ANDROID_SERIAL="$ADB_SERIAL"
@@ -54,13 +108,20 @@ against deterministic Docker SSH fixtures. Artifacts are written under:
   build/phone-dogfood/<run-id>/
 
 Supported scenarios:
-  terminal-lab   isolated terminal lab: connect, type, stress layout/input
-  all            currently aliases to terminal-lab
+  terminal-lab               isolated terminal lab: connect, type, stress layout/input
+  tmux-existing-session      host picker -> existing tmux session -> terminal command
+  visual-audit               release visual audit screenshots for reviewer inspection
+  setup-detection            full bootstrap setup/detection matrix
+  setup-detection:<profile>  one bootstrap profile by name
+  all                        all implemented scenarios
 
-Planned scenarios are accepted by issue #80 but not implemented yet:
-  tmux-existing-session
-  setup-detection
-  visual-audit
+Setup-detection profiles:
+  ready
+  uv-install
+  unsupported
+  daemon-disabled
+  user-local-path
+  fish-user-local-path
 
 Environment overrides:
   ANDROID_SDK=/home/alexey/Android/Sdk
@@ -150,9 +211,16 @@ collect_diagnostics() {
 
   docker compose -f "$COMPOSE_FILE" ps > "$LOG_DIR/docker-compose-ps.txt" 2>&1 || true
   docker compose -f "$COMPOSE_FILE" logs --no-color --timestamps agents > "$LOG_DIR/docker.txt" 2>&1 || true
-  "$ADB" devices -l > "$LOG_DIR/adb-devices-final.txt" 2>&1 || true
-  "$ADB" shell getprop sys.boot_completed > "$LOG_DIR/adb-boot-completed-final.txt" 2>&1 || true
-  "$ADB" logcat -d -v threadtime -t "$LOGCAT_LINES" > "$LOG_DIR/logcat.txt" 2>&1 || true
+  docker compose -f "$COMPOSE_FILE" logs --no-color --timestamps \
+    bootstrap-ready \
+    bootstrap-uv-install \
+    bootstrap-unsupported \
+    bootstrap-daemon-disabled \
+    bootstrap-user-local-path \
+    bootstrap-fish-user-local-path > "$LOG_DIR/docker-bootstrap.txt" 2>&1 || true
+  timeout 20s "$ADB" devices -l > "$LOG_DIR/adb-devices-final.txt" 2>&1 || true
+  timeout 20s "$ADB" shell getprop sys.boot_completed > "$LOG_DIR/adb-boot-completed-final.txt" 2>&1 || true
+  timeout 20s "$ADB" logcat -d -v threadtime -t "$LOGCAT_LINES" > "$LOG_DIR/logcat.txt" 2>&1 || true
   rg -n 'FATAL EXCEPTION|Process: com[.]pocketshell[.]app|Crash of app com[.]pocketshell[.]app|ANR in com[.]pocketshell[.]app|INSTRUMENTATION_RESULT: shortMsg=Process crashed' \
     "$LOG_DIR/logcat.txt" "$LOG_DIR"/*.log > "$LOG_DIR/crash-diagnostics.txt" 2>&1 || true
 
@@ -173,13 +241,25 @@ select_scenarios() {
   for scenario in "$@"; do
     case "$scenario" in
       -h|--help)
+        trap - EXIT
         usage
         exit 0
         ;;
       all)
         SCENARIOS+=("terminal-lab")
+        SCENARIOS+=("tmux-existing-session")
+        SCENARIOS+=("visual-audit")
+        SCENARIOS+=("setup-detection")
         ;;
       terminal-lab|tmux-existing-session|setup-detection|visual-audit)
+        SCENARIOS+=("$scenario")
+        ;;
+      setup-detection:*)
+        local profile="${scenario#setup-detection:}"
+        if [[ -z "${SETUP_DETECTION_SERVICES[$profile]:-}" ]]; then
+          usage >&2
+          fail "unknown setup-detection profile '$profile'"
+        fi
         SCENARIOS+=("$scenario")
         ;;
       *)
@@ -188,6 +268,15 @@ select_scenarios() {
         ;;
     esac
   done
+}
+
+setup_detection_profiles_for_scenario() {
+  local scenario="$1"
+  if [[ "$scenario" == setup-detection:* ]]; then
+    printf '%s\n' "${scenario#setup-detection:}"
+  else
+    printf '%s\n' "${SETUP_DETECTION_PROFILES[@]}"
+  fi
 }
 
 verify_static_tools() {
@@ -253,6 +342,77 @@ verify_docker_agents() {
   fail "Docker SSH fixture did not become ready at $SSH_USER@$SSH_HOST:$SSH_PORT"
 }
 
+verify_docker_bootstrap_profiles() {
+  local profiles=("$@")
+  local services=()
+  local profile
+  for profile in "${profiles[@]}"; do
+    services+=("${SETUP_DETECTION_SERVICES[$profile]}")
+  done
+
+  run_logged "05-docker-bootstrap-up" docker compose -f "$COMPOSE_FILE" up -d --build "${services[@]}"
+
+  for profile in "${profiles[@]}"; do
+    local port="${SETUP_DETECTION_PORTS[$profile]}"
+    local log_file="$LOG_DIR/06-docker-bootstrap-readiness-$profile.log"
+    : > "$log_file"
+    local attempt
+    for attempt in $(seq 1 60); do
+      {
+        printf '[%s] profile=%s attempt=%s\n' "$(date -Is)" "$profile" "$attempt"
+        ssh \
+          -i "$SSH_KEY" \
+          -p "$port" \
+          -o BatchMode=yes \
+          -o ConnectTimeout=3 \
+          -o ConnectionAttempts=1 \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          "$SSH_USER@$SSH_HOST" \
+          'printf "bootstrap ssh ready "; uname -a'
+      } >> "$log_file" 2>&1 && {
+        printf '\n[06-docker-bootstrap-readiness-%s]\nLog: %s\n' "$profile" "$(relpath "$log_file")"
+        tail -n 10 "$log_file"
+        break
+      }
+      sleep 1
+    done
+    if ! grep -q "bootstrap ssh ready" "$log_file"; then
+      tail -n 100 "$log_file" || true
+      fail "Docker bootstrap fixture '$profile' did not become ready at $SSH_USER@$SSH_HOST:$port"
+    fi
+  done
+}
+
+ensure_remote_tmux_existing_session() {
+  local session_name="$1"
+  local log_file="$LOG_DIR/06b-docker-tmux-existing-session.log"
+  : > "$log_file"
+  local attempt
+  for attempt in $(seq 1 30); do
+    {
+      printf '[%s] attempt=%s session=%s\n' "$(date -Is)" "$attempt" "$session_name"
+      ssh \
+        -i "$SSH_KEY" \
+        -p "$SSH_PORT" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=3 \
+        -o ConnectionAttempts=1 \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        "$SSH_USER@$SSH_HOST" \
+        "tmux has-session -t '$session_name' 2>/dev/null || tmux new-session -d -s '$session_name' 'printf \"PocketShell dogfood tmux fixture ready\\\\n\"; exec sh'; tmux display-message -p -t '$session_name' '#S'; tmux list-sessions"
+    } >> "$log_file" 2>&1 && {
+      printf '\n[06b-docker-tmux-existing-session]\nLog: %s\n' "$(relpath "$log_file")"
+      tail -n 30 "$log_file"
+      return 0
+    }
+    sleep 1
+  done
+  tail -n 100 "$log_file" || true
+  fail "Docker SSH fixture did not expose tmux session '$session_name'"
+}
+
 install_apk() {
   local package="$1"
   local apk="$2"
@@ -306,6 +466,15 @@ assert_no_crash_diagnostics() {
   if [[ -s "$LOG_DIR/crash-diagnostics.txt" ]]; then
     fail "crash diagnostics were found in $(relpath "$LOG_DIR/crash-diagnostics.txt")"
   fi
+}
+
+assert_instrumentation_success() {
+  local log_file="$1"
+  local selector="$2"
+  grep -q "INSTRUMENTATION_CODE: -1" "$log_file" &&
+    grep -q "OK (" "$log_file" &&
+    ! grep -q "FAILURES!!!" "$log_file" ||
+    fail "$selector did not report instrumentation success"
 }
 
 run_terminal_lab() {
@@ -388,6 +557,316 @@ run_terminal_lab() {
   printf '  %s\n' "$(relpath "$TIMING_DIR/commands.tsv")"
 }
 
+run_visual_audit() {
+  CURRENT_SCENARIO="visual-audit"
+  local scenario_start_ms scenario_end_ms scenario_elapsed_ms
+  local main_status=0
+  local composer_status=0
+  local device_artifact_dir="$DEVICE_ARTIFACT_ROOT/dogfood-visual-pass"
+  local screenshot_dir="$SCREENSHOT_ROOT/visual-audit"
+  local timing_file="$TIMING_DIR/visual-audit.txt"
+
+  scenario_start_ms="$(date +%s%3N)"
+  verify_static_tools
+  verify_emulator_booted
+  verify_docker_agents
+  build_and_install_apks
+
+  run_logged "12-reset-visual-audit-artifacts" bash -lc \
+    "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$VISUAL_AUDIT_DEVICE_DIR'"
+  run_logged "13-clear-logcat" "$ADB" logcat -c
+
+  local main_start_ms main_end_ms composer_start_ms composer_end_ms
+  main_start_ms="$(date +%s%3N)"
+  run_logged "14-run-visual-audit-main-instrumentation" \
+    "$ADB" shell am instrument -w -r \
+    -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
+    -e class "$VISUAL_AUDIT_MAIN_TEST_CLASS" \
+    com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner ||
+    main_status=$?
+  main_end_ms="$(date +%s%3N)"
+
+  mkdir -p "$DEVICE_ARTIFACT_ROOT" "$screenshot_dir"
+  run_logged "15-pull-visual-audit-main-artifacts" "$ADB" pull "$VISUAL_AUDIT_DEVICE_DIR" "$DEVICE_ARTIFACT_ROOT/" || true
+
+  composer_start_ms="$(date +%s%3N)"
+  run_logged "16-run-visual-audit-composer-instrumentation" \
+    "$ADB" shell am instrument -w -r \
+    -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
+    -e class "$VISUAL_AUDIT_COMPOSER_TEST_CLASS" \
+    com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner ||
+    composer_status=$?
+  composer_end_ms="$(date +%s%3N)"
+
+  run_logged "17-pull-visual-audit-composer-artifacts" "$ADB" pull "$VISUAL_AUDIT_DEVICE_DIR" "$DEVICE_ARTIFACT_ROOT/" || true
+  if [[ -d "$device_artifact_dir" ]]; then
+    run_logged "18-visual-audit-artifact-file-info" file "$device_artifact_dir"/* || true
+  fi
+
+  cp "$LOG_DIR/14-run-visual-audit-main-instrumentation.log" "$LOG_DIR/visual-audit-main-instrumentation.txt"
+  cp "$LOG_DIR/16-run-visual-audit-composer-instrumentation.log" "$LOG_DIR/visual-audit-composer-instrumentation.txt"
+  {
+    printf 'main_instrumentation_ms=%s\n' "$((main_end_ms - main_start_ms))"
+    printf 'composer_instrumentation_ms=%s\n' "$((composer_end_ms - composer_start_ms))"
+  } > "$timing_file"
+  "$ADB" logcat -d -v threadtime -t "$LOGCAT_LINES" > "$LOG_DIR/logcat.txt" 2>&1 || true
+  rg -n 'DOGFOOD_SCREENSHOT|DogfoodVisualScreenshotTest|PromptComposerVisualScreenshotTest' \
+    "$LOG_DIR/logcat.txt" \
+    "$LOG_DIR/visual-audit-main-instrumentation.txt" \
+    "$LOG_DIR/visual-audit-composer-instrumentation.txt" > "$LOG_DIR/visual-audit-filtered-log.txt" 2>&1 || true
+  rg -n 'FATAL EXCEPTION|Process: com[.]pocketshell[.]app|Crash of app com[.]pocketshell[.]app|ANR in com[.]pocketshell[.]app|INSTRUMENTATION_RESULT: shortMsg=Process crashed' \
+    "$LOG_DIR/logcat.txt" \
+    "$LOG_DIR/visual-audit-main-instrumentation.txt" \
+    "$LOG_DIR/visual-audit-composer-instrumentation.txt" > "$LOG_DIR/crash-diagnostics.txt" 2>&1 || true
+
+  if [[ "$main_status" -ne 0 ]]; then
+    fail "$VISUAL_AUDIT_MAIN_TEST_CLASS instrumentation command exited with $main_status"
+  fi
+  if [[ "$composer_status" -ne 0 ]]; then
+    fail "$VISUAL_AUDIT_COMPOSER_TEST_CLASS instrumentation command exited with $composer_status"
+  fi
+  assert_instrumentation_success "$LOG_DIR/visual-audit-main-instrumentation.txt" "$VISUAL_AUDIT_MAIN_TEST_CLASS"
+  assert_instrumentation_success "$LOG_DIR/visual-audit-composer-instrumentation.txt" "$VISUAL_AUDIT_COMPOSER_TEST_CLASS"
+
+  local missing=()
+  local screenshot
+  for screenshot in "${VISUAL_AUDIT_SCREENSHOTS[@]}"; do
+    if [[ -s "$device_artifact_dir/$screenshot" ]]; then
+      cp "$device_artifact_dir/$screenshot" "$screenshot_dir/$screenshot"
+    else
+      missing+=("$screenshot")
+    fi
+  done
+  if [[ "${#missing[@]}" -ne 0 ]]; then
+    printf '%s\n' "Missing visual-audit screenshots:" "${missing[@]}" >&2
+    fail "expected visual-audit screenshots were not pulled"
+  fi
+
+  scenario_end_ms="$(date +%s%3N)"
+  scenario_elapsed_ms=$((scenario_end_ms - scenario_start_ms))
+  printf 'scenario_elapsed_ms=%s\n' "$scenario_elapsed_ms" >> "$timing_file"
+  assert_no_crash_diagnostics
+
+  printf '\nPASS visual-audit\n'
+  printf 'artifacts: %s\n' "$(relpath "$RUN_DIR")"
+  printf 'screenshots:\n'
+  for screenshot in "${VISUAL_AUDIT_SCREENSHOTS[@]}"; do
+    printf '  %s\n' "$(relpath "$screenshot_dir/$screenshot")"
+  done
+  printf 'device artifacts:\n'
+  printf '  %s\n' "$(relpath "$device_artifact_dir")"
+  printf 'timing:\n'
+  sed 's/^/  /' "$timing_file"
+  printf 'logs:\n'
+  printf '  %s\n' "$(relpath "$LOG_DIR/logcat.txt")"
+  printf '  %s\n' "$(relpath "$LOG_DIR/visual-audit-main-instrumentation.txt")"
+  printf '  %s\n' "$(relpath "$LOG_DIR/visual-audit-composer-instrumentation.txt")"
+  printf '  %s\n' "$(relpath "$LOG_DIR/visual-audit-filtered-log.txt")"
+  printf '  %s\n' "$(relpath "$LOG_DIR/docker.txt")"
+  printf '  %s\n' "$(relpath "$TIMING_DIR/commands.tsv")"
+}
+
+run_tmux_existing_session() {
+  CURRENT_SCENARIO="tmux-existing-session"
+  local scenario_start_ms scenario_end_ms scenario_elapsed_ms
+  local instrumentation_status=0
+  local pulled_artifact_dir="$DEVICE_ARTIFACT_ROOT/issue78-phone-dogfood"
+  local scenario_artifact_dir="$DEVICE_ARTIFACT_ROOT/tmux-existing-session"
+  local screenshot_dir="$SCREENSHOT_ROOT/tmux-existing-session"
+  local timing_file="$TIMING_DIR/$TMUX_EXISTING_SESSION_TIMINGS"
+
+  scenario_start_ms="$(date +%s%3N)"
+  verify_static_tools
+  verify_emulator_booted
+  verify_docker_agents
+  ensure_remote_tmux_existing_session "$TMUX_EXISTING_SESSION_REMOTE_NAME"
+  build_and_install_apks
+
+  run_logged "12-reset-tmux-existing-session-artifacts" bash -lc \
+    "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$TMUX_EXISTING_SESSION_DEVICE_DIR'"
+  run_logged "13-clear-logcat" "$ADB" logcat -c
+
+  run_logged "14-run-tmux-existing-session-instrumentation" \
+    "$ADB" shell am instrument -w -r \
+    -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
+    -e class "$TMUX_EXISTING_SESSION_TEST_SELECTOR" \
+    com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner ||
+    instrumentation_status=$?
+
+  cp "$LOG_DIR/14-run-tmux-existing-session-instrumentation.log" "$LOG_DIR/instrumentation.txt"
+  "$ADB" logcat -d -v threadtime -t "$LOGCAT_LINES" > "$LOG_DIR/logcat.txt" 2>&1 || true
+  rg -n 'ISSUE78_|PocketShellDogfood' \
+    "$LOG_DIR/logcat.txt" "$LOG_DIR/instrumentation.txt" > "$LOG_DIR/tmux-existing-session-filtered-log.txt" 2>&1 || true
+  rg -n 'FATAL EXCEPTION|Process: com[.]pocketshell[.]app|Crash of app com[.]pocketshell[.]app|ANR in com[.]pocketshell[.]app|INSTRUMENTATION_RESULT: shortMsg=Process crashed' \
+    "$LOG_DIR/logcat.txt" "$LOG_DIR/instrumentation.txt" > "$LOG_DIR/crash-diagnostics.txt" 2>&1 || true
+
+  mkdir -p "$DEVICE_ARTIFACT_ROOT" "$scenario_artifact_dir" "$screenshot_dir"
+  run_logged "15-pull-tmux-existing-session-artifacts" "$ADB" pull "$TMUX_EXISTING_SESSION_DEVICE_DIR" "$DEVICE_ARTIFACT_ROOT/" || true
+  if [[ -d "$pulled_artifact_dir" ]]; then
+    run_logged "16-tmux-existing-session-artifact-file-info" file "$pulled_artifact_dir"/* || true
+  fi
+
+  if [[ "$instrumentation_status" -ne 0 ]]; then
+    fail "$TMUX_EXISTING_SESSION_TEST_SELECTOR instrumentation command exited with $instrumentation_status"
+  fi
+  grep -q "INSTRUMENTATION_CODE: -1" "$LOG_DIR/instrumentation.txt" &&
+    grep -q "OK (" "$LOG_DIR/instrumentation.txt" &&
+    ! grep -q "FAILURES!!!" "$LOG_DIR/instrumentation.txt" ||
+    fail "$TMUX_EXISTING_SESSION_TEST_SELECTOR did not report instrumentation success"
+
+  local source_screenshot="$pulled_artifact_dir/issue78-existing-tmux-output.png"
+  local source_transcript="$pulled_artifact_dir/issue78-existing-tmux-transcript.txt"
+  local source_timings="$pulled_artifact_dir/issue78-timings.txt"
+  local missing=()
+  [[ -s "$source_screenshot" ]] || missing+=("issue78-existing-tmux-output.png")
+  [[ -s "$source_transcript" ]] || missing+=("issue78-existing-tmux-transcript.txt")
+  [[ -s "$source_timings" ]] || missing+=("issue78-timings.txt")
+  if [[ "${#missing[@]}" -ne 0 ]]; then
+    printf '%s\n' "Missing tmux-existing-session artifacts:" "${missing[@]}" >&2
+    fail "expected tmux-existing-session artifacts were not pulled"
+  fi
+
+  grep -q 'issue78-complete-' "$source_transcript" ||
+    fail "terminal transcript did not include the completed tmux-existing-session marker"
+  grep -q "tmux_session=$TMUX_EXISTING_SESSION_REMOTE_NAME" "$source_timings" ||
+    fail "timing artifact did not verify tmux session '$TMUX_EXISTING_SESSION_REMOTE_NAME'"
+
+  local foreground_pixels
+  foreground_pixels="$(awk -F= '/^visible_terminal_foreground_pixels=/ { print $2 }' "$source_timings" | tail -n 1)"
+  if [[ -z "$foreground_pixels" || ! "$foreground_pixels" =~ ^[0-9]+$ ]]; then
+    fail "timing artifact did not include visible terminal foreground pixel evidence"
+  fi
+  if (( foreground_pixels < TMUX_EXISTING_SESSION_MIN_FOREGROUND_PIXELS )); then
+    fail "terminal screenshot appears blank or header-only; foreground_pixels=$foreground_pixels"
+  fi
+
+  cp "$source_screenshot" "$scenario_artifact_dir/$TMUX_EXISTING_SESSION_SCREENSHOT"
+  cp "$source_transcript" "$scenario_artifact_dir/$TMUX_EXISTING_SESSION_TRANSCRIPT"
+  cp "$source_timings" "$scenario_artifact_dir/$TMUX_EXISTING_SESSION_TIMINGS"
+  cp "$source_screenshot" "$screenshot_dir/$TMUX_EXISTING_SESSION_SCREENSHOT"
+  cp "$source_transcript" "$screenshot_dir/$TMUX_EXISTING_SESSION_TRANSCRIPT"
+  cp "$source_timings" "$timing_file"
+
+  scenario_end_ms="$(date +%s%3N)"
+  scenario_elapsed_ms=$((scenario_end_ms - scenario_start_ms))
+  printf 'scenario_elapsed_ms=%s\n' "$scenario_elapsed_ms" >> "$timing_file"
+  assert_no_crash_diagnostics
+
+  printf '\nPASS tmux-existing-session\n'
+  printf 'artifacts: %s\n' "$(relpath "$RUN_DIR")"
+  printf 'screenshot:\n'
+  printf '  %s\n' "$(relpath "$screenshot_dir/$TMUX_EXISTING_SESSION_SCREENSHOT")"
+  printf 'transcript:\n'
+  printf '  %s\n' "$(relpath "$screenshot_dir/$TMUX_EXISTING_SESSION_TRANSCRIPT")"
+  printf 'timing:\n'
+  sed 's/^/  /' "$timing_file"
+  printf 'logs:\n'
+  printf '  %s\n' "$(relpath "$LOG_DIR/logcat.txt")"
+  printf '  %s\n' "$(relpath "$LOG_DIR/instrumentation.txt")"
+  printf '  %s\n' "$(relpath "$LOG_DIR/tmux-existing-session-filtered-log.txt")"
+  printf '  %s\n' "$(relpath "$LOG_DIR/docker.txt")"
+  printf '  %s\n' "$(relpath "$TIMING_DIR/commands.tsv")"
+}
+
+run_setup_detection_profile() {
+  local profile="$1"
+  CURRENT_SCENARIO="setup-detection:$profile"
+
+  local method="${SETUP_DETECTION_METHODS[$profile]}"
+  local service="${SETUP_DETECTION_SERVICES[$profile]}"
+  local scenario_start_ms scenario_end_ms scenario_elapsed_ms
+  local instrumentation_status=0
+  local device_artifact_parent="$DEVICE_ARTIFACT_ROOT/setup-detection"
+  local device_artifact_dir="$device_artifact_parent/$profile"
+  local screenshot_dir="$SCREENSHOT_ROOT/setup-detection/$profile"
+  local timing_file="$TIMING_DIR/setup-detection-$profile.txt"
+  local instrumentation_log="$LOG_DIR/instrumentation-setup-detection-$profile.txt"
+  local logcat_file="$LOG_DIR/logcat-setup-detection-$profile.txt"
+  local crash_file="$LOG_DIR/crash-diagnostics-setup-detection-$profile.txt"
+  local docker_log="$LOG_DIR/docker-setup-detection-$profile.txt"
+
+  scenario_start_ms="$(date +%s%3N)"
+
+  run_logged "12-reset-setup-detection-$profile-artifacts" bash -lc \
+    "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$SETUP_DETECTION_DEVICE_DIR/$profile'"
+  run_logged "13-clear-logcat-setup-detection-$profile" "$ADB" logcat -c
+
+  run_logged "14-run-setup-detection-$profile-instrumentation" \
+    "$ADB" shell am instrument -w -r \
+    -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
+    -e pocketshellBootstrapScenarios true \
+    -e class "$SETUP_DETECTION_TEST_CLASS#$method" \
+    com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner ||
+    instrumentation_status=$?
+
+  cp "$LOG_DIR/14-run-setup-detection-$profile-instrumentation.log" "$instrumentation_log"
+  cp "$instrumentation_log" "$LOG_DIR/instrumentation.txt"
+  "$ADB" logcat -d -v threadtime -t "$LOGCAT_LINES" > "$logcat_file" 2>&1 || true
+  cp "$logcat_file" "$LOG_DIR/logcat.txt"
+  docker compose -f "$COMPOSE_FILE" logs --no-color --timestamps "$service" > "$docker_log" 2>&1 || true
+  rg -n 'FATAL EXCEPTION|Process: com[.]pocketshell[.]app|Crash of app com[.]pocketshell[.]app|ANR in com[.]pocketshell[.]app|INSTRUMENTATION_RESULT: shortMsg=Process crashed' \
+    "$logcat_file" "$instrumentation_log" > "$crash_file" 2>&1 || true
+  cp "$crash_file" "$LOG_DIR/crash-diagnostics.txt"
+
+  mkdir -p "$device_artifact_parent" "$screenshot_dir"
+  run_logged "15-pull-setup-detection-$profile-artifacts" "$ADB" pull "$SETUP_DETECTION_DEVICE_DIR/$profile" "$device_artifact_parent/" || true
+  if [[ -d "$device_artifact_dir" ]]; then
+    run_logged "16-setup-detection-$profile-artifact-file-info" file "$device_artifact_dir"/* || true
+  fi
+
+  if [[ "$instrumentation_status" -ne 0 ]]; then
+    fail "$SETUP_DETECTION_TEST_CLASS#$method instrumentation command exited with $instrumentation_status"
+  fi
+  grep -q "INSTRUMENTATION_CODE: -1" "$instrumentation_log" &&
+    grep -q "OK (" "$instrumentation_log" &&
+    ! grep -q "FAILURES!!!" "$instrumentation_log" ||
+    fail "$SETUP_DETECTION_TEST_CLASS#$method did not report instrumentation success"
+
+  local screenshot_count=0
+  if [[ -d "$device_artifact_dir" ]]; then
+    find "$device_artifact_dir" -maxdepth 1 -type f -name '*.png' -exec cp {} "$screenshot_dir/" \;
+    screenshot_count="$(find "$screenshot_dir" -maxdepth 1 -type f -name '*.png' | wc -l | tr -d ' ')"
+  fi
+  [[ "$screenshot_count" -gt 0 ]] || fail "expected setup-detection screenshots for $profile were not pulled"
+  [[ -s "$device_artifact_dir/timings.txt" ]] || fail "expected setup-detection timings for $profile were not pulled"
+  [[ -s "$device_artifact_dir/remote-probes.txt" ]] || fail "expected setup-detection remote probes for $profile were not pulled"
+
+  cp "$device_artifact_dir/timings.txt" "$timing_file"
+  scenario_end_ms="$(date +%s%3N)"
+  scenario_elapsed_ms=$((scenario_end_ms - scenario_start_ms))
+  printf 'scenario_elapsed_ms=%s\n' "$scenario_elapsed_ms" >> "$timing_file"
+  assert_no_crash_diagnostics
+
+  printf '\nPASS setup-detection:%s\n' "$profile"
+  printf 'artifacts: %s\n' "$(relpath "$RUN_DIR")"
+  printf 'screenshots: %s\n' "$(relpath "$screenshot_dir")"
+  printf 'remote probes: %s\n' "$(relpath "$device_artifact_dir/remote-probes.txt")"
+  printf 'timing:\n'
+  sed 's/^/  /' "$timing_file"
+  printf 'logs:\n'
+  printf '  %s\n' "$(relpath "$logcat_file")"
+  printf '  %s\n' "$(relpath "$instrumentation_log")"
+  printf '  %s\n' "$(relpath "$docker_log")"
+  printf '  %s\n' "$(relpath "$TIMING_DIR/commands.tsv")"
+}
+
+run_setup_detection() {
+  local scenario="$1"
+  CURRENT_SCENARIO="$scenario"
+  local -a selected_profiles
+  mapfile -t selected_profiles < <(setup_detection_profiles_for_scenario "$scenario")
+
+  verify_static_tools
+  verify_emulator_booted
+  verify_docker_bootstrap_profiles "${selected_profiles[@]}"
+  build_and_install_apks
+
+  local profile
+  for profile in "${selected_profiles[@]}"; do
+    run_setup_detection_profile "$profile"
+  done
+}
+
 run_unimplemented() {
   CURRENT_SCENARIO="$1"
   fail "scenario '$1' is planned for issue #80 but is not implemented yet; run terminal-lab"
@@ -406,8 +885,14 @@ for scenario in "${SCENARIOS[@]}"; do
     terminal-lab)
       run_terminal_lab
       ;;
-    tmux-existing-session|setup-detection|visual-audit)
-      run_unimplemented "$scenario"
+    tmux-existing-session)
+      run_tmux_existing_session
+      ;;
+    setup-detection|setup-detection:*)
+      run_setup_detection "$scenario"
+      ;;
+    visual-audit)
+      run_visual_audit
       ;;
   esac
 done

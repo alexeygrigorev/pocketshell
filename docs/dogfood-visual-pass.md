@@ -11,6 +11,17 @@ Start or reuse the local `test` AVD, then run:
 scripts/capture-dogfood-screenshots.sh
 ```
 
+The same screenshot set is also available through the phone dogfood harness:
+
+```bash
+scripts/phone-dogfood.sh visual-audit
+```
+
+That scenario writes normalized review artifacts under
+`build/phone-dogfood/<run-id>/screenshots/visual-audit/` while preserving the
+raw pulled device directory under
+`build/phone-dogfood/<run-id>/device-artifacts/dogfood-visual-pass/`.
+
 The script uses explicit SDK paths unless overridden:
 
 ```bash

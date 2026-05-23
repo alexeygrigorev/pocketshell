@@ -819,11 +819,8 @@ private fun ChipRow(
     val scrollState = rememberScrollState()
     Row(
         modifier = modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .border(width = 1.dp, color = PocketShellColors.Border)
             .horizontalScroll(scrollState)
-            .padding(start = 8.dp, top = 8.dp, end = 80.dp, bottom = 8.dp),
+            .padding(start = 8.dp, top = 8.dp, end = 8.dp, bottom = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -870,21 +867,32 @@ private fun BottomChipControls(
     onDictateTap: () -> Unit,
     onAddSnippetTap: (() -> Unit)? = null,
 ) {
-    Box(modifier = Modifier.fillMaxWidth()) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .border(width = 1.dp, color = PocketShellColors.Border),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         ChipRow(
             chips = chips,
             onChipTap = onChipTap,
             onProjectNavigationTap = onProjectNavigationTap,
             onDictateTap = onDictateTap,
             onAddSnippetTap = onAddSnippetTap,
+            modifier = Modifier.weight(1f),
         )
-        MicButton(
-            state = MicButtonState.Idle,
-            onClick = onDictateTap,
+        Box(
             modifier = Modifier
-                .align(Alignment.CenterEnd)
+                .width(80.dp)
                 .padding(end = 12.dp),
-        )
+            contentAlignment = Alignment.CenterEnd,
+        ) {
+            MicButton(
+                state = MicButtonState.Idle,
+                onClick = onDictateTap,
+            )
+        }
     }
 }
 

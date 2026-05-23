@@ -225,6 +225,74 @@ This differs from CI and the pre-release confidence gate: it is a local
 reproduction loop for one dogfood journey and reviewer-visible artifacts. It
 does not replace unit tests, connected CI, or the slower release gate.
 
+### APK dogfood pre-release confidence gate
+
+Before tagging an APK for dogfood testing, run the documented local gate from
+the repository root:
+
+```bash
+scripts/pre-release-confidence-gate.sh
+```
+
+This combines the normal compile/unit check, deterministic Docker `agents`
+target verification, explicit-path emulator readiness checks, focused connected
+dogfood journeys for keyboard/input, snippets/composer, dictation, planner, and
+Docker SSH/tmux smoke, then builds and installs
+`app/build/outputs/apk/debug/app-debug.apk` on the emulator. Logs are written
+under `build/pre-release-confidence-gate/<run-id>/`. By default the gate also
+uses `build/pre-release-confidence-gate/gradle-home` as an isolated
+`GRADLE_USER_HOME`, so unrelated local Gradle daemon/cache activity cannot stop
+or corrupt the scripted run. Gate Gradle invocations use `--no-build-cache`,
+`--no-parallel`, and `--max-workers=2` to avoid cache-packing,
+generated-source races, and local resource oversubscription. The
+compile/check phase pre-generates focused app KSP/Hilt sources for debug,
+release, androidTest, and unit-test variants before `check`, which keeps lint
+from depending on stale generated files in the checkout without building a full
+release APK inside the fast gate. Lint is excluded from this local dogfood gate
+so unrelated dirty-worktree lint issues cannot prevent the install and focused
+instrumentation checks from running; run lint separately before release when the
+checkout is clean.
+By default the gate also copies the current working tree to
+`build/pre-release-confidence-gate/<run-id>/worktree` and re-execs there,
+excluding `.git`, `.gradle`, and `build` directories. That keeps shared
+`app/build` output from unrelated local work out of the release gate while still
+testing the current source files. Set `GATE_ISOLATED_WORKTREE=0` only when the
+checkout is otherwise idle.
+
+The focused app dogfood selectors run through direct
+`adb shell am instrument -e class <selector>` invocations after one app/test
+package reset and one explicit app/test APK install for the whole focused
+phase. This makes the gate repeatable on a reused emulator, avoids stale Gradle
+connected-test runner arguments, and keeps package deletion/replacement work out
+of the selector window.
+The reset clears existing package data without uninstalling in the normal path,
+then replace-installs both APKs and waits for package-manager handlers to go
+idle. Uninstall is only used as a logged fallback for incompatible existing
+packages. After install, the gate watches a stability window for delayed
+PocketShell package removal broadcasts from earlier emulator work and reinstalls
+before instrumentation if one appears. The gate then force-stops app/test
+packages before each selector and waits until no PocketShell process is running
+and both packages report
+`stopped=true`, followed by a short stable settle window. If Android restarts
+the app/test package during that settle window due prior instrumentation
+teardown, the gate repeats the force-stop/idle/settle cycle up to three times.
+That keeps delayed
+package deletion, the quiesce force-stop itself, Android's normal `start instr`
+force-stop, prior selector teardown, and any restored task cleanup from killing
+the running instrumentation process. Each focused invocation clears logcat; if
+Android reports a process-crashed instrumentation result with no app exception
+and logcat shows the app was externally force-stopped while instrumentation was
+running, the selector is retried once after another package-manager idle wait.
+If the retry also fails, or the failure is not that exact transient shape, the
+gate keeps the final failure. If
+instrumentation crashes or reports a non-success code, the step log includes
+filtered crash context and points to the bounded full logcat artifact in the same
+run directory.
+
+See [docker-emulator-runbook.md](docker-emulator-runbook.md#apk-dogfood-pre-release-gate)
+for the exact steps, SDK paths, focused test list, APK location, and slower
+opt-in suites that remain outside the fast gate.
+
 ### Opt-in end-to-end scenario suites
 
 Some workflows need real app UI plus multiple remote-host states, but are too

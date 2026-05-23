@@ -130,6 +130,7 @@ class SshKeysViewModelTest {
         // success the new code clears `_error.value = null`.
         vm.generateKey(context)
         withTimeout(15_000) { vm.keys.first { it.isNotEmpty() } }
+        withTimeout(5_000) { vm.error.first { it == null } }
         assertEquals(null, vm.error.value)
     }
 

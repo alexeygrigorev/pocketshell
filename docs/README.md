@@ -14,6 +14,7 @@ Conceptual planning. Captured 2026-05-21, before any code is written.
 | [roadmap.md](roadmap.md) | Phased build order with rough sizing |
 | [decisions.md](decisions.md) | Log of what's locked, what's still open |
 | [testing.md](testing.md) | Android emulator + Docker remote-server test environment |
+| [docker-emulator-runbook.md](docker-emulator-runbook.md) | Docker profiles, ports, emulator commands, connected-test runbook |
 | [../agents.md](../agents.md) | Orchestrator + sub-agent process (auto-loaded via [../CLAUDE.md](../CLAUDE.md)) |
 | [mockups/](mockups/) | Static HTML mockups, Pixel 7 viewport — open `mockups/index.html` in a browser |
 

@@ -211,8 +211,145 @@ logs, and crash diagnostics under `build/phone-dogfood/<run-id>/`. The first
 supported scenario is `terminal-lab`; `tmux-existing-session`,
 `setup-detection`, and `visual-audit` are planned follow-ups.
 
+## APK Dogfood Pre-Release Gate
 
-## Bootstrap Setup Suite
+Before pushing a version tag for APK dogfood, run the local confidence gate from
+the repository root:
+
+```bash
+scripts/pre-release-confidence-gate.sh
+```
+
+The gate uses the explicit SDK paths documented in [agents.md](../agents.md):
+
+- `adb`: `/home/alexey/Android/Sdk/platform-tools/adb`
+- `emulator`: `/home/alexey/Android/Sdk/emulator/emulator`
+- AVD: `test`
+
+It writes timestamped output under
+`build/pre-release-confidence-gate/<run-id>/`. Each step gets its own log file
+and the script exits at the first failed step with the log directory printed.
+Unless `GRADLE_USER_HOME` is already set, the gate uses
+`build/pre-release-confidence-gate/gradle-home` for its Gradle cache and daemon
+registry. This isolates the release gate from unrelated local Gradle daemon
+stops and generated-output churn in other worktrees. Gate Gradle invocations
+also pass `--no-build-cache`, `--no-parallel`, and `--max-workers=2` to avoid
+cache-packing races, generated-source ordering races, and resource
+oversubscription when other local Gradle jobs are active.
+
+By default, the script copies the current working tree to
+`build/pre-release-confidence-gate/<run-id>/worktree` and re-execs from that
+copy, excluding `.git`, `.gradle`, and `build` directories. This protects the
+gate from unrelated local work mutating shared `app/build` or module build
+outputs while still validating the current source files. Set
+`GATE_ISOLATED_WORKTREE=0` only when the checkout is idle and direct in-place
+execution is intentional.
+
+The fast dogfood gate does all of the following:
+
+1. Runs normal compile/unit checks. In a fresh isolated Gradle home, the gate
+   first runs focused app KSP/Hilt generated-source tasks for debug, release,
+   androidTest, and unit-test variants so lint has deterministic generated
+   source inputs, then runs
+   `./gradlew --no-daemon --no-build-cache --no-parallel --max-workers=2 assembleDebug check -x lint -x lintDebug --stacktrace`.
+   Lint is intentionally excluded from this local dogfood gate so unrelated
+   dirty-worktree lint findings do not block the install and focused
+   instrumentation checks; run lint separately from a clean checkout before
+   release.
+2. Starts or verifies the deterministic Docker `agents` target:
+   `docker compose -f tests/docker/docker-compose.yml up -d --build agents`.
+3. SSHes into the Docker target on `127.0.0.1:2222` and verifies the expected
+   shims: `claude`, `codex`, `opencode`, `heru`, `agent-log-explorer`,
+   `tmuxctl`, and `uv`.
+4. Verifies emulator readiness with the explicit `adb` path and
+   `sys.boot_completed`.
+5. Runs focused connected dogfood journeys:
+   - `:shared:core-terminal:connectedDebugAndroidTest` for keyboard/input.
+   - Builds the app and Android test APKs, clears existing app/test package
+     data once, replace-installs both APKs once with explicit-path
+     `adb install -r`, stops any restored app/test process before each focused
+     selector, then runs direct
+     `adb shell am instrument -e class <selector>` invocations covering both
+     `PromptComposerSmokeTest` methods,
+     `SnippetTerminalE2eTest`, both `InlineDictationUiTest` methods,
+     `VoiceCommandPlannerE2eTest`, and both `EmulatorDockerSshSmokeTest`
+     methods.
+6. Rebuilds `app/build/outputs/apk/debug/app-debug.apk`.
+7. Installs the final APK on the emulator with explicit-path `adb install -r`.
+
+Before the focused app instrumentation phase, the gate force-stops
+`com.pocketshell.app.test` and `com.pocketshell.app`, clears existing package
+data if either package is already installed, and waits for the package-manager
+handler queues to go idle. It then replace-installs the app/test APKs once and
+waits for package-manager idle plus a stable package path check before starting
+instrumentation. During that stability window it also watches logcat for delayed
+PocketShell package removal broadcasts left over from earlier emulator work; if
+one appears, it waits for package-manager idle, reinstalls both APKs, and repeats
+the stability check before instrumentation. Uninstall is only used as a logged
+fallback when replace install reports an incompatible existing package, and that
+fallback also waits for package-manager idle before retrying install. Before
+each focused selector, the gate force-stops the app/test packages, waits until
+no PocketShell process is visible, verifies both packages report `stopped=true`,
+and holds that state through a short settle window. If prior instrumentation
+teardown starts the app/test package again during that settle window, the gate
+repeats the force-stop/idle/settle cycle up to three times. The focused tests
+run as direct instrumentation invocations without deleting or reinstalling packages between selectors, which
+keeps delayed `deletePackageX`, package replacement force-stops, restored
+tasks, the quiesce force-stop itself, and previous-run instrumentation teardown
+out of the running selector window.
+
+Each focused app instrumentation invocation clears logcat immediately before
+running. If Android reports `Process crashed` with no app exception and logcat
+shows the app was externally force-stopped while instrumentation was running,
+the selector is retried once after another package-manager idle wait. If the
+runner exits non-zero, does not report `INSTRUMENTATION_CODE: -1`, or the retry
+also fails, the step log prints the instrumentation output, filtered crash
+context from logcat, recent app-crash dropbox entries, and the tombstone
+listing. The run directory also keeps a bounded full logcat artifact for the
+failed focused invocation.
+
+The script does not start the emulator. If no emulator is running, start the
+known local AVD first:
+
+```bash
+/home/alexey/Android/Sdk/emulator/emulator \
+  -avd test \
+  -no-snapshot-load \
+  -no-window \
+  -gpu swiftshader_indirect \
+  -no-audio
+```
+
+The script accepts these environment overrides when a local machine differs:
+
+```bash
+ANDROID_SDK=/path/to/sdk
+ADB=/path/to/adb
+EMULATOR=/path/to/emulator
+AVD_NAME=test
+LOG_ROOT=build/pre-release-confidence-gate
+GRADLE_USER_HOME=/tmp/pocketshell-gate-gradle-home
+GRADLE_FLAGS="--no-daemon --no-build-cache --no-parallel --max-workers=2"
+GATE_ISOLATED_WORKTREE=1
+TEST_APK_DIR=app/build/outputs/apk/androidTest/debug
+TEST_APK_PATH="$TEST_APK_DIR/app-debug-androidTest.apk"
+export ANDROID_SDK ADB EMULATOR AVD_NAME LOG_ROOT GRADLE_USER_HOME GRADLE_FLAGS GATE_ISOLATED_WORKTREE TEST_APK_PATH
+scripts/pre-release-confidence-gate.sh
+```
+
+Slower opt-in suites are not part of the fast APK dogfood gate:
+
+- Full connected Android sweep:
+  `./gradlew --no-daemon connectedDebugAndroidTest --stacktrace`. Run this
+  before a public release candidate or when shared instrumentation fixtures
+  change.
+- Bootstrap/setup scenarios:
+  `HostBootstrapScenarioSuiteTest` with
+  `pocketshellBootstrapScenarios=true`. Run this before a release that changes
+  host setup, tool detection, daemon enablement, `uv` install behavior, or
+  SSH environment/PATH handling.
+- Manual visual audit and screenshots. Run this for visual or navigation
+  changes, and store screenshots beside the issue/release evidence.
 
 Start all bootstrap profiles:
 

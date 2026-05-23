@@ -54,6 +54,9 @@ import androidx.fragment.app.FragmentActivity
 import com.pocketshell.app.bootstrap.HostBootstrapSheet
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
+import com.pocketshell.app.sessions.HostTmuxSessionPickerSheet
+import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.sessions.SessionsDashboardViewModel
 import com.pocketshell.app.sessions.SessionsSection
 import com.pocketshell.core.storage.entity.HostEntity
@@ -100,15 +103,19 @@ fun HostListScreen(
     onManageKeys: () -> Unit,
     onOpenCrashReports: () -> Unit,
     onOpenSession: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit,
+    onOpenTmuxHostSession: (HostEntity, keyPath: String, passphrase: CharArray?, sessionName: String) -> Unit =
+        { _, _, _, _ -> },
     onOpenPortForwardPanel: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier,
     viewModel: HostListViewModel = hiltViewModel(),
     sessionsViewModel: SessionsDashboardViewModel = hiltViewModel(),
+    hostTmuxSessionPickerViewModel: HostTmuxSessionPickerViewModel = hiltViewModel(),
     onOpenTmuxSession: (ActiveTmuxClients.Entry, sessionName: String) -> Unit =
         { _, _ -> },
 ) {
     val hosts by viewModel.hosts.collectAsState()
     val sessions by sessionsViewModel.sessions.collectAsState()
+    val hostTmuxPickerState by hostTmuxSessionPickerViewModel.state.collectAsState()
     val updateInfo by viewModel.updateAvailable.collectAsState()
     val bootstrapState by viewModel.bootstrapState.collectAsState()
     val bootstrapHostName by viewModel.bootstrapHostName.collectAsState()
@@ -152,6 +159,7 @@ fun HostListScreen(
     val portPanelRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
     val currentHosts by rememberUpdatedState(hosts)
     val currentOpenSession by rememberUpdatedState(onOpenSession)
+    val currentOpenTmuxHostSession by rememberUpdatedState(onOpenTmuxHostSession)
     val currentOpenPortForwardPanel by rememberUpdatedState(onOpenPortForwardPanel)
     var pendingPassphrase by remember { mutableStateOf<PendingPassphraseRequest?>(null) }
     var passphraseText by remember { mutableStateOf("") }
@@ -222,7 +230,13 @@ fun HostListScreen(
     LaunchedEffect(pendingNavigation) {
         val pending = pendingNavigation
         if (pending != null && pending.ready) {
-            currentOpenSession(pending.host, pending.keyPath, pending.passphrase)
+            hostTmuxSessionPickerViewModel.load(
+                HostTmuxSessionPickerRequest(
+                    host = pending.host,
+                    keyPath = pending.keyPath,
+                    passphrase = pending.passphrase,
+                ),
+            )
             viewModel.consumePendingNavigation()
         }
     }
@@ -406,6 +420,19 @@ fun HostListScreen(
                 },
             )
         }
+
+        HostTmuxSessionPickerSheet(
+            state = hostTmuxPickerState,
+            onAttach = { request, sessionName ->
+                hostTmuxSessionPickerViewModel.dismiss()
+                currentOpenTmuxHostSession(request.host, request.keyPath, request.passphrase, sessionName)
+            },
+            onRawSsh = { request ->
+                hostTmuxSessionPickerViewModel.dismiss()
+                currentOpenSession(request.host, request.keyPath, request.passphrase)
+            },
+            onDismiss = hostTmuxSessionPickerViewModel::dismiss,
+        )
     }
 }
 

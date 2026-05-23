@@ -44,6 +44,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -240,6 +243,7 @@ internal fun SheetContent(
     modifier: Modifier = Modifier,
     onSnippets: (() -> Unit)? = null,
 ) {
+    val isTranscribing = state.recording == PromptComposerViewModel.RecordingState.Transcribing
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -298,7 +302,9 @@ internal fun SheetContent(
             BasicTextField(
                 value = state.draft,
                 onValueChange = onDraftChange,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(COMPOSER_DRAFT_TAG),
                 textStyle = TextStyle(
                     color = PocketShellColors.Text,
                     fontSize = 14.sp,
@@ -352,14 +358,25 @@ internal fun SheetContent(
                     PromptComposerViewModel.RecordingState.Recording -> MicButtonState.Recording
                     PromptComposerViewModel.RecordingState.Transcribing -> MicButtonState.Disabled
                 },
-                onClick = onMicTap,
+                onClick = { if (!isTranscribing) onMicTap() },
             )
             Waveform(
                 amplitude = state.amplitude,
                 active = state.recording == PromptComposerViewModel.RecordingState.Recording,
                 modifier = Modifier
                     .weight(1f)
-                    .height(32.dp),
+                    .height(32.dp)
+                    .testTag(COMPOSER_WAVEFORM_TAG)
+                    .semantics {
+                        contentDescription = when (state.recording) {
+                            PromptComposerViewModel.RecordingState.Recording ->
+                                "Prompt composer recording waveform"
+                            PromptComposerViewModel.RecordingState.Transcribing ->
+                                "Prompt composer transcribing"
+                            PromptComposerViewModel.RecordingState.Idle ->
+                                "Prompt composer idle waveform"
+                        }
+                    },
             )
             Text(
                 text = when (state.recording) {
@@ -370,6 +387,7 @@ internal fun SheetContent(
                 color = PocketShellColors.Accent,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.testTag(COMPOSER_STATUS_TAG),
             )
         }
 
@@ -390,16 +408,23 @@ internal fun SheetContent(
                     onSnippets?.invoke()
                 },
                 modifier = Modifier.weight(1f),
+                enabled = !isTranscribing,
             )
             NeutralButton(
                 label = "Send",
                 onClick = { onSend(false) },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag(COMPOSER_SEND_TAG),
+                enabled = !isTranscribing && state.draft.isNotEmpty(),
             )
             PrimaryButton(
                 label = "Send + ↵",
                 onClick = { onSend(true) },
-                modifier = Modifier.weight(1f),
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag(COMPOSER_SEND_ENTER_TAG),
+                enabled = !isTranscribing && state.draft.isNotEmpty(),
             )
         }
     }
@@ -476,11 +501,17 @@ internal fun barEnvelopeHeightDp(index: Int): Float {
 }
 
 @Composable
-private fun GhostButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun GhostButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
     TextButton(
         onClick = onClick,
         modifier = modifier
             .height(44.dp),
+        enabled = enabled,
         colors = ButtonDefaults.textButtonColors(contentColor = PocketShellColors.TextSecondary),
     ) {
         Text(label, fontSize = 13.sp, fontWeight = FontWeight.Medium)
@@ -488,11 +519,17 @@ private fun GhostButton(label: String, onClick: () -> Unit, modifier: Modifier =
 }
 
 @Composable
-private fun NeutralButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun NeutralButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
     Button(
         onClick = onClick,
         modifier = modifier
             .height(44.dp),
+        enabled = enabled,
         shape = RoundedCornerShape(10.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = PocketShellColors.SurfaceElev,
@@ -505,11 +542,17 @@ private fun NeutralButton(label: String, onClick: () -> Unit, modifier: Modifier
 }
 
 @Composable
-private fun PrimaryButton(label: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun PrimaryButton(
+    label: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
     Button(
         onClick = onClick,
         modifier = modifier
             .height(44.dp),
+        enabled = enabled,
         shape = RoundedCornerShape(10.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = PocketShellColors.Accent,
@@ -590,6 +633,12 @@ private fun PromptComposerViewModel.UiState.placeholderHint(): String = when (re
     PromptComposerViewModel.RecordingState.Recording -> "Listening — speak when ready"
     PromptComposerViewModel.RecordingState.Transcribing -> "Transcribing..."
 }
+
+internal const val COMPOSER_DRAFT_TAG = "prompt-composer-draft"
+internal const val COMPOSER_SEND_TAG = "prompt-composer-send"
+internal const val COMPOSER_SEND_ENTER_TAG = "prompt-composer-send-enter"
+internal const val COMPOSER_STATUS_TAG = "prompt-composer-status"
+internal const val COMPOSER_WAVEFORM_TAG = "prompt-composer-waveform"
 
 // -- Previews -----------------------------------------------------------------
 

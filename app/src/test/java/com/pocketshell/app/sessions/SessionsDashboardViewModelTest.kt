@@ -4,6 +4,7 @@ import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.tmux.FakeTmuxClient
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.uikit.model.TagKind
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.runCurrent
@@ -402,6 +403,44 @@ class SessionsDashboardViewModelTest {
         // Clamped at zero — clock skew between the host and the device
         // should never produce a negative delta.
         assertEquals("now", formatRelativeTime(nowSec = 0L, thenSec = 100L))
+    }
+
+    @Test
+    fun dashboardRowUiSurfacesAgentAndAttachedState() {
+        val row = SessionSummary(
+            hostId = 1L,
+            hostName = "hetzner",
+            sessionName = "codex",
+            lastActivity = 100L,
+            attached = true,
+        ).dashboardRowUi()
+
+        assertEquals("C", row.badge)
+        assertEquals("codex conversation active", row.preview)
+        assertEquals(listOf("codex", "attached"), row.tags.map { it.label })
+        assertEquals(listOf(TagKind.Agent, TagKind.Default), row.tags.map { it.kind })
+    }
+
+    @Test
+    fun dashboardRowUiSurfacesDomainHintsWithoutAgent() {
+        val deploy = SessionSummary(
+            hostId = 1L,
+            hostName = "prod",
+            sessionName = "deploy-watch",
+            lastActivity = 100L,
+            attached = false,
+        ).dashboardRowUi()
+        val training = SessionSummary(
+            hostId = 2L,
+            hostName = "gpu-box",
+            sessionName = "training",
+            lastActivity = 100L,
+            attached = false,
+        ).dashboardRowUi()
+
+        assertEquals("tmux session idle", deploy.preview)
+        assertEquals(listOf(TagKind.Deploy), deploy.tags.map { it.kind })
+        assertEquals(listOf(TagKind.Ml), training.tags.map { it.kind })
     }
 
     @Test

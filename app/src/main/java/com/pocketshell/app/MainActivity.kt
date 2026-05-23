@@ -153,6 +153,20 @@ private fun AppNavigator(
                     ),
                 )
             },
+            onOpenTmuxHostSession = { host, keyPath, passphrase, sessionName ->
+                navigate(
+                    AppDestination.TmuxSession(
+                        hostId = host.id,
+                        hostName = host.name,
+                        hostname = host.hostname,
+                        port = host.port,
+                        username = host.username,
+                        keyPath = keyPath,
+                        passphrase = passphrase,
+                        sessionName = sessionName,
+                    ),
+                )
+            },
             onOpenPortForwardPanel = { host, keyPath, passphrase ->
                 navigate(AppDestination.PortForwardPanel(hostId = host.id, keyPath = keyPath, passphrase = passphrase))
             },
@@ -286,23 +300,6 @@ private fun AppNavigator(
             },
             onReplaceTmuxSession = { sessionName ->
                 replace(dest.copy(sessionName = sessionName))
-            },
-            onOpenTmuxSessionFromSheet = { entry, sessionName ->
-                val next = AppDestination.TmuxSession(
-                    hostId = entry.hostId,
-                    hostName = entry.hostName,
-                    hostname = entry.hostname,
-                    port = entry.port,
-                    username = entry.username,
-                    keyPath = entry.keyPath,
-                    passphrase = null,
-                    sessionName = sessionName,
-                )
-                when {
-                    next == dest -> Unit
-                    next.hostId == dest.hostId -> replace(next)
-                    else -> navigate(next)
-                }
             },
             onOpenJobs = {
                 navigate(

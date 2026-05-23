@@ -5,7 +5,9 @@ import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -17,6 +19,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -29,6 +32,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.PaddingValues
@@ -39,8 +43,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -59,15 +61,20 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
+import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.session.SessionTab
-import com.pocketshell.app.sessions.ActiveTmuxClients
-import com.pocketshell.app.sessions.SessionsSection
+import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
+import com.pocketshell.app.sessions.HostTmuxSessionPickerState
+import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
+import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
+import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.KeyBar
@@ -104,7 +111,6 @@ import kotlin.math.abs
  * tmux client, and the per-pane terminal state holders all live in the
  * view model.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 public fun TmuxSessionScreen(
     viewModel: TmuxSessionViewModel,
@@ -117,10 +123,10 @@ public fun TmuxSessionScreen(
     passphrase: CharArray? = null,
     sessionName: String,
     modifier: Modifier = Modifier,
+    sessionPickerViewModel: HostTmuxSessionPickerViewModel = hiltViewModel(),
     onBack: () -> Unit = {},
     onOpenTmuxSession: (sessionName: String) -> Unit = {},
     onReplaceTmuxSession: (sessionName: String) -> Unit = {},
-    onOpenTmuxSessionFromSheet: (ActiveTmuxClients.Entry, sessionName: String) -> Unit = { _, _ -> },
     onOpenJobs: () -> Unit = {},
 ) {
     LaunchedEffect(hostId, hostName, host, port, user, keyPath, passphrase, sessionName) {
@@ -130,6 +136,7 @@ public fun TmuxSessionScreen(
     val panes by viewModel.panes.collectAsState()
     val status by viewModel.connectionStatus.collectAsState()
     val agentConversations by viewModel.agentConversations.collectAsState()
+    val sessionPickerState by sessionPickerViewModel.state.collectAsState()
 
     val pagerState = rememberPagerState(pageCount = { panes.size })
 
@@ -152,7 +159,21 @@ public fun TmuxSessionScreen(
     var dialogMode by remember { mutableStateOf<TmuxDialogMode?>(null) }
     var dialogText by remember { mutableStateOf("") }
     var showWindowSwitcher by remember { mutableStateOf(false) }
-    var showSessionSheet by remember { mutableStateOf(false) }
+    var showSessionDrawer by remember { mutableStateOf(false) }
+    val sessionPickerRequest = remember(hostId, hostName, host, port, user, keyPath, passphrase) {
+        HostTmuxSessionPickerRequest(
+            host = HostEntity(
+                id = hostId,
+                name = hostName.ifBlank { host },
+                hostname = host,
+                port = port,
+                username = user,
+                keyId = 0L,
+            ),
+            keyPath = keyPath,
+            passphrase = passphrase,
+        )
+    }
 
     fun openTextDialog(mode: TmuxDialogMode, initialText: String = "") {
         dialogMode = mode
@@ -170,7 +191,8 @@ public fun TmuxSessionScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(color = PocketShellColors.Background),
+            .background(color = PocketShellColors.Background)
+            .testTag(TMUX_SESSION_SCREEN_TAG),
     ) {
         Column(
             modifier = Modifier
@@ -185,7 +207,7 @@ public fun TmuxSessionScreen(
                     .verticalSwipeInput(
                         thresholdPx = verticalSwipeThresholdPx,
                         onBoundary = { haptics.performHapticFeedback(HapticFeedbackType.LongPress) },
-                        onSwipeDown = { showSessionSheet = true },
+                        onSwipeDown = { showSessionDrawer = true },
                     ),
             ) {
                 Breadcrumb(
@@ -208,6 +230,10 @@ public fun TmuxSessionScreen(
                     onKillSession = {
                         moreExpanded = false
                         dialogMode = TmuxDialogMode.KillSession
+                    },
+                    onSwitchSession = {
+                        moreExpanded = false
+                        showSessionDrawer = true
                     },
                     onOpenJobs = {
                         moreExpanded = false
@@ -279,7 +305,9 @@ public fun TmuxSessionScreen(
                 ) {
                     TmuxConversationPane(
                         events = currentAgentConversation.events,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag(TMUX_CONVERSATION_PANE_TAG),
                     )
                 } else if (panes.isEmpty()) {
                     EmptyPanesPlaceholder()
@@ -312,7 +340,8 @@ public fun TmuxSessionScreen(
                         },
                         modifier = Modifier
                             .align(Alignment.TopCenter)
-                            .padding(12.dp),
+                            .padding(12.dp)
+                            .testTag(TMUX_AGENT_HINT_TAG),
                     )
                 }
             }
@@ -415,20 +444,218 @@ public fun TmuxSessionScreen(
                 },
             )
         }
+
+        TmuxSessionDrawer(
+            visible = showSessionDrawer,
+            state = sessionPickerState,
+            hostName = hostName.ifBlank { host },
+            currentSessionName = sessionName,
+            onRefresh = { sessionPickerViewModel.load(sessionPickerRequest) },
+            onDismiss = {
+                showSessionDrawer = false
+                sessionPickerViewModel.dismiss()
+            },
+            onAttach = { selectedSessionName ->
+                showSessionDrawer = false
+                sessionPickerViewModel.dismiss()
+                if (selectedSessionName != sessionName) {
+                    onReplaceTmuxSession(selectedSessionName)
+                }
+            },
+            onCreate = {
+                showSessionDrawer = false
+                sessionPickerViewModel.dismiss()
+                openTextDialog(TmuxDialogMode.CreateSession)
+            },
+        )
     }
 
-    if (showSessionSheet) {
-        ModalBottomSheet(
-            onDismissRequest = { showSessionSheet = false },
-        ) {
-            SessionsSection(
-                modifier = Modifier.padding(bottom = 24.dp),
-                onOpenTmuxSession = { entry, selectedSessionName ->
-                    showSessionSheet = false
-                    onOpenTmuxSessionFromSheet(entry, selectedSessionName)
+    LaunchedEffect(showSessionDrawer, sessionPickerRequest) {
+        if (showSessionDrawer) {
+            sessionPickerViewModel.load(sessionPickerRequest)
+        }
+    }
+}
+
+@Composable
+private fun TmuxSessionDrawer(
+    visible: Boolean,
+    state: HostTmuxSessionPickerState,
+    hostName: String,
+    currentSessionName: String,
+    onRefresh: () -> Unit,
+    onDismiss: () -> Unit,
+    onAttach: (String) -> Unit,
+    onCreate: () -> Unit,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(animationSpec = tween(durationMillis = MotionDurationMs)),
+        exit = fadeOut(animationSpec = tween(durationMillis = MotionDurationMs)),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(PocketShellColors.Background.copy(alpha = 0.72f))
+                .clickable(onClick = onDismiss),
+        )
+    }
+    AnimatedVisibility(
+        visible = visible,
+        enter = slideInHorizontally(
+            animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+            initialOffsetX = { it },
+        ),
+        exit = slideOutHorizontally(
+            animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+            targetOffsetX = { it },
+        ),
+    ) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.CenterEnd) {
+            Column(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .fillMaxWidth(0.92f)
+                    .widthIn(max = SessionDrawerMaxWidth)
+                    .background(PocketShellColors.Surface)
+                    .border(width = 1.dp, color = PocketShellColors.BorderSoft)
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
+                    .testTag(TMUX_SESSION_SWITCHER_TAG)
+                    .clickable(onClick = {}),
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Tmux sessions",
+                            color = PocketShellColors.Text,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            text = "$hostName / $currentSessionName",
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("Close")
+                    }
+                }
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    item {
+                        TextButton(
+                            modifier = Modifier.fillMaxWidth(),
+                            onClick = onCreate,
+                        ) {
+                            Text("+ New session")
+                        }
+                    }
+                    when (state) {
+                        HostTmuxSessionPickerState.Idle,
+                        is HostTmuxSessionPickerState.Loading,
+                        -> item {
+                            TmuxSessionDrawerMessage(
+                                text = if (state is HostTmuxSessionPickerState.Loading) {
+                                    "Loading sessions from ${state.hostName}..."
+                                } else {
+                                    "Loading sessions..."
+                                },
+                            )
+                        }
+                        is HostTmuxSessionPickerState.Ready -> {
+                            state.message?.let { message ->
+                                item { TmuxSessionDrawerMessage(text = message) }
+                            }
+                            items(state.rows, key = { it.name }) { row ->
+                                TmuxSessionDrawerRow(
+                                    row = row,
+                                    selected = row.name == currentSessionName,
+                                    onClick = { onAttach(row.name) },
+                                )
+                            }
+                        }
+                        is HostTmuxSessionPickerState.Fallback -> item {
+                            TmuxSessionDrawerMessage(text = state.message)
+                        }
+                    }
+                }
+                TextButton(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    onClick = onRefresh,
+                ) {
+                    Text("Refresh")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TmuxSessionDrawerMessage(text: String) {
+    Text(
+        text = text,
+        color = PocketShellColors.TextSecondary,
+        fontSize = 13.sp,
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+    )
+}
+
+@Composable
+private fun TmuxSessionDrawerRow(
+    row: HostTmuxSessionRow,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                color = if (selected) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = row.name,
+                color = if (selected) PocketShellColors.Background else PocketShellColors.Text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                text = when {
+                    selected -> "current"
+                    row.attached -> "attached"
+                    else -> "available"
                 },
+                color = if (selected) PocketShellColors.Background else PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
             )
         }
+        Text(
+            text = if (selected) "Open" else "Attach",
+            color = if (selected) PocketShellColors.Background else PocketShellColors.Accent,
+            fontSize = 13.sp,
+        )
     }
 }
 
@@ -451,8 +678,13 @@ private sealed interface TmuxDialogMode {
 }
 
 private val VerticalSwipeThreshold = 72.dp
+private val SessionDrawerMaxWidth = 360.dp
 private const val MotionDurationMs: Int = 200
 private val MotionEasing = CubicBezierEasing(0f, 0f, 0.2f, 1f)
+internal const val TMUX_SESSION_SCREEN_TAG = "tmux:session"
+internal const val TMUX_SESSION_SWITCHER_TAG = "tmux:session-switcher"
+internal const val TMUX_CONVERSATION_PANE_TAG = "tmux:conversation"
+internal const val TMUX_AGENT_HINT_TAG = "tmux:agent-hint"
 
 private fun Modifier.verticalSwipeInput(
     thresholdPx: Float,
@@ -793,6 +1025,7 @@ private fun TmuxMoreMenu(
     onCreateSession: () -> Unit,
     onRenameSession: () -> Unit,
     onKillSession: () -> Unit,
+    onSwitchSession: () -> Unit,
     onOpenJobs: () -> Unit,
     onNewWindow: () -> Unit,
     onRenameWindow: () -> Unit,
@@ -807,6 +1040,7 @@ private fun TmuxMoreMenu(
             onDismissRequest = onDismiss,
         ) {
             DropdownMenuItem(text = { Text("New session") }, onClick = onCreateSession)
+            DropdownMenuItem(text = { Text("Switch session") }, onClick = onSwitchSession)
             DropdownMenuItem(text = { Text("Rename session") }, onClick = onRenameSession)
             DropdownMenuItem(text = { Text("Kill session") }, onClick = onKillSession)
             DropdownMenuItem(text = { Text("Recurring jobs") }, onClick = onOpenJobs)

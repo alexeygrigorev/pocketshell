@@ -3,6 +3,35 @@ set -eu
 
 fixture_dir="${POCKETSHELL_AGENT_FIXTURE_DIR:-/opt/pocketshell-agent-fixtures}"
 
+if [ "${1:-}" = "list" ] || [ "${1:-}" = "ls" ] || [ "${1:-}" = "l" ]; then
+  cat "${fixture_dir}/tmuxctl-list.txt"
+  exit 0
+fi
+
+case "${1:-}" in
+  1|claude-main)
+    printf 'Attached to session claude-main\n'
+    exit 0
+    ;;
+  2|codex)
+    printf 'Attached to session codex\n'
+    exit 0
+    ;;
+  3|opencode-lab)
+    printf 'Attached to session opencode-lab\n'
+    exit 0
+    ;;
+  :*)
+    session="${1#:}"
+    if [ -z "${session}" ]; then
+      printf 'session name required after :\n' >&2
+      exit 64
+    fi
+    printf 'Created and attached to session %s\n' "${session}"
+    exit 0
+    ;;
+esac
+
 if [ "${1:-}" = "jobs" ]; then
   case "${2:-}" in
     list)
@@ -24,5 +53,5 @@ if [ "${1:-}" = "jobs" ]; then
   esac
 fi
 
-printf 'tmuxctl fixture supports: jobs list/add/edit/remove\n' >&2
+printf 'tmuxctl fixture supports: list, attach by id/name, :create, and jobs list/add/edit/remove\n' >&2
 exit 64

@@ -1,6 +1,7 @@
 package com.pocketshell.app.docker
 
 import com.pocketshell.app.jobs.TmuxctlJobsParser
+import com.pocketshell.app.sessions.HostTmuxSessionListParser
 import com.pocketshell.core.usage.HeruUsageJsonParser
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -30,6 +31,31 @@ class DockerAgentFixtureContractTest {
 
         assertEquals(listOf("claude-main", "codex", "opencode-lab"), jobs.map { it.sessionName })
         assertTrue(jobs.first { it.sessionName == "codex" }.enabled)
+    }
+
+    @Test
+    fun tmuxctlListFixtureMatchesHostSessionParser() {
+        val output = runFixtureCommand("tmuxctl", "list", "--by", "activity")
+        val sessions = HostTmuxSessionListParser().parseTmuxctlList(output)
+
+        assertEquals(listOf("claude-main", "codex", "opencode-lab"), sessions.map { it.name })
+        assertTrue(sessions.all { it.createdAt != null })
+    }
+
+    @Test
+    fun tmuxctlAttachAndCreateFixturesMatchSessionWorkflowCommands() {
+        assertEquals(
+            "Attached to session codex\n",
+            runFixtureCommand("tmuxctl", "codex"),
+        )
+        assertEquals(
+            "Attached to session codex\n",
+            runFixtureCommand("tmuxctl", "2"),
+        )
+        assertEquals(
+            "Created and attached to session fresh-work\n",
+            runFixtureCommand("tmuxctl", ":fresh-work"),
+        )
     }
 
     @Test

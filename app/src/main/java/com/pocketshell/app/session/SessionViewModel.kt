@@ -17,6 +17,8 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.storage.entity.SnippetEntity
+import com.pocketshell.core.storage.dao.ProjectRootDao
+import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.voice.CommandPlan
 import com.pocketshell.core.voice.CommandPlannerException
@@ -31,6 +33,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -96,6 +99,7 @@ import javax.inject.Inject
 public class SessionViewModel @Inject constructor(
     @ApplicationContext private val applicationContext: Context,
     private val commandPlannerClientFactory: CommandPlannerClientFactory = CommandPlannerClientFactory { null },
+    private val projectRootDao: ProjectRootDao? = null,
 ) : ViewModel() {
 
     /**
@@ -139,6 +143,12 @@ public class SessionViewModel @Inject constructor(
     public val voiceCommandReview: StateFlow<VoiceCommandReviewUiState> =
         _voiceCommandReview.asStateFlow()
 
+    private val _projectNavigation: MutableStateFlow<ProjectNavigationUiState> =
+        MutableStateFlow(ProjectNavigationUiState())
+
+    public val projectNavigation: StateFlow<ProjectNavigationUiState> =
+        _projectNavigation.asStateFlow()
+
     private val dismissedAgentHints: MutableSet<String> = mutableSetOf()
 
     private var sessionRef: SshSession? = null
@@ -148,6 +158,7 @@ public class SessionViewModel @Inject constructor(
     private var agentDetectJob: Job? = null
     private var agentTailJob: Job? = null
     private var commandPlannerJob: Job? = null
+    private var projectRootsJob: Job? = null
 
     /**
      * Connect to the given host (idempotent — re-calling with the same
@@ -172,6 +183,18 @@ public class SessionViewModel @Inject constructor(
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
         connectJob = viewModelScope.launch {
             runConnect(host, port, user, keyPath, passphrase, viewModelScope)
+        }
+    }
+
+    public fun bindProjectNavigationHost(hostId: Long?) {
+        if (_projectNavigation.value.hostId == hostId) return
+        projectRootsJob?.cancel()
+        _projectNavigation.value = ProjectNavigationUiState(hostId = hostId)
+        if (hostId == null || projectRootDao == null) return
+        projectRootsJob = viewModelScope.launch {
+            projectRootDao.getByHostId(hostId).collectLatest { roots ->
+                _projectNavigation.value = _projectNavigation.value.copy(roots = roots)
+            }
         }
     }
 
@@ -367,6 +390,62 @@ public class SessionViewModel @Inject constructor(
         sendText(text, withEnter = true)
     }
 
+    public fun addProjectRoot(path: String, label: String = "") {
+        val hostId = _projectNavigation.value.hostId
+        if (hostId == null || projectRootDao == null) {
+            updateProjectNavigationFeedback("Open a saved host before adding project roots.")
+            return
+        }
+        val commandResult = ProjectNavigationCommands.cd(path)
+        val normalized = path.trim()
+        if (commandResult.isFailure) {
+            updateProjectNavigationFeedback(commandResult.exceptionOrNull()?.message ?: "Invalid project root.")
+            return
+        }
+        viewModelScope.launch {
+            projectRootDao.insert(
+                ProjectRootEntity(
+                    hostId = hostId,
+                    label = label.trim().ifBlank { normalized.substringAfterLast('/').ifBlank { normalized } },
+                    path = normalized,
+                ),
+            )
+            updateProjectNavigationFeedback("Project root saved.")
+        }
+    }
+
+    public fun navigateToDirectory(path: String) {
+        sendProjectCommand(
+            result = ProjectNavigationCommands.cd(path),
+            successMessage = "Running cd. Result will print in the terminal.",
+            recentPath = path,
+        )
+    }
+
+    public fun createFolderAndCd(root: String, folderName: String) {
+        val target = root.trimEnd('/') + "/" + folderName.trim().trim('/')
+        sendProjectCommand(
+            result = ProjectNavigationCommands.mkdirAndCd(root, folderName),
+            successMessage = "Running mkdir and cd. Result will print in the terminal.",
+            recentPath = target,
+        )
+    }
+
+    public fun cloneRepositoryAndCd(root: String, repository: String, folderName: String? = null) {
+        val cleanFolder = folderName?.trim()?.takeIf { it.isNotEmpty() }
+            ?: repository.trimEnd('/').substringAfterLast('/').substringAfterLast(':').removeSuffix(".git")
+        val target = root.trimEnd('/') + "/" + cleanFolder
+        sendProjectCommand(
+            result = ProjectNavigationCommands.gitCloneAndCd(root, repository, folderName),
+            successMessage = "Running git clone and cd. Result will print in the terminal.",
+            recentPath = target,
+        )
+    }
+
+    public fun clearProjectNavigationFeedback() {
+        updateProjectNavigationFeedback(null)
+    }
+
     /**
      * Route a picked snippet through the same terminal input bridge as the
      * key bar and command chips.
@@ -454,6 +533,32 @@ public class SessionViewModel @Inject constructor(
 
     private fun sendTerminalInput(bytes: ByteArray) {
         terminalState.writeInput(bytes)
+    }
+
+    private fun sendProjectCommand(result: Result<String>, successMessage: String, recentPath: String) {
+        result.fold(
+            onSuccess = { command ->
+                sendText(command, withEnter = true)
+                rememberRecentDirectory(recentPath)
+                updateProjectNavigationFeedback(successMessage)
+            },
+            onFailure = { error ->
+                updateProjectNavigationFeedback(error.message ?: "Invalid project command.")
+            },
+        )
+    }
+
+    private fun rememberRecentDirectory(path: String) {
+        val clean = path.trim()
+        if (clean.isEmpty()) return
+        val current = _projectNavigation.value
+        _projectNavigation.value = current.copy(
+            recentDirectories = (listOf(clean) + current.recentDirectories.filterNot { it == clean }).take(6),
+        )
+    }
+
+    private fun updateProjectNavigationFeedback(message: String?) {
+        _projectNavigation.value = _projectNavigation.value.copy(feedback = message)
     }
 
     private fun commandPlannerSessionMetadata(): CommandPlannerSessionMetadata {
@@ -609,6 +714,7 @@ public class SessionViewModel @Inject constructor(
         agentDetectJob?.cancel()
         agentTailJob?.cancel()
         commandPlannerJob?.cancel()
+        projectRootsJob?.cancel()
         producerJob?.cancel()
         terminalState.detachExternalProducer()
         runCatching { shellRef?.shell?.close() }

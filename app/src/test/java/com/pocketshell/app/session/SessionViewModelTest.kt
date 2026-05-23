@@ -4,6 +4,8 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.di.CommandPlannerClientFactory
 import com.pocketshell.app.session.SessionViewModel.Modifier
 import com.pocketshell.core.storage.entity.SnippetEntity
+import com.pocketshell.core.storage.dao.ProjectRootDao
+import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
@@ -25,6 +27,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -65,9 +69,11 @@ class SessionViewModelTest {
 
     private fun newVm(
         commandPlannerClientFactory: CommandPlannerClientFactory = CommandPlannerClientFactory { null },
+        projectRootDao: ProjectRootDao? = null,
     ): SessionViewModel = SessionViewModel(
         applicationContext = ApplicationProvider.getApplicationContext(),
         commandPlannerClientFactory = commandPlannerClientFactory,
+        projectRootDao = projectRootDao,
     )
 
     // -- Unmodified byte mapping --------------------------------------------
@@ -256,6 +262,96 @@ class SessionViewModelTest {
     }
 
     @Test
+    fun projectNavigationBindsStoredRoots() = runTest {
+        val dao = FakeProjectRootDao()
+        dao.roots.value = listOf(ProjectRootEntity(hostId = 42, label = "work", path = "~/work"))
+        val vm = newVm(projectRootDao = dao)
+
+        vm.bindProjectNavigationHost(42)
+        advanceUntilIdle()
+
+        assertEquals(42L, vm.projectNavigation.value.hostId)
+        assertEquals(listOf("~/work"), vm.projectNavigation.value.roots.map { it.path })
+        assertTrue(vm.projectNavigation.value.items.any { it.path == "~/work" })
+    }
+
+    @Test
+    fun addProjectRootValidatesAndPersistsForBoundHost() = runTest {
+        val dao = FakeProjectRootDao()
+        val vm = newVm(projectRootDao = dao)
+        vm.bindProjectNavigationHost(42)
+
+        vm.addProjectRoot("/srv/client apps", "clients")
+        advanceUntilIdle()
+
+        assertEquals("/srv/client apps", dao.inserted.single().path)
+        assertEquals("clients", dao.inserted.single().label)
+        assertEquals("Project root saved.", vm.projectNavigation.value.feedback)
+    }
+
+    @Test
+    fun addProjectRootRejectsRelativePath() = runTest {
+        val dao = FakeProjectRootDao()
+        val vm = newVm(projectRootDao = dao)
+        vm.bindProjectNavigationHost(42)
+
+        vm.addProjectRoot("client apps", "clients")
+        advanceUntilIdle()
+
+        assertTrue(dao.inserted.isEmpty())
+        assertEquals("Use an absolute path or a path under ~.", vm.projectNavigation.value.feedback)
+    }
+
+    @Test
+    fun projectCommandsUpdateRecentDirectoriesAndFeedback() {
+        val vm = newVm()
+
+        vm.navigateToDirectory("~/work/current")
+        vm.createFolderAndCd("~/work", "new app")
+        vm.cloneRepositoryAndCd("~/src", "https://github.com/example/repo.git")
+
+        assertEquals(
+            listOf("~/src/repo", "~/work/new app", "~/work/current"),
+            vm.projectNavigation.value.recentDirectories,
+        )
+        assertEquals(
+            "Running git clone and cd. Result will print in the terminal.",
+            vm.projectNavigation.value.feedback,
+        )
+    }
+
+    @Test
+    fun projectCommandsWriteWrappedFeedbackCommandThroughTerminalBridge() = runBlocking {
+        val vm = newVm()
+        val stdin = ByteArrayOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerJob = vm.terminalState.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = stdin,
+        )
+
+        try {
+            vm.createFolderAndCd("~/work", "new app")
+
+            waitForStdinContaining(stdin, "mkdir -p ~/'work/new app' && cd ~/'work/new app'")
+            val command = stdin.toString(Charsets.UTF_8.name())
+            assertTrue(command.contains("[pocketshell] %s succeeded: %s"))
+            assertTrue(command.contains("[pocketshell] %s failed with exit %s: %s"))
+            assertTrue(command.endsWith("\r"))
+            assertEquals(
+                "Running mkdir and cd. Result will print in the terminal.",
+                vm.projectNavigation.value.feedback,
+            )
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            vm.terminalState.detachExternalProducer()
+        }
+    }
+
+    @Test
     fun commandSnippetWritesBodyWithKeyboardEnterThroughTerminalBridge() = runBlocking {
         val vm = newVm()
         val stdin = ByteArrayOutputStream()
@@ -311,6 +407,52 @@ class SessionViewModelTest {
 
             waitForStdin(stdin, "explain this diff")
             assertEquals("explain this diff", stdin.toString(Charsets.UTF_8.name()))
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            vm.terminalState.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun promptComposerSendWritesDraftWithoutEnterThroughTerminalBridge() = runBlocking {
+        val vm = newVm()
+        val stdin = ByteArrayOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerJob = vm.terminalState.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = stdin,
+        )
+
+        try {
+            vm.sendText("review the failing tests", withEnter = false)
+
+            waitForStdin(stdin, "review the failing tests")
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            vm.terminalState.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun promptComposerSendEnterWritesDraftWithKeyboardEnterThroughTerminalBridge() = runBlocking {
+        val vm = newVm()
+        val stdin = ByteArrayOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerJob = vm.terminalState.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = stdin,
+        )
+
+        try {
+            vm.sendText("summarize git status", withEnter = true)
+
+            waitForStdin(stdin, "summarize git status\r")
         } finally {
             producerJob.cancel()
             producerScope.cancel()
@@ -540,11 +682,40 @@ class SessionViewModelTest {
         }
     }
 
+    private suspend fun waitForStdinContaining(stdin: ByteArrayOutputStream, expected: String) {
+        withTimeout(5_000) {
+            while (!stdin.toString(Charsets.UTF_8.name()).contains(expected)) {
+                delay(25)
+            }
+        }
+    }
+
     private suspend fun waitUntil(predicate: () -> Boolean) {
         withTimeout(5_000) {
             while (!predicate()) {
                 delay(25)
             }
         }
+    }
+}
+
+private class FakeProjectRootDao : ProjectRootDao {
+    val roots = MutableStateFlow<List<ProjectRootEntity>>(emptyList())
+    val inserted = mutableListOf<ProjectRootEntity>()
+
+    override fun getByHostId(hostId: Long): Flow<List<ProjectRootEntity>> = roots
+
+    override suspend fun insert(root: ProjectRootEntity): Long {
+        inserted += root
+        roots.value = roots.value + root.copy(id = inserted.size.toLong())
+        return inserted.size.toLong()
+    }
+
+    override suspend fun update(root: ProjectRootEntity) {
+        roots.value = roots.value.map { if (it.id == root.id) root else it }
+    }
+
+    override suspend fun delete(root: ProjectRootEntity) {
+        roots.value = roots.value.filterNot { it.id == root.id }
     }
 }

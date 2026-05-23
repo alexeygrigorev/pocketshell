@@ -18,10 +18,17 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.SessionRow
+import com.pocketshell.uikit.model.Tag
+import com.pocketshell.uikit.model.TagKind
 import kotlin.math.max
+
+internal const val DASHBOARD_SESSIONS_SECTION_TAG = "dashboard:sessions"
+internal const val DASHBOARD_NEW_SESSION_TAG = "dashboard:sessions:new"
+internal const val DASHBOARD_SESSION_ROW_TAG_PREFIX = "dashboard:sessions:row:"
 
 /**
  * Sessions section of the dashboard — issue #46.
@@ -54,9 +61,15 @@ import kotlin.math.max
 fun SessionsSection(
     modifier: Modifier = Modifier,
     viewModel: SessionsDashboardViewModel = hiltViewModel(),
+    hostIdFilter: Long? = null,
     onOpenTmuxSession: (ActiveTmuxClients.Entry, sessionName: String) -> Unit = { _, _ -> },
 ) {
-    val sessions by viewModel.sessions.collectAsState()
+    val allSessions by viewModel.sessions.collectAsState()
+    val sessions = if (hostIdFilter == null) {
+        allSessions
+    } else {
+        allSessions.filter { it.hostId == hostIdFilter }
+    }
     if (sessions.isEmpty()) return
 
     val nowSec = System.currentTimeMillis() / 1000L
@@ -70,10 +83,14 @@ fun SessionsSection(
     }
 
     Column(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp),
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp)
+            .testTag(DASHBOARD_SESSIONS_SECTION_TAG),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         TextButton(
+            modifier = Modifier.testTag(DASHBOARD_NEW_SESSION_TAG),
             onClick = {
                 val entry = sessions.firstOrNull()?.let { viewModel.entryFor(it.hostId) }
                     ?: return@TextButton
@@ -91,18 +108,15 @@ fun SessionsSection(
         }
         sessions.forEach { summary ->
             Box(modifier = Modifier.fillMaxWidth()) {
+                val rowUi = summary.dashboardRowUi()
                 SessionRow(
-                    badge = summary.sessionName,
+                    modifier = Modifier.testTag(DASHBOARD_SESSION_ROW_TAG_PREFIX + summary.sessionName),
+                    badge = rowUi.badge,
                     name = summary.sessionName,
                     host = summary.hostName,
-                    // No preview text in v1 — the tmux protocol does not
-                    // surface "last line written to the session" cheaply.
-                    // The mockup's preview lines are aspirational and will
-                    // arrive with the agent-aware conversation view in
-                    // Phase 3 (#23 / #14).
-                    preview = "",
+                    preview = rowUi.preview,
                     time = formatRelativeTime(nowSec = nowSec, thenSec = summary.lastActivity),
-                    tags = emptyList(),
+                    tags = rowUi.tags,
                     onClick = {
                         // Resolve the navigation tuple via the view model's
                         // entry lookup — the row stays light, the view
@@ -278,4 +292,38 @@ internal fun formatRelativeTime(nowSec: Long, thenSec: Long): String {
         deltaSec < 86_400L -> "${deltaSec / 3_600L}h"
         else -> "${deltaSec / 86_400L}d"
     }
+}
+
+internal data class DashboardSessionRowUi(
+    val badge: String,
+    val preview: String,
+    val tags: List<Tag>,
+)
+
+internal fun SessionSummary.dashboardRowUi(): DashboardSessionRowUi {
+    val normalized = sessionName.lowercase()
+    val agentTag = when {
+        normalized.contains("claude") -> Tag("claude code", TagKind.Agent)
+        normalized.contains("codex") -> Tag("codex", TagKind.Agent)
+        normalized.contains("opencode") -> Tag("opencode", TagKind.Agent)
+        normalized.contains("agent") -> Tag("agent", TagKind.Agent)
+        else -> null
+    }
+    val domainTag = when {
+        normalized.contains("deploy") || normalized.contains("prod") -> Tag("deploy", TagKind.Deploy)
+        normalized.contains("train") || normalized.contains("gpu") || normalized.contains("ml") -> Tag("ml", TagKind.Ml)
+        else -> null
+    }
+    val attachedTag = if (attached) Tag("attached", TagKind.Default) else null
+    val preview = when {
+        agentTag != null && attached -> "${agentTag.label} conversation active"
+        agentTag != null -> "${agentTag.label} workspace ready"
+        attached -> "attached tmux client"
+        else -> "tmux session idle"
+    }
+    return DashboardSessionRowUi(
+        badge = sessionName.firstOrNull()?.uppercaseChar()?.toString().orEmpty(),
+        preview = preview,
+        tags = listOfNotNull(agentTag, domainTag, attachedTag),
+    )
 }

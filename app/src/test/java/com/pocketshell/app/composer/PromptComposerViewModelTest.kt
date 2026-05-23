@@ -401,6 +401,16 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun typedDraftIsEditableAndPreservedUntilCallerClearsIt() {
+        val vm = newVm()
+
+        vm.onDraftChange("first dictated idea")
+        vm.onDraftChange("first dictated idea with an edit")
+
+        assertEquals("first dictated idea with an edit", vm.uiState.value.draft)
+    }
+
+    @Test
     fun clearErrorRemovesBanner() {
         val vm = newVm()
         vm.surfacePermissionDenied()

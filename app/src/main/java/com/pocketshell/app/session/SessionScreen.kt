@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
@@ -29,9 +30,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -45,6 +48,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -66,6 +70,10 @@ import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
+
+internal const val SESSION_SCREEN_TAG = "session:screen"
+internal const val SESSION_CONVERSATION_PANE_TAG = "session:conversation"
+internal const val SESSION_AGENT_HINT_TAG = "session:agent-hint"
 
 /**
  * Phase 1 session screen — the visual target is `docs/mockups/session.html`.
@@ -103,11 +111,15 @@ public fun SessionScreen(
     LaunchedEffect(host, port, user, keyPath, passphrase) {
         viewModel.connect(host, port, user, keyPath, passphrase)
     }
+    LaunchedEffect(hostId) {
+        viewModel.bindProjectNavigationHost(hostId)
+    }
 
     val status by viewModel.connectionStatus.collectAsState()
     val modifierStates by viewModel.modifierStates.collectAsState()
     val agentConversation by viewModel.agentConversation.collectAsState()
     val voiceCommandReview by viewModel.voiceCommandReview.collectAsState()
+    val projectNavigation by viewModel.projectNavigation.collectAsState()
     val dictationState by inlineDictationViewModel.uiState.collectAsState()
     val keyBarModifierStates = remember(modifierStates) {
         modifierStates.mapKeys { (modifier, _) -> modifier.keyBarLabel }
@@ -115,6 +127,7 @@ public fun SessionScreen(
 
     var showMicSheet by remember { mutableStateOf(false) }
     var showMoreMenu by remember { mutableStateOf(false) }
+    var showProjectNavigation by remember { mutableStateOf(false) }
     // Issue #17: the chip-row "+" entry opens the snippet picker. The
     // picker is only meaningful when we know which host's library to
     // render — at the Phase 0 / proof-of-life entry point hostId is null
@@ -158,7 +171,8 @@ public fun SessionScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(color = PocketShellColors.Background),
+            .background(color = PocketShellColors.Background)
+            .testTag(SESSION_SCREEN_TAG),
     ) {
         Column(
             modifier = Modifier
@@ -203,7 +217,9 @@ public fun SessionScreen(
                 if (agentConversation.selectedTab == SessionTab.Conversation && agentConversation.detection != null) {
                     ConversationPane(
                         events = agentConversation.events,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .testTag(SESSION_CONVERSATION_PANE_TAG),
                     )
                 } else {
                     TerminalSurface(
@@ -218,7 +234,8 @@ public fun SessionScreen(
                             onDismiss = viewModel::dismissAgentHint,
                             modifier = Modifier
                                 .align(Alignment.TopCenter)
-                                .padding(12.dp),
+                                .padding(12.dp)
+                                .testTag(SESSION_AGENT_HINT_TAG),
                         )
                     }
                 }
@@ -282,6 +299,7 @@ public fun SessionScreen(
                 BottomChipControls(
                     chips = DefaultChips,
                     onChipTap = viewModel::onChipTap,
+                    onProjectNavigationTap = { showProjectNavigation = true },
                     onDictateTap = { showMicSheet = true },
                     onAddSnippetTap = if (hostId != null) {
                         { showSnippetPicker = true }
@@ -330,6 +348,21 @@ public fun SessionScreen(
                 viewModel.onSnippetPicked(snippet)
                 showSnippetPicker = false
             },
+        )
+    }
+
+    if (showProjectNavigation) {
+        ProjectNavigationSheet(
+            state = projectNavigation,
+            targetLabel = "$user@$host",
+            onDismiss = {
+                showProjectNavigation = false
+                viewModel.clearProjectNavigationFeedback()
+            },
+            onDirectoryTap = viewModel::navigateToDirectory,
+            onAddRoot = viewModel::addProjectRoot,
+            onCreateFolder = viewModel::createFolderAndCd,
+            onClone = viewModel::cloneRepositoryAndCd,
         )
     }
 }
@@ -616,6 +649,153 @@ private fun ArmedModifierStrip(states: Map<SessionViewModel.Modifier, KeyModifie
     }
 }
 
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun ProjectNavigationSheet(
+    state: ProjectNavigationUiState,
+    targetLabel: String,
+    onDismiss: () -> Unit,
+    onDirectoryTap: (String) -> Unit,
+    onAddRoot: (path: String, label: String) -> Unit,
+    onCreateFolder: (root: String, folder: String) -> Unit,
+    onClone: (root: String, repository: String, folder: String?) -> Unit,
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var rootPath by remember { mutableStateOf("") }
+    var rootLabel by remember { mutableStateOf("") }
+    var selectedRoot by remember(state.roots) { mutableStateOf(state.roots.firstOrNull()?.path ?: "~/projects") }
+    var folderName by remember { mutableStateOf("") }
+    var repoUrl by remember { mutableStateOf("") }
+    var cloneFolder by remember { mutableStateOf("") }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = PocketShellColors.Surface,
+        contentColor = PocketShellColors.Text,
+    ) {
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 620.dp)
+                .padding(horizontal = 16.dp),
+            contentPadding = PaddingValues(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            item {
+                Text(
+                    text = "Project navigation",
+                    color = PocketShellColors.Text,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = "Commands send to $targetLabel pane 1",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+            state.feedback?.let { feedback ->
+                item {
+                    Text(
+                        text = feedback,
+                        color = PocketShellColors.Accent,
+                        fontSize = 12.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(PocketShellColors.AccentSoft)
+                            .padding(8.dp),
+                    )
+                }
+            }
+            item {
+                Text("Directories", color = PocketShellColors.Text, fontWeight = FontWeight.Medium)
+            }
+            items(state.items, key = { "${it.kind}:${it.path}" }) { item ->
+                DirectoryShortcutRow(item = item, onClick = { onDirectoryTap(item.path) })
+            }
+            item {
+                Text("Add project root", color = PocketShellColors.Text, fontWeight = FontWeight.Medium)
+                OutlinedTextField(
+                    value = rootPath,
+                    onValueChange = { rootPath = it },
+                    placeholder = { Text("~/projects or /srv/work") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = rootLabel,
+                    onValueChange = { rootLabel = it },
+                    placeholder = { Text("Label") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                TextButton(onClick = { onAddRoot(rootPath, rootLabel) }) {
+                    Text("Save root")
+                }
+            }
+            item {
+                Text("Root workflows", color = PocketShellColors.Text, fontWeight = FontWeight.Medium)
+                OutlinedTextField(
+                    value = selectedRoot,
+                    onValueChange = { selectedRoot = it },
+                    placeholder = { Text("Project root") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = folderName,
+                    onValueChange = { folderName = it },
+                    placeholder = { Text("New folder") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                TextButton(onClick = { onCreateFolder(selectedRoot, folderName) }) {
+                    Text("mkdir + cd")
+                }
+                OutlinedTextField(
+                    value = repoUrl,
+                    onValueChange = { repoUrl = it },
+                    placeholder = { Text("Repository URL") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = cloneFolder,
+                    onValueChange = { cloneFolder = it },
+                    placeholder = { Text("Folder override") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                TextButton(
+                    onClick = { onClone(selectedRoot, repoUrl, cloneFolder.takeIf { it.isNotBlank() }) },
+                ) {
+                    Text("git clone + cd")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DirectoryShortcutRow(item: ProjectNavigationItem, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(width = 1.dp, color = PocketShellColors.Border)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(item.label, color = PocketShellColors.Text, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            Text(item.path, color = PocketShellColors.TextSecondary, fontSize = 11.sp)
+        }
+        Text(item.kind.name.lowercase(), color = PocketShellColors.TextSecondary, fontSize = 11.sp)
+    }
+}
+
 /**
  * Always-visible chip row (only when the IME is hidden, per
  * `docs/input-methods.md` §"Screen real estate"). The first chip is the
@@ -631,6 +811,7 @@ private fun ArmedModifierStrip(states: Map<SessionViewModel.Modifier, KeyModifie
 private fun ChipRow(
     chips: List<String>,
     onChipTap: (String) -> Unit,
+    onProjectNavigationTap: () -> Unit,
     onDictateTap: () -> Unit,
     onAddSnippetTap: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
@@ -654,6 +835,11 @@ private fun ChipRow(
         CommandChip(
             label = "dictate",
             onClick = onDictateTap,
+            icon = DictateDotIcon,
+        )
+        CommandChip(
+            label = "dirs",
+            onClick = onProjectNavigationTap,
             icon = DictateDotIcon,
         )
         if (onAddSnippetTap != null) {
@@ -680,6 +866,7 @@ private fun ChipRow(
 private fun BottomChipControls(
     chips: List<String>,
     onChipTap: (String) -> Unit,
+    onProjectNavigationTap: () -> Unit,
     onDictateTap: () -> Unit,
     onAddSnippetTap: (() -> Unit)? = null,
 ) {
@@ -687,6 +874,7 @@ private fun BottomChipControls(
         ChipRow(
             chips = chips,
             onChipTap = onChipTap,
+            onProjectNavigationTap = onProjectNavigationTap,
             onDictateTap = onDictateTap,
             onAddSnippetTap = onAddSnippetTap,
         )

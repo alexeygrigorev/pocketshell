@@ -6,6 +6,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.storage.entity.AgentSessionEntity
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.PortRemappingEntity
+import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SessionEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
@@ -129,6 +130,22 @@ class AppDatabaseTest {
         assertEquals("ls", snippets[0].label)
         assertEquals("ls -la", snippets[0].body)
         assertEquals("command", snippets[0].kind)
+    }
+
+    @Test
+    fun projectRoot_insert_then_read_by_host() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(name = "h", hostname = "h", username = "u", keyId = keyId),
+        )
+        db.projectRootDao().insert(
+            ProjectRootEntity(hostId = hostId, label = "work", path = "~/work"),
+        )
+
+        val roots = db.projectRootDao().getByHostId(hostId).first()
+        assertEquals(1, roots.size)
+        assertEquals("work", roots[0].label)
+        assertEquals("~/work", roots[0].path)
     }
 
     @Test

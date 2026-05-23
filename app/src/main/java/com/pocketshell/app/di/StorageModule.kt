@@ -4,9 +4,11 @@ import android.content.Context
 import androidx.room.Room
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SnippetDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.migrations.MIGRATION_1_2
+import com.pocketshell.core.storage.migrations.MIGRATION_2_3
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -48,12 +50,15 @@ object StorageModule {
             // app. `dropAllTables = false` keeps user data on the safer
             // path; once we ship to real users this fallback should be
             // removed and missing migrations should hard-fail.
-            .addMigrations(MIGRATION_1_2)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
             .fallbackToDestructiveMigration(dropAllTables = false)
             .build()
 
     @Provides
     fun provideHostDao(db: AppDatabase): HostDao = db.hostDao()
+
+    @Provides
+    fun provideProjectRootDao(db: AppDatabase): ProjectRootDao = db.projectRootDao()
 
     @Provides
     fun provideSshKeyDao(db: AppDatabase): SshKeyDao = db.sshKeyDao()

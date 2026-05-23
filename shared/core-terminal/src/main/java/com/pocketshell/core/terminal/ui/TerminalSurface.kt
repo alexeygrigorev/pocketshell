@@ -69,9 +69,8 @@ internal const val DEFAULT_TEXT_SIZE_RAW_PX: Int = 24
  *
  * 1. Construct one [TerminalView] per composition slot and reuse it across
  *    recompositions.
- * 2. Apply the design-language background colour and JetBrains-Mono-ish
- *    typeface (falling back to the system monospace when JetBrains Mono is
- *    not registered).
+ * 2. Apply the design-language background colour and Android's deterministic
+ *    monospace typeface.
  * 3. Bind the [TerminalView] to whatever [TerminalSession] the [state]
  *    currently holds, attaching / detaching as the state changes.
  * 4. Wire the [TerminalView]'s required [TerminalViewClient] to a sane
@@ -249,7 +248,7 @@ internal fun TerminalView.applyPocketShellDefaults(viewClient: TerminalViewClien
     // Termux's setTypeface reads mRenderer.mTextSize, so text size must create
     // the renderer before we swap in the app typeface.
     setTextSize(DEFAULT_TEXT_SIZE_RAW_PX)
-    setTypeface(Typeface.create("JetBrains Mono", Typeface.NORMAL))
+    setTypeface(Typeface.MONOSPACE)
     setBackgroundColor(DefaultTerminalBackground.toArgb())
     isFocusable = true
     isFocusableInTouchMode = true

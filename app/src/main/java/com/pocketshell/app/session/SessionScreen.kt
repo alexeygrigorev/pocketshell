@@ -224,7 +224,9 @@ public fun SessionScreen(
                 } else {
                     TerminalSurface(
                         state = viewModel.terminalState,
-                        modifier = Modifier.fillMaxSize(),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 4.dp, vertical = 4.dp),
                         onTerminalSizeChanged = viewModel::resizeRemotePty,
                     )
                     val detection = agentConversation.detection

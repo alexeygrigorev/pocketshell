@@ -2,6 +2,7 @@ package com.pocketshell.app.terminal
 
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Rect
 import android.os.SystemClock
@@ -26,6 +27,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import java.security.MessageDigest
 import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
@@ -38,6 +40,7 @@ class TerminalLabDockerTest {
 
     private var launchedActivity: ActivityScenario<TerminalLabActivity>? = null
     private val timings = mutableListOf<String>()
+    private val screenshots = mutableListOf<TerminalScreenshotArtifact>()
 
     @After
     fun closeLaunchedActivity() {
@@ -71,26 +74,41 @@ class TerminalLabDockerTest {
     fun terminalWorkbenchCapturesRealAgentCliScreens() = runBlocking {
         launchTerminalWorkbench(markerPrefix = "psagent")
         assertRemotePtyMatchesTerminalGrid("agents")
-        captureAndAssertTerminalInk("agents-01-prompt", minInkPixels = 1_500)
+        val promptArtifact = captureAndAssertTerminalInk("agents-01-prompt", minInkPixels = 1_500)
 
         runRealAgentCli(
             command = "opencode",
             versionExpected = "1.",
+            screenExpected = "Ask anything",
             screenshotName = "agents-02-opencode",
+            baselineArtifact = promptArtifact,
         )
         runRealAgentCli(
             command = "codex",
             versionExpected = "codex-cli",
+            screenExpected = "Welcome to Codex",
             screenshotName = "agents-03-codex",
+            baselineArtifact = promptArtifact,
         )
         runRealAgentCli(
             command = "claude",
             versionExpected = "Claude Code",
+            screenExpected = "Welcome to Claude Code",
             screenshotName = "agents-04-claude",
+            baselineArtifact = promptArtifact,
         )
 
+        val debugHoldMs = InstrumentationRegistry.getArguments()
+            .getString("terminalWorkbenchDebugHoldMs")
+            ?.toLongOrNull()
+            ?: 0L
+        if (debugHoldMs > 0L) {
+            SystemClock.sleep(debugHoldMs)
+            captureAndAssertTerminalInk("agents-99-debug-hold-current", minInkPixels = 6_000)
+        }
+
         TerminalLabArtifacts.writeTimings(timings)
-        TerminalLabArtifacts.writeText("agents-summary.txt", transcriptSnapshot())
+        writeArtifactSummary("agents")
         Unit
     }
 
@@ -186,12 +204,23 @@ class TerminalLabDockerTest {
     private fun runRealAgentCli(
         command: String,
         versionExpected: String,
+        screenExpected: String,
         screenshotName: String,
+        baselineArtifact: TerminalScreenshotArtifact,
     ) {
         sendViaTerminalInput("$command --version", versionExpected, "$command-version")
         requireController().sendText(command, withEnter = true)
-        SystemClock.sleep(2_500)
-        captureAndAssertTerminalInk(screenshotName, minInkPixels = 6_000)
+        waitForVisibleTerminalText("$command-screen") { screenExpected in it }
+        val screenArtifact = captureAndAssertTerminalInk(
+            name = screenshotName,
+            minInkPixels = 6_000,
+            requireDeviceInk = false,
+        )
+        assertTrue(
+            "expected $command viewport capture to differ from prompt baseline; " +
+                "baseline=${baselineArtifact.fileName} screen=${screenArtifact.fileName}",
+            baselineArtifact.sha256 != screenArtifact.sha256,
+        )
         TerminalLabArtifacts.writeText("$screenshotName-visible-terminal.txt", visibleTerminalText())
         requireController().terminalState.writeInput(byteArrayOf(0x03))
         SystemClock.sleep(500)
@@ -220,9 +249,30 @@ class TerminalLabDockerTest {
     }
 
     private fun assertRemotePtyMatchesTerminalGrid(label: String) {
-        val grid = terminalGridSize()
-        val expected = "PTY-$label ${grid.rows} ${grid.columns}"
-        sendViaTerminalInput("printf 'PTY-$label '; stty size", expected, "$label-pty-size")
+        val start = SystemClock.elapsedRealtime()
+        var lastVisible = ""
+        var lastExpected = ""
+        for (attempt in 1..5) {
+            val grid = terminalGridSize()
+            val marker = "PTY-$label-$attempt"
+            val expected = "$marker ${grid.rows} ${grid.columns}"
+            lastExpected = expected
+            requireController().sendText("printf '$marker '; stty size", withEnter = true)
+            waitForTranscript("$label-pty-size-$attempt") { marker in it }
+            waitForVisibleTerminalText("$label-pty-size-$attempt") {
+                lastVisible = it
+                marker in it
+            }
+            if (expected in lastVisible) {
+                recordTiming("send_to_output_${label}_pty_size_ms", SystemClock.elapsedRealtime() - start)
+                return
+            }
+            SystemClock.sleep(500)
+        }
+        assertTrue(
+            "expected remote PTY to match current terminal grid '$lastExpected', got visible terminal:\n$lastVisible",
+            lastExpected in lastVisible,
+        )
     }
 
     private fun terminalGridSize(): TerminalGridSize {
@@ -297,26 +347,82 @@ class TerminalLabDockerTest {
         assertTrue("expected visible terminal text predicate for $label, got:\n$last", predicate(last))
     }
 
-    private fun captureAndAssertTerminalInk(name: String, minInkPixels: Int) {
+    private fun captureAndAssertTerminalInk(
+        name: String,
+        minInkPixels: Int,
+        requireDeviceInk: Boolean = true,
+    ): TerminalScreenshotArtifact {
         val bounds = terminalViewBounds()
-        var screenshot: File? = null
-        var inkPixels = 0
+        val grid = terminalGridSize()
+        var deviceScreenshot: File? = null
+        var viewportScreenshot: File? = null
+        var deviceInkPixels = 0
+        var viewportInkPixels = 0
         val deadline = SystemClock.elapsedRealtime() + 10_000
         do {
-            screenshot = TerminalLabArtifacts.capture(name)
-            inkPixels = TerminalLabArtifacts.countBrightPixels(screenshot, bounds)
-            if (inkPixels >= minInkPixels) break
+            deviceScreenshot = TerminalLabArtifacts.capture(name)
+            viewportScreenshot = captureTerminalViewport("$name-viewport")
+            deviceInkPixels = TerminalLabArtifacts.countBrightPixels(deviceScreenshot, bounds)
+            viewportInkPixels = TerminalLabArtifacts.countBrightPixels(viewportScreenshot)
+            val deviceSatisfied = !requireDeviceInk || deviceInkPixels >= minInkPixels
+            if (deviceSatisfied && viewportInkPixels >= minInkPixels) break
             SystemClock.sleep(250)
         } while (SystemClock.elapsedRealtime() < deadline)
 
         TerminalLabArtifacts.writeText("$name-visible-terminal.txt", visibleTerminalText())
-        recordTiming("visible_ink_${name}_px", inkPixels.toLong())
-        val finalScreenshot = checkNotNull(screenshot) { "terminal screenshot was not captured" }
-        assertTrue(
-            "expected terminal viewport in $name screenshot to contain shell output ink; " +
-                "brightPixels=$inkPixels min=$minInkPixels bounds=$bounds screenshot=${finalScreenshot.absolutePath}",
-            inkPixels >= minInkPixels,
+        recordTiming("visible_ink_${name}_px", deviceInkPixels.toLong())
+        recordTiming("viewport_ink_${name}_px", viewportInkPixels.toLong())
+        val finalDeviceScreenshot = checkNotNull(deviceScreenshot) { "device screenshot was not captured" }
+        val finalViewportScreenshot = checkNotNull(viewportScreenshot) { "terminal viewport screenshot was not captured" }
+        val viewportHash = TerminalLabArtifacts.sha256(finalViewportScreenshot)
+        val artifact = TerminalScreenshotArtifact(
+            name = name,
+            fileName = finalViewportScreenshot.name,
+            deviceFileName = finalDeviceScreenshot.name,
+            bounds = bounds,
+            grid = grid,
+            brightPixels = viewportInkPixels,
+            deviceBrightPixels = deviceInkPixels,
+            sha256 = viewportHash,
         )
+        screenshots += artifact
+        if (requireDeviceInk) {
+            assertTrue(
+                "expected terminal viewport in actual device screenshot to contain shell output ink; " +
+                    "deviceBrightPixels=$deviceInkPixels min=$minInkPixels bounds=$bounds " +
+                    "device=${finalDeviceScreenshot.absolutePath}",
+                deviceInkPixels >= minInkPixels,
+            )
+        }
+        assertTrue(
+            "expected direct terminal viewport render in $name screenshot to contain shell output ink; " +
+                "viewportBrightPixels=$viewportInkPixels min=$minInkPixels bounds=$bounds " +
+                "viewport=${finalViewportScreenshot.absolutePath} device=${finalDeviceScreenshot.absolutePath}",
+            viewportInkPixels >= minInkPixels,
+        )
+        return artifact
+    }
+
+    private fun captureTerminalViewport(name: String): File {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(300)
+
+        lateinit var bitmap: Bitmap
+        launchedActivity?.onActivity { activity ->
+            val view = checkNotNull(activity.window.decorView.findTerminalView()) {
+                "TerminalView was not found"
+            }
+            check(view.width > 0 && view.height > 0) {
+                "TerminalView has invalid dimensions ${view.width}x${view.height}"
+            }
+            bitmap = Bitmap.createBitmap(view.width, view.height, Bitmap.Config.ARGB_8888)
+            view.draw(Canvas(bitmap))
+        }
+
+        return TerminalLabArtifacts.writeBitmap(name, bitmap).also {
+            bitmap.recycle()
+        }
     }
 
     private fun terminalViewBounds(): Rect {
@@ -371,23 +477,59 @@ class TerminalLabDockerTest {
 
     private fun writeWorkbenchSummary(capturePrefix: String, marker: String) {
         if (capturePrefix.isBlank()) return
+        writeArtifactSummary(capturePrefix.trimEnd('-'), marker)
+    }
+
+    private fun writeArtifactSummary(label: String, marker: String? = null) {
         val bounds = terminalViewBounds()
+        val grid = terminalGridSize()
         val density = InstrumentationRegistry.getInstrumentation()
             .targetContext
             .resources
             .displayMetrics
             .density
         TerminalLabArtifacts.writeText(
-            "${capturePrefix}summary.txt",
+            "$label-summary.txt",
             buildString {
-                appendLine("marker=$marker")
+                if (marker != null) appendLine("marker=$marker")
+                appendLine("terminal_grid_columns=${grid.columns}")
+                appendLine("terminal_grid_rows=${grid.rows}")
                 appendLine("terminal_bounds=$bounds")
                 appendLine("display_density=${String.format(Locale.US, "%.2f", density)}")
                 appendLine("transcript_chars=${transcriptSnapshot().length}")
+                appendLine("visible_terminal_chars=${visibleTerminalText().length}")
+                appendLine()
+                appendLine("screenshots:")
+                screenshots.forEach { screenshot ->
+                    appendLine(
+                        "${screenshot.fileName} " +
+                            "device=${screenshot.deviceFileName} " +
+                            "name=${screenshot.name} " +
+                            "grid=${screenshot.grid.columns}x${screenshot.grid.rows} " +
+                            "bounds=${screenshot.bounds} " +
+                            "viewport_bright_pixels=${screenshot.brightPixels} " +
+                            "device_bright_pixels=${screenshot.deviceBrightPixels} " +
+                            "sha256=${screenshot.sha256}",
+                    )
+                }
+                appendLine()
+                appendLine("visible_terminal:")
+                appendLine(visibleTerminalText())
             },
         )
     }
 }
+
+private data class TerminalScreenshotArtifact(
+    val name: String,
+    val fileName: String,
+    val deviceFileName: String,
+    val bounds: Rect,
+    val grid: TerminalGridSize,
+    val brightPixels: Int,
+    val deviceBrightPixels: Int,
+    val sha256: String,
+)
 
 private data class TerminalGridSize(
     val columns: Int,
@@ -402,13 +544,18 @@ object TerminalLabArtifacts {
         instrumentation.waitForIdleSync()
         SystemClock.sleep(300)
         val bitmap = instrumentation.uiAutomation.takeScreenshot()
+        return writeBitmap(name, bitmap).also {
+            bitmap.recycle()
+        }
+    }
+
+    fun writeBitmap(name: String, bitmap: Bitmap): File {
         val file = artifactFile("$name.png")
         FileOutputStream(file).use { output ->
             check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
                 "Could not write screenshot: ${file.absolutePath}"
             }
         }
-        bitmap.recycle()
         println("TERMINAL_LAB_SCREENSHOT ${file.absolutePath}")
         return file
     }
@@ -451,6 +598,49 @@ object TerminalLabArtifacts {
         } finally {
             bitmap.recycle()
         }
+    }
+
+    fun countBrightPixels(file: File): Int {
+        val bitmap = BitmapFactory.decodeFile(file.absolutePath)
+            ?: error("Could not decode screenshot: ${file.absolutePath}")
+        try {
+            return countBrightPixels(bitmap, Rect(0, 0, bitmap.width, bitmap.height))
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    fun sha256(file: File): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                val read = input.read(buffer)
+                if (read == -1) break
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString(separator = "") { "%02x".format(it) }
+    }
+
+    private fun countBrightPixels(bitmap: Bitmap, bounds: Rect): Int {
+        val left = max(0, bounds.left)
+        val top = max(0, bounds.top)
+        val right = min(bitmap.width, bounds.right)
+        val bottom = min(bitmap.height, bounds.bottom)
+        var brightPixels = 0
+        for (y in top until bottom) {
+            for (x in left until right) {
+                val pixel = bitmap.getPixel(x, y)
+                val luminance = (
+                    Color.red(pixel) * 299 +
+                        Color.green(pixel) * 587 +
+                        Color.blue(pixel) * 114
+                    ) / 1000
+                if (luminance > 120) brightPixels++
+            }
+        }
+        return brightPixels
     }
 
     private fun artifactFile(name: String): File {

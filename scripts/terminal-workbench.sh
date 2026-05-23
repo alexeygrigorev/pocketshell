@@ -18,6 +18,7 @@ RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
 BUILD_APKS="${BUILD_APKS:-1}"
 HOLD_MS="${HOLD_MS:-0}"
+DEBUG_HOLD_MS="${DEBUG_HOLD_MS:-0}"
 REAL_AGENTS="${REAL_AGENTS:-0}"
 if [[ -n "${TEST_SELECTOR:-}" ]]; then
   TEST_SELECTOR_WAS_SET=1
@@ -129,6 +130,7 @@ trap collect_diagnostics EXIT
 printf 'PocketShell terminal workbench\n'
 printf 'Artifacts: %s\n' "$RUN_DIR"
 printf 'Hold ms: %s\n' "$HOLD_MS"
+printf 'Debug hold ms: %s\n' "$DEBUG_HOLD_MS"
 printf 'Agent service: %s\n' "$AGENT_SERVICE"
 printf 'Test selector: %s\n' "$TEST_SELECTOR"
 
@@ -157,6 +159,7 @@ run_logged "07-run-workbench" \
   "$ADB" shell am instrument -w -r \
   -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
   -e terminalWorkbenchHoldMs "$HOLD_MS" \
+  -e terminalWorkbenchDebugHoldMs "$DEBUG_HOLD_MS" \
   -e terminalWorkbenchSshPort "$SSH_PORT" \
   -e class "$TEST_SELECTOR" \
   com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner
@@ -164,6 +167,18 @@ mkdir -p "$RUN_DIR/artifacts"
 run_logged "08-pull-artifacts" "$ADB" pull "$DEVICE_ARTIFACT_DIR" "$RUN_DIR/artifacts/" || true
 if [[ -d "$RUN_DIR/artifacts/terminal-lab" ]]; then
   run_logged "09-artifact-file-info" file "$RUN_DIR"/artifacts/terminal-lab/* || true
+  {
+    printf 'run_dir=%s\n' "$RUN_DIR"
+    printf 'real_agents=%s\n' "$REAL_AGENTS"
+    printf 'test_selector=%s\n' "$TEST_SELECTOR"
+    printf 'hold_ms=%s\n' "$HOLD_MS"
+    printf 'debug_hold_ms=%s\n' "$DEBUG_HOLD_MS"
+    printf 'device_artifact_dir=%s\n' "$DEVICE_ARTIFACT_DIR"
+    printf '\nPulled artifacts:\n'
+    find "$RUN_DIR/artifacts/terminal-lab" -maxdepth 1 -type f -printf '%f\t%k KB\n' | sort
+    printf '\nScreenshots:\n'
+    find "$RUN_DIR/artifacts/terminal-lab" -maxdepth 1 -type f -name '*.png' -printf '%f\n' | sort
+  } > "$RUN_DIR/artifact-summary.txt"
 fi
 
 grep -q "OK (" "$RUN_DIR/07-run-workbench.log" &&

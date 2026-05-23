@@ -225,6 +225,7 @@ public fun SessionScreen(
                     TerminalSurface(
                         state = viewModel.terminalState,
                         modifier = Modifier.fillMaxSize(),
+                        onTerminalSizeChanged = viewModel::resizeRemotePty,
                     )
                     val detection = agentConversation.detection
                     if (agentConversation.hintVisible && detection != null) {

@@ -63,6 +63,7 @@ fun createStdoutFlow(shell: Session.Shell): Flow<ByteArray> = flow {
 
 suspend fun waitForSshFixtureReady(
     key: SshKey.Pem,
+    port: Int = DEFAULT_PORT,
     timeout: Duration = 45.seconds,
 ) {
     val deadline = SystemClock.elapsedRealtime() + timeout.inWholeMilliseconds
@@ -72,7 +73,7 @@ suspend fun waitForSshFixtureReady(
         attempt += 1
         val result = SshConnection.connect(
             host = DEFAULT_HOST,
-            port = DEFAULT_PORT,
+            port = port,
             user = DEFAULT_USER,
             key = key,
             knownHosts = com.pocketshell.core.ssh.KnownHostsPolicy.AcceptAll,
@@ -89,7 +90,7 @@ suspend fun waitForSshFixtureReady(
             (result.exceptionOrNull()?.toString() ?: "exit=${execResult?.exitCode} stderr=${execResult?.stderr}")
         SystemClock.sleep(1_000)
     }
-    error("SSH fixture was not ready after $attempt attempts:\n${failures.takeLast(10).joinToString("\n")}")
+    error("SSH fixture on $DEFAULT_HOST:$port was not ready after $attempt attempts:\n${failures.takeLast(10).joinToString("\n")}")
 }
 
 object DogfoodScreenshotArtifacts {

@@ -1,0 +1,13 @@
+services:
+  real-agents:
+    build:
+      context: ..
+      dockerfile: real-agent/Dockerfile
+      args:
+        OPENCODE_VERSION: "1.15.1"
+        CODEX_VERSION: "0.133.0"
+        CLAUDE_CODE_VERSION: "2.1.150"
+    image: pocketshell-test:real-agents
+    container_name: pocketshell-test-real-agents
+    ports:
+      - "2240:22"

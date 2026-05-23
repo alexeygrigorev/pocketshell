@@ -26,6 +26,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import java.util.Locale
 import kotlin.math.max
 import kotlin.math.min
 
@@ -46,35 +47,65 @@ class TerminalLabDockerTest {
 
     @Test
     fun terminalLabConnectsAndRunsStressCommandsThroughInputPath() = runBlocking {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val appContext = instrumentation.targetContext
-        val key = instrumentation.context.assets
-            .open("test_key")
-            .bufferedReader()
-            .use { it.readText() }
-        val sshKey = SshKey.Pem(key)
-        waitForSshFixtureReady(sshKey)
+        runTerminalWorkbench(
+            markerPrefix = "pslab",
+            capturePrefix = "",
+            holdOpenMs = 0L,
+        )
+    }
 
-        val marker = "pslab${System.currentTimeMillis()}"
-        val intent = TerminalLabActivity.intent(
-            context = appContext,
-            host = DEFAULT_HOST,
-            port = DEFAULT_PORT,
-            user = DEFAULT_USER,
-            privateKeyPem = key,
+    @Test
+    fun terminalWorkbenchKeepsDockerShellOpenForVisualIteration() = runBlocking {
+        val holdOpenMs = InstrumentationRegistry.getArguments()
+            .getString("terminalWorkbenchHoldMs")
+            ?.toLongOrNull()
+            ?: 0L
+        runTerminalWorkbench(
+            markerPrefix = "psworkbench",
+            capturePrefix = "workbench-",
+            holdOpenMs = holdOpenMs,
+        )
+    }
+
+    @Test
+    fun terminalWorkbenchCapturesRealAgentCliScreens() = runBlocking {
+        launchTerminalWorkbench(markerPrefix = "psagent")
+        assertRemotePtyMatchesTerminalGrid("agents")
+        captureAndAssertTerminalInk("agents-01-prompt", minInkPixels = 1_500)
+
+        runRealAgentCli(
+            command = "opencode",
+            versionExpected = "1.",
+            screenshotName = "agents-02-opencode",
+        )
+        runRealAgentCli(
+            command = "codex",
+            versionExpected = "codex-cli",
+            screenshotName = "agents-03-codex",
+        )
+        runRealAgentCli(
+            command = "claude",
+            versionExpected = "Claude Code",
+            screenshotName = "agents-04-claude",
         )
 
-        launchedActivity = ActivityScenario.launch(intent)
-        compose.onNodeWithTag(TERMINAL_LAB_SCREEN_TAG, useUnmergedTree = true).assertExists()
-        waitForTerminalViewAttached()
-        waitForPrompt()
-        waitForVisibleTerminalText("prompt") { it.isNotBlank() }
-        recordTiming("connect_to_prompt_ms", requireController().uiState.value.connectToPromptMs)
-        captureAndAssertTerminalInk("01-connected-prompt", minInkPixels = 1_500)
+        TerminalLabArtifacts.writeTimings(timings)
+        TerminalLabArtifacts.writeText("agents-summary.txt", transcriptSnapshot())
+        Unit
+    }
+
+    private suspend fun runTerminalWorkbench(
+        markerPrefix: String,
+        capturePrefix: String,
+        holdOpenMs: Long,
+    ) {
+        val marker = launchTerminalWorkbench(markerPrefix)
+        assertRemotePtyMatchesTerminalGrid(capturePrefix.ifBlank { "terminal-lab" }.trimEnd('-'))
+        captureAndAssertTerminalInk("${capturePrefix}01-connected-prompt", minInkPixels = 1_500)
 
         sendViaTerminalInput("printf 'PWD-$marker\\n'; pwd", "PWD-$marker", "pwd")
         sendViaTerminalInput("printf 'LS-$marker\\n'; ls -la /home/testuser /usr/local/bin", "LS-$marker", "ls")
-        captureAndAssertTerminalInk("02-pwd-ls", minInkPixels = 4_000)
+        captureAndAssertTerminalInk("${capturePrefix}02-pwd-ls", minInkPixels = 4_000)
 
         val longPath = "/tmp/pocketshell-lab-$marker/alpha/beta/gamma/delta/epsilon/zeta/eta/theta/iota/kappa"
         sendViaTerminalInput(
@@ -87,7 +118,7 @@ class TerminalLabDockerTest {
             "GITSTATUS-$marker",
             "git-status-style",
         )
-        captureAndAssertTerminalInk("03-long-path-git-status", minInkPixels = 6_000)
+        captureAndAssertTerminalInk("${capturePrefix}03-long-path-git-status", minInkPixels = 6_000)
 
         sendBackspaceEditViaTerminalInput(marker)
         sendViaTerminalInput(
@@ -95,7 +126,8 @@ class TerminalLabDockerTest {
             "REPEAT-$marker-3",
             "repeated-commands",
         )
-        captureAndAssertTerminalInk("04-backspace-repeat", minInkPixels = 6_000)
+        captureAndAssertTerminalInk("${capturePrefix}04-backspace-repeat", minInkPixels = 6_000)
+        writeWorkbenchSummary(capturePrefix, marker)
         TerminalLabArtifacts.writeTimings(timings)
 
         val transcript = transcriptSnapshot()
@@ -112,6 +144,59 @@ class TerminalLabDockerTest {
         ).forEach { expected ->
             assertTrue("expected terminal transcript to contain '$expected', got:\n$transcript", expected in transcript)
         }
+
+        if (holdOpenMs > 0L) {
+            SystemClock.sleep(holdOpenMs)
+            captureAndAssertTerminalInk("${capturePrefix}05-held-open", minInkPixels = 6_000)
+        }
+    }
+
+    private suspend fun launchTerminalWorkbench(markerPrefix: String): String {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val appContext = instrumentation.targetContext
+        val key = instrumentation.context.assets
+            .open("test_key")
+            .bufferedReader()
+            .use { it.readText() }
+        val sshKey = SshKey.Pem(key)
+        val port = InstrumentationRegistry.getArguments()
+            .getString("terminalWorkbenchSshPort")
+            ?.toIntOrNull()
+            ?: DEFAULT_PORT
+        waitForSshFixtureReady(sshKey, port = port)
+
+        val marker = "${markerPrefix}${System.currentTimeMillis()}"
+        val intent = TerminalLabActivity.intent(
+            context = appContext,
+            host = DEFAULT_HOST,
+            port = port,
+            user = DEFAULT_USER,
+            privateKeyPem = key,
+        )
+
+        launchedActivity = ActivityScenario.launch(intent)
+        compose.onNodeWithTag(TERMINAL_LAB_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        waitForPrompt()
+        waitForVisibleTerminalText("prompt") { it.isNotBlank() }
+        recordTiming("connect_to_prompt_ms", requireController().uiState.value.connectToPromptMs)
+        return marker
+    }
+
+    private fun runRealAgentCli(
+        command: String,
+        versionExpected: String,
+        screenshotName: String,
+    ) {
+        sendViaTerminalInput("$command --version", versionExpected, "$command-version")
+        requireController().sendText(command, withEnter = true)
+        SystemClock.sleep(2_500)
+        captureAndAssertTerminalInk(screenshotName, minInkPixels = 6_000)
+        TerminalLabArtifacts.writeText("$screenshotName-visible-terminal.txt", visibleTerminalText())
+        requireController().terminalState.writeInput(byteArrayOf(0x03))
+        SystemClock.sleep(500)
+        requireController().sendText("", withEnter = true)
+        waitForVisibleTerminalText("$command-return-to-prompt") { it.isNotBlank() }
     }
 
     private fun sendViaTerminalInput(command: String, expected: String, label: String) {
@@ -132,6 +217,26 @@ class TerminalLabDockerTest {
         waitForTranscript("backspace-edit") { "lab-edit-good-$marker" in it }
         waitForVisibleTerminalText("backspace-edit") { "lab-edit-good-$marker" in it }
         recordTiming("send_to_output_backspace_edit_ms", SystemClock.elapsedRealtime() - start)
+    }
+
+    private fun assertRemotePtyMatchesTerminalGrid(label: String) {
+        val grid = terminalGridSize()
+        val expected = "PTY-$label ${grid.rows} ${grid.columns}"
+        sendViaTerminalInput("printf 'PTY-$label '; stty size", expected, "$label-pty-size")
+    }
+
+    private fun terminalGridSize(): TerminalGridSize {
+        var grid: TerminalGridSize? = null
+        launchedActivity?.onActivity { activity ->
+            activity.window.decorView
+                .findTerminalView()
+                ?.currentSession
+                ?.emulator
+                ?.let { emulator ->
+                    grid = TerminalGridSize(columns = emulator.mColumns, rows = emulator.mRows)
+                }
+        }
+        return checkNotNull(grid) { "Terminal emulator grid was not available" }
     }
 
     private fun waitForPrompt() {
@@ -263,7 +368,31 @@ class TerminalLabDockerTest {
         timings += line
         println(line)
     }
+
+    private fun writeWorkbenchSummary(capturePrefix: String, marker: String) {
+        if (capturePrefix.isBlank()) return
+        val bounds = terminalViewBounds()
+        val density = InstrumentationRegistry.getInstrumentation()
+            .targetContext
+            .resources
+            .displayMetrics
+            .density
+        TerminalLabArtifacts.writeText(
+            "${capturePrefix}summary.txt",
+            buildString {
+                appendLine("marker=$marker")
+                appendLine("terminal_bounds=$bounds")
+                appendLine("display_density=${String.format(Locale.US, "%.2f", density)}")
+                appendLine("transcript_chars=${transcriptSnapshot().length}")
+            },
+        )
+    }
 }
+
+private data class TerminalGridSize(
+    val columns: Int,
+    val rows: Int,
+)
 
 object TerminalLabArtifacts {
     private const val DEVICE_DIR_NAME: String = "terminal-lab"

@@ -9,34 +9,20 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.lifecycleScope
@@ -63,6 +49,7 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.schmizz.sshj.connection.channel.direct.Session
+import net.schmizz.sshj.connection.channel.direct.SessionChannel
 
 class TerminalLabActivity : FragmentActivity() {
 
@@ -168,6 +155,8 @@ class TerminalLabController(
     private var shellRef: SshShellHandle? = null
     private var connectStartedAtMs: Long = 0L
     private var pendingSendStartedAtMs: Long? = null
+    private var remoteColumns: Int = 0
+    private var remoteRows: Int = 0
 
     fun connect(scope: CoroutineScope) {
         if (connectJob?.isActive == true || terminalState.isAttached) return
@@ -209,6 +198,20 @@ class TerminalLabController(
     }
 
     fun transcriptSnapshot(): String = synchronized(transcript) { transcript.toString() }
+
+    fun resizeRemotePty(columns: Int, rows: Int) {
+        if (columns <= 0 || rows <= 0) return
+        if (columns == remoteColumns && rows == remoteRows) return
+        remoteColumns = columns
+        remoteRows = rows
+        val channel = shellRef?.sessionChannel as? SessionChannel ?: return
+        Thread({
+            runCatching { channel.changeWindowDimensions(columns, rows, 0, 0) }
+        }, "PocketShellTerminalResize").apply {
+            isDaemon = true
+            start()
+        }
+    }
 
     private fun recordOutput(bytes: ByteArray) {
         if (bytes.isEmpty()) return
@@ -293,8 +296,7 @@ fun TerminalLabScreen(
     controller: TerminalLabController,
     modifier: Modifier = Modifier,
 ) {
-    val state by controller.uiState.collectAsState()
-    var input by remember { mutableStateOf("") }
+    controller.uiState.collectAsState()
 
     Column(
         modifier = modifier
@@ -305,7 +307,6 @@ fun TerminalLabScreen(
             .imePadding()
             .testTag(TERMINAL_LAB_SCREEN_TAG),
     ) {
-        TerminalLabHeader(state)
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -315,78 +316,7 @@ fun TerminalLabScreen(
             TerminalSurface(
                 state = controller.terminalState,
                 modifier = Modifier.fillMaxSize(),
-            )
-        }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            OutlinedTextField(
-                value = input,
-                onValueChange = { input = it },
-                singleLine = true,
-                label = { Text("Terminal input") },
-                modifier = Modifier
-                    .weight(1f)
-                    .heightIn(min = 56.dp)
-                    .testTag(TERMINAL_LAB_INPUT_TAG),
-            )
-            Button(
-                onClick = {
-                    controller.sendText(input, withEnter = false)
-                    input = ""
-                },
-                modifier = Modifier.testTag(TERMINAL_LAB_SEND_TAG),
-            ) {
-                Text("Send")
-            }
-            Button(
-                onClick = {
-                    controller.sendText(input, withEnter = true)
-                    input = ""
-                },
-                modifier = Modifier.testTag(TERMINAL_LAB_SEND_ENTER_TAG),
-            ) {
-                Text("Enter")
-            }
-        }
-    }
-}
-
-@Composable
-private fun TerminalLabHeader(state: TerminalLabUiState) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        Text(
-            text = "Terminal lab",
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onBackground,
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(
-                text = state.status,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.76f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Text(
-                text = "prompt ${state.connectToPromptMs?.let { "${it}ms" } ?: "..."}",
-                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.72f),
-            )
-            Text(
-                text = "send ${state.lastSendToOutputMs?.let { "${it}ms" } ?: "..."}",
-                style = MaterialTheme.typography.labelSmall.copy(fontFamily = FontFamily.Monospace),
-                color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.72f),
+                onTerminalSizeChanged = controller::resizeRemotePty,
             )
         }
     }

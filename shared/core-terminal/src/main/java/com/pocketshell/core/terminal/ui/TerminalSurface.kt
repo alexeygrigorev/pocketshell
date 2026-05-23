@@ -49,16 +49,15 @@ val DefaultTerminalBackground: Color = Color(0xFF0D1117)
  * pixels" but that is inaccurate for the code as it actually runs — confirmed
  * by reading [com.termux.view.TerminalRenderer]'s constructor.
  *
- * Why 30: the real-phone report for #72 showed that 36 px was too coarse for
- * a Pixel-style viewport: common `ls` output wrapped early and the prompt
- * consumed too much of the terminal area. 30 px keeps the Termius-like mobile
- * density readable while giving the emulator enough columns for paths and
- * multi-column command output.
+ * Why 24: the real-phone report for #79 showed that 30 px still made the
+ * terminal feel coarse and cramped on a Pixel-style viewport. 24 px gives the
+ * emulator enough columns for paths and multi-column command output while
+ * staying readable on a handheld screen.
  *
  * Suffixed `_RAW_PX` (not just `_PX`) to make the unit unambiguous in IDE
  * autocomplete and search results.
  */
-internal const val DEFAULT_TEXT_SIZE_RAW_PX: Int = 30
+internal const val DEFAULT_TEXT_SIZE_RAW_PX: Int = 24
 
 /**
  * Hosts the vendored [TerminalView] inside a Compose tree via
@@ -113,12 +112,14 @@ fun TerminalSurface(
     state: TerminalSurfaceState,
     modifier: Modifier = Modifier,
     matchListener: ((TerminalMatch) -> Unit)? = null,
+    onTerminalSizeChanged: ((columns: Int, rows: Int) -> Unit)? = null,
     onKeyEvent: ((ComposeKeyEvent) -> Boolean)? = null,
 ) {
     // Hoist the bridge so the same instance survives recompositions and we
     // do not leak listeners across configuration changes. AndroidView's
     // factory runs once; update runs every recomposition.
     val viewClient = remember { PocketShellTerminalViewClient() }
+    viewClient.onTerminalSizeChanged = onTerminalSizeChanged
 
     // Subscribe to the detector flow only when the caller actually wants
     // match callbacks. The empty-flow fallback avoids spinning up a debounce
@@ -266,6 +267,7 @@ internal fun TerminalView.applyPocketShellDefaults(viewClient: TerminalViewClien
  */
 internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessionClient {
     private var terminalView: TerminalView? = null
+    var onTerminalSizeChanged: ((columns: Int, rows: Int) -> Unit)? = null
 
     fun bind(view: TerminalView) {
         terminalView = view
@@ -307,7 +309,12 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
     override fun readShiftKey(): Boolean = false
     override fun readFnKey(): Boolean = false
     override fun onCodePoint(codePoint: Int, ctrlDown: Boolean, session: TerminalSession?): Boolean = false
-    override fun onEmulatorSet() = Unit
+    override fun onEmulatorSet() {
+        val emulator = terminalView?.currentSession?.emulator ?: return
+        if (emulator.mColumns > 0 && emulator.mRows > 0) {
+            onTerminalSizeChanged?.invoke(emulator.mColumns, emulator.mRows)
+        }
+    }
     override fun logError(tag: String?, message: String?) = Unit
     override fun logWarn(tag: String?, message: String?) = Unit
     override fun logInfo(tag: String?, message: String?) = Unit

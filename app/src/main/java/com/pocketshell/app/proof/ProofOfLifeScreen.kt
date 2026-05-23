@@ -28,7 +28,8 @@ import com.pocketshell.core.terminal.ui.rememberTerminalSurfaceState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.schmizz.sshj.SSHClient
@@ -228,44 +229,22 @@ internal suspend fun openShell(
  * [Flow] that emits a `ByteArray` for every chunk read from the SSH
  * channel. The flow terminates when the stream returns -1 (remote closed).
  *
- * Reads happen on [Dispatchers.IO]. We do not buffer beyond the underlying
- * stream's defaults; downstream collectors (the bridge's `feedBytes`) are
- * responsible for not lagging — but `MutableSharedFlow(extraBufferCapacity)`
- * inside [com.pocketshell.core.terminal.ui.TerminalSurfaceState] absorbs the
- * common burst case.
+ * Reads happen on [Dispatchers.IO] and use normal Flow backpressure. Terminal
+ * bytes must not be dropped: split escape sequences corrupt full-screen CLI
+ * rendering.
  */
 internal fun createStdoutFlow(shell: Session.Shell): Flow<ByteArray> {
-    val flow = MutableSharedFlow<ByteArray>(
-        replay = 0,
-        extraBufferCapacity = 64,
-    )
-    val readerThread = Thread({
+    return flow {
         val input = shell.inputStream
         val buffer = ByteArray(4096)
-        try {
-            while (true) {
-                val n = input.read(buffer)
-                if (n == -1) break
-                if (n > 0) {
-                    // tryEmit honours `extraBufferCapacity`; if collectors
-                    // lag, the byte chunk is dropped. For Phase 0 this is
-                    // acceptable — we are visualising the stream, not
-                    // logging it for replay.
-                    val chunk = buffer.copyOf(n)
-                    if (!flow.tryEmit(chunk)) {
-                        // Buffer full + no collector ready. Drop and
-                        // continue; the SSH channel will keep delivering.
-                    }
-                }
+        while (true) {
+            val n = input.read(buffer)
+            if (n == -1) break
+            if (n > 0) {
+                emit(buffer.copyOf(n))
             }
-        } catch (_: Throwable) {
-            // Stream closed underneath us — fine, the flow ends naturally
-            // when this thread exits.
         }
-    }, "PocketShellSshReader")
-    readerThread.isDaemon = true
-    readerThread.start()
-    return flow
+    }.flowOn(Dispatchers.IO)
 }
 
 /**

@@ -29,12 +29,14 @@ import com.pocketshell.uikit.model.KeyModifierState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import net.schmizz.sshj.connection.channel.direct.SessionChannel
 import javax.inject.Inject
 
 /**
@@ -153,6 +155,8 @@ public class SessionViewModel @Inject constructor(
 
     private var sessionRef: SshSession? = null
     private var shellRef: SshShellHandle? = null
+    private var remoteColumns: Int = 0
+    private var remoteRows: Int = 0
     private var producerJob: Job? = null
     private var connectJob: Job? = null
     private var agentDetectJob: Job? = null
@@ -529,6 +533,17 @@ public class SessionViewModel @Inject constructor(
         if (text.isEmpty() && !withEnter) return
         val payload = if (withEnter) text + "\r" else text
         sendTerminalInput(payload.toByteArray(Charsets.UTF_8))
+    }
+
+    public fun resizeRemotePty(columns: Int, rows: Int) {
+        if (columns <= 0 || rows <= 0) return
+        if (columns == remoteColumns && rows == remoteRows) return
+        remoteColumns = columns
+        remoteRows = rows
+        val channel = shellRef?.sessionChannel as? SessionChannel ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { channel.changeWindowDimensions(columns, rows, 0, 0) }
+        }
     }
 
     private fun sendTerminalInput(bytes: ByteArray) {

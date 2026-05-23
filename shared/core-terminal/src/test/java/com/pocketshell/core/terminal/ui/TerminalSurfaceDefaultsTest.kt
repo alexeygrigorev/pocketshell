@@ -1,6 +1,8 @@
 package com.pocketshell.core.terminal.ui
 
 import android.content.Context
+import android.graphics.Paint
+import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.text.InputType
 import android.view.inputmethod.EditorInfo
@@ -28,6 +30,7 @@ class TerminalSurfaceDefaultsTest {
 
         assertEquals(DefaultTerminalBackground.toArgb(), (view.background as ColorDrawable).color)
         assertEquals(DEFAULT_TEXT_SIZE_RAW_PX, view.appliedRendererTextSize())
+        assertMonospace(view.appliedRendererTypeface())
         assertTrue(view.isFocusable)
         assertTrue(view.isFocusableInTouchMode)
     }
@@ -96,5 +99,26 @@ class TerminalSurfaceDefaultsTest {
         val textSize = renderer.javaClass.getDeclaredField("mTextSize")
         textSize.isAccessible = true
         return textSize.getInt(renderer)
+    }
+
+    private fun TerminalView.appliedRendererTypeface(): Typeface {
+        val renderer = TerminalView::class.java.getField("mRenderer").get(this)
+        val typeface = renderer.javaClass.getDeclaredField("mTypeface")
+        typeface.isAccessible = true
+        return typeface.get(renderer) as Typeface
+    }
+
+    private fun assertMonospace(typeface: Typeface) {
+        val paint = Paint().apply {
+            this.typeface = typeface
+            textSize = DEFAULT_TEXT_SIZE_RAW_PX.toFloat()
+        }
+
+        assertEquals(
+            "terminal typeface must give narrow and wide ASCII glyphs the same cell width",
+            paint.measureText("i"),
+            paint.measureText("W"),
+            0.01f,
+        )
     }
 }

@@ -18,6 +18,7 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.viewinterop.AndroidView
 import com.pocketshell.core.terminal.selection.SelectionOverlay
 import com.pocketshell.core.terminal.selection.TerminalMatch
+import com.termux.terminal.TextStyle
 import com.termux.terminal.TerminalSessionClient
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
@@ -26,14 +27,16 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 
 /**
- * Background colour applied to the [TerminalView]'s parent surface. Matches
- * the deep-navy chrome from `docs/design-language.md` ("Background: deep
- * navy/charcoal, never pure black"). The vendored [TerminalView] itself
- * paints its own canvas via [TerminalView.onDraw] (defaulting to solid
- * black when no emulator is attached); this colour shows through while the
- * view is being measured and around any padding the caller applies.
+ * Background colour applied to the [TerminalView]'s parent surface. This is
+ * the terminal-specific near-black token rather than the app chrome colour;
+ * keeping terminal canvas and default VT background aligned avoids navy
+ * gutters and makes the surface read as a real SSH terminal.
  */
-val DefaultTerminalBackground: Color = Color(0xFF0D1117)
+val DefaultTerminalBackground: Color = Color(TERMINAL_BACKGROUND_ARGB)
+
+internal const val TERMINAL_BACKGROUND_ARGB: Int = -0x00FEFBF7 // 0xFF010409
+internal const val TERMINAL_FOREGROUND_ARGB: Int = -0x0019120D // 0xFFE6EDF3
+internal const val TERMINAL_CURSOR_ARGB: Int = -0x00DD2C12 // 0xFF22D3EE
 
 /**
  * Default text size used by the embedded [TerminalView], expressed in **raw
@@ -49,15 +52,15 @@ val DefaultTerminalBackground: Color = Color(0xFF0D1117)
  * pixels" but that is inaccurate for the code as it actually runs — confirmed
  * by reading [com.termux.view.TerminalRenderer]'s constructor.
  *
- * Why 24: the real-phone report for #79 showed that 30 px still made the
- * terminal feel coarse and cramped on a Pixel-style viewport. 24 px gives the
- * emulator enough columns for paths and multi-column command output while
- * staying readable on a handheld screen.
+ * Why 28: issue #98's phone reference needs larger, more deliberate terminal
+ * typography than the previous 24 px default, but 30+ px drops the phone
+ * viewport to a cramped column count for real agent CLIs. 28 px keeps command
+ * output readable while preserving a usable grid on 1080 px wide devices.
  *
  * Suffixed `_RAW_PX` (not just `_PX`) to make the unit unambiguous in IDE
  * autocomplete and search results.
  */
-internal const val DEFAULT_TEXT_SIZE_RAW_PX: Int = 24
+internal const val DEFAULT_TEXT_SIZE_RAW_PX: Int = 28
 
 /**
  * Hosts the vendored [TerminalView] inside a Compose tree via
@@ -248,11 +251,18 @@ internal fun TerminalView.applyPocketShellDefaults(viewClient: TerminalViewClien
     // Termux's setTypeface reads mRenderer.mTextSize, so text size must create
     // the renderer before we swap in the app typeface.
     setTextSize(DEFAULT_TEXT_SIZE_RAW_PX)
-    setTypeface(Typeface.MONOSPACE)
+    setTypeface(Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL))
     setBackgroundColor(DefaultTerminalBackground.toArgb())
     isFocusable = true
     isFocusableInTouchMode = true
     return this
+}
+
+private fun TerminalView.applyPocketShellDefaultColors() {
+    val emulator = currentSession?.emulator ?: return
+    emulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_BACKGROUND] = TERMINAL_BACKGROUND_ARGB
+    emulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_FOREGROUND] = TERMINAL_FOREGROUND_ARGB
+    emulator.mColors.mCurrentColors[TextStyle.COLOR_INDEX_CURSOR] = TERMINAL_CURSOR_ARGB
 }
 
 /**
@@ -282,7 +292,10 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
     override fun onPasteTextFromClipboard(session: TerminalSession?) = Unit
     override fun onBell(session: TerminalSession) = Unit
     override fun onColorsChanged(session: TerminalSession) {
-        terminalView?.onScreenUpdated()
+        terminalView?.apply {
+            applyPocketShellDefaultColors()
+            onScreenUpdated()
+        }
     }
 
     override fun onTerminalCursorStateChange(state: Boolean) = Unit
@@ -309,6 +322,7 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
     override fun readFnKey(): Boolean = false
     override fun onCodePoint(codePoint: Int, ctrlDown: Boolean, session: TerminalSession?): Boolean = false
     override fun onEmulatorSet() {
+        terminalView?.applyPocketShellDefaultColors()
         val emulator = terminalView?.currentSession?.emulator ?: return
         if (emulator.mColumns > 0 && emulator.mRows > 0) {
             onTerminalSizeChanged?.invoke(emulator.mColumns, emulator.mRows)

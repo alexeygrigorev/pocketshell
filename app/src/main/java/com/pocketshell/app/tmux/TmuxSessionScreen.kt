@@ -197,8 +197,6 @@ public fun TmuxSessionScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .statusBarsPadding()
-                .navigationBarsPadding()
                 .imePadding(),
         ) {
             Box(
@@ -320,7 +318,9 @@ public fun TmuxSessionScreen(
                         val pane = panes[pageIndex]
                         TerminalSurface(
                             state = pane.terminalState,
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 4.dp, vertical = 6.dp),
                         )
                     }
                 }

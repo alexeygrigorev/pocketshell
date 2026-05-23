@@ -214,6 +214,21 @@ logs, and crash diagnostics under `build/phone-dogfood/<run-id>/`.
 output under
 `build/phone-dogfood/<run-id>/device-artifacts/dogfood-visual-pass/`.
 
+For release tagging, use the guarded emulator-only wrapper from clean pushed
+`main`:
+
+```bash
+scripts/release-emulator-validation.sh
+scripts/push-release-tag.sh --visual-audit-inspected v0.2.1 build/release-emulator-validation/<run-id>/summary.md
+```
+
+The wrapper runs the pre-release confidence gate, terminal-lab phone dogfood,
+tmux existing-session phone dogfood, the setup-detection matrix, and visual
+screenshot capture. Attach or link every artifact directory listed in
+`build/release-emulator-validation/<run-id>/summary.md` in the release issue
+and tag notes. Pass `--visual-audit-inspected` only after inspecting the
+visual-audit screenshots.
+
 ## APK Dogfood Pre-Release Gate
 
 Before pushing a version tag for APK dogfood, run the local confidence gate from

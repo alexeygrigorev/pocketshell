@@ -1,0 +1,124 @@
+name: Release Emulator Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Optional artifact run id suffix. Leave blank for timestamp.
+        required: false
+        type: string
+
+jobs:
+  emulator-release-validation:
+    name: Emulator-only release validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    env:
+      ANDROID_SDK: /usr/local/lib/android/sdk
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      RELEASE_VALIDATION_SKIP_MAIN_GUARD: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make scripts executable
+        run: chmod +x ./gradlew scripts/*.sh
+
+      - name: Verify Docker is available
+        run: docker info
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Prepare release validation run id
+        id: validation
+        env:
+          RUN_ID_INPUT: ${{ inputs.run_id }}
+        run: |
+          if [[ -n "$RUN_ID_INPUT" ]]; then
+            RUN_ID="$(printf '%s' "$RUN_ID_INPUT" | tr -cs 'A-Za-z0-9._-' '-')"
+            RUN_ID="${RUN_ID#-}"
+            RUN_ID="${RUN_ID%-}"
+          else
+            RUN_ID="gha-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}-$(date +'%Y%m%d-%H%M%S')"
+          fi
+          if [[ -z "$RUN_ID" ]]; then
+            RUN_ID="gha-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}-$(date +'%Y%m%d-%H%M%S')"
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Run emulator-only release validation
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          RUN_ID: ${{ steps.validation.outputs.run_id }}
+          ANDROID_SDK: ${{ env.ANDROID_SDK }}
+          ADB: ${{ env.ANDROID_SDK }}/platform-tools/adb
+          EMULATOR: ${{ env.ANDROID_SDK }}/emulator/emulator
+          RELEASE_VALIDATION_SKIP_MAIN_GUARD: ${{ env.RELEASE_VALIDATION_SKIP_MAIN_GUARD }}
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          script: scripts/release-emulator-validation.sh
+
+      - name: Publish validation summary
+        if: always()
+        run: |
+          summary="build/release-emulator-validation/${{ steps.validation.outputs.run_id }}/summary.md"
+          if [[ -f "$summary" ]]; then
+            cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "# PocketShell Release Emulator Validation"
+              echo
+              echo "No release validation summary was written."
+              echo
+              echo "Expected: \`$summary\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload release validation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-emulator-validation-${{ steps.validation.outputs.run_id }}
+          path: |
+            build/release-emulator-validation/${{ steps.validation.outputs.run_id }}/
+            build/pre-release-confidence-gate/${{ steps.validation.outputs.run_id }}-pre-release/
+            !build/pre-release-confidence-gate/${{ steps.validation.outputs.run_id }}-pre-release/worktree/
+            build/phone-dogfood/${{ steps.validation.outputs.run_id }}-terminal-lab/
+            build/phone-dogfood/${{ steps.validation.outputs.run_id }}-tmux-existing-session/
+            build/phone-dogfood/${{ steps.validation.outputs.run_id }}-setup-detection/
+            build/dogfood-visual-pass/${{ steps.validation.outputs.run_id }}-visual-audit/
+            **/build/reports/
+            **/build/test-results/
+            **/build/outputs/androidTest-results/
+            **/build/outputs/connected_android_test_additional_output/
+          if-no-files-found: ignore
+
+      - name: Stop Docker targets
+        if: always()
+        run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans

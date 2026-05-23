@@ -202,14 +202,28 @@ Before tagging:
 2. Update `app/build.gradle.kts` so `versionName` matches the tag without the
    leading `v`.
 3. Increase `versionCode` monotonically.
-4. Run the normal verification gate, including Docker/emulator checks when the
-   change affects mobile, SSH, tmux, agent, setup, or release behavior.
-5. Commit the version bump.
-6. Create and push a matching tag such as `v0.2.1`.
-7. Watch the Build workflow and verify the uploaded APK artifact.
+4. Run the normal verification gate before committing the version bump.
+5. Commit the version bump on `main` and push `main` first.
+6. From clean `main`, with `HEAD` equal to `origin/main`, run
+   `scripts/release-emulator-validation.sh`.
+7. Inspect the visual-audit screenshots listed in that summary.
+8. Push the matching tag with the guarded helper, for example
+   `scripts/push-release-tag.sh --visual-audit-inspected v0.2.1 build/release-emulator-validation/<run-id>/summary.md`.
+9. Watch the Build workflow and verify the uploaded APK artifact.
+
+The same emulator-only release validation can be run from GitHub Actions
+without a physical phone: Actions -> Release Emulator Validation -> Run
+workflow. Choose the release branch or `main`; optionally provide a `run_id`.
+Read the job summary first, then download the
+`release-emulator-validation-<run-id>` artifact for logs, screenshots, and the
+release summary.
 
 Do not tag a release while the APK metadata still reports the previous
 version. That can make the installed app offer the same release as an update.
+Release issue/tag notes must attach or link the validation artifact directories
+listed in `build/release-emulator-validation/<run-id>/summary.md`. Physical
+phone testing is final user acceptance only; emulator/Docker validation catches
+basic release blockers before a tag is pushed.
 
 ## Process And Runbooks
 

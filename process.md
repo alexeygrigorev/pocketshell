@@ -256,19 +256,39 @@ Release build steps:
 2. Update Android metadata before tagging:
    - `versionName` must equal the tag without the leading `v`.
    - `versionCode` must increase monotonically.
-3. Run the normal verification gate before committing the version bump, and
-   confirm the Tests workflow is green for the commit being tagged.
+3. Run the normal verification gate before committing the version bump.
 4. Commit the version bump on `main` and push `main` first.
-5. Confirm `origin/main` points at the pushed version-bump commit.
-6. Create the matching tag on that exact `origin/main` commit, for example
-   `v0.2.1`, and push the tag.
-7. Watch the tag-triggered Build workflow and verify the uploaded APK artifact.
+5. From clean `main`, with `HEAD` equal to `origin/main`, run the emulator-only
+   release validation:
+   - `scripts/pre-release-confidence-gate.sh`
+   - `scripts/phone-dogfood.sh terminal-lab`
+   - `scripts/phone-dogfood.sh tmux-existing-session`
+   - `scripts/phone-dogfood.sh setup-detection`
+   - visual-audit screenshot capture, then inspect the screenshots
+6. Prefer the wrapper that runs that sequence and writes the required summary:
+   `scripts/release-emulator-validation.sh`.
+7. Push the matching tag with the guarded tag helper, for example
+   `scripts/push-release-tag.sh --visual-audit-inspected v0.2.1 build/release-emulator-validation/<run-id>/summary.md`.
+8. Watch the tag-triggered Build workflow and verify the uploaded APK artifact.
+
+The release issue and tag notes must attach or link all emulator-only evidence
+directories:
+
+- `build/pre-release-confidence-gate/<run-id>-pre-release/`
+- `build/phone-dogfood/<run-id>-terminal-lab/`
+- `build/phone-dogfood/<run-id>-tmux-existing-session/`
+- `build/phone-dogfood/<run-id>-setup-detection/`
+- `build/dogfood-visual-pass/<run-id>-visual-audit/`
 
 Release tags must come from stable `main`. Do not create release commits from a
 detached HEAD, a tag checkout, or a temporary worktree that is not first pushed
 back to `main`. Do not rebase local work from a tag or treat a tag as the
 source branch for release work. Tags are labels on already-reviewed `main`
 commits; they are not development branches.
+
+Physical phone testing is final user acceptance only. Do not use a phone pass
+to discover or waive basic release blockers that the emulator/Docker validation
+above is meant to catch before a tag exists.
 
 Never tag a release when the APK metadata still reports the previous release
 version. That creates a self-update loop where the installed app offers the same

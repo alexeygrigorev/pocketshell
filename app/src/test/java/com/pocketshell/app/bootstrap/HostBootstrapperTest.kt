@@ -155,12 +155,12 @@ class HostBootstrapperTest {
             mapOf(
                 "cat /etc/os-release" to ExecResult("ID=ubuntu\n", "", 0),
                 "id -u" to ExecResult("1000\n", "", 0),
-                "sudo apt-get install -y tmux" to ExecResult("done\n", "", 0),
+                shell("sudo apt-get install -y tmux") to ExecResult("done\n", "", 0),
             ),
         )
         val result = bootstrapper.installTmux(session)
         assertEquals(InstallResult.Success, result)
-        assertTrue(session.recorded.contains("sudo apt-get install -y tmux"))
+        assertTrue(session.recorded.contains(shell("sudo apt-get install -y tmux")))
     }
 
     @Test
@@ -169,14 +169,14 @@ class HostBootstrapperTest {
             mapOf(
                 "cat /etc/os-release" to ExecResult("ID=alpine\n", "", 0),
                 "id -u" to ExecResult("0\n", "", 0),
-                "apk add tmux" to ExecResult("(1/1) Installing tmux\n", "", 0),
+                shell("apk add tmux") to ExecResult("(1/1) Installing tmux\n", "", 0),
             ),
         )
         val result = bootstrapper.installTmux(session)
         assertEquals(InstallResult.Success, result)
         // Confirm no sudo prefix was used.
-        assertTrue(session.recorded.any { it == "apk add tmux" })
-        assertTrue(session.recorded.none { it.startsWith("sudo ") })
+        assertTrue(session.recorded.any { it == shell("apk add tmux") })
+        assertTrue(session.recorded.none { it.contains("sudo ") })
     }
 
     @Test
@@ -187,12 +187,12 @@ class HostBootstrapperTest {
             mapOf(
                 "cat /etc/os-release" to ExecResult("", "No such file", 1),
                 "uname -s" to ExecResult("Darwin\n", "", 0),
-                "brew install tmux" to ExecResult("==> Pouring tmux\n", "", 0),
+                shell("brew install tmux") to ExecResult("==> Pouring tmux\n", "", 0),
             ),
         )
         val result = bootstrapper.installTmux(session)
         assertEquals(InstallResult.Success, result)
-        assertTrue(session.recorded.contains("brew install tmux"))
+        assertTrue(session.recorded.contains(shell("brew install tmux")))
     }
 
     @Test
@@ -201,7 +201,7 @@ class HostBootstrapperTest {
             mapOf(
                 "cat /etc/os-release" to ExecResult("ID=ubuntu\n", "", 0),
                 "id -u" to ExecResult("0\n", "", 0),
-                "apt-get install -y tmux" to ExecResult("", "E: Unable to locate package tmux\n", 100),
+                shell("apt-get install -y tmux") to ExecResult("", "E: Unable to locate package tmux\n", 100),
             ),
         )
         val result = bootstrapper.installTmux(session)
@@ -246,8 +246,8 @@ class HostBootstrapperTest {
                 pathAware("command -v 'agent-log-explorer'") to ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
-                "systemctl --user is-active tmuxctl-jobs.service" to ExecResult("active\n", "", 0),
-                "systemctl --user is-enabled tmuxctl-jobs.service" to ExecResult("enabled\n", "", 0),
+                systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("active\n", "", 0),
+                systemdAware("systemctl --user is-enabled tmuxctl-jobs.service") to ExecResult("enabled\n", "", 0),
             ),
         )
 
@@ -269,8 +269,8 @@ class HostBootstrapperTest {
                 pathAware("command -v 'agent-log-explorer'") to ExecResult("/home/u/.cargo/bin/agent-log-explorer\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
-                "systemctl --user is-active tmuxctl-jobs.service" to ExecResult("active\n", "", 0),
-                "systemctl --user is-enabled tmuxctl-jobs.service" to ExecResult("enabled\n", "", 0),
+                systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("active\n", "", 0),
+                systemdAware("systemctl --user is-enabled tmuxctl-jobs.service") to ExecResult("enabled\n", "", 0),
             ),
         )
 
@@ -283,9 +283,34 @@ class HostBootstrapperTest {
         assertTrue(report.missingTools.isEmpty())
         assertTrue(report.isReady)
         assertTrue(session.recorded.all { command ->
-            !command.startsWith("command -v '") ||
-                command.startsWith("PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\";")
+            !command.contains("command -v '") ||
+                command.startsWith("/bin/sh -lc ") &&
+                command.contains("PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"")
         })
+    }
+
+    @Test
+    fun checkServerSetup_wrapsBootstrapCommandsInPosixShell() = runTest {
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
+                pathAware("command -v 'heru'") to ExecResult("/home/u/.local/bin/heru\n", "", 0),
+                pathAware("command -v 'agent-log-explorer'") to ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0),
+                pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
+                pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
+                systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("active\n", "", 0),
+                systemdAware("systemctl --user is-enabled tmuxctl-jobs.service") to ExecResult("enabled\n", "", 0),
+            ),
+        )
+
+        val report = bootstrapper.checkServerSetup(session)
+
+        assertTrue(report.isReady)
+        assertTrue(session.recorded.all { it.startsWith("/bin/sh -lc ") })
+        assertTrue(session.recorded.any { it.contains("PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"") })
+        assertTrue(session.recorded.any { it.contains("XDG_RUNTIME_DIR=\"\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}\"") })
+        assertTrue(session.recorded.none { it.startsWith("PATH=") })
+        assertTrue(session.recorded.none { it.startsWith("systemctl --user") })
     }
 
     @Test
@@ -359,8 +384,8 @@ class HostBootstrapperTest {
                         ExecResult("installed agent-log-explorer\n", "", 0)
                     }
                     pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
-                    "systemctl --user is-active tmuxctl-jobs.service" -> ExecResult("inactive\n", "", 3)
-                    "systemctl --user is-enabled tmuxctl-jobs.service" -> ExecResult("disabled\n", "", 1)
+                    systemdAware("systemctl --user is-active tmuxctl-jobs.service") -> ExecResult("inactive\n", "", 3)
+                    systemdAware("systemctl --user is-enabled tmuxctl-jobs.service") -> ExecResult("disabled\n", "", 1)
                     else -> if (command.contains("systemctl --user enable --now tmuxctl-jobs.service")) {
                         ExecResult("", "", 0)
                     } else {
@@ -406,7 +431,7 @@ class HostBootstrapperTest {
                 pathAware("command -v 'agent-log-explorer'") to ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
-                "systemctl --user is-active tmuxctl-jobs.service" to
+                systemdAware("systemctl --user is-active tmuxctl-jobs.service") to
                     ExecResult("", "Failed to connect to bus: No medium found\n", 1),
             ),
         )
@@ -426,8 +451,8 @@ class HostBootstrapperTest {
                 pathAware("command -v 'agent-log-explorer'") to ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
-                "systemctl --user is-active tmuxctl-jobs.service" to ExecResult("active\n", "", 0),
-                "systemctl --user is-enabled tmuxctl-jobs.service" to ExecResult("disabled\n", "", 1),
+                systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("active\n", "", 0),
+                systemdAware("systemctl --user is-enabled tmuxctl-jobs.service") to ExecResult("disabled\n", "", 1),
             ),
         )
 
@@ -446,8 +471,8 @@ class HostBootstrapperTest {
                 pathAware("command -v 'agent-log-explorer'") to ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
-                "systemctl --user is-active tmuxctl-jobs.service" to ExecResult("inactive\n", "", 3),
-                "systemctl --user is-enabled tmuxctl-jobs.service" to ExecResult("disabled\n", "", 1),
+                systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("inactive\n", "", 3),
+                systemdAware("systemctl --user is-enabled tmuxctl-jobs.service") to ExecResult("disabled\n", "", 1),
             ),
         )
 
@@ -463,7 +488,7 @@ class HostBootstrapperTest {
             dynamic = { command ->
                 when (command) {
                     pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
-                    "systemctl --user is-active tmuxctl-jobs.service" -> throw SshException("channel closed")
+                    systemdAware("systemctl --user is-active tmuxctl-jobs.service") -> throw SshException("channel closed")
                     else -> null
                 }
             },
@@ -485,8 +510,8 @@ class HostBootstrapperTest {
                     pathAware("command -v 'agent-log-explorer'") -> ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0)
                     pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
                     pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
-                    "systemctl --user is-active tmuxctl-jobs.service" -> ExecResult("active\n", "", 0)
-                    "systemctl --user is-enabled tmuxctl-jobs.service" -> ExecResult("disabled\n", "", 1)
+                    systemdAware("systemctl --user is-active tmuxctl-jobs.service") -> ExecResult("active\n", "", 0)
+                    systemdAware("systemctl --user is-enabled tmuxctl-jobs.service") -> ExecResult("disabled\n", "", 1)
                     else -> if (command.contains("systemctl --user enable --now tmuxctl-jobs.service")) {
                         ExecResult("", "", 0)
                     } else {
@@ -530,8 +555,8 @@ class HostBootstrapperTest {
                     pathAware("command -v 'agent-log-explorer'") -> ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0)
                     pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
                     pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
-                    "systemctl --user is-active tmuxctl-jobs.service" -> ExecResult("active\n", "", 0)
-                    "systemctl --user is-enabled tmuxctl-jobs.service" -> ExecResult("enabled\n", "", 0)
+                    systemdAware("systemctl --user is-active tmuxctl-jobs.service") -> ExecResult("active\n", "", 0)
+                    systemdAware("systemctl --user is-enabled tmuxctl-jobs.service") -> ExecResult("enabled\n", "", 0)
                     else -> null
                 }
             },
@@ -585,7 +610,20 @@ class HostBootstrapperTest {
     }
 
     private fun pathAware(command: String): String =
-        "PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; $command"
+        shell("PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; export PATH; $command")
+
+    private fun systemdAware(command: String): String =
+        shell(
+            "XDG_RUNTIME_DIR=\"\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}\"; export XDG_RUNTIME_DIR; " +
+                "DBUS_SESSION_BUS_ADDRESS=\"\${DBUS_SESSION_BUS_ADDRESS:-unix:path=\$XDG_RUNTIME_DIR/bus}\"; " +
+                "export DBUS_SESSION_BUS_ADDRESS; $command",
+        )
+
+    private fun shell(command: String): String =
+        "/bin/sh -lc ${shellQuote(command)}"
+
+    private fun shellQuote(value: String): String =
+        "'" + value.replace("'", "'\"'\"'") + "'"
 
     private fun toolLookup(binaryName: String, installedTools: Set<String>): ExecResult =
         if (binaryName in installedTools) {

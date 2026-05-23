@@ -246,7 +246,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         }
 
         val active = try {
-            session.exec("systemctl --user is-active tmuxctl-jobs.service")
+            session.exec(systemdUserCommand("systemctl --user is-active tmuxctl-jobs.service"))
         } catch (t: Throwable) {
             return TmuxctlDaemonStatus.Unknown(
                 "failed to query systemd user service: ${t.javaClass.simpleName}: ${t.message ?: "unknown error"}",
@@ -256,7 +256,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             return TmuxctlDaemonStatus.Unavailable(active.combinedOutput().ifBlank { "systemd user services are unavailable on this host" })
         }
         val enabled = try {
-            session.exec("systemctl --user is-enabled tmuxctl-jobs.service")
+            session.exec(systemdUserCommand("systemctl --user is-enabled tmuxctl-jobs.service"))
         } catch (_: Throwable) {
             return TmuxctlDaemonStatus.Unknown("failed to query whether tmuxctl-jobs.service is enabled")
         }
@@ -315,7 +315,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
                 return InstallResult.Error("failed to detect OS: ${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
             }
             return when (uname.stdout.trim()) {
-                "Darwin" -> runInstall(session, "brew install tmux", needsRoot = false)
+                "Darwin" -> runInstall(session, posixShellCommand("brew install tmux"), needsRoot = false)
                 else -> InstallResult.UnsupportedOs(osId = null)
             }
         }
@@ -325,7 +325,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
 
         val needsRoot = pm.needsRoot && !runningAsRoot(session)
         val cmd = if (needsRoot) "sudo ${pm.command}" else pm.command
-        return runInstall(session, cmd, needsRoot)
+        return runInstall(session, posixShellCommand(cmd), needsRoot)
     }
 
     /**
@@ -428,7 +428,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             append("systemctl --user daemon-reload && ")
             append("systemctl --user enable --now tmuxctl-jobs.service")
         }
-        return runInstall(session, command, needsRoot = false)
+        return runInstall(session, systemdUserCommand(command), needsRoot = false)
     }
 
     private suspend fun runningAsRoot(session: SshSession): Boolean = try {
@@ -450,7 +450,17 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     )
 
     private fun pathAwareCommand(command: String): String =
-        "PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; $command"
+        posixShellCommand("PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; export PATH; $command")
+
+    private fun systemdUserCommand(command: String): String =
+        posixShellCommand(
+            "XDG_RUNTIME_DIR=\"\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}\"; export XDG_RUNTIME_DIR; " +
+                "DBUS_SESSION_BUS_ADDRESS=\"\${DBUS_SESSION_BUS_ADDRESS:-unix:path=\$XDG_RUNTIME_DIR/bus}\"; " +
+                "export DBUS_SESSION_BUS_ADDRESS; $command",
+        )
+
+    private fun posixShellCommand(command: String): String =
+        "/bin/sh -lc ${shellQuote(command)}"
 
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"

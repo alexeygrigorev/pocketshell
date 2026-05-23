@@ -101,3 +101,16 @@ services:
     container_name: pocketshell-test-bootstrap-user-local-path
     ports:
       - "2234:22"
+
+  bootstrap-fish-user-local-path:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: user-local-path
+        INSTALL_FISH: "true"
+        LOGIN_SHELL: /usr/bin/fish
+    image: pocketshell-test:bootstrap-fish-user-local-path
+    container_name: pocketshell-test-bootstrap-fish-user-local-path
+    ports:
+      - "2235:22"

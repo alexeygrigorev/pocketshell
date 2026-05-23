@@ -120,6 +120,14 @@ class HostBootstrapScenarioSuiteTest {
         waitForReadyNavigation()
     }
 
+    @Test
+    fun fishUserLocalPath() = scenario("fish-user-local-path") {
+        launchSeededHost()
+        tapSeededHost()
+
+        waitForReadyNavigation()
+    }
+
     private fun scenario(name: String, block: ScenarioContext.() -> Unit) = runBlocking {
         assumeScenariosEnabled()
         val definition = requireNotNull(SCENARIOS[name]) { "unknown bootstrap scenario: $name" }
@@ -306,6 +314,11 @@ class HostBootstrapScenarioSuiteTest {
             "user-local-path" to ScenarioDefinition(
                 label = "user local path",
                 port = 2234,
+                resetCommand = "printf 'active enabled\\n' > $STATE_FILE",
+            ),
+            "fish-user-local-path" to ScenarioDefinition(
+                label = "fish user local path",
+                port = 2235,
                 resetCommand = "printf 'active enabled\\n' > $STATE_FILE",
             ),
         )

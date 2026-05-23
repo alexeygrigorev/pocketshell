@@ -1,11 +1,15 @@
 FROM alpine:latest
 
 ARG SCENARIO=ready
+ARG INSTALL_FISH=false
+ARG LOGIN_SHELL=/bin/sh
 ENV POCKETSHELL_BOOTSTRAP_SCENARIO=${SCENARIO}
 
-RUN apk add --no-cache openssh-server tmux procps \
+RUN packages="openssh-server tmux procps" \
+    && if [ "$INSTALL_FISH" = "true" ]; then packages="$packages fish"; fi \
+    && apk add --no-cache $packages \
     && ssh-keygen -A \
-    && adduser -D -s /bin/sh testuser \
+    && adduser -D -s "$LOGIN_SHELL" testuser \
     && passwd -u testuser \
     && mkdir -p /home/testuser/.ssh \
     && chmod 700 /home/testuser/.ssh

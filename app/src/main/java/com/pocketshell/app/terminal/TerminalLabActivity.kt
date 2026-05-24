@@ -215,16 +215,44 @@ class TerminalLabController(
         }
     }
 
+    /**
+     * Issue #104: per-chunk callback wired into the SSH output flow via
+     * `.onEach(::recordOutput)`. Originally also pumped the full transcript
+     * snapshot into [_uiState] on every chunk; under live remote output
+     * (e.g. an agent CLI streaming hundreds of bytes per second) that
+     * snapshot copy ran on the Main thread for every read, ballooning to
+     * ~24 KB per chunk and blocking IME echo of typed characters until the
+     * stream calmed down. The lab activity does not actually render the
+     * transcript anywhere — `TerminalLabScreen` discards the collected
+     * `uiState` — so the per-chunk `copy(transcript=)` was pure waste.
+     *
+     * The bookkeeping kept here is:
+     *
+     * - Appending bytes to the [transcript] StringBuilder for the
+     *   instrumented test path (`transcriptSnapshot()` is the only public
+     *   reader and it does its own `.toString()` snapshot under the lock).
+     * - Recording the connect-to-prompt latency exactly once on first
+     *   output. [_uiState] is updated only at that transition, not on
+     *   every chunk.
+     */
     private fun recordOutput(bytes: ByteArray) {
         if (bytes.isEmpty()) return
         val now = SystemClock.elapsedRealtime()
         val text = bytes.toString(Charsets.UTF_8)
-        val snapshot = synchronized(transcript) {
+        var hadContent = false
+        var transcriptLooksLikePrompt = false
+        synchronized(transcript) {
             transcript.append(text)
             if (transcript.length > MaxTranscriptChars) {
                 transcript.delete(0, transcript.length - MaxTranscriptChars)
             }
-            transcript.toString()
+            hadContent = transcript.isNotEmpty()
+            // Only do the heavy `looksLikePrompt` scan if we still have not
+            // recorded the connect-to-prompt time. After that, the result
+            // is unused and we skip the scan entirely.
+            if (hadContent && _uiState.value.connectToPromptMs == null) {
+                transcriptLooksLikePrompt = looksLikePromptTail()
+            }
         }
 
         val pendingSendMs = pendingSendStartedAtMs?.let { now - it }
@@ -233,13 +261,43 @@ class TerminalLabController(
         }
 
         val current = _uiState.value
-        val connectToPromptMs = current.connectToPromptMs
-            ?: if (looksLikePrompt(snapshot) || snapshot.isNotBlank()) now - connectStartedAtMs else null
-        _uiState.value = current.copy(
-            transcript = snapshot,
-            connectToPromptMs = connectToPromptMs,
-            lastSendToOutputMs = pendingSendMs ?: current.lastSendToOutputMs,
-        )
+        val needsPromptUpdate =
+            current.connectToPromptMs == null && (transcriptLooksLikePrompt || hadContent)
+        if (needsPromptUpdate || pendingSendMs != null) {
+            _uiState.value = current.copy(
+                connectToPromptMs = if (needsPromptUpdate) {
+                    now - connectStartedAtMs
+                } else {
+                    current.connectToPromptMs
+                },
+                lastSendToOutputMs = pendingSendMs ?: current.lastSendToOutputMs,
+            )
+        }
+    }
+
+    /**
+     * Issue #104: cheaper variant of the original `looksLikePrompt(snapshot)`
+     * call. Operates directly on the trailing window of the existing
+     * [transcript] StringBuilder so we avoid building a fresh
+     * `transcript.toString()` (up to 24 KB allocation per chunk) just to
+     * check the last few lines. Must be called while holding the
+     * [transcript] monitor.
+     */
+    private fun looksLikePromptTail(): Boolean {
+        val length = transcript.length
+        if (length == 0) return false
+        val windowStart = (length - LooksLikePromptWindowChars).coerceAtLeast(0)
+        // Walk backwards counting recent line breaks until we have up to
+        // the last 4 logical lines worth of trailing characters. This
+        // avoids string splitting and list allocation entirely.
+        val tail = transcript.substring(windowStart)
+        val normalized = tail.replace("\r", "")
+        val lines = normalized.split('\n')
+        val lastFour = if (lines.size <= 4) lines else lines.subList(lines.size - 4, lines.size)
+        return lastFour.any { candidate ->
+            val trimmed = candidate.trimEnd()
+            trimmed == "$" || trimmed.endsWith(" $") || trimmed.endsWith("~ $") || trimmed.endsWith("#")
+        }
     }
 
     override fun close() {
@@ -253,18 +311,18 @@ class TerminalLabController(
         ignoreClose { handle?.client?.disconnect() }
     }
 
-    private fun looksLikePrompt(text: String): Boolean {
-        val normalized = text.replace("\r", "")
-        return normalized
-            .lineSequence()
-            .toList()
-            .takeLast(4)
-            .map { it.trimEnd() }
-            .any { it == "$" || it.endsWith(" $") || it.endsWith("~ $") || it.endsWith("#") }
-    }
-
     private companion object {
         const val MaxTranscriptChars: Int = 24_000
+
+        /**
+         * Issue #104: cap how many trailing characters we re-scan for the
+         * `looksLikePrompt` heuristic. 1 KB easily covers four 80-column
+         * lines plus their CRLF terminators, which is what the original
+         * `takeLast(4)` was looking at. Bounding the scan keeps
+         * [looksLikePromptTail] O(1) per chunk even when the transcript is
+         * at its full 24 KB cap.
+         */
+        const val LooksLikePromptWindowChars: Int = 1_024
     }
 }
 

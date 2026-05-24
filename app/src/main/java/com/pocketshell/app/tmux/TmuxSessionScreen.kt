@@ -1,5 +1,9 @@
 package com.pocketshell.app.tmux
 
+import android.Manifest
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
@@ -59,13 +63,18 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
+import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.app.composer.PromptComposerSheet
+import com.pocketshell.app.session.InlineDictationViewModel
+import com.pocketshell.app.session.KeyBarWithMic
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
@@ -73,7 +82,13 @@ import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
+import com.pocketshell.app.snippets.SnippetPickerSheet
+import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
+import com.pocketshell.app.voice.BottomChipControls
+import com.pocketshell.app.voice.DefaultSessionChips
+import com.pocketshell.app.voice.InlineDictationErrorStrip
+import com.pocketshell.app.voice.VoiceCommandReviewStrip
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.storage.entity.HostEntity
@@ -113,6 +128,7 @@ import kotlin.math.abs
  * tmux client, and the per-pane terminal state holders all live in the
  * view model.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 public fun TmuxSessionScreen(
     viewModel: TmuxSessionViewModel,
@@ -127,6 +143,7 @@ public fun TmuxSessionScreen(
     startDirectory: String? = null,
     modifier: Modifier = Modifier,
     sessionPickerViewModel: HostTmuxSessionPickerViewModel = hiltViewModel(),
+    inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
     onBack: () -> Unit = {},
     onOpenTmuxSession: (sessionName: String, startDirectory: String?) -> Unit = { _, _ -> },
     onReplaceTmuxSession: (sessionName: String) -> Unit = {},
@@ -151,6 +168,8 @@ public fun TmuxSessionScreen(
     val status by viewModel.connectionStatus.collectAsState()
     val agentConversations by viewModel.agentConversations.collectAsState()
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
+    val voiceCommandReview by viewModel.voiceCommandReview.collectAsState()
+    val dictationState by inlineDictationViewModel.uiState.collectAsState()
 
     val pagerState = rememberPagerState(pageCount = { panes.size })
 
@@ -175,6 +194,49 @@ public fun TmuxSessionScreen(
     var dialogStartDirectory by remember { mutableStateOf(DEFAULT_TMUX_START_DIRECTORY) }
     var showWindowSwitcher by remember { mutableStateOf(false) }
     var showSessionDrawer by remember { mutableStateOf(false) }
+    // Voice/dictation surfaces — mirror SessionScreen so the tmux route
+    // gets the prompt composer, the mic FAB, the inline-dictation key bar,
+    // and the snippet picker. Without these the user can never dictate
+    // into a tmux pane (see #123 — the primary user route was completely
+    // dark for voice input).
+    var showMicSheet by remember { mutableStateOf(false) }
+    var showSnippetPicker by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    // Route inline-dictation transcripts into the currently focused pane.
+    // The collector re-binds whenever the focused pane or dictation mode
+    // changes so we always write into the pane the user is looking at, not
+    // some stale pane id captured at first composition. Prompt-mode bytes
+    // go straight to the pane via `send-keys`; Command-mode bytes go
+    // through the planner for explicit review (mirroring SessionScreen).
+    val focusedPaneId = currentPane?.paneId
+    LaunchedEffect(inlineDictationViewModel, dictationState.mode, focusedPaneId) {
+        inlineDictationViewModel.transcriptions.collect { text ->
+            val paneId = focusedPaneId ?: return@collect
+            when (dictationState.mode) {
+                InlineDictationViewModel.DictationMode.Prompt -> {
+                    if (text.isNotEmpty()) {
+                        viewModel.writeInputToPane(paneId, text.toByteArray(Charsets.UTF_8))
+                    }
+                }
+                InlineDictationViewModel.DictationMode.Command -> viewModel.planVoiceCommand(text)
+            }
+        }
+    }
+
+    // Runtime RECORD_AUDIO gate for the inline-dictation path. Mirrors the
+    // raw-SSH SessionScreen permission launcher; the OS only ever shows one
+    // prompt because the grant is per-package.
+    val inlinePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            inlineDictationViewModel.onMicTap()
+        } else {
+            inlineDictationViewModel.surfacePermissionDenied()
+        }
+    }
+
     val sessionPickerRequest = remember(hostId, hostName, host, port, user, keyPath, passphrase) {
         HostTmuxSessionPickerRequest(
             host = HostEntity(
@@ -371,12 +433,82 @@ public fun TmuxSessionScreen(
                 }
             }
 
+            // Voice-related strips sit above the input band so they remain
+            // visible while the IME is up. Tapping the error strip clears
+            // it; the planner review strip's buttons route through the
+            // currently focused pane.
+            dictationState.error?.let { msg ->
+                InlineDictationErrorStrip(msg, onDismiss = inlineDictationViewModel::clearError)
+            }
+            VoiceCommandReviewStrip(
+                state = voiceCommandReview,
+                onInsert = {
+                    currentPane?.let { pane ->
+                        viewModel.approvePendingVoiceCommand(pane.paneId, withEnter = false)
+                    }
+                },
+                onRun = {
+                    currentPane?.let { pane ->
+                        viewModel.approvePendingVoiceCommand(pane.paneId, withEnter = true)
+                    }
+                },
+                onDismiss = viewModel::dismissVoiceCommandReview,
+            )
+
             if (isImeVisible && currentPane != null) {
-                KeyBar(
+                KeyBarWithMic(
                     keys = KeyBarLayout,
                     onKey = { binding ->
                         viewModel.onKeyBarKey(currentPane.paneId, binding.label)
                     },
+                    micState = dictationState.recording,
+                    micAmplitude = dictationState.amplitude,
+                    dictationMode = dictationState.mode,
+                    onDictationModeSelected = inlineDictationViewModel::selectMode,
+                    onMicTap = {
+                        // Three-step gate identical to SessionScreen: runtime
+                        // permission → stored API key → recorder. Without an
+                        // API key we open the prompt composer (which hosts
+                        // the key-entry dialog) rather than dead-ending in a
+                        // silent banner.
+                        val granted = ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.RECORD_AUDIO,
+                        ) == PackageManager.PERMISSION_GRANTED
+                        if (!granted) {
+                            inlinePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                            return@KeyBarWithMic
+                        }
+                        if (!inlineDictationViewModel.hasApiKey()) {
+                            showMicSheet = true
+                            return@KeyBarWithMic
+                        }
+                        inlineDictationViewModel.onMicTap()
+                    },
+                )
+            } else if (!isImeVisible && currentPane != null) {
+                BottomChipControls(
+                    chips = DefaultSessionChips,
+                    onChipTap = { chip ->
+                        // Chip taps run literal commands in the focused
+                        // pane. Mirrors `SessionViewModel.onChipTap` which
+                        // appends a CR; the tmux input bridge translates
+                        // the trailing CR into a named `Enter` key.
+                        currentPane?.let { pane ->
+                            viewModel.writeInputToPane(
+                                pane.paneId,
+                                (chip + "\r").toByteArray(Charsets.UTF_8),
+                            )
+                        }
+                    },
+                    onDictateTap = { showMicSheet = true },
+                    onAddSnippetTap = if (hostId != 0L) {
+                        { showSnippetPicker = true }
+                    } else null,
+                    // Project navigation on tmux panes is a separate
+                    // follow-up — see #123 notes on per-pane cwd /
+                    // project-root wiring.
+                    onProjectNavigationTap = null,
                 )
             }
 
@@ -503,6 +635,51 @@ public fun TmuxSessionScreen(
         if (showSessionDrawer) {
             sessionPickerViewModel.load(sessionPickerRequest)
         }
+    }
+
+    if (showMicSheet) {
+        // PromptComposerSheet drives dictation + the one-field API-key
+        // entry dialog (the inline-dictation path delegates the key entry
+        // here too). `onSend` routes through writeInputToPane so the
+        // composer's Send / Send+Enter buttons reach the focused tmux pane
+        // via `send-keys`, identical to chip taps and snippet picks.
+        PromptComposerSheet(
+            onDismiss = { showMicSheet = false },
+            onSend = { text, withEnter ->
+                currentPane?.let { pane ->
+                    val payload = if (withEnter) text + "\r" else text
+                    viewModel.writeInputToPane(
+                        pane.paneId,
+                        payload.toByteArray(Charsets.UTF_8),
+                    )
+                }
+                showMicSheet = false
+            },
+            hostId = hostId.takeIf { it != 0L },
+        )
+    }
+
+    if (showSnippetPicker && hostId != 0L) {
+        // Mirrors SessionScreen's snippet wiring. Command snippets execute
+        // immediately (CR appended); Prompt snippets are inserted without
+        // CR so the user can continue editing before pressing Enter.
+        SnippetPickerSheet(
+            hostId = hostId,
+            onDismiss = { showSnippetPicker = false },
+            onSnippetPicked = { snippet ->
+                currentPane?.let { pane ->
+                    val payload = when (SnippetKind.fromStorage(snippet.kind)) {
+                        SnippetKind.Command -> snippet.body + "\r"
+                        SnippetKind.Prompt -> snippet.body
+                    }
+                    viewModel.writeInputToPane(
+                        pane.paneId,
+                        payload.toByteArray(Charsets.UTF_8),
+                    )
+                }
+                showSnippetPicker = false
+            },
+        )
     }
 }
 

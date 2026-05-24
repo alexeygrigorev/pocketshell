@@ -2,9 +2,11 @@ package com.pocketshell.app.tmux
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.di.CommandPlannerClientFactory
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.SessionTab
+import com.pocketshell.app.session.VoiceCommandReviewUiState
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
@@ -19,6 +21,10 @@ import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.protocol.ControlEvent
+import com.pocketshell.core.voice.CommandPlannerException
+import com.pocketshell.core.voice.CommandPlannerRequest
+import com.pocketshell.core.voice.CommandPlannerSafetyConstraints
+import com.pocketshell.core.voice.CommandPlannerSessionMetadata
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -88,6 +94,8 @@ import javax.inject.Inject
 public class TmuxSessionViewModel @Inject constructor(
     private val tmuxClientFactory: TmuxClientFactory,
     private val activeTmuxClients: ActiveTmuxClients,
+    private val commandPlannerClientFactory: CommandPlannerClientFactory =
+        CommandPlannerClientFactory { null },
 ) : ViewModel() {
 
     private val _panes: MutableStateFlow<List<TmuxPaneState>> =
@@ -118,6 +126,21 @@ public class TmuxSessionViewModel @Inject constructor(
     /** Coarse-grained status the screen surfaces above the terminal. */
     public val connectionStatus: StateFlow<ConnectionStatus> =
         _connectionStatus.asStateFlow()
+
+    // Voice Command-mode planner state — mirrors
+    // [com.pocketshell.app.session.SessionViewModel]'s voice planner so the
+    // tmux route (host tap → tmux picker → "Attach to session") gets the
+    // same dictate-then-review affordance as the raw-SSH route. The pending
+    // plan is screen-global, not per-pane, because the user reviews and
+    // approves one transcript at a time; the approving call targets the
+    // currently focused pane (see [approvePendingVoiceCommand]).
+    private val _voiceCommandReview: MutableStateFlow<VoiceCommandReviewUiState> =
+        MutableStateFlow(VoiceCommandReviewUiState())
+
+    public val voiceCommandReview: StateFlow<VoiceCommandReviewUiState> =
+        _voiceCommandReview.asStateFlow()
+
+    private var commandPlannerJob: Job? = null
 
     private var sessionRef: SshSession? = null
     private var clientRef: TmuxClient? = null
@@ -582,6 +605,110 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Voice Command-mode transcript entry point. Mirrors
+     * [com.pocketshell.app.session.SessionViewModel.planVoiceCommand]:
+     * Prompt-mode dictation writes the transcript bytes directly into the
+     * pane (via [writeInputToPane]); Command mode lands here so the
+     * generated shell commands are planned, validated, and held for
+     * explicit user review before they reach a pane.
+     */
+    public fun planVoiceCommand(transcript: String) {
+        val cleaned = transcript.trim()
+        if (cleaned.isEmpty()) return
+        if (commandPlannerJob?.isActive == true) return
+
+        val client = commandPlannerClientFactory.create()
+        if (client == null) {
+            _voiceCommandReview.value = VoiceCommandReviewUiState(
+                error = "No OpenAI API key saved. Open the composer to add one.",
+            )
+            return
+        }
+
+        _voiceCommandReview.value = VoiceCommandReviewUiState(
+            isPlanning = true,
+            transcript = cleaned,
+        )
+        commandPlannerJob = viewModelScope.launch {
+            val result = client.plan(
+                CommandPlannerRequest(
+                    transcript = cleaned,
+                    session = commandPlannerSessionMetadata(),
+                    safety = CommandPlannerSafetyConstraints(
+                        requireReviewBeforeExecution = true,
+                        allowAutoSend = false,
+                    ),
+                ),
+            )
+            _voiceCommandReview.value = result.fold(
+                onSuccess = { plan ->
+                    VoiceCommandReviewUiState(
+                        transcript = cleaned,
+                        pendingPlan = plan,
+                    )
+                },
+                onFailure = { error ->
+                    VoiceCommandReviewUiState(
+                        transcript = cleaned,
+                        error = commandPlannerMessage(error),
+                    )
+                },
+            )
+        }
+    }
+
+    /**
+     * Approve the held [voiceCommandReview] plan and route its commands
+     * into [paneId] through the same `send-keys` bridge used by chip taps,
+     * inline dictation prompt-mode, and snippet picks. `withEnter = true`
+     * sends Enter after the literal so the command runs; `false` inserts
+     * the bytes only so the user can keep editing.
+     */
+    public fun approvePendingVoiceCommand(paneId: String, withEnter: Boolean) {
+        val plan = _voiceCommandReview.value.pendingPlan ?: return
+        if (paneId.isBlank()) return
+        val joined = plan.commands.joinToString("\n") { it.command }
+        val payload = if (withEnter) joined + "\r" else joined
+        writeInputToPane(paneId, payload.toByteArray(Charsets.UTF_8))
+        _voiceCommandReview.value = VoiceCommandReviewUiState()
+    }
+
+    public fun dismissVoiceCommandReview() {
+        commandPlannerJob?.cancel()
+        _voiceCommandReview.value = VoiceCommandReviewUiState()
+    }
+
+    private fun commandPlannerSessionMetadata(): CommandPlannerSessionMetadata {
+        val connected = _connectionStatus.value as? ConnectionStatus.Connected
+        val target = activeTarget
+        return CommandPlannerSessionMetadata(
+            hostLabel = target?.hostName?.takeIf { it.isNotBlank() }
+                ?: connected?.host
+                ?: target?.host
+                ?: "",
+            username = connected?.user ?: target?.user ?: "",
+            // Per-pane current directory, project roots, and shell type
+            // remain a separate follow-up (see #123 — they are not in
+            // scope for this implementer pass). Tmux pane `cwd` is
+            // already cached on TmuxPaneState but threading it through
+            // here would expand scope into per-pane metadata wiring.
+            currentDirectory = null,
+            projectRoots = emptyList(),
+            shellType = null,
+        )
+    }
+
+    private fun commandPlannerMessage(error: Throwable): String = when (error) {
+        is CommandPlannerException.Rejected -> "Command planner rejected this request: ${error.message}"
+        is CommandPlannerException.Auth -> "Command planner credentials were rejected."
+        is CommandPlannerException.RateLimited -> "Command planner is rate limited. Try again later."
+        is CommandPlannerException.Server -> "Command planner service failed. Try again later."
+        is CommandPlannerException.Parse -> "Command planner returned an invalid response."
+        is CommandPlannerException.Transport -> "Command planner could not be reached."
+        else -> error.message ?: "Command planner failed."
+    }
+
     private fun inputSinkForPane(paneId: String): OutputStream {
         val channel = paneInputChannels.getOrPut(paneId) {
             Channel<ByteArray>(Channel.UNLIMITED).also { newChannel ->
@@ -779,6 +906,8 @@ public class TmuxSessionViewModel @Inject constructor(
     override fun onCleared() {
         connectJob?.cancel()
         connectJob = null
+        commandPlannerJob?.cancel()
+        commandPlannerJob = null
         closeCurrentConnection()
         // bridgeScope is parented to viewModelScope, so its SupervisorJob
         // tears down automatically when viewModelScope cancels post-super

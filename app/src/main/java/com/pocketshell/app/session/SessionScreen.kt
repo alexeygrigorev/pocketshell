@@ -7,13 +7,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -21,10 +19,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -42,9 +38,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
@@ -55,18 +48,19 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
 import com.pocketshell.app.snippets.SnippetPickerSheet
+import com.pocketshell.app.voice.BottomChipControls
+import com.pocketshell.app.voice.DefaultSessionChips
+import com.pocketshell.app.voice.InlineDictationErrorStrip
+import com.pocketshell.app.voice.VoiceCommandReviewStrip
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.uikit.components.Breadcrumb
-import com.pocketshell.uikit.components.CommandChip
-import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.components.Tabs
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.model.KeyModifierState
-import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
 
 internal const val SESSION_SCREEN_TAG = "session:screen"
@@ -297,13 +291,13 @@ public fun SessionScreen(
                 )
             } else {
                 BottomChipControls(
-                    chips = DefaultChips,
+                    chips = DefaultSessionChips,
                     onChipTap = viewModel::onChipTap,
-                    onProjectNavigationTap = { showProjectNavigation = true },
                     onDictateTap = { showMicSheet = true },
                     onAddSnippetTap = if (hostId != null) {
                         { showSnippetPicker = true }
                     } else null,
+                    onProjectNavigationTap = { showProjectNavigation = true },
                 )
             }
         }
@@ -553,88 +547,6 @@ private fun StatusLine(text: String) {
 }
 
 /**
- * Compact one-line error strip surfaced when the inline-dictation FSM
- * reports a permission / API-key / Whisper failure. Tapping the strip
- * dismisses the banner; the next mic tap also clears it via the
- * ViewModel's `clearError()`. Visually distinct from the armed-modifier
- * strip — accent-soft fill with an accent-dim top border, full-width.
- */
-@Composable
-private fun InlineDictationErrorStrip(message: String, onDismiss: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.AccentSoft)
-            .border(width = 1.dp, color = PocketShellColors.AccentDim)
-            .clickable(onClick = onDismiss)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
-        contentAlignment = Alignment.CenterStart,
-    ) {
-        Text(
-            text = message,
-            color = PocketShellColors.Accent,
-            fontSize = 11.sp,
-        )
-    }
-}
-
-@Composable
-private fun VoiceCommandReviewStrip(
-    state: VoiceCommandReviewUiState,
-    onInsert: () -> Unit,
-    onRun: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    val plan = state.pendingPlan
-    if (!state.isPlanning && state.error == null && plan == null) return
-
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .border(width = 1.dp, color = PocketShellColors.AccentDim)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Text(
-            text = when {
-                state.isPlanning -> "Planning command..."
-                state.error != null -> state.error
-                else -> "Review planned command"
-            },
-            color = if (state.error != null) PocketShellColors.Accent else PocketShellColors.Text,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-        )
-        if (plan != null) {
-            Text(
-                text = plan.commands.joinToString("\n") { it.command },
-                color = PocketShellColors.Text,
-                fontSize = 12.sp,
-            )
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TextButton(onClick = onInsert) {
-                    Text("Insert")
-                }
-                TextButton(onClick = onRun) {
-                    Text("Run")
-                }
-                TextButton(onClick = onDismiss) {
-                    Text("Dismiss")
-                }
-            }
-        } else if (state.error != null) {
-            TextButton(onClick = onDismiss) {
-                Text("Dismiss")
-            }
-        }
-    }
-}
-
-/**
  * Small accent strip surfaced while one or more sticky modifiers are
  * active. It gives a textual hint alongside the key bar's active-key
  * treatment, especially for the locked state.
@@ -807,106 +719,6 @@ private fun DirectoryShortcutRow(item: ProjectNavigationItem, onClick: () -> Uni
 }
 
 /**
- * Always-visible chip row (only when the IME is hidden, per
- * `docs/input-methods.md` §"Screen real estate"). The first chip is the
- * `dictate` icon chip — tapping it opens the composer placeholder; the
- * rest write their literal text + `\n` into the terminal.
- *
- * Issue #17: a trailing `+` chip opens the snippet picker when a host
- * is bound (see [onAddSnippetTap]). It is rendered with the accent
- * `icon-chip` treatment to mirror the dictate entry's "actionable"
- * visual weight.
- */
-@Composable
-private fun ChipRow(
-    chips: List<String>,
-    onChipTap: (String) -> Unit,
-    onProjectNavigationTap: () -> Unit,
-    onDictateTap: () -> Unit,
-    onAddSnippetTap: (() -> Unit)? = null,
-    modifier: Modifier = Modifier,
-) {
-    val scrollState = rememberScrollState()
-    Row(
-        modifier = modifier
-            .horizontalScroll(scrollState)
-            .padding(start = 8.dp, top = 8.dp, end = 8.dp, bottom = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        // The dictate chip uses the accent treatment via the ui-kit's
-        // `icon-chip` mode. We pass a small filled-circle marker so the
-        // ui-kit picks the accent style without us having to ship a real
-        // icon set yet (the ui-kit's CommandChip swaps `ImageVector` once
-        // the design language gets a proper icon ramp).
-        CommandChip(
-            label = "dictate",
-            onClick = onDictateTap,
-            icon = DictateDotIcon,
-        )
-        CommandChip(
-            label = "dirs",
-            onClick = onProjectNavigationTap,
-            icon = DictateDotIcon,
-        )
-        if (onAddSnippetTap != null) {
-            // Issue #17: "+" icon-chip routes the user into the snippet
-            // picker. Reuses the accent `icon-chip` treatment so the
-            // affordance reads as an action, not a literal text payload.
-            CommandChip(
-                label = "+ snippet",
-                onClick = onAddSnippetTap,
-                icon = DictateDotIcon,
-            )
-        }
-        chips.forEach { chip ->
-            CommandChip(
-                label = chip,
-                onClick = { onChipTap(chip) },
-            )
-        }
-        Spacer(modifier = Modifier.width(4.dp))
-    }
-}
-
-@Composable
-private fun BottomChipControls(
-    chips: List<String>,
-    onChipTap: (String) -> Unit,
-    onProjectNavigationTap: () -> Unit,
-    onDictateTap: () -> Unit,
-    onAddSnippetTap: (() -> Unit)? = null,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .border(width = 1.dp, color = PocketShellColors.Border),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        ChipRow(
-            chips = chips,
-            onChipTap = onChipTap,
-            onProjectNavigationTap = onProjectNavigationTap,
-            onDictateTap = onDictateTap,
-            onAddSnippetTap = onAddSnippetTap,
-            modifier = Modifier.weight(1f),
-        )
-        Box(
-            modifier = Modifier
-                .width(80.dp)
-                .padding(end = 12.dp),
-            contentAlignment = Alignment.CenterEnd,
-        ) {
-            MicButton(
-                state = MicButtonState.Idle,
-                onClick = onDictateTap,
-            )
-        }
-    }
-}
-
-/**
  * The 8 bar slots from `docs/mockups/session.html`:
  *
  * - Esc, Tab, Ctrl, Alt, then four arrows.
@@ -924,55 +736,6 @@ private val KeyBarLayout: List<KeyBinding> = listOf(
     KeyBinding(label = "⌃", kind = KeyKind.Arrow),
     KeyBinding(label = "⌄", kind = KeyKind.Arrow),
     KeyBinding(label = "›", kind = KeyKind.Arrow),
-)
-
-/**
- * A 24x24 filled dot used as the dictate chip's leading icon. We build
- * the [ImageVector] inline rather than pull in `material-icons-extended`
- * for one glyph — the icon set already in the classpath
- * (`material-icons-core`, transitively from material3) does not ship a
- * standalone `Filled.Circle`.
- */
-private val DictateDotIcon: ImageVector = ImageVector.Builder(
-    name = "DictateDot",
-    defaultWidth = 24.dp,
-    defaultHeight = 24.dp,
-    viewportWidth = 24f,
-    viewportHeight = 24f,
-).addCirclePath(
-    fill = SolidColor(androidx.compose.ui.graphics.Color.White),
-).build()
-
-/**
- * Build a filled circle centred at (12, 12) with radius 6 in the path
- * data, then append it to this [ImageVector.Builder]. Kept as a private
- * extension so the inline icon definition stays declarative.
- *
- * Uses two relative arcs (the standard SVG idiom for a circle: a half-arc
- * down, then a half-arc back up) so we do not need an `Oval` primitive in
- * the path-node vocabulary.
- */
-private fun ImageVector.Builder.addCirclePath(fill: SolidColor): ImageVector.Builder {
-    val builder = PathBuilder()
-    builder.moveTo(12f, 6f)
-    // arcToRelative(a, b, theta, isMoreThanHalf, isPositiveArc, dx1, dy1)
-    builder.arcToRelative(6f, 6f, 0f, true, true, 0f, 12f)
-    builder.arcToRelative(6f, 6f, 0f, true, true, 0f, -12f)
-    builder.close()
-    addPath(pathData = builder.nodes, fill = fill)
-    return this
-}
-
-/**
- * v1 chip set — matches `docs/mockups/session.html`'s `.chip-row`
- * (without the dictate entry, which the screen renders separately as the
- * icon chip). Phase 2 / #18 will source these from per-host storage.
- */
-private val DefaultChips: List<String> = listOf(
-    "git status",
-    "tmux ls",
-    "k logs",
-    "clear",
 )
 
 private val SessionViewModel.Modifier.keyBarLabel: String

@@ -131,6 +131,10 @@ dependencies {
     implementation(libs.material)
     implementation(libs.androidx.biometric)
     implementation(libs.zxing.core)
+    // Issue #129: live camera scanner for QR-import. Brings a CameraX-
+    // based scanner Activity + a Compose-friendly `DecoratedBarcodeView`
+    // on top of the existing `com.google.zxing:core` decoder.
+    implementation(libs.zxing.android.embedded)
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)

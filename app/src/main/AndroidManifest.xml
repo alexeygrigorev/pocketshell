@@ -21,6 +21,20 @@
     -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!--
+        Issue #129: live QR camera scanner. The user points the phone
+        camera at a QR code rendered on their desktop to import a host
+        config + SSH key without saving anything to disk. The runtime
+        rationale is in `R.string.qr_scanner_camera_permission_rationale`
+        and surfaced by `QrScannerScreen` before the system prompt fires.
+        Declared optional so devices without a back camera can still
+        install the app; the scanner screen routes to the file-picker
+        fallback when the hardware is absent.
+    -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -40,6 +54,28 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--
+                Issue #129: deep-link `pocketshell://import?payload=...`
+                URLs route directly to the host-import path. MainActivity
+                inspects the launching intent in `onCreate` /
+                `onNewIntent` and hands the `payload` query parameter to
+                `HostListViewModel.importSharedHostPayload`. `BROWSABLE`
+                is required so the link is followable from a browser /
+                share sheet; `DEFAULT` makes the implicit-intent match
+                succeed without an explicit component.
+
+                The desktop emitter under `tools/qr-share/` can emit a
+                single deep-link URL for the common case where a host
+                config (no embedded key) fits inside the URL budget, so
+                the user only ever sees one tap-to-import action.
+            -->
+            <intent-filter android:autoVerify="false">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="pocketshell" android:host="import" />
             </intent-filter>
         </activity>
 

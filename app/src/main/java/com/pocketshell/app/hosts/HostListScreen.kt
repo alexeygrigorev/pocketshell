@@ -117,6 +117,10 @@ fun HostListScreen(
     // entry point later (e.g. a deep link) without re-threading state.
     @Suppress("UNUSED_PARAMETER") onOpenCrashReports: () -> Unit,
     onOpenSettings: () -> Unit = {},
+    // Issue #129: live QR scanner destination. Optional so older callers
+    // that haven't wired the destination yet keep compiling, but the
+    // production nav graph in `MainActivity` always supplies it.
+    onOpenScan: () -> Unit = {},
     onOpenSession: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit,
     onOpenTmuxHostSession: (
         HostEntity,
@@ -302,6 +306,7 @@ fun HostListScreen(
             HostsAppBar(
                 onKeysClick = onManageKeys,
                 onImportHostClick = { hostSharePicker.launch("*/*") },
+                onScanClick = onOpenScan,
                 onSettingsClick = onOpenSettings,
             )
 
@@ -692,6 +697,7 @@ private fun VersionFooter(versionName: String) {
 private fun HostsAppBar(
     onKeysClick: () -> Unit,
     onImportHostClick: () -> Unit,
+    onScanClick: () -> Unit,
     onSettingsClick: () -> Unit = {},
 ) {
     Column(
@@ -722,6 +728,7 @@ private fun HostsAppBar(
             onHostsClick = { /* already on Hosts; no-op */ },
             onSettingsClick = onSettingsClick,
             onImportClick = onImportHostClick,
+            onScanClick = onScanClick,
             onKeysClick = onKeysClick,
         )
     }
@@ -758,12 +765,20 @@ private fun HostsTabRow(
     onHostsClick: () -> Unit,
     onSettingsClick: () -> Unit,
     onImportClick: () -> Unit,
+    onScanClick: () -> Unit,
     onKeysClick: () -> Unit,
 ) {
+    // Issue #129: a dedicated "Scan" tab sits next to "Import" so the
+    // user can pick between camera-scan and pick-a-file flows from the
+    // same row. The two tabs do related work but the user surfaces are
+    // different enough — file picker vs camera permission prompt — that
+    // bundling them under a single entry point would hide the camera
+    // affordance.
     val tabs = listOf(
         "Hosts" to onHostsClick,
         "Settings" to onSettingsClick,
         "Import" to onImportClick,
+        "Scan" to onScanClick,
         "Keys" to onKeysClick,
     )
     TabRow(

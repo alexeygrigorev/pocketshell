@@ -5,4 +5,16 @@
     <string name="widget_active_sessions_description">Shows the latest active tmux session count.</string>
     <string name="widget_active_sessions_empty">0 active sessions</string>
     <string name="qs_forwarding_tile_label">PocketShell Forwarding</string>
+
+    <!-- Issue #129: rationale shown above the system Camera permission prompt when the user opens the QR scanner. -->
+    <string name="qr_scanner_camera_permission_rationale">PocketShell needs camera access to scan QR codes from your desktop. Camera frames are processed on-device and never leave your phone.</string>
+    <string name="qr_scanner_title">Scan host QR</string>
+    <string name="qr_scanner_prompt">Point the camera at the QR code shown by the PocketShell desktop helper. PocketShell never uploads the camera feed — codes are decoded locally.</string>
+    <string name="qr_scanner_progress_chip">Scanned %1$d of %2$d</string>
+    <string name="qr_scanner_permission_denied">Camera access is required to scan QR codes. Grant the permission in system settings, or use Import from a saved file instead.</string>
+    <string name="qr_scanner_permission_retry">Grant access</string>
+    <string name="qr_scanner_fallback_pick_file">Pick a saved QR or JSON file</string>
+    <string name="qr_scanner_error_generic">Could not decode that QR. Hold the phone steady and try again.</string>
+    <string name="qr_scanner_retry">Retry</string>
+    <string name="qr_scanner_close">Close</string>
 </resources>

@@ -19,6 +19,14 @@ activity-compose = "1.10.1"
 material = "1.12.0"
 androidx-biometric = "1.1.0"
 zxing = "3.5.3"
+# Live camera scanner for QR import (issue #129). The
+# zxing-android-embedded library wraps the upstream `com.google.zxing:core`
+# (already on the classpath for static QR encoding/decoding) with a
+# CameraX-backed scanning Activity / Compose-compatible view. Picked over
+# ML Kit because it's a single small AAR with no Play Services
+# dependency, which keeps the F-Droid story unblocked and matches the
+# existing zxing pin.
+zxing-android-embedded = "4.3.0"
 
 # hilt-navigation-compose (issue #18 follow-up #38). Provides
 # `hiltViewModel()` for composables. Tracks Compose / lifecycle versions in
@@ -67,6 +75,7 @@ activity-compose = { group = "androidx.activity", name = "activity-compose", ver
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 androidx-biometric = { group = "androidx.biometric", name = "biometric", version.ref = "androidx-biometric" }
 zxing-core = { group = "com.google.zxing", name = "core", version.ref = "zxing" }
+zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxing-android-embedded" }
 
 compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "compose-bom" }
 compose-ui = { group = "androidx.compose.ui", name = "ui" }

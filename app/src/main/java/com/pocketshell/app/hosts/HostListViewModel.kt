@@ -252,6 +252,23 @@ class HostListViewModel @Inject constructor(
     }
 
     private suspend fun importSharedHostPayloadInternal(payload: String) {
+        // Issue #129: a multi-QR envelope wraps the SSH-import JSON.
+        // Single-part envelopes also use the same prefix so a desktop
+        // emitter can always emit envelopes regardless of payload size;
+        // we unwrap once here and recurse with the inner payload.
+        if (QrChunkCodec.isEnvelope(payload)) {
+            val part = QrChunkCodec.decodePart(payload).getOrElse { error ->
+                _shareMessage.value = error.message ?: "Could not decode QR envelope"
+                return
+            }
+            if (part.total != 1) {
+                _shareMessage.value =
+                    "This is part ${part.part} of ${part.total}. Scan from the QR scanner so all parts can be combined."
+                return
+            }
+            importSharedHostPayloadInternal(String(part.chunk, Charsets.UTF_8))
+            return
+        }
         val sshImport = SshImportPayloadCodec.decode(payload)
         if (sshImport.isSuccess) {
             importSshHost(sshImport.getOrThrow())

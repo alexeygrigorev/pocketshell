@@ -31,6 +31,18 @@ sealed interface AppDestination {
     /** Manage SSH keys (add / list / delete). */
     data object SshKeys : AppDestination
 
+    /**
+     * Live camera QR scanner (issue #129). Reachable from the Host list
+     * top bar (a new "Scan" tab next to "Import"). Hosted by
+     * [com.pocketshell.app.hosts.QrScannerScreen]; on success the
+     * payload is dispatched through the existing
+     * [com.pocketshell.app.hosts.HostListViewModel.importSharedHostPayload]
+     * entry point, which already understands both the legacy
+     * single-QR payload and the multi-QR envelope from
+     * [com.pocketshell.app.hosts.QrChunkCodec].
+     */
+    data object Scan : AppDestination
+
     /** Local, user-shared-only crash reports captured after uncaught exceptions. */
     data object CrashReports : AppDestination
 

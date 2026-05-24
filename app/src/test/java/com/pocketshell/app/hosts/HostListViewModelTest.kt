@@ -713,6 +713,69 @@ class HostListViewModelTest {
         assertEquals(1, db.sshKeyDao().getAll().first().size)
     }
 
+    @Test
+    fun importSharedHostPayload_acceptsSinglePartEnvelopeWrappingSshImportPayload() = runTest {
+        // Issue #129: a single-part envelope wraps the existing
+        // ssh-import JSON. The view model should unwrap and import
+        // the host the same as if the JSON had arrived raw.
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "existing-key", privateKeyPath = "/tmp/existing-key"),
+        )
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+        )
+        val inner = SshImportPayloadCodec.encode(
+            SshImportConfig(
+                name = "envelope-ref",
+                host = "env.example.com",
+                port = 22,
+                username = "alexey",
+                auth = SshImportAuth.KeyReference("existing-key"),
+            ),
+        )
+        val envelopes = QrChunkCodec.encode(inner, id = "deadbeef")
+        assertEquals(1, envelopes.size)
+
+        viewModel.importSharedHostPayload(envelopes[0]).join()
+
+        val hosts = db.hostDao().getAll().first()
+        assertEquals(1, hosts.size)
+        assertEquals("envelope-ref", hosts[0].name)
+        assertEquals(keyId, hosts[0].keyId)
+    }
+
+    @Test
+    fun importSharedHostPayload_rejectsMultiPartEnvelope_withGuidance() = runTest {
+        // Issue #129: a single envelope from a multi-part transmission
+        // is not a complete payload. The view model surfaces guidance
+        // pointing the user to the QR scanner rather than silently
+        // failing.
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+        )
+        val payload = "X".repeat(QrChunkCodec.ChunkSize * 2 + 1)
+        val envelopes = QrChunkCodec.encode(payload, id = "deadbeef")
+        assertTrue(envelopes.size > 1)
+
+        viewModel.importSharedHostPayload(envelopes[0]).join()
+
+        assertEquals(0, db.hostDao().getAll().first().size)
+        val message = viewModel.shareMessage.value
+        assertNotNull(message)
+        assertTrue(
+            "expected guidance message to mention the scanner, got: $message",
+            message!!.contains("scanner", ignoreCase = true),
+        )
+    }
+
     private companion object {
         val EncryptedOpenSshPrivateKey = """
             -----BEGIN OPENSSH PRIVATE KEY-----

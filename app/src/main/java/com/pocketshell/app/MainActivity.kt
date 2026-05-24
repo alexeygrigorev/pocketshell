@@ -25,6 +25,8 @@ import androidx.fragment.app.FragmentActivity
 import com.pocketshell.app.crash.CrashReportsScreen
 import com.pocketshell.app.hosts.AddEditHostScreen
 import com.pocketshell.app.hosts.HostListScreen
+import com.pocketshell.app.hosts.HostListViewModel
+import com.pocketshell.app.hosts.QrScannerScreen
 import com.pocketshell.app.hosts.SshKeysScreen
 import com.pocketshell.app.jobs.RecurringJobsScreen
 import com.pocketshell.app.jobs.RecurringJobsViewModel
@@ -76,6 +78,14 @@ class MainActivity : FragmentActivity() {
     private val sessionViewModel: SessionViewModel by viewModels()
     private var requestedDestination by mutableStateOf<AppDestination>(AppDestination.HostList)
 
+    /**
+     * Issue #129: payload pulled out of a `pocketshell://import?...`
+     * deep link. Consumed exactly once by the [AppNavigator] root
+     * composition so a re-launch from `onNewIntent` with a different
+     * payload is routed without the previous payload being re-imported.
+     */
+    private var pendingImportPayload by mutableStateOf<String?>(null)
+
     // Issue #112: theme preference observed at the composable root so a
     // tap in Settings re-themes the entire activity with no restart. The
     // repository is `@Singleton` so the Settings view model and this
@@ -86,6 +96,7 @@ class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedDestination = initialDestinationFromIntent(intent)
+        pendingImportPayload = importPayloadFromIntent(intent)
         window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(DarkSystemBarColor))
         window.decorView.setBackgroundColor(DarkSystemBarColor)
         @Suppress("DEPRECATION")
@@ -119,6 +130,8 @@ class MainActivity : FragmentActivity() {
                     AppNavigator(
                         sessionViewModel = sessionViewModel,
                         requestedDestination = requestedDestination,
+                        pendingImportPayload = pendingImportPayload,
+                        onImportPayloadConsumed = { pendingImportPayload = null },
                     )
                 }
             }
@@ -129,6 +142,7 @@ class MainActivity : FragmentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         requestedDestination = initialDestinationFromIntent(intent)
+        importPayloadFromIntent(intent)?.let { pendingImportPayload = it }
     }
 }
 
@@ -153,7 +167,23 @@ private fun ThemePreference.toThemeMode(): PocketShellThemeMode = when (this) {
 private fun AppNavigator(
     sessionViewModel: SessionViewModel,
     requestedDestination: AppDestination,
+    pendingImportPayload: String? = null,
+    onImportPayloadConsumed: () -> Unit = {},
 ) {
+    // Issue #129: the activity scrapes the import payload out of a
+    // `pocketshell://import?...` deep link before composition starts
+    // and stores it here. We hand it to the host-list view model the
+    // moment that VM materialises (host list is the landing
+    // destination, so this is always one composition away), then call
+    // `onImportPayloadConsumed` so the activity clears the state and
+    // a future re-launch with a fresh payload is processed correctly.
+    val hostListViewModelForImport: HostListViewModel = hiltViewModel()
+    LaunchedEffect(pendingImportPayload) {
+        val payload = pendingImportPayload ?: return@LaunchedEffect
+        hostListViewModelForImport.importSharedHostPayload(payload)
+        onImportPayloadConsumed()
+    }
+
     // Volatile in-memory state. Cold-launch (process death) always lands
     // on `HostList`; full saved-state restoration arrives when
     // navigation-compose lands and brings its own saver machinery.
@@ -190,6 +220,7 @@ private fun AppNavigator(
             onManageKeys = { navigate(AppDestination.SshKeys) },
             onOpenCrashReports = { navigate(AppDestination.CrashReports) },
             onOpenSettings = { navigate(AppDestination.Settings) },
+            onOpenScan = { navigate(AppDestination.Scan) },
             onOpenSession = { host, keyPath, passphrase ->
                 navigate(
                     AppDestination.Session(
@@ -251,6 +282,29 @@ private fun AppNavigator(
         )
 
         AppDestination.SshKeys -> SshKeysScreen(onBack = ::back)
+
+        // Issue #129: live camera QR scanner. Dispatches the decoded
+        // payload through the existing host-list import path so both
+        // the legacy single-QR (`pocketshell.ssh-import.v1` JSON) and
+        // the new multi-QR envelope (`pocketshell.qr.v1?...`) share one
+        // code path. The view model is the activity-scoped
+        // [HostListViewModel] so the resulting "Imported …" banner /
+        // host insertion are observable in the host list when the
+        // navigator pops back.
+        AppDestination.Scan -> {
+            val hostListViewModel: HostListViewModel = hiltViewModel()
+            QrScannerScreen(
+                onDecoded = { payload ->
+                    hostListViewModel.importSharedHostPayload(payload)
+                    back()
+                },
+                onPickFile = { uri ->
+                    hostListViewModel.importSharedHostUri(uri)
+                    back()
+                },
+                onClose = ::back,
+            )
+        }
 
         AppDestination.CrashReports -> CrashReportsScreen(onBack = ::back)
 
@@ -402,5 +456,32 @@ internal fun initialDestinationFromIntent(intent: Intent?): AppDestination =
     } else {
         AppDestination.HostList
     }
+
+/**
+ * Issue #129: pull a `pocketshell://import?payload=...` (or
+ * `pocketshell://import?uri=...`) intent into a UTF-8 payload string
+ * the host-list import path can consume.
+ *
+ * Returns `null` if the intent is unrelated to import or is missing
+ * both query parameters. The MainActivity wires the result through
+ * `HostListViewModel.importSharedHostPayload` on `onCreate` /
+ * `onNewIntent`.
+ *
+ * Reusing the existing import path means both deep-links and QR
+ * scans share the same envelope-aware logic — multi-part envelopes
+ * delivered via deep link still trigger the same "scan from the QR
+ * scanner" hint that the camera path uses, which is the right
+ * behaviour because a deep link can't transport more than one part
+ * at a time anyway.
+ */
+internal fun importPayloadFromIntent(intent: Intent?): String? {
+    if (intent?.action != Intent.ACTION_VIEW) return null
+    val data = intent.data ?: return null
+    if (data.scheme != "pocketshell") return null
+    if (data.host != "import") return null
+    val payload = data.getQueryParameter("payload")
+    if (!payload.isNullOrBlank()) return payload
+    return null
+}
 
 private const val DefaultTmuxSessionName = "pocketshell"

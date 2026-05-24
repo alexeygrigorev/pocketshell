@@ -53,9 +53,34 @@ Supported auth objects:
 
 ## Size And Security
 
-Single QR import works best below about 2,800 UTF-8 bytes. PocketShell currently accepts payload files up to 12 KiB, but camera/QR decoding for larger private keys is not implemented yet. For keys that do not fit a reliable single QR, import the key separately and use `keyRef`, or transfer the text payload as a file and select it with **Import**.
+Single QR import works best below about 2,800 UTF-8 bytes. Larger payloads (RSA 4096 keys, ed25519 keys with long comments) are split into a sequence of QR codes wrapped in the `pocketshell.qr.v1` envelope; see [Multi-QR Envelope](#multi-qr-envelope) below. PocketShell's live camera scanner (under the host list's **Scan** tab, issue #129) accumulates the parts in memory keyed by transmission id, validates each chunk's checksum, and only dispatches the assembled payload to the import path once every part has arrived. Partial scans expire after 60 s of idle.
 
 Private keys in QR codes are visible secrets. Generate and scan them in a private space, prefer passphrase-protected keys, and delete any generated payload or QR image after import.
+
+## Multi-QR Envelope
+
+The chunking envelope is a versioned URI-shaped string. Each chunk QR carries one envelope, and every chunk in a sequence shares the same `id` so the scanner accumulates them in memory:
+
+```
+pocketshell.qr.v1?part=<idx>/<count>&id=<short>&checksum=<crc32>&payload=<base64-chunk>
+```
+
+| Token | Notes |
+|---|---|
+| `part=<idx>/<count>` | 1-indexed part number and total. `1/3` is the first of three. |
+| `id=<short>` | 8 hex chars. Parts from different transmissions cannot collide; rescanning a single chunk with a different id resets the accumulator. |
+| `checksum=<crc32>` | CRC-32 over the chunk bytes BEFORE base64. Mismatch rejects the part. |
+| `payload=<base64-chunk>` | URL-safe base64 (no padding) of up to 1500 raw bytes per chunk. |
+
+A payload below 1500 bytes still encodes as a single envelope with `part=1/1` so the scanner has one decoder path regardless of size. The scanner's progress chip reads "Scanned X of Y"; partial transmissions are dropped after 60 s of idle.
+
+## Desktop Emitter
+
+The companion CLI lives at [`tools/qr-share/`](../tools/qr-share/) and reads `~/.ssh/config` (or accepts `--host` / `--user` / `--port` / `--key` flags) to produce a payload and emit QR(s). It prints QRs inline in the terminal when stdout is a TTY and writes a numbered PNG sequence (`qr-share-01.png`, ...) otherwise. For multi-QR payloads it pauses between codes so the user can scan each in turn.
+
+## Deep Link
+
+The Android manifest registers an intent filter for `pocketshell://import?payload=<urlencoded>` URLs. Tapping such a link from a browser, share sheet, or `adb shell am start` routes the payload through the same import path the QR scanner uses. Multi-part envelopes cannot be delivered over a deep link (one URL = one payload); the camera scanner is the right surface when more than one chunk is needed.
 
 ## Generate From SSH Config
 

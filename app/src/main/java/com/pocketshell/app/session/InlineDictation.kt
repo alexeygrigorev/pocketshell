@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -37,6 +38,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.di.WhisperClientFactory
+import com.pocketshell.app.voice.DictateDotIcon
 import com.pocketshell.core.voice.AudioRecorderException
 import com.pocketshell.core.voice.WhisperException
 import com.pocketshell.uikit.components.KeyBar
@@ -632,14 +634,20 @@ private fun InlineMicSlot(
         } else if (state == InlineDictationViewModel.RecordingState.Recording) {
             InlineMicWaveform(amplitude = amplitude)
         } else {
-            // Filled-dot glyph — same approach as the chip row's dictate
-            // icon. Reads as a microphone body without dragging in
-            // material-icons-extended for one glyph.
-            Text(
-                text = "●",
-                color = glyph,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
+            // Microphone glyph — shared with the chip row's dictate
+            // icon (`DictateDotIcon` in `voice/VoiceSessionSurface.kt`).
+            // Replaces an earlier filled-dot `Text("●")` fallback that the
+            // UI/UX audit (#108, re-flagged in #123) found ambiguous: the
+            // dot did not read as "microphone" without the adjacent
+            // dictate caption. Tinted to the same `glyph` colour the
+            // state-driven Triple picks (Idle: text-secondary, Recording
+            // and Transcribing: accent), so the state-colour story is
+            // preserved.
+            Icon(
+                imageVector = DictateDotIcon,
+                contentDescription = null,
+                tint = glyph,
+                modifier = Modifier.size(16.dp),
             )
         }
     }

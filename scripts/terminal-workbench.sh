@@ -16,10 +16,12 @@ COMPOSE_FILE="${COMPOSE_FILE:-tests/docker/docker-compose.yml}"
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/terminal-workbench}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
+ARTIFACT_DIR="$RUN_DIR/artifacts/terminal-lab"
 BUILD_APKS="${BUILD_APKS:-1}"
 HOLD_MS="${HOLD_MS:-0}"
 DEBUG_HOLD_MS="${DEBUG_HOLD_MS:-0}"
 REAL_AGENTS="${REAL_AGENTS:-0}"
+ALLOW_DUPLICATE_VIEWPORT_HASHES="${ALLOW_DUPLICATE_VIEWPORT_HASHES:-0}"
 if [[ -n "${TEST_SELECTOR:-}" ]]; then
   TEST_SELECTOR_WAS_SET=1
 else
@@ -51,6 +53,135 @@ fail() {
   printf 'FAIL: %s\n' "$1" >&2
   printf 'Artifacts: %s\n' "$RUN_DIR" >&2
   exit 1
+}
+
+extract_field() {
+  local line="$1"
+  local key="$2"
+  printf '%s\n' "$line" | sed -n "s/.* $key=\\([^ ]*\\).*/\\1/p"
+}
+
+require_positive_integer() {
+  local value="$1"
+  local label="$2"
+  [[ "$value" =~ ^[0-9]+$ ]] || fail "$label is not a number: $value"
+  (( value > 0 )) || fail "$label is not positive: $value"
+}
+
+validate_terminal_artifacts() {
+  [[ -d "$ARTIFACT_DIR" ]] || fail "terminal artifact directory missing at $ARTIFACT_DIR"
+  [[ -s "$ARTIFACT_DIR/timings.txt" ]] || fail "terminal timings artifact is missing or empty"
+  grep -q 'send_to_output_.*_pty_size_ms=' "$ARTIFACT_DIR/timings.txt" ||
+    fail "terminal timings are missing PTY sizing evidence"
+
+  local summary_files=()
+  while IFS= read -r -d '' summary_file; do
+    summary_files+=("$summary_file")
+  done < <(find "$ARTIFACT_DIR" -maxdepth 1 -type f -name '*-summary.txt' -print0 | sort -z)
+  (( ${#summary_files[@]} > 0 )) || fail "no terminal capture summary artifacts were pulled"
+
+  local viewport_count=0
+  local visible_count=0
+  local real_agent_cli_count=0
+  local hash_index="$RUN_DIR/viewport-hashes.txt"
+  : > "$hash_index"
+
+  local summary_file
+  for summary_file in "${summary_files[@]}"; do
+    [[ -s "$summary_file" ]] || fail "terminal capture summary is empty: $summary_file"
+    grep -q '^capture_policy:' "$summary_file" ||
+      fail "terminal capture summary is missing capture_policy: $summary_file"
+    grep -q '^authoritative=direct TerminalView viewport render plus terminal emulator visible text$' "$summary_file" ||
+      fail "terminal capture summary is missing authoritative capture policy: $summary_file"
+
+    local columns rows visible_chars
+    columns="$(sed -n 's/^terminal_grid_columns=//p' "$summary_file" | head -n 1)"
+    rows="$(sed -n 's/^terminal_grid_rows=//p' "$summary_file" | head -n 1)"
+    visible_chars="$(sed -n 's/^visible_terminal_chars=//p' "$summary_file" | head -n 1)"
+    require_positive_integer "$columns" "terminal grid columns in $(basename "$summary_file")"
+    require_positive_integer "$rows" "terminal grid rows in $(basename "$summary_file")"
+    require_positive_integer "$visible_chars" "visible terminal chars in $(basename "$summary_file")"
+
+    local capture_lines=()
+    while IFS= read -r capture_line; do
+      [[ -n "$capture_line" ]] && capture_lines+=("$capture_line")
+    done < <(
+      awk '
+        /^authoritative_captures:/ { in_section=1; next }
+        in_section && /^$/ { exit }
+        in_section && /-viewport[.]png/ { print }
+      ' "$summary_file"
+    )
+    (( ${#capture_lines[@]} > 0 )) ||
+      fail "terminal capture summary has no authoritative viewport captures: $summary_file"
+
+    local capture_line
+    for capture_line in "${capture_lines[@]}"; do
+      local file_name viewport_file viewport_pixels viewport_sha visible_capture_chars actual_sha sidecar
+      file_name="${capture_line%% *}"
+      viewport_file="$ARTIFACT_DIR/$file_name"
+      [[ -s "$viewport_file" ]] || fail "authoritative viewport artifact is missing or empty: $viewport_file"
+
+      viewport_pixels="$(extract_field "$capture_line" "viewport_bright_pixels")"
+      viewport_sha="$(extract_field "$capture_line" "viewport_sha256")"
+      visible_capture_chars="$(extract_field "$capture_line" "visible_terminal_chars")"
+      require_positive_integer "$viewport_pixels" "viewport bright pixels for $file_name"
+      require_positive_integer "$visible_capture_chars" "visible terminal chars for $file_name"
+      [[ "$viewport_sha" =~ ^[0-9a-f]{64}$ ]] ||
+        fail "viewport summary hash is missing or invalid for $file_name: $viewport_sha"
+      actual_sha="$(sha256sum "$viewport_file" | awk '{print $1}')"
+      [[ "$actual_sha" == "$viewport_sha" ]] ||
+        fail "viewport hash mismatch for $file_name; summary=$viewport_sha actual=$actual_sha"
+
+      sidecar="${viewport_file%-viewport.png}-visible-terminal.txt"
+      [[ -s "$sidecar" ]] || fail "visible terminal text sidecar is missing or empty: $sidecar"
+      grep -q '[[:graph:]]' "$sidecar" ||
+        fail "visible terminal text sidecar has no printable content: $sidecar"
+
+      viewport_count=$((viewport_count + 1))
+      visible_count=$((visible_count + 1))
+      case "$file_name" in
+        *held-open*|*debug-hold*)
+          ;;
+        *)
+          printf '%s\t%s\n' "$viewport_sha" "$file_name" >> "$hash_index"
+          ;;
+      esac
+      case "$file_name" in
+        agents-0[2-9]-*-viewport.png|agents-[1-9][0-9]-*-viewport.png)
+          real_agent_cli_count=$((real_agent_cli_count + 1))
+          ;;
+      esac
+    done
+  done
+
+  if [[ "$ALLOW_DUPLICATE_VIEWPORT_HASHES" != "1" ]]; then
+    local duplicate_hashes
+    duplicate_hashes="$(awk -F '\t' '{ count[$1]++; names[$1]=names[$1] " " $2 } END { for (hash in count) if (count[hash] > 1) print hash names[hash] }' "$hash_index")"
+    [[ -z "$duplicate_hashes" ]] ||
+      fail "duplicate authoritative viewport hashes suggest stale captures: $duplicate_hashes"
+  fi
+
+  if [[ "$REAL_AGENTS" == "1" ]]; then
+    (( real_agent_cli_count > 0 )) ||
+      fail "real-agent workbench did not produce an interactive agent CLI viewport"
+    find "$ARTIFACT_DIR" -maxdepth 1 -type f -name 'agents-*-visible-terminal.txt' -print0 |
+      xargs -0 grep -E 'Ask anything|Welcome to Codex|Welcome to Claude Code' >/dev/null ||
+      fail "real-agent visible terminal artifacts are missing expected interactive CLI screen text"
+  fi
+
+  {
+    printf '\nValidation:\n'
+    printf 'status=PASS\n'
+    printf 'authoritative_viewport_count=%s\n' "$viewport_count"
+    printf 'visible_terminal_sidecar_count=%s\n' "$visible_count"
+    printf 'duplicate_viewport_hash_check=%s\n' "$([[ "$ALLOW_DUPLICATE_VIEWPORT_HASHES" == "1" ]] && printf skipped || printf passed)"
+    printf 'real_agent_cli_viewport_count=%s\n' "$real_agent_cli_count"
+    printf 'ssh_readiness_log=%s\n' "$RUN_DIR/docker-ssh-readiness.log"
+    printf 'instrumentation_log=%s\n' "$RUN_DIR/07-run-workbench.log"
+    printf 'docker_log=%s\n' "$RUN_DIR/docker-agents.log"
+    printf 'logcat=%s\n' "$RUN_DIR/logcat.txt"
+  } >> "$RUN_DIR/artifact-summary.txt"
 }
 
 run_logged() {
@@ -171,10 +302,13 @@ run_logged "07-run-workbench" \
   "${INSTRUMENTATION_ARGS[@]}" \
   com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner
 mkdir -p "$RUN_DIR/artifacts"
-run_logged "08-pull-artifacts" "$ADB" pull "$DEVICE_ARTIFACT_DIR" "$RUN_DIR/artifacts/" || true
-if [[ -d "$RUN_DIR/artifacts/terminal-lab" ]]; then
+rm -rf "$RUN_DIR/artifacts"
+mkdir -p "$RUN_DIR/artifacts"
+run_logged "08-pull-artifacts" "$ADB" pull "$DEVICE_ARTIFACT_DIR" "$RUN_DIR/artifacts/"
+if [[ -d "$ARTIFACT_DIR" ]]; then
   run_logged "09-artifact-file-info" file "$RUN_DIR"/artifacts/terminal-lab/* || true
   {
+    printf 'PocketShell terminal workbench artifact summary\n'
     printf 'run_dir=%s\n' "$RUN_DIR"
     printf 'real_agents=%s\n' "$REAL_AGENTS"
     printf 'test_selector=%s\n' "$TEST_SELECTOR"
@@ -182,13 +316,13 @@ if [[ -d "$RUN_DIR/artifacts/terminal-lab" ]]; then
     printf 'debug_hold_ms=%s\n' "$DEBUG_HOLD_MS"
     printf 'device_artifact_dir=%s\n' "$DEVICE_ARTIFACT_DIR"
     printf '\nPulled artifacts:\n'
-    find "$RUN_DIR/artifacts/terminal-lab" -maxdepth 1 -type f -printf '%f\t%k KB\n' | sort
+    find "$ARTIFACT_DIR" -maxdepth 1 -type f -printf '%f\t%k KB\n' | sort
     printf '\nAuthoritative terminal viewport renders:\n'
-    find "$RUN_DIR/artifacts/terminal-lab" -maxdepth 1 -type f -name '*-viewport.png' -printf '%f\n' | sort
+    find "$ARTIFACT_DIR" -maxdepth 1 -type f -name '*-viewport.png' -printf '%f\n' | sort
     printf '\nAdvisory full-device/window screenshots:\n'
-    find "$RUN_DIR/artifacts/terminal-lab" -maxdepth 1 -type f -name '*.png' ! -name '*-viewport.png' -printf '%f\n' | sort
+    find "$ARTIFACT_DIR" -maxdepth 1 -type f -name '*.png' ! -name '*-viewport.png' -printf '%f\n' | sort
     printf '\nCapture summaries:\n'
-    find "$RUN_DIR/artifacts/terminal-lab" -maxdepth 1 -type f -name '*-summary.txt' -print0 |
+    find "$ARTIFACT_DIR" -maxdepth 1 -type f -name '*-summary.txt' -print0 |
       sort -z |
       while IFS= read -r -d '' summary_file; do
         printf '\n--- %s ---\n' "$(basename "$summary_file")"
@@ -201,5 +335,8 @@ grep -q "OK (" "$RUN_DIR/07-run-workbench.log" &&
   grep -q "INSTRUMENTATION_CODE: -1" "$RUN_DIR/07-run-workbench.log" ||
   fail "terminal workbench instrumentation did not pass"
 
+validate_terminal_artifacts
+
 printf '\nPASS: terminal workbench completed\n'
-printf 'Artifacts: %s/artifacts/terminal-lab\n' "$RUN_DIR"
+printf 'Artifacts: %s\n' "$ARTIFACT_DIR"
+printf 'Summary: %s/artifact-summary.txt\n' "$RUN_DIR"

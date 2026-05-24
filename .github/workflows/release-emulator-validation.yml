@@ -7,6 +7,11 @@ on:
         description: Optional artifact run id suffix. Leave blank for timestamp.
         required: false
         type: string
+      terminal_release_gate:
+        description: Run optional real-agent terminal release gate.
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   emulator-release-validation:
@@ -76,6 +81,7 @@ jobs:
           ADB: ${{ env.ANDROID_SDK }}/platform-tools/adb
           EMULATOR: ${{ env.ANDROID_SDK }}/emulator/emulator
           RELEASE_VALIDATION_SKIP_MAIN_GUARD: ${{ env.RELEASE_VALIDATION_SKIP_MAIN_GUARD }}
+          TERMINAL_RELEASE_GATE: ${{ inputs.terminal_release_gate && '1' || '0' }}
         with:
           api-level: 34
           target: google_apis
@@ -107,6 +113,7 @@ jobs:
           name: release-emulator-validation-${{ steps.validation.outputs.run_id }}
           path: |
             build/release-emulator-validation/${{ steps.validation.outputs.run_id }}/
+            build/terminal-workbench/${{ steps.validation.outputs.run_id }}-terminal-release/
             build/pre-release-confidence-gate/${{ steps.validation.outputs.run_id }}-pre-release/
             !build/pre-release-confidence-gate/${{ steps.validation.outputs.run_id }}-pre-release/worktree/
             build/phone-dogfood/${{ steps.validation.outputs.run_id }}-terminal-lab/
@@ -121,4 +128,6 @@ jobs:
 
       - name: Stop Docker targets
         if: always()
-        run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
+        run: |
+          docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
+          docker compose -f tests/docker/real-agent/compose.yml down --volumes --remove-orphans || true

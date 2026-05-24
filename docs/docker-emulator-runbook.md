@@ -266,6 +266,26 @@ This switches to `tests/docker/real-agent/compose.yml`, starts the
 `TerminalLabDockerTest#terminalWorkbenchCapturesRealAgentCliScreens`. The same
 artifact authority rules apply: direct `*-viewport.png` terminal renders and
 visible terminal text are authoritative; full-device screenshots are advisory.
+The script fails if authoritative viewport PNGs, visible-terminal sidecars,
+timings, summaries, PTY sizing evidence, or expected real-agent CLI screen text
+are missing. It also verifies every summary hash against the pulled PNG and
+rejects duplicate non-hold viewport hashes as stale capture evidence.
+
+For terminal-focused release confidence, run the guarded release validation
+with the optional terminal gate enabled:
+
+```bash
+TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh
+```
+
+That command runs the normal pre-release confidence gate first, then runs the
+real-agent terminal workbench from the emulator over SSH into Docker, validates
+the artifact bundle, and continues with the standard phone-dogfood and visual
+audit release evidence. The terminal gate is intentionally manual/optional and
+is not part of every local or CI release validation run unless
+`TERMINAL_RELEASE_GATE=1` is set or the matching GitHub Actions workflow input
+is enabled. Use it before release candidates that include terminal input,
+viewport rendering, SSH/PTY, or agent CLI usability changes.
 
 For release tagging, use the guarded emulator-only wrapper from clean pushed
 `main`:

@@ -235,6 +235,11 @@ the artifact rejection checklist in [process.md](../process.md#terminal-artifact
 Direct terminal viewport renders plus visible terminal text are authoritative;
 full-device screenshots are advisory for terminal content unless the run summary
 proves they are reliable.
+The workbench deletes stale pulled artifacts before each run, verifies SSH,
+terminal command input, PTY sizing, direct viewport renders, visible terminal
+sidecars, timings, and summary hashes, and fails on missing, blank, duplicate
+non-hold, or contradictory authoritative terminal evidence. Set
+`REAL_AGENTS=1` when the issue requires real interactive agent CLI screens.
 
 The host setup matrix is available through the same harness. It starts the
 bootstrap Docker services on ports `2230` through `2235`, drives the emulator UI
@@ -299,6 +304,23 @@ scripts/push-release-tag.sh --visual-audit-inspected <tag> build/release-emulato
 Use `--visual-audit-inspected` only after reviewing the visual-audit
 screenshots. Physical phone testing is final user acceptance only; it does not
 replace the emulator/Docker release blockers above.
+
+Terminal-heavy release candidates can opt into the slower real-agent terminal
+release gate:
+
+```bash
+TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh
+```
+
+The optional step runs after the normal pre-release confidence gate and before
+the rest of the release evidence. It starts
+`tests/docker/real-agent/compose.yml`, SSHes from the emulator into Docker on
+port `2240`, drives at least one real interactive agent CLI screen through
+`TerminalLabDockerTest`, validates the authoritative viewport and visible-text
+artifacts, and writes
+`build/terminal-workbench/<run-id>-terminal-release/artifact-summary.txt`. It
+is manual/optional unless explicitly enabled through the environment or the
+GitHub Actions workflow input.
 
 The same validation can be run manually from GitHub Actions when local emulator
 capacity is unavailable: Actions -> Release Emulator Validation -> Run

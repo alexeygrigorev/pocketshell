@@ -206,6 +206,9 @@ Before tagging:
 5. Commit the version bump on `main` and push `main` first.
 6. From clean pushed `main`, with `HEAD` equal to `origin/main`, run
    `scripts/release-emulator-validation.sh`.
+   For terminal-heavy release candidates, opt into the slower real-agent
+   terminal gate with
+   `TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh`.
 7. Inspect the visual-audit screenshots listed in that summary.
 8. Push the matching tag with the guarded helper, for example
    `scripts/push-release-tag.sh --visual-audit-inspected v0.2.1 build/release-emulator-validation/<run-id>/summary.md`.
@@ -231,6 +234,12 @@ Release issue/tag notes must attach or link the validation artifact directories
 listed in `build/release-emulator-validation/<run-id>/summary.md`. Physical
 phone testing is final user acceptance only; emulator/Docker validation catches
 basic release blockers before a tag is pushed.
+
+The optional terminal release gate writes its compact summary under
+`build/terminal-workbench/<run-id>-terminal-release/artifact-summary.txt` and
+fails on missing, blank, stale, or contradictory authoritative terminal
+artifacts. It remains manual/optional unless the environment variable or
+GitHub Actions workflow input enables it.
 
 ## Process And Runbooks
 

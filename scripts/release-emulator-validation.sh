@@ -16,6 +16,9 @@ PRE_RELEASE_GATE_LOG_ROOT="$ROOT_DIR/build/pre-release-confidence-gate"
 PRE_RELEASE_GATE_RUN_DIR="$PRE_RELEASE_GATE_LOG_ROOT/$PRE_RELEASE_RUN_ID"
 PRE_RELEASE_GATE_APK="$PRE_RELEASE_GATE_RUN_DIR/worktree/app/build/outputs/apk/debug/app-debug.apk"
 VALIDATED_APK="$RUN_DIR/app-debug.apk"
+TERMINAL_RELEASE_GATE="${TERMINAL_RELEASE_GATE:-0}"
+TERMINAL_RELEASE_RUN_ID="$RUN_ID-terminal-release"
+TERMINAL_WORKBENCH_LOG_ROOT="$ROOT_DIR/build/terminal-workbench"
 
 usage() {
   cat <<'USAGE'
@@ -33,11 +36,16 @@ Environment overrides:
   RELEASE_VALIDATION_SKIP_MAIN_GUARD=1
       Skip the clean pushed-main guard for CI workflow_dispatch runs where the
       checkout is intentionally detached.
+  TERMINAL_RELEASE_GATE=1
+      Also run the optional high-confidence terminal release gate. This starts
+      the real-agent Docker target, SSHes into it from the emulator, drives real
+      interactive agent CLI screens, and validates terminal artifacts.
 
 Artifacts:
   build/release-emulator-validation/<run-id>/summary.md
   build/release-emulator-validation/<run-id>/app-debug.apk
   build/pre-release-confidence-gate/<run-id>-pre-release/
+  build/terminal-workbench/<run-id>-terminal-release/ (optional)
   build/phone-dogfood/<run-id>-terminal-lab/
   build/phone-dogfood/<run-id>-tmux-existing-session/
   build/phone-dogfood/<run-id>-setup-detection/
@@ -87,6 +95,7 @@ write_summary_header() {
     printf 'Branch: %s\n' "$(git branch --show-current)"
     printf 'Automated status: RUNNING\n'
     printf 'Visual audit inspected: no\n'
+    printf 'Optional terminal release gate: %s\n' "$([[ "$TERMINAL_RELEASE_GATE" == "1" ]] && printf enabled || printf skipped)"
     printf '\n## Required Artifacts\n\n'
   } > "$SUMMARY_PATH"
 }
@@ -127,6 +136,13 @@ run_required \
   "build/pre-release-confidence-gate/$PRE_RELEASE_RUN_ID/" \
   env LOG_ROOT="$PRE_RELEASE_GATE_LOG_ROOT" RUN_ID="$PRE_RELEASE_RUN_ID" scripts/pre-release-confidence-gate.sh
 
+if [[ "$TERMINAL_RELEASE_GATE" == "1" ]]; then
+  run_required \
+    "optional terminal release gate" \
+    "build/terminal-workbench/$TERMINAL_RELEASE_RUN_ID/" \
+    env LOG_ROOT="$TERMINAL_WORKBENCH_LOG_ROOT" RUN_ID="$TERMINAL_RELEASE_RUN_ID" REAL_AGENTS=1 scripts/terminal-workbench.sh
+fi
+
 run_required \
   "terminal-lab phone dogfood" \
   "build/phone-dogfood/$RUN_ID-terminal-lab/" \
@@ -152,6 +168,11 @@ publish_validated_apk
 {
   printf '\n## Release Notes Checklist\n\n'
   printf -- '- [ ] Attach or link every artifact directory listed above in the issue and tag notes.\n'
+  if [[ "$TERMINAL_RELEASE_GATE" == "1" ]]; then
+    printf -- '- [ ] Inspect `build/terminal-workbench/%s/artifact-summary.txt` and the authoritative `*-viewport.png` renders before treating terminal usability as release-ready.\n' "$TERMINAL_RELEASE_RUN_ID"
+  else
+    printf -- '- [ ] Optional terminal release gate was skipped. Run `TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh` when terminal usability is in release scope.\n'
+  fi
   printf -- '- [ ] Download the tested debug APK from `release-emulator-validation/%s/app-debug.apk` inside the validation artifact, or `build/release-emulator-validation/%s/app-debug.apk` locally.\n' "$RUN_ID" "$RUN_ID"
   printf -- '- [ ] Inspect `build/dogfood-visual-pass/%s-visual-audit/screenshots/dogfood-visual-pass/` for release blockers.\n' "$RUN_ID"
   printf -- '- [ ] Treat physical phone testing as final user acceptance only; emulator/Docker validation catches basic release blockers before tagging.\n'

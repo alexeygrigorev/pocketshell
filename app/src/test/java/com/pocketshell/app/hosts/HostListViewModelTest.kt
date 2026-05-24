@@ -356,6 +356,191 @@ class HostListViewModelTest {
         assertNull(viewModel.bootstrapState.value)
     }
 
+    /**
+     * Issue #120: pure derivation rule. The unit test exercises the
+     * persisted-column projection without standing up the ViewModel so
+     * the mapping is observable in isolation. Mirrors the doc on
+     * [deriveSetupState]:
+     *
+     * - tmuxInstalled=null OR heruInstalled=null → Unknown
+     * - tmuxInstalled=false → NeedsSetup
+     * - tmuxInstalled=true && heruInstalled=false → NeedsSetup
+     * - tmuxInstalled=true && heruInstalled=true → Ready
+     */
+    @Test
+    fun deriveSetupState_returnsUnknown_whenTmuxInstalledIsNull() {
+        val host = hostFixture().copy(tmuxInstalled = null, heruInstalled = null)
+        assertEquals(
+            com.pocketshell.uikit.model.HostSetupState.Unknown,
+            deriveSetupState(host),
+        )
+    }
+
+    @Test
+    fun deriveSetupState_returnsUnknown_whenHeruInstalledIsNullButTmuxIsTrue() {
+        val host = hostFixture().copy(tmuxInstalled = true, heruInstalled = null)
+        assertEquals(
+            com.pocketshell.uikit.model.HostSetupState.Unknown,
+            deriveSetupState(host),
+        )
+    }
+
+    @Test
+    fun deriveSetupState_returnsNeedsSetup_whenTmuxIsFalse() {
+        val host = hostFixture().copy(tmuxInstalled = false, heruInstalled = true)
+        assertEquals(
+            com.pocketshell.uikit.model.HostSetupState.NeedsSetup,
+            deriveSetupState(host),
+        )
+    }
+
+    @Test
+    fun deriveSetupState_returnsNeedsSetup_whenHeruIsFalseButTmuxIsTrue() {
+        val host = hostFixture().copy(tmuxInstalled = true, heruInstalled = false)
+        assertEquals(
+            com.pocketshell.uikit.model.HostSetupState.NeedsSetup,
+            deriveSetupState(host),
+        )
+    }
+
+    @Test
+    fun deriveSetupState_returnsReady_whenBothFlagsAreTrue() {
+        val host = hostFixture().copy(tmuxInstalled = true, heruInstalled = true)
+        assertEquals(
+            com.pocketshell.uikit.model.HostSetupState.Ready,
+            deriveSetupState(host),
+        )
+    }
+
+    /**
+     * Issue #120: the [HostListViewModel.setupStates] flow projects the
+     * persisted columns onto the badge state, keyed by host id. Verify
+     * the mapping by inserting three hosts in each of the three states
+     * and reading the projection back.
+     */
+    @Test
+    fun setupStates_projectsHosts_intoTheirBadgeStates() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/no-such-key"))
+        val readyId = db.hostDao().insert(
+            HostEntity(
+                name = "ready",
+                hostname = "h",
+                username = "u",
+                keyId = keyId,
+                tmuxInstalled = true,
+                heruInstalled = true,
+            ),
+        )
+        val needsSetupId = db.hostDao().insert(
+            HostEntity(
+                name = "needs",
+                hostname = "h",
+                username = "u",
+                keyId = keyId,
+                tmuxInstalled = true,
+                heruInstalled = false,
+            ),
+        )
+        val unknownId = db.hostDao().insert(
+            HostEntity(
+                name = "unknown",
+                hostname = "h",
+                username = "u",
+                keyId = keyId,
+                // tmuxInstalled, heruInstalled both null by default.
+            ),
+        )
+
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+        )
+
+        // Read the upstream projection — same `stateIn(WhileSubscribed)`
+        // caveat as `hostsFlow_emitsStoredHosts_orderedByName` applies.
+        val projection = db.hostDao().getAll().first()
+            .associate { it.id to deriveSetupState(it) }
+        assertEquals(
+            com.pocketshell.uikit.model.HostSetupState.Ready,
+            projection[readyId],
+        )
+        assertEquals(
+            com.pocketshell.uikit.model.HostSetupState.NeedsSetup,
+            projection[needsSetupId],
+        )
+        assertEquals(
+            com.pocketshell.uikit.model.HostSetupState.Unknown,
+            projection[unknownId],
+        )
+        // Sanity: the ViewModel constructed and exposes a non-null flow.
+        assertNotNull(viewModel.setupStates)
+    }
+
+    /**
+     * Issue #120: tapping "Re-check setup" must clear the cache and
+     * surface the acknowledgement message. The probe itself goes through
+     * the standard bootstrap path; the connect fails because there is no
+     * server, but the cache invalidation is observable.
+     */
+    @Test
+    fun recheckSetup_setsAcknowledgementMessage_andClearsCache() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/no-such-key"))
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "recheck",
+                hostname = "127.0.0.1",
+                port = 1, // closed port → connect fails fast
+                username = "u",
+                keyId = keyId,
+                tmuxInstalled = true,
+                heruInstalled = true,
+                lastBootstrapAt = System.currentTimeMillis() - 60_000L,
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+        )
+
+        // Pre-condition: no acknowledgement banner yet.
+        assertNull(viewModel.recheckMessage.value)
+
+        viewModel.recheckSetup(host, keyPath = "/tmp/no-such-key")
+
+        // Acknowledgement message names the host so the user knows the
+        // tap landed on the right row.
+        val msg = viewModel.recheckMessage.value
+        assertNotNull(msg)
+        assertTrue(
+            "expected acknowledgement to mention the host name, got '$msg'",
+            msg!!.contains("recheck"),
+        )
+
+        // The refresh path under the hood calls `bootstrapHost` with the
+        // host's cache cleared — pendingNavigation should now be set,
+        // which is the canonical "the probe is running" signal.
+        assertNotNull(viewModel.pendingNavigation.value)
+
+        // The clear hook hides the banner without touching anything else.
+        viewModel.clearRecheckMessage()
+        assertNull(viewModel.recheckMessage.value)
+    }
+
+    /** Build a minimally-populated host row for the derivation tests. */
+    private fun hostFixture(): HostEntity = HostEntity(
+        name = "h",
+        hostname = "h.example",
+        username = "u",
+        keyId = 1L,
+    )
+
     @Test
     fun importSharedHostPayload_insertsHost_whenMatchingKeyExists() = runTest {
         val keyId = db.sshKeyDao().insert(

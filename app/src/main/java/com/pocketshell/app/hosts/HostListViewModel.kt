@@ -21,6 +21,7 @@ import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.uikit.model.HostSetupState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Job
@@ -28,6 +29,8 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -85,6 +88,43 @@ class HostListViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
 
     /**
+     * Per-host setup-state derived from the persisted bootstrap columns
+     * on [HostEntity]. Drives the badge on the host card surface (issue
+     * #120). Keyed by `HostEntity.id` so the screen can look up the
+     * state for a row independently of the host snapshot it currently
+     * holds.
+     *
+     * Derivation rule (kept intentionally narrow):
+     *
+     * - `Ready`        — `tmuxInstalled == true` AND `heruInstalled == true`.
+     *                    Both required tools have been verified by the
+     *                    most recent bootstrap probe.
+     * - `NeedsSetup`   — `tmuxInstalled == false`, OR `heruInstalled ==
+     *                    false`. The probe reported at least one tool
+     *                    missing.
+     * - `Unknown`      — anything else (no probe yet, or pre-#117 row
+     *                    that never recorded `heruInstalled`).
+     *
+     * The map only reflects what's persisted; the in-memory
+     * [HostBootstrapReport] from the most recent connect lives in the
+     * sheet state and is not durable across screens. The persisted flags
+     * are the contract for the badge so the value survives navigation.
+     */
+    val setupStates: StateFlow<Map<Long, HostSetupState>> = hostDao.getAll()
+        .map { rows -> rows.associate { it.id to deriveSetupState(it) } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyMap())
+
+    /**
+     * Transient one-shot acknowledgement message for the manual
+     * "Re-check setup" affordance (issue #120). Surfaces in the existing
+     * `shareMessage` banner slot — keeping the banner pattern means no
+     * Scaffold-level Snackbar host is required. `null` hides the
+     * banner; the screen consumes via [clearRecheckMessage].
+     */
+    private val _recheckMessage = MutableStateFlow<String?>(null)
+    val recheckMessage: StateFlow<String?> = _recheckMessage.asStateFlow()
+
+    /**
      * Non-null when a newer GitHub Release is available than the
      * installed APK. Consumed by [HostListScreen] to render the update
      * banner / chip with a tap-to-download action.
@@ -124,8 +164,56 @@ class HostListViewModel @Inject constructor(
     /** Cached host so install can update the right row. */
     private var bootstrapTargetHost: HostEntity? = null
 
+    /** Guard so the cold-launch reprobe only fires once per ViewModel. */
+    private var autoReprobeKicked = false
+
     init {
         checkForUpdates()
+    }
+
+    /**
+     * Cold-launch background reprobe entry point (issue #120 AC: "If
+     * the report has not run yet… show `unknown` and trigger a
+     * background reprobe on first composition"). Invoked from the host
+     * list screen via `LaunchedEffect(Unit) {}` so the trigger is
+     * literally "first composition" — and unit tests that construct
+     * the ViewModel without a UI don't get a surprise IO probe firing
+     * in the background.
+     *
+     * Idempotent: subsequent calls within the same ViewModel lifetime
+     * are no-ops. The guard intentionally lives on the ViewModel (not
+     * the screen) so a configuration change that re-composes the
+     * screen doesn't re-fire the probe.
+     *
+     * Only hosts whose key is NOT passphrase-protected are probed —
+     * unlocking a passphrase requires user interaction (biometric
+     * prompt / dialog), so a silent background probe cannot succeed
+     * there. For passphrase-protected hosts the badge stays `Unknown`
+     * until the user manually taps "Re-check setup".
+     */
+    fun reprobeUnknownHostsOnce() {
+        if (autoReprobeKicked) return
+        autoReprobeKicked = true
+        viewModelScope.launch {
+            // Defensive: probe failures stay silent for the user — the
+            // badge just remains `Unknown` and the manual re-check
+            // affordance is available.
+            try {
+                val firstRows = hosts.first { it.isNotEmpty() }
+                firstRows
+                    .filter { deriveSetupState(it) == HostSetupState.Unknown }
+                    .forEach { host ->
+                        val key = sshKeyDao.getById(host.keyId) ?: return@forEach
+                        if (key.hasPassphrase) return@forEach
+                        if (!File(key.privateKeyPath).exists()) return@forEach
+                        recheckHostSilently(host, key.privateKeyPath)
+                    }
+            } catch (_: IllegalStateException) {
+                // Most often: "Cannot perform this operation because the
+                // connection pool has been closed" — the DB went away
+                // mid-probe. Defensive swallow.
+            }
+        }
     }
 
     /**
@@ -366,6 +454,62 @@ class HostListViewModel @Inject constructor(
     fun refreshBootstrap(host: HostEntity, keyPath: String) {
         val cleared = host.copy(tmuxInstalled = null, lastBootstrapAt = null)
         bootstrapHost(cleared, keyPath)
+    }
+
+    /**
+     * Issue #120: manual "Re-check setup" entry point invoked from the
+     * host-card kebab. Reuses [refreshBootstrap] under the hood so the
+     * 24h cache is invalidated and the next bootstrap run does a real
+     * probe, and surfaces a small acknowledgement message in the same
+     * banner slot used by host-share messages so the user knows the tap
+     * registered.
+     *
+     * Calls [refreshBootstrap] (and therefore [bootstrapHost]) which
+     * already kicks the probe on the IO dispatcher and persists the
+     * result through [persistResult] / [persistHeruResult]. The badge
+     * state is derived from the persisted columns, so it updates
+     * automatically once the probe lands — no extra wiring required.
+     */
+    fun recheckSetup(host: HostEntity, keyPath: String) {
+        _recheckMessage.value = "Re-checking setup for ${host.name}…"
+        refreshBootstrap(host, keyPath)
+    }
+
+    /**
+     * Internal counterpart to [recheckSetup] used by the cold-launch
+     * background reprobe. No banner message; result lands in the
+     * persisted columns and the badge derivation picks it up. Bypasses
+     * the standard [bootstrapHost] flow so the user is NOT routed to a
+     * session as a side effect of a silent probe.
+     */
+    private fun recheckHostSilently(host: HostEntity, keyPath: String) {
+        viewModelScope.launch {
+            val session = openSession(host, keyPath, passphrase = null) ?: return@launch
+            try {
+                when (bootstrapper.checkTmux(session)) {
+                    TmuxStatus.Installed -> {
+                        persistResult(host, installed = true)
+                        val report = bootstrapper.checkServerSetup(session)
+                        persistHeruResult(host, report)
+                    }
+                    TmuxStatus.Missing -> {
+                        persistResult(host, installed = false)
+                        val report = bootstrapper.checkServerSetup(session)
+                        persistHeruResult(host, report)
+                    }
+                    is TmuxStatus.Unknown -> {
+                        // Cannot prove either way — leave the persisted
+                        // flags untouched. Badge stays Unknown.
+                    }
+                }
+            } finally {
+                runCatching { session.close() }
+            }
+        }
+    }
+
+    fun clearRecheckMessage() {
+        _recheckMessage.value = null
     }
 
     /**
@@ -647,5 +791,32 @@ class HostListViewModel @Inject constructor(
     private fun HostEntity.isBootstrapFresh(now: Long = System.currentTimeMillis()): Boolean {
         val last = lastBootstrapAt ?: return false
         return now - last < BOOTSTRAP_CACHE_MS
+    }
+}
+
+/**
+ * Pure derivation of the host-card badge state (issue #120) from the
+ * persisted bootstrap columns on [HostEntity]. Top-level rather than a
+ * companion-object member so the unit tests can call it without
+ * standing up an Android-runtime ViewModel, and so the value-side
+ * derivation cannot accidentally close over instance state.
+ *
+ * - `Unknown`     — `tmuxInstalled == null` (never probed) OR
+ *                   `heruInstalled == null` (probed before #117 added
+ *                   the heru column).
+ * - `NeedsSetup`  — `tmuxInstalled == false`, OR `heruInstalled ==
+ *                   false`. At least one required tool is missing.
+ * - `Ready`       — `tmuxInstalled == true` AND `heruInstalled == true`.
+ */
+internal fun deriveSetupState(host: HostEntity): HostSetupState {
+    val tmux = host.tmuxInstalled
+    val heru = host.heruInstalled
+    return when {
+        tmux == null -> HostSetupState.Unknown
+        tmux == false -> HostSetupState.NeedsSetup
+        // tmux == true past here.
+        heru == null -> HostSetupState.Unknown
+        heru == false -> HostSetupState.NeedsSetup
+        else -> HostSetupState.Ready
     }
 }

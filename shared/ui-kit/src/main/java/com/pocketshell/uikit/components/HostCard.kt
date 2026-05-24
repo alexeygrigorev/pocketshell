@@ -3,6 +3,7 @@ package com.pocketshell.uikit.components
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,10 +21,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.uikit.model.HostSetupState
 import com.pocketshell.uikit.model.HostStatus
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -46,12 +49,20 @@ import com.pocketshell.uikit.theme.PocketShellColors
  *   the kebab overflow button) and an optional [onLongClick] callback
  *   used by the same caller to surface the overflow menu via long-press.
  *
+ * Issue #120 added a per-host setup-state badge rendered between the
+ * host name and the `user@host:port` subtitle. [setupState] drives the
+ * badge label + colour (Ready / Needs setup / Unknown). When the badge
+ * is `NeedsSetup`, tapping it invokes [onSetupBadgeClick] so the caller
+ * can open the bootstrap sheet — the badge itself is presentational and
+ * the action mapping lives at the call site.
+ *
  * Layout (top-to-bottom, left-to-right):
  * - 40dp circular avatar with the host's initial letter on a hashed
  *   per-host hue (`HostAvatarColor.colorFor(name)`).
  * - 12dp gap.
- * - Two-line info: bright name + muted monospace `user@host:port` that
- *   wraps to as many lines as the font scale needs.
+ * - Two-line info: bright name (+ setup badge inline) and muted
+ *   monospace `user@host:port` that wraps to as many lines as the font
+ *   scale needs.
  * - Trailing status chip (colour + label).
  * - Optional trailing slot for caller-supplied affordances (e.g. the
  *   overflow kebab in `HostListScreen`).
@@ -74,6 +85,8 @@ fun HostCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     onLongClick: (() -> Unit)? = null,
+    setupState: HostSetupState = HostSetupState.Unknown,
+    onSetupBadgeClick: (() -> Unit)? = null,
     trailingContent: (@Composable () -> Unit)? = null,
 ) {
     Row(
@@ -126,12 +139,27 @@ fun HostCard(
         // vertically and the full `user@host:port` is visible — the
         // outer LazyColumn handles the extra height.
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = name,
-                color = PocketShellColors.Text,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
-            )
+            // Issue #120: render the host name + setup-state badge inline
+            // so the badge sits to the right of the name, consistent
+            // with the AC. The name takes the flex space via `weight(1f)`
+            // (which fills) so a long name truncates gracefully, leaving
+            // the badge at its intrinsic width on the trailing edge.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = name,
+                    color = PocketShellColors.Text,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 2,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                HostSetupBadge(
+                    state = setupState,
+                    onClick = onSetupBadgeClick,
+                )
+            }
             Spacer(modifier = Modifier.size(2.dp))
             Text(
                 text = subtitle,
@@ -208,3 +236,68 @@ private fun HostStatusChip(status: HostStatus) {
         )
     }
 }
+
+/**
+ * Small colour + text chip rendering the per-host bootstrap state.
+ * Mirrors the visual language of [HostStatusChip] (pill outline, inner
+ * dot, accent-soft fill) so the two badges read as siblings — one
+ * reports connection state, this one reports server-side setup state.
+ *
+ * Mapping (issue #120):
+ *
+ * - [HostSetupState.Ready]      -> green, "ready"
+ * - [HostSetupState.NeedsSetup] -> amber, "needs setup"
+ * - [HostSetupState.Unknown]    -> muted grey, "unknown"
+ *
+ * When [onClick] is non-null the entire pill is tappable. Callers wire a
+ * click handler only for the `NeedsSetup` state — the AC explicitly says
+ * tapping a `needs setup` badge opens the bootstrap sheet. For other
+ * states the badge stays informational.
+ *
+ * The pill carries a stable [HOST_SETUP_BADGE_TAG] test tag so
+ * instrumentation tests can find it regardless of language / wording.
+ */
+@Composable
+private fun HostSetupBadge(state: HostSetupState, onClick: (() -> Unit)?) {
+    val (color, label) = when (state) {
+        HostSetupState.Ready -> PocketShellColors.Green to "ready"
+        HostSetupState.NeedsSetup -> PocketShellColors.Amber to "needs setup"
+        HostSetupState.Unknown -> PocketShellColors.TextMuted to "unknown"
+    }
+    val baseModifier = Modifier
+        .testTag(HOST_SETUP_BADGE_TAG)
+        .background(
+            color = color.copy(alpha = 0.16f),
+            shape = RoundedCornerShape(999.dp),
+        )
+        .border(
+            width = 1.dp,
+            color = color.copy(alpha = 0.5f),
+            shape = RoundedCornerShape(999.dp),
+        )
+    val pillModifier = if (onClick != null) {
+        baseModifier.clickable(role = Role.Button, onClick = onClick)
+    } else {
+        baseModifier
+    }
+    Row(
+        modifier = pillModifier.padding(horizontal = 8.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .background(color = color, shape = CircleShape),
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = label,
+            color = color,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+/** Test tag carried by the [HostSetupBadge] pill — used by instrumentation. */
+const val HOST_SETUP_BADGE_TAG: String = "host-setup-badge"

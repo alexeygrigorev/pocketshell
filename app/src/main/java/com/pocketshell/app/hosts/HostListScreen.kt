@@ -71,6 +71,7 @@ import com.pocketshell.app.sessions.SessionsSection
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.components.HostCard
+import com.pocketshell.uikit.model.HostSetupState
 import com.pocketshell.uikit.model.HostStatus
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -150,6 +151,8 @@ fun HostListScreen(
     val pendingNavigation by viewModel.pendingNavigation.collectAsState()
     val sharePayload by viewModel.sharePayload.collectAsState()
     val shareMessage by viewModel.shareMessage.collectAsState()
+    val recheckMessage by viewModel.recheckMessage.collectAsState()
+    val setupStates by viewModel.setupStates.collectAsState()
     val context = LocalContext.current
     val activity = context as? FragmentActivity
     val hostSharePicker = rememberLauncherForActivityResult(
@@ -185,6 +188,7 @@ fun HostListScreen(
     // `onOpenSession` only once `ready == true`.
     val tapRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
     val portPanelRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
+    val recheckRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
     val currentHosts by rememberUpdatedState(hosts)
     val currentOpenSession by rememberUpdatedState(onOpenSession)
     val currentOpenTmuxHostSession by rememberUpdatedState(onOpenTmuxHostSession)
@@ -250,6 +254,26 @@ fun HostListScreen(
             requestProtectedConnection(host, key, PendingPassphraseAction.OpenPorts)
         }
     }
+    // Issue #120: "Re-check setup" kebab item. Resolves the host's key
+    // path the same way the connect tap does, then asks the ViewModel
+    // to invalidate the bootstrap cache and re-probe. The ViewModel
+    // surfaces a one-shot acknowledgement message via [recheckMessage]
+    // which renders in the share-banner slot.
+    LaunchedEffect(Unit) {
+        recheckRequests.collect { hostId ->
+            val host = currentHosts.find { it.id == hostId } ?: return@collect
+            val key = viewModel.keyFor(host.keyId) ?: return@collect
+            viewModel.recheckSetup(host, key.privateKeyPath)
+        }
+    }
+    // Issue #120 AC: when no bootstrap report exists yet, the badge
+    // shows `unknown` and the ViewModel triggers a background reprobe
+    // on first composition. `LaunchedEffect(Unit)` runs exactly once
+    // per composition and the ViewModel guards against re-firing under
+    // config changes.
+    LaunchedEffect(Unit) {
+        viewModel.reprobeUnknownHostsOnce()
+    }
 
     // Fire `onOpenSession` once the ViewModel marks the pending
     // navigation ready. The ViewModel handles the cache-hit fast path
@@ -299,6 +323,16 @@ fun HostListScreen(
                 ShareMessageBanner(message = msg, onDismiss = viewModel::clearShareMessage)
             }
 
+            // Issue #120: dedicated banner for the manual "Re-check
+            // setup" acknowledgement. Reuses [ShareMessageBanner] for
+            // visual consistency with the existing share-message banner;
+            // a separate StateFlow keeps the two messages independent so
+            // a host-share doesn't blow away a re-check ack and vice
+            // versa.
+            recheckMessage?.let { msg ->
+                ShareMessageBanner(message = msg, onDismiss = viewModel::clearRecheckMessage)
+            }
+
             // Issue #46: cross-host session dashboard. Render the
             // Sessions section ABOVE the Hosts section per the mockup
             // at `docs/mockups/dashboard.html`, but only when there is
@@ -345,6 +379,12 @@ fun HostListScreen(
                                 .fillMaxWidth()
                                 .padding(horizontal = 12.dp),
                         ) {
+                            // Issue #120: derive the per-host setup state from
+                            // the ViewModel's persisted-column projection.
+                            // Default to Unknown if the row isn't yet in the
+                            // map (race-free fallback while the DAO emission
+                            // catches up).
+                            val setupState = setupStates[host.id] ?: HostSetupState.Unknown
                             HostCard(
                                 name = host.name,
                                 subtitle = "${host.username}@${host.hostname}:${host.port}",
@@ -360,6 +400,19 @@ fun HostListScreen(
                                 // secondary actions. Wired through
                                 // `combinedClickable` inside `HostCard`.
                                 onLongClick = { menuOpen = true },
+                                setupState = setupState,
+                                onSetupBadgeClick = if (setupState == HostSetupState.NeedsSetup) {
+                                    // Issue #120: tapping a `needs setup`
+                                    // badge opens the existing bootstrap
+                                    // sheet through the standard tap-to-
+                                    // connect path. `bootstrapHost` is
+                                    // cache-aware: a `needsSetup` row has
+                                    // either `tmuxInstalled == false` or
+                                    // `heruInstalled == false`, both of
+                                    // which surface the sheet when the
+                                    // probe re-runs.
+                                    { tapRequests.tryEmit(host.id) }
+                                } else null,
                                 trailingContent = {
                                     HostOverflowMenuAnchor(
                                         expanded = menuOpen,
@@ -372,6 +425,10 @@ fun HostListScreen(
                                         onShare = {
                                             menuOpen = false
                                             viewModel.createSharePayload(host)
+                                        },
+                                        onRecheckSetup = {
+                                            menuOpen = false
+                                            recheckRequests.tryEmit(host.id)
                                         },
                                     )
                                 },
@@ -770,12 +827,14 @@ private fun HostOverflowMenuAnchor(
     onDismiss: () -> Unit,
     onOpenPorts: () -> Unit,
     onShare: () -> Unit,
+    onRecheckSetup: () -> Unit,
 ) {
     Box {
         Box(
             modifier = Modifier
                 .size(40.dp)
-                .clickable(role = Role.Button, onClick = onExpand),
+                .clickable(role = Role.Button, onClick = onExpand)
+                .testTag(HOST_OVERFLOW_BUTTON_TAG),
             contentAlignment = Alignment.Center,
         ) {
             KebabIcon()
@@ -792,9 +851,21 @@ private fun HostOverflowMenuAnchor(
                 text = { Text("Share") },
                 onClick = onShare,
             )
+            // Issue #120: manual re-probe entry point. Sits below the
+            // existing items so the placement is visually stable when
+            // long-press users learn the menu layout.
+            DropdownMenuItem(
+                text = { Text(RECHECK_SETUP_LABEL) },
+                onClick = onRecheckSetup,
+                modifier = Modifier.testTag(HOST_RECHECK_SETUP_ITEM_TAG),
+            )
         }
     }
 }
+
+internal const val HOST_OVERFLOW_BUTTON_TAG: String = "host:overflow:button"
+internal const val HOST_RECHECK_SETUP_ITEM_TAG: String = "host:overflow:recheck-setup"
+internal const val RECHECK_SETUP_LABEL: String = "Re-check setup"
 
 /**
  * Three small dots stacked vertically — the classic Android "more"

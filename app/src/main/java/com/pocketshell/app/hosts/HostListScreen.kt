@@ -24,9 +24,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.Canvas
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -314,38 +317,54 @@ fun HostListScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(hosts, key = { it.id }) { host ->
-                        Row(
+                        // Issue #113: the row used to carry three squared
+                        // chips ("HostCard | Ports | Share") that visually
+                        // competed with the primary "tap → connect" affordance.
+                        // The secondary actions now live behind a kebab + an
+                        // optional long-press on the card; the card itself
+                        // owns the only tap target and gets the full row
+                        // width so the `user@host:port` line can wrap at
+                        // large font scales instead of truncating.
+                        var menuOpen by remember(host.id) { mutableStateOf(false) }
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
                         ) {
                             HostCard(
                                 name = host.name,
                                 subtitle = "${host.username}@${host.hostname}:${host.port}",
                                 // Phase 1 does not track live connection state
                                 // here — the host list is a static snapshot.
-                                // Live "connected" dots return when session-state
-                                // plumbing lands (#22).
+                                // Live "connected" chips return when
+                                // session-state plumbing lands (#22).
                                 status = HostStatus.Disconnected,
                                 onClick = { tapRequests.tryEmit(host.id) },
-                                // Issue #38 item 1: only `HostCard`'s own
-                                // `.clickable` handles taps. Wrapping it in an
-                                // outer `combinedClickable` here used to layer
-                                // a long-press hook on top, but the inner
-                                // clickable always consumed the gesture first
-                                // so the long-press never fired in practice.
-                                // Until `HostCard` exposes a long-press
-                                // callback we route edit via the nav graph
-                                // alone (see `MainActivity`).
+                                // Issue #113: long-press now opens the same
+                                // overflow menu the kebab exposes — gives
+                                // users two equivalent ways to reach the
+                                // secondary actions. Wired through
+                                // `combinedClickable` inside `HostCard`.
+                                onLongClick = { menuOpen = true },
+                                trailingContent = {
+                                    HostOverflowMenuAnchor(
+                                        expanded = menuOpen,
+                                        onExpand = { menuOpen = true },
+                                        onDismiss = { menuOpen = false },
+                                        onOpenPorts = {
+                                            menuOpen = false
+                                            portPanelRequests.tryEmit(host.id)
+                                        },
+                                        onShare = {
+                                            menuOpen = false
+                                            viewModel.createSharePayload(host)
+                                        },
+                                    )
+                                },
                                 modifier = Modifier
-                                    .weight(1f)
+                                    .fillMaxWidth()
                                     .testTag(HOST_ROW_TAG_PREFIX + host.id),
                             )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            HostPortButton(onClick = { portPanelRequests.tryEmit(host.id) })
-                            Spacer(modifier = Modifier.width(8.dp))
-                            HostShareButton(onClick = { viewModel.createSharePayload(host) })
                         }
                     }
                 }
@@ -698,29 +717,73 @@ internal const val HOSTS_TAB_ROW_TAG = "hosts:tabrow"
 internal const val HOSTS_TAB_TAG_PREFIX = "hosts:tab:"
 private const val HOSTS_TAB_INDEX = 0
 
+/**
+ * Trailing kebab (vertical three-dot) button + the [DropdownMenu] it
+ * anchors. Lives in the [HostCard]'s `trailingContent` slot. Tapping
+ * the icon flips [expanded] via the caller; long-press on the card
+ * also calls back to flip the same state so the menu is reachable both
+ * ways. The icon is drawn directly with [Canvas] to avoid pulling in
+ * `material-icons-extended` for a single glyph (`Icons.Filled.MoreVert`
+ * is not part of `material-icons-core`, the only ramp on our
+ * classpath).
+ */
 @Composable
-private fun HostPortButton(onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .height(48.dp)
-            .background(
-                color = PocketShellColors.SurfaceElev,
-                shape = RoundedCornerShape(10.dp),
+private fun HostOverflowMenuAnchor(
+    expanded: Boolean,
+    onExpand: () -> Unit,
+    onDismiss: () -> Unit,
+    onOpenPorts: () -> Unit,
+    onShare: () -> Unit,
+) {
+    Box {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clickable(role = Role.Button, onClick = onExpand),
+            contentAlignment = Alignment.Center,
+        ) {
+            KebabIcon()
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = onDismiss,
+        ) {
+            DropdownMenuItem(
+                text = { Text("Ports") },
+                onClick = onOpenPorts,
             )
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(10.dp),
+            DropdownMenuItem(
+                text = { Text("Share") },
+                onClick = onShare,
             )
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 10.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = "Ports",
-            color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
+        }
+    }
+}
+
+/**
+ * Three small dots stacked vertically — the classic Android "more"
+ * affordance. Drawn with [Canvas] (3 filled circles) because
+ * `material-icons-core` (the only icon ramp on the classpath; see the
+ * comment on `DictateDotIcon` in `SessionScreen.kt`) does not ship
+ * `MoreVert`. Coloured `TextSecondary` so it reads as chrome, not a
+ * primary affordance.
+ */
+@Composable
+private fun KebabIcon() {
+    val color = PocketShellColors.TextSecondary
+    Canvas(modifier = Modifier.size(width = 4.dp, height = 18.dp)) {
+        val r = size.width / 2f
+        val gap = (size.height - 6f * r) / 2f
+        drawCircle(color = color, radius = r, center = androidx.compose.ui.geometry.Offset(r, r))
+        drawCircle(
+            color = color,
+            radius = r,
+            center = androidx.compose.ui.geometry.Offset(r, 3f * r + gap),
+        )
+        drawCircle(
+            color = color,
+            radius = r,
+            center = androidx.compose.ui.geometry.Offset(r, 5f * r + 2f * gap),
         )
     }
 }
@@ -838,33 +901,6 @@ private fun SshPassphraseDialog(
         },
         containerColor = PocketShellColors.Surface,
     )
-}
-
-@Composable
-private fun HostShareButton(onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .height(48.dp)
-            .background(
-                color = PocketShellColors.SurfaceElev,
-                shape = RoundedCornerShape(10.dp),
-            )
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(10.dp),
-            )
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 10.dp),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = "Share",
-            color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
 }
 
 /**

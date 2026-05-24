@@ -39,6 +39,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -55,6 +56,7 @@ import com.pocketshell.app.voice.VoiceCommandReviewStrip
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.terminal.ui.TerminalSurface
+import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
 import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.Tabs
 import com.pocketshell.uikit.model.Crumb
@@ -140,6 +142,12 @@ public fun SessionScreen(
     var showSnippetPicker by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
+    // Issue #131: the show-keyboard chip needs the Compose root view so it
+    // can locate the embedded `TerminalView` under it. `LocalView.current`
+    // is the `AndroidComposeView` host attached to this window; descending
+    // it finds the `AndroidView`-wrapped `TerminalView` inside the
+    // `TerminalSurface`.
+    val composeRootView = LocalView.current
 
     // Wire the inline-dictation transcription stream to the terminal. The
     // collector lives as long as the screen does — every emission writes
@@ -328,6 +336,13 @@ public fun SessionScreen(
                     chips = DefaultSessionChips,
                     onChipTap = viewModel::onChipTap,
                     onDictateTap = { showMicSheet = true },
+                    // Issue #131: the show-keyboard chip routes through the
+                    // helper that finds the TerminalView under the current
+                    // Compose root and requests focus + IMM. `showSoftInput`
+                    // is documented as an idempotent no-op when the keyboard
+                    // is already up, which matches the "no-op when shown"
+                    // contract from the issue.
+                    onShowKeyboardTap = { showTerminalSoftKeyboard(composeRootView) },
                     onAddSnippetTap = if (hostId != null) {
                         { showSnippetPicker = true }
                     } else null,

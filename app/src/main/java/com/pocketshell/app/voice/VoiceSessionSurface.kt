@@ -22,6 +22,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -138,12 +139,19 @@ internal fun VoiceCommandReviewStrip(
  * `docs/input-methods.md` §"Screen real estate"). The first chip is the
  * `dictate` icon chip — tapping it opens the prompt composer; the
  * rest write their literal text + `\n` into the terminal.
+ *
+ * The `keyboard` chip (issue #131) sits between `dictate` and `dirs` /
+ * `+ snippet` so the IME affordance lives next to the other input-mode
+ * chips. It is only rendered when [onShowKeyboardTap] is non-null — the
+ * tmux raw-SSH path always wires it; pure presentational previews can
+ * leave it `null` to drop the chip from the row.
  */
 @Composable
 private fun ChipRow(
     chips: List<String>,
     onChipTap: (String) -> Unit,
     onDictateTap: () -> Unit,
+    onShowKeyboardTap: (() -> Unit)? = null,
     onAddSnippetTap: (() -> Unit)? = null,
     onProjectNavigationTap: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
@@ -161,6 +169,14 @@ private fun ChipRow(
             onClick = onDictateTap,
             icon = DictateDotIcon,
         )
+        if (onShowKeyboardTap != null) {
+            CommandChip(
+                label = "keyboard",
+                onClick = onShowKeyboardTap,
+                icon = KeyboardChipIcon,
+                modifier = Modifier.testTag(SHOW_KEYBOARD_CHIP_TAG),
+            )
+        }
         if (onProjectNavigationTap != null) {
             CommandChip(
                 label = "dirs",
@@ -204,6 +220,7 @@ internal fun BottomChipControls(
     chips: List<String>,
     onChipTap: (String) -> Unit,
     onDictateTap: () -> Unit,
+    onShowKeyboardTap: (() -> Unit)? = null,
     onAddSnippetTap: (() -> Unit)? = null,
     onProjectNavigationTap: (() -> Unit)? = null,
 ) {
@@ -218,6 +235,7 @@ internal fun BottomChipControls(
             chips = chips,
             onChipTap = onChipTap,
             onDictateTap = onDictateTap,
+            onShowKeyboardTap = onShowKeyboardTap,
             onAddSnippetTap = onAddSnippetTap,
             onProjectNavigationTap = onProjectNavigationTap,
             modifier = Modifier.weight(1f),
@@ -323,5 +341,122 @@ private fun ImageVector.Builder.addMicPath(fill: SolidColor): ImageVector.Builde
     builder.close()
 
     addPath(pathData = builder.nodes, fill = fill)
+    return this
+}
+
+/**
+ * Issue #131: stable test tag for the show-keyboard chip. Lives next to
+ * `INLINE_DICTATION_*` tags so connected tests can reach the chip without
+ * relying on its visible label ("keyboard"), which could shift if the
+ * caption is renamed (e.g. to "show keyboard") later.
+ */
+internal const val SHOW_KEYBOARD_CHIP_TAG: String = "session:show-keyboard-chip"
+
+/**
+ * A 24x24 keyboard glyph used as the leading icon on the "keyboard" chip
+ * (issue #131). We hand-trace rather than pull in `material-icons-extended`
+ * for one glyph — same rationale as the [DictateDotIcon] mic above; the
+ * `material-icons-core` set transitively present via material3 does not
+ * ship a stand-alone `Filled.Keyboard`.
+ *
+ * The shape reads as the standard "keyboard" silhouette: a rounded outer
+ * rectangle outline (the keyboard's body) plus seven small filled rounded
+ * squares laid out as two key rows above a long bottom space-bar. Sized
+ * so each key remains distinguishable at the 14dp render size used by
+ * [CommandChip].
+ */
+internal val KeyboardChipIcon: ImageVector = ImageVector.Builder(
+    name = "ShowKeyboard",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).addKeyboardPath(
+    fill = SolidColor(Color.White),
+).build()
+
+/**
+ * Trace a Material-style filled keyboard into this [ImageVector.Builder].
+ *
+ * The path is rendered as one filled even-odd path so the outer-body
+ * rectangle (drawn clockwise) and the inner rectangle (drawn
+ * counter-clockwise) combine into a hollow outline — the keys then sit
+ * inside that hollow as small filled rounded squares.
+ *
+ * Geometry:
+ *
+ * - Outer body: rounded rectangle, x in [2, 22], y in [5, 19], corner
+ *   radius 2.
+ * - Inner cut: rounded rectangle, x in [3.5, 20.5], y in [6.5, 17.5],
+ *   corner radius 1. Drawn counter-clockwise to subtract from the outer
+ *   rectangle.
+ * - Key row 1 (y ≈ 8.5..10): three 2x1.5 keys at x = 5, 9.5, 14.
+ * - Key row 2 (y ≈ 11..12.5): three 2x1.5 keys at x = 5, 9.5, 14, with
+ *   the rightmost 1.5x1.5 "enter" key at x = 17.5.
+ * - Space bar (y ≈ 13.5..15): a 10x1.5 wide rectangle centred on x = 12.
+ */
+private fun ImageVector.Builder.addKeyboardPath(fill: SolidColor): ImageVector.Builder {
+    val builder = PathBuilder()
+
+    // Outer body (clockwise).
+    builder.moveTo(4f, 5f)
+    builder.lineToRelative(16f, 0f)
+    builder.arcToRelative(2f, 2f, 0f, false, true, 2f, 2f)
+    builder.lineToRelative(0f, 10f)
+    builder.arcToRelative(2f, 2f, 0f, false, true, -2f, 2f)
+    builder.lineToRelative(-16f, 0f)
+    builder.arcToRelative(2f, 2f, 0f, false, true, -2f, -2f)
+    builder.lineToRelative(0f, -10f)
+    builder.arcToRelative(2f, 2f, 0f, false, true, 2f, -2f)
+    builder.close()
+
+    // Inner cut (counter-clockwise) → produces a hollow border via the
+    // even-odd fill rule applied when this path is added below.
+    builder.moveTo(4.5f, 6.5f)
+    builder.arcToRelative(1f, 1f, 0f, false, false, -1f, 1f)
+    builder.lineToRelative(0f, 9f)
+    builder.arcToRelative(1f, 1f, 0f, false, false, 1f, 1f)
+    builder.lineToRelative(15f, 0f)
+    builder.arcToRelative(1f, 1f, 0f, false, false, 1f, -1f)
+    builder.lineToRelative(0f, -9f)
+    builder.arcToRelative(1f, 1f, 0f, false, false, -1f, -1f)
+    builder.close()
+
+    // Key row 1.
+    for (x in listOf(5f, 9.5f, 14f)) {
+        builder.moveTo(x, 8.5f)
+        builder.lineToRelative(2f, 0f)
+        builder.lineToRelative(0f, 1.5f)
+        builder.lineToRelative(-2f, 0f)
+        builder.close()
+    }
+
+    // Key row 2: three regular keys plus a wider "enter" key.
+    for (x in listOf(5f, 9.5f, 14f)) {
+        builder.moveTo(x, 11f)
+        builder.lineToRelative(2f, 0f)
+        builder.lineToRelative(0f, 1.5f)
+        builder.lineToRelative(-2f, 0f)
+        builder.close()
+    }
+    // Wider key on the right of row 2.
+    builder.moveTo(17.5f, 11f)
+    builder.lineToRelative(1.5f, 0f)
+    builder.lineToRelative(0f, 1.5f)
+    builder.lineToRelative(-1.5f, 0f)
+    builder.close()
+
+    // Space bar.
+    builder.moveTo(7f, 13.5f)
+    builder.lineToRelative(10f, 0f)
+    builder.lineToRelative(0f, 1.5f)
+    builder.lineToRelative(-10f, 0f)
+    builder.close()
+
+    addPath(
+        pathData = builder.nodes,
+        fill = fill,
+        pathFillType = androidx.compose.ui.graphics.PathFillType.EvenOdd,
+    )
     return this
 }

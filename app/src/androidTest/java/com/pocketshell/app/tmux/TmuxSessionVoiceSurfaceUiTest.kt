@@ -105,6 +105,7 @@ class TmuxSessionVoiceSurfaceUiTest {
     fun bottomChipControlsRendersMicFabAndDictateChip() {
         var dictateTaps = 0
         var snippetTaps = 0
+        var keyboardTaps = 0
         val chipTaps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme {
@@ -112,6 +113,7 @@ class TmuxSessionVoiceSurfaceUiTest {
                     chips = DefaultSessionChips,
                     onChipTap = { chipTaps += it },
                     onDictateTap = { dictateTaps += 1 },
+                    onShowKeyboardTap = { keyboardTaps += 1 },
                     onAddSnippetTap = { snippetTaps += 1 },
                     onProjectNavigationTap = null,
                 )
@@ -123,6 +125,13 @@ class TmuxSessionVoiceSurfaceUiTest {
         // site as the cyan dictate chip).
         compose.onNodeWithText("dictate").assertIsDisplayed().performClick()
         assertEquals(1, dictateTaps)
+
+        // Issue #131: the show-keyboard chip lives between `dictate` and
+        // `+ snippet` and routes through onShowKeyboardTap. Verified by
+        // its stable test tag so the assertion is robust against a future
+        // caption rename.
+        compose.onNodeWithTag("session:show-keyboard-chip").assertIsDisplayed().performClick()
+        assertEquals(1, keyboardTaps)
 
         compose.onNodeWithText("+ snippet").assertIsDisplayed().performClick()
         assertEquals(1, snippetTaps)

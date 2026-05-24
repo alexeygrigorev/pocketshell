@@ -66,6 +66,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -93,6 +94,7 @@ import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.ui.TerminalSurface
+import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
 import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.components.Tabs
@@ -210,6 +212,10 @@ public fun TmuxSessionScreen(
     var showMicSheet by remember { mutableStateOf(false) }
     var showSnippetPicker by remember { mutableStateOf(false) }
     val context = LocalContext.current
+    // Issue #131: same root-view handle as `SessionScreen`. The pager
+    // renders one pane at a time, so the helper's recursive search lands
+    // on the visible pane's `TerminalView`.
+    val composeRootView = LocalView.current
 
     // Route inline-dictation transcripts into the currently focused pane.
     // The collector re-binds whenever the focused pane or dictation mode
@@ -529,6 +535,13 @@ public fun TmuxSessionScreen(
                         }
                     },
                     onDictateTap = { showMicSheet = true },
+                    // Issue #131: surface the show-keyboard chip on the
+                    // tmux route too. The helper looks up the
+                    // `TerminalView` of the currently visible pane (the
+                    // pager renders one pane at a time, so there is only
+                    // ever a single attached `TerminalView` to find under
+                    // the Compose root).
+                    onShowKeyboardTap = { showTerminalSoftKeyboard(composeRootView) },
                     onAddSnippetTap = if (hostId != 0L) {
                         { showSnippetPicker = true }
                     } else null,

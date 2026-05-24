@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -24,7 +25,9 @@ import org.robolectric.annotation.Config
  * Covers:
  * - Saving a new host writes a row with the trimmed form values.
  * - Loading an existing host hydrates the form state.
- * - Validation errors surface for missing required fields and missing key.
+ * - Per-field validation errors surface for missing required fields,
+ *   missing key, and out-of-range port (issue #111).
+ * - The first invalid field is reported so the screen can request focus.
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [33])
@@ -78,6 +81,7 @@ class AddEditHostViewModelTest {
         // synchronously, so the state has already settled.
         assertTrue(vm.state.value.saved)
         assertNull(vm.state.value.error)
+        assertTrue(vm.state.value.fieldErrors.isClean())
 
         val hosts = db.hostDao().getAll().first()
         assertEquals(1, hosts.size)
@@ -90,25 +94,136 @@ class AddEditHostViewModelTest {
     }
 
     @Test
-    fun save_reportsError_whenRequiredFieldsBlank() = runTest {
+    fun save_reportsPerFieldErrors_andFirstInvalid_whenRequiredFieldsBlank() = runTest {
         val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
         vm.save()
-        assertNotNull(vm.state.value.error)
-        assertEquals(false, vm.state.value.saved)
-        // No row was persisted.
+
+        val state = vm.state.value
+        // Issue #111 — global prose error is gone; per-field errors light up.
+        assertNull(state.error)
+        assertEquals("Required", state.fieldErrors.name)
+        assertEquals("Required", state.fieldErrors.hostname)
+        assertEquals("Required", state.fieldErrors.username)
+        // Port keeps the default "22" so it is valid even on an empty submit.
+        assertNull(state.fieldErrors.port)
+        // No keys exist either.
+        assertNotNull(state.fieldErrors.selectedKey)
+        // The screen should move focus to the first field in tab order.
+        assertEquals(HostFormField.Name, state.firstInvalidField)
+        assertFalse(state.saved)
         assertEquals(0, db.hostDao().getAll().first().size)
     }
 
     @Test
-    fun save_reportsError_whenNoKeySelected() = runTest {
+    fun save_reportsKeyError_whenAllFieldsFilledButNoKeySelected() = runTest {
         val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
         vm.updateState {
             it.copy(name = "x", hostname = "h", username = "u", selectedKeyId = null)
         }
         vm.save()
-        assertNotNull(vm.state.value.error)
-        assertEquals(false, vm.state.value.saved)
+
+        val state = vm.state.value
+        assertNull(state.error)
+        assertEquals("Select an SSH key", state.fieldErrors.selectedKey)
+        assertEquals(HostFormField.SelectedKey, state.firstInvalidField)
+        assertFalse(state.saved)
         assertEquals(0, db.hostDao().getAll().first().size)
+    }
+
+    @Test
+    fun save_reportsPortError_whenPortOutOfRange() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),
+        )
+        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        vm.updateState {
+            it.copy(
+                name = "x",
+                hostname = "h",
+                username = "u",
+                port = "99999",
+                selectedKeyId = keyId,
+            )
+        }
+        vm.save()
+
+        val state = vm.state.value
+        assertEquals("Invalid port (1-65535)", state.fieldErrors.port)
+        assertEquals(HostFormField.Port, state.firstInvalidField)
+        assertFalse(state.saved)
+        assertEquals(0, db.hostDao().getAll().first().size)
+    }
+
+    @Test
+    fun save_reportsPortError_whenPortNotInteger() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),
+        )
+        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        vm.updateState {
+            it.copy(
+                name = "x",
+                hostname = "h",
+                username = "u",
+                port = "abc",
+                selectedKeyId = keyId,
+            )
+        }
+        vm.save()
+
+        assertEquals("Invalid port (1-65535)", vm.state.value.fieldErrors.port)
+        assertFalse(vm.state.value.saved)
+    }
+
+    @Test
+    fun updateState_clearsFieldError_whenUserEditsThatField() = runTest {
+        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        // Trigger errors first.
+        vm.save()
+        assertEquals("Required", vm.state.value.fieldErrors.name)
+
+        // Type into the Name field — its error should clear immediately so
+        // the red outline doesn't linger after the fix (issue #111).
+        vm.updateState { it.copy(name = "homelab") }
+        assertNull(vm.state.value.fieldErrors.name)
+        // Untouched fields keep their errors until the user edits them or
+        // hits Save again.
+        assertEquals("Required", vm.state.value.fieldErrors.hostname)
+    }
+
+    @Test
+    fun consumeFirstInvalidField_clearsTheSignal() = runTest {
+        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        vm.save()
+        assertNotNull(vm.state.value.firstInvalidField)
+
+        vm.consumeFirstInvalidField()
+        assertNull(vm.state.value.firstInvalidField)
+    }
+
+    @Test
+    fun validate_pure_returnsCleanErrorsForCompletelyValidState() {
+        val state = HostFormState(
+            name = "x",
+            hostname = "h",
+            port = "22",
+            username = "u",
+            selectedKeyId = 1L,
+        )
+        val errs = AddEditHostViewModel.validate(state)
+        assertTrue(errs.isClean())
+    }
+
+    @Test
+    fun validate_pure_acceptsPortBoundaries() {
+        val base = HostFormState(
+            name = "x", hostname = "h", username = "u", selectedKeyId = 1L,
+        )
+        assertNull(AddEditHostViewModel.validate(base.copy(port = "1")).port)
+        assertNull(AddEditHostViewModel.validate(base.copy(port = "65535")).port)
+        assertNotNull(AddEditHostViewModel.validate(base.copy(port = "0")).port)
+        assertNotNull(AddEditHostViewModel.validate(base.copy(port = "65536")).port)
+        assertNotNull(AddEditHostViewModel.validate(base.copy(port = "")).port)
     }
 
     @Test

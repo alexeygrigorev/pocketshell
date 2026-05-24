@@ -15,7 +15,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -36,19 +36,51 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.theme.PocketShellColors
+
+/**
+ * Test tags exposed for the issue #111 Add Host instrumentation tests.
+ *
+ * Field tags follow the form `add-host-field-<name>`; the CTA tag is
+ * `add-host-cta`. Tags are intentionally stable / opaque so a test can
+ * look up a node without depending on label wording, which is part of
+ * the spec under review (issue #111).
+ */
+const val ADD_HOST_NAME_FIELD_TAG = "add-host-field-name"
+const val ADD_HOST_HOSTNAME_FIELD_TAG = "add-host-field-hostname"
+const val ADD_HOST_PORT_FIELD_TAG = "add-host-field-port"
+const val ADD_HOST_USERNAME_FIELD_TAG = "add-host-field-username"
+const val ADD_HOST_KEY_FIELD_TAG = "add-host-field-key"
+const val ADD_HOST_CTA_TAG = "add-host-cta"
+const val ADD_HOST_KEY_DROPDOWN_TAG = "add-host-key-dropdown"
+
+/**
+ * Default supporting text shown under the Port field when there is no
+ * validation error. Mirrors Material 3 guidance to render the prefilled
+ * "22" as a hint rather than relying on a floating-label-with-value
+ * convention that mixed three label styles on this form (issue #111).
+ */
+private const val PORT_SUPPORTING_TEXT = "Default: 22"
 
 /**
  * Add a new host (when [hostId] is `null`) or edit an existing one. The
  * brief calls for "name, hostname, port, username, key selector"; this
  * screen lays them out as a single vertical column inside a scroll
  * container, with a save button pinned at the bottom of the scroll.
+ *
+ * Issue #111 standardises the form on Material 3 `OutlinedTextField`
+ * with persistent labels for every field (no placeholder-as-label), adds
+ * per-field validation with error outline + supporting text, disables
+ * the CTA until the form is valid, and on a rejected submit moves focus
+ * to the first invalid field.
  *
  * The key selector dropdown reads from [AddEditHostViewModel.sshKeys];
  * if the user has not registered any keys yet, the dropdown shows a
@@ -76,6 +108,38 @@ fun AddEditHostScreen(
     LaunchedEffect(state.saved) {
         if (state.saved) onDone()
     }
+
+    // Per-field focus requesters drive the "move focus to the first
+    // invalid field on a failed submit" requirement (issue #111). They
+    // are remembered once per screen instance so requesting focus on a
+    // recomposition routes to the same node the user is seeing.
+    val nameFocus = remember { FocusRequester() }
+    val hostnameFocus = remember { FocusRequester() }
+    val portFocus = remember { FocusRequester() }
+    val usernameFocus = remember { FocusRequester() }
+    val keyFocus = remember { FocusRequester() }
+
+    LaunchedEffect(state.firstInvalidField) {
+        val target = state.firstInvalidField ?: return@LaunchedEffect
+        val requester = when (target) {
+            HostFormField.Name -> nameFocus
+            HostFormField.Hostname -> hostnameFocus
+            HostFormField.Port -> portFocus
+            HostFormField.Username -> usernameFocus
+            HostFormField.SelectedKey -> keyFocus
+        }
+        // requestFocus can throw if the node hasn't been laid out yet
+        // (e.g. screen is still composing). We silently swallow that
+        // because the next save attempt will queue another focus request.
+        runCatching { requester.requestFocus() }
+        viewModel.consumeFirstInvalidField()
+    }
+
+    // CTA enablement derives reactively from the same pure validator the
+    // ViewModel uses inside save(). Disabled until every required field
+    // is non-empty AND port parses as int in [1..65535] AND a key is
+    // selected (issue #111).
+    val canSubmit = AddEditHostViewModel.validate(state).isClean()
 
     // Issue #38 item 3: intercept system-back so unsaved edits aren't
     // dropped silently. A "discard?" dialog only shows when the form is
@@ -128,12 +192,18 @@ fun AddEditHostScreen(
                     label = "Name",
                     value = state.name,
                     onValueChange = { v -> viewModel.updateState { it.copy(name = v) } },
+                    errorText = state.fieldErrors.name,
+                    focusRequester = nameFocus,
+                    testTag = ADD_HOST_NAME_FIELD_TAG,
                 )
 
                 FormField(
                     label = "Hostname / IP",
                     value = state.hostname,
                     onValueChange = { v -> viewModel.updateState { it.copy(hostname = v) } },
+                    errorText = state.fieldErrors.hostname,
+                    focusRequester = hostnameFocus,
+                    testTag = ADD_HOST_HOSTNAME_FIELD_TAG,
                 )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -141,14 +211,23 @@ fun AddEditHostScreen(
                         label = "Port",
                         value = state.port,
                         onValueChange = { v -> viewModel.updateState { it.copy(port = v) } },
+                        // Show the default-22 hint at rest; an error
+                        // message replaces it when validation fails.
+                        supportingText = PORT_SUPPORTING_TEXT,
+                        errorText = state.fieldErrors.port,
+                        focusRequester = portFocus,
                         modifier = Modifier.weight(1f),
+                        testTag = ADD_HOST_PORT_FIELD_TAG,
                         keyboardType = KeyboardType.Number,
                     )
                     FormField(
                         label = "Username",
                         value = state.username,
                         onValueChange = { v -> viewModel.updateState { it.copy(username = v) } },
+                        errorText = state.fieldErrors.username,
+                        focusRequester = usernameFocus,
                         modifier = Modifier.weight(2f),
+                        testTag = ADD_HOST_USERNAME_FIELD_TAG,
                     )
                 }
 
@@ -157,8 +236,15 @@ fun AddEditHostScreen(
                     keys = sshKeys.map { it.id to it.name },
                     onSelect = { id -> viewModel.updateState { it.copy(selectedKeyId = id) } },
                     onManageKeys = onManageKeys,
+                    errorText = state.fieldErrors.selectedKey,
+                    focusRequester = keyFocus,
                 )
 
+                // The legacy global prose error survives only for the
+                // "no SSH keys exist on the device at all" hint — that's
+                // a global precondition, not a per-field problem. The
+                // per-field rejection messages live under each field via
+                // `state.fieldErrors`.
                 state.error?.let { err ->
                     Text(
                         text = err,
@@ -171,10 +257,15 @@ fun AddEditHostScreen(
 
                 Button(
                     onClick = viewModel::save,
-                    modifier = Modifier.fillMaxWidth(),
+                    enabled = canSubmit,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(ADD_HOST_CTA_TAG),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = PocketShellColors.Accent,
                         contentColor = PocketShellColors.OnAccent,
+                        disabledContainerColor = PocketShellColors.Border,
+                        disabledContentColor = PocketShellColors.TextMuted,
                     ),
                 ) {
                     Text(
@@ -228,6 +319,12 @@ private fun FormAppBar(title: String, onBack: () -> Unit) {
 /**
  * Thin wrapper around [OutlinedTextField] that pre-applies the
  * PocketShell colour scheme so every form field reads consistently.
+ *
+ * Supports per-field validation via [errorText] (issue #111). When set,
+ * the field renders with `isError = true`, swapping the outline + label
+ * to the error colour and replacing any [supportingText] with the error
+ * message. [focusRequester] lets the screen move focus to the first
+ * invalid field after a rejected submit.
  */
 @Composable
 private fun FormField(
@@ -236,39 +333,70 @@ private fun FormField(
     onValueChange: (String) -> Unit,
     modifier: Modifier = Modifier,
     keyboardType: KeyboardType = KeyboardType.Text,
+    supportingText: String? = null,
+    errorText: String? = null,
+    focusRequester: FocusRequester? = null,
+    testTag: String? = null,
 ) {
+    val isError = errorText != null
+    val effectiveSupport = errorText ?: supportingText
+    // Apply the test tag as the LAST modifier on the OutlinedTextField so
+    // the semantics node it produces carries it. Putting `testTag` at the
+    // outer end of the chain — and not on a Row-scope `Modifier.weight()`
+    // that gets consumed before semantics — is what makes the tag
+    // discoverable from `onNodeWithTag` for Material 3 text fields, which
+    // wrap their content in a merge-descendants semantics node.
+    var effective: Modifier = modifier
+    if (focusRequester != null) effective = effective.focusRequester(focusRequester)
+    effective = effective.fillMaxWidth()
+    if (testTag != null) effective = effective.testTag(testTag)
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
         label = { Text(label) },
         singleLine = true,
-        modifier = modifier.fillMaxWidth(),
+        isError = isError,
+        supportingText = effectiveSupport?.let {
+            { Text(text = it) }
+        },
+        modifier = effective,
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
         colors = OutlinedTextFieldDefaults.colors(
             focusedTextColor = PocketShellColors.Text,
             unfocusedTextColor = PocketShellColors.Text,
             focusedBorderColor = PocketShellColors.Accent,
             unfocusedBorderColor = PocketShellColors.Border,
+            errorBorderColor = PocketShellColors.Red,
             focusedLabelColor = PocketShellColors.Accent,
             unfocusedLabelColor = PocketShellColors.TextSecondary,
+            errorLabelColor = PocketShellColors.Red,
+            errorSupportingTextColor = PocketShellColors.Red,
+            focusedSupportingTextColor = PocketShellColors.TextSecondary,
+            unfocusedSupportingTextColor = PocketShellColors.TextSecondary,
             cursorColor = PocketShellColors.Accent,
             focusedContainerColor = PocketShellColors.Surface,
             unfocusedContainerColor = PocketShellColors.Surface,
+            errorContainerColor = PocketShellColors.Surface,
         ),
     )
 }
 
 /**
- * Key-selector dropdown. Renders the currently-selected key's name (or a
- * placeholder if nothing is selected) in a tappable surface; tapping
- * opens a [DropdownMenu] with one item per registered key plus a trailing
- * "Manage keys…" entry that routes to [SshKeysScreen].
+ * Key-selector field. Issue #111 standardises every form field on a
+ * persistent label + outline; this selector reuses the [OutlinedTextField]
+ * chrome in read-only mode (no keyboard pops up) and anchors a
+ * [DropdownMenu] off the surrounding [Box]. Tapping anywhere on the
+ * field opens the menu.
+ *
+ * The selector accepts a [focusRequester] (so failed-submit focus moves
+ * land here) and an optional [errorText] (so a missing-key save attempt
+ * paints the field in the same per-field error style as the others).
  *
  * Material3's `ExposedDropdownMenuBox` is the canonical pattern but
- * pulls in `material3-adaptive` for full anchoring on some toolchains;
- * a hand-rolled tap-target + `DropdownMenu` is functionally equivalent
- * for this single-line use and keeps the dependency footprint flat
- * (issue #18 forbids new catalog entries).
+ * historically pulled in `material3-adaptive`; a hand-rolled tap-target
+ * + `DropdownMenu` is functionally equivalent for this single-line use
+ * and keeps the dependency footprint flat (issue #18 forbids new
+ * catalog entries).
  */
 @Composable
 private fun KeySelector(
@@ -276,77 +404,107 @@ private fun KeySelector(
     keys: List<Pair<Long, String>>,
     onSelect: (Long) -> Unit,
     onManageKeys: () -> Unit,
+    errorText: String? = null,
+    focusRequester: FocusRequester? = null,
 ) {
     var expanded by remember { mutableStateOf(false) }
     val selectedName = keys.firstOrNull { it.first == selectedKeyId }?.second
+    val isError = errorText != null
 
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = "SSH key",
-            color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
-            modifier = Modifier.padding(start = 4.dp, bottom = 4.dp),
+    Box(modifier = Modifier.fillMaxWidth()) {
+        // The read-only OutlinedTextField gives us the same persistent
+        // label + outlined chrome as every other field on the form
+        // (issue #111). It is `enabled = false` so the soft keyboard
+        // doesn't pop up — taps fall through to the overlay below that
+        // toggles the dropdown.
+        OutlinedTextField(
+            value = selectedName ?: "",
+            onValueChange = {},
+            readOnly = true,
+            enabled = false,
+            label = { Text("SSH key") },
+            placeholder = {
+                Text(
+                    "Select an SSH key",
+                    color = PocketShellColors.TextMuted,
+                )
+            },
+            isError = isError,
+            supportingText = errorText?.let { { Text(it) } },
+            singleLine = true,
+            modifier = (focusRequester?.let {
+                Modifier.focusRequester(it)
+            } ?: Modifier)
+                .fillMaxWidth()
+                .testTag(ADD_HOST_KEY_FIELD_TAG),
+            colors = OutlinedTextFieldDefaults.colors(
+                // We use `disabledXxx` because we set enabled=false so
+                // the soft keyboard doesn't appear; the visual still
+                // needs to match the other (enabled) fields.
+                disabledTextColor = PocketShellColors.Text,
+                disabledBorderColor = PocketShellColors.Border,
+                disabledLabelColor = PocketShellColors.TextSecondary,
+                disabledPlaceholderColor = PocketShellColors.TextMuted,
+                disabledSupportingTextColor = PocketShellColors.TextSecondary,
+                disabledContainerColor = PocketShellColors.Surface,
+                errorBorderColor = PocketShellColors.Red,
+                errorLabelColor = PocketShellColors.Red,
+                errorSupportingTextColor = PocketShellColors.Red,
+                errorContainerColor = PocketShellColors.Surface,
+            ),
         )
+        // Transparent click-catcher that sits on top of the disabled
+        // OutlinedTextField and opens the menu. Sized to match the
+        // outlined area; supportingText shows below so the catcher
+        // doesn't need to cover it.
         Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
-                .border(
-                    width = 1.dp,
-                    color = PocketShellColors.Border,
-                    shape = RoundedCornerShape(8.dp),
-                )
-                .clickable { expanded = true }
-                .padding(horizontal = 16.dp, vertical = 14.dp),
+                .matchParentSize()
+                .clickable { expanded = true },
+        )
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier
+                .background(PocketShellColors.Surface)
+                .testTag(ADD_HOST_KEY_DROPDOWN_TAG),
         ) {
-            Text(
-                text = selectedName ?: "Select an SSH key",
-                color = if (selectedName != null)
-                    PocketShellColors.Text else PocketShellColors.TextMuted,
-                fontSize = 14.sp,
-            )
-            DropdownMenu(
-                expanded = expanded,
-                onDismissRequest = { expanded = false },
-                modifier = Modifier.background(PocketShellColors.Surface),
-            ) {
-                if (keys.isEmpty()) {
-                    DropdownMenuItem(
-                        text = {
-                            Text(
-                                text = "No keys yet — tap Manage keys",
-                                color = PocketShellColors.TextMuted,
-                            )
-                        },
-                        onClick = {
-                            expanded = false
-                            onManageKeys()
-                        },
-                    )
-                } else {
-                    keys.forEach { (id, name) ->
-                        DropdownMenuItem(
-                            text = { Text(name, color = PocketShellColors.Text) },
-                            onClick = {
-                                onSelect(id)
-                                expanded = false
-                            },
+            if (keys.isEmpty()) {
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = "No keys yet — tap Manage keys",
+                            color = PocketShellColors.TextMuted,
                         )
-                    }
+                    },
+                    onClick = {
+                        expanded = false
+                        onManageKeys()
+                    },
+                )
+            } else {
+                keys.forEach { (id, name) ->
                     DropdownMenuItem(
-                        text = {
-                            Text(
-                                text = "Manage keys…",
-                                color = PocketShellColors.Accent,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                        },
+                        text = { Text(name, color = PocketShellColors.Text) },
                         onClick = {
+                            onSelect(id)
                             expanded = false
-                            onManageKeys()
                         },
                     )
                 }
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = "Manage keys…",
+                            color = PocketShellColors.Accent,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    },
+                    onClick = {
+                        expanded = false
+                        onManageKeys()
+                    },
+                )
             }
         }
     }

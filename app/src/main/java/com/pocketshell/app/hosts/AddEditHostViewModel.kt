@@ -16,6 +16,42 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
+ * Per-field validation errors for the Add / Edit host form (issue #111).
+ *
+ * Each property carries a human-readable message that the screen renders
+ * as `OutlinedTextField` supporting text in error colour. `null` means the
+ * field is clean. The whole struct is `null` on the form state until the
+ * user attempts a submit — until then we don't want to red-flag empty
+ * fields the user simply hasn't reached yet.
+ */
+data class HostFormErrors(
+    val name: String? = null,
+    val hostname: String? = null,
+    val port: String? = null,
+    val username: String? = null,
+    val selectedKey: String? = null,
+) {
+    /** Convenience for the CTA disabled-state check. */
+    fun isClean(): Boolean =
+        name == null && hostname == null && port == null &&
+            username == null && selectedKey == null
+}
+
+/**
+ * Which field a failed [AddEditHostViewModel.save] should move focus to.
+ *
+ * The screen exposes a `FocusRequester` per field and routes focus to the
+ * first invalid one, matching Material 3 form guidance.
+ */
+enum class HostFormField {
+    Name,
+    Hostname,
+    Port,
+    Username,
+    SelectedKey,
+}
+
+/**
  * View-model state for the add / edit host form.
  *
  * Fields mirror the persisted [HostEntity] but as `String` for the
@@ -23,9 +59,20 @@ import javax.inject.Inject
  * `OutlinedTextField`s, and a partially-typed value is a valid
  * intermediate state.
  *
- * [error] is `null` while the form is clean; it becomes a user-facing
- * message after a failed [AddEditHostViewModel.save] (missing required
- * field, missing key selection).
+ * [fieldErrors] holds the per-field error messages set after a failed
+ * `save()` attempt (issue #111). It stays empty while the user has not
+ * yet attempted to submit — empty required fields don't flash red the
+ * moment the screen opens.
+ *
+ * [firstInvalidField] is a one-shot signal so the screen knows where to
+ * move focus after a rejected submit. The screen consumes it via
+ * [AddEditHostViewModel.consumeFirstInvalidField] so we don't repeatedly
+ * yank focus on every recomposition.
+ *
+ * [error] survives only as a "no SSH keys available" banner above the
+ * CTA — that's a global precondition, not a per-field problem. Per-field
+ * errors (missing field, invalid port, no key selected) are surfaced via
+ * [fieldErrors].
  *
  * [saved] flips to `true` once the row is persisted — the screen
  * `LaunchedEffect`s on this flag to navigate back.
@@ -36,6 +83,8 @@ data class HostFormState(
     val port: String = "22",
     val username: String = "",
     val selectedKeyId: Long? = null,
+    val fieldErrors: HostFormErrors = HostFormErrors(),
+    val firstInvalidField: HostFormField? = null,
     val error: String? = null,
     val saved: Boolean = false,
 )
@@ -103,6 +152,8 @@ class AddEditHostViewModel @Inject constructor(
                 port = host.port.toString(),
                 username = host.username,
                 selectedKeyId = host.keyId,
+                fieldErrors = HostFormErrors(),
+                firstInvalidField = null,
                 error = null,
             )
             _state.value = loaded
@@ -112,25 +163,50 @@ class AddEditHostViewModel @Inject constructor(
         }
     }
 
-    /** Lambda-form state updater so the screen can compose changes inline. */
+    /**
+     * Lambda-form state updater so the screen can compose changes inline.
+     *
+     * As soon as the user types into a field that previously showed an
+     * error, clear that field's error so the red outline doesn't linger
+     * after they fix the value. The user has to re-press Save to
+     * re-validate.
+     */
     fun updateState(update: (HostFormState) -> HostFormState) {
-        _state.value = update(_state.value)
+        val previous = _state.value
+        val next = update(previous)
+        val cleared = clearErrorsForChangedFields(previous, next)
+        _state.value = cleared
+    }
+
+    /**
+     * After [save] queues focus on the first invalid field, the screen
+     * pulls the value out and clears the signal. Without consuming it,
+     * `LaunchedEffect(firstInvalidField)` would re-trigger on every
+     * recomposition that happens before the user submits again.
+     */
+    fun consumeFirstInvalidField() {
+        val s = _state.value
+        if (s.firstInvalidField != null) {
+            _state.value = s.copy(firstInvalidField = null)
+        }
     }
 
     /**
      * Persist the form. On success [HostFormState.saved] flips to `true`
-     * so the screen can pop back; on failure [HostFormState.error] carries
-     * a human-readable message.
+     * so the screen can pop back; on failure the per-field
+     * [HostFormState.fieldErrors] are populated and
+     * [HostFormState.firstInvalidField] is set so the screen can request
+     * focus.
      */
     fun save() {
         val s = _state.value
-        if (s.name.isBlank() || s.hostname.isBlank() || s.username.isBlank()) {
-            _state.value = s.copy(error = "Name, hostname and username are required")
-            return
-        }
-        val keyId = s.selectedKeyId
-        if (keyId == null) {
-            _state.value = s.copy(error = "Select an SSH key first (Keys → +)")
+        val errors = validate(s)
+        if (!errors.isClean()) {
+            _state.value = s.copy(
+                fieldErrors = errors,
+                firstInvalidField = firstInvalid(errors),
+                error = null,
+            )
             return
         }
 
@@ -139,16 +215,87 @@ class AddEditHostViewModel @Inject constructor(
                 id = editingHostId ?: 0,
                 name = s.name.trim(),
                 hostname = s.hostname.trim(),
-                port = s.port.toIntOrNull() ?: 22,
+                port = s.port.toInt(),
                 username = s.username.trim(),
-                keyId = keyId,
+                keyId = checkNotNull(s.selectedKeyId),
             )
             if (editingHostId != null) {
                 hostDao.update(host)
             } else {
                 hostDao.insert(host)
             }
-            _state.value = _state.value.copy(saved = true, error = null)
+            _state.value = _state.value.copy(
+                saved = true,
+                fieldErrors = HostFormErrors(),
+                firstInvalidField = null,
+                error = null,
+            )
         }
+    }
+
+    /**
+     * Pure-function validation used both by [save] and by the screen for
+     * the CTA enabled-state check. Kept outside the `save()` call so the
+     * screen can derive `canSubmit` reactively without trying to call
+     * `save()` speculatively.
+     */
+    internal fun validate(state: HostFormState): HostFormErrors = Companion.validate(state)
+
+    companion object {
+        /**
+         * Pure-function validation. Exposed at companion scope so unit
+         * tests and screen-level helpers can call it without
+         * constructing a ViewModel.
+         */
+        fun validate(state: HostFormState): HostFormErrors {
+            val name = if (state.name.isBlank()) "Required" else null
+            val hostname = if (state.hostname.isBlank()) "Required" else null
+            val username = if (state.username.isBlank()) "Required" else null
+            val portInt = state.port.trim().toIntOrNull()
+            val port = when {
+                state.port.isBlank() -> "Required"
+                portInt == null || portInt !in 1..65535 ->
+                    "Invalid port (1-65535)"
+                else -> null
+            }
+            val selectedKey =
+                if (state.selectedKeyId == null) "Select an SSH key" else null
+            return HostFormErrors(
+                name = name,
+                hostname = hostname,
+                port = port,
+                username = username,
+                selectedKey = selectedKey,
+            )
+        }
+    }
+
+    /**
+     * Clears any existing per-field error for a field whose value the
+     * user just changed. Without this the error outline would persist
+     * after the fix until the next Save press, which feels stale.
+     */
+    private fun clearErrorsForChangedFields(
+        previous: HostFormState,
+        next: HostFormState,
+    ): HostFormState {
+        val errs = previous.fieldErrors
+        val updated = errs.copy(
+            name = if (errs.name != null && previous.name != next.name) null else errs.name,
+            hostname = if (errs.hostname != null && previous.hostname != next.hostname) null else errs.hostname,
+            port = if (errs.port != null && previous.port != next.port) null else errs.port,
+            username = if (errs.username != null && previous.username != next.username) null else errs.username,
+            selectedKey = if (errs.selectedKey != null && previous.selectedKeyId != next.selectedKeyId) null else errs.selectedKey,
+        )
+        return if (updated == errs) next else next.copy(fieldErrors = updated)
+    }
+
+    private fun firstInvalid(errors: HostFormErrors): HostFormField? = when {
+        errors.name != null -> HostFormField.Name
+        errors.hostname != null -> HostFormField.Hostname
+        errors.port != null -> HostFormField.Port
+        errors.username != null -> HostFormField.Username
+        errors.selectedKey != null -> HostFormField.SelectedKey
+        else -> null
     }
 }

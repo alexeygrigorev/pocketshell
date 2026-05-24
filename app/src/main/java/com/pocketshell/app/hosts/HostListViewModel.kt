@@ -4,11 +4,13 @@ import android.content.Context
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.bootstrap.HostBootstrapReport
 import com.pocketshell.app.bootstrap.HostBootstrapSheetState
 import com.pocketshell.app.bootstrap.HostBootstrapper
 import com.pocketshell.app.bootstrap.InstallResult
 import com.pocketshell.app.bootstrap.BootstrapTool
 import com.pocketshell.app.bootstrap.TmuxStatus
+import com.pocketshell.app.bootstrap.ToolStatus
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.core.ssh.KnownHostsPolicy
@@ -322,6 +324,7 @@ class HostListViewModel @Inject constructor(
                 TmuxStatus.Installed -> {
                     persistResult(host, installed = true)
                     val report = bootstrapper.checkServerSetup(session)
+                    persistHeruResult(host, report)
                     if (report.isReady) {
                         closeBootstrapSession()
                         _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
@@ -336,6 +339,7 @@ class HostListViewModel @Inject constructor(
                 TmuxStatus.Missing -> {
                     persistResult(host, installed = false)
                     val report = bootstrapper.checkServerSetup(session)
+                    persistHeruResult(host, report)
                     _bootstrapState.value = HostBootstrapSheetState.Prompt(
                         needsTmux = true,
                         report = report,
@@ -414,6 +418,11 @@ class HostListViewModel @Inject constructor(
             persistResult(host, installed = true)
             when (val result = bootstrapper.installServerSetup(session, prompt?.report ?: bootstrapper.checkServerSetup(session))) {
                 InstallResult.Success -> {
+                    // Re-probe so the persisted heru flag reflects the
+                    // post-install reality, then flip to the success
+                    // state so the sheet can offer the Open Usage CTA.
+                    val finalReport = bootstrapper.checkServerSetup(session)
+                    persistHeruResult(host, finalReport)
                     _bootstrapState.value = HostBootstrapSheetState.Success
                 }
 
@@ -509,6 +518,7 @@ class HostListViewModel @Inject constructor(
 
     private suspend fun refreshServerSetupPrompt(session: SshSession, needsTmux: Boolean) {
         val report = bootstrapper.checkServerSetup(session)
+        bootstrapTargetHost?.let { persistHeruResult(it, report) }
         _bootstrapState.value = if (!needsTmux && report.isReady) {
             HostBootstrapSheetState.Success
         } else {
@@ -549,6 +559,34 @@ class HostListViewModel @Inject constructor(
             current.copy(
                 tmuxInstalled = installed,
                 lastBootstrapAt = now,
+            ),
+        )
+    }
+
+    /**
+     * Persist the heru-installed flag from a fresh [HostBootstrapReport]
+     * (issue #117, usage-panel Fix C). The check is decoupled from
+     * [persistResult] because the heru probe arrives via the broader
+     * `checkServerSetup` call, not the single-tool `checkTmux` probe.
+     *
+     * Records `heruLastDetectedAt` whether heru is present or missing so
+     * the periodic usage scheduler can apply the same 24h freshness
+     * heuristic the tmux probe uses — the scheduler only re-detects when
+     * the cache is stale.
+     */
+    private suspend fun persistHeruResult(host: HostEntity, report: HostBootstrapReport) {
+        val heruInstalled = report.tools[BootstrapTool.Heru] is ToolStatus.Installed
+        val now = System.currentTimeMillis()
+        val current = hostDao.getById(host.id) ?: host
+        // Only write when the cached value would change; avoids a churn
+        // on every connect for a row that has not moved.
+        if (current.heruInstalled == heruInstalled && current.heruLastDetectedAt != null) {
+            return
+        }
+        hostDao.update(
+            current.copy(
+                heruInstalled = heruInstalled,
+                heruLastDetectedAt = now,
             ),
         )
     }

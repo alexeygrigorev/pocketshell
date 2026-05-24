@@ -83,6 +83,16 @@ data class HostFormState(
     val port: String = "22",
     val username: String = "",
     val selectedKeyId: Long? = null,
+    /**
+     * Issue #117 (usage Fix C): optional override for the per-host usage
+     * command. `null` and the empty string both mean "use the default
+     * `heru usage --json`". Persisted to [HostEntity.usageCommandOverride]
+     * and forwarded to [UsageRemoteSource.fetchUsage] as
+     * `commandOverride`. Not validated — any non-empty string is
+     * accepted because the value is shell-executed server-side and the
+     * app deliberately doesn't second-guess the user's wrapper script.
+     */
+    val usageCommand: String = "",
     val fieldErrors: HostFormErrors = HostFormErrors(),
     val firstInvalidField: HostFormField? = null,
     val error: String? = null,
@@ -134,7 +144,8 @@ class AddEditHostViewModel @Inject constructor(
             s.hostname != baseline.hostname ||
             s.port != baseline.port ||
             s.username != baseline.username ||
-            s.selectedKeyId != baseline.selectedKeyId
+            s.selectedKeyId != baseline.selectedKeyId ||
+            s.usageCommand != baseline.usageCommand
     }
 
     /**
@@ -152,6 +163,7 @@ class AddEditHostViewModel @Inject constructor(
                 port = host.port.toString(),
                 username = host.username,
                 selectedKeyId = host.keyId,
+                usageCommand = host.usageCommandOverride.orEmpty(),
                 fieldErrors = HostFormErrors(),
                 firstInvalidField = null,
                 error = null,
@@ -211,15 +223,43 @@ class AddEditHostViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
-            val host = HostEntity(
-                id = editingHostId ?: 0,
-                name = s.name.trim(),
-                hostname = s.hostname.trim(),
-                port = s.port.toInt(),
-                username = s.username.trim(),
-                keyId = checkNotNull(s.selectedKeyId),
-            )
-            if (editingHostId != null) {
+            val usageOverride = s.usageCommand.trim().takeIf { it.isNotEmpty() }
+            val editingId = editingHostId
+            val host = if (editingId != null) {
+                // Merge form fields into the persisted row so bootstrap
+                // cache columns (tmuxInstalled, heruInstalled,
+                // lastBootstrapAt, heruLastDetectedAt, etc.) and the
+                // auto-forward defaults survive a form save. The form
+                // only owns the user-editable fields plus the new
+                // [usageCommandOverride] from issue #117.
+                val existing = hostDao.getById(editingId) ?: HostEntity(
+                    id = editingId,
+                    name = s.name.trim(),
+                    hostname = s.hostname.trim(),
+                    port = s.port.toInt(),
+                    username = s.username.trim(),
+                    keyId = checkNotNull(s.selectedKeyId),
+                )
+                existing.copy(
+                    name = s.name.trim(),
+                    hostname = s.hostname.trim(),
+                    port = s.port.toInt(),
+                    username = s.username.trim(),
+                    keyId = checkNotNull(s.selectedKeyId),
+                    usageCommandOverride = usageOverride,
+                )
+            } else {
+                HostEntity(
+                    id = 0,
+                    name = s.name.trim(),
+                    hostname = s.hostname.trim(),
+                    port = s.port.toInt(),
+                    username = s.username.trim(),
+                    keyId = checkNotNull(s.selectedKeyId),
+                    usageCommandOverride = usageOverride,
+                )
+            }
+            if (editingId != null) {
                 hostDao.update(host)
             } else {
                 hostDao.insert(host)

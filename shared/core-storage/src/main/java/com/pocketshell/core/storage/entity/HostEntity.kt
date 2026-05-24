@@ -21,6 +21,16 @@ import androidx.room.PrimaryKey
  * the existing `createdAt` / `lastConnectedAt` convention — the issue body
  * mentioned `Instant?` but the codebase has no `kotlinx-datetime` dependency
  * and the brief forbids adding new catalog entries.
+ *
+ * Issue #117 (usage-panel Fix C) added [heruInstalled],
+ * [heruLastDetectedAt], and [usageCommandOverride]: the same bootstrap
+ * probe that fills [tmuxInstalled] also reports whether `heru` (the
+ * usage CLI) is present on the host. The detected result is cached the
+ * same way so the periodic usage scheduler can skip hosts that don't
+ * have heru without re-probing on every poll. [usageCommandOverride] is
+ * an optional per-host override for the usage command (e.g. a corporate
+ * wrapper that emits the same JSON shape) — `null` falls back to
+ * `heru usage --json`.
  */
 @Entity(
     tableName = "hosts",
@@ -49,4 +59,7 @@ data class HostEntity(
     val lastConnectedAt: Long? = null,
     val tmuxInstalled: Boolean? = null,
     val lastBootstrapAt: Long? = null,
+    val heruInstalled: Boolean? = null,
+    val heruLastDetectedAt: Long? = null,
+    val usageCommandOverride: String? = null,
 )

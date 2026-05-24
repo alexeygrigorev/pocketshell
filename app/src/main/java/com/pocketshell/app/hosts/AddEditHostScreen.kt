@@ -59,8 +59,19 @@ const val ADD_HOST_HOSTNAME_FIELD_TAG = "add-host-field-hostname"
 const val ADD_HOST_PORT_FIELD_TAG = "add-host-field-port"
 const val ADD_HOST_USERNAME_FIELD_TAG = "add-host-field-username"
 const val ADD_HOST_KEY_FIELD_TAG = "add-host-field-key"
+const val ADD_HOST_USAGE_COMMAND_FIELD_TAG = "add-host-field-usage-command"
 const val ADD_HOST_CTA_TAG = "add-host-cta"
 const val ADD_HOST_KEY_DROPDOWN_TAG = "add-host-key-dropdown"
+
+/**
+ * Default placeholder shown in the optional "Usage command" field
+ * (issue #117). Mirrors `UsageRemoteSource.defaultUsageCommand` — the
+ * literal is duplicated here so the form doesn't depend on the
+ * `app.usage` package, keeping the Compose surface package-isolated.
+ */
+private const val USAGE_COMMAND_PLACEHOLDER = "heru usage --json"
+private const val USAGE_COMMAND_SUPPORTING_TEXT =
+    "Optional override. Leave blank to use heru usage --json."
 
 /**
  * Default supporting text shown under the Port field when there is no
@@ -240,6 +251,23 @@ fun AddEditHostScreen(
                     focusRequester = keyFocus,
                 )
 
+                // Issue #117 (usage Fix C): optional per-host override
+                // for the usage command. The field is plain — no
+                // validation, no required-marker — because (a) any
+                // non-empty string is forwarded verbatim to
+                // [UsageRemoteSource.fetchUsage] as `commandOverride`,
+                // and (b) leaving it blank just falls back to
+                // `heru usage --json`. The placeholder is the default so
+                // the user can see what the empty state will do.
+                FormField(
+                    label = "Usage command (optional)",
+                    value = state.usageCommand,
+                    onValueChange = { v -> viewModel.updateState { it.copy(usageCommand = v) } },
+                    supportingText = USAGE_COMMAND_SUPPORTING_TEXT,
+                    placeholder = USAGE_COMMAND_PLACEHOLDER,
+                    testTag = ADD_HOST_USAGE_COMMAND_FIELD_TAG,
+                )
+
                 // The legacy global prose error survives only for the
                 // "no SSH keys exist on the device at all" hint — that's
                 // a global precondition, not a per-field problem. The
@@ -337,6 +365,7 @@ private fun FormField(
     errorText: String? = null,
     focusRequester: FocusRequester? = null,
     testTag: String? = null,
+    placeholder: String? = null,
 ) {
     val isError = errorText != null
     val effectiveSupport = errorText ?: supportingText
@@ -354,6 +383,9 @@ private fun FormField(
         value = value,
         onValueChange = onValueChange,
         label = { Text(label) },
+        placeholder = placeholder?.let {
+            { Text(text = it, color = PocketShellColors.TextMuted) }
+        },
         singleLine = true,
         isError = isError,
         supportingText = effectiveSupport?.let {

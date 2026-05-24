@@ -31,6 +31,7 @@ import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.migrations.MIGRATION_1_2
 import com.pocketshell.core.storage.migrations.MIGRATION_2_3
+import com.pocketshell.core.storage.migrations.MIGRATION_3_4
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.delay
@@ -187,7 +188,7 @@ class EmulatorDockerSshSmokeTest {
 
         var hostRowTag = ""
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
             .fallbackToDestructiveMigration(dropAllTables = false)
             .build()
         try {

@@ -125,6 +125,15 @@ fun HostListScreen(
         startDirectory: String?,
     ) -> Unit = { _, _, _, _, _ -> },
     onOpenPortForwardPanel: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit = { _, _, _ -> },
+    /**
+     * Issue #117 (usage Fix C): the bootstrap sheet's Success state can
+     * route the user to the usage panel when `heru` was just installed.
+     * The callback is optional because Fix A owns the actual
+     * `AppDestination.Usage` destination and only wires the route once
+     * its branch lands; until then the call site can pass `null` and the
+     * Success row falls back to a Continue-only layout.
+     */
+    onOpenUsage: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     viewModel: HostListViewModel = hiltViewModel(),
     sessionsViewModel: SessionsDashboardViewModel = hiltViewModel(),
@@ -412,6 +421,12 @@ fun HostListScreen(
                 onSetupDaemon = { viewModel.setupBootstrapDaemon() },
                 onSkip = { viewModel.dismissBootstrapAndOpen() },
                 onDismiss = { viewModel.dismissBootstrapAndOpen() },
+                onOpenUsage = onOpenUsage?.let { route ->
+                    {
+                        viewModel.dismissBootstrapAndOpen()
+                        route()
+                    }
+                },
             )
         }
 

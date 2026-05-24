@@ -71,6 +71,7 @@ public const val HOST_BOOTSTRAP_CONTINUE_TAG: String = "host-bootstrap-continue"
 public const val HOST_BOOTSTRAP_CLOSE_TAG: String = "host-bootstrap-close"
 public const val HOST_BOOTSTRAP_INSTALLING_TAG: String = "host-bootstrap-installing"
 public const val HOST_BOOTSTRAP_ROW_TAG_PREFIX: String = "host-bootstrap-row-"
+public const val HOST_BOOTSTRAP_OPEN_USAGE_TAG: String = "host-bootstrap-open-usage"
 
 /**
  * Compose modal that surfaces on host connect when `tmux` is missing.
@@ -103,6 +104,7 @@ public fun HostBootstrapSheet(
     onSetupDaemon: () -> Unit = onInstall,
     onSkip: () -> Unit,
     onDismiss: () -> Unit,
+    onOpenUsage: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
 ) {
@@ -128,6 +130,7 @@ public fun HostBootstrapSheet(
             HostBootstrapSheetState.Success -> SuccessContent(
                 hostName = hostName,
                 onContinue = onDismiss,
+                onOpenUsage = onOpenUsage,
             )
 
             is HostBootstrapSheetState.Failed -> FailedContent(
@@ -332,18 +335,49 @@ private fun InstallingContent(hostName: String) {
 }
 
 @Composable
-private fun SuccessContent(hostName: String, onContinue: () -> Unit) {
+private fun SuccessContent(
+    hostName: String,
+    onContinue: () -> Unit,
+    onOpenUsage: (() -> Unit)? = null,
+) {
     SheetColumn {
         SheetTitle(text = "Host ready")
         SheetSubtitle(text = "$hostName · server tools are installed and the tmuxctl user daemon is enabled.")
         Spacer(modifier = Modifier.height(20.dp))
-        Row(modifier = Modifier.fillMaxWidth()) {
-            Spacer(modifier = Modifier.weight(1f))
-            PrimaryButton(
-                label = "Continue",
-                onClick = onContinue,
-                modifier = Modifier.testTag(HOST_BOOTSTRAP_CONTINUE_TAG),
-            )
+        // Issue #117 (usage Fix C): when heru was just installed by the
+        // bootstrap flow, surface a direct route to the usage panel. The
+        // callback is supplied by the caller — when it is `null` the sheet
+        // falls back to a Continue-only row so older call sites keep
+        // working unchanged.
+        if (onOpenUsage != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                SecondaryButton(
+                    label = "Continue",
+                    onClick = onContinue,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(HOST_BOOTSTRAP_CONTINUE_TAG),
+                )
+                PrimaryButton(
+                    label = "Open Usage",
+                    onClick = onOpenUsage,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(HOST_BOOTSTRAP_OPEN_USAGE_TAG),
+                )
+            }
+        } else {
+            Row(modifier = Modifier.fillMaxWidth()) {
+                Spacer(modifier = Modifier.weight(1f))
+                PrimaryButton(
+                    label = "Continue",
+                    onClick = onContinue,
+                    modifier = Modifier.testTag(HOST_BOOTSTRAP_CONTINUE_TAG),
+                )
+            }
         }
     }
 }

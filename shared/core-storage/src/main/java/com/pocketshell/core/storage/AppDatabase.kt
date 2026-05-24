@@ -40,6 +40,11 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
  * Version 3 (issues #58/#59) added [ProjectRootEntity] for per-host project
  * root shortcuts used by the terminal navigation lane.
  *
+ * Version 4 (issue #117) added three columns to [HostEntity] for the
+ * usage-panel periodic poll: `heruInstalled`, `heruLastDetectedAt`, and
+ * `usageCommandOverride`. The SQL lives in
+ * [com.pocketshell.core.storage.migrations.MIGRATION_3_4].
+ *
  * `exportSchema = false` matches the reference module. When the schema
  * starts evolving in real users' hands, flip this on and check generated
  * schemas into `schemas/` so migrations are reviewable.
@@ -54,7 +59,7 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
         SnippetEntity::class,
         AgentSessionEntity::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {

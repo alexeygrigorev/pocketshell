@@ -263,6 +263,70 @@ class AddEditHostViewModelTest {
     }
 
     @Test
+    fun save_persistsUsageCommandOverride_andTrimsBlankToNull() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),
+        )
+        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        vm.updateState {
+            it.copy(
+                name = "x",
+                hostname = "h",
+                username = "u",
+                selectedKeyId = keyId,
+                usageCommand = " mycorp-usage --json ",
+            )
+        }
+        vm.save()
+
+        val hosts = db.hostDao().getAll().first()
+        assertEquals("mycorp-usage --json", hosts.single().usageCommandOverride)
+
+        // A second save with a blank usage command clears the override
+        // back to null (the scheduler then falls back to the default).
+        val vm2 = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        vm2.loadHost(hosts.single().id)
+        vm2.updateState { it.copy(usageCommand = "   ") }
+        vm2.save()
+        assertNull(db.hostDao().getAll().first().single().usageCommandOverride)
+    }
+
+    @Test
+    fun save_onEdit_preservesBootstrapCacheColumns() = runTest {
+        // Issue #117 regression: save() used to overwrite the entire
+        // HostEntity, clobbering tmuxInstalled / heruInstalled /
+        // lastBootstrapAt. Verify the edit path now merges into the
+        // existing row.
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),
+        )
+        val hostId = db.hostDao().insert(
+            com.pocketshell.core.storage.entity.HostEntity(
+                name = "h",
+                hostname = "h.example",
+                port = 22,
+                username = "u",
+                keyId = keyId,
+                tmuxInstalled = true,
+                lastBootstrapAt = 12345L,
+                heruInstalled = true,
+                heruLastDetectedAt = 9999L,
+            ),
+        )
+        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        vm.loadHost(hostId)
+        vm.updateState { it.copy(name = "renamed") }
+        vm.save()
+
+        val row = db.hostDao().getById(hostId)!!
+        assertEquals("renamed", row.name)
+        assertEquals(true, row.tmuxInstalled)
+        assertEquals(12345L, row.lastBootstrapAt)
+        assertEquals(true, row.heruInstalled)
+        assertEquals(9999L, row.heruLastDetectedAt)
+    }
+
+    @Test
     fun loadHost_hydratesFormState() = runTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),

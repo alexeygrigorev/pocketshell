@@ -262,7 +262,7 @@ internal fun TerminalView.applyPocketShellDefaults(viewClient: TerminalViewClien
     // the renderer before we swap in the app typeface.
     setTextSize(DEFAULT_TEXT_SIZE_RAW_PX)
     setTypeface(Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL))
-    setBackgroundColor(DefaultTerminalBackground.toArgb())
+    setDefaultBackgroundColor(DefaultTerminalBackground.toArgb())
     isFocusable = true
     isFocusableInTouchMode = true
     return this

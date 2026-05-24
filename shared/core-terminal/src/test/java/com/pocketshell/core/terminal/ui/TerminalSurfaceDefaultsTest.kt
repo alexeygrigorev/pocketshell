@@ -1,6 +1,8 @@
 package com.pocketshell.core.terminal.ui
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
@@ -33,6 +35,23 @@ class TerminalSurfaceDefaultsTest {
         assertMonospace(view.appliedRendererTypeface())
         assertTrue(view.isFocusable)
         assertTrue(view.isFocusableInTouchMode)
+    }
+
+    @Test
+    fun unattachedTerminalCanvasUsesPocketShellBackground() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val view = TerminalView(context, null)
+        val bitmap = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888)
+
+        view.applyPocketShellDefaults(FakeTerminalViewClient)
+        view.layout(0, 0, bitmap.width, bitmap.height)
+        view.draw(Canvas(bitmap))
+
+        assertEquals(
+            "blank terminal frames should match the attached terminal background",
+            DefaultTerminalBackground.toArgb(),
+            bitmap.getPixel(0, 0),
+        )
     }
 
     @Test

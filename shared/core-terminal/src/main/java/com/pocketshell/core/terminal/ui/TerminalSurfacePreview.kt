@@ -33,11 +33,11 @@ import androidx.compose.ui.tooling.preview.Preview
  * state holder's flow instead, which exercises the public state surface
  * without touching JNI.
  *
- * The unattached surface renders as the design-language background colour
- * with the [com.termux.view.TerminalView]'s default black canvas inset;
- * that is enough for reviewers to eyeball sizing, padding, and typeface
- * behaviour. Issue #9 will swap in a richer preview once the JNI is wired
- * (or, more likely, a synthetic byte feeder for previews specifically).
+ * The unattached surface renders as the same near-black terminal background
+ * used by attached sessions; that is enough for reviewers to eyeball sizing,
+ * padding, and typeface behaviour. Issue #9 will swap in a richer preview
+ * once the JNI is wired (or, more likely, a synthetic byte feeder for
+ * previews specifically).
  */
 @Preview(
     name = "TerminalSurface — unattached",

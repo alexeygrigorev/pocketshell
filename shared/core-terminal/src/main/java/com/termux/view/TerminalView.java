@@ -73,6 +73,7 @@ public final class TerminalView extends View {
     private boolean mRenderInvalidationPending;
     private int mPendingRenderInvalidationRequests;
     private int mCoalescedRenderInvalidationFrames;
+    private int mDefaultBackgroundColor = 0XFF000000;
     private final Runnable mRenderInvalidationRunnable = new Runnable() {
         @Override
         public void run() {
@@ -539,6 +540,11 @@ public final class TerminalView extends View {
         mRenderer = new TerminalRenderer(mRenderer.mTextSize, newTypeface);
         updateSize();
         scheduleRenderInvalidation();
+    }
+
+    public void setDefaultBackgroundColor(int color) {
+        mDefaultBackgroundColor = color;
+        setBackgroundColor(color);
     }
 
     @Override
@@ -1033,7 +1039,7 @@ public final class TerminalView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         if (mEmulator == null) {
-            canvas.drawColor(0XFF000000);
+            canvas.drawColor(mDefaultBackgroundColor);
         } else {
             // render the terminal view and highlight any selected text
             int[] sel = mDefaultSelectors;

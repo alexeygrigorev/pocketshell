@@ -34,6 +34,13 @@ sealed interface AppDestination {
     /** Local, user-shared-only crash reports captured after uncaught exceptions. */
     data object CrashReports : AppDestination
 
+    /**
+     * App-level Settings surface introduced in issue #112 — theme,
+     * terminal defaults, diagnostics, and About. Reachable from the
+     * top bar's gear affordance on [HostList].
+     */
+    data object Settings : AppDestination
+
     /** Host chooser opened from Android system forwarding surfaces such as the QS tile. */
     data object PortForwardChooser : AppDestination
 

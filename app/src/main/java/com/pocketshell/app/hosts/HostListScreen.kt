@@ -110,7 +110,12 @@ fun HostListScreen(
     onAddHost: () -> Unit,
     @Suppress("UNUSED_PARAMETER") onEditHost: (Long) -> Unit,
     onManageKeys: () -> Unit,
-    onOpenCrashReports: () -> Unit,
+    // Issue #112: Crashes affordance was moved off the top bar and now
+    // lives under Settings → Diagnostics. The activity-level wiring still
+    // passes this callback so the navigator can re-introduce a direct
+    // entry point later (e.g. a deep link) without re-threading state.
+    @Suppress("UNUSED_PARAMETER") onOpenCrashReports: () -> Unit,
+    onOpenSettings: () -> Unit = {},
     onOpenSession: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit,
     onOpenTmuxHostSession: (
         HostEntity,
@@ -263,8 +268,8 @@ fun HostListScreen(
         Column(modifier = Modifier.fillMaxSize()) {
             HostsAppBar(
                 onKeysClick = onManageKeys,
-                onCrashReportsClick = onOpenCrashReports,
                 onImportHostClick = { hostSharePicker.launch("*/*") },
+                onSettingsClick = onOpenSettings,
             )
 
             // Issue #40: surface the upgrade prompt at the top so the
@@ -597,11 +602,14 @@ private fun VersionFooter(versionName: String) {
  * 1. A title row carrying the bold "PocketShell" wordmark (visual parity
  *    with the mockup).
  * 2. A Material 3 [TabRow] underneath, with "Hosts" as the always-active
- *    landing tab plus "Crashes" / "Import" / "Keys" as navigation tabs.
- *    The selected tab is rendered with the [PocketShellColors.Accent]
- *    indicator. Tapping a non-Hosts tab invokes the relevant navigation
- *    callback; the indicator does not move because the user leaves this
- *    screen entirely (and returns with "Hosts" selected again).
+ *    landing tab plus "Settings" / "Import" / "Keys" as navigation tabs.
+ *    Per issue #112 the "Crashes" tab is replaced with a "Settings" tab
+ *    (gear-style entry point) and the actual crash-reports surface is
+ *    relocated under Settings → Diagnostics. The selected tab is rendered
+ *    with the [PocketShellColors.Accent] indicator. Tapping a non-Hosts
+ *    tab invokes the relevant navigation callback; the indicator does not
+ *    move because the user leaves this screen entirely (and returns with
+ *    "Hosts" selected again).
  *
  * `Tab` from Material 3 wraps its content in
  * `Modifier.selectable(role = Role.Tab)`, so each tab is announced to
@@ -611,8 +619,8 @@ private fun VersionFooter(versionName: String) {
 @Composable
 private fun HostsAppBar(
     onKeysClick: () -> Unit,
-    onCrashReportsClick: () -> Unit,
     onImportHostClick: () -> Unit,
+    onSettingsClick: () -> Unit = {},
 ) {
     Column(
         modifier = Modifier
@@ -640,19 +648,32 @@ private fun HostsAppBar(
         HostsTabRow(
             selectedIndex = HOSTS_TAB_INDEX,
             onHostsClick = { /* already on Hosts; no-op */ },
-            onCrashesClick = onCrashReportsClick,
+            onSettingsClick = onSettingsClick,
             onImportClick = onImportHostClick,
             onKeysClick = onKeysClick,
         )
     }
 }
 
+// Issue #112: convenience alias so tests can target the Settings entry
+// without depending on [HostsTabRow]'s tag-construction. Must stay
+// equal to `HOSTS_TAB_TAG_PREFIX + "settings"` (see [HostsTabRow]).
+internal const val SETTINGS_BUTTON_TAG = "hosts:tab:settings"
+
 /**
  * Material 3 [TabRow] for the top-bar navigation. "Hosts" is the
  * landing tab and is selected whenever the host list is on screen;
- * tapping any other tab routes to the matching screen (Crashes,
+ * tapping any other tab routes to the matching screen (Settings,
  * Import, Keys) without flipping the indicator first — the indicator
  * follows the actual visible surface.
+ *
+ * Issue #112 swaps the previous "Crashes" tab for a "Settings" tab
+ * that opens the app-level settings surface. Crash reports are now
+ * reachable under Settings → Diagnostics, matching the AC: "gear icon
+ * replacing the 'Crashes' text label, with Crashes moved INSIDE
+ * Settings". The text label "Settings" is intentional — the app does
+ * not yet have a vector icon set; a true gear glyph follows once the
+ * icon set lands.
  *
  * Custom indicator and divider colors keep the row on-brand
  * ([PocketShellColors.Accent] underline; muted divider) while the
@@ -663,13 +684,13 @@ private fun HostsAppBar(
 private fun HostsTabRow(
     selectedIndex: Int,
     onHostsClick: () -> Unit,
-    onCrashesClick: () -> Unit,
+    onSettingsClick: () -> Unit,
     onImportClick: () -> Unit,
     onKeysClick: () -> Unit,
 ) {
     val tabs = listOf(
         "Hosts" to onHostsClick,
-        "Crashes" to onCrashesClick,
+        "Settings" to onSettingsClick,
         "Import" to onImportClick,
         "Keys" to onKeysClick,
     )

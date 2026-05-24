@@ -32,12 +32,17 @@ import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.portfwd.PortForwardPanelScreen
 import com.pocketshell.app.session.SessionScreen
 import com.pocketshell.app.session.SessionViewModel
+import com.pocketshell.app.settings.SettingsRepository
+import com.pocketshell.app.settings.SettingsScreen
+import com.pocketshell.app.settings.ThemePreference
 import com.pocketshell.app.systemsurfaces.ForwardingChooserScreen
 import com.pocketshell.app.systemsurfaces.ForwardingTileService
 import com.pocketshell.app.tmux.TmuxSessionScreen
 import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
 
 /**
  * Phase 1 entry point.
@@ -69,6 +74,13 @@ class MainActivity : FragmentActivity() {
     private val sessionViewModel: SessionViewModel by viewModels()
     private var requestedDestination by mutableStateOf<AppDestination>(AppDestination.HostList)
 
+    // Issue #112: theme preference observed at the composable root so a
+    // tap in Settings re-themes the entire activity with no restart. The
+    // repository is `@Singleton` so the Settings view model and this
+    // activity share the same instance.
+    @Inject
+    lateinit var settingsRepository: SettingsRepository
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedDestination = initialDestinationFromIntent(intent)
@@ -94,7 +106,8 @@ class MainActivity : FragmentActivity() {
             isAppearanceLightNavigationBars = false
         }
         setContent {
-            PocketShellTheme {
+            val settings by settingsRepository.settings.collectAsState()
+            PocketShellTheme(mode = settings.theme.toThemeMode()) {
                 Surface(
                     modifier = Modifier
                         .fillMaxSize()
@@ -118,6 +131,12 @@ class MainActivity : FragmentActivity() {
 }
 
 private val DarkSystemBarColor: Int = android.graphics.Color.rgb(13, 17, 23)
+
+private fun ThemePreference.toThemeMode(): PocketShellThemeMode = when (this) {
+    ThemePreference.System -> PocketShellThemeMode.System
+    ThemePreference.Light -> PocketShellThemeMode.Light
+    ThemePreference.Dark -> PocketShellThemeMode.Dark
+}
 
 /**
  * Sealed-class destination state machine. The back-stack is a `List<AppDestination>`
@@ -168,6 +187,7 @@ private fun AppNavigator(
             onEditHost = { id -> navigate(AppDestination.EditHost(id)) },
             onManageKeys = { navigate(AppDestination.SshKeys) },
             onOpenCrashReports = { navigate(AppDestination.CrashReports) },
+            onOpenSettings = { navigate(AppDestination.Settings) },
             onOpenSession = { host, keyPath, passphrase ->
                 navigate(
                     AppDestination.Session(
@@ -231,6 +251,11 @@ private fun AppNavigator(
         AppDestination.SshKeys -> SshKeysScreen(onBack = ::back)
 
         AppDestination.CrashReports -> CrashReportsScreen(onBack = ::back)
+
+        AppDestination.Settings -> SettingsScreen(
+            onBack = ::back,
+            onOpenCrashReports = { navigate(AppDestination.CrashReports) },
+        )
 
         AppDestination.PortForwardChooser -> ForwardingChooserScreen(
             onBack = ::back,

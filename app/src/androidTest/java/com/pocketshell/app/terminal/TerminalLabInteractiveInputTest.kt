@@ -89,9 +89,21 @@ class TerminalLabInteractiveInputTest {
             captureAndAssertViewport(scenario, "interactive-03-draft-abc")
 
             timeInputToVisibleChange(scenario, "backspace", "backspace edited draft", {
-                instrumentation.runOnMainSync {
-                    input.deleteSurroundingText(1, 0)
-                }
+                // Dispatching `KEYCODE_DEL` directly through the view
+                // is more reliable on the loaded CI emulator than
+                // routing through `input.deleteSurroundingText(1, 0)`.
+                // The InputConnection path enqueues a KeyEvent on the
+                // input-method framework's dispatcher, which has been
+                // observed to drop / defer the event under contention
+                // (the type/abc commit just before this lands, but the
+                // backspace never reaches the TUI, so the visible
+                // `draft:` line stays at `abc` for the full deadline
+                // — see the issue #130 CI traces). The direct
+                // `view.dispatchKeyEvent(...)` path used here matches
+                // `dispatchKey(...)` already used for arrow-up and
+                // Ctrl-C below and is synchronous on the test thread,
+                // bypassing the IMF queue.
+                dispatchKey(scenario, instrumentation, KeyEvent.KEYCODE_DEL)
             }) {
                 it.hasVisibleDraft("ab")
             }

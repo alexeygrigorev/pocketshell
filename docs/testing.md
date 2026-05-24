@@ -46,15 +46,21 @@ docker compose -f tests/docker/docker-compose.yml up -d --build agents
 docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans
 ```
 
-### Manual visual validation (issue evidence)
+### Manual visual validation (reviewer evidence)
 
-For visual changes:
+For visual or user-facing Android changes, the implementer should provide the
+commands they ran and any screenshots or artifact paths they produced. Reviewer
+approval owns the final evidence: the reviewer reproduces the relevant emulator
+flow, inspects the visible result, and records the command, artifact path, Docker
+involvement when relevant, and observed result in the issue.
 
-1. Make the change for the scoped issue
-2. `./gradlew installDebug`
-3. Compare side-by-side with `docs/mockups/<screen>.html` open in Chrome at 412 × 915
-4. Capture issue evidence: `adb shell screencap -p > /tmp/screen.png && adb pull /tmp/screen.png`
-5. Post the command, screenshot path, and observed result in the implementer or
+1. Start from the latest implementer status for the scoped issue
+2. `./gradlew installDebug`, or use the issue's documented dogfood command
+3. Compare side-by-side with `docs/mockups/<screen>.html` open in Chrome at
+   412 × 915
+4. Capture reviewer evidence:
+   `adb exec-out screencap -p > /tmp/screen.png`
+5. Post the command, screenshot or artifact path, and observed result in the
    reviewer issue comment
 
 ---
@@ -257,7 +263,9 @@ state renderer, then writes reviewer-facing PNGs under
 
 This differs from CI and the pre-release confidence gate: it is a local
 reproduction loop for one dogfood journey and reviewer-visible artifacts. It
-does not replace unit tests, connected CI, or the slower release gate.
+does not replace unit tests, connected CI, or the slower release gate. A
+physical phone is not required for basic release confidence; emulator + Docker
+evidence is the release blocker, and phone testing is final user acceptance.
 
 ### APK dogfood pre-release confidence gate
 
@@ -369,9 +377,9 @@ opt-in suites that remain outside the fast gate.
 ### Opt-in end-to-end scenario suites
 
 Some workflows need real app UI plus multiple remote-host states, but are too
-slow and stateful for every PR. These live as opt-in scenario suites: automated,
-repeatable, and documented, but run manually before releases or while
-investigating regressions.
+slow and stateful for every issue. These live as opt-in scenario suites:
+automated, repeatable, and documented, but run manually when the issue scope
+requires them, before releases, or while investigating regressions.
 
 Scenario suites should follow these rules:
 
@@ -470,20 +478,22 @@ GitHub Actions runs:
 
 ---
 
-## Orchestrator's final issue QA checkpoint
+## Process verification checklist
 
-After reviewer `APPROVED` and before committing or pushing an approved issue,
-the orchestrator runs at minimum:
+PocketShell uses the issue-based implementer/reviewer loop in
+[process.md](../process.md). After reviewer `APPROVED` and before committing or
+pushing an approved issue, the orchestrator follows the
+[process verification checklist](../process.md#verification-checklist).
+For testing-specific work, the minimum local checks are:
 
 1. `./gradlew assembleDebug` — does it build?
 2. `./gradlew check` — do unit tests pass?
 3. For UI changes: install on emulator, eyeball against the matching mockup
-4. For SSH / tmux / agent / usage changes: run the relevant Testcontainers integration test
+4. For SSH / tmux / agent / usage changes: run the relevant Testcontainers
+   integration test
 5. For user-facing Android, terminal/input, SSH/tmux/agent, setup, or
-   release-gate changes: verify the reviewer supplied emulator evidence with
+   release-gate changes: verify the reviewer-owned emulator evidence includes
    commands, logs/screenshots, Docker involvement when relevant, and observed
    results
 
-See [process.md](../process.md#verification-checklist) for the full
-verification checklist. [agents.md](../agents.md) is only the quick local agent
-rule sheet.
+[agents.md](../agents.md) is only the quick local agent rule sheet.

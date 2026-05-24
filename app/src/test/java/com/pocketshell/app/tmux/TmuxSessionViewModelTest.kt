@@ -652,6 +652,151 @@ class TmuxSessionViewModelTest {
         assertEquals("", vm.escapeSingleQuoted(""))
     }
 
+    // ----- Issue #102 (reopen): resizeRemotePty for the tmux path.
+
+    @Test
+    fun resizeRemotePtyIssuesResizeWindowAgainstActiveSession() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        vm.resizeRemotePty(columns = 48, rows = 96)
+        advanceUntilIdle()
+
+        val command = client.sentCommands.single { it.startsWith("resize-window") }
+        // Single-quoted session target keeps shell parsing safe; -x/-y
+        // carry the on-screen grid so tmux re-flows the inner pane
+        // (which is what opencode / Codex / Claude Code's alt-screen
+        // input boxes are anchored to).
+        assertEquals("resize-window -t 'work' -x 48 -y 96", command)
+    }
+
+    @Test
+    fun resizeRemotePtyIsIdempotentForSameDimensions() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        vm.resizeRemotePty(columns = 48, rows = 96)
+        vm.resizeRemotePty(columns = 48, rows = 96)
+        vm.resizeRemotePty(columns = 48, rows = 96)
+        advanceUntilIdle()
+
+        // Compose re-fires onTerminalSizeChanged on every layout pass —
+        // we must dedup so tmux is not bombarded with no-op resize
+        // commands. A single dispatch is the contract.
+        assertEquals(1, client.sentCommands.count { it.startsWith("resize-window") })
+    }
+
+    @Test
+    fun resizeRemotePtyFiresAgainWhenDimensionsChange() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        vm.resizeRemotePty(columns = 48, rows = 96)
+        vm.resizeRemotePty(columns = 50, rows = 96)
+        vm.resizeRemotePty(columns = 50, rows = 80)
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("resize-window") }
+        assertEquals(3, sent.size)
+        assertEquals("resize-window -t 'work' -x 48 -y 96", sent[0])
+        assertEquals("resize-window -t 'work' -x 50 -y 96", sent[1])
+        assertEquals("resize-window -t 'work' -x 50 -y 80", sent[2])
+    }
+
+    @Test
+    fun resizeRemotePtyIgnoresZeroAndNegativeDimensions() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        // TerminalView fires onTerminalSizeChanged with the on-screen
+        // emulator grid; a not-yet-laid-out grid reports 0×0. We must
+        // not send a `resize-window -x 0 -y 0` to tmux (which is an
+        // error and would wipe out the legitimate prior size).
+        vm.resizeRemotePty(columns = 0, rows = 0)
+        vm.resizeRemotePty(columns = -1, rows = 96)
+        vm.resizeRemotePty(columns = 48, rows = 0)
+        advanceUntilIdle()
+
+        assertTrue(client.sentCommands.none { it.startsWith("resize-window") })
+    }
+
+    @Test
+    fun resizeRemotePtyIsNoOpBeforeConnect() = runTest {
+        val vm = newVm()
+        // No replaceClientForTest / attachClientForTest call — the view
+        // model has no active target yet. Resizes that race the connect
+        // path must be silent rather than crashing or queueing.
+        vm.resizeRemotePty(columns = 48, rows = 96)
+        advanceUntilIdle()
+        // Nothing to assert beyond "did not throw"; absence of crash is
+        // the contract.
+    }
+
+    @Test
+    fun resizeRemotePtyEscapesSessionNameSingleQuotes() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            // tmux session names may contain `'` (rare but legal); the
+            // resize command must close-escape-open so the shell does
+            // not parse half the name as a positional arg.
+            sessionName = "it's work",
+            client = client,
+        )
+
+        vm.resizeRemotePty(columns = 60, rows = 24)
+        advanceUntilIdle()
+
+        val command = client.sentCommands.single { it.startsWith("resize-window") }
+        assertEquals("resize-window -t 'it'\\''s work' -x 60 -y 24", command)
+    }
+
     @Test
     fun outputForReceivesEventsRoutedThroughEventsFlow() = runTest {
         val vm = newVm()

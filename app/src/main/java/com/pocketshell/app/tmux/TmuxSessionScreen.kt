@@ -438,6 +438,17 @@ public fun TmuxSessionScreen(
                         val pane = panes[pageIndex]
                         TerminalSurface(
                             state = pane.terminalState,
+                            // Issue #102 (reopen): propagate the on-screen
+                            // grid to the remote tmux pane so opencode /
+                            // Codex / Claude Code render their UI for the
+                            // grid the local emulator is actually painting.
+                            // Without this, tmux keeps the pane at the
+                            // SSH-PTY-time 80x24 default and the inner
+                            // CLI's input box / cursor land at the wrong
+                            // on-screen cells. The raw-SSH route has the
+                            // equivalent wiring via SessionScreen ->
+                            // SessionViewModel.resizeRemotePty.
+                            onTerminalSizeChanged = viewModel::resizeRemotePty,
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(horizontal = 2.dp, vertical = 4.dp),

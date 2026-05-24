@@ -163,6 +163,16 @@ public class TmuxSessionViewModel @Inject constructor(
     private var connectingTarget: ConnectionTarget? = null
     private var connectJob: Job? = null
     private var eventsJob: Job? = null
+
+    // Issue #102 (reopen): last on-screen terminal grid we propagated to
+    // tmux via `resize-window`. Tracked so [resizeRemotePty] is a no-op
+    // when Compose re-fires onTerminalSizeChanged with the same numbers
+    // (which it does on every layout pass), and so a fresh
+    // [closeCurrentConnection] resets back to "unknown" — the new
+    // tmux-CC client will get its own resize-window when the surface
+    // lays out against the freshly attached pane.
+    private var remoteColumns: Int = 0
+    private var remoteRows: Int = 0
     private val agentRepository: AgentConversationRepository = AgentConversationRepository()
     private val paneAgentJobs: MutableMap<String, Job> = ConcurrentHashMap()
     private val paneAgentInputs: MutableMap<String, Pair<String, String>> = ConcurrentHashMap()
@@ -871,6 +881,62 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Issue #102 (reopen): propagate the on-screen [TerminalView]'s grid
+     * dimensions to the **remote tmux pane** so opencode / Codex / Claude
+     * Code (which draw their alternate-screen UI for whatever size tmux
+     * reports) line up with the cells the local emulator is rendering.
+     *
+     * The raw-SSH route ([com.pocketshell.app.session.SessionViewModel.resizeRemotePty])
+     * forwards via the SSH session channel's `changeWindowDimensions`
+     * (TIOCSWINSZ on the remote PTY) so the shell sees a SIGWINCH and
+     * re-flows. The tmux-CC route cannot do the same — the SSH PTY
+     * carries the tmux *control* channel, not the inner pane's PTY.
+     * tmux owns the per-pane terminal size; we must ask tmux to resize
+     * the session window via the control protocol.
+     *
+     * `resize-window -t <session> -x <cols> -y <rows>` does exactly that:
+     * tmux resizes the named session's active window (and its panes) to
+     * the requested geometry and refreshes attached clients. The change
+     * is wire-only (no `set-option -g window-size manual` toggling) so
+     * the next reattach without a connected client of our size falls
+     * back to tmux defaults — the right behaviour for an SSH-CC client
+     * that may be detached and reattached from different devices.
+     *
+     * Idempotent: a re-call with the same dimensions is a no-op (the
+     * Compose layout system re-fires `onTerminalSizeChanged` on every
+     * pass even when nothing visibly changed). Initial dimensions of
+     * `0` (i.e. the view never laid out) are also a no-op.
+     *
+     * Without this, the user reported "typing into opencode places the
+     * input somewhere in the center" on v0.2.6: tmux thought the
+     * window was 80x24 (the size the SSH PTY allocated in
+     * [com.pocketshell.core.ssh.RealSshSession.startShell]), opencode
+     * drew its UI box for an 80x24 grid, and the local emulator
+     * rendered a different on-screen grid — so the box edges and
+     * cursor positions landed at the wrong cells of the visible
+     * viewport. The TerminalLab path in the original #102 round did
+     * not have this bug because it owns the SSH PTY directly and
+     * already calls `changeWindowDimensions` from
+     * [com.pocketshell.app.terminal.TerminalLabActivity].
+     */
+    public fun resizeRemotePty(columns: Int, rows: Int) {
+        if (columns <= 0 || rows <= 0) return
+        if (columns == remoteColumns && rows == remoteRows) return
+        val client = clientRef ?: return
+        val target = activeTarget ?: return
+        remoteColumns = columns
+        remoteRows = rows
+        bridgeScope.launch {
+            runCatching {
+                client.sendCommand(
+                    "resize-window -t '${escapeSingleQuoted(target.sessionName)}' " +
+                        "-x $columns -y $rows",
+                )
+            }
+        }
+    }
+
     public fun createSession(
         name: String,
         startDirectory: String = DEFAULT_TMUX_START_DIRECTORY,
@@ -1017,6 +1083,10 @@ public class TmuxSessionViewModel @Inject constructor(
         sessionRef = null
         activeTarget = null
         connectingTarget = null
+        // Issue #102 (reopen): a fresh attach must re-fire `resize-window`
+        // against the new tmux session's pane on the next layout pass.
+        remoteColumns = 0
+        remoteRows = 0
     }
 
     /**

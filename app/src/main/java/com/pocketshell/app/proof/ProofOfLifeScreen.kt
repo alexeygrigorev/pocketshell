@@ -219,10 +219,67 @@ internal suspend fun openShell(
     client.authPublickey(user, keyProvider)
 
     val sessionChannel = client.startSession()
-    sessionChannel.allocateDefaultPTY()
+    // Allocate a PTY that real interactive agent CLIs (opencode, Codex,
+    // Claude Code) recognise. Issue #102: `allocateDefaultPTY()` in sshj 0.40
+    // advertises `TERM=vt100` at 80x24. opencode / Codex / Claude Code
+    // inspect TERM at startup; with `vt100` they fall back to a degraded
+    // line-mode rendering where the prompt input drops to the bottom of
+    // the scrolling shell instead of using the alternate-screen buffer
+    // with proper cursor positioning. Typed bytes already reach the remote
+    // PTY via the existing input bridge — what was wrong was the *visible*
+    // app cursor placement, because the remote app would not draw its
+    // input box at the cursor row when it thought it was talking to a
+    // bare VT100.
+    //
+    // `xterm-256color` is the AOSP / Termux baseline that those TUIs are
+    // designed against. We keep the initial cols/rows at the same 80x24
+    // defaults sshj used so the boot-time PTY allocation matches the
+    // pre-fix behaviour for shells that do not care about TERM; once the
+    // TerminalView lays out, [SessionViewModel.resizeRemotePty] /
+    // [TerminalLabController.resizeRemotePty] call `changeWindowDimensions`
+    // with the real grid so the application re-flows to the phone viewport.
+    // The empty mode map preserves the kernel defaults — which is what
+    // `allocateDefaultPTY` does too.
+    sessionChannel.allocatePTY(
+        /* term = */ INTERACTIVE_PTY_TERM,
+        /* cols = */ INTERACTIVE_PTY_INITIAL_COLUMNS,
+        /* rows = */ INTERACTIVE_PTY_INITIAL_ROWS,
+        /* widthPx = */ 0,
+        /* heightPx = */ 0,
+        /* modes = */ emptyMap(),
+    )
     val shell = sessionChannel.startShell()
     SshShellHandle(client = client, sessionChannel = sessionChannel, shell = shell)
 }
+
+/**
+ * Terminfo entry advertised on PTY allocation. xterm-256color is the AOSP /
+ * Termux baseline and the one that real interactive agent CLIs (opencode,
+ * Codex, Claude Code) target. Anything more conservative — notably the
+ * `vt100` that sshj's `allocateDefaultPTY` defaults to — pushes those CLIs
+ * into a degraded line-mode where the prompt input drops to the bottom of
+ * the scrolling shell instead of rendering inside their alternate-screen
+ * input box. Kept as a top-level constant so it is visible in code review
+ * and easy to grep when bumping sshj or refactoring the SSH layer.
+ */
+internal const val INTERACTIVE_PTY_TERM: String = "xterm-256color"
+
+/**
+ * Initial PTY column count advertised on shell allocation. Matches sshj's
+ * historical `allocateDefaultPTY` default (80) so well-behaved login shells
+ * that read the SSH-time TIOCGWINSZ see the same starting geometry as
+ * before; the on-device [com.termux.view.TerminalView] resizes the remote
+ * PTY to the real on-screen grid via `changeWindowDimensions` once it lays
+ * out, so this value is only ever seen by the brief pre-layout window.
+ */
+internal const val INTERACTIVE_PTY_INITIAL_COLUMNS: Int = 80
+
+/**
+ * Initial PTY row count. See [INTERACTIVE_PTY_INITIAL_COLUMNS] for the
+ * rationale on keeping the 80x24 default; the real grid replaces this on
+ * first layout.
+ */
+internal const val INTERACTIVE_PTY_INITIAL_ROWS: Int = 24
 
 /**
  * Wrap the blocking [Session.Shell.getInputStream] into a coroutine-friendly

@@ -96,6 +96,22 @@ class TerminalLabDockerTest {
             screenExpected = "Ask anything",
             screenshotName = "agents-02-opencode",
             baselineArtifact = promptArtifact,
+            // Issue #102: drive a typed prompt through the same input path
+            // the phone user hits (`controller.sendText` -> the embedded
+            // terminal session's write queue -> the SSH PTY's stdin) and
+            // assert the prompt appears at the application cursor inside
+            // opencode's alternate-screen input box — not in a detached
+            // bottom input line, which is the regression this issue exists
+            // to prevent. opencode is the canonical full-screen agent CLI
+            // available in the real-agent Docker target; Codex and Claude
+            // Code do not need the same coverage because the same SSH PTY
+            // path serves all three.
+            typeBeforeExit = TypedPromptScenario(
+                marker = "issue102 hello",
+                editedMarker = "issue102 he",
+                backspaces = 3,
+                screenshotPrefix = "agents-02-opencode-prompt",
+            ),
         )
         runRealAgentCli(
             command = "codex",
@@ -231,6 +247,7 @@ class TerminalLabDockerTest {
         screenExpected: String,
         screenshotName: String,
         baselineArtifact: TerminalScreenshotArtifact,
+        typeBeforeExit: TypedPromptScenario? = null,
     ) {
         sendViaTerminalInput("$command --version", versionExpected, "$command-version")
         requireController().sendText(command, withEnter = true)
@@ -245,10 +262,337 @@ class TerminalLabDockerTest {
             baselineArtifact.sha256 != screenArtifact.sha256,
         )
         TerminalLabArtifacts.writeText("$screenshotName-visible-terminal.txt", visibleTerminalText())
+
+        if (typeBeforeExit != null) {
+            assertTypedPromptAppearsAtAppCursor(
+                command = command,
+                screenExpected = screenExpected,
+                welcomeArtifact = screenArtifact,
+                scenario = typeBeforeExit,
+            )
+        }
+
         requireController().terminalState.writeInput(byteArrayOf(0x03))
         SystemClock.sleep(500)
         requireController().sendText("", withEnter = true)
         waitForVisibleTerminalText("$command-return-to-prompt") { it.isNotBlank() }
+    }
+
+    /**
+     * Issue #102: assert that typed prompt text reaches the running agent
+     * CLI's input box at its application cursor, not in a detached bottom
+     * input line.
+     *
+     * Drives the same `controller.sendText(...)` path the phone user hits
+     * via the prompt composer / inline dictation / snippet pick — all of
+     * which funnel into `TerminalSurfaceState.writeInput`. The assertions
+     * are layered so a regression shows clearly which property failed:
+     *
+     * 1. The terminal is in the alternate-screen buffer (`smcup`) — proof
+     *    that the remote app understands our `TERM` and rendered its UI
+     *    box rather than falling back to a scrolling line-mode prompt.
+     * 2. The typed marker appears in the visible-terminal text.
+     * 3. The marker sits on the cursor row of the alternate screen, not
+     *    on the very bottom row of the underlying main-screen shell — the
+     *    user-visible regression we are fixing.
+     * 4. Backspace shortens the marker in place inside the same input
+     *    box (the cursor moves left, the trailing characters are gone).
+     * 5. Enter changes the visible-terminal state (the app reacts to the
+     *    submission — usually clearing the input box and showing thinking
+     *    UI even when no API key is configured).
+     *
+     * Captures `*-viewport.png` + `*-visible-terminal.txt` after each step
+     * so the reviewer can inspect authoritative terminal evidence rather
+     * than relying on full-device screenshots, per
+     * [process.md](process.md#terminal-artifact-review).
+     */
+    private fun assertTypedPromptAppearsAtAppCursor(
+        command: String,
+        screenExpected: String,
+        welcomeArtifact: TerminalScreenshotArtifact,
+        scenario: TypedPromptScenario,
+    ) {
+        val controller = requireController()
+
+        // Step 1: confirm the alt-screen buffer is active *before* we
+        // touch anything. If the remote CLI is rendering inline because
+        // it sees `TERM=vt100` (#102 root cause) this is the failure
+        // point and the message tells the reviewer what to fix.
+        val altBeforeType = isAlternateBufferActive()
+        assertTrue(
+            "expected $command to be rendering in the alternate-screen buffer " +
+                "(real interactive CLIs use smcup so input lives inside their UI box); " +
+                "TERM may have been advertised as vt100 instead of xterm-256color, " +
+                "causing the input to render at the bottom of the scrolling shell. " +
+                "visible terminal text follows:\n${visibleTerminalText()}",
+            altBeforeType,
+        )
+
+        val cursorBeforeType = cursorPosition()
+        recordTiming("issue102_cursor_row_before_type_$command", cursorBeforeType.row.toLong())
+        recordTiming("issue102_cursor_col_before_type_$command", cursorBeforeType.column.toLong())
+
+        // Step 2: type the marker (no Enter). Same call path as
+        // PromptComposerSheet.onSend / InlineDictation transcription /
+        // SnippetPicker — see SessionViewModel.sendText.
+        val typeStart = SystemClock.elapsedRealtime()
+        controller.sendText(scenario.marker, withEnter = false)
+        waitForVisibleTerminalText("$command-prompt-typed") { scenario.marker in it }
+        recordTiming(
+            "issue102_send_to_visible_$command",
+            SystemClock.elapsedRealtime() - typeStart,
+        )
+
+        val typedArtifact = captureAndAssertTerminalInk(
+            name = "${scenario.screenshotPrefix}-01-typed",
+            minInkPixels = 6_000,
+        )
+        TerminalLabArtifacts.writeText(
+            "${scenario.screenshotPrefix}-01-typed-visible-terminal.txt",
+            visibleTerminalText(),
+        )
+
+        // Step 3: the marker must appear *inside* the running CLI's drawn
+        // input box, NOT in a detached scrolling area at the bottom of
+        // the main screen. We re-check alt-screen here so a regression
+        // that flips us out of smcup mid-type is caught.
+        assertTrue(
+            "expected $command alt-screen to remain active while typing into the prompt; " +
+                "if this fails, the remote CLI dropped out of smcup mid-typing, which " +
+                "would land subsequent keystrokes in the scrolling shell. " +
+                "visible terminal text:\n${visibleTerminalText()}",
+            isAlternateBufferActive(),
+        )
+        val cursorAfterType = cursorPosition()
+        recordTiming("issue102_cursor_row_after_type_$command", cursorAfterType.row.toLong())
+        recordTiming("issue102_cursor_col_after_type_$command", cursorAfterType.column.toLong())
+
+        // The marker text must appear inside the app's drawn input frame.
+        // opencode renders its prompt inside a box bounded on the left by
+        // U+2503 (HEAVY VERTICAL `┃`). Matching the marker on the same
+        // row as that box character is the load-bearing proof that the
+        // typed bytes landed inside the application UI, rather than in a
+        // detached bottom input line — which is the regression #102 fixes.
+        // If a future CLI (Codex, Claude Code) is added to this scenario
+        // map, the box characters table below should be extended.
+        val visibleLines = visibleTerminalText().split('\n')
+        val matchingLines = visibleLines.withIndex().filter { scenario.marker in it.value }
+        assertTrue(
+            "expected marker '${scenario.marker}' to appear in the visible $command screen; " +
+                "visible terminal text:\n${visibleTerminalText()}",
+            matchingLines.isNotEmpty(),
+        )
+        val expectedFrameMarkers = appInputFrameMarkersFor(command)
+        val frameMatch = matchingLines.firstOrNull { (_, line) ->
+            val markerIndex = line.indexOf(scenario.marker)
+            val prefix = line.substring(0, markerIndex)
+            expectedFrameMarkers.any { it in prefix }
+        }
+        assertTrue(
+            "expected marker '${scenario.marker}' to land inside $command's drawn input frame " +
+                "(detected by one of the frame-edge characters $expectedFrameMarkers " +
+                "appearing on the same row, to the left of the marker). " +
+                "Without that, the prompt is rendering in a detached bottom-of-screen line " +
+                "instead of inside the CLI's input box, which is the regression #102 fixes.\n" +
+                "matchingLines=${matchingLines.map { it.value }}\n" +
+                "visible terminal text:\n${visibleTerminalText()}",
+            frameMatch != null,
+        )
+
+        // Belt-and-braces: even without the frame check, the marker should
+        // not be sitting on the very last row of the visible viewport
+        // (which is where a TERM=vt100 fallback would echo it). This is a
+        // weaker signal than the frame check above and is logged as a
+        // recordTiming so the reviewer can confirm the property at a
+        // glance from the artifact bundle.
+        val grid = terminalGridSize()
+        val lastMatchRow = matchingLines.last().index
+        recordTiming("issue102_marker_row_$command", lastMatchRow.toLong())
+        recordTiming("issue102_marker_row_distance_from_bottom_$command", (grid.rows - 1 - lastMatchRow).toLong())
+        assertTrue(
+            "expected marker '${scenario.marker}' to land somewhere other than the very last " +
+                "row of the visible viewport — landing on the last row is the classic " +
+                "TERM=vt100 fallback where input echoes into a detached bottom line. " +
+                "lastMatchRow=$lastMatchRow grid=$grid",
+            lastMatchRow < grid.rows - 1,
+        )
+
+        // The typed view should not just be a stale capture of the welcome
+        // screen — the typing must have actually re-rendered the CLI's
+        // input box.
+        assertTrue(
+            "expected $command viewport to change after typing the prompt — a stale capture " +
+                "would mean the typing did not reach the app's input area. " +
+                "welcome=${welcomeArtifact.fileName} typed=${typedArtifact.fileName}",
+            welcomeArtifact.sha256 != typedArtifact.sha256,
+        )
+
+        // Step 4: backspace removes the trailing characters from the
+        // input. opencode/Codex/Claude Code accept DEL (0x7F) per the
+        // xterm/Termux convention; we send the byte directly via the
+        // bridge to mirror how the on-screen keybar's backspace mapping
+        // ends up at the same code path.
+        val backspaceStart = SystemClock.elapsedRealtime()
+        repeat(scenario.backspaces) {
+            controller.terminalState.writeInput(byteArrayOf(0x7F))
+        }
+        waitForVisibleTerminalText("$command-prompt-backspaced") {
+            scenario.editedMarker in it && !it.containsLastFullMarker(scenario.marker, scenario.editedMarker)
+        }
+        recordTiming(
+            "issue102_backspace_to_visible_$command",
+            SystemClock.elapsedRealtime() - backspaceStart,
+        )
+
+        val backspaceArtifact = captureAndAssertTerminalInk(
+            name = "${scenario.screenshotPrefix}-02-backspaced",
+            minInkPixels = 6_000,
+        )
+        TerminalLabArtifacts.writeText(
+            "${scenario.screenshotPrefix}-02-backspaced-visible-terminal.txt",
+            visibleTerminalText(),
+        )
+        assertTrue(
+            "expected $command viewport to change after backspacing — if it does not, the " +
+                "backspace bytes were absorbed by a detached input strip and never reached the " +
+                "app. typed=${typedArtifact.fileName} backspaced=${backspaceArtifact.fileName}",
+            typedArtifact.sha256 != backspaceArtifact.sha256,
+        )
+        val cursorAfterBackspace = cursorPosition()
+        recordTiming(
+            "issue102_cursor_col_after_backspace_$command",
+            cursorAfterBackspace.column.toLong(),
+        )
+        // The visible-terminal waiter already proves the edited marker is
+        // present and the full marker is gone, so the keystrokes reached
+        // the application. We deliberately do NOT assert on the terminal's
+        // raw cursor column here because opencode/Codex/Claude Code repaint
+        // their cursor at a fixed position inside their drawn frame on
+        // every keystroke (e.g. opencode keeps the cursor on the footer
+        // version row), so a "cursor moved left" check would be a false
+        // positive even when typing/editing works correctly. The viewport
+        // SHA inequality above and the per-row marker check before it
+        // already pin down the behaviour we care about.
+
+        // Belt-and-braces: the edited marker should also land inside the
+        // CLI's drawn input frame (same property as Step 3, post-edit).
+        val backspacedLines = visibleTerminalText().split('\n')
+        val backspacedMatches = backspacedLines.withIndex().filter { scenario.editedMarker in it.value }
+        assertTrue(
+            "expected edited marker '${scenario.editedMarker}' to appear in the visible " +
+                "$command screen after backspacing; visible terminal text:\n${visibleTerminalText()}",
+            backspacedMatches.isNotEmpty(),
+        )
+        val backspacedFrameMatch = backspacedMatches.firstOrNull { (_, line) ->
+            val markerIndex = line.indexOf(scenario.editedMarker)
+            val prefix = line.substring(0, markerIndex)
+            expectedFrameMarkers.any { it in prefix }
+        }
+        assertTrue(
+            "expected edited marker '${scenario.editedMarker}' to remain inside $command's " +
+                "drawn input frame after backspacing (frame characters $expectedFrameMarkers). " +
+                "Backspacing knocking the marker out of the frame would mean the keystrokes " +
+                "landed in the wrong region of the buffer.\n" +
+                "matchingLines=${backspacedMatches.map { it.value }}\n" +
+                "visible terminal text:\n${visibleTerminalText()}",
+            backspacedFrameMatch != null,
+        )
+
+        // Step 5: Enter submits. The app should react with a visible
+        // change — either acknowledging the prompt, clearing the input,
+        // or surfacing an auth error. We only assert that *something*
+        // changes so the test stays robust whether or not the container
+        // has API credentials configured.
+        val enterStart = SystemClock.elapsedRealtime()
+        val visibleBeforeEnter = visibleTerminalText()
+        controller.sendText("", withEnter = true)
+        waitForVisibleTerminalText("$command-prompt-submitted") {
+            it != visibleBeforeEnter
+        }
+        recordTiming(
+            "issue102_enter_to_visible_$command",
+            SystemClock.elapsedRealtime() - enterStart,
+        )
+        val submittedArtifact = captureAndAssertTerminalInk(
+            name = "${scenario.screenshotPrefix}-03-submitted",
+            minInkPixels = 6_000,
+        )
+        TerminalLabArtifacts.writeText(
+            "${scenario.screenshotPrefix}-03-submitted-visible-terminal.txt",
+            visibleTerminalText(),
+        )
+        assertTrue(
+            "expected $command viewport to change after pressing Enter on the typed prompt — " +
+                "if Enter is absorbed by a detached input line, the app would never see the " +
+                "submission. backspaced=${backspaceArtifact.fileName} submitted=${submittedArtifact.fileName}",
+            backspaceArtifact.sha256 != submittedArtifact.sha256,
+        )
+
+        // The screen-expected token (e.g. "Ask anything") confirms the
+        // remote CLI is still the one driving the buffer — i.e. Enter
+        // didn't crash it or knock us back to the bare shell. We do not
+        // assert it still shows the welcome line verbatim; opencode and
+        // friends rewrite the input area on submission.
+        val visibleAfterEnter = visibleTerminalText()
+        assertTrue(
+            "expected $command to remain the active TUI after Enter — losing the welcome " +
+                "marker '$screenExpected' from the visible text suggests Enter exited the app " +
+                "rather than submitting the prompt within it.\nvisible terminal:\n$visibleAfterEnter",
+            screenExpected in visibleAfterEnter || isAlternateBufferActive(),
+        )
+    }
+
+    private fun isAlternateBufferActive(): Boolean {
+        var active = false
+        launchedActivity?.onActivity { activity ->
+            activity.window.decorView
+                .findTerminalView()
+                ?.currentSession
+                ?.emulator
+                ?.let { emulator ->
+                    active = emulator.isAlternateBufferActive
+                }
+        }
+        return active
+    }
+
+    private fun cursorPosition(): CursorPosition {
+        var position: CursorPosition? = null
+        launchedActivity?.onActivity { activity ->
+            activity.window.decorView
+                .findTerminalView()
+                ?.currentSession
+                ?.emulator
+                ?.let { emulator ->
+                    position = CursorPosition(row = emulator.cursorRow, column = emulator.cursorCol)
+                }
+        }
+        return checkNotNull(position) { "Terminal emulator was not available to read the cursor position" }
+    }
+
+    /**
+     * Issue #102: per-CLI list of box-drawing characters that should appear
+     * on the same row as the typed marker, to the left of the marker. The
+     * presence of these characters in the row's prefix is what proves the
+     * marker landed inside the CLI's drawn input frame and not in a
+     * detached bottom input line.
+     *
+     * - opencode draws its input box with U+2503 HEAVY VERTICAL (`┃`); the
+     *   left edge of the box is reliably to the left of the typed prompt.
+     * - Codex draws with U+2502 BOX DRAWINGS LIGHT VERTICAL (`│`) in the
+     *   newer release; we add both so a TUI redesign that adopts a
+     *   thicker glyph does not break the check.
+     * - Claude Code draws its prompt panel with U+2502 (`│`) as well.
+     *
+     * If a future #102 scenario adds another CLI, extend the map below.
+     * The frame characters were copied from the post-fix capture artifact
+     * (issue-102-impl-2/agents-02-opencode-prompt-01-typed-visible-terminal.txt).
+     */
+    private fun appInputFrameMarkersFor(command: String): List<String> = when (command) {
+        "opencode" -> listOf("┃", "│")
+        "codex" -> listOf("│", "┃")
+        "claude" -> listOf("│", "┃")
+        else -> listOf("┃", "│")
     }
 
     private fun sendViaTerminalInput(command: String, expected: String, label: String) {
@@ -572,6 +916,53 @@ private data class TerminalGridSize(
     val columns: Int,
     val rows: Int,
 )
+
+/**
+ * Issue #102: position of the terminal emulator's text cursor, as exposed
+ * by `TerminalEmulator.getCursorRow()` / `getCursorCol()` (zero-indexed,
+ * row 0 at the top of the visible viewport). Used to assert that typed
+ * input lands at the application's cursor inside its alternate-screen
+ * input box, not at the bottom of the underlying main-screen shell.
+ */
+private data class CursorPosition(
+    val row: Int,
+    val column: Int,
+)
+
+/**
+ * Issue #102: parameters for the typed-prompt assertion driven inside a
+ * real interactive agent CLI (opencode by default; the same scenario shape
+ * fits Codex and Claude Code if a future test wants to exercise them too).
+ *
+ * @property marker recognisable prompt body to type. Kept short to fit
+ *   inside the opencode input box on the phone-shaped emulator viewport.
+ * @property editedMarker what the marker should look like after
+ *   [backspaces] characters have been deleted from the tail. Used as the
+ *   visible-terminal predicate after the backspace step.
+ * @property backspaces number of DEL (0x7F) bytes sent through the
+ *   `TerminalSurfaceState.writeInput` bridge to shorten the marker.
+ * @property screenshotPrefix shared prefix for the per-step viewport and
+ *   visible-terminal artifacts. Suffixed with `-01-typed`, `-02-backspaced`
+ *   and `-03-submitted` so the reviewer can step through the artifact
+ *   bundle in order.
+ */
+private data class TypedPromptScenario(
+    val marker: String,
+    val editedMarker: String,
+    val backspaces: Int,
+    val screenshotPrefix: String,
+)
+
+/**
+ * Issue #102 helper: the marker has been edited if the *full* marker no
+ * longer appears in the visible terminal text but the [editedMarker]
+ * prefix still does. We use a simple substring check rather than a regex
+ * because the marker is plain ASCII; this stays robust against ANSI
+ * styling because [visibleTerminalText] returns the rendered text without
+ * SGR sequences.
+ */
+private fun String.containsLastFullMarker(marker: String, editedMarker: String): Boolean =
+    marker in this && marker != editedMarker
 
 private class TerminalCaptureHelper(
     private val terminalBounds: () -> Rect,

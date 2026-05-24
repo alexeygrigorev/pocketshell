@@ -127,10 +127,26 @@ internal class RealSshSession(
     override fun startShell(): SshShell {
         ensureConnected()
         // Two-step open mirroring sshj's idiomatic interactive-shell
-        // recipe: `startSession()` to get a session channel, allocate the
-        // default PTY (xterm-256color, 80x24 — the emulator will resize on
-        // first layout), then `startShell()` to bind the channel to the
-        // user's login shell.
+        // recipe: `startSession()` to get a session channel, allocate a
+        // PTY advertising [INTERACTIVE_PTY_TERM] ("xterm-256color") at
+        // [INTERACTIVE_PTY_INITIAL_COLUMNS]x[INTERACTIVE_PTY_INITIAL_ROWS]
+        // (the on-device TerminalView resizes the remote PTY to the real
+        // grid on first layout), then `startShell()` to bind the channel
+        // to the user's login shell.
+        //
+        // Issue #106: this used to call `sessionChannel.allocateDefaultPTY()`,
+        // which advertises `TERM=vt100` in sshj 0.40. Real interactive
+        // agent CLIs (opencode, Codex, Claude Code) probe TERM at startup
+        // and fall back to a degraded line-mode rendering when they see
+        // vt100 — the prompt input drops to the bottom of the scrolling
+        // shell instead of rendering inside their alternate-screen input
+        // box. The same root cause was fixed for the proof-of-life shell
+        // entry point in #102; this is the second SSH-shell entry point.
+        // The two entry points are deliberately not refactored into a
+        // shared helper here (out of scope per #106 non-goals); the
+        // [INTERACTIVE_PTY_TERM] constant exists so both call sites are
+        // grep-able and the chosen terminfo entry is reviewable in one
+        // place.
         //
         // Failures at any of the three steps are wrapped in SshException
         // so callers don't have to know about sshj's exception hierarchy.
@@ -142,7 +158,14 @@ internal class RealSshSession(
             throw SshException("Failed to open SSH session channel for shell: ${t.message}", t)
         }
         try {
-            sessionChannel.allocateDefaultPTY()
+            sessionChannel.allocatePTY(
+                /* term = */ INTERACTIVE_PTY_TERM,
+                /* cols = */ INTERACTIVE_PTY_INITIAL_COLUMNS,
+                /* rows = */ INTERACTIVE_PTY_INITIAL_ROWS,
+                /* widthPx = */ 0,
+                /* heightPx = */ 0,
+                /* modes = */ emptyMap(),
+            )
             val shell = sessionChannel.startShell()
             return RealSshShell(sessionChannel = sessionChannel, shell = shell)
         } catch (t: Throwable) {
@@ -160,3 +183,40 @@ internal class RealSshSession(
         if (!isConnected) throw SshException("SSH session is not connected")
     }
 }
+
+/**
+ * Terminfo entry advertised when allocating the PTY for [RealSshSession.startShell].
+ *
+ * `xterm-256color` is the AOSP / Termux baseline and the terminfo entry that
+ * real interactive agent CLIs (opencode, Codex, Claude Code) target. Anything
+ * more conservative — notably the `vt100` that sshj 0.40's
+ * `Session.allocateDefaultPTY` defaults to — pushes those CLIs into a degraded
+ * line-mode rendering where the prompt input drops to the bottom of the
+ * scrolling shell instead of rendering inside their alternate-screen input
+ * box.
+ *
+ * Issue #106: kept as an `internal const` so the unit test in
+ * `RealSshSessionPtyAllocationTest` can pin the value and so the chosen
+ * terminfo entry is grep-able from both SSH-shell entry points (the second
+ * one lives in `app/src/main/java/com/pocketshell/app/proof/ProofOfLifeScreen.kt`
+ * as `INTERACTIVE_PTY_TERM` per #102). Update both call sites in lock-step.
+ */
+internal const val INTERACTIVE_PTY_TERM: String = "xterm-256color"
+
+/**
+ * Initial PTY column count advertised on shell allocation.
+ *
+ * Matches sshj's historical `allocateDefaultPTY` default (80) so well-behaved
+ * login shells that read the SSH-time TIOCGWINSZ see the same starting
+ * geometry as before. The on-device terminal resizes the remote PTY to the
+ * real on-screen grid via `changeWindowDimensions` once it lays out, so this
+ * value is only ever observed by the brief pre-layout window.
+ */
+internal const val INTERACTIVE_PTY_INITIAL_COLUMNS: Int = 80
+
+/**
+ * Initial PTY row count. See [INTERACTIVE_PTY_INITIAL_COLUMNS] for the
+ * rationale on keeping the 80x24 default; the real grid replaces this on
+ * first layout.
+ */
+internal const val INTERACTIVE_PTY_INITIAL_ROWS: Int = 24

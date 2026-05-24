@@ -564,7 +564,7 @@ public class TmuxSessionViewModel @Inject constructor(
             when (token) {
                 is TmuxInputToken.Literal -> {
                     if (token.text.isNotEmpty()) {
-                        client.sendCommand("send-keys -l -t $paneId '${escapeSingleQuoted(token.text)}'")
+                        client.sendCommand("send-keys -l -t $paneId -- '${escapeSingleQuoted(token.text)}'")
                     }
                 }
                 is TmuxInputToken.NamedKey -> {

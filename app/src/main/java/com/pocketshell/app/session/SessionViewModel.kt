@@ -732,14 +732,41 @@ public class SessionViewModel @Inject constructor(
         projectRootsJob?.cancel()
         producerJob?.cancel()
         terminalState.detachExternalProducer()
-        runCatching { shellRef?.shell?.close() }
-        runCatching { shellRef?.sessionChannel?.close() }
-        runCatching { shellRef?.client?.disconnect() }
-        runCatching { sessionRef?.close() }
+        val shell = shellRef
+        val session = sessionRef
         sessionRef = null
         shellRef = null
         producerJob = null
+        closeSshResourcesAsync(shell, session)
         super.onCleared()
+    }
+
+    private fun closeSshResourcesAsync(shell: SshShellHandle?, session: SshSession?) {
+        if (shell == null && session == null) return
+        Thread(
+            {
+                closeIgnoringFailure { shell?.shell?.close() }
+                closeIgnoringFailure { shell?.sessionChannel?.close() }
+                // The SSHJ transport can throw a BY_APPLICATION disconnect
+                // exception during Activity teardown even when the close is
+                // intentional. Keep explicit transport cleanup, but keep it
+                // off the lifecycle callback thread and suppress teardown
+                // noise locally.
+                closeIgnoringFailure { shell?.client?.disconnect() }
+                closeIgnoringFailure { session?.close() }
+            },
+            "PocketShellSshCleanup",
+        ).apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun closeIgnoringFailure(block: () -> Unit) {
+        try {
+            block()
+        } catch (_: Throwable) {
+        }
     }
 
     /**

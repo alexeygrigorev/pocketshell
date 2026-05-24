@@ -400,8 +400,21 @@ class TmuxSessionViewModelTest {
 
         val sent = client.sentCommands.filter { it.startsWith("send-keys") }
         assertEquals(sent.toString(), 2, sent.size)
-        assertEquals("send-keys -l -t %0 'ls'", sent[0])
+        assertEquals("send-keys -l -t %0 -- 'ls'", sent[0])
         assertEquals("send-keys -t %0 Enter", sent[1])
+    }
+
+    @Test
+    fun writeInputToPaneSeparatesLeadingDashLiteralFromTmuxOptions() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        vm.writeInputToPane("%0", "-tproof".toByteArray(Charsets.UTF_8))
+        advanceUntilIdle()
+
+        val cmd = client.sentCommands.single { it.startsWith("send-keys") }
+        assertEquals("send-keys -l -t %0 -- '-tproof'", cmd)
     }
 
     @Test
@@ -418,7 +431,7 @@ class TmuxSessionViewModelTest {
         val cmd = client.sentCommands.single { it.startsWith("send-keys") }
         assertTrue(
             "expected POSIX-shell-style escape in $cmd",
-            cmd == "send-keys -l -t %2 'it'\\''s'",
+            cmd == "send-keys -l -t %2 -- 'it'\\''s'",
         )
     }
 
@@ -437,7 +450,7 @@ class TmuxSessionViewModelTest {
         waitForSentCommandCount(client, expectedCount = 2)
 
         val sent = client.sentCommands.filter { it.startsWith("send-keys") }
-        assertEquals("send-keys -l -t %0 'echo ok'", sent[0])
+        assertEquals("send-keys -l -t %0 -- 'echo ok'", sent[0])
         assertEquals("send-keys -t %0 Enter", sent[1])
     }
 

@@ -601,7 +601,7 @@ run_bash_step "gradle-compile-unit" \
 
 run_step "docker-agents-up" docker compose -f "$COMPOSE_FILE" up -d --build agents
 run_bash_step "docker-agents-ssh-sanity" \
-  "chmod 600 '$SSH_KEY' && for i in {1..30}; do ssh -i '$SSH_KEY' -p 2222 -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null testuser@127.0.0.1 'for tool in claude codex opencode heru agent-log-explorer tmuxctl uv; do command -v \"\$tool\"; done && heru usage --json >/dev/null && tmuxctl jobs list --session codex >/dev/null' && exit 0; sleep 2; done; exit 1"
+  "chmod 600 '$SSH_KEY' && for i in {1..30}; do ssh -i '$SSH_KEY' -p 2222 -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null testuser@127.0.0.1 'for tool in claude codex opencode quse tmuxctl uv; do command -v \"\$tool\"; done && quse --json >/dev/null && tmuxctl jobs list --session codex >/dev/null' && exit 0; sleep 2; done; exit 1"
 
 run_bash_step "emulator-readiness" \
   "'$ADB' devices && for i in {1..90}; do state=\$('$ADB' shell getprop sys.boot_completed 2>/dev/null | tr -d '\r'); if [ \"\$state\" = 1 ]; then exit 0; fi; sleep 2; done; '$ADB' devices; exit 1"

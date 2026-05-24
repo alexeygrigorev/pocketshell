@@ -155,6 +155,14 @@ jobs:
           exit 1
 
       - name: Run connected Android tests
+        # `-Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true`
+        # is read by `TerminalTestTimeouts` (see
+        # `app/src/androidTest/java/com/pocketshell/app/proof/TerminalTestTimeouts.kt`)
+        # so emulator-smoke terminal waits use a generous CI deadline
+        # (180 s) without changing local feedback (60 s). The
+        # instrumentation runs on the device, so host env vars like
+        # `CI=true` are NOT visible to test code — gradle runner-args
+        # are the supported propagation channel.
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -162,7 +170,7 @@ jobs:
           arch: x86_64
           profile: pixel_7
           disable-animations: true
-          script: ./gradlew connectedDebugAndroidTest --stacktrace
+          script: ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true --stacktrace
 
       - name: Collect Docker logs
         if: always()

@@ -238,18 +238,20 @@ class TerminalKeyboardStressTest {
                 val expectedCountAfter = baselineTypedCount + charIndex + 1
                 val perCharStart = SystemClock.elapsedRealtime()
                 instr.runOnMainSync { input.commitText(ch.toString(), 1) }
-                // CI fix: the GitHub Actions emulator (Pixel 7, api-34,
-                // 2 cores, swiftshader GPU) is materially slower than
-                // the local Linux emulators we develop against. A
-                // handful of characters per 100-char burst can stall
-                // long enough to miss a 5 s deadline (a recent CI run
-                // observed missed=5 samples=100). The responsiveness
-                // gate is the `median < 200 ms` assertion at the end of
-                // the test; per-character `deadline` is a stall ceiling
-                // and 10 s remains generous against any reasonable
-                // emulator stall. Local runs still hit this branch in
-                // ~20 ms median, so the bump does not slow them.
-                val deadline = perCharStart + 10_000
+                // CI-aware stall ceiling: on the GitHub Actions
+                // emulator (Pixel 7, api-34, 2 cores, swiftshader GPU)
+                // a handful of characters per 100-char burst can stall
+                // long enough to miss a tight deadline (a CI run was
+                // observed with missed=5 samples=100 against 5 s, and
+                // even 10 s regressed to flaky once #122/#123's
+                // sibling tests crowded the emulator). The
+                // responsiveness gate is the `median < 200 ms`
+                // assertion at the end of the test; this per-character
+                // deadline is only a stall ceiling that flags a
+                // pathological hang. Local runs hit this branch in ~20
+                // ms median, so a larger CI ceiling does not slow them.
+                val deadline = perCharStart +
+                    com.pocketshell.app.proof.TerminalTestTimeouts.perCharacterStallCeilingMs()
                 var visibleByDeadline = false
                 while (SystemClock.elapsedRealtime() < deadline) {
                     val text = visibleTerminalText()
@@ -585,7 +587,12 @@ class TerminalKeyboardStressTest {
     }
 
     private fun waitForVisibleTerminalText(label: String, predicate: (String) -> Boolean) {
-        val deadline = SystemClock.elapsedRealtime() + 20_000
+        // CI-aware deadline: same rationale as the other emulator-smoke
+        // terminal waits (`EmulatorWorkflowE2eTest`, `TerminalLabInteractiveInputTest`).
+        // Local: 60 s. CI: 180 s. Predicate polls every 75 ms and exits
+        // as soon as it matches, so local runs are unaffected.
+        val deadline = SystemClock.elapsedRealtime() +
+            com.pocketshell.app.proof.TerminalTestTimeouts.terminalVisibilityTimeoutMs()
         var last = ""
         while (SystemClock.elapsedRealtime() < deadline) {
             last = visibleTerminalText()

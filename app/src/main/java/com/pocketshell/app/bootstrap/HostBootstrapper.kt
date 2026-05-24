@@ -49,7 +49,6 @@ public enum class BootstrapTool(
 ) {
     Tmuxctl(binaryName = "tmuxctl"),
     Heru(binaryName = "heru"),
-    AgentLogExplorer(binaryName = "agent-log-explorer"),
 }
 
 public enum class PythonToolInstaller(
@@ -184,7 +183,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         val missingTools = currentReport.missingTools
         if (missingTools.isNotEmpty()) {
             val installer = currentReport.installer ?: return InstallResult.Error(
-                "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install tmuxctl, heru, and agent-log-explorer.",
+                "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install tmuxctl and heru.",
             )
             for (tool in missingTools) {
                 val result = installServerTool(session, installer, tool)

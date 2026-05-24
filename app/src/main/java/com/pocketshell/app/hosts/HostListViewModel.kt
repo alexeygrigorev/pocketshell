@@ -448,7 +448,7 @@ class HostListViewModel @Inject constructor(
         val installer = prompt.report.installer
         if (installer == null) {
             _bootstrapState.value = HostBootstrapSheetState.Failed(
-                message = "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install tmuxctl, heru, and agent-log-explorer.",
+                message = "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install tmuxctl and heru.",
             )
             return
         }

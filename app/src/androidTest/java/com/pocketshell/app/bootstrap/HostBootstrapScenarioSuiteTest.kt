@@ -70,7 +70,7 @@ class HostBootstrapScenarioSuiteTest {
 
         waitForBootstrapSheet()
         compose.onNodeWithText("Host setup needed").assertExists()
-        assertSetupRows("tmuxctl", "heru", "agent-log-explorer")
+        assertSetupRows("tmuxctl", "heru")
         capture("02-setup-needed")
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALL_ALL_TAG).assertExists().performClick()
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALLING_TAG).assertExists()
@@ -92,7 +92,7 @@ class HostBootstrapScenarioSuiteTest {
 
         waitForBootstrapSheet()
         compose.onNodeWithText("Host setup needed").assertExists()
-        assertSetupRows("tmuxctl", "heru", "agent-log-explorer")
+        assertSetupRows("tmuxctl", "heru")
         compose.onNodeWithText("uv tool install tmuxctl or pipx install tmuxctl").assertExists()
         capture("02-unsupported-manual-setup")
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALL_ALL_TAG).assertExists().performClick()
@@ -106,7 +106,6 @@ class HostBootstrapScenarioSuiteTest {
         assertRemote("unsupported profile should still lack automatic installers and tools") {
             "! command -v tmuxctl >/dev/null 2>&1 && " +
                 "! command -v heru >/dev/null 2>&1 && " +
-                "! command -v agent-log-explorer >/dev/null 2>&1 && " +
                 "! command -v uv >/dev/null 2>&1 && " +
                 "! command -v pipx >/dev/null 2>&1"
         }
@@ -298,7 +297,7 @@ class HostBootstrapScenarioSuiteTest {
 
     private fun installedToolsAndEnabledDaemonCommand(): String =
         "/bin/sh -lc 'PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; " +
-            "command -v tmuxctl heru agent-log-explorer >/dev/null && " +
+            "command -v tmuxctl heru >/dev/null && " +
             "systemctl --user is-enabled tmuxctl-jobs.service >/dev/null'"
 
     private fun waitForBootstrapSheet() {
@@ -355,25 +354,25 @@ class HostBootstrapScenarioSuiteTest {
             "ready" to ScenarioDefinition(
                 label = "ready",
                 port = 2230,
-                resetCommand = "rm -f ~/.local/bin/tmuxctl ~/.local/bin/heru ~/.local/bin/agent-log-explorer; " +
+                resetCommand = "rm -f ~/.local/bin/tmuxctl ~/.local/bin/heru; " +
                     "printf 'active enabled\\n' > $STATE_FILE",
             ),
             "uv-install" to ScenarioDefinition(
                 label = "uv install",
                 port = 2231,
-                resetCommand = "rm -f ~/.local/bin/tmuxctl ~/.local/bin/heru ~/.local/bin/agent-log-explorer; " +
+                resetCommand = "rm -f ~/.local/bin/tmuxctl ~/.local/bin/heru; " +
                     "printf 'active enabled\\n' > $STATE_FILE",
             ),
             "unsupported" to ScenarioDefinition(
                 label = "unsupported",
                 port = 2232,
-                resetCommand = "rm -f ~/.local/bin/tmuxctl ~/.local/bin/heru ~/.local/bin/agent-log-explorer; " +
+                resetCommand = "rm -f ~/.local/bin/tmuxctl ~/.local/bin/heru; " +
                     "printf 'inactive disabled\\n' > $STATE_FILE",
             ),
             "daemon-disabled" to ScenarioDefinition(
                 label = "daemon disabled",
                 port = 2233,
-                resetCommand = "rm -f ~/.local/bin/tmuxctl ~/.local/bin/heru ~/.local/bin/agent-log-explorer; " +
+                resetCommand = "rm -f ~/.local/bin/tmuxctl ~/.local/bin/heru; " +
                     "printf 'active disabled\\n' > $STATE_FILE",
             ),
             "user-local-path" to ScenarioDefinition(

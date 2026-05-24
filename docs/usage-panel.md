@@ -44,7 +44,7 @@ For each connected host, PocketShell:
 
 1. On host bootstrap, detects whether a supported usage tool is installed: `command -v heru` over SSH
 2. If present: enables the usage panel for that host
-3. If absent: silently omits the host from the usage panel. (The bootstrap flow may offer to install `heru` as a separate, optional step — alongside `tmuxctl` and `agent-log-explorer`.)
+3. If absent: silently omits the host from the usage panel. (The bootstrap flow may offer to install `heru` as a separate, optional step — alongside `tmuxctl`.)
 4. Runs the usage command on a configurable interval: default 60s while the usage screen is open, 5m in background
 5. Parses the normalized JSON, renders mobile UI
 

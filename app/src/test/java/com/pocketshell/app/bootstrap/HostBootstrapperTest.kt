@@ -243,7 +243,6 @@ class HostBootstrapperTest {
             mapOf(
                 pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
                 pathAware("command -v 'heru'") to ExecResult("/home/u/.local/bin/heru\n", "", 0),
-                pathAware("command -v 'agent-log-explorer'") to ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
                 systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("active\n", "", 0),
@@ -266,7 +265,6 @@ class HostBootstrapperTest {
             mapOf(
                 pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
                 pathAware("command -v 'heru'") to ExecResult("/home/u/bin/heru\n", "", 0),
-                pathAware("command -v 'agent-log-explorer'") to ExecResult("/home/u/.cargo/bin/agent-log-explorer\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
                 systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("active\n", "", 0),
@@ -295,7 +293,6 @@ class HostBootstrapperTest {
             mapOf(
                 pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
                 pathAware("command -v 'heru'") to ExecResult("/home/u/.local/bin/heru\n", "", 0),
-                pathAware("command -v 'agent-log-explorer'") to ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
                 systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("active\n", "", 0),
@@ -348,7 +345,6 @@ class HostBootstrapperTest {
             mapOf(
                 pathAware("command -v 'tmuxctl'") to ExecResult("", "", 1),
                 pathAware("command -v 'heru'") to ExecResult("", "", 1),
-                pathAware("command -v 'agent-log-explorer'") to ExecResult("", "", 1),
                 pathAware("command -v 'uv'") to ExecResult("", "", 1),
                 pathAware("command -v 'pipx'") to ExecResult("/usr/bin/pipx\n", "", 0),
             ),
@@ -369,7 +365,6 @@ class HostBootstrapperTest {
                 when (command) {
                     pathAware("command -v 'tmuxctl'") -> toolLookup("tmuxctl", installedTools)
                     pathAware("command -v 'heru'") -> toolLookup("heru", installedTools)
-                    pathAware("command -v 'agent-log-explorer'") -> toolLookup("agent-log-explorer", installedTools)
                     pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
                     pathAware("uv tool install tmuxctl") -> {
                         installedTools += "tmuxctl"
@@ -378,10 +373,6 @@ class HostBootstrapperTest {
                     pathAware("uv tool install heru") -> {
                         installedTools += "heru"
                         ExecResult("installed heru\n", "", 0)
-                    }
-                    pathAware("uv tool install agent-log-explorer") -> {
-                        installedTools += "agent-log-explorer"
-                        ExecResult("installed agent-log-explorer\n", "", 0)
                     }
                     pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
                     systemdAware("systemctl --user is-active tmuxctl-jobs.service") -> ExecResult("inactive\n", "", 3)
@@ -405,7 +396,6 @@ class HostBootstrapperTest {
         assertEquals(InstallResult.Success, result)
         assertTrue(session.recorded.contains(pathAware("uv tool install tmuxctl")))
         assertTrue(session.recorded.contains(pathAware("uv tool install heru")))
-        assertTrue(session.recorded.contains(pathAware("uv tool install agent-log-explorer")))
         assertTrue(session.recorded.any { it.contains("ExecStart=\"/home/u/.local/bin/tmuxctl\" jobs daemon") })
         assertTrue(session.recorded.any { it.contains("systemctl --user enable --now tmuxctl-jobs.service") })
     }
@@ -428,7 +418,6 @@ class HostBootstrapperTest {
             mapOf(
                 pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
                 pathAware("command -v 'heru'") to ExecResult("/home/u/.local/bin/heru\n", "", 0),
-                pathAware("command -v 'agent-log-explorer'") to ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
                 systemdAware("systemctl --user is-active tmuxctl-jobs.service") to
@@ -448,7 +437,6 @@ class HostBootstrapperTest {
             mapOf(
                 pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
                 pathAware("command -v 'heru'") to ExecResult("/home/u/.local/bin/heru\n", "", 0),
-                pathAware("command -v 'agent-log-explorer'") to ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
                 systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("active\n", "", 0),
@@ -468,7 +456,6 @@ class HostBootstrapperTest {
             mapOf(
                 pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
                 pathAware("command -v 'heru'") to ExecResult("/home/u/.local/bin/heru\n", "", 0),
-                pathAware("command -v 'agent-log-explorer'") to ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
                 systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("inactive\n", "", 3),
@@ -507,7 +494,6 @@ class HostBootstrapperTest {
                 when (command) {
                     pathAware("command -v 'tmuxctl'") -> ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0)
                     pathAware("command -v 'heru'") -> ExecResult("/home/u/.local/bin/heru\n", "", 0)
-                    pathAware("command -v 'agent-log-explorer'") -> ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0)
                     pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
                     pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
                     systemdAware("systemctl --user is-active tmuxctl-jobs.service") -> ExecResult("active\n", "", 0)
@@ -552,7 +538,6 @@ class HostBootstrapperTest {
                 when (command) {
                     pathAware("command -v 'tmuxctl'") -> ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0)
                     pathAware("command -v 'heru'") -> ExecResult("/home/u/.local/bin/heru\n", "", 0)
-                    pathAware("command -v 'agent-log-explorer'") -> ExecResult("/home/u/.local/bin/agent-log-explorer\n", "", 0)
                     pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
                     pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
                     systemdAware("systemctl --user is-active tmuxctl-jobs.service") -> ExecResult("active\n", "", 0)

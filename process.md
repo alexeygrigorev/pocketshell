@@ -136,9 +136,162 @@ Parallelism is issue-scoped, not role-skipping:
 - Launch agents asynchronously. The orchestrator must not start agents in a blocking mode when there is useful coordinator work available, such as refining issues, reading surrounding code, preparing reviewer briefs, or checking unrelated backlog status.
 - Waiting on an agent is only appropriate when the next required process step depends on that specific agent result and there is no other useful non-overlapping work to do.
 
-Parallel work is safe when issues touch different modules or paths and neither depends on another's unmerged work.
+Parallel work is safe when issues touch different modules or paths and
+neither depends on another's unmerged work. Worktree isolation (see next
+section) is mandatory and makes the filesystem layer safe; the orchestrator
+still owns the logical-conflict question.
 
-Parallel work is not safe when issues edit the same files or one issue's output is another issue's input. Without isolated worktrees, the orchestrator must track file ownership carefully and sequence overlapping issues.
+Parallel work is not safe when issues edit the same files or one issue's
+output is another issue's input. Even with isolated worktrees, the
+orchestrator must assign disjoint file ownership in each brief and merge
+approved worktrees back to `main` one at a time.
+
+## Agent Worktrees
+
+Implementer and reviewer agents do NOT edit the orchestrator's main
+checkout. Every agent runs inside its own isolated git worktree branched
+from `main`. This keeps the main checkout clean, makes parallel work safe
+at the filesystem level, and means failed or abandoned agent runs leave no
+residue.
+
+This applies to every implementer regardless of which AI runs it (Claude
+Code, Codex, opencode, etc.) or whether the implementer is a human pair.
+The convention is the worktree itself, not a tool-specific feature.
+
+### Worktree layout
+
+- Main checkout: `~/git/pocketshell` (this repo on `main`).
+- Worktree root: `.worktrees/` inside the main checkout. The directory is
+  covered by `.gitignore` so its contents never appear in `git status` for
+  `main`. The orchestrator creates it once with `mkdir -p` if it does not
+  already exist.
+- Per-issue worktree path: `.worktrees/issue-<N>/` (relative to the repo
+  root, i.e. absolute path
+  `~/git/pocketshell/.worktrees/issue-<N>/`).
+- Per-issue branch name: `issue-<N>` (branched off `main`).
+- Pickup patches for in-flight draft work: `.pickup/issue-<N>-starter.patch`
+  inside the main checkout. The `.pickup/` directory is gitignored so the
+  patches never get committed, but kept in-repo so they stay visible from
+  both the main checkout and any worktree. (Trade-off: `git clean -fdx`
+  will remove them; back up any patch you can't afford to lose.)
+
+Use the same `<N>` everywhere so worktree path, branch, patch file, and
+GitHub issue all line up. If multiple rounds of work are needed on the
+same issue (e.g. follow-up after `CHANGES REQUESTED`), reuse the existing
+worktree rather than creating a parallel one.
+
+### Creating a worktree (tool-agnostic)
+
+From the main checkout (`~/git/pocketshell`), the orchestrator runs:
+
+```bash
+mkdir -p .worktrees
+git fetch origin main
+git worktree add .worktrees/issue-<N> -b issue-<N> origin/main
+```
+
+The implementer then `cd .worktrees/issue-<N>` (or uses the absolute path
+`~/git/pocketshell/.worktrees/issue-<N>`) and works there. Build artifacts,
+test runs, and emulator/Docker workbench scripts all execute from inside
+the worktree.
+
+Claude Code shortcut: dispatching an agent via the Agent tool with
+`isolation: "worktree"` performs the equivalent setup automatically and
+returns the resulting path in the agent's final message. Treat that path
+the same as one created by the raw commands above.
+
+### Orchestrator responsibilities
+
+- Use `isolation: "worktree"` when dispatching Claude Code Agent runs;
+  otherwise create the worktree manually with the commands above before
+  pointing any non-Claude-Code agent at the issue.
+- Always asynchronous: Claude Code Agent runs use
+  `run_in_background: true`; other agents are launched in their own
+  terminal / session so the orchestrator can keep coordinating.
+- Before dispatch, ensure `main` is clean. If there is in-flight work that
+  does not belong to the issue, stash it (`git stash push -m "..."`) or
+  save it as a patch under `.pickup/` first. Never let an agent inherit
+  unrelated dirty state.
+- For pickup of in-flight draft work, save a starter patch to
+  `.pickup/issue-<N>-starter.patch` and reference its path in the brief.
+  The implementer applies it from inside its worktree as the first step.
+  From `.worktrees/issue-<N>/` the relative path is
+  `../../.pickup/issue-<N>-starter.patch`; the absolute path
+  `~/git/pocketshell/.pickup/issue-<N>-starter.patch` also works.
+- Track each active worktree path (`.worktrees/issue-<N>/`) so the
+  reviewer can be pointed at it and the orchestrator can later merge from
+  it.
+
+### Implementer responsibilities
+
+- Work entirely inside the assigned worktree. Never edit the main checkout.
+- Apply any provided starter patch first, then validate it before adding
+  new work.
+- Respect file ownership across parallel issues — the brief lists which
+  files belong to other live issues and must not be touched.
+- Queue politely on shared resources (local emulator, Docker compose). If
+  resources are held by a sibling worktree, wait or retry once; do not
+  race. Surface persistent contention in the status comment.
+- Report by posting a comment on the GitHub issue. Include the absolute
+  worktree path in the final message back to the orchestrator so the diff
+  can be reviewed and merged.
+
+### Reviewer responsibilities
+
+- Review inside the implementer's worktree (path provided in the brief).
+  Do not pull the diff into `main` to inspect — that pollutes the
+  orchestrator's checkout.
+- Run build, unit tests, and the emulator/Docker workbench from inside the
+  worktree.
+- Approve or request changes via an issue comment as usual. The reviewer
+  does not need its own worktree.
+
+### Merge back to `main`
+
+Only the orchestrator merges. After reviewer `APPROVED` and the pre-merge
+verification checklist passes, from `~/git/pocketshell` on `main`:
+
+1. Confirm `git status` is clean.
+2. Capture the implementer's diff from the worktree. If the implementer
+   left changes uncommitted in the worktree (default for our implementer
+   role):
+
+   ```bash
+   git -C .worktrees/issue-<N> diff --no-color > /tmp/issue-<N>.patch
+   ```
+
+   If the implementer committed inside the worktree, diff against `main`:
+
+   ```bash
+   git -C .worktrees/issue-<N> diff --no-color main..HEAD \
+     > /tmp/issue-<N>.patch
+   ```
+
+3. Apply in `main` and inspect before staging:
+
+   ```bash
+   git apply /tmp/issue-<N>.patch
+   git status
+   git diff
+   ```
+
+4. Run the final verification checklist commands in `main`.
+5. Commit with `Closes #N`, push, and let GitHub close the issue.
+6. Clean up the worktree and branch:
+
+   ```bash
+   git worktree remove .worktrees/issue-<N>
+   git branch -D issue-<N>   # already merged via patch; safe to drop
+   ```
+
+   For Claude-Code-dispatched worktrees the harness auto-cleans empty or
+   abandoned ones; running `git worktree remove` explicitly is still safe
+   and idempotent.
+
+If two approved worktrees touch the same file, do NOT attempt a manual
+3-way merge in the orchestrator. Merge the first, then send the second
+back to a fresh implementer round to rebase onto the updated `main`
+(re-create the worktree off the new `main` if needed).
 
 ## Briefing Rules
 
@@ -148,14 +301,23 @@ Implementer briefs include:
 - Project context and relevant docs
 - Scope and acceptance criteria verbatim
 - Exact files or areas likely to change
+- File ownership across other live issues (which files belong to siblings
+  and must not be touched)
+- Path to any starter patch under `.pickup/` if picking up in-flight work
+- Note that the agent runs in an isolated worktree off `main` and must
+  return the worktree path in its final message
 - Non-goals
-- Required deliverable: an issue comment with files changed and verification results
-- Hard rule: do not commit, push, or close
+- Required deliverable: an issue comment with files changed and
+  verification results, plus the worktree path back to the orchestrator
+- Hard rule: do not commit, push, or close, and do not edit the main
+  checkout
 
 Reviewer briefs include:
 
 - Issue number and URL
 - Implementer's latest status comment
+- Absolute path to the implementer's worktree (the reviewer reads, builds,
+  and runs tests from inside it; do not pull the diff into `main`)
 - Instruction to run build and tests
 - Instruction to run emulator validation for any user-facing Android flow,
   terminal/input behavior, SSH/tmux/agent workflow, screenshot/UI audit, or

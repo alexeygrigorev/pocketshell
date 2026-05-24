@@ -52,3 +52,19 @@ Thumbs.db
 !debug.keystore
 *.jks
 keystore.properties
+
+# Per-issue git worktrees used by the orchestrator/implementer/reviewer
+# loop (see process.md "Agent Worktrees"). Each implementer works in
+# .worktrees/issue-<N>/; the directory contents are themselves a separate
+# checkout and must never be tracked from the main checkout. The
+# .claude/worktrees/ entry covers the Claude Code Agent tool's
+# isolation:"worktree" mode, which creates its own per-agent worktrees
+# there automatically.
+.worktrees/
+.claude/worktrees/
+
+# Starter patches the orchestrator hands to implementers when picking up
+# in-flight draft work (see process.md "Agent Worktrees"). Kept inside the
+# repo so they survive `cd` between worktree and main, but gitignored so
+# they never accidentally get committed.
+.pickup/

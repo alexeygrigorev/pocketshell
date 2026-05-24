@@ -11,6 +11,11 @@ fi
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
 SUMMARY_PATH="$RUN_DIR/summary.md"
+PRE_RELEASE_RUN_ID="$RUN_ID-pre-release"
+PRE_RELEASE_GATE_LOG_ROOT="$ROOT_DIR/build/pre-release-confidence-gate"
+PRE_RELEASE_GATE_RUN_DIR="$PRE_RELEASE_GATE_LOG_ROOT/$PRE_RELEASE_RUN_ID"
+PRE_RELEASE_GATE_APK="$PRE_RELEASE_GATE_RUN_DIR/worktree/app/build/outputs/apk/debug/app-debug.apk"
+VALIDATED_APK="$RUN_DIR/app-debug.apk"
 
 usage() {
   cat <<'USAGE'
@@ -31,6 +36,7 @@ Environment overrides:
 
 Artifacts:
   build/release-emulator-validation/<run-id>/summary.md
+  build/release-emulator-validation/<run-id>/app-debug.apk
   build/pre-release-confidence-gate/<run-id>-pre-release/
   build/phone-dogfood/<run-id>-terminal-lab/
   build/phone-dogfood/<run-id>-tmux-existing-session/
@@ -106,13 +112,20 @@ run_required() {
   }
 }
 
+publish_validated_apk() {
+  [[ -f "$PRE_RELEASE_GATE_APK" ]] ||
+    fail "validated debug APK was not created by the pre-release gate at $PRE_RELEASE_GATE_APK"
+  cp "$PRE_RELEASE_GATE_APK" "$VALIDATED_APK"
+  record_artifact "tested debug APK" "build/release-emulator-validation/$RUN_ID/app-debug.apk"
+}
+
 require_clean_pushed_main
 write_summary_header
 
 run_required \
   "pre-release confidence gate" \
-  "build/pre-release-confidence-gate/$RUN_ID-pre-release/" \
-  env RUN_ID="$RUN_ID-pre-release" scripts/pre-release-confidence-gate.sh
+  "build/pre-release-confidence-gate/$PRE_RELEASE_RUN_ID/" \
+  env LOG_ROOT="$PRE_RELEASE_GATE_LOG_ROOT" RUN_ID="$PRE_RELEASE_RUN_ID" scripts/pre-release-confidence-gate.sh
 
 run_required \
   "terminal-lab phone dogfood" \
@@ -134,9 +147,12 @@ run_required \
   "build/dogfood-visual-pass/$RUN_ID-visual-audit/" \
   env RUN_ID="$RUN_ID-visual-audit" scripts/capture-dogfood-screenshots.sh
 
+publish_validated_apk
+
 {
   printf '\n## Release Notes Checklist\n\n'
   printf -- '- [ ] Attach or link every artifact directory listed above in the issue and tag notes.\n'
+  printf -- '- [ ] Download the tested debug APK from `release-emulator-validation/%s/app-debug.apk` inside the validation artifact, or `build/release-emulator-validation/%s/app-debug.apk` locally.\n' "$RUN_ID" "$RUN_ID"
   printf -- '- [ ] Inspect `build/dogfood-visual-pass/%s-visual-audit/screenshots/dogfood-visual-pass/` for release blockers.\n' "$RUN_ID"
   printf -- '- [ ] Treat physical phone testing as final user acceptance only; emulator/Docker validation catches basic release blockers before tagging.\n'
 } >> "$SUMMARY_PATH"

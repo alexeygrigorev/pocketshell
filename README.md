@@ -204,7 +204,7 @@ Before tagging:
 3. Increase `versionCode` monotonically.
 4. Run the normal verification gate before committing the version bump.
 5. Commit the version bump on `main` and push `main` first.
-6. From clean `main`, with `HEAD` equal to `origin/main`, run
+6. From clean pushed `main`, with `HEAD` equal to `origin/main`, run
    `scripts/release-emulator-validation.sh`.
 7. Inspect the visual-audit screenshots listed in that summary.
 8. Push the matching tag with the guarded helper, for example
@@ -216,10 +216,17 @@ without a physical phone: Actions -> Release Emulator Validation -> Run
 workflow. Choose the release branch or `main`; optionally provide a `run_id`.
 Read the job summary first, then download the
 `release-emulator-validation-<run-id>` artifact for logs, screenshots, and the
-release summary.
+release summary. The tested debug APK is included inside that artifact at
+`release-emulator-validation/<run-id>/app-debug.apk`; locally, the same file is
+written under `build/release-emulator-validation/<run-id>/app-debug.apk`. That
+copy comes from the pre-release gate worktree, so it matches the APK installed
+during the gate.
 
 Do not tag a release while the APK metadata still reports the previous
 version. That can make the installed app offer the same release as an update.
+Do not create or push release tags from a detached HEAD, tag checkout, or local
+commit that has not first landed on `main`; tags must label reviewed commits
+already pushed to `main`.
 Release issue/tag notes must attach or link the validation artifact directories
 listed in `build/release-emulator-validation/<run-id>/summary.md`. Physical
 phone testing is final user acceptance only; emulator/Docker validation catches

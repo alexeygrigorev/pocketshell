@@ -30,6 +30,10 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
+import androidx.compose.material3.TabRowDefaults
+import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -557,10 +561,28 @@ private fun VersionFooter(versionName: String) {
 }
 
 /**
- * Top app bar matching `.appbar` in `docs/mockups/styles.css`: 60dp tall,
- * bold 22sp title, trailing 40dp icon buttons. The trailing affordance
- * for #18 is the SSH-keys manager — the global Settings sheet the mockup
- * gestures at is not in scope for this issue.
+ * Top app bar matching `.appbar` in `docs/mockups/styles.css`. The
+ * original mockup pictured a 60dp single-row bar with the "PocketShell"
+ * title on the left and three text affordances on the right ("Crashes",
+ * "Import", "Keys"). UI audit #108 / issue #110 found that those three
+ * items read as static labels rather than tappable destinations because
+ * they had no separator, underline, or active-state indicator.
+ *
+ * The bar is now stacked vertically:
+ *
+ * 1. A title row carrying the bold "PocketShell" wordmark (visual parity
+ *    with the mockup).
+ * 2. A Material 3 [TabRow] underneath, with "Hosts" as the always-active
+ *    landing tab plus "Crashes" / "Import" / "Keys" as navigation tabs.
+ *    The selected tab is rendered with the [PocketShellColors.Accent]
+ *    indicator. Tapping a non-Hosts tab invokes the relevant navigation
+ *    callback; the indicator does not move because the user leaves this
+ *    screen entirely (and returns with "Hosts" selected again).
+ *
+ * `Tab` from Material 3 wraps its content in
+ * `Modifier.selectable(role = Role.Tab)`, so each tab is announced to
+ * TalkBack as "tab" with its selected state — no extra semantics
+ * wiring needed.
  */
 @Composable
 private fun HostsAppBar(
@@ -568,55 +590,108 @@ private fun HostsAppBar(
     onCrashReportsClick: () -> Unit,
     onImportHostClick: () -> Unit,
 ) {
-    Row(
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .height(60.dp)
             .background(PocketShellColors.Background)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-            .padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft),
     ) {
-        Text(
-            text = "PocketShell",
-            color = PocketShellColors.Text,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = (-0.4).sp,
-            modifier = Modifier.weight(1f),
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(60.dp)
+                .padding(horizontal = 16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "PocketShell",
+                color = PocketShellColors.Text,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = (-0.4).sp,
+                modifier = Modifier.weight(1f),
+            )
+        }
 
-        AppBarIconButton(label = "Crashes", onClick = onCrashReportsClick)
-        Spacer(modifier = Modifier.width(8.dp))
-        AppBarIconButton(label = "Import", onClick = onImportHostClick)
-        Spacer(modifier = Modifier.width(8.dp))
-        AppBarIconButton(label = "Keys", onClick = onKeysClick)
+        HostsTabRow(
+            selectedIndex = HOSTS_TAB_INDEX,
+            onHostsClick = { /* already on Hosts; no-op */ },
+            onCrashesClick = onCrashReportsClick,
+            onImportClick = onImportHostClick,
+            onKeysClick = onKeysClick,
+        )
     }
 }
 
 /**
- * 40dp tap target with a label centred. The mockup uses Unicode glyphs
- * for the icon ramp (`⌕`, `⚙`); here we keep "Keys" as a 12sp text label
- * since we have no proper icon set yet. Swapping to vector icons is a
- * pure ui-kit move once those land.
+ * Material 3 [TabRow] for the top-bar navigation. "Hosts" is the
+ * landing tab and is selected whenever the host list is on screen;
+ * tapping any other tab routes to the matching screen (Crashes,
+ * Import, Keys) without flipping the indicator first — the indicator
+ * follows the actual visible surface.
+ *
+ * Custom indicator and divider colors keep the row on-brand
+ * ([PocketShellColors.Accent] underline; muted divider) while the
+ * [Tab] composable handles `Role.Tab` semantics and TalkBack's
+ * "selected" announcement out of the box.
  */
 @Composable
-private fun AppBarIconButton(label: String, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .height(40.dp)
-            .width(64.dp)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
+private fun HostsTabRow(
+    selectedIndex: Int,
+    onHostsClick: () -> Unit,
+    onCrashesClick: () -> Unit,
+    onImportClick: () -> Unit,
+    onKeysClick: () -> Unit,
+) {
+    val tabs = listOf(
+        "Hosts" to onHostsClick,
+        "Crashes" to onCrashesClick,
+        "Import" to onImportClick,
+        "Keys" to onKeysClick,
+    )
+    TabRow(
+        selectedTabIndex = selectedIndex,
+        containerColor = PocketShellColors.Background,
+        contentColor = PocketShellColors.TextSecondary,
+        indicator = { tabPositions ->
+            if (selectedIndex < tabPositions.size) {
+                TabRowDefaults.SecondaryIndicator(
+                    modifier = Modifier.tabIndicatorOffset(tabPositions[selectedIndex]),
+                    height = 2.dp,
+                    color = PocketShellColors.Accent,
+                )
+            }
+        },
+        divider = {
+            // Suppress the default Material 3 divider — the parent
+            // already draws a 1dp border around the whole app bar.
+        },
+        modifier = Modifier.testTag(HOSTS_TAB_ROW_TAG),
     ) {
-        Text(
-            text = label,
-            color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
+        tabs.forEachIndexed { index, (label, onClick) ->
+            val selected = index == selectedIndex
+            Tab(
+                selected = selected,
+                onClick = onClick,
+                selectedContentColor = PocketShellColors.Accent,
+                unselectedContentColor = PocketShellColors.TextSecondary,
+                modifier = Modifier.testTag(HOSTS_TAB_TAG_PREFIX + label.lowercase()),
+                text = {
+                    Text(
+                        text = label,
+                        fontSize = 13.sp,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                        letterSpacing = 0.2.sp,
+                    )
+                },
+            )
+        }
     }
 }
+
+internal const val HOSTS_TAB_ROW_TAG = "hosts:tabrow"
+internal const val HOSTS_TAB_TAG_PREFIX = "hosts:tab:"
+private const val HOSTS_TAB_INDEX = 0
 
 @Composable
 private fun HostPortButton(onClick: () -> Unit) {

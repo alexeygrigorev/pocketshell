@@ -578,11 +578,25 @@ public class SessionViewModel @Inject constructor(
 
     private fun commandPlannerSessionMetadata(): CommandPlannerSessionMetadata {
         val connected = _connectionStatus.value as? ConnectionStatus.Connected
+        val nav = _projectNavigation.value
+        // Opportunistic cwd capture: the project-navigation chips
+        // ([navigateToDirectory], [createFolderAndCd], [cloneRepositoryAndCd])
+        // push the target path onto [recentDirectories] the moment the
+        // command is dispatched. The freshest entry is therefore the
+        // best directory the ViewModel knows about — better than `null`,
+        // and free of the round-trip a periodic `pwd` would cost. When
+        // the user has not yet navigated this session, fall back to null
+        // and let the planner default to `~`.
+        val recentDir = nav.recentDirectories.firstOrNull()?.takeIf { it.isNotBlank() }
         return CommandPlannerSessionMetadata(
             hostLabel = connected?.host ?: SessionDefaults.HOST,
             username = connected?.user ?: SessionDefaults.USER,
-            currentDirectory = null,
-            projectRoots = emptyList(),
+            currentDirectory = recentDir,
+            projectRoots = nav.roots.map { it.path },
+            // Raw-SSH shell type detection (e.g. parsing `$SHELL` or
+            // `ps -p $$`) requires a round-trip per session boot and is
+            // covered by the follow-up to #66 — leaving null until we
+            // wire a one-shot probe at connect time.
             shellType = null,
         )
     }

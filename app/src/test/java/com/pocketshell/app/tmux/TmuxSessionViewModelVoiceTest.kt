@@ -3,6 +3,8 @@ package com.pocketshell.app.tmux
 import com.pocketshell.app.di.CommandPlannerClientFactory
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.core.storage.dao.ProjectRootDao
+import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.voice.CommandPlan
 import com.pocketshell.core.voice.CommandPlannerClient
@@ -14,6 +16,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -46,10 +50,12 @@ class TmuxSessionViewModelVoiceTest {
 
     private fun newVm(
         planner: CommandPlannerClient? = null,
+        projectRootDao: ProjectRootDao? = null,
     ): TmuxSessionViewModel = TmuxSessionViewModel(
         tmuxClientFactory = TmuxClientFactory(factoryScope),
         activeTmuxClients = ActiveTmuxClients(),
         commandPlannerClientFactory = CommandPlannerClientFactory { planner },
+        projectRootDao = projectRootDao,
     )
 
     @After
@@ -196,6 +202,162 @@ class TmuxSessionViewModelVoiceTest {
         // composer / chip taps silently drop input when `currentPane` is
         // null on the tmux screen.
         assertNotNull(vm.voiceCommandReview.value.pendingPlan)
+    }
+
+    @Test
+    fun planVoiceCommandRequestIncludesFocusedPaneCwdAndShellType() = runTest {
+        val planner = FakeCommandPlannerClient(
+            result = Result.success(CommandPlan(listOf(PlannedCommand("ls")))),
+        )
+        val vm = newVm(planner = planner)
+
+        // Seed a connection target (so hostLabel / username get populated)
+        // and a parsed pane with cwd + a known shell name.
+        vm.replaceClientForTest(
+            hostId = 42,
+            hostName = "prod",
+            host = "host.example",
+            port = 22,
+            user = "deploy",
+            keyPath = "/tmp/key",
+            sessionName = "main",
+            client = FakeTmuxClient(),
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "shell",
+                    paneIndex = 0,
+                    cwd = "/srv/work",
+                    currentCommand = "zsh",
+                    sessionName = "main",
+                ),
+            ),
+        )
+
+        vm.planVoiceCommand("list files", focusedPaneId = "%0")
+        advanceUntilIdle()
+
+        val session = planner.requests.single().session
+        assertEquals("prod", session.hostLabel)
+        assertEquals("deploy", session.username)
+        assertEquals("/srv/work", session.currentDirectory)
+        assertEquals("zsh", session.shellType)
+    }
+
+    @Test
+    fun planVoiceCommandRequestSuppressesNonShellCurrentCommand() = runTest {
+        val planner = FakeCommandPlannerClient(
+            result = Result.success(CommandPlan(listOf(PlannedCommand("ls")))),
+        )
+        val vm = newVm(planner = planner)
+
+        vm.replaceClientForTest(
+            hostId = 42,
+            hostName = "prod",
+            host = "host.example",
+            port = 22,
+            user = "deploy",
+            keyPath = "/tmp/key",
+            sessionName = "main",
+            client = FakeTmuxClient(),
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "editing",
+                    paneIndex = 0,
+                    cwd = "/srv/work",
+                    currentCommand = "vim",
+                    sessionName = "main",
+                ),
+            ),
+        )
+
+        vm.planVoiceCommand("save the file", focusedPaneId = "%0")
+        advanceUntilIdle()
+
+        val session = planner.requests.single().session
+        // Cwd is still cached even though the foreground process is not
+        // a shell — only the shell-type heuristic suppresses non-shells.
+        assertEquals("/srv/work", session.currentDirectory)
+        assertNull(session.shellType)
+    }
+
+    @Test
+    fun planVoiceCommandRequestIncludesProjectRootsFromDao() = runTest {
+        val planner = FakeCommandPlannerClient(
+            result = Result.success(CommandPlan(listOf(PlannedCommand("ls")))),
+        )
+        val dao = FakeProjectRootDao()
+        dao.roots.value = listOf(
+            ProjectRootEntity(id = 1L, hostId = 42, label = "work", path = "/srv/work"),
+            ProjectRootEntity(id = 2L, hostId = 42, label = "src", path = "~/src"),
+        )
+        val vm = newVm(planner = planner, projectRootDao = dao)
+
+        vm.replaceClientForTest(
+            hostId = 42,
+            hostName = "prod",
+            host = "host.example",
+            port = 22,
+            user = "deploy",
+            keyPath = "/tmp/key",
+            sessionName = "main",
+            client = FakeTmuxClient(),
+        )
+        advanceUntilIdle()
+
+        vm.planVoiceCommand("list files", focusedPaneId = null)
+        advanceUntilIdle()
+
+        val session = planner.requests.single().session
+        assertEquals(listOf("/srv/work", "~/src"), session.projectRoots)
+        // No focused pane → cwd / shellType are absent (null), not empty
+        // strings or stale values from another pane.
+        assertNull(session.currentDirectory)
+        assertNull(session.shellType)
+    }
+
+    @Test
+    fun planVoiceCommandRequestEmptyMetadataWhenNothingKnown() = runTest {
+        val planner = FakeCommandPlannerClient(
+            result = Result.success(CommandPlan(listOf(PlannedCommand("ls")))),
+        )
+        val vm = newVm(planner = planner)
+
+        vm.planVoiceCommand("list files")
+        advanceUntilIdle()
+
+        val session = planner.requests.single().session
+        assertNull(session.currentDirectory)
+        assertEquals(emptyList<String>(), session.projectRoots)
+        assertNull(session.shellType)
+    }
+
+    private class FakeProjectRootDao : ProjectRootDao {
+        val roots = MutableStateFlow<List<ProjectRootEntity>>(emptyList())
+
+        override fun getByHostId(hostId: Long): Flow<List<ProjectRootEntity>> = roots
+
+        override suspend fun insert(root: ProjectRootEntity): Long {
+            roots.value = roots.value + root
+            return roots.value.size.toLong()
+        }
+
+        override suspend fun update(root: ProjectRootEntity) {
+            roots.value = roots.value.map { if (it.id == root.id) root else it }
+        }
+
+        override suspend fun delete(root: ProjectRootEntity) {
+            roots.value = roots.value.filterNot { it.id == root.id }
+        }
     }
 
     private class FakeCommandPlannerClient(

@@ -482,6 +482,51 @@ class SessionViewModelTest {
     }
 
     @Test
+    fun voiceCommandPlannerRequestIncludesProjectRootsFromBoundHost() = runTest {
+        val dao = FakeProjectRootDao()
+        dao.roots.value = listOf(
+            ProjectRootEntity(id = 1L, hostId = 42, label = "work", path = "/srv/work"),
+            ProjectRootEntity(id = 2L, hostId = 42, label = "src", path = "~/src"),
+        )
+        val planner = FakeCommandPlannerClient(
+            result = Result.success(CommandPlan(listOf(PlannedCommand("ls")))),
+        )
+        val vm = newVm(
+            commandPlannerClientFactory = CommandPlannerClientFactory { planner },
+            projectRootDao = dao,
+        )
+        vm.bindProjectNavigationHost(42)
+        advanceUntilIdle()
+
+        vm.planVoiceCommand("list files")
+        advanceUntilIdle()
+
+        val session = planner.requests.single().session
+        assertEquals(listOf("/srv/work", "~/src"), session.projectRoots)
+        // currentDirectory / shellType have no opportunistic value yet
+        // for a freshly bound host that the user has not navigated.
+        assertNull(session.currentDirectory)
+        assertNull(session.shellType)
+    }
+
+    @Test
+    fun voiceCommandPlannerRequestIncludesRecentDirectoryAfterProjectNavigation() = runTest {
+        val planner = FakeCommandPlannerClient(
+            result = Result.success(CommandPlan(listOf(PlannedCommand("ls")))),
+        )
+        val vm = newVm(commandPlannerClientFactory = CommandPlannerClientFactory { planner })
+
+        vm.navigateToDirectory("~/work/current")
+        vm.planVoiceCommand("list files")
+        advanceUntilIdle()
+
+        val session = planner.requests.single().session
+        assertEquals("~/work/current", session.currentDirectory)
+        // No DAO bound → projectRoots is empty, not null.
+        assertEquals(emptyList<String>(), session.projectRoots)
+    }
+
+    @Test
     fun voiceCommandPlannerFailureShowsVisibleErrorState() = runTest {
         val planner = FakeCommandPlannerClient(
             result = Result.failure(CommandPlannerException.Rejected("unsafe command")),

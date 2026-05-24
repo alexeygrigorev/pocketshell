@@ -219,7 +219,7 @@ public fun TmuxSessionScreen(
                         viewModel.writeInputToPane(paneId, text.toByteArray(Charsets.UTF_8))
                     }
                 }
-                InlineDictationViewModel.DictationMode.Command -> viewModel.planVoiceCommand(text)
+                InlineDictationViewModel.DictationMode.Command -> viewModel.planVoiceCommand(text, paneId)
             }
         }
     }

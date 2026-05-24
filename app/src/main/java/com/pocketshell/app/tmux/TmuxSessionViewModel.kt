@@ -17,6 +17,8 @@ import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.storage.dao.ProjectRootDao
+import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientFactory
@@ -35,6 +37,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.io.File
@@ -96,6 +99,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private val activeTmuxClients: ActiveTmuxClients,
     private val commandPlannerClientFactory: CommandPlannerClientFactory =
         CommandPlannerClientFactory { null },
+    private val projectRootDao: ProjectRootDao? = null,
 ) : ViewModel() {
 
     private val _panes: MutableStateFlow<List<TmuxPaneState>> =
@@ -141,6 +145,16 @@ public class TmuxSessionViewModel @Inject constructor(
         _voiceCommandReview.asStateFlow()
 
     private var commandPlannerJob: Job? = null
+
+    // Project roots for the connected host, mirrored from
+    // [ProjectRootDao.getByHostId] so the voice planner request can carry
+    // the same `projectRoots` the raw-SSH SessionViewModel sends. The flow
+    // is rebound on every [connect] / [replaceClientForTest]; tearing the
+    // connection down clears the list so a stale host's roots never bleed
+    // into a fresh session.
+    private val _projectRoots: MutableStateFlow<List<ProjectRootEntity>> =
+        MutableStateFlow(emptyList())
+    private var projectRootsJob: Job? = null
 
     private var sessionRef: SshSession? = null
     private var clientRef: TmuxClient? = null
@@ -260,6 +274,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 client = client,
             )
             registeredHostId = target.hostId
+            bindProjectRootsForHost(target.hostId)
 
             // Bootstrap the pane list once tmux has had a moment to settle.
             // We don't strictly need this — the opening %window-add event
@@ -351,7 +366,25 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         registeredHostId = hostId
         activeTarget = target
+        bindProjectRootsForHost(hostId)
         _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+    }
+
+    /**
+     * Subscribe [_projectRoots] to the DAO-backed roots for [hostId].
+     * Idempotent: cancels any prior subscription before starting a new
+     * one. When no DAO is wired (unit tests that don't care about roots),
+     * leaves the flow empty.
+     */
+    private fun bindProjectRootsForHost(hostId: Long) {
+        projectRootsJob?.cancel()
+        _projectRoots.value = emptyList()
+        val dao = projectRootDao ?: return
+        projectRootsJob = viewModelScope.launch {
+            dao.getByHostId(hostId).collectLatest { roots ->
+                _projectRoots.value = roots
+            }
+        }
     }
 
     /**
@@ -612,8 +645,14 @@ public class TmuxSessionViewModel @Inject constructor(
      * pane (via [writeInputToPane]); Command mode lands here so the
      * generated shell commands are planned, validated, and held for
      * explicit user review before they reach a pane.
+     *
+     * [focusedPaneId] is the pane the user is currently looking at — when
+     * non-null we use its cached `pane_current_path` / `pane_current_command`
+     * to populate the planner request's per-session metadata. The screen
+     * supplies the pager's `currentPage` pane; tests can pass `null` to
+     * exercise the no-focus path.
      */
-    public fun planVoiceCommand(transcript: String) {
+    public fun planVoiceCommand(transcript: String, focusedPaneId: String? = null) {
         val cleaned = transcript.trim()
         if (cleaned.isEmpty()) return
         if (commandPlannerJob?.isActive == true) return
@@ -634,7 +673,7 @@ public class TmuxSessionViewModel @Inject constructor(
             val result = client.plan(
                 CommandPlannerRequest(
                     transcript = cleaned,
-                    session = commandPlannerSessionMetadata(),
+                    session = commandPlannerSessionMetadata(focusedPaneId),
                     safety = CommandPlannerSafetyConstraints(
                         requireReviewBeforeExecution = true,
                         allowAutoSend = false,
@@ -679,24 +718,49 @@ public class TmuxSessionViewModel @Inject constructor(
         _voiceCommandReview.value = VoiceCommandReviewUiState()
     }
 
-    private fun commandPlannerSessionMetadata(): CommandPlannerSessionMetadata {
+    private fun commandPlannerSessionMetadata(
+        focusedPaneId: String? = null,
+    ): CommandPlannerSessionMetadata {
         val connected = _connectionStatus.value as? ConnectionStatus.Connected
         val target = activeTarget
+        val focusedPane = focusedPaneId?.let { paneRows[it] }
         return CommandPlannerSessionMetadata(
             hostLabel = target?.hostName?.takeIf { it.isNotBlank() }
                 ?: connected?.host
                 ?: target?.host
                 ?: "",
             username = connected?.user ?: target?.user ?: "",
-            // Per-pane current directory, project roots, and shell type
-            // remain a separate follow-up (see #123 — they are not in
-            // scope for this implementer pass). Tmux pane `cwd` is
-            // already cached on TmuxPaneState but threading it through
-            // here would expand scope into per-pane metadata wiring.
-            currentDirectory = null,
-            projectRoots = emptyList(),
-            shellType = null,
+            // tmux already caches each pane's `pane_current_path` /
+            // `pane_current_command` (see [reconcilePanes]); when the
+            // screen tells us which pane the user is looking at, we
+            // forward that cache to the planner request rather than do a
+            // redundant `pwd` round-trip.
+            currentDirectory = focusedPane?.cwd?.takeIf { it.isNotBlank() },
+            projectRoots = _projectRoots.value.map { it.path },
+            // `pane_current_command` is the *focused* foreground process
+            // tmux is reporting — often a shell name (`bash` / `zsh` /
+            // `fish`) but sometimes a transient process (`vim`, `git`,
+            // `claude`). Only forward it when it looks like a known
+            // shell; anything else falls back to null so the planner
+            // sees "unknown" instead of being misled by an editor name.
+            shellType = focusedPane?.currentCommand?.let { shellTypeOrNull(it) },
         )
+    }
+
+    /**
+     * Filter [pane_current_command] down to a known shell name, or null
+     * if the foreground process is not a shell we want to advertise.
+     *
+     * Keeping the allow-list narrow on purpose: passing `vim` or `git`
+     * as `shell_type` would teach the planner the wrong syntax. The list
+     * matches the common Unix login shells called out in the #66 doc.
+     */
+    private fun shellTypeOrNull(command: String): String? {
+        val trimmed = command.trim().substringAfterLast('/')
+        return when (trimmed) {
+            "bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "csh" -> trimmed
+            else -> null
+        }
     }
 
     private fun commandPlannerMessage(error: Throwable): String = when (error) {
@@ -919,6 +983,9 @@ public class TmuxSessionViewModel @Inject constructor(
     private fun closeCurrentConnection() {
         eventsJob?.cancel()
         eventsJob = null
+        projectRootsJob?.cancel()
+        projectRootsJob = null
+        _projectRoots.value = emptyList()
         for ((_, job) in paneProducerJobs) {
             job.cancel()
         }

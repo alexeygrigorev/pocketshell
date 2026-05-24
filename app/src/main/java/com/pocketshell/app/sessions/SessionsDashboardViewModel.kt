@@ -263,12 +263,21 @@ class SessionsDashboardViewModel @Inject constructor(
     fun entryFor(hostId: Long): ActiveTmuxClients.Entry? =
         activeClients.clients.value[hostId]
 
-    fun createSession(entry: ActiveTmuxClients.Entry, name: String) {
-        val trimmed = name.trim()
-        if (trimmed.isEmpty()) return
+    fun createSession(
+        entry: ActiveTmuxClients.Entry,
+        name: String,
+        startDirectory: String = DEFAULT_TMUX_START_DIRECTORY,
+    ) {
+        val creation = resolveTmuxSessionCreation(
+            rawName = name,
+            rawStartDirectory = startDirectory,
+        )
         viewModelScope.launch {
             runCatching {
-                entry.client.sendCommand("new-session -d -s '${escapeSingleQuoted(trimmed)}'")
+                entry.client.sendCommand(
+                    "new-session -d -s '${escapeSingleQuoted(creation.sessionName)}' " +
+                        "-c '${escapeSingleQuoted(creation.startDirectory)}'",
+                )
             }
             refreshEntry(entry)
         }

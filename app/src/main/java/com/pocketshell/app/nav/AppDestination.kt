@@ -86,6 +86,8 @@ sealed interface AppDestination {
      *   `new-session -A -s`). Today defaulted by the caller to
      *   `"pocketshell"` to match
      *   [com.pocketshell.core.tmux.TmuxClientFactory]'s default.
+     * @property startDirectory optional start folder passed to tmux
+     *   `new-session -A -c` when this destination came from a create flow.
      */
     data class TmuxSession(
         val hostId: Long,
@@ -96,6 +98,7 @@ sealed interface AppDestination {
         val keyPath: String,
         val passphrase: CharArray?,
         val sessionName: String,
+        val startDirectory: String? = null,
     ) : AppDestination
 
     /** Per-session recurring jobs backed by the host's `tmuxctl jobs` CLI. */

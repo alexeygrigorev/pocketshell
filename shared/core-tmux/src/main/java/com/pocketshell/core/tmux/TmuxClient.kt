@@ -141,13 +141,17 @@ public class TmuxClientException(message: String, cause: Throwable? = null) :
  *   reader's failures don't cancel siblings of [scope]. The caller's
  *   scope's lifetime is the upper bound on this client's lifetime.
  * @param sessionName tmux session name to attach to (or create). Defaults
- *   to `"pocketshell"`. We use `new-session -A -s <name>` so existing
- *   sessions with the same name are reattached rather than refused.
+ *   to `"pocketshell"`. Blank input also falls back to this default. We
+ *   use `new-session -A -s <name>` so existing sessions with the same
+ *   name are reattached rather than refused.
+ * @param startDirectory optional tmux `-c` start directory for newly
+ *   created sessions. Existing sessions are still attached via `-A`.
  */
 internal class RealTmuxClient(
     private val session: SshSession,
     scope: CoroutineScope,
     private val sessionName: String = DEFAULT_SESSION_NAME,
+    private val startDirectory: String? = null,
 ) : TmuxClient {
 
     // Child scope rooted under the caller's scope. SupervisorJob() so a
@@ -226,7 +230,19 @@ internal class RealTmuxClient(
         // a new one — the right behaviour for "reattach across phone
         // reconnects" which is the whole point of running tmux remotely.
         try {
-            val command = "tmux -CC new-session -A -s '${escapeSingleQuoted(sessionName)}'\n"
+            val resolvedSessionName = sessionName.trim().ifBlank { DEFAULT_SESSION_NAME }
+            val resolvedStartDirectory = startDirectory?.trim().orEmpty()
+            val command = buildString {
+                append("tmux -CC new-session -A -s '")
+                append(escapeSingleQuoted(resolvedSessionName))
+                append("'")
+                if (resolvedStartDirectory.isNotEmpty()) {
+                    append(" -c '")
+                    append(escapeSingleQuoted(resolvedStartDirectory))
+                    append("'")
+                }
+                append('\n')
+            }
             withContext(Dispatchers.IO) {
                 sh.stdin.write(command.toByteArray(Charsets.UTF_8))
                 sh.stdin.flush()

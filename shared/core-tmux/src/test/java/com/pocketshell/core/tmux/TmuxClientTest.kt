@@ -96,6 +96,49 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `connect falls back to default session name when custom name is blank`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, sessionName = " ")
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            assertEquals(
+                "tmux -CC new-session -A -s 'pocketshell'\n",
+                shell.stdinAsString(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `connect includes shell-quoted start directory when provided`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(
+            session,
+            scope,
+            sessionName = "test",
+            startDirectory = "/work/it's here",
+        )
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            assertEquals(
+                "tmux -CC new-session -A -s 'test' -c '/work/it'\\''s here'\n",
+                shell.stdinAsString(),
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `connect shell-quotes custom session name`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)

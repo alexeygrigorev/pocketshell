@@ -48,15 +48,19 @@ public class TmuxClientFactory(
      * @param sessionName tmux session name to attach to or create. Pass a
      *   distinct value when running multiple PocketShell clients against
      *   the same host. Defaults to `"pocketshell"`.
+     * @param startDirectory optional tmux `-c` start directory for newly
+     *   created sessions.
      */
     @JvmOverloads
     public fun create(
         session: SshSession,
         sessionName: String = DEFAULT_SESSION_NAME,
+        startDirectory: String? = null,
     ): TmuxClient = RealTmuxClient(
         session = session,
         scope = scope,
         sessionName = sessionName,
+        startDirectory = startDirectory,
     )
 
     private companion object {

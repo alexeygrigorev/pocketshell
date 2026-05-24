@@ -507,7 +507,7 @@ class SessionsDashboardViewModelTest {
         vm.killSession(entry, "renamed")
         runCurrent()
 
-        assertTrue(client.sentCommands.contains("new-session -d -s 'next'"))
+        assertTrue(client.sentCommands.contains("new-session -d -s 'next' -c '~'"))
         assertTrue(client.sentCommands.contains("rename-session -t 'next' 'renamed'"))
         assertTrue(client.sentCommands.contains("kill-session -t 'renamed'"))
     }

@@ -62,7 +62,8 @@ fun SessionsSection(
     modifier: Modifier = Modifier,
     viewModel: SessionsDashboardViewModel = hiltViewModel(),
     hostIdFilter: Long? = null,
-    onOpenTmuxSession: (ActiveTmuxClients.Entry, sessionName: String) -> Unit = { _, _ -> },
+    onOpenTmuxSession: (ActiveTmuxClients.Entry, sessionName: String, startDirectory: String?) -> Unit =
+        { _, _, _ -> },
 ) {
     val allSessions by viewModel.sessions.collectAsState()
     val sessions = if (hostIdFilter == null) {
@@ -76,10 +77,16 @@ fun SessionsSection(
     var selectedSession by remember { mutableStateOf<SessionSummary?>(null) }
     var dialogMode by remember { mutableStateOf<DashboardDialogMode?>(null) }
     var dialogText by remember { mutableStateOf("") }
+    var dialogStartDirectory by remember { mutableStateOf(DEFAULT_TMUX_START_DIRECTORY) }
 
-    fun openDialog(mode: DashboardDialogMode, initialText: String = "") {
+    fun openDialog(
+        mode: DashboardDialogMode,
+        initialText: String = "",
+        initialStartDirectory: String = DEFAULT_TMUX_START_DIRECTORY,
+    ) {
         dialogMode = mode
         dialogText = initialText
+        dialogStartDirectory = initialStartDirectory
     }
 
     Column(
@@ -125,7 +132,7 @@ fun SessionsSection(
                         // tap silently; the row will disappear on the next
                         // poll cycle.
                         val entry = viewModel.entryFor(summary.hostId) ?: return@SessionRow
-                        onOpenTmuxSession(entry, summary.sessionName)
+                        onOpenTmuxSession(entry, summary.sessionName, null)
                     },
                     onLongClick = {
                         selectedSession = summary
@@ -138,7 +145,7 @@ fun SessionsSection(
                         val entry = viewModel.entryFor(summary.hostId)
                         if (entry != null) {
                             selectedSession = null
-                            onOpenTmuxSession(entry, summary.sessionName)
+                            onOpenTmuxSession(entry, summary.sessionName, null)
                         }
                     },
                     onRename = {
@@ -162,6 +169,8 @@ fun SessionsSection(
             sessionName = currentSession.sessionName,
             text = dialogText,
             onTextChange = { dialogText = it },
+            startDirectory = dialogStartDirectory,
+            onStartDirectoryChange = { dialogStartDirectory = it },
             onDismiss = {
                 dialogMode = null
                 selectedSession = null
@@ -171,11 +180,11 @@ fun SessionsSection(
                 if (entry != null) {
                     when (currentDialog) {
                         DashboardDialogMode.CreateSession -> {
-                            val name = dialogText.trim()
-                            viewModel.createSession(entry, name)
-                            if (name.isNotEmpty()) {
-                                onOpenTmuxSession(entry, name)
-                            }
+                            val creation = resolveTmuxSessionCreation(
+                                rawName = dialogText,
+                                rawStartDirectory = dialogStartDirectory,
+                            )
+                            onOpenTmuxSession(entry, creation.sessionName, creation.startDirectory)
                         }
                         DashboardDialogMode.RenameSession -> {
                             viewModel.renameSession(
@@ -226,10 +235,13 @@ private fun DashboardLifecycleDialog(
     sessionName: String,
     text: String,
     onTextChange: (String) -> Unit,
+    startDirectory: String,
+    onStartDirectoryChange: (String) -> Unit,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
     val isTextMode = mode != DashboardDialogMode.KillSession
+    val isCreateMode = mode == DashboardDialogMode.CreateSession
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -242,7 +254,22 @@ private fun DashboardLifecycleDialog(
             )
         },
         text = {
-            if (isTextMode) {
+            if (isCreateMode) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = onTextChange,
+                        singleLine = true,
+                        label = { Text("Session name") },
+                    )
+                    OutlinedTextField(
+                        value = startDirectory,
+                        onValueChange = onStartDirectoryChange,
+                        singleLine = true,
+                        label = { Text("Start folder") },
+                    )
+                }
+            } else if (isTextMode) {
                 OutlinedTextField(
                     value = text,
                     onValueChange = onTextChange,
@@ -256,7 +283,7 @@ private fun DashboardLifecycleDialog(
         confirmButton = {
             TextButton(
                 onClick = onConfirm,
-                enabled = !isTextMode || text.trim().isNotEmpty(),
+                enabled = isCreateMode || !isTextMode || text.trim().isNotEmpty(),
             ) {
                 Text(if (mode == DashboardDialogMode.KillSession) "Kill" else "Save")
             }

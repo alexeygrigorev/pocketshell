@@ -546,7 +546,7 @@ class TmuxSessionViewModelTest {
         vm.killCurrentSession()
         advanceUntilIdle()
 
-        assertTrue(client.sentCommands.contains("new-session -d -s 'next'"))
+        assertTrue(client.sentCommands.contains("new-session -d -s 'next' -c '~'"))
         assertTrue(client.sentCommands.contains("rename-session -t 'work' 'renamed'"))
         assertTrue(client.sentCommands.contains("new-window -t 'work'"))
         assertTrue(client.sentCommands.contains("select-window -t @2"))
@@ -556,7 +556,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun lifecycleCommandsIgnoreBlankNames() = runTest {
+    fun lifecycleCommandsDeriveCreateNameButIgnoreBlankRenameNames() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
@@ -575,7 +575,9 @@ class TmuxSessionViewModelTest {
         vm.renameWindow("@2", " ")
         advanceUntilIdle()
 
-        assertTrue(client.sentCommands.isEmpty())
+        val command = client.sentCommands.single()
+        assertTrue(command.startsWith("new-session -d -s 'pocketshell-"))
+        assertTrue(command.endsWith("' -c '~'"))
     }
 
     @Test

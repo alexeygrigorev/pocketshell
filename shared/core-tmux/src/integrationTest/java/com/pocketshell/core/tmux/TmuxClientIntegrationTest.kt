@@ -229,6 +229,38 @@ class TmuxClientIntegrationTest {
     }
 
     @Test
+    fun `new session with test name starts in requested directory`() = runBlocking {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            connectSession().use { session ->
+                session.exec("tmux kill-session -t test >/dev/null 2>&1 || true")
+                val client: TmuxClient = TmuxClientFactory(scope).create(
+                    session,
+                    sessionName = "test",
+                    startDirectory = "/tmp",
+                )
+                client.use {
+                    it.connect()
+                    delay(500)
+                    val response = withTimeout(10_000) {
+                        it.sendCommand("display-message -p '#{session_name}::#{pane_current_path}'")
+                    }
+                    assertFalse(
+                        "display-message must succeed; got `${response.output}`",
+                        response.isError,
+                    )
+                    assertEquals(
+                        listOf("test::/tmp"),
+                        response.output.map { line -> line.trim() },
+                    )
+                }
+            }
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    @Test
     fun `sendCommand error response surfaces with isError true`() = runBlocking {
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {

@@ -181,7 +181,7 @@ private fun AppNavigator(
                     ),
                 )
             },
-            onOpenTmuxHostSession = { host, keyPath, passphrase, sessionName ->
+            onOpenTmuxHostSession = { host, keyPath, passphrase, sessionName, startDirectory ->
                 navigate(
                     AppDestination.TmuxSession(
                         hostId = host.id,
@@ -192,13 +192,14 @@ private fun AppNavigator(
                         keyPath = keyPath,
                         passphrase = passphrase,
                         sessionName = sessionName,
+                        startDirectory = startDirectory,
                     ),
                 )
             },
             onOpenPortForwardPanel = { host, keyPath, passphrase ->
                 navigate(AppDestination.PortForwardPanel(hostId = host.id, keyPath = keyPath, passphrase = passphrase))
             },
-            onOpenTmuxSession = { entry, sessionName ->
+            onOpenTmuxSession = { entry, sessionName, startDirectory ->
                 navigate(
                     AppDestination.TmuxSession(
                         hostId = entry.hostId,
@@ -209,6 +210,7 @@ private fun AppNavigator(
                         keyPath = entry.keyPath,
                         passphrase = null,
                         sessionName = sessionName,
+                        startDirectory = startDirectory,
                     ),
                 )
             },
@@ -320,14 +322,15 @@ private fun AppNavigator(
             keyPath = dest.keyPath,
             passphrase = dest.passphrase,
             sessionName = dest.sessionName,
+            startDirectory = dest.startDirectory,
             onBack = ::back,
-            onOpenTmuxSession = { sessionName ->
+            onOpenTmuxSession = { sessionName, startDirectory ->
                 navigate(
-                    dest.copy(sessionName = sessionName),
+                    dest.copy(sessionName = sessionName, startDirectory = startDirectory),
                 )
             },
             onReplaceTmuxSession = { sessionName ->
-                replace(dest.copy(sessionName = sessionName))
+                replace(dest.copy(sessionName = sessionName, startDirectory = null))
             },
             onOpenJobs = {
                 navigate(

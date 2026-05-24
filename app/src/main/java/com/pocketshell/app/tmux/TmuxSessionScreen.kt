@@ -67,10 +67,12 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.session.SessionTab
+import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.sessions.HostTmuxSessionRow
+import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
@@ -122,15 +124,26 @@ public fun TmuxSessionScreen(
     keyPath: String,
     passphrase: CharArray? = null,
     sessionName: String,
+    startDirectory: String? = null,
     modifier: Modifier = Modifier,
     sessionPickerViewModel: HostTmuxSessionPickerViewModel = hiltViewModel(),
     onBack: () -> Unit = {},
-    onOpenTmuxSession: (sessionName: String) -> Unit = {},
+    onOpenTmuxSession: (sessionName: String, startDirectory: String?) -> Unit = { _, _ -> },
     onReplaceTmuxSession: (sessionName: String) -> Unit = {},
     onOpenJobs: () -> Unit = {},
 ) {
-    LaunchedEffect(hostId, hostName, host, port, user, keyPath, passphrase, sessionName) {
-        viewModel.connect(hostId, hostName, host, port, user, keyPath, passphrase, sessionName)
+    LaunchedEffect(hostId, hostName, host, port, user, keyPath, passphrase, sessionName, startDirectory) {
+        viewModel.connect(
+            hostId = hostId,
+            hostName = hostName,
+            host = host,
+            port = port,
+            user = user,
+            keyPath = keyPath,
+            passphrase = passphrase,
+            sessionName = sessionName,
+            startDirectory = startDirectory,
+        )
     }
 
     val panes by viewModel.panes.collectAsState()
@@ -158,6 +171,7 @@ public fun TmuxSessionScreen(
     var windowMenuFor by remember { mutableStateOf<WindowSummary?>(null) }
     var dialogMode by remember { mutableStateOf<TmuxDialogMode?>(null) }
     var dialogText by remember { mutableStateOf("") }
+    var dialogStartDirectory by remember { mutableStateOf(DEFAULT_TMUX_START_DIRECTORY) }
     var showWindowSwitcher by remember { mutableStateOf(false) }
     var showSessionDrawer by remember { mutableStateOf(false) }
     val sessionPickerRequest = remember(hostId, hostName, host, port, user, keyPath, passphrase) {
@@ -175,9 +189,15 @@ public fun TmuxSessionScreen(
         )
     }
 
-    fun openTextDialog(mode: TmuxDialogMode, initialText: String = "") {
+    fun openTextDialog(
+        mode: TmuxDialogMode,
+        initialText: String = "",
+        initialStartDirectory: String = currentPane?.cwd?.takeIf { it.isNotBlank() }
+            ?: DEFAULT_TMUX_START_DIRECTORY,
+    ) {
         dialogMode = mode
         dialogText = initialText
+        dialogStartDirectory = initialStartDirectory
     }
 
     fun selectWindow(window: WindowSummary) {
@@ -413,13 +433,17 @@ public fun TmuxSessionScreen(
                 currentWindowId = currentWindowId,
                 text = dialogText,
                 onTextChange = { dialogText = it },
+                startDirectory = dialogStartDirectory,
+                onStartDirectoryChange = { dialogStartDirectory = it },
                 onDismiss = { dialogMode = null },
                 onConfirm = {
                     when (val currentMode = mode) {
                         TmuxDialogMode.CreateSession -> {
-                            val name = dialogText.trim()
-                            viewModel.createSession(name)
-                            if (name.isNotEmpty()) onOpenTmuxSession(name)
+                            val creation = resolveTmuxSessionCreation(
+                                rawName = dialogText,
+                                rawStartDirectory = dialogStartDirectory,
+                            )
+                            onOpenTmuxSession(creation.sessionName, creation.startDirectory)
                         }
                         TmuxDialogMode.RenameSession -> {
                             val name = dialogText.trim()
@@ -1133,6 +1157,8 @@ private fun TmuxLifecycleDialog(
     currentWindowId: String?,
     text: String,
     onTextChange: (String) -> Unit,
+    startDirectory: String,
+    onStartDirectoryChange: (String) -> Unit,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
@@ -1154,11 +1180,27 @@ private fun TmuxLifecycleDialog(
     val isTextMode = mode == TmuxDialogMode.CreateSession ||
         mode == TmuxDialogMode.RenameSession ||
         mode == TmuxDialogMode.RenameWindow
+    val isCreateMode = mode == TmuxDialogMode.CreateSession
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
-            if (isTextMode) {
+            if (isCreateMode) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    OutlinedTextField(
+                        value = text,
+                        onValueChange = onTextChange,
+                        singleLine = true,
+                        label = { Text("Session name") },
+                    )
+                    OutlinedTextField(
+                        value = startDirectory,
+                        onValueChange = onStartDirectoryChange,
+                        singleLine = true,
+                        label = { Text("Start folder") },
+                    )
+                }
+            } else if (isTextMode) {
                 OutlinedTextField(
                     value = text,
                     onValueChange = onTextChange,
@@ -1178,7 +1220,7 @@ private fun TmuxLifecycleDialog(
         confirmButton = {
             TextButton(
                 onClick = onConfirm,
-                enabled = !isTextMode || text.trim().isNotEmpty(),
+                enabled = isCreateMode || !isTextMode || text.trim().isNotEmpty(),
             ) {
                 Text(confirm)
             }

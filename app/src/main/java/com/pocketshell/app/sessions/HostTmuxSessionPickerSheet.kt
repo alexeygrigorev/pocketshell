@@ -33,7 +33,11 @@ import com.pocketshell.uikit.theme.PocketShellColors
 @Composable
 fun HostTmuxSessionPickerSheet(
     state: HostTmuxSessionPickerState,
-    onAttach: (HostTmuxSessionPickerRequest, sessionName: String) -> Unit,
+    onAttach: (
+        HostTmuxSessionPickerRequest,
+        sessionName: String,
+        startDirectory: String?,
+    ) -> Unit,
     onRawSsh: (HostTmuxSessionPickerRequest) -> Unit,
     onDismiss: () -> Unit,
 ) {
@@ -77,7 +81,7 @@ fun HostTmuxSessionPickerSheet(
                         Text("Continue with SSH")
                     }
                     state.rows.forEach { row ->
-                        HostTmuxSessionRowView(row = row, onClick = { onAttach(state.request, row.name) })
+                        HostTmuxSessionRowView(row = row, onClick = { onAttach(state.request, row.name, null) })
                     }
                 }
                 is HostTmuxSessionPickerState.Fallback -> {
@@ -104,9 +108,9 @@ fun HostTmuxSessionPickerSheet(
     if (showCreateDialog && request != null) {
         CreateTmuxSessionDialog(
             onDismiss = { showCreateDialog = false },
-            onCreate = { name ->
+            onCreate = { creation ->
                 showCreateDialog = false
-                onAttach(request, name)
+                onAttach(request, creation.sessionName, creation.startDirectory)
             },
         )
     }
@@ -142,24 +146,39 @@ private fun HostTmuxSessionRowView(row: HostTmuxSessionRow, onClick: () -> Unit)
 @Composable
 private fun CreateTmuxSessionDialog(
     onDismiss: () -> Unit,
-    onCreate: (String) -> Unit,
+    onCreate: (TmuxSessionCreation) -> Unit,
 ) {
     var text by remember { mutableStateOf("") }
+    var startDirectory by remember { mutableStateOf(DEFAULT_TMUX_START_DIRECTORY) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("New session") },
         text = {
-            OutlinedTextField(
-                value = text,
-                onValueChange = { text = it },
-                singleLine = true,
-                label = { Text("Session name") },
-            )
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    singleLine = true,
+                    label = { Text("Session name") },
+                )
+                OutlinedTextField(
+                    value = startDirectory,
+                    onValueChange = { startDirectory = it },
+                    singleLine = true,
+                    label = { Text("Start folder") },
+                )
+            }
         },
         confirmButton = {
             TextButton(
-                onClick = { onCreate(text.trim()) },
-                enabled = text.trim().isNotEmpty(),
+                onClick = {
+                    onCreate(
+                        resolveTmuxSessionCreation(
+                            rawName = text,
+                            rawStartDirectory = startDirectory,
+                        ),
+                    )
+                },
             ) {
                 Text("Create")
             }

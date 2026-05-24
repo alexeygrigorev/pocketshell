@@ -6,6 +6,8 @@ import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
+import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
@@ -174,8 +176,19 @@ public class TmuxSessionViewModel @Inject constructor(
         keyPath: String,
         passphrase: CharArray?,
         sessionName: String,
+        startDirectory: String? = null,
     ) {
-        val target = ConnectionTarget(hostId, hostName, host, port, user, keyPath, passphrase, sessionName)
+        val target = ConnectionTarget(
+            hostId = hostId,
+            hostName = hostName,
+            host = host,
+            port = port,
+            user = user,
+            keyPath = keyPath,
+            passphrase = passphrase,
+            sessionName = sessionName,
+            startDirectory = startDirectory,
+        )
         if (connectJob?.isActive == true && connectingTarget == target) return
         if (_connectionStatus.value is ConnectionStatus.Connected && activeTarget == target) return
 
@@ -206,7 +219,11 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             sessionRef = session
 
-            val client = tmuxClientFactory.create(session, sessionName = target.sessionName)
+            val client = tmuxClientFactory.create(
+                session,
+                sessionName = target.sessionName,
+                startDirectory = target.startDirectory,
+            )
             attachClient(client)
             client.connect()
             activeTmuxClients.register(
@@ -287,7 +304,17 @@ public class TmuxSessionViewModel @Inject constructor(
         sessionName: String,
         client: TmuxClient,
     ) {
-        val target = ConnectionTarget(hostId, hostName, host, port, user, keyPath, null, sessionName)
+        val target = ConnectionTarget(
+            hostId = hostId,
+            hostName = hostName,
+            host = host,
+            port = port,
+            user = user,
+            keyPath = keyPath,
+            passphrase = null,
+            sessionName = sessionName,
+            startDirectory = null,
+        )
         closeCurrentConnection()
         attachClient(client)
         activeTmuxClients.register(
@@ -639,10 +666,18 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
-    public fun createSession(name: String) {
-        val trimmed = name.trim()
-        if (trimmed.isEmpty()) return
-        sendLifecycleCommand("new-session -d -s '${escapeSingleQuoted(trimmed)}'")
+    public fun createSession(
+        name: String,
+        startDirectory: String = DEFAULT_TMUX_START_DIRECTORY,
+    ) {
+        val creation = resolveTmuxSessionCreation(
+            rawName = name,
+            rawStartDirectory = startDirectory,
+        )
+        sendLifecycleCommand(
+            "new-session -d -s '${escapeSingleQuoted(creation.sessionName)}' " +
+                "-c '${escapeSingleQuoted(creation.startDirectory)}'",
+        )
     }
 
     public fun renameCurrentSession(newName: String) {
@@ -827,6 +862,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val keyPath: String,
         val passphrase: CharArray?,
         val sessionName: String,
+        val startDirectory: String?,
     )
 
     private sealed interface TmuxInputToken {

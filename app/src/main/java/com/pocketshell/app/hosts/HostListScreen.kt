@@ -105,15 +105,20 @@ fun HostListScreen(
     onManageKeys: () -> Unit,
     onOpenCrashReports: () -> Unit,
     onOpenSession: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit,
-    onOpenTmuxHostSession: (HostEntity, keyPath: String, passphrase: CharArray?, sessionName: String) -> Unit =
-        { _, _, _, _ -> },
+    onOpenTmuxHostSession: (
+        HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        sessionName: String,
+        startDirectory: String?,
+    ) -> Unit = { _, _, _, _, _ -> },
     onOpenPortForwardPanel: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier,
     viewModel: HostListViewModel = hiltViewModel(),
     sessionsViewModel: SessionsDashboardViewModel = hiltViewModel(),
     hostTmuxSessionPickerViewModel: HostTmuxSessionPickerViewModel = hiltViewModel(),
-    onOpenTmuxSession: (ActiveTmuxClients.Entry, sessionName: String) -> Unit =
-        { _, _ -> },
+    onOpenTmuxSession: (ActiveTmuxClients.Entry, sessionName: String, startDirectory: String?) -> Unit =
+        { _, _, _ -> },
 ) {
     val hosts by viewModel.hosts.collectAsState()
     val sessions by sessionsViewModel.sessions.collectAsState()
@@ -427,9 +432,15 @@ fun HostListScreen(
 
         HostTmuxSessionPickerSheet(
             state = hostTmuxPickerState,
-            onAttach = { request, sessionName ->
+            onAttach = { request, sessionName, startDirectory ->
                 hostTmuxSessionPickerViewModel.dismiss()
-                currentOpenTmuxHostSession(request.host, request.keyPath, request.passphrase, sessionName)
+                currentOpenTmuxHostSession(
+                    request.host,
+                    request.keyPath,
+                    request.passphrase,
+                    sessionName,
+                    startDirectory,
+                )
             },
             onRawSsh = { request ->
                 hostTmuxSessionPickerViewModel.dismiss()

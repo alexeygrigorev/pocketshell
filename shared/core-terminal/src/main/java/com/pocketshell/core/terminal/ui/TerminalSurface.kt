@@ -6,9 +6,12 @@ import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.inputmethod.InputMethodManager
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
@@ -122,6 +125,7 @@ fun TerminalSurface(
     // factory runs once; update runs every recomposition.
     val viewClient = remember { PocketShellTerminalViewClient() }
     viewClient.onTerminalSizeChanged = onTerminalSizeChanged
+    var terminalView by remember { mutableStateOf<TerminalView?>(null) }
 
     // Subscribe to the detector flow only when the caller actually wants
     // match callbacks. The empty-flow fallback avoids spinning up a debounce
@@ -129,7 +133,13 @@ fun TerminalSurface(
     val matchesFlow: Flow<List<TerminalMatch>> =
         if (matchListener != null) state.flowOfMatches else remember { flowOf(emptyList()) }
     val matches by matchesFlow.collectAsState(initial = emptyList<TerminalMatch>())
-    val renderTick = state.renderTick
+
+    LaunchedEffect(state, terminalView) {
+        val view = terminalView ?: return@LaunchedEffect
+        state.renderRequests.collect {
+            view.onScreenUpdated()
+        }
+    }
 
     // If the caller installed an onKeyEvent slot, chain it onto the
     // user-supplied modifier so the Compose focus system routes key events
@@ -154,9 +164,12 @@ fun TerminalSurface(
         content = {
             AndroidView(
                 factory = { context ->
-                    TerminalView(context, /* attributes = */ null).applyPocketShellDefaults(viewClient)
+                    TerminalView(context, /* attributes = */ null)
+                        .applyPocketShellDefaults(viewClient)
+                        .also { terminalView = it }
                 },
                 update = { view ->
+                    terminalView = view
                     val current = view.currentSession
                     val desired = state.session
                     // Attach / detach as the state's session reference
@@ -176,9 +189,6 @@ fun TerminalSurface(
                         // session reference until the next attach. This
                         // is acceptable for #8 — #9 will always have a
                         // fresh session on hand when changing sessions.
-                    }
-                    if (desired != null && view.currentSession === desired && renderTick > 0L) {
-                        view.onScreenUpdated()
                     }
                 },
             )

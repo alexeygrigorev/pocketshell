@@ -320,7 +320,7 @@ public fun TmuxSessionScreen(
                             state = pane.terminalState,
                             modifier = Modifier
                                 .fillMaxSize()
-                                .padding(horizontal = 4.dp, vertical = 6.dp),
+                                .padding(horizontal = 2.dp, vertical = 4.dp),
                         )
                     }
                 }

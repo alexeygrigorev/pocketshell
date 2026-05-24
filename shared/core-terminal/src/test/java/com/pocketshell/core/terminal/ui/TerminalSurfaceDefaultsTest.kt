@@ -15,8 +15,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.robolectric.Shadows.shadowOf
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 
 @RunWith(RobolectricTestRunner::class)
 class TerminalSurfaceDefaultsTest {
@@ -65,6 +65,43 @@ class TerminalSurfaceDefaultsTest {
         assertEquals(
             InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
             editorInfo.inputType,
+        )
+    }
+
+    @Test
+    fun terminalViewCoalescesRenderInvalidationsToFrame() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val view = TerminalView(context, null)
+
+        view.applyPocketShellDefaults(FakeTerminalViewClient)
+        val frameCountBefore = view.getCoalescedRenderInvalidationFramesForTesting()
+        val requestCountBefore = view.getPendingRenderInvalidationRequestsForTesting()
+
+        view.requestRenderInvalidationForTesting()
+        view.requestRenderInvalidationForTesting()
+        view.requestRenderInvalidationForTesting()
+
+        assertTrue(
+            "screen updates in the same loop should leave one render invalidation pending",
+            view.hasPendingRenderInvalidationForTesting(),
+        )
+        assertEquals(
+            "each screen update is tracked for smoothness metrics",
+            requestCountBefore + 3,
+            view.getPendingRenderInvalidationRequestsForTesting(),
+        )
+        assertEquals(
+            "coalesced frame must not run before the choreographer tick",
+            frameCountBefore,
+            view.getCoalescedRenderInvalidationFramesForTesting(),
+        )
+
+        view.drainPendingRenderInvalidationForTesting()
+
+        assertEquals(
+            "multiple screen updates should collapse to one frame invalidation",
+            frameCountBefore + 1,
+            view.getCoalescedRenderInvalidationFramesForTesting(),
         )
     }
 

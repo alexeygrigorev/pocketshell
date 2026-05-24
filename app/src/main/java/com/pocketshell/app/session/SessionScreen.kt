@@ -222,7 +222,7 @@ public fun SessionScreen(
                         state = viewModel.terminalState,
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(horizontal = 4.dp, vertical = 6.dp),
+                            .padding(horizontal = 2.dp, vertical = 4.dp),
                         onTerminalSizeChanged = viewModel::resizeRemotePty,
                     )
                     val detection = agentConversation.detection

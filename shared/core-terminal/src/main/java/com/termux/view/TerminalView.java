@@ -70,6 +70,18 @@ public final class TerminalView extends View {
     int mTopRow;
     int[] mDefaultSelectors = new int[]{-1,-1,-1,-1};
 
+    private boolean mRenderInvalidationPending;
+    private int mPendingRenderInvalidationRequests;
+    private int mCoalescedRenderInvalidationFrames;
+    private final Runnable mRenderInvalidationRunnable = new Runnable() {
+        @Override
+        public void run() {
+            mRenderInvalidationPending = false;
+            mCoalescedRenderInvalidationFrames++;
+            invalidate();
+        }
+    };
+
     float mScaleFactor = 1.f;
     final GestureAndScaleRecognizer mGestureRecognizer;
 
@@ -494,8 +506,15 @@ public final class TerminalView extends View {
 
         mEmulator.clearScrollCounter();
 
-        invalidate();
+        scheduleRenderInvalidation();
         if (mAccessibilityEnabled) setContentDescription(getText());
+    }
+
+    private void scheduleRenderInvalidation() {
+        mPendingRenderInvalidationRequests++;
+        if (mRenderInvalidationPending) return;
+        mRenderInvalidationPending = true;
+        postOnAnimation(mRenderInvalidationRunnable);
     }
 
     /** This must be called by the hosting activity in {@link Activity#onContextMenuClosed(Menu)}
@@ -519,7 +538,7 @@ public final class TerminalView extends View {
     public void setTypeface(Typeface newTypeface) {
         mRenderer = new TerminalRenderer(mRenderer.mTextSize, newTypeface);
         updateSize();
-        invalidate();
+        scheduleRenderInvalidation();
     }
 
     @Override
@@ -574,6 +593,7 @@ public final class TerminalView extends View {
     void doScroll(MotionEvent event, int rowsDown) {
         boolean up = rowsDown < 0;
         int amount = Math.abs(rowsDown);
+        boolean changedTopRow = false;
         for (int i = 0; i < amount; i++) {
             if (mEmulator.isMouseTrackingActive()) {
                 sendMouseEventCode(event, up ? TerminalEmulator.MOUSE_WHEELUP_BUTTON : TerminalEmulator.MOUSE_WHEELDOWN_BUTTON, true);
@@ -582,10 +602,14 @@ public final class TerminalView extends View {
                 // e.g. less, which shifts to the alt screen without mouse handling.
                 handleKeyCode(up ? KeyEvent.KEYCODE_DPAD_UP : KeyEvent.KEYCODE_DPAD_DOWN, 0);
             } else {
-                mTopRow = Math.min(0, Math.max(-(mEmulator.getScreen().getActiveTranscriptRows()), mTopRow + (up ? -1 : 1)));
-                if (!awakenScrollBars()) invalidate();
+                int nextTopRow = Math.min(0, Math.max(-(mEmulator.getScreen().getActiveTranscriptRows()), mTopRow + (up ? -1 : 1)));
+                if (nextTopRow != mTopRow) {
+                    mTopRow = nextTopRow;
+                    changedTopRow = true;
+                }
             }
         }
+        if (changedTopRow && !awakenScrollBars()) scheduleRenderInvalidation();
     }
 
     /** Overriding {@link View#onGenericMotionEvent(MotionEvent)}. */
@@ -985,6 +1009,7 @@ public final class TerminalView extends View {
         int viewWidth = getWidth();
         int viewHeight = getHeight();
         if (viewWidth == 0 || viewHeight == 0 || mTermSession == null) return;
+        if (mRenderer.mFontWidth <= 0 || mRenderer.mFontLineSpacing <= 0) return;
 
         // Set to 80 and 24 if you want to enable vttest.
         int newColumns = Math.max(4, (int) (viewWidth / mRenderer.mFontWidth));
@@ -1001,7 +1026,7 @@ public final class TerminalView extends View {
 
             mTopRow = 0;
             scrollTo(0, 0);
-            invalidate();
+            scheduleRenderInvalidation();
         }
     }
 
@@ -1056,6 +1081,29 @@ public final class TerminalView extends View {
 
     public void setTopRow(int mTopRow) {
         this.mTopRow = mTopRow;
+    }
+
+    public boolean hasPendingRenderInvalidationForTesting() {
+        return mRenderInvalidationPending;
+    }
+
+    public int getPendingRenderInvalidationRequestsForTesting() {
+        return mPendingRenderInvalidationRequests;
+    }
+
+    public int getCoalescedRenderInvalidationFramesForTesting() {
+        return mCoalescedRenderInvalidationFrames;
+    }
+
+    public void requestRenderInvalidationForTesting() {
+        scheduleRenderInvalidation();
+    }
+
+    public void drainPendingRenderInvalidationForTesting() {
+        if (mRenderInvalidationPending) {
+            removeCallbacks(mRenderInvalidationRunnable);
+            mRenderInvalidationRunnable.run();
+        }
     }
 
 

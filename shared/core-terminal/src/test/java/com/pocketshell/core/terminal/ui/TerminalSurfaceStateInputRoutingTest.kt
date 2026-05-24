@@ -1,12 +1,14 @@
 package com.pocketshell.core.terminal.ui
 
 import android.os.Looper
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
@@ -76,7 +78,7 @@ class TerminalSurfaceStateInputRoutingTest {
     }
 
     @Test
-    fun externalProducerOutputTicksRenderSignalForTerminalViewInvalidation() = runBlocking {
+    fun externalProducerOutputEmitsRenderRequestWithoutComposeStateTick() = runBlocking {
         val state = TerminalSurfaceState()
         val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
         val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
@@ -85,23 +87,25 @@ class TerminalSurfaceStateInputRoutingTest {
             stdout = stdout,
             remoteStdin = RecordingOutputStream(),
         )
+        val renderRequest = CompletableDeferred<Unit>()
+        val renderCollector = launch(Dispatchers.Unconfined) {
+            state.renderRequests.collect {
+                if (!renderRequest.isCompleted) renderRequest.complete(Unit)
+            }
+        }
 
         try {
-            val initialTick = state.renderTick
-
             stdout.emit("hello from remote\n".toByteArray(Charsets.UTF_8))
 
             withTimeout(2_000) {
-                while (state.renderTick == initialTick) {
+                while (!renderRequest.isCompleted) {
                     shadowOf(Looper.getMainLooper()).idle()
                     delay(10)
                 }
             }
-            assertTrue(
-                "remote output must tick renderTick so TerminalSurface calls TerminalView.onScreenUpdated()",
-                state.renderTick > initialTick,
-            )
+            assertTrue("remote output must ask the TerminalView to redraw", renderRequest.isCompleted)
         } finally {
+            renderCollector.cancel()
             producerJob.cancel()
             producerScope.cancel()
             state.detachExternalProducer()

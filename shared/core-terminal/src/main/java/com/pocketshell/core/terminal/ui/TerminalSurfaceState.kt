@@ -127,17 +127,21 @@ class TerminalSurfaceState {
     internal val session: TerminalSession? get() = _session
 
     /**
-     * Monotonic signal used by [TerminalSurface] to invalidate the embedded
-     * [TerminalView] when the emulator changes. The transcript can update
-     * without a Compose state change, so the Termux session callback must
-     * explicitly poke the Android view.
+     * Render requests emitted by Termux session callbacks. This is deliberately
+     * not Compose state: remote output can arrive in tight bursts, and each
+     * burst should redraw the Android [TerminalView] without recomposing the
+     * Compose wrapper.
      */
-    internal var renderTick: Long by mutableStateOf(0L)
-        private set
+    private val _renderRequests = MutableSharedFlow<Unit>(
+        replay = 0,
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    internal val renderRequests: SharedFlow<Unit> get() = _renderRequests.asSharedFlow()
 
     private val sessionClient = object : TerminalSessionClient {
         override fun onTextChanged(changedSession: TerminalSession) {
-            renderTick += 1
+            _renderRequests.tryEmit(Unit)
         }
 
         override fun onTitleChanged(changedSession: TerminalSession) = Unit
@@ -147,11 +151,11 @@ class TerminalSurfaceState {
         override fun onBell(session: TerminalSession) = Unit
 
         override fun onColorsChanged(session: TerminalSession) {
-            renderTick += 1
+            _renderRequests.tryEmit(Unit)
         }
 
         override fun onTerminalCursorStateChange(state: Boolean) {
-            renderTick += 1
+            _renderRequests.tryEmit(Unit)
         }
 
         override fun setTerminalShellPid(session: TerminalSession, pid: Int) = Unit

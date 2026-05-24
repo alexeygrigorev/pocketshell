@@ -22,7 +22,7 @@ write_daemon_state() {
 
 case "$scenario" in
   ready)
-    for tool in tmuxctl heru systemctl; do
+    for tool in tmuxctl quse systemctl; do
       install_tool "$tool" /usr/local/bin
     done
     write_daemon_state active enabled
@@ -36,13 +36,13 @@ case "$scenario" in
     write_daemon_state inactive disabled
     ;;
   daemon-disabled)
-    for tool in tmuxctl heru systemctl; do
+    for tool in tmuxctl quse systemctl; do
       install_tool "$tool" /usr/local/bin
     done
     write_daemon_state active disabled
     ;;
   user-local-path)
-    for tool in tmuxctl heru; do
+    for tool in tmuxctl quse; do
       install_tool "$tool" "$local_bin"
     done
     install_tool systemctl /usr/local/bin

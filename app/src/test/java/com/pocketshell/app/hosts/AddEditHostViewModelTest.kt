@@ -294,7 +294,7 @@ class AddEditHostViewModelTest {
     @Test
     fun save_onEdit_preservesBootstrapCacheColumns() = runTest {
         // Issue #117 regression: save() used to overwrite the entire
-        // HostEntity, clobbering tmuxInstalled / heruInstalled /
+        // HostEntity, clobbering tmuxInstalled / quseInstalled /
         // lastBootstrapAt. Verify the edit path now merges into the
         // existing row.
         val keyId = db.sshKeyDao().insert(
@@ -309,8 +309,8 @@ class AddEditHostViewModelTest {
                 keyId = keyId,
                 tmuxInstalled = true,
                 lastBootstrapAt = 12345L,
-                heruInstalled = true,
-                heruLastDetectedAt = 9999L,
+                quseInstalled = true,
+                quseLastDetectedAt = 9999L,
             ),
         )
         val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
@@ -322,8 +322,8 @@ class AddEditHostViewModelTest {
         assertEquals("renamed", row.name)
         assertEquals(true, row.tmuxInstalled)
         assertEquals(12345L, row.lastBootstrapAt)
-        assertEquals(true, row.heruInstalled)
-        assertEquals(9999L, row.heruLastDetectedAt)
+        assertEquals(true, row.quseInstalled)
+        assertEquals(9999L, row.quseLastDetectedAt)
     }
 
     @Test

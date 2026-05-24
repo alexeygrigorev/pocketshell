@@ -7,7 +7,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
-import com.pocketshell.core.usage.HeruUsageJsonParser
+import com.pocketshell.core.usage.QuseUsageJsonParser
 import com.pocketshell.core.usage.UsageProviderRecord
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
@@ -28,7 +28,7 @@ import java.time.Instant
  * Robolectric tests for [UsageViewModel].
  *
  * The view model is constructed with a fake [HostUsageFetcher] so SSH /
- * heru I/O is entirely bypassed. Hosts are seeded into an in-memory Room
+ * quse I/O is entirely bypassed. Hosts are seeded into an in-memory Room
  * database; the fake fetcher classifies each one by hostname.
  *
  * This covers the routing surface only — the SSH-backed
@@ -64,7 +64,7 @@ class UsageViewModelTest {
     }
 
     @Test
-    fun refresh_partitionsHostsByHeruStatus() = runTest {
+    fun refresh_partitionsHostsByQuseStatus() = runTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
         )
@@ -97,12 +97,9 @@ class UsageViewModelTest {
             ),
         )
 
-        val parser = HeruUsageJsonParser()
+        val parser = QuseUsageJsonParser()
         val populatedRecords = parser.parse(
-            """[
-              {"provider":"codex","status":"limited",
-               "windows":[{"name":"weekly","used":75,"limit":100,"unit":"percent"}]}
-            ]""".trimIndent(),
+            """{"provider":"codex","status":"limited","short_term":null,"long_term":{"percent_remaining":25.0,"reset_at":null},"block_reason":null,"error":null,"details":{}}""",
         )
         val fetcher = FakeFetcher(
             scripts = mapOf(

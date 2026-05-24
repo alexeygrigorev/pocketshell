@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+fixture_dir="${POCKETSHELL_AGENT_FIXTURE_DIR:-/opt/pocketshell-agent-fixtures}"
+
+if [ "${1:-}" = "--json" ]; then
+  cat "${fixture_dir}/quse-usage.ndjson"
+  exit 0
+fi
+
+printf 'quse fixture supports: --json\n' >&2
+exit 64

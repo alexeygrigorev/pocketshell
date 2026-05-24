@@ -5,7 +5,7 @@ package com.pocketshell.uikit.model
  *
  * Issue #120: the host list previously had no visible signal for whether
  * a saved host already had the server-side tooling (`tmux`, `tmuxctl`,
- * `heru`, jobs daemon) installed. The card now renders a small badge to
+ * `quse`, jobs daemon) installed. The card now renders a small badge to
  * the right of the host name with three states:
  *
  * - [Ready] — the most recent bootstrap probe reported every required

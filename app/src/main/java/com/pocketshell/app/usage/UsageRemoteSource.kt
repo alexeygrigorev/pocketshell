@@ -2,7 +2,7 @@ package com.pocketshell.app.usage
 
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshSession
-import com.pocketshell.core.usage.HeruUsageJsonParser
+import com.pocketshell.core.usage.QuseUsageJsonParser
 import com.pocketshell.core.usage.UsageProviderRecord
 import kotlinx.coroutines.CancellationException
 import javax.inject.Inject
@@ -26,12 +26,15 @@ public sealed interface UsageFetchResult {
  * PocketShell never asks for provider OAuth/API keys and never calls provider
  * APIs directly. A host can override [defaultUsageCommand] with any compatible
  * script as long as it emits the normalized JSON parsed by core-usage.
+ *
+ * Issue #128 switched the default command from the legacy `heru usage --json`
+ * to `quse --json` — see [docs/usage-panel.md](../../../../../../../docs/usage-panel.md).
  */
 public class UsageRemoteSource @Inject constructor(
-    private val parser: HeruUsageJsonParser = HeruUsageJsonParser(),
+    private val parser: QuseUsageJsonParser = QuseUsageJsonParser(),
 ) {
-    public suspend fun detectHeru(session: SshSession): UsageToolStatus = try {
-        val result = session.exec(DETECT_HERU_COMMAND)
+    public suspend fun detectQuse(session: SshSession): UsageToolStatus = try {
+        val result = session.exec(DETECT_QUSE_COMMAND)
         when {
             result.exitCode == 0 && result.stdout.isNotBlank() -> UsageToolStatus.Installed
             result.exitCode != 0 -> UsageToolStatus.Missing
@@ -66,7 +69,7 @@ public class UsageRemoteSource @Inject constructor(
     }
 
     public companion object {
-        public const val DETECT_HERU_COMMAND: String = "command -v heru"
-        public const val defaultUsageCommand: String = "heru usage --json"
+        public const val DETECT_QUSE_COMMAND: String = "command -v quse"
+        public const val defaultUsageCommand: String = "quse --json"
     }
 }

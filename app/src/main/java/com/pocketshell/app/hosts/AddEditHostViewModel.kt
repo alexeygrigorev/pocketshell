@@ -86,7 +86,7 @@ data class HostFormState(
     /**
      * Issue #117 (usage Fix C): optional override for the per-host usage
      * command. `null` and the empty string both mean "use the default
-     * `heru usage --json`". Persisted to [HostEntity.usageCommandOverride]
+     * `quse --json`". Persisted to [HostEntity.usageCommandOverride]
      * and forwarded to [UsageRemoteSource.fetchUsage] as
      * `commandOverride`. Not validated — any non-empty string is
      * accepted because the value is shell-executed server-side and the
@@ -227,8 +227,8 @@ class AddEditHostViewModel @Inject constructor(
             val editingId = editingHostId
             val host = if (editingId != null) {
                 // Merge form fields into the persisted row so bootstrap
-                // cache columns (tmuxInstalled, heruInstalled,
-                // lastBootstrapAt, heruLastDetectedAt, etc.) and the
+                // cache columns (tmuxInstalled, quseInstalled,
+                // lastBootstrapAt, quseLastDetectedAt, etc.) and the
                 // auto-forward defaults survive a form save. The form
                 // only owns the user-editable fields plus the new
                 // [usageCommandOverride] from issue #117.

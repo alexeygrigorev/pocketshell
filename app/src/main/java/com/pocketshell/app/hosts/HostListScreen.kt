@@ -128,7 +128,7 @@ fun HostListScreen(
     onOpenPortForwardPanel: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit = { _, _, _ -> },
     /**
      * Issue #117 (usage Fix C): the bootstrap sheet's Success state can
-     * route the user to the usage panel when `heru` was just installed.
+     * route the user to the usage panel when `quse` was just installed.
      * The callback is optional because Fix A owns the actual
      * `AppDestination.Usage` destination and only wires the route once
      * its branch lands; until then the call site can pass `null` and the
@@ -408,7 +408,7 @@ fun HostListScreen(
                                     // connect path. `bootstrapHost` is
                                     // cache-aware: a `needsSetup` row has
                                     // either `tmuxInstalled == false` or
-                                    // `heruInstalled == false`, both of
+                                    // `quseInstalled == false`, both of
                                     // which surface the sheet when the
                                     // probe re-runs.
                                     { tapRequests.tryEmit(host.id) }

@@ -96,14 +96,14 @@ class HostListViewModel @Inject constructor(
      *
      * Derivation rule (kept intentionally narrow):
      *
-     * - `Ready`        — `tmuxInstalled == true` AND `heruInstalled == true`.
+     * - `Ready`        — `tmuxInstalled == true` AND `quseInstalled == true`.
      *                    Both required tools have been verified by the
      *                    most recent bootstrap probe.
-     * - `NeedsSetup`   — `tmuxInstalled == false`, OR `heruInstalled ==
+     * - `NeedsSetup`   — `tmuxInstalled == false`, OR `quseInstalled ==
      *                    false`. The probe reported at least one tool
      *                    missing.
      * - `Unknown`      — anything else (no probe yet, or pre-#117 row
-     *                    that never recorded `heruInstalled`).
+     *                    that never recorded `quseInstalled`).
      *
      * The map only reflects what's persisted; the in-memory
      * [HostBootstrapReport] from the most recent connect lives in the
@@ -412,7 +412,7 @@ class HostListViewModel @Inject constructor(
                 TmuxStatus.Installed -> {
                     persistResult(host, installed = true)
                     val report = bootstrapper.checkServerSetup(session)
-                    persistHeruResult(host, report)
+                    persistQuseResult(host, report)
                     if (report.isReady) {
                         closeBootstrapSession()
                         _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
@@ -427,7 +427,7 @@ class HostListViewModel @Inject constructor(
                 TmuxStatus.Missing -> {
                     persistResult(host, installed = false)
                     val report = bootstrapper.checkServerSetup(session)
-                    persistHeruResult(host, report)
+                    persistQuseResult(host, report)
                     _bootstrapState.value = HostBootstrapSheetState.Prompt(
                         needsTmux = true,
                         report = report,
@@ -466,7 +466,7 @@ class HostListViewModel @Inject constructor(
      *
      * Calls [refreshBootstrap] (and therefore [bootstrapHost]) which
      * already kicks the probe on the IO dispatcher and persists the
-     * result through [persistResult] / [persistHeruResult]. The badge
+     * result through [persistResult] / [persistQuseResult]. The badge
      * state is derived from the persisted columns, so it updates
      * automatically once the probe lands — no extra wiring required.
      */
@@ -490,12 +490,12 @@ class HostListViewModel @Inject constructor(
                     TmuxStatus.Installed -> {
                         persistResult(host, installed = true)
                         val report = bootstrapper.checkServerSetup(session)
-                        persistHeruResult(host, report)
+                        persistQuseResult(host, report)
                     }
                     TmuxStatus.Missing -> {
                         persistResult(host, installed = false)
                         val report = bootstrapper.checkServerSetup(session)
-                        persistHeruResult(host, report)
+                        persistQuseResult(host, report)
                     }
                     is TmuxStatus.Unknown -> {
                         // Cannot prove either way — leave the persisted
@@ -562,11 +562,11 @@ class HostListViewModel @Inject constructor(
             persistResult(host, installed = true)
             when (val result = bootstrapper.installServerSetup(session, prompt?.report ?: bootstrapper.checkServerSetup(session))) {
                 InstallResult.Success -> {
-                    // Re-probe so the persisted heru flag reflects the
+                    // Re-probe so the persisted quse flag reflects the
                     // post-install reality, then flip to the success
                     // state so the sheet can offer the Open Usage CTA.
                     val finalReport = bootstrapper.checkServerSetup(session)
-                    persistHeruResult(host, finalReport)
+                    persistQuseResult(host, finalReport)
                     _bootstrapState.value = HostBootstrapSheetState.Success
                 }
 
@@ -601,7 +601,7 @@ class HostListViewModel @Inject constructor(
         val installer = prompt.report.installer
         if (installer == null) {
             _bootstrapState.value = HostBootstrapSheetState.Failed(
-                message = "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install tmuxctl and heru.",
+                message = "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install tmuxctl and quse.",
             )
             return
         }
@@ -662,7 +662,7 @@ class HostListViewModel @Inject constructor(
 
     private suspend fun refreshServerSetupPrompt(session: SshSession, needsTmux: Boolean) {
         val report = bootstrapper.checkServerSetup(session)
-        bootstrapTargetHost?.let { persistHeruResult(it, report) }
+        bootstrapTargetHost?.let { persistQuseResult(it, report) }
         _bootstrapState.value = if (!needsTmux && report.isReady) {
             HostBootstrapSheetState.Success
         } else {
@@ -708,29 +708,30 @@ class HostListViewModel @Inject constructor(
     }
 
     /**
-     * Persist the heru-installed flag from a fresh [HostBootstrapReport]
-     * (issue #117, usage-panel Fix C). The check is decoupled from
-     * [persistResult] because the heru probe arrives via the broader
-     * `checkServerSetup` call, not the single-tool `checkTmux` probe.
+     * Persist the quse-installed flag from a fresh [HostBootstrapReport]
+     * (issue #117, usage-panel Fix C; renamed from heru → quse in #128).
+     * The check is decoupled from [persistResult] because the quse probe
+     * arrives via the broader `checkServerSetup` call, not the
+     * single-tool `checkTmux` probe.
      *
-     * Records `heruLastDetectedAt` whether heru is present or missing so
+     * Records `quseLastDetectedAt` whether quse is present or missing so
      * the periodic usage scheduler can apply the same 24h freshness
      * heuristic the tmux probe uses — the scheduler only re-detects when
      * the cache is stale.
      */
-    private suspend fun persistHeruResult(host: HostEntity, report: HostBootstrapReport) {
-        val heruInstalled = report.tools[BootstrapTool.Heru] is ToolStatus.Installed
+    private suspend fun persistQuseResult(host: HostEntity, report: HostBootstrapReport) {
+        val quseInstalled = report.tools[BootstrapTool.Quse] is ToolStatus.Installed
         val now = System.currentTimeMillis()
         val current = hostDao.getById(host.id) ?: host
         // Only write when the cached value would change; avoids a churn
         // on every connect for a row that has not moved.
-        if (current.heruInstalled == heruInstalled && current.heruLastDetectedAt != null) {
+        if (current.quseInstalled == quseInstalled && current.quseLastDetectedAt != null) {
             return
         }
         hostDao.update(
             current.copy(
-                heruInstalled = heruInstalled,
-                heruLastDetectedAt = now,
+                quseInstalled = quseInstalled,
+                quseLastDetectedAt = now,
             ),
         )
     }
@@ -802,21 +803,21 @@ class HostListViewModel @Inject constructor(
  * derivation cannot accidentally close over instance state.
  *
  * - `Unknown`     — `tmuxInstalled == null` (never probed) OR
- *                   `heruInstalled == null` (probed before #117 added
- *                   the heru column).
- * - `NeedsSetup`  — `tmuxInstalled == false`, OR `heruInstalled ==
+ *                   `quseInstalled == null` (probed before #117 added
+ *                   the usage-tool column).
+ * - `NeedsSetup`  — `tmuxInstalled == false`, OR `quseInstalled ==
  *                   false`. At least one required tool is missing.
- * - `Ready`       — `tmuxInstalled == true` AND `heruInstalled == true`.
+ * - `Ready`       — `tmuxInstalled == true` AND `quseInstalled == true`.
  */
 internal fun deriveSetupState(host: HostEntity): HostSetupState {
     val tmux = host.tmuxInstalled
-    val heru = host.heruInstalled
+    val quse = host.quseInstalled
     return when {
         tmux == null -> HostSetupState.Unknown
         tmux == false -> HostSetupState.NeedsSetup
         // tmux == true past here.
-        heru == null -> HostSetupState.Unknown
-        heru == false -> HostSetupState.NeedsSetup
+        quse == null -> HostSetupState.Unknown
+        quse == false -> HostSetupState.NeedsSetup
         else -> HostSetupState.Ready
     }
 }

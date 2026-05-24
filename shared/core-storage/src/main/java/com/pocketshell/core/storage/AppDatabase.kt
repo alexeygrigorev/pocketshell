@@ -42,8 +42,15 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
  *
  * Version 4 (issue #117) added three columns to [HostEntity] for the
  * usage-panel periodic poll: `heruInstalled`, `heruLastDetectedAt`, and
- * `usageCommandOverride`. The SQL lives in
+ * `usageCommandOverride`. The first two were renamed to `quseInstalled`
+ * and `quseLastDetectedAt` in v5 below. The SQL lives in
  * [com.pocketshell.core.storage.migrations.MIGRATION_3_4].
+ *
+ * Version 5 (issue #128) renamed the usage-tool cache columns from
+ * `heruInstalled` → `quseInstalled` and `heruLastDetectedAt` →
+ * `quseLastDetectedAt` to match the new `quse` library that replaces
+ * the legacy `heru` CLI. The SQL lives in
+ * [com.pocketshell.core.storage.migrations.MIGRATION_4_5].
  *
  * `exportSchema = false` matches the reference module. When the schema
  * starts evolving in real users' hands, flip this on and check generated
@@ -59,7 +66,7 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
         SnippetEntity::class,
         AgentSessionEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {

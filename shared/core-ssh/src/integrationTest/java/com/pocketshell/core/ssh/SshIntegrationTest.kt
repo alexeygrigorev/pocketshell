@@ -138,7 +138,7 @@ class SshIntegrationTest {
         session.use {
             // `ls` on a missing file: non-zero exit, message on stderr,
             // empty stdout. This is the contract we want callers (tmuxctl,
-            // heru, agent helpers) to be able to rely on.
+            // quse, agent helpers) to be able to rely on.
             val exec = it.exec("ls /definitely/not/a/real/path 2>&1 1>/dev/null; ls /nope")
             // Either branch produces a non-zero exit + something on stderr;
             // just confirm we see both signals correctly threaded through.

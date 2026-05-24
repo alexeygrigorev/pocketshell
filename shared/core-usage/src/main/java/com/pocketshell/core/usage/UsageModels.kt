@@ -7,7 +7,7 @@ import kotlin.math.roundToInt
  * Normalized provider status emitted by server-side usage tools.
  *
  * The parser is intentionally tolerant: unknown status strings become
- * [Unknown] so a newer `heru` can add states without breaking the whole
+ * [Unknown] so a newer `quse` can add states without breaking the whole
  * panel. The raw string remains on [UsageProviderRecord.rawStatus].
  */
 public enum class UsageStatus {
@@ -44,7 +44,7 @@ public data class UsageWindow(
 }
 
 /**
- * One provider record from `heru usage --json` or another compatible
+ * One provider record from `quse --json` or another compatible
  * server-side command.
  */
 public data class UsageProviderRecord(

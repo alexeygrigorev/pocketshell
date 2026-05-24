@@ -18,22 +18,22 @@ class UsageRemoteSourceTest {
     private val source = UsageRemoteSource()
 
     @Test
-    fun detectHeru_installedWhenCommandExists() = runTest {
+    fun detectQuse_installedWhenCommandExists() = runTest {
         val session = FakeSshSession(
-            mapOf(UsageRemoteSource.DETECT_HERU_COMMAND to ExecResult("/usr/bin/heru\n", "", 0)),
+            mapOf(UsageRemoteSource.DETECT_QUSE_COMMAND to ExecResult("/usr/bin/quse\n", "", 0)),
         )
 
-        assertEquals(UsageToolStatus.Installed, source.detectHeru(session))
-        assertEquals(listOf(UsageRemoteSource.DETECT_HERU_COMMAND), session.recorded)
+        assertEquals(UsageToolStatus.Installed, source.detectQuse(session))
+        assertEquals(listOf(UsageRemoteSource.DETECT_QUSE_COMMAND), session.recorded)
     }
 
     @Test
-    fun detectHeru_missingWhenCommandFails() = runTest {
+    fun detectQuse_missingWhenCommandFails() = runTest {
         val session = FakeSshSession(
-            mapOf(UsageRemoteSource.DETECT_HERU_COMMAND to ExecResult("", "", 1)),
+            mapOf(UsageRemoteSource.DETECT_QUSE_COMMAND to ExecResult("", "", 1)),
         )
 
-        assertEquals(UsageToolStatus.Missing, source.detectHeru(session))
+        assertEquals(UsageToolStatus.Missing, source.detectQuse(session))
     }
 
     @Test
@@ -41,7 +41,7 @@ class UsageRemoteSourceTest {
         val session = FakeSshSession(
             mapOf(
                 UsageRemoteSource.defaultUsageCommand to ExecResult(
-                    """[{"provider":"codex","status":"blocked","windows":[{"name":"weekly","used":100,"limit":100,"unit":"percent"}]}]""",
+                    """{"provider":"codex","status":"blocked","short_term":null,"long_term":null,"block_reason":"weekly limit reached","error":null,"details":{}}""",
                     "",
                     0,
                 ),
@@ -61,7 +61,7 @@ class UsageRemoteSourceTest {
         val session = FakeSshSession(
             mapOf(
                 "custom-usage --json" to ExecResult(
-                    """{"provider":"claude","status":"ok","windows":[]}""",
+                    """{"provider":"claude","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
                     "",
                     0,
                 ),
@@ -77,18 +77,18 @@ class UsageRemoteSourceTest {
     @Test
     fun fetchUsage_exit127IsToolMissing() = runTest {
         val session = FakeSshSession(
-            mapOf(UsageRemoteSource.defaultUsageCommand to ExecResult("", "heru: not found", 127)),
+            mapOf(UsageRemoteSource.defaultUsageCommand to ExecResult("", "quse: not found", 127)),
         )
 
         assertEquals(UsageFetchResult.ToolMissing, source.fetchUsage(session))
     }
 
     @Test
-    fun detectHeru_propagatesCancellation() = runTest {
+    fun detectQuse_propagatesCancellation() = runTest {
         val session = ThrowingSshSession(CancellationException("cancelled"))
 
         assertThrows(CancellationException::class.java) {
-            kotlinx.coroutines.runBlocking { source.detectHeru(session) }
+            kotlinx.coroutines.runBlocking { source.detectQuse(session) }
         }
     }
 

@@ -2,7 +2,7 @@ package com.pocketshell.app.docker
 
 import com.pocketshell.app.jobs.TmuxctlJobsParser
 import com.pocketshell.app.sessions.HostTmuxSessionListParser
-import com.pocketshell.core.usage.HeruUsageJsonParser
+import com.pocketshell.core.usage.QuseUsageJsonParser
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -16,12 +16,12 @@ class DockerAgentFixtureContractTest {
     private val fixtureDir: Path = dockerDir.resolve("agent-fixtures")
 
     @Test
-    fun heruUsageFixtureMatchesCoreUsageParser() {
-        val output = runFixtureCommand("heru", "usage", "--json")
-        val records = HeruUsageJsonParser().parse(output)
+    fun quseUsageFixtureMatchesCoreUsageParser() {
+        val output = runFixtureCommand("quse", "--json")
+        val records = QuseUsageJsonParser().parse(output)
 
-        assertEquals(listOf("claude", "codex", "opencode"), records.map { it.provider })
-        assertEquals("limited", records.first { it.provider == "codex" }.rawStatus)
+        assertEquals(listOf("codex", "claude", "copilot"), records.map { it.provider })
+        assertEquals("limited", records.first { it.provider == "claude" }.rawStatus)
     }
 
     @Test
@@ -86,7 +86,7 @@ class DockerAgentFixtureContractTest {
 
     @Test
     fun bootstrapInstallerAndSystemctlFixturesAreDeterministic() {
-        assertTrue(runFixtureCommand("uv", "tool", "install", "heru").contains("installed fixture tool heru"))
+        assertTrue(runFixtureCommand("uv", "tool", "install", "quse").contains("installed fixture tool quse"))
         assertEquals("active\n", runFixtureCommand("systemctl", "--user", "is-active", "tmuxctl-jobs.service"))
         assertEquals("enabled\n", runFixtureCommand("systemctl", "--user", "is-enabled", "tmuxctl-jobs.service"))
     }

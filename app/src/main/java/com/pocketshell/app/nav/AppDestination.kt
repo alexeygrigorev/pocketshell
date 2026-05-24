@@ -44,7 +44,7 @@ sealed interface AppDestination {
     /**
      * Usage/quota panel introduced in issue #114 (Fix A). Renders
      * [com.pocketshell.app.usage.UsageScreen] populated from every
-     * bootstrapped host whose `heru` detection succeeded. Reachable
+     * bootstrapped host whose `quse` detection succeeded. Reachable
      * from the Settings → Diagnostics row and from the in-session
      * kebab menus in [Session] / [TmuxSession]. Fix B and Fix C add
      * a host-list dashboard strip and a bootstrap-driven CTA — out of

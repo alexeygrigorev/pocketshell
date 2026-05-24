@@ -12,7 +12,7 @@ Conceptual planning is complete. Implementation in progress, tracked as GitHub i
 - [docs/decisions.md](docs/decisions.md) — locked design decisions, open questions, rejected alternatives
 - [docs/input-methods.md](docs/input-methods.md) — voice (Whisper) + key bar + snippets
 - [docs/agent-awareness.md](docs/agent-awareness.md) — Claude Code runtime detection + Codex/OpenCode parser status + conversation view
-- [docs/usage-panel.md](docs/usage-panel.md) — provider quota via server-side `heru`
+- [docs/usage-panel.md](docs/usage-panel.md) — provider quota via server-side `quse`
 - [docs/testing.md](docs/testing.md) — Android emulator + Docker remote-server test environment
 - [docs/mockups/index.html](docs/mockups/index.html) — Pixel 7 mockups (open in a browser; serve at `python3 -m http.server --directory docs/mockups`)
 

@@ -32,6 +32,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.migrations.MIGRATION_1_2
 import com.pocketshell.core.storage.migrations.MIGRATION_2_3
 import com.pocketshell.core.storage.migrations.MIGRATION_3_4
+import com.pocketshell.core.storage.migrations.MIGRATION_4_5
 import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.delay
@@ -41,7 +42,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import org.json.JSONArray
 import java.io.File
 import java.io.FileOutputStream
 
@@ -103,22 +103,28 @@ class EmulatorDockerSshSmokeTest {
                 )
 
                 val toolPaths = session.exec(
-                    "for tool in claude codex opencode heru agent-log-explorer tmuxctl uv; do command -v \"${'$'}tool\"; done",
+                    "for tool in claude codex opencode quse agent-log-explorer tmuxctl uv; do command -v \"${'$'}tool\"; done",
                 )
                 assertTrue(
                     "expected deterministic agent tools on PATH, got stdout='${toolPaths.stdout}' stderr='${toolPaths.stderr}'",
                     toolPaths.exitCode == 0 &&
-                        listOf("claude", "codex", "opencode", "heru", "agent-log-explorer", "tmuxctl", "uv")
+                        listOf("claude", "codex", "opencode", "quse", "agent-log-explorer", "tmuxctl", "uv")
                             .all { toolPaths.stdout.contains("/$it") },
                 )
 
-                val usage = session.exec("heru usage --json")
+                val usage = session.exec("quse --json")
                 assertTrue(
-                    "expected heru usage fixture to succeed, got stdout='${usage.stdout}' stderr='${usage.stderr}'",
+                    "expected quse usage fixture to succeed, got stdout='${usage.stdout}' stderr='${usage.stderr}'",
                     usage.exitCode == 0,
                 )
-                val usageJson = JSONArray(usage.stdout)
-                assertTrue("expected three provider usage records", usageJson.length() == 3)
+                // quse emits one JSON object per line (NDJSON).
+                val usageLines = usage.stdout.lineSequence()
+                    .filter { it.isNotBlank() }
+                    .toList()
+                assertTrue(
+                    "expected three provider usage records, got ${usageLines.size}",
+                    usageLines.size == 3,
+                )
 
                 val jobs = session.exec("tmuxctl jobs list --session codex")
                 assertTrue(
@@ -188,7 +194,7 @@ class EmulatorDockerSshSmokeTest {
 
         var hostRowTag = ""
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
             .fallbackToDestructiveMigration(dropAllTables = false)
             .build()
         try {

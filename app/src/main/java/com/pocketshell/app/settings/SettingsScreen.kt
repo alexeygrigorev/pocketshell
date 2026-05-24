@@ -365,7 +365,7 @@ private fun TerminalSection(
  * Settings because the panel surfaces cross-host server-side state, not a
  * per-host preference. Tapping the row routes to
  * [com.pocketshell.app.nav.AppDestination.Usage] which renders
- * `UsageScreen` populated from every bootstrapped host that has the heru
+ * `UsageScreen` populated from every bootstrapped host that has the quse
  * CLI installed.
  *
  * Fix B (compact dashboard strip on the host list) and Fix C
@@ -395,7 +395,7 @@ private fun UsageSection(onOpenUsage: () -> Unit) {
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "Provider quotas reported by heru on bootstrapped hosts.",
+                        text = "Provider quotas reported by quse on bootstrapped hosts.",
                         color = PocketShellColors.TextSecondary,
                         fontSize = 12.sp,
                     )

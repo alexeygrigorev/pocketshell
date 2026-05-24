@@ -344,7 +344,7 @@ private fun SuccessContent(
         SheetTitle(text = "Host ready")
         SheetSubtitle(text = "$hostName · server tools are installed and the tmuxctl user daemon is enabled.")
         Spacer(modifier = Modifier.height(20.dp))
-        // Issue #117 (usage Fix C): when heru was just installed by the
+        // Issue #117 (usage Fix C): when quse was just installed by the
         // bootstrap flow, surface a direct route to the usage panel. The
         // callback is supplied by the caller — when it is `null` the sheet
         // falls back to a Continue-only row so older call sites keep

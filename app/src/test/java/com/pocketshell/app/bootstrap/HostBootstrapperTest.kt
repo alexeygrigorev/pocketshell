@@ -242,7 +242,7 @@ class HostBootstrapperTest {
         val session = FakeSshSession(
             mapOf(
                 pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
-                pathAware("command -v 'heru'") to ExecResult("/home/u/.local/bin/heru\n", "", 0),
+                pathAware("command -v 'quse'") to ExecResult("/home/u/.local/bin/quse\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
                 systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("active\n", "", 0),
@@ -264,7 +264,7 @@ class HostBootstrapperTest {
         val session = FakeSshSession(
             mapOf(
                 pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
-                pathAware("command -v 'heru'") to ExecResult("/home/u/bin/heru\n", "", 0),
+                pathAware("command -v 'quse'") to ExecResult("/home/u/bin/quse\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
                 systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("active\n", "", 0),
@@ -275,8 +275,8 @@ class HostBootstrapperTest {
         val report = bootstrapper.checkServerSetup(session)
 
         assertEquals(
-            ToolStatus.Installed("/home/u/bin/heru"),
-            report.tools[BootstrapTool.Heru],
+            ToolStatus.Installed("/home/u/bin/quse"),
+            report.tools[BootstrapTool.Quse],
         )
         assertTrue(report.missingTools.isEmpty())
         assertTrue(report.isReady)
@@ -292,7 +292,7 @@ class HostBootstrapperTest {
         val session = FakeSshSession(
             mapOf(
                 pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
-                pathAware("command -v 'heru'") to ExecResult("/home/u/.local/bin/heru\n", "", 0),
+                pathAware("command -v 'quse'") to ExecResult("/home/u/.local/bin/quse\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
                 systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("active\n", "", 0),
@@ -344,7 +344,7 @@ class HostBootstrapperTest {
         val session = FakeSshSession(
             mapOf(
                 pathAware("command -v 'tmuxctl'") to ExecResult("", "", 1),
-                pathAware("command -v 'heru'") to ExecResult("", "", 1),
+                pathAware("command -v 'quse'") to ExecResult("", "", 1),
                 pathAware("command -v 'uv'") to ExecResult("", "", 1),
                 pathAware("command -v 'pipx'") to ExecResult("/usr/bin/pipx\n", "", 0),
             ),
@@ -364,15 +364,15 @@ class HostBootstrapperTest {
             dynamic = { command ->
                 when (command) {
                     pathAware("command -v 'tmuxctl'") -> toolLookup("tmuxctl", installedTools)
-                    pathAware("command -v 'heru'") -> toolLookup("heru", installedTools)
+                    pathAware("command -v 'quse'") -> toolLookup("quse", installedTools)
                     pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
                     pathAware("uv tool install tmuxctl") -> {
                         installedTools += "tmuxctl"
                         ExecResult("installed tmuxctl\n", "", 0)
                     }
-                    pathAware("uv tool install heru") -> {
-                        installedTools += "heru"
-                        ExecResult("installed heru\n", "", 0)
+                    pathAware("uv tool install quse") -> {
+                        installedTools += "quse"
+                        ExecResult("installed quse\n", "", 0)
                     }
                     pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
                     systemdAware("systemctl --user is-active tmuxctl-jobs.service") -> ExecResult("inactive\n", "", 3)
@@ -395,7 +395,7 @@ class HostBootstrapperTest {
 
         assertEquals(InstallResult.Success, result)
         assertTrue(session.recorded.contains(pathAware("uv tool install tmuxctl")))
-        assertTrue(session.recorded.contains(pathAware("uv tool install heru")))
+        assertTrue(session.recorded.contains(pathAware("uv tool install quse")))
         assertTrue(session.recorded.any { it.contains("ExecStart=\"/home/u/.local/bin/tmuxctl\" jobs daemon") })
         assertTrue(session.recorded.any { it.contains("systemctl --user enable --now tmuxctl-jobs.service") })
     }
@@ -403,13 +403,13 @@ class HostBootstrapperTest {
     @Test
     fun installServerTool_usesPipxWithPathAwareLookup() = runTest {
         val session = FakeSshSession(
-            mapOf(pathAware("pipx install heru") to ExecResult("installed heru\n", "", 0)),
+            mapOf(pathAware("pipx install quse") to ExecResult("installed quse\n", "", 0)),
         )
 
-        val result = bootstrapper.installServerTool(session, PythonToolInstaller.Pipx, BootstrapTool.Heru)
+        val result = bootstrapper.installServerTool(session, PythonToolInstaller.Pipx, BootstrapTool.Quse)
 
         assertEquals(InstallResult.Success, result)
-        assertEquals(listOf(pathAware("pipx install heru")), session.recorded)
+        assertEquals(listOf(pathAware("pipx install quse")), session.recorded)
     }
 
     @Test
@@ -417,7 +417,7 @@ class HostBootstrapperTest {
         val session = FakeSshSession(
             mapOf(
                 pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
-                pathAware("command -v 'heru'") to ExecResult("/home/u/.local/bin/heru\n", "", 0),
+                pathAware("command -v 'quse'") to ExecResult("/home/u/.local/bin/quse\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
                 systemdAware("systemctl --user is-active tmuxctl-jobs.service") to
@@ -436,7 +436,7 @@ class HostBootstrapperTest {
         val session = FakeSshSession(
             mapOf(
                 pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
-                pathAware("command -v 'heru'") to ExecResult("/home/u/.local/bin/heru\n", "", 0),
+                pathAware("command -v 'quse'") to ExecResult("/home/u/.local/bin/quse\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
                 systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("active\n", "", 0),
@@ -455,7 +455,7 @@ class HostBootstrapperTest {
         val session = FakeSshSession(
             mapOf(
                 pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
-                pathAware("command -v 'heru'") to ExecResult("/home/u/.local/bin/heru\n", "", 0),
+                pathAware("command -v 'quse'") to ExecResult("/home/u/.local/bin/quse\n", "", 0),
                 pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
                 pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
                 systemdAware("systemctl --user is-active tmuxctl-jobs.service") to ExecResult("inactive\n", "", 3),
@@ -493,7 +493,7 @@ class HostBootstrapperTest {
             dynamic = { command ->
                 when (command) {
                     pathAware("command -v 'tmuxctl'") -> ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0)
-                    pathAware("command -v 'heru'") -> ExecResult("/home/u/.local/bin/heru\n", "", 0)
+                    pathAware("command -v 'quse'") -> ExecResult("/home/u/.local/bin/quse\n", "", 0)
                     pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
                     pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
                     systemdAware("systemctl --user is-active tmuxctl-jobs.service") -> ExecResult("active\n", "", 0)
@@ -537,7 +537,7 @@ class HostBootstrapperTest {
             dynamic = { command ->
                 when (command) {
                     pathAware("command -v 'tmuxctl'") -> ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0)
-                    pathAware("command -v 'heru'") -> ExecResult("/home/u/.local/bin/heru\n", "", 0)
+                    pathAware("command -v 'quse'") -> ExecResult("/home/u/.local/bin/quse\n", "", 0)
                     pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
                     pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
                     systemdAware("systemctl --user is-active tmuxctl-jobs.service") -> ExecResult("active\n", "", 0)

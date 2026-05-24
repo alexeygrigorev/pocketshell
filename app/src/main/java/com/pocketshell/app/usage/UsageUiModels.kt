@@ -14,7 +14,7 @@ public data class UsageHostSnapshot(
 public data class UsageMissingToolHost(
     val hostId: Long,
     val hostName: String,
-    val toolName: String = "heru",
+    val toolName: String = "quse",
 )
 
 public data class UsageScreenState(

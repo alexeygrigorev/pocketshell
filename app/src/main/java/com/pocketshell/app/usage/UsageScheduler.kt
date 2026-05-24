@@ -29,8 +29,8 @@ import javax.inject.Singleton
 
 /**
  * Application-singleton scheduler that periodically polls each
- * `heru`-installed host for its usage payload (issue #117, usage-panel
- * Fix C).
+ * `quse`-installed host for its usage payload (issue #117, usage-panel
+ * Fix C; renamed from heru → quse in issue #128).
  *
  * **Why a coroutine on a Singleton scope, not WorkManager?**
  *
@@ -53,11 +53,11 @@ import javax.inject.Singleton
  * **Inputs & outputs.**
  *
  * - Consumes [HostDao.getAll] to discover the set of saved hosts.
- * - Filters to hosts whose [HostEntity.heruInstalled] cache says heru is
- *   present. The cache is populated by [HostListViewModel.persistHeruResult]
+ * - Filters to hosts whose [HostEntity.quseInstalled] cache says quse is
+ *   present. The cache is populated by [HostListViewModel.persistQuseResult]
  *   on host bootstrap. Hosts that have never been probed are skipped here
  *   — the scheduler is intentionally passive; the bootstrap flow is the
- *   only entry point that mutates the heru-cache columns.
+ *   only entry point that mutates the quse-cache columns.
  * - Forwards [HostEntity.usageCommandOverride] (or `null` for the
  *   default) to [UsageRemoteSource.fetchUsage].
  * - Exposes results via [snapshots] — a map from host id to the latest
@@ -188,16 +188,16 @@ public class UsageScheduler @Inject constructor(
 
     private suspend fun fetchOnce() {
         val hosts = hostDao.getAll().first()
-        val heruHosts = hosts.filter { it.heruInstalled == true }
-        if (heruHosts.isEmpty()) {
-            // Drop any stale snapshots for hosts that no longer have heru.
+        val quseHosts = hosts.filter { it.quseInstalled == true }
+        if (quseHosts.isEmpty()) {
+            // Drop any stale snapshots for hosts that no longer have quse.
             if (_snapshots.value.isNotEmpty()) _snapshots.value = emptyMap()
             return
         }
         val next = _snapshots.value.toMutableMap()
-        // Drop snapshots for hosts that have been removed or lost heru.
-        next.keys.retainAll(heruHosts.map { it.id }.toSet())
-        heruHosts.forEach { host ->
+        // Drop snapshots for hosts that have been removed or lost quse.
+        next.keys.retainAll(quseHosts.map { it.id }.toSet())
+        quseHosts.forEach { host ->
             val snapshot = fetchHost(host)
             if (snapshot != null) {
                 next[host.id] = snapshot

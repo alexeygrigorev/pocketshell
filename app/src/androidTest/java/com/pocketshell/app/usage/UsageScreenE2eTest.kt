@@ -43,18 +43,18 @@ import java.io.FileOutputStream
  * panel end-to-end.
  *
  * Both cells reuse the deterministic `tests/docker/agents` SSH target
- * (host port 2222). The heru fixture installed there returns three
- * provider records on `heru usage --json` (see
- * `tests/docker/agent-fixtures/heru-usage.json`) — that drives the
+ * (host port 2222). The quse fixture installed there returns three
+ * provider records on `quse --json` (see
+ * `tests/docker/agent-fixtures/quse-usage.ndjson`) — that drives the
  * populated cell. The empty cell uses an additional host pointed at a
  * port nobody is listening to (`10.0.2.2:2299`) so the per-host fetcher
  * returns `Skipped`, which the screen renders as "no provider cards" —
- * the closest the agents fixture can come to "heru returns empty" without
+ * the closest the agents fixture can come to "quse returns empty" without
  * standing up a second container.
  *
- * The full four-cell matrix (no heru / heru empty / heru populated / SSH
+ * The full four-cell matrix (no quse / quse empty / quse populated / SSH
  * dropped) lives with Fix B / Fix C — those follow-ups can layer the
- * bootstrap-ready Docker target (heru returns `[]`) and the SSH
+ * bootstrap-ready Docker target (quse returns no lines) and the SSH
  * disconnect scenarios on top of this skeleton.
  */
 @RunWith(AndroidJUnit4::class)
@@ -89,9 +89,9 @@ class UsageScreenE2eTest {
                 knownHosts = KnownHostsPolicy.AcceptAll,
             ).getOrThrow()
             session.use {
-                val result = it.exec("heru usage --json")
+                val result = it.exec("quse --json")
                 assertTrue(
-                    "expected heru fixture to succeed, got exit=${result.exitCode} stderr=${result.stderr}",
+                    "expected quse fixture to succeed, got exit=${result.exitCode} stderr=${result.stderr}",
                     result.exitCode == 0 && result.stdout.contains("provider"),
                 )
             }

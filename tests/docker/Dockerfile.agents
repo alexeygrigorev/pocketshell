@@ -22,7 +22,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys \
     && chmod +x /usr/local/bin/claude \
         /usr/local/bin/codex \
         /usr/local/bin/opencode \
-        /usr/local/bin/heru \
+        /usr/local/bin/quse \
         /usr/local/bin/agent-log-explorer \
         /usr/local/bin/tmuxctl \
         /usr/local/bin/uv \

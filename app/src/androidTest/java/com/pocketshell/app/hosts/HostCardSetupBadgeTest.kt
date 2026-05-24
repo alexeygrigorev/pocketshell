@@ -31,7 +31,7 @@ import java.io.FileOutputStream
  *
  * Two Docker bootstrap fixtures from `tests/docker/docker-compose.yml`
  * back the test: the `bootstrap-ready` profile, which already has
- * `tmuxctl` + `heru` installed and the daemon enabled, and the
+ * `tmuxctl` + `quse` installed and the daemon enabled, and the
  * `bootstrap-uv-install` profile, which has the installers but the
  * required tools missing — equivalent to a "needs setup" host. A third
  * scenario seeds a host with the bootstrap columns left `null` to
@@ -65,7 +65,7 @@ class HostCardSetupBadgeTest {
 
     /**
      * A pre-bootstrapped host renders the badge in the `Ready` state.
-     * Seeding `tmuxInstalled=true, heruInstalled=true` exercises the
+     * Seeding `tmuxInstalled=true, quseInstalled=true` exercises the
      * derivation rule (see [deriveSetupState]) without going through a
      * real connect — the rule is the contract for the badge regardless
      * of how the persisted flags arrived.
@@ -78,7 +78,7 @@ class HostCardSetupBadgeTest {
     fun readyBadge_rendersForBootstrappedHost() {
         assumeScenariosEnabled()
         val ctx = scenario(name = "ready", port = 2230) {
-            seedHost(tmuxInstalled = true, heruInstalled = true)
+            seedHost(tmuxInstalled = true, quseInstalled = true)
             launchHostList()
             capture("01-ready-badge")
             // Badge pill is present somewhere on the screen and reads "ready".
@@ -91,7 +91,7 @@ class HostCardSetupBadgeTest {
 
     /**
      * A host whose persisted bootstrap row reports a missing tool
-     * (`tmuxInstalled=true, heruInstalled=false`) renders the `Needs
+     * (`tmuxInstalled=true, quseInstalled=false`) renders the `Needs
      * setup` badge in amber. The fixture is `bootstrap-uv-install`,
      * which would surface the install sheet on a real connect — here
      * we seed the persisted state directly so the badge is observable
@@ -101,7 +101,7 @@ class HostCardSetupBadgeTest {
     fun needsSetupBadge_rendersForUnreadyHost() {
         assumeScenariosEnabled()
         val ctx = scenario(name = "needs-setup", port = 2231) {
-            seedHost(tmuxInstalled = true, heruInstalled = false)
+            seedHost(tmuxInstalled = true, quseInstalled = false)
             launchHostList()
             capture("01-needs-setup-badge")
             compose.onAllNodesWithTag(HOST_SETUP_BADGE_TAG, useUnmergedTree = true).fetchSemanticsNodes()
@@ -127,7 +127,7 @@ class HostCardSetupBadgeTest {
     fun unknownBadge_andRecheckKebab_areVisibleForFreshHost() {
         assumeScenariosEnabled()
         val ctx = scenario(name = "unknown", port = 2231) {
-            seedHost(tmuxInstalled = null, heruInstalled = null)
+            seedHost(tmuxInstalled = null, quseInstalled = null)
             launchHostList()
             capture("01-unknown-badge")
             compose.onAllNodesWithTag(HOST_SETUP_BADGE_TAG, useUnmergedTree = true).fetchSemanticsNodes()
@@ -175,7 +175,7 @@ class HostCardSetupBadgeTest {
         private var hostId: Long? = null
         private var keyId: Long? = null
 
-        fun seedHost(tmuxInstalled: Boolean?, heruInstalled: Boolean?) {
+        fun seedHost(tmuxInstalled: Boolean?, quseInstalled: Boolean?) {
             val appContext = InstrumentationRegistry.getInstrumentation().targetContext
             val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME).build()
             try {
@@ -195,12 +195,12 @@ class HostCardSetupBadgeTest {
                             username = DEFAULT_USER,
                             keyId = storedKey.id,
                             tmuxInstalled = tmuxInstalled,
-                            heruInstalled = heruInstalled,
+                            quseInstalled = quseInstalled,
                             // Mark the cache fresh so the cold-launch
                             // reprobe does not race the test by silently
                             // flipping the persisted columns under us.
                             lastBootstrapAt = System.currentTimeMillis(),
-                            heruLastDetectedAt = System.currentTimeMillis(),
+                            quseLastDetectedAt = System.currentTimeMillis(),
                         ),
                     )
                 }

@@ -24,9 +24,9 @@ import javax.inject.Inject
 
 /**
  * Per-host usage fetcher. Injected into [UsageViewModel] so tests can
- * stub the SSH/heru path without needing a real transport. The default
+ * stub the SSH/quse path without needing a real transport. The default
  * implementation opens a short-lived SSH session via [SshConnection],
- * runs [UsageRemoteSource.detectHeru], and — when present —
+ * runs [UsageRemoteSource.detectQuse], and — when present —
  * [UsageRemoteSource.fetchUsage].
  *
  * The result is one of the four [HostUsageFetch] cases the view model
@@ -89,7 +89,7 @@ public class SshHostUsageFetcher @Inject constructor(
         }
 
         return try {
-            when (remoteSource.detectHeru(session)) {
+            when (remoteSource.detectQuse(session)) {
                 UsageToolStatus.Installed -> {
                     when (val fetch = remoteSource.fetchUsage(session)) {
                         is UsageFetchResult.Success -> HostUsageFetch.Records(
@@ -115,11 +115,11 @@ public class SshHostUsageFetcher @Inject constructor(
  * Backs [UsageScreen] for issue #114 Fix A.
  *
  * Iterates over every saved host and asks [HostUsageFetcher] for its
- * heru/quota state. Results are aggregated into a single
+ * quse/quota state. Results are aggregated into a single
  * [UsageScreenState] that the screen renders. Hosts whose key file is
- * missing, who fail to connect, or whose heru status is unknown are
+ * missing, who fail to connect, or whose quse status is unknown are
  * silently skipped so the panel only shows actionable rows. Hosts where
- * heru is confirmed absent populate the "missing tool" empty-state list.
+ * quse is confirmed absent populate the "missing tool" empty-state list.
  *
  * The view model is deliberately stateless across visits: every
  * navigation to [com.pocketshell.app.nav.AppDestination.Usage] spins up a

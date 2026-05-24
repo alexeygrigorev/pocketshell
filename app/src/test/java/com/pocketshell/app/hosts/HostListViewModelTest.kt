@@ -362,14 +362,14 @@ class HostListViewModelTest {
      * the mapping is observable in isolation. Mirrors the doc on
      * [deriveSetupState]:
      *
-     * - tmuxInstalled=null OR heruInstalled=null → Unknown
+     * - tmuxInstalled=null OR quseInstalled=null → Unknown
      * - tmuxInstalled=false → NeedsSetup
-     * - tmuxInstalled=true && heruInstalled=false → NeedsSetup
-     * - tmuxInstalled=true && heruInstalled=true → Ready
+     * - tmuxInstalled=true && quseInstalled=false → NeedsSetup
+     * - tmuxInstalled=true && quseInstalled=true → Ready
      */
     @Test
     fun deriveSetupState_returnsUnknown_whenTmuxInstalledIsNull() {
-        val host = hostFixture().copy(tmuxInstalled = null, heruInstalled = null)
+        val host = hostFixture().copy(tmuxInstalled = null, quseInstalled = null)
         assertEquals(
             com.pocketshell.uikit.model.HostSetupState.Unknown,
             deriveSetupState(host),
@@ -377,8 +377,8 @@ class HostListViewModelTest {
     }
 
     @Test
-    fun deriveSetupState_returnsUnknown_whenHeruInstalledIsNullButTmuxIsTrue() {
-        val host = hostFixture().copy(tmuxInstalled = true, heruInstalled = null)
+    fun deriveSetupState_returnsUnknown_whenQuseInstalledIsNullButTmuxIsTrue() {
+        val host = hostFixture().copy(tmuxInstalled = true, quseInstalled = null)
         assertEquals(
             com.pocketshell.uikit.model.HostSetupState.Unknown,
             deriveSetupState(host),
@@ -387,7 +387,7 @@ class HostListViewModelTest {
 
     @Test
     fun deriveSetupState_returnsNeedsSetup_whenTmuxIsFalse() {
-        val host = hostFixture().copy(tmuxInstalled = false, heruInstalled = true)
+        val host = hostFixture().copy(tmuxInstalled = false, quseInstalled = true)
         assertEquals(
             com.pocketshell.uikit.model.HostSetupState.NeedsSetup,
             deriveSetupState(host),
@@ -395,8 +395,8 @@ class HostListViewModelTest {
     }
 
     @Test
-    fun deriveSetupState_returnsNeedsSetup_whenHeruIsFalseButTmuxIsTrue() {
-        val host = hostFixture().copy(tmuxInstalled = true, heruInstalled = false)
+    fun deriveSetupState_returnsNeedsSetup_whenQuseIsFalseButTmuxIsTrue() {
+        val host = hostFixture().copy(tmuxInstalled = true, quseInstalled = false)
         assertEquals(
             com.pocketshell.uikit.model.HostSetupState.NeedsSetup,
             deriveSetupState(host),
@@ -405,7 +405,7 @@ class HostListViewModelTest {
 
     @Test
     fun deriveSetupState_returnsReady_whenBothFlagsAreTrue() {
-        val host = hostFixture().copy(tmuxInstalled = true, heruInstalled = true)
+        val host = hostFixture().copy(tmuxInstalled = true, quseInstalled = true)
         assertEquals(
             com.pocketshell.uikit.model.HostSetupState.Ready,
             deriveSetupState(host),
@@ -428,7 +428,7 @@ class HostListViewModelTest {
                 username = "u",
                 keyId = keyId,
                 tmuxInstalled = true,
-                heruInstalled = true,
+                quseInstalled = true,
             ),
         )
         val needsSetupId = db.hostDao().insert(
@@ -438,7 +438,7 @@ class HostListViewModelTest {
                 username = "u",
                 keyId = keyId,
                 tmuxInstalled = true,
-                heruInstalled = false,
+                quseInstalled = false,
             ),
         )
         val unknownId = db.hostDao().insert(
@@ -447,7 +447,7 @@ class HostListViewModelTest {
                 hostname = "h",
                 username = "u",
                 keyId = keyId,
-                // tmuxInstalled, heruInstalled both null by default.
+                // tmuxInstalled, quseInstalled both null by default.
             ),
         )
 
@@ -496,7 +496,7 @@ class HostListViewModelTest {
                 username = "u",
                 keyId = keyId,
                 tmuxInstalled = true,
-                heruInstalled = true,
+                quseInstalled = true,
                 lastBootstrapAt = System.currentTimeMillis() - 60_000L,
             ),
         )

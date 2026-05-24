@@ -69,9 +69,9 @@ const val ADD_HOST_KEY_DROPDOWN_TAG = "add-host-key-dropdown"
  * literal is duplicated here so the form doesn't depend on the
  * `app.usage` package, keeping the Compose surface package-isolated.
  */
-private const val USAGE_COMMAND_PLACEHOLDER = "heru usage --json"
+private const val USAGE_COMMAND_PLACEHOLDER = "quse --json"
 private const val USAGE_COMMAND_SUPPORTING_TEXT =
-    "Optional override. Leave blank to use heru usage --json."
+    "Optional override. Leave blank to use quse --json."
 
 /**
  * Default supporting text shown under the Port field when there is no
@@ -257,7 +257,7 @@ fun AddEditHostScreen(
                 // non-empty string is forwarded verbatim to
                 // [UsageRemoteSource.fetchUsage] as `commandOverride`,
                 // and (b) leaving it blank just falls back to
-                // `heru usage --json`. The placeholder is the default so
+                // `quse --json`. The placeholder is the default so
                 // the user can see what the empty state will do.
                 FormField(
                     label = "Usage command (optional)",

@@ -78,8 +78,12 @@ class DogfoodVisualScreenshotTest {
             }
             compose.onNodeWithText("Dogfood Docker", useUnmergedTree = true).assertExists()
             val hostListScreenshot = DogfoodScreenshotArtifacts.capture("01-host-list")
+            // Issue #112 swapped the "Crashes" top-bar tab for "Settings"
+            // (crash reports were relocated under Settings → Diagnostics).
+            // Keep this assertion in sync with the current TabRow layout
+            // in HostListScreen.kt (Hosts / Settings / Import / Keys).
             assertTextsClearOfStatusBar(
-                texts = listOf("PocketShell", "Crashes", "Import", "Keys"),
+                texts = listOf("PocketShell", "Settings", "Import", "Keys"),
                 screenshotName = "01-host-list.png",
                 artifact = hostListScreenshot,
             )

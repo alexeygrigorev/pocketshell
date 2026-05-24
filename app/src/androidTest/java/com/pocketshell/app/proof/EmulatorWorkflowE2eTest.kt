@@ -324,7 +324,13 @@ class EmulatorWorkflowE2eTest {
 
     private fun waitForVisibleTerminalText(
         label: String,
-        timeoutMillis: Long = 20_000,
+        // CI fix: the GitHub Actions emulator (Pixel 7, api-34, 2 cores,
+        // swiftshader GPU) is materially slower than the local Linux
+        // emulators we develop against. Round-trip SSH input → remote
+        // PTY render → TerminalEmulator state can occasionally take
+        // 25–40 s under load. 60 s gives CI room without slowing local
+        // runs (the predicate polls and exits as soon as it matches).
+        timeoutMillis: Long = 60_000,
         predicate: (String) -> Boolean,
     ) {
         var last = ""

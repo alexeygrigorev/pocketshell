@@ -7,7 +7,8 @@ file is the source of truth; this file is only the quick local checklist.
 
 - Work from GitHub issues. Implementers and reviewers report through issue
   comments; the orchestrator relays between them.
-- Keep agents asynchronous when possible. Do not block on one agent while useful
+- Keep orchestration asynchronous and nonblocking when possible. Launch agents
+  only in asynchronous mode; do not use blocked agent runs while useful
   non-overlapping coordinator work is available.
 - Implementers edit and test, then report changed files and verification. They
   do not commit, push, close issues, or edit outside scope.
@@ -19,8 +20,8 @@ file is the source of truth; this file is only the quick local checklist.
   authoritative viewport screenshots, visible terminal text, timings, and
   Docker/emulator logs required by [process.md](process.md#terminal-artifact-review).
 - Commit only after reviewer `APPROVED` and the orchestrator's final
-  verification checklist in [process.md](process.md). Prefer one small commit
-  per approved issue or tightly coupled approved batch.
+  verification checklist in [process.md](process.md). Make one small commit
+  after each approved task.
 - Release tags come only after the version bump is committed to `main`, pushed,
   and confirmed with `HEAD == origin/main`; tags label stable reviewed `main`
   commits.

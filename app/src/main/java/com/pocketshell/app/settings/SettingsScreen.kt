@@ -69,6 +69,7 @@ import kotlin.math.roundToInt
 fun SettingsScreen(
     onBack: () -> Unit,
     onOpenCrashReports: () -> Unit,
+    onOpenUsage: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
@@ -108,6 +109,9 @@ fun SettingsScreen(
                     tmuxOnAttach = settings.tmuxOnAttachByDefault,
                     onTmuxOnAttachChange = viewModel::setTmuxOnAttachByDefault,
                 )
+            }
+            item {
+                UsageSection(onOpenUsage = onOpenUsage)
             }
             item {
                 DiagnosticsSection(onOpenCrashReports = onOpenCrashReports)
@@ -356,6 +360,57 @@ private fun TerminalSection(
     }
 }
 
+/**
+ * Issue #114 Fix A: entry point to the Usage / quota panel. Lives under
+ * Settings because the panel surfaces cross-host server-side state, not a
+ * per-host preference. Tapping the row routes to
+ * [com.pocketshell.app.nav.AppDestination.Usage] which renders
+ * `UsageScreen` populated from every bootstrapped host that has the heru
+ * CLI installed.
+ *
+ * Fix B (compact dashboard strip on the host list) and Fix C
+ * (bootstrap-aware periodic fetch + per-host command override) extend the
+ * surfaces — both are tracked as follow-up issues so the panel becomes
+ * reachable in this issue without scope creep.
+ */
+@Composable
+private fun UsageSection(onOpenUsage: () -> Unit) {
+    Column {
+        SectionLabel("Usage")
+        SectionCard {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(role = Role.Button, onClick = onOpenUsage)
+                    .padding(vertical = 8.dp)
+                    .testTag(USAGE_OPEN_TAG),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Usage & quota",
+                        color = PocketShellColors.Text,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Provider quotas reported by heru on bootstrapped hosts.",
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 12.sp,
+                    )
+                }
+                Text(
+                    text = "›",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun DiagnosticsSection(onOpenCrashReports: () -> Unit) {
     Column {
@@ -431,6 +486,7 @@ internal const val SETTINGS_TITLE_TAG = "settings:title"
 internal const val TERMINAL_FONT_SLIDER_TAG = "settings:terminal:font-slider"
 internal const val TMUX_SWITCH_TAG = "settings:terminal:tmux-switch"
 internal const val DIAGNOSTICS_CRASHES_TAG = "settings:diagnostics:crashes"
+internal const val USAGE_OPEN_TAG = "settings:usage:open"
 internal const val ABOUT_VERSION_TAG = "settings:about:version"
 
 internal fun themeOptionTestTag(theme: ThemePreference): String =

@@ -104,6 +104,7 @@ public fun SessionScreen(
     hostId: Long? = null,
     onBack: () -> Unit = {},
     onOpenJobs: () -> Unit = {},
+    onOpenUsage: () -> Unit = {},
     inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
 ) {
     LaunchedEffect(host, port, user, keyPath, passphrase) {
@@ -314,6 +315,10 @@ public fun SessionScreen(
                 showMoreMenu = false
                 onOpenJobs()
             },
+            onOpenUsage = {
+                showMoreMenu = false
+                onOpenUsage()
+            },
         )
 
     }
@@ -371,6 +376,7 @@ private fun SessionMoreMenu(
     expanded: Boolean,
     onDismiss: () -> Unit,
     onOpenJobs: () -> Unit,
+    onOpenUsage: () -> Unit,
 ) {
     Box(
         modifier = Modifier.fillMaxWidth(),
@@ -381,6 +387,11 @@ private fun SessionMoreMenu(
             onDismissRequest = onDismiss,
         ) {
             DropdownMenuItem(text = { Text("Recurring jobs") }, onClick = onOpenJobs)
+            // Issue #114 Fix A: in-session entry to the cross-host
+            // Usage / quota panel. The panel is host-agnostic for now —
+            // a per-host filter and "Open Usage from bootstrap" follow
+            // in Fix B / Fix C.
+            DropdownMenuItem(text = { Text("Usage") }, onClick = onOpenUsage)
         }
     }
 }

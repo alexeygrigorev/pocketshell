@@ -131,6 +131,7 @@ public fun TmuxSessionScreen(
     onOpenTmuxSession: (sessionName: String, startDirectory: String?) -> Unit = { _, _ -> },
     onReplaceTmuxSession: (sessionName: String) -> Unit = {},
     onOpenJobs: () -> Unit = {},
+    onOpenUsage: () -> Unit = {},
 ) {
     LaunchedEffect(hostId, hostName, host, port, user, keyPath, passphrase, sessionName, startDirectory) {
         viewModel.connect(
@@ -256,6 +257,10 @@ public fun TmuxSessionScreen(
                     onOpenJobs = {
                         moreExpanded = false
                         onOpenJobs()
+                    },
+                    onOpenUsage = {
+                        moreExpanded = false
+                        onOpenUsage()
                     },
                     onNewWindow = {
                         moreExpanded = false
@@ -1065,6 +1070,7 @@ private fun TmuxMoreMenu(
     onKillSession: () -> Unit,
     onSwitchSession: () -> Unit,
     onOpenJobs: () -> Unit,
+    onOpenUsage: () -> Unit,
     onNewWindow: () -> Unit,
     onRenameWindow: () -> Unit,
     onKillWindow: () -> Unit,
@@ -1082,6 +1088,9 @@ private fun TmuxMoreMenu(
             DropdownMenuItem(text = { Text("Rename session") }, onClick = onRenameSession)
             DropdownMenuItem(text = { Text("Kill session") }, onClick = onKillSession)
             DropdownMenuItem(text = { Text("Recurring jobs") }, onClick = onOpenJobs)
+            // Issue #114 Fix A: jump to the cross-host Usage / quota
+            // panel from inside a live tmux session.
+            DropdownMenuItem(text = { Text("Usage") }, onClick = onOpenUsage)
             DropdownMenuItem(text = { Text("New window") }, onClick = onNewWindow)
             DropdownMenuItem(
                 text = { Text("Rename window") },

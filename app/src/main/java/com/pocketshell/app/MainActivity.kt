@@ -39,6 +39,8 @@ import com.pocketshell.app.systemsurfaces.ForwardingChooserScreen
 import com.pocketshell.app.systemsurfaces.ForwardingTileService
 import com.pocketshell.app.tmux.TmuxSessionScreen
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.app.usage.UsageScreen
+import com.pocketshell.app.usage.UsageViewModel
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellThemeMode
 import dagger.hilt.android.AndroidEntryPoint
@@ -255,7 +257,25 @@ private fun AppNavigator(
         AppDestination.Settings -> SettingsScreen(
             onBack = ::back,
             onOpenCrashReports = { navigate(AppDestination.CrashReports) },
+            onOpenUsage = { navigate(AppDestination.Usage) },
         )
+
+        // Issue #114 Fix A: Usage / quota panel. The view model loads
+        // every bootstrapped host on construction and pull-to-refresh
+        // (the breadcrumb "more" action on UsageScreen) re-runs
+        // `fetchUsage` for each host. A fresh ViewModel is materialised
+        // every visit so missing-tool / failed-fetch state can't leak
+        // across navigations.
+        AppDestination.Usage -> {
+            val usageViewModel = hiltViewModel<UsageViewModel>()
+            val usageState by usageViewModel.state.collectAsState()
+            UsageScreen(
+                state = usageState,
+                onBack = ::back,
+                onRefresh = usageViewModel::refresh,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
 
         AppDestination.PortForwardChooser -> ForwardingChooserScreen(
             onBack = ::back,
@@ -295,6 +315,7 @@ private fun AppNavigator(
                     ),
                 )
             },
+            onOpenUsage = { navigate(AppDestination.Usage) },
         )
 
         is AppDestination.PortForwardPanel -> PortForwardPanelScreen(
@@ -370,6 +391,7 @@ private fun AppNavigator(
                     ),
                 )
             },
+            onOpenUsage = { navigate(AppDestination.Usage) },
         )
     }
 }

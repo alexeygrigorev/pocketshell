@@ -131,6 +131,7 @@ printf 'PocketShell terminal workbench\n'
 printf 'Artifacts: %s\n' "$RUN_DIR"
 printf 'Hold ms: %s\n' "$HOLD_MS"
 printf 'Debug hold ms: %s\n' "$DEBUG_HOLD_MS"
+printf 'Real agents: %s\n' "$REAL_AGENTS"
 printf 'Agent service: %s\n' "$AGENT_SERVICE"
 printf 'Test selector: %s\n' "$TEST_SELECTOR"
 
@@ -155,13 +156,19 @@ fi
 
 run_logged "05-install-apks" bash -lc "'$ADB' install -r -d -t '$APP_APK' && '$ADB' install -r -d -t '$TEST_APK'"
 run_logged "06-reset-artifacts" "$ADB" shell rm -rf "$DEVICE_ARTIFACT_DIR"
+INSTRUMENTATION_ARGS=(
+  -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR"
+  -e terminalWorkbenchHoldMs "$HOLD_MS"
+  -e terminalWorkbenchDebugHoldMs "$DEBUG_HOLD_MS"
+  -e terminalWorkbenchSshPort "$SSH_PORT"
+  -e class "$TEST_SELECTOR"
+)
+if [[ "$REAL_AGENTS" == "1" ]]; then
+  INSTRUMENTATION_ARGS+=(-e terminalWorkbenchRealAgents 1)
+fi
 run_logged "07-run-workbench" \
   "$ADB" shell am instrument -w -r \
-  -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
-  -e terminalWorkbenchHoldMs "$HOLD_MS" \
-  -e terminalWorkbenchDebugHoldMs "$DEBUG_HOLD_MS" \
-  -e terminalWorkbenchSshPort "$SSH_PORT" \
-  -e class "$TEST_SELECTOR" \
+  "${INSTRUMENTATION_ARGS[@]}" \
   com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner
 mkdir -p "$RUN_DIR/artifacts"
 run_logged "08-pull-artifacts" "$ADB" pull "$DEVICE_ARTIFACT_DIR" "$RUN_DIR/artifacts/" || true

@@ -23,6 +23,7 @@ import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertTrue
+import org.junit.Assume.assumeTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -36,6 +37,10 @@ import kotlin.math.min
 
 @RunWith(AndroidJUnit4::class)
 class TerminalLabDockerTest {
+
+    private companion object {
+        const val REAL_AGENT_CLI_SCREENS_ARG = "terminalWorkbenchRealAgents"
+    }
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -80,6 +85,7 @@ class TerminalLabDockerTest {
 
     @Test
     fun terminalWorkbenchCapturesRealAgentCliScreens() = runBlocking {
+        assumeRealAgentCliScreensEnabled()
         launchTerminalWorkbench(markerPrefix = "psagent")
         assertRemotePtyMatchesTerminalGrid("agents")
         val promptArtifact = captureAndAssertTerminalInk("agents-01-prompt", minInkPixels = 1_500)
@@ -118,6 +124,16 @@ class TerminalLabDockerTest {
         TerminalLabArtifacts.writeTimings(timings)
         writeArtifactSummary("agents")
         Unit
+    }
+
+    private fun assumeRealAgentCliScreensEnabled() {
+        val enabled = InstrumentationRegistry.getArguments()
+            .getString(REAL_AGENT_CLI_SCREENS_ARG)
+            ?.lowercase(Locale.US) in setOf("1", "true", "yes")
+        assumeTrue(
+            "Real agent CLI screen capture requires -e $REAL_AGENT_CLI_SCREENS_ARG 1",
+            enabled,
+        )
     }
 
     private suspend fun runTerminalWorkbench(

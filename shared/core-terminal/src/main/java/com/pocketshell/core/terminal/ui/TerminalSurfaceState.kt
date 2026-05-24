@@ -209,6 +209,19 @@ class TerminalSurfaceState {
     }
 
     /**
+     * Append already-known remote output directly into the attached
+     * emulator. This is used by tmux reattach to seed a new pane with a
+     * `capture-pane` snapshot before future `%output` events arrive.
+     */
+    fun appendRemoteOutput(bytes: ByteArray) {
+        if (bytes.isEmpty()) return
+        val activeBridge = bridge ?: return
+        activeBridge.feedBytes(bytes)
+        _output.tryEmit(bytes)
+        bufferTick.value = bufferTick.value + 1
+    }
+
+    /**
      * Test-only seam: push synthetic output bytes into [output] without
      * needing a real PTY. Used by [TerminalSurface]'s `@Preview` and by the
      * module's unit tests to exercise the flow without standing up a

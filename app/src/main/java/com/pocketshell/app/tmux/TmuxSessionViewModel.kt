@@ -224,6 +224,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 sessionName = target.sessionName,
                 startDirectory = target.startDirectory,
             )
+            activeTarget = target
             attachClient(client)
             client.connect()
             activeTmuxClients.register(
@@ -236,7 +237,6 @@ public class TmuxSessionViewModel @Inject constructor(
                 client = client,
             )
             registeredHostId = target.hostId
-            activeTarget = target
 
             // Bootstrap the pane list once tmux has had a moment to settle.
             // We don't strictly need this — the opening %window-add event
@@ -385,7 +385,8 @@ public class TmuxSessionViewModel @Inject constructor(
         if (response.isError) return
 
         val parsed: List<ParsedPane> = response.output.mapNotNull { parsePaneRow(it) }
-        applyParsedPanes(parsed)
+        val newPanes = applyParsedPanes(parsed)
+        preloadVisibleContentForNewPanes(newPanes)
     }
 
     /**
@@ -398,7 +399,7 @@ public class TmuxSessionViewModel @Inject constructor(
         applyParsedPanes(parsed)
     }
 
-    private fun applyParsedPanes(parsed: List<ParsedPane>) {
+    private fun applyParsedPanes(parsed: List<ParsedPane>): List<TmuxPaneState> {
         val client = clientRef
         val target = activeTarget
         val sorted = parsed
@@ -406,6 +407,7 @@ public class TmuxSessionViewModel @Inject constructor(
             .sortedWith(compareBy({ it.windowId }, { it.paneIndex }, { it.paneId }))
 
         val nextById: MutableMap<String, TmuxPaneState> = LinkedHashMap()
+        val newRows = mutableListOf<TmuxPaneState>()
         for (p in sorted) {
             val existing = paneRows[p.paneId]
             val row = if (existing != null) {
@@ -443,7 +445,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     cwd = p.cwd,
                     currentCommand = p.currentCommand,
                     terminalState = state,
-                )
+                ).also { newRows += it }
             }
             nextById[p.paneId] = row
             startAgentDetectionForPane(row)
@@ -465,6 +467,18 @@ public class TmuxSessionViewModel @Inject constructor(
         _agentConversations.value = _agentConversations.value.filterKeys { it in nextById.keys }
         paneRows.putAll(nextById)
         _panes.value = nextById.values.toList()
+        return newRows
+    }
+
+    private suspend fun preloadVisibleContentForNewPanes(newPanes: List<TmuxPaneState>) {
+        val client = clientRef ?: return
+        for (pane in newPanes) {
+            val response = runCatching {
+                client.sendCommand("capture-pane -p -e -S -200 -t ${pane.paneId}")
+            }.getOrNull()
+            if (response == null || response.isError || response.output.isEmpty()) continue
+            pane.terminalState.appendRemoteOutput(response.output.toTerminalViewportBytes())
+        }
     }
 
     private fun startAgentDetectionForPane(pane: TmuxPaneState) {
@@ -906,6 +920,19 @@ private fun boundedDistinctEvents(events: List<ConversationEvent>): List<Convers
     } else {
         distinct.subList(distinct.size - MaxAgentEvents, distinct.size)
     }
+}
+
+private fun List<String>.toTerminalViewportBytes(): ByteArray {
+    val lines = this
+    val text = buildString {
+        append("\u001b[H\u001b[2J")
+        lines.forEachIndexed { index, line ->
+            if (index > 0) append("\r\n")
+            append(line)
+        }
+        append("\r\n")
+    }
+    return text.toByteArray(Charsets.UTF_8)
 }
 
 private const val MaxAgentEvents: Int = 500

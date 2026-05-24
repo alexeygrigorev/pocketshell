@@ -47,6 +47,8 @@ internal class FakeTmuxClient : TmuxClient {
      */
     val responses: ArrayDeque<CommandResponse> = ArrayDeque()
 
+    val capturePaneResponses: ArrayDeque<CommandResponse> = ArrayDeque()
+
     @Volatile
     var closed: Boolean = false
 
@@ -59,6 +61,13 @@ internal class FakeTmuxClient : TmuxClient {
 
     override suspend fun sendCommand(cmd: String): CommandResponse {
         sentCommands += cmd
+        if (cmd.startsWith("capture-pane")) {
+            return capturePaneResponses.removeFirstOrNull() ?: CommandResponse(
+                number = 0L,
+                output = emptyList(),
+                isError = false,
+            )
+        }
         return responses.removeFirstOrNull() ?: CommandResponse(
             number = 0L,
             output = emptyList(),

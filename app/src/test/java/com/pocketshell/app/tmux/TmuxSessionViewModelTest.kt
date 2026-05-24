@@ -218,6 +218,69 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun newPaneReconcileCapturesExistingVisibleContent() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tshell\t0"),
+                isError = false,
+            ),
+        )
+        client.capturePaneResponses.addLast(
+            CommandResponse(
+                number = 2L,
+                output = listOf("issue103-line-001", "issue103-line-002"),
+                isError = false,
+            ),
+        )
+        vm.attachClientForTest(client)
+
+        client.emittedEvents.emit(
+            ControlEvent.WindowAdd(sessionId = "", windowId = "@0", name = ""),
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "expected a capture-pane prefill for the new pane, got ${client.sentCommands}",
+            client.sentCommands.contains("capture-pane -p -e -S -200 -t %0"),
+        )
+    }
+
+    @Test
+    fun existingPaneReconcileDoesNotRecaptureContent() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tshell\t0"),
+                isError = false,
+            ),
+        )
+        client.responses.addLast(
+            CommandResponse(
+                number = 2L,
+                output = listOf("%0\t@0\t\$0\twork\tshell\t0"),
+                isError = false,
+            ),
+        )
+        vm.attachClientForTest(client)
+
+        client.emittedEvents.emit(
+            ControlEvent.WindowAdd(sessionId = "", windowId = "@0", name = ""),
+        )
+        advanceUntilIdle()
+        client.emittedEvents.emit(
+            ControlEvent.LayoutChange(sessionId = "", windowId = "@0", layout = "bf3d,80x24"),
+        )
+        advanceUntilIdle()
+
+        assertEquals(1, client.sentCommands.count { it.startsWith("capture-pane") })
+    }
+
+    @Test
     fun reconcileScopesPanesAndWindowSummariesToActiveSession() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()

@@ -357,13 +357,17 @@ Manual Release Emulator Validation can also be run from GitHub Actions when a
 local emulator is unavailable:
 
 1. Open Actions -> Release Emulator Validation -> Run workflow.
-2. Select `main` or the already-reviewed release branch and optionally provide
-   a `run_id`.
+2. Choose the release branch or `main`; optionally provide a `run_id`.
 3. Wait for the workflow to finish, then read the job summary.
-4. Download the `release-emulator-validation-<run-id>` artifact.
-5. Inspect the visual-audit screenshots before treating the run as release
+4. Download the `release-emulator-validation-<run-id>` artifact for logs,
+   screenshots, and the release summary.
+5. Confirm the tested debug APK is present inside the downloaded artifact at
+   `release-emulator-validation/<run-id>/app-debug.apk`. The equivalent local
+   wrapper path is
+   `build/release-emulator-validation/<run-id>/app-debug.apk`.
+6. Inspect the visual-audit screenshots before treating the run as release
    evidence.
-6. Attach or link the summary and artifact directories in the release issue and
+7. Attach or link the summary and artifact directories in the release issue and
    tag notes.
 
 The manual workflow is validation evidence only. It does not create or push the

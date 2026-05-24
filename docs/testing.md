@@ -302,11 +302,15 @@ replace the emulator/Docker release blockers above.
 
 The same validation can be run manually from GitHub Actions when local emulator
 capacity is unavailable: Actions -> Release Emulator Validation -> Run
-workflow. Select `main` or the already-reviewed release branch, optionally set
-`run_id`, wait for the job summary, download
-`release-emulator-validation-<run-id>`, and inspect the visual-audit screenshots
-before using the artifact as release evidence. This workflow produces evidence
-only; it does not push the tag and does not relax the stable-main tag rule.
+workflow. Choose the release branch or `main`; optionally provide a `run_id`.
+Read the job summary first, then download the
+`release-emulator-validation-<run-id>` artifact for logs, screenshots, and the
+release summary. The tested debug APK is included inside that artifact at
+`release-emulator-validation/<run-id>/app-debug.apk`; locally, the same file is
+written under `build/release-emulator-validation/<run-id>/app-debug.apk`.
+Inspect the visual-audit screenshots before using the artifact as release
+evidence. This workflow produces evidence only; it does not push the tag and
+does not relax the stable-main tag rule.
 
 This combines the normal compile/unit check, deterministic Docker `agents`
 target verification, explicit-path emulator readiness checks, focused connected

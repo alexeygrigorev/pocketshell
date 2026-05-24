@@ -282,6 +282,18 @@ screenshot capture. Attach or link every artifact directory listed in
 and tag notes. Pass `--visual-audit-inspected` only after inspecting the
 visual-audit screenshots.
 
+When local emulator capacity is unavailable, run the same validation manually
+from GitHub Actions: Actions -> Release Emulator Validation -> Run workflow.
+Choose the release branch or `main`; optionally provide a `run_id`. Read the
+job summary first, then download the
+`release-emulator-validation-<run-id>` artifact for logs, screenshots, and the
+release summary. The tested debug APK is included inside that artifact at
+`release-emulator-validation/<run-id>/app-debug.apk`; locally, the same file is
+written under `build/release-emulator-validation/<run-id>/app-debug.apk`.
+Inspect the visual-audit screenshots before using the artifact as release
+evidence. The manual workflow does not push the tag and does not relax the
+stable-main tag rule.
+
 ## APK Dogfood Pre-Release Gate
 
 Before pushing a version tag for APK dogfood, run the local confidence gate from

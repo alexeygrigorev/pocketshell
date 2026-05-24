@@ -33,7 +33,11 @@ class SshHostTmuxSessionsGateway @Inject constructor(
             passphrase = passphrase?.copyOf(),
             knownHosts = KnownHostsPolicy.AcceptAll,
         ).getOrElse { error ->
-            return HostTmuxSessionListResult.Failed("connect failed: ${error.message}")
+            // Issue #109: surface the throwable up to the view-model so
+            // the user-facing summary path (HostConnectError) can run.
+            // Concatenating `error.message` into the sheet body was what
+            // produced the raw "ECONNREFUSED" stack trace.
+            return HostTmuxSessionListResult.ConnectFailed(error)
         }
 
         return try {

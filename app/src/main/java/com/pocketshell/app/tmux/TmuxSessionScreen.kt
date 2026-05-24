@@ -613,6 +613,20 @@ internal fun TmuxSessionDrawer(
                         is HostTmuxSessionPickerState.Fallback -> item {
                             TmuxSessionDrawerMessage(text = state.message)
                         }
+                        // Issue #109: in-session drawer also handles
+                        // connect-error by rendering the same friendly
+                        // body line. Retry/raw-shell affordances live on
+                        // the host-list sheet only — from inside an
+                        // already-open session the user typically wants
+                        // the message and can dismiss the drawer to
+                        // continue with the live connection.
+                        is HostTmuxSessionPickerState.ConnectError -> item {
+                            val host = state.request.host
+                            TmuxSessionDrawerMessage(
+                                text = "Couldn't reach ${host.username}@${host.hostname}:${host.port}. " +
+                                    state.summary.shortReason,
+                            )
+                        }
                     }
                 }
                 TextButton(

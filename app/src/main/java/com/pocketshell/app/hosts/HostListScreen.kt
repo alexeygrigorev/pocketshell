@@ -451,6 +451,11 @@ fun HostListScreen(
                 currentOpenSession(request.host, request.keyPath, request.passphrase)
             },
             onDismiss = hostTmuxSessionPickerViewModel::dismiss,
+            // Issue #109: Retry rebuilds the same SSH connect attempt
+            // from the saved request; Cancel aborts the in-flight
+            // connect coroutine and returns the sheet to Idle.
+            onRetry = hostTmuxSessionPickerViewModel::retry,
+            onCancel = hostTmuxSessionPickerViewModel::cancelLoading,
         )
     }
 }

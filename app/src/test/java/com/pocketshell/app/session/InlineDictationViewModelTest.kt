@@ -29,6 +29,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.util.concurrent.atomic.AtomicReference
 
 /**
  * Unit tests for [InlineDictationViewModel] — the FSM that drives the
@@ -115,18 +116,37 @@ class InlineDictationViewModelTest {
         override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> = result()
     }
 
+    /**
+     * In-memory [PromptComposerViewModel.VoiceSettingsSnapshot] for unit
+     * tests. Defaults preserve the historic 5s silence window and the
+     * "no language hint" behaviour so the existing FSM assertions keep
+     * passing without per-test wiring.
+     */
+    private class FakeVoiceSettings(
+        private var window: Long = InlineDictationViewModel.SILENCE_WINDOW_MS,
+        private var language: String? = null,
+    ) : PromptComposerViewModel.VoiceSettingsSnapshot {
+        override fun silenceWindowMs(): Long = window
+        override fun whisperLanguageHint(): String? = language
+
+        fun setWindow(ms: Long) { window = ms }
+        fun setLanguage(code: String?) { language = code }
+    }
+
     private fun newVm(
         mic: PromptComposerViewModel.MicCapture = FakeMicCapture(),
         whisper: WhisperClient? = fakeWhisperClient { Result.success("git status") },
         storage: PromptComposerViewModel.ApiKeyVault = FakeVault().also { it.save("sk-test".toCharArray()) },
         samplerDispatcher: TestDispatcher? = null,
         clock: () -> Long = { System.currentTimeMillis() },
+        voiceSettings: PromptComposerViewModel.VoiceSettingsSnapshot = FakeVoiceSettings(),
     ): InlineDictationViewModel {
         val factory = WhisperClientFactory { whisper }
         val vm = InlineDictationViewModel(
             audioRecorder = mic,
             whisperClientFactory = factory,
             apiKeyStorage = storage,
+            voiceSettings = voiceSettings,
         )
         if (samplerDispatcher != null) vm.samplerDispatcher = samplerDispatcher
         vm.clock = clock
@@ -644,6 +664,69 @@ class InlineDictationViewModelTest {
     }
 
     // -- FSM no-op while transcribing ---------------------------------------
+
+    // -- Issue #125: VoiceSettingsSnapshot integration --------------------
+
+    @Test
+    fun voiceSettingsLanguageHintFlowsIntoWhisperTranscribe() = runTest {
+        // The inline path threads the user-configured language through
+        // to Whisper, same as the composer.
+        val captured = AtomicReference<String?>(null)
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                captured.set(language)
+                return Result.success("git status")
+            }
+        }
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            voiceSettings = FakeVoiceSettings(language = "fr"),
+        )
+
+        val received = mutableListOf<String>()
+        val collector = launch { received += vm.transcriptions.first() }
+        runCurrent()
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals("fr", captured.get())
+        collector.join()
+    }
+
+    @Test
+    fun voiceSettingsCustomSilenceWindowAutoStopsAtConfiguredThreshold() = runTest {
+        val mic = FakeMicCapture(amplitudes = listOf(0.5f, 0.5f, 0.5f) + List(500) { 0f })
+        val customWindowMs = 1_500L
+        val vm = newVm(
+            mic = mic,
+            whisper = fakeWhisperClient { Result.success("short") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { testScheduler.currentTime },
+            voiceSettings = FakeVoiceSettings(window = customWindowMs),
+        )
+
+        val collector = launch { vm.transcriptions.first() }
+        runCurrent()
+
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        advanceTimeBy(3L * InlineDictationViewModel.SAMPLE_INTERVAL_MS)
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        advanceTimeBy(customWindowMs + 500L)
+        advanceUntilIdle()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals(1, mic.stopCount)
+        collector.join()
+    }
 
     @Test
     fun micTapWhileTranscribingIsIgnored() = runTest {

@@ -19,21 +19,28 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -74,6 +81,7 @@ fun SettingsScreen(
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val settings by viewModel.state.collectAsState()
+    val keyStatus by viewModel.keyStatus.collectAsState()
     val context = LocalContext.current
 
     val versionName = remember {
@@ -108,6 +116,17 @@ fun SettingsScreen(
                     onFontSizeChange = viewModel::setTerminalFontSizeSp,
                     tmuxOnAttach = settings.tmuxOnAttachByDefault,
                     onTmuxOnAttachChange = viewModel::setTmuxOnAttachByDefault,
+                )
+            }
+            item {
+                VoiceSection(
+                    keyStatus = keyStatus,
+                    language = settings.voiceLanguage,
+                    silenceThresholdSeconds = settings.voiceSilenceThresholdSeconds,
+                    onSaveApiKey = viewModel::saveApiKey,
+                    onClearApiKey = viewModel::clearApiKey,
+                    onLanguageSelected = viewModel::setVoiceLanguage,
+                    onSilenceThresholdChange = viewModel::setVoiceSilenceThresholdSeconds,
                 )
             }
             item {
@@ -361,6 +380,278 @@ private fun TerminalSection(
 }
 
 /**
+ * Voice section — issue #125. Surfaces the three voice-related knobs
+ * named in `docs/input-methods.md` §Settings:
+ *
+ *  - **Whisper API key** — single-field dialog that delegates to
+ *    [AndroidKeystoreApiKeyStorage]. The masked tail (`sk-…1234`) shows
+ *    when a key is saved; an inline "Clear" affordance removes it. The
+ *    plaintext key never enters the [androidx.compose.runtime.State]
+ *    graph — the dialog owns its own `String` for the lifetime of the
+ *    entry, hands it as a `CharArray` to the ViewModel, and zeroes the
+ *    local copy on dismiss.
+ *  - **Language** — radio group over [AppSettings.VOICE_LANGUAGE_OPTIONS].
+ *    The selected ISO-639-1 code is forwarded to Whisper's `language`
+ *    parameter; the sentinel `auto` value means "let Whisper detect" and
+ *    causes the parameter to be omitted from the multipart upload.
+ *  - **Auto-stop silence threshold** — slider over
+ *    [AppSettings.MIN_VOICE_SILENCE_SECONDS] /
+ *    [AppSettings.MAX_VOICE_SILENCE_SECONDS] in
+ *    [AppSettings.VOICE_SILENCE_STEP_SECONDS] increments. The current
+ *    value is rendered next to the label as `Xs`. Both the prompt
+ *    composer and inline dictation read the latest snapshot before each
+ *    recording starts, so a slider drag while the mic is idle takes
+ *    effect on the next tap without any restart.
+ */
+@Composable
+private fun VoiceSection(
+    keyStatus: WhisperKeyStatus,
+    language: String,
+    silenceThresholdSeconds: Float,
+    onSaveApiKey: (CharArray) -> Unit,
+    onClearApiKey: () -> Unit,
+    onLanguageSelected: (String) -> Unit,
+    onSilenceThresholdChange: (Float) -> Unit,
+) {
+    var showKeyDialog by remember { mutableStateOf(false) }
+
+    Column {
+        SectionLabel("Voice")
+        SectionCard {
+            // -- API key row --------------------------------------------
+            Text(
+                text = "Whisper API key",
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Stored encrypted on this device. Only sent to api.openai.com.",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val statusLabel = when (keyStatus) {
+                    WhisperKeyStatus.Unset -> "Set Whisper API key"
+                    is WhisperKeyStatus.Set -> "Key set: sk-…${keyStatus.maskedTail}"
+                }
+                Text(
+                    text = statusLabel,
+                    color = when (keyStatus) {
+                        WhisperKeyStatus.Unset -> PocketShellColors.TextSecondary
+                        is WhisperKeyStatus.Set -> PocketShellColors.Text
+                    },
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(role = Role.Button) { showKeyDialog = true }
+                        .testTag(VOICE_API_KEY_ROW_TAG)
+                        .padding(vertical = 8.dp),
+                )
+                if (keyStatus is WhisperKeyStatus.Set) {
+                    Text(
+                        text = "Clear",
+                        color = PocketShellColors.Accent,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .clickable(role = Role.Button, onClick = onClearApiKey)
+                            .testTag(VOICE_API_KEY_CLEAR_TAG)
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // -- Language row -------------------------------------------
+            Text(
+                text = "Language",
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Hint Whisper about the spoken language. Auto-detect works for most cases.",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            AppSettings.VOICE_LANGUAGE_OPTIONS.forEach { option ->
+                LanguageOptionRow(
+                    option = option,
+                    selected = option.code == language,
+                    onClick = { onLanguageSelected(option.code) },
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // -- Silence threshold row ---------------------------------
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Auto-stop silence threshold",
+                    color = PocketShellColors.Text,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = "${formatThresholdLabel(silenceThresholdSeconds)}s",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.testTag(VOICE_SILENCE_VALUE_TAG),
+                )
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Recording auto-stops after this many seconds of silence.",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            val totalRangeSeconds =
+                AppSettings.MAX_VOICE_SILENCE_SECONDS - AppSettings.MIN_VOICE_SILENCE_SECONDS
+            val steps = (totalRangeSeconds / AppSettings.VOICE_SILENCE_STEP_SECONDS)
+                .toInt()
+                .coerceAtLeast(1) - 1
+            Slider(
+                value = silenceThresholdSeconds,
+                onValueChange = onSilenceThresholdChange,
+                valueRange = AppSettings.MIN_VOICE_SILENCE_SECONDS..AppSettings.MAX_VOICE_SILENCE_SECONDS,
+                steps = steps,
+                colors = SliderDefaults.colors(
+                    thumbColor = PocketShellColors.Accent,
+                    activeTrackColor = PocketShellColors.Accent,
+                    inactiveTrackColor = PocketShellColors.Border,
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(VOICE_SILENCE_SLIDER_TAG),
+            )
+        }
+    }
+
+    if (showKeyDialog) {
+        VoiceApiKeyEntryDialog(
+            onDismiss = { showKeyDialog = false },
+            onSave = { key ->
+                onSaveApiKey(key)
+                java.util.Arrays.fill(key, ' ')
+                showKeyDialog = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun LanguageOptionRow(
+    option: VoiceLanguageOption,
+    selected: Boolean,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.RadioButton, onClick = onClick)
+            .padding(vertical = 8.dp)
+            .testTag(voiceLanguageOptionTestTag(option.code)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioMark(selected = selected)
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+            text = option.label,
+            color = PocketShellColors.Text,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+/**
+ * Minimal one-field dialog for entering an OpenAI Whisper API key from
+ * the Settings screen. Mirrors `ApiKeyEntryDialog` in
+ * `PromptComposerSheet.kt` so users see the same dialog whether they
+ * enter the key from the composer first-tap fallback or from Settings.
+ */
+@Composable
+internal fun VoiceApiKeyEntryDialog(
+    onDismiss: () -> Unit,
+    onSave: (CharArray) -> Unit,
+) {
+    var keyText by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("OpenAI API key", color = PocketShellColors.Text) },
+        text = {
+            Column {
+                Text(
+                    text = "Paste your OpenAI API key. It's stored encrypted on this device " +
+                        "and only sent in the Authorization header to api.openai.com.",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 12.sp,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = keyText,
+                    onValueChange = { keyText = it },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(VOICE_API_KEY_FIELD_TAG),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val chars = keyText.toCharArray()
+                    onSave(chars)
+                    keyText = ""
+                },
+                enabled = keyText.isNotBlank(),
+                modifier = Modifier.testTag(VOICE_API_KEY_SAVE_TAG),
+            ) {
+                Text("Save", color = PocketShellColors.Accent)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = PocketShellColors.TextSecondary)
+            }
+        },
+        containerColor = PocketShellColors.Surface,
+        titleContentColor = PocketShellColors.Text,
+        textContentColor = PocketShellColors.TextSecondary,
+    )
+}
+
+/**
+ * Pretty-format the silence threshold for the inline `Xs` label. Drops
+ * the trailing `.0` for whole-second values so the label reads `5s`
+ * rather than `5.0s`; otherwise renders one decimal (`1.5s`).
+ */
+internal fun formatThresholdLabel(seconds: Float): String {
+    val rounded = (seconds * 10f).roundToInt() / 10f
+    val asInt = rounded.toInt()
+    return if (rounded == asInt.toFloat()) asInt.toString() else "%.1f".format(rounded)
+}
+
+/**
  * Issue #114 Fix A: entry point to the Usage / quota panel. Lives under
  * Settings because the panel surfaces cross-host server-side state, not a
  * per-host preference. Tapping the row routes to
@@ -488,6 +779,15 @@ internal const val TMUX_SWITCH_TAG = "settings:terminal:tmux-switch"
 internal const val DIAGNOSTICS_CRASHES_TAG = "settings:diagnostics:crashes"
 internal const val USAGE_OPEN_TAG = "settings:usage:open"
 internal const val ABOUT_VERSION_TAG = "settings:about:version"
+internal const val VOICE_API_KEY_ROW_TAG = "settings:voice:api-key-row"
+internal const val VOICE_API_KEY_CLEAR_TAG = "settings:voice:api-key-clear"
+internal const val VOICE_API_KEY_FIELD_TAG = "settings:voice:api-key-field"
+internal const val VOICE_API_KEY_SAVE_TAG = "settings:voice:api-key-save"
+internal const val VOICE_SILENCE_SLIDER_TAG = "settings:voice:silence-slider"
+internal const val VOICE_SILENCE_VALUE_TAG = "settings:voice:silence-value"
 
 internal fun themeOptionTestTag(theme: ThemePreference): String =
     "settings:appearance:theme:" + theme.name.lowercase()
+
+internal fun voiceLanguageOptionTestTag(code: String): String =
+    "settings:voice:language:" + code.lowercase()

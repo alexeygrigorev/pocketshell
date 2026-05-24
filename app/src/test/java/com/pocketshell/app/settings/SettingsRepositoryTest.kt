@@ -43,6 +43,12 @@ class SettingsRepositoryTest {
         assertEquals(ThemePreference.System, snap.theme)
         assertEquals(AppSettings.DEFAULT_TERMINAL_FONT_SP, snap.terminalFontSizeSp, 0f)
         assertTrue(snap.tmuxOnAttachByDefault)
+        assertEquals(AppSettings.VOICE_LANGUAGE_AUTO, snap.voiceLanguage)
+        assertEquals(
+            AppSettings.DEFAULT_VOICE_SILENCE_SECONDS,
+            snap.voiceSilenceThresholdSeconds,
+            0f,
+        )
     }
 
     @Test
@@ -94,5 +100,67 @@ class SettingsRepositoryTest {
             .edit().putString("theme", "Polkadot").commit()
         val repo = SettingsRepository(context)
         assertEquals(ThemePreference.System, repo.settings.value.theme)
+    }
+
+    // -- Issue #125: voice preferences -------------------------------------
+
+    @Test
+    fun `setVoiceLanguage persists and round-trips`() {
+        val repo = SettingsRepository(context)
+        repo.setVoiceLanguage("es")
+        assertEquals("es", repo.settings.value.voiceLanguage)
+        // Re-read from a new instance against the same prefs file to
+        // confirm the write reached disk.
+        assertEquals("es", SettingsRepository(context).settings.value.voiceLanguage)
+    }
+
+    @Test
+    fun `setVoiceLanguage normalises case and trims whitespace`() {
+        val repo = SettingsRepository(context)
+        repo.setVoiceLanguage("  EN  ")
+        assertEquals("en", repo.settings.value.voiceLanguage)
+    }
+
+    @Test
+    fun `setVoiceLanguage empty falls back to auto sentinel`() {
+        val repo = SettingsRepository(context)
+        repo.setVoiceLanguage("ru")
+        assertEquals("ru", repo.settings.value.voiceLanguage)
+        repo.setVoiceLanguage("")
+        assertEquals(AppSettings.VOICE_LANGUAGE_AUTO, repo.settings.value.voiceLanguage)
+    }
+
+    @Test
+    fun `setVoiceSilenceThresholdSeconds clamps below minimum`() {
+        val repo = SettingsRepository(context)
+        repo.setVoiceSilenceThresholdSeconds(0.1f)
+        assertEquals(
+            AppSettings.MIN_VOICE_SILENCE_SECONDS,
+            repo.settings.value.voiceSilenceThresholdSeconds,
+            0f,
+        )
+    }
+
+    @Test
+    fun `setVoiceSilenceThresholdSeconds clamps above maximum`() {
+        val repo = SettingsRepository(context)
+        repo.setVoiceSilenceThresholdSeconds(99f)
+        assertEquals(
+            AppSettings.MAX_VOICE_SILENCE_SECONDS,
+            repo.settings.value.voiceSilenceThresholdSeconds,
+            0f,
+        )
+    }
+
+    @Test
+    fun `setVoiceSilenceThresholdSeconds persists and round-trips`() {
+        val repo = SettingsRepository(context)
+        repo.setVoiceSilenceThresholdSeconds(2.5f)
+        assertEquals(2.5f, repo.settings.value.voiceSilenceThresholdSeconds, 0.01f)
+        assertEquals(
+            2.5f,
+            SettingsRepository(context).settings.value.voiceSilenceThresholdSeconds,
+            0.01f,
+        )
     }
 }

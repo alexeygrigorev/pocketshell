@@ -5,6 +5,8 @@ import androidx.annotation.RequiresPermission
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.di.WhisperClientFactory
+import com.pocketshell.app.settings.AppSettings
+import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.core.voice.AndroidKeystoreApiKeyStorage
 import com.pocketshell.core.voice.AudioRecorderException
 import com.pocketshell.core.voice.WhisperException
@@ -70,6 +72,7 @@ public class PromptComposerViewModel @Inject constructor(
     internal val audioRecorder: MicCapture,
     internal val whisperClientFactory: WhisperClientFactory,
     internal val apiKeyStorage: ApiKeyVault,
+    internal val voiceSettings: VoiceSettingsSnapshot,
 ) : ViewModel() {
 
     private val _uiState: MutableStateFlow<UiState> = MutableStateFlow(UiState())
@@ -178,13 +181,19 @@ public class PromptComposerViewModel @Inject constructor(
     private suspend fun sampleAmplitudeAndAutoStopOnSilence() {
         var lastLoudAtMs: Long = clock()
         var triggerAutoStop = false
+        // Snapshot the user-configured silence window at recording start.
+        // Reading it once here (rather than on every loop iteration)
+        // matches the issue's intent: the next recording picks up the
+        // latest setting, but a slider drag mid-recording does not
+        // shorten the current window underfoot.
+        val silenceWindowMs = voiceSettings.silenceWindowMs()
         while (kotlinx.coroutines.currentCoroutineContext().isActive) {
             val amp = audioRecorder.currentAmplitude()
             _uiState.update { it.copy(amplitude = amp) }
 
             if (amp >= SILENCE_AMPLITUDE_THRESHOLD) {
                 lastLoudAtMs = clock()
-            } else if (clock() - lastLoudAtMs >= SILENCE_WINDOW_MS) {
+            } else if (clock() - lastLoudAtMs >= silenceWindowMs) {
                 // Drop out of the loop *before* triggering the transcribe;
                 // `stopAndTranscribe()` will null `recordingJob` itself.
                 triggerAutoStop = true
@@ -249,7 +258,7 @@ public class PromptComposerViewModel @Inject constructor(
             // don't double-switch here. That also keeps the test scope's
             // virtual scheduler in charge — wrapping with a real
             // dispatcher would make `runTest`'s `advanceUntilIdle` hang.
-            val result = client.transcribe(audio)
+            val result = client.transcribe(audio, voiceSettings.whisperLanguageHint())
             result.fold(
                 onSuccess = { text ->
                     _uiState.update {
@@ -372,6 +381,39 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Thin pull-on-demand seam over [SettingsRepository] so the ViewModel
+     * can read the user-configured Whisper language and silence threshold
+     * without holding a direct dependency on the repository (and without
+     * dragging `SharedPreferences` into the unit tests).
+     *
+     * Issue #125 added the two knobs to Settings; this interface is the
+     * narrow surface the composer ViewModel actually consumes. Production
+     * wiring lives in [com.pocketshell.app.di.VoiceModule]; tests
+     * substitute an in-line fake that returns scripted values.
+     *
+     * Both methods are called *at the start of each recording* — the
+     * Settings → Voice slider drag during a live recording does not
+     * shorten the in-flight window, but the next mic tap picks up the
+     * latest stored value.
+     */
+    public interface VoiceSettingsSnapshot {
+        /**
+         * Auto-stop silence window in milliseconds. Defaults to the
+         * historic 5-second constant when no preference is stored, so
+         * fresh installs feel identical to the pre-#125 behaviour.
+         */
+        public fun silenceWindowMs(): Long
+
+        /**
+         * ISO-639-1 language hint or `null` for "let Whisper detect".
+         * The historic behaviour (no hint) is preserved by returning
+         * `null` whenever the stored preference is the
+         * [AppSettings.VOICE_LANGUAGE_AUTO] sentinel.
+         */
+        public fun whisperLanguageHint(): String?
+    }
+
+    /**
      * Thin abstraction over [com.pocketshell.core.voice.AudioRecorder] so
      * the ViewModel can be unit-tested without an Android microphone.
      *
@@ -403,9 +445,15 @@ public class PromptComposerViewModel @Inject constructor(
         public const val SILENCE_AMPLITUDE_THRESHOLD: Float = 0.04f
 
         /**
-         * Silence window — once this much time passes without amplitude
-         * crossing [SILENCE_AMPLITUDE_THRESHOLD], the recording is
-         * auto-stopped. Per D10: "auto-stop after 5s silence".
+         * Default silence window — once this much time passes without
+         * amplitude crossing [SILENCE_AMPLITUDE_THRESHOLD], the recording
+         * is auto-stopped. Per D10: "auto-stop after 5s silence".
+         *
+         * Issue #125 made the window user-configurable from Settings →
+         * Voice; this constant is now only the fallback used when no
+         * preference has been stored yet. The live value comes from
+         * [VoiceSettingsSnapshot.silenceWindowMs] and is sampled at the
+         * start of each recording.
          */
         public const val SILENCE_WINDOW_MS: Long = 5_000L
 

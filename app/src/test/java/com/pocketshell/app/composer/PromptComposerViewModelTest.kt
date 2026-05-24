@@ -7,6 +7,7 @@ import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.core.voice.AudioRecorderException
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestDispatcher
@@ -114,18 +115,38 @@ class PromptComposerViewModelTest {
         override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> = result()
     }
 
+    /**
+     * In-memory [PromptComposerViewModel.VoiceSettingsSnapshot] for unit
+     * tests. The default mirrors the historic 5s window + no language
+     * hint so every existing assertion still holds — issue #125-specific
+     * tests override the values via [SettingsRepositoryTest]'s explicit
+     * factory call site below.
+     */
+    private class FakeVoiceSettings(
+        private var window: Long = PromptComposerViewModel.SILENCE_WINDOW_MS,
+        private var language: String? = null,
+    ) : PromptComposerViewModel.VoiceSettingsSnapshot {
+        override fun silenceWindowMs(): Long = window
+        override fun whisperLanguageHint(): String? = language
+
+        fun setWindow(ms: Long) { window = ms }
+        fun setLanguage(code: String?) { language = code }
+    }
+
     private fun newVm(
         mic: PromptComposerViewModel.MicCapture = FakeMicCapture(),
         whisper: WhisperClient? = fakeWhisperClient { Result.success("hello world") },
         storage: ApiKeyVault = newStorage().also { it.save("sk-test".toCharArray()) },
         samplerDispatcher: TestDispatcher? = null,
         clock: () -> Long = { System.currentTimeMillis() },
+        voiceSettings: PromptComposerViewModel.VoiceSettingsSnapshot = FakeVoiceSettings(),
     ): PromptComposerViewModel {
         val factory = WhisperClientFactory { whisper }
         val vm = PromptComposerViewModel(
             audioRecorder = mic,
             whisperClientFactory = factory,
             apiKeyStorage = storage,
+            voiceSettings = voiceSettings,
         )
         if (samplerDispatcher != null) vm.samplerDispatcher = samplerDispatcher
         vm.clock = clock
@@ -417,5 +438,67 @@ class PromptComposerViewModelTest {
         assertNotNull(vm.uiState.value.error)
         vm.clearError()
         assertNull(vm.uiState.value.error)
+    }
+
+    // -- Issue #125: VoiceSettingsSnapshot integration --------------------
+
+    @Test
+    fun voiceSettingsLanguageHintFlowsIntoWhisperTranscribe() = runTest {
+        // Capture the language argument the ViewModel passes to Whisper.
+        // The configured language must thread through; sentinel `null`
+        // means "no hint".
+        val captured = AtomicReference<String?>(null)
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                captured.set(language)
+                return Result.success("transcribed")
+            }
+        }
+        val voice = FakeVoiceSettings(language = "ru")
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            voiceSettings = voice,
+        )
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals("ru", captured.get())
+    }
+
+    @Test
+    fun voiceSettingsCustomSilenceWindowAutoStopsAtConfiguredThreshold() = runTest {
+        // Configure a 1.5s window — well below the historic 5s default —
+        // and verify the recording auto-stops just past the new bound.
+        val mic = FakeMicCapture(amplitudes = listOf(0.5f, 0.5f, 0.5f) + List(500) { 0f })
+        val customWindowMs = 1_500L
+        val vm = newVm(
+            mic = mic,
+            whisper = fakeWhisperClient { Result.success("short") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { testScheduler.currentTime },
+            voiceSettings = FakeVoiceSettings(window = customWindowMs),
+        )
+
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        advanceTimeBy(3L * PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+        runCurrent()
+        // At 0.15s we are still recording — well inside the 1.5s window.
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        // Advance past the configured 1.5s window — the watchdog should
+        // fire even though the historic 5s constant has not elapsed.
+        advanceTimeBy(customWindowMs + 500L)
+        advanceUntilIdle()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals(1, mic.stopCount)
     }
 }

@@ -69,6 +69,39 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(tmuxOnAttachByDefault = enabled)
     }
 
+    /**
+     * Persist the user's preferred Whisper language. [code] is either
+     * [AppSettings.VOICE_LANGUAGE_AUTO] (Whisper auto-detect) or an
+     * ISO-639-1 string matching one of [AppSettings.VOICE_LANGUAGE_OPTIONS].
+     * Values not in the option list are accepted but coerced to lowercase
+     * — `SettingsViewModel` validates against the menu, so unknown codes
+     * can only arrive from a hand-edited prefs file.
+     */
+    fun setVoiceLanguage(code: String) {
+        val normalised = code.trim().lowercase().ifEmpty { AppSettings.VOICE_LANGUAGE_AUTO }
+        if (_settings.value.voiceLanguage == normalised) return
+        prefs.edit().putString(KEY_VOICE_LANGUAGE, normalised).apply()
+        _settings.value = _settings.value.copy(voiceLanguage = normalised)
+    }
+
+    /**
+     * Persist the user's preferred auto-stop silence threshold (seconds).
+     * Clamped to [AppSettings.MIN_VOICE_SILENCE_SECONDS] /
+     * [AppSettings.MAX_VOICE_SILENCE_SECONDS] so a hand-edited prefs file
+     * or a slider rounding error can't push the threshold below the
+     * 50ms sample interval (which would auto-stop instantly) or above a
+     * window so long the user assumes the mic is broken.
+     */
+    fun setVoiceSilenceThresholdSeconds(seconds: Float) {
+        val clamped = seconds.coerceIn(
+            AppSettings.MIN_VOICE_SILENCE_SECONDS,
+            AppSettings.MAX_VOICE_SILENCE_SECONDS,
+        )
+        if (_settings.value.voiceSilenceThresholdSeconds == clamped) return
+        prefs.edit().putFloat(KEY_VOICE_SILENCE_SECONDS, clamped).apply()
+        _settings.value = _settings.value.copy(voiceSilenceThresholdSeconds = clamped)
+    }
+
     private fun readSnapshot(): AppSettings {
         val themeName = prefs.getString(KEY_THEME, ThemePreference.System.name)
             ?: ThemePreference.System.name
@@ -77,10 +110,24 @@ class SettingsRepository @Inject constructor(
         val font = prefs.getFloat(KEY_TERMINAL_FONT_SP, AppSettings.DEFAULT_TERMINAL_FONT_SP)
             .coerceIn(AppSettings.MIN_TERMINAL_FONT_SP, AppSettings.MAX_TERMINAL_FONT_SP)
         val tmux = prefs.getBoolean(KEY_TMUX_ON_ATTACH, true)
+        val language = prefs.getString(KEY_VOICE_LANGUAGE, AppSettings.VOICE_LANGUAGE_AUTO)
+            ?.trim()
+            ?.lowercase()
+            ?.ifEmpty { AppSettings.VOICE_LANGUAGE_AUTO }
+            ?: AppSettings.VOICE_LANGUAGE_AUTO
+        val silence = prefs.getFloat(
+            KEY_VOICE_SILENCE_SECONDS,
+            AppSettings.DEFAULT_VOICE_SILENCE_SECONDS,
+        ).coerceIn(
+            AppSettings.MIN_VOICE_SILENCE_SECONDS,
+            AppSettings.MAX_VOICE_SILENCE_SECONDS,
+        )
         return AppSettings(
             theme = theme,
             terminalFontSizeSp = font,
             tmuxOnAttachByDefault = tmux,
+            voiceLanguage = language,
+            voiceSilenceThresholdSeconds = silence,
         )
     }
 
@@ -89,5 +136,7 @@ class SettingsRepository @Inject constructor(
         const val KEY_THEME = "theme"
         const val KEY_TERMINAL_FONT_SP = "terminal_font_sp"
         const val KEY_TMUX_ON_ATTACH = "tmux_on_attach_default"
+        const val KEY_VOICE_LANGUAGE = "voice_language"
+        const val KEY_VOICE_SILENCE_SECONDS = "voice_silence_seconds"
     }
 }

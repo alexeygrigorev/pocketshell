@@ -143,6 +143,7 @@ public class InlineDictationViewModel @Inject constructor(
     internal val audioRecorder: PromptComposerViewModel.MicCapture,
     internal val whisperClientFactory: WhisperClientFactory,
     internal val apiKeyStorage: PromptComposerViewModel.ApiKeyVault,
+    internal val voiceSettings: PromptComposerViewModel.VoiceSettingsSnapshot,
 ) : ViewModel() {
 
     private val _uiState: MutableStateFlow<UiState> = MutableStateFlow(UiState())
@@ -250,6 +251,12 @@ public class InlineDictationViewModel @Inject constructor(
     private suspend fun sampleAmplitudeAndAutoStopOnSilence() {
         var lastLoudAtMs: Long = clock()
         var triggerAutoStop = false
+        // Snapshot the user-configured silence window once at recording
+        // start. Issue #125 made the threshold user-configurable from
+        // Settings → Voice; the snapshot read here keeps the running
+        // window stable so a slider drag does not shorten the in-flight
+        // recording underfoot.
+        val silenceWindowMs = voiceSettings.silenceWindowMs()
         while (kotlinx.coroutines.currentCoroutineContext().isActive) {
             val amp = audioRecorder.currentAmplitude()
             _uiState.update {
@@ -264,7 +271,7 @@ public class InlineDictationViewModel @Inject constructor(
             }
             if (amp >= SILENCE_AMPLITUDE_THRESHOLD) {
                 lastLoudAtMs = clock()
-            } else if (clock() - lastLoudAtMs >= SILENCE_WINDOW_MS) {
+            } else if (clock() - lastLoudAtMs >= silenceWindowMs) {
                 triggerAutoStop = true
                 break
             }
@@ -311,7 +318,7 @@ public class InlineDictationViewModel @Inject constructor(
                 }
                 return@launch
             }
-            val result = client.transcribe(audio)
+            val result = client.transcribe(audio, voiceSettings.whisperLanguageHint())
             result.fold(
                 onSuccess = { text ->
                     // Empty / whitespace-only transcriptions get dropped —
@@ -409,7 +416,14 @@ public class InlineDictationViewModel @Inject constructor(
         /** Same threshold as [PromptComposerViewModel.SILENCE_AMPLITUDE_THRESHOLD]. */
         public const val SILENCE_AMPLITUDE_THRESHOLD: Float = 0.04f
 
-        /** Same window as [PromptComposerViewModel.SILENCE_WINDOW_MS] — per D10. */
+        /**
+         * Default silence window. Per D10 the historic value is 5s; this
+         * constant is now only the fallback used when no preference has
+         * been stored. Issue #125 made the window user-configurable from
+         * Settings → Voice; the live value comes from
+         * [PromptComposerViewModel.VoiceSettingsSnapshot.silenceWindowMs]
+         * sampled at the start of each recording.
+         */
         public const val SILENCE_WINDOW_MS: Long = 5_000L
 
         /** Same poll interval as [PromptComposerViewModel.SAMPLE_INTERVAL_MS]. */

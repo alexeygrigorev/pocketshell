@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Context
 import androidx.annotation.RequiresPermission
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.settings.AppSettings
+import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.core.voice.AndroidKeystoreApiKeyStorage
 import com.pocketshell.core.voice.AudioRecorder
 import com.pocketshell.core.voice.CommandPlannerClient
@@ -88,6 +90,19 @@ object VoiceModule {
     fun provideApiKeyVault(storage: AndroidKeystoreApiKeyStorage): PromptComposerViewModel.ApiKeyVault =
         EncryptedApiKeyVault(storage)
 
+    /**
+     * Bind [PromptComposerViewModel.VoiceSettingsSnapshot] onto the
+     * [SettingsRepository] persisted by issue #125. Singleton because
+     * the underlying repository is one; the snapshot itself is stateless
+     * and reads the latest StateFlow value on each call.
+     */
+    @Provides
+    @Singleton
+    fun provideVoiceSettingsSnapshot(
+        repository: SettingsRepository,
+    ): PromptComposerViewModel.VoiceSettingsSnapshot =
+        SettingsRepositoryVoiceSnapshot(repository)
+
     @Provides
     fun provideWhisperClientFactory(
         storage: AndroidKeystoreApiKeyStorage,
@@ -130,6 +145,27 @@ internal class EncryptedApiKeyVault(
     override fun save(key: CharArray) = storage.save(key)
     override fun load(): CharArray? = storage.load()
     override fun clear() = storage.clear()
+}
+
+/**
+ * Default [PromptComposerViewModel.VoiceSettingsSnapshot] — reads the
+ * latest [SettingsRepository] snapshot on every call so a user-tap in
+ * the Voice section takes effect on the next recording without any
+ * cross-scope plumbing. The repository's StateFlow guarantees the read
+ * sees the most recently persisted value.
+ */
+internal class SettingsRepositoryVoiceSnapshot(
+    private val repository: SettingsRepository,
+) : PromptComposerViewModel.VoiceSettingsSnapshot {
+    override fun silenceWindowMs(): Long {
+        val seconds = repository.settings.value.voiceSilenceThresholdSeconds
+        return (seconds * 1000f).toLong()
+    }
+
+    override fun whisperLanguageHint(): String? {
+        val code = repository.settings.value.voiceLanguage
+        return if (code == AppSettings.VOICE_LANGUAGE_AUTO || code.isBlank()) null else code
+    }
 }
 
 /**

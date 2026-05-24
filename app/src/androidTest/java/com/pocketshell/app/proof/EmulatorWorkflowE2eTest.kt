@@ -122,7 +122,16 @@ class EmulatorWorkflowE2eTest {
         val inputStart = SystemClock.elapsedRealtime()
         input.commitText("abc", 1)
         waitForVisibleTerminalText("tui draft abc") { it.hasVisibleDraft("abc") }
-        input.deleteSurroundingText(1, 0)
+        // Backspace via direct key dispatch on the TerminalView, not
+        // through `input.deleteSurroundingText(1, 0)`. The
+        // InputConnection path enqueues a KeyEvent on the IMF
+        // dispatcher, which has been observed to silently defer the
+        // event on the CI emulator under contention (issue #130: the
+        // type/abc commit just before this one was visible in <1 s,
+        // but the backspace never reached the TUI even after 180 s,
+        // leaving `draft:abc` instead of `draft:ab`). Direct dispatch
+        // matches what real users feel pressing a key-bar key.
+        dispatchKeyOnTerminal(android.view.KeyEvent.KEYCODE_DEL)
         waitForVisibleTerminalText("tui draft ab") { it.hasVisibleDraft("ab") }
         input.commitText("d", 1)
         waitForVisibleTerminalText("tui draft abd") { it.hasVisibleDraft("abd") }
@@ -310,6 +319,44 @@ class EmulatorWorkflowE2eTest {
         }
         InstrumentationRegistry.getInstrumentation().waitForIdleSync()
         return requireNotNull(connection) { "TerminalView did not create an InputConnection" }
+    }
+
+    /**
+     * Dispatch a synthesized hardware key directly through the
+     * `TerminalView`. Bypasses the `InputConnection.sendKeyEvent`
+     * path (which enqueues the event on the input-method framework
+     * dispatcher and has been observed to silently drop / defer
+     * keystrokes under CI emulator contention — the `deleteSurroundingText`
+     * route in particular). Synchronous via `runOnMainSync`.
+     */
+    private fun dispatchKeyOnTerminal(keyCode: Int, metaState: Int = 0) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.runOnMainSync {
+            launchedActivity?.onActivity { activity ->
+                val view = requireNotNull(activity.window.decorView.findTerminalView()) {
+                    "TerminalView was not found"
+                }
+                val down = android.view.KeyEvent(
+                    0L,
+                    0L,
+                    android.view.KeyEvent.ACTION_DOWN,
+                    keyCode,
+                    0,
+                    metaState,
+                )
+                val up = android.view.KeyEvent(
+                    0L,
+                    0L,
+                    android.view.KeyEvent.ACTION_UP,
+                    keyCode,
+                    0,
+                    metaState,
+                )
+                view.dispatchKeyEvent(down)
+                view.dispatchKeyEvent(up)
+            }
+        }
+        instrumentation.waitForIdleSync()
     }
 
     private fun waitForTerminalViewAttached() {

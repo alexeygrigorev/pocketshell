@@ -7,6 +7,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageStatus
+import com.pocketshell.core.usage.UsageWindow
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -172,6 +173,102 @@ class UsageSchedulerTest {
 
         scheduler.refreshNow()
         assertTrue("stale snapshot must be dropped when quse is gone", scheduler.snapshots.value.isEmpty())
+    }
+
+    /**
+     * Issue #116 (usage-panel Fix B): the `worstBadgeRecord` extension
+     * picks a blocked provider over a near-limit one, falls back to a
+     * near-limit provider when no blocked one is present, and returns
+     * `null` when no record warrants a badge. The map below tabulates
+     * the three legs of the rule.
+     */
+    @Test
+    fun worstBadgeRecord_prefersBlockedOverNearLimit_andReturnsNullForHealthy() {
+        val blocked = UsageProviderRecord(
+            provider = "codex",
+            status = UsageStatus.Blocked,
+            windows = listOf(UsageWindow("5h", 100.0, 100.0, "percent", null)),
+            rawStatus = "limited",
+        )
+        val near = UsageProviderRecord(
+            provider = "claude",
+            status = UsageStatus.Ok,
+            windows = listOf(UsageWindow("5h", 92.0, 100.0, "percent", null)),
+            rawStatus = "ok",
+        )
+        val healthy = UsageProviderRecord(
+            provider = "copilot",
+            status = UsageStatus.Ok,
+            windows = listOf(UsageWindow("7d", 10.0, 100.0, "percent", null)),
+            rawStatus = "ok",
+        )
+
+        val blockedSnapshot = UsageSnapshot.Records(
+            hostId = 1, hostName = "h", records = listOf(near, blocked),
+            fetchedAt = Instant.now(), command = "quse --json",
+        )
+        assertEquals(blocked, blockedSnapshot.worstBadgeRecord())
+
+        val nearSnapshot = UsageSnapshot.Records(
+            hostId = 1, hostName = "h", records = listOf(healthy, near),
+            fetchedAt = Instant.now(), command = "quse --json",
+        )
+        assertEquals(near, nearSnapshot.worstBadgeRecord())
+
+        val healthySnapshot = UsageSnapshot.Records(
+            hostId = 1, hostName = "h", records = listOf(healthy),
+            fetchedAt = Instant.now(), command = "quse --json",
+        )
+        assertNull(healthySnapshot.worstBadgeRecord())
+
+        // ToolMissing + Failed never produce a chip — the host card
+        // already conveys the issue via the setup-state badge.
+        assertNull(
+            UsageSnapshot.ToolMissing(1, "h", Instant.now()).worstBadgeRecord(),
+        )
+        assertNull(
+            UsageSnapshot.Failed(1, "h", "boom", Instant.now()).worstBadgeRecord(),
+        )
+    }
+
+    /**
+     * Issue #116: `updateSnapshots` merges externally-produced
+     * snapshots (e.g. the pull-to-refresh path on `UsageViewModel`)
+     * into the scheduler's flow so cross-surface badges (the host
+     * list strip + the in-session chip) stay in sync without waiting
+     * for the next polling tick.
+     */
+    @Test
+    fun updateSnapshots_mergesAndPreservesExistingEntries() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        db.hostDao().insert(
+            HostEntity(name = "host-a", hostname = "a", username = "u", keyId = keyId, quseInstalled = true),
+        )
+        val scheduler = UsageScheduler(db.hostDao(), db.sshKeyDao(), UsageRemoteSource())
+        assertTrue(scheduler.snapshots.value.isEmpty())
+
+        val externalRecord = UsageProviderRecord(
+            provider = "codex",
+            status = UsageStatus.Blocked,
+            windows = listOf(UsageWindow("5h", 100.0, 100.0, "percent", null)),
+            rawStatus = "limited",
+        )
+        scheduler.updateSnapshots(
+            mapOf(
+                42L to UsageSnapshot.Records(
+                    hostId = 42L,
+                    hostName = "external",
+                    records = listOf(externalRecord),
+                    fetchedAt = Instant.now(),
+                    command = "quse --json",
+                ),
+            ),
+        )
+        assertTrue(scheduler.snapshots.value.containsKey(42L))
+        assertEquals(
+            externalRecord,
+            (scheduler.snapshots.value[42L] as UsageSnapshot.Records).records.single(),
+        )
     }
 
     @Test

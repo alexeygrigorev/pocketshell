@@ -87,6 +87,15 @@ fun HostCard(
     onLongClick: (() -> Unit)? = null,
     setupState: HostSetupState = HostSetupState.Unknown,
     onSetupBadgeClick: (() -> Unit)? = null,
+    // Issue #116 (usage-panel Fix B): optional caller-supplied chip
+    // rendered to the right of the setup-state badge from #120. The
+    // host list call site uses this slot for the cross-host
+    // [com.pocketshell.app.usage.UsageSessionBlockedBadge] chip when
+    // the most-recent `quse` poll reports the host is blocked or
+    // near-limit. The slot is intentionally generic so a future
+    // surface (e.g. a "session live" pulse from #22) can reuse it
+    // without re-shaping the API.
+    usageBadge: (@Composable () -> Unit)? = null,
     trailingContent: (@Composable () -> Unit)? = null,
 ) {
     Row(
@@ -159,6 +168,15 @@ fun HostCard(
                     state = setupState,
                     onClick = onSetupBadgeClick,
                 )
+                // Issue #116: the usage chip coexists with the
+                // setup-state badge from #120; both can be present at
+                // once (e.g. a Ready host whose Claude window is at
+                // 92% renders "ready" + "Near limit"). A small gap
+                // separates the two so they don't read as one chip.
+                if (usageBadge != null) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    usageBadge()
+                }
             }
             Spacer(modifier = Modifier.size(2.dp))
             Text(

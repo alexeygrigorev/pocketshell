@@ -137,6 +137,16 @@ public class SshHostUsageFetcher @Inject constructor(
 open class UsageViewModel @Inject constructor(
     private val hostDao: HostDao,
     private val fetcher: HostUsageFetcher,
+    // Issue #116 (usage-panel Fix B): the scheduler is the single
+    // source of truth for the per-host usage snapshots that the host
+    // list strip + per-card badge + in-session chip all read. The view
+    // model's pull-to-refresh path now feeds the scheduler too so the
+    // badges in those surfaces update when the user taps refresh on
+    // the Usage screen (AC #4: "both update on pull-to-refresh on
+    // UsageScreen"). Nullable + defaulted so the existing test suite
+    // — which constructs the view model directly with a fake fetcher
+    // — keeps compiling without rewiring every test fixture.
+    private val usageScheduler: UsageScheduler? = null,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(UsageScreenState())
@@ -151,6 +161,10 @@ open class UsageViewModel @Inject constructor(
     /**
      * Re-fetch usage for every host. Cancels any in-flight refresh first
      * so rapid pull-to-refresh taps don't stack overlapping probes.
+     *
+     * Issue #116 also fans the same per-host result into
+     * [UsageScheduler] (when injected) so the host-list strip and the
+     * in-session chips stay in sync with what's on the usage panel.
      */
     fun refresh() {
         inFlight?.cancel()
@@ -159,20 +173,37 @@ open class UsageViewModel @Inject constructor(
             val hosts = hostDao.getAll().first()
             val snapshots = mutableListOf<UsageHostSnapshot>()
             val missing = mutableListOf<UsageMissingToolHost>()
+            val schedulerUpdates = mutableMapOf<Long, UsageSnapshot>()
 
             hosts.forEach { host ->
                 when (val result = fetcher.fetch(host)) {
-                    is HostUsageFetch.Records -> snapshots += UsageHostSnapshot(
-                        hostId = host.id,
-                        hostName = host.name,
-                        records = result.records,
-                        lastSyncedAt = result.syncedAt,
-                    )
+                    is HostUsageFetch.Records -> {
+                        snapshots += UsageHostSnapshot(
+                            hostId = host.id,
+                            hostName = host.name,
+                            records = result.records,
+                            lastSyncedAt = result.syncedAt,
+                        )
+                        schedulerUpdates[host.id] = UsageSnapshot.Records(
+                            hostId = host.id,
+                            hostName = host.name,
+                            records = result.records,
+                            fetchedAt = result.syncedAt,
+                            command = host.usageCommandOverride ?: UsageRemoteSource.defaultUsageCommand,
+                        )
+                    }
 
-                    HostUsageFetch.ToolMissing -> missing += UsageMissingToolHost(
-                        hostId = host.id,
-                        hostName = host.name,
-                    )
+                    HostUsageFetch.ToolMissing -> {
+                        missing += UsageMissingToolHost(
+                            hostId = host.id,
+                            hostName = host.name,
+                        )
+                        schedulerUpdates[host.id] = UsageSnapshot.ToolMissing(
+                            hostId = host.id,
+                            hostName = host.name,
+                            fetchedAt = java.time.Instant.now(),
+                        )
+                    }
 
                     HostUsageFetch.Skipped -> Unit
                 }
@@ -183,6 +214,9 @@ open class UsageViewModel @Inject constructor(
                 missingToolHosts = missing,
                 isRefreshing = false,
             )
+
+            // Fan into the scheduler so cross-surface badges update.
+            usageScheduler?.updateSnapshots(schedulerUpdates)
         }
     }
 }

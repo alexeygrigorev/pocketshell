@@ -149,6 +149,14 @@ public fun TmuxSessionScreen(
     onReplaceTmuxSession: (sessionName: String) -> Unit = {},
     onOpenJobs: () -> Unit = {},
     onOpenUsage: () -> Unit = {},
+    /**
+     * Issue #116 (usage-panel Fix B): same per-host worst-case
+     * [com.pocketshell.core.usage.UsageProviderRecord] surface as
+     * [com.pocketshell.app.session.SessionScreen], but for the
+     * `tmux -CC` route. MainActivity passes the lookup for the active
+     * host id; `null` when no chip should render.
+     */
+    usageBadgeProvider: com.pocketshell.core.usage.UsageProviderRecord? = null,
 ) {
     LaunchedEffect(hostId, hostName, host, port, user, keyPath, passphrase, sessionName, startDirectory) {
         viewModel.connect(
@@ -344,6 +352,25 @@ public fun TmuxSessionScreen(
             }
             (status as? ConnectionStatus.Failed)?.let {
                 StatusLine(it.message)
+            }
+            // Issue #116 (usage-panel Fix B): in-session blocked /
+            // near-limit chip for the active host. Mirrors the
+            // status-area placement on [com.pocketshell.app.session.SessionScreen]
+            // so the user sees the same affordance regardless of
+            // whether the route is plain SSH or tmux -CC.
+            if (usageBadgeProvider != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(color = PocketShellColors.Surface)
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .testTag(TMUX_SESSION_USAGE_BADGE_TAG),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    com.pocketshell.app.usage.UsageSessionBlockedBadge(
+                        provider = usageBadgeProvider,
+                    )
+                }
             }
 
             val tabs = if (currentAgentConversation?.detection != null) {
@@ -905,6 +932,8 @@ internal const val TMUX_SESSION_SCREEN_TAG = "tmux:session"
 internal const val TMUX_SESSION_SWITCHER_TAG = "tmux:session-switcher"
 internal const val TMUX_CONVERSATION_PANE_TAG = "tmux:conversation"
 internal const val TMUX_AGENT_HINT_TAG = "tmux:agent-hint"
+/** Issue #116: stable test tag for the in-tmux-session blocked / near-limit chip. */
+internal const val TMUX_SESSION_USAGE_BADGE_TAG = "tmux:usage-badge"
 
 private fun Modifier.verticalSwipeInput(
     thresholdPx: Float,

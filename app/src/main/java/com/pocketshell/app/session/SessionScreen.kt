@@ -66,6 +66,8 @@ import com.pocketshell.uikit.theme.PocketShellColors
 internal const val SESSION_SCREEN_TAG = "session:screen"
 internal const val SESSION_CONVERSATION_PANE_TAG = "session:conversation"
 internal const val SESSION_AGENT_HINT_TAG = "session:agent-hint"
+/** Issue #116: stable test tag for the in-session blocked / near-limit chip. */
+internal const val SESSION_USAGE_BADGE_TAG = "session:usage-badge"
 
 /**
  * Phase 1 session screen — the visual target is `docs/mockups/session.html`.
@@ -99,6 +101,16 @@ public fun SessionScreen(
     onBack: () -> Unit = {},
     onOpenJobs: () -> Unit = {},
     onOpenUsage: () -> Unit = {},
+    /**
+     * Issue #116 (usage-panel Fix B): the most-concerning
+     * [com.pocketshell.core.usage.UsageProviderRecord] for this
+     * session's host as reported by [com.pocketshell.app.usage.UsageScheduler].
+     * `null` when no record warrants a chip — the badge composable
+     * still short-circuits on `null` so passing it through is safe.
+     * MainActivity computes the lookup from the scheduler's snapshot
+     * map for the active session's `hostId`.
+     */
+    usageBadgeProvider: com.pocketshell.core.usage.UsageProviderRecord? = null,
     inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
 ) {
     LaunchedEffect(host, port, user, keyPath, passphrase) {
@@ -198,6 +210,28 @@ public fun SessionScreen(
             }
             (status as? ConnectionStatus.Failed)?.let {
                 StatusLine(it.message)
+            }
+            // Issue #116 (usage-panel Fix B): in-session blocked /
+            // near-limit chip for the active host. Rendered in the
+            // status area so it sits above the terminal viewport
+            // without competing with the breadcrumb's `host > session
+            // > pane` chain. The badge composable already returns
+            // early when neither `isBlocked` nor `isNearLimit` is
+            // true, so passing a non-null provider that doesn't
+            // warrant a chip still renders nothing.
+            if (usageBadgeProvider != null) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(color = PocketShellColors.Surface)
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .testTag(SESSION_USAGE_BADGE_TAG),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    com.pocketshell.app.usage.UsageSessionBlockedBadge(
+                        provider = usageBadgeProvider,
+                    )
+                }
             }
 
             // The terminal surface owns the rest of the vertical band. The

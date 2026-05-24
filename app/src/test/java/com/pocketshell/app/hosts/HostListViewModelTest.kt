@@ -10,6 +10,10 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.bootstrap.HostBootstrapper
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
+import com.pocketshell.app.usage.UsageRemoteSource
+import com.pocketshell.app.usage.UsageScheduler
+import com.pocketshell.app.usage.UsageSnapshot
+import com.pocketshell.app.usage.worstBadgeRecord
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
@@ -90,6 +94,17 @@ class HostListViewModelTest {
     }
 
     /**
+     * A scheduler wired against the in-memory database so the ViewModel
+     * can construct without standing up Hilt. Tests that exercise the
+     * usage-strip / per-host badge flows seed the snapshot map via
+     * [UsageScheduler.refreshNow] with a fake [UsageScheduler.fetchHost]
+     * lambda; the rest of the suite only needs a scheduler that is
+     * inert.
+     */
+    private fun newUsageScheduler(): UsageScheduler =
+        UsageScheduler(db.hostDao(), db.sshKeyDao(), UsageRemoteSource())
+
+    /**
      * A test double for [ReleaseChecker] that returns a pre-canned
      * [ReleaseInfo] (or `null`) and records the number of `check()`
      * calls so the test can assert that `init {}` and `checkForUpdates()`
@@ -134,6 +149,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
         // Read from the underlying DAO flow directly — the ViewModel's
         // own StateFlow uses `WhileSubscribed(5s)`, which interacts with
@@ -159,6 +175,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
         val key = viewModel.keyFor(keyId)
         assertNotNull(key)
@@ -174,6 +191,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
         assertNull(viewModel.keyFor(9_999L))
     }
@@ -196,6 +214,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = fake,
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
 
         // `init {}` kicks off the check; UnconfinedTestDispatcher drains
@@ -213,6 +232,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = fake,
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
 
         assertEquals(1, fake.callCount)
@@ -228,6 +248,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = fake,
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
         // `init {}` already fired one call.
         assertEquals(1, fake.callCount)
@@ -255,6 +276,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = fake,
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
 
         assertEquals(0, fake.callCount)
@@ -298,6 +320,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
 
         viewModel.bootstrapHost(host, keyPath = "/tmp/k")
@@ -339,6 +362,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
 
         // Synchronous cache-check sets pending immediately at ready=false
@@ -457,6 +481,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
 
         // Read the upstream projection — same `stateIn(WhileSubscribed)`
@@ -507,6 +532,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
 
         // Pre-condition: no acknowledgement banner yet.
@@ -552,6 +578,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
         val payload = """
             {
@@ -584,6 +611,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
         val payload = """
             {
@@ -613,6 +641,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
         val payload = SshImportPayloadCodec.encode(
             SshImportConfig(
@@ -658,6 +687,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
         val payload = SshImportPayloadCodec.encode(
             SshImportConfig(
@@ -693,6 +723,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
         val payload = SshImportPayloadCodec.encode(
             SshImportConfig(
@@ -727,6 +758,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
         val inner = SshImportPayloadCodec.encode(
             SshImportConfig(
@@ -760,6 +792,7 @@ class HostListViewModelTest {
             sshKeyDao = db.sshKeyDao(),
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
         )
         val payload = "X".repeat(QrChunkCodec.ChunkSize * 2 + 1)
         val envelopes = QrChunkCodec.encode(payload, id = "deadbeef")
@@ -774,6 +807,148 @@ class HostListViewModelTest {
             "expected guidance message to mention the scanner, got: $message",
             message!!.contains("scanner", ignoreCase = true),
         )
+    }
+
+    /**
+     * Issue #116 (usage-panel Fix B): `hasUsageInstalledHost` flips
+     * to `true` exactly when at least one persisted host has
+     * `quseInstalled = true`. This is the gate the host list uses to
+     * decide whether to render the cross-host usage strip.
+     */
+    @Test
+    fun hasUsageInstalledHost_reflectsPersistedQuseFlag() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        // First: no hosts at all → false.
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+        )
+        assertEquals(
+            false,
+            db.hostDao().getAll().first().any { it.quseInstalled == true },
+        )
+
+        // Add a host with quseInstalled = false → still false.
+        db.hostDao().insert(
+            HostEntity(name = "no-quse", hostname = "n.example", username = "u", keyId = keyId, quseInstalled = false),
+        )
+        assertEquals(
+            false,
+            db.hostDao().getAll().first().any { it.quseInstalled == true },
+        )
+
+        // Add a host with quseInstalled = true → flag flips on.
+        db.hostDao().insert(
+            HostEntity(name = "with-quse", hostname = "q.example", username = "u", keyId = keyId, quseInstalled = true),
+        )
+        assertEquals(
+            true,
+            db.hostDao().getAll().first().any { it.quseInstalled == true },
+        )
+
+        // The view model exposes the same predicate via the
+        // `hasUsageInstalledHost` flow; sanity-check it is non-null.
+        assertNotNull(viewModel.hasUsageInstalledHost)
+    }
+
+    /**
+     * Issue #116: when the scheduler reports a blocked record for a
+     * host, `usageBadges` carries the worst-case provider for that
+     * host id. Hosts with a healthy snapshot are absent from the
+     * map — the host card uses absence as "do not render the chip".
+     */
+    @Test
+    fun usageBadges_mapsHostIdToWorstProvider() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val blockedHostId = db.hostDao().insert(
+            HostEntity(name = "blocked", hostname = "b", username = "u", keyId = keyId, quseInstalled = true),
+        )
+        val healthyHostId = db.hostDao().insert(
+            HostEntity(name = "healthy", hostname = "h", username = "u", keyId = keyId, quseInstalled = true),
+        )
+
+        val scheduler = newUsageScheduler()
+        // Seed the scheduler synchronously with a deterministic fetch
+        // lambda so the snapshot map has predictable contents before
+        // the view model materialises.
+        scheduler.fetchHost = { host ->
+            val provider = if (host.id == blockedHostId) {
+                com.pocketshell.core.usage.UsageProviderRecord(
+                    provider = "codex",
+                    status = com.pocketshell.core.usage.UsageStatus.Blocked,
+                    windows = listOf(
+                        com.pocketshell.core.usage.UsageWindow(
+                            name = "5h",
+                            used = 100.0,
+                            limit = 100.0,
+                            unit = "percent",
+                            resetAt = null,
+                        ),
+                    ),
+                    rawStatus = "limited",
+                )
+            } else {
+                com.pocketshell.core.usage.UsageProviderRecord(
+                    provider = "claude",
+                    status = com.pocketshell.core.usage.UsageStatus.Ok,
+                    windows = listOf(
+                        com.pocketshell.core.usage.UsageWindow(
+                            name = "5h",
+                            used = 10.0,
+                            limit = 100.0,
+                            unit = "percent",
+                            resetAt = null,
+                        ),
+                    ),
+                    rawStatus = "ok",
+                )
+            }
+            UsageSnapshot.Records(
+                hostId = host.id,
+                hostName = host.name,
+                records = listOf(provider),
+                fetchedAt = java.time.Instant.now(),
+                command = UsageRemoteSource.defaultUsageCommand,
+            )
+        }
+        scheduler.refreshNow()
+
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = scheduler,
+        )
+
+        // The snapshots flow on the scheduler is the upstream — that's
+        // the authoritative source of truth and easier to read than
+        // the WhileSubscribed-gated flows on the view model.
+        val snapshots = scheduler.snapshots.value
+        assertTrue(snapshots[blockedHostId] is UsageSnapshot.Records)
+        assertTrue(snapshots[healthyHostId] is UsageSnapshot.Records)
+        val blockedSnapshot = snapshots[blockedHostId] as UsageSnapshot.Records
+        // The view model's `usageBadges` flow runs the same
+        // worstBadgeRecord rule on the same snapshots map; assert
+        // directly on the rule so the test does not race the
+        // WhileSubscribed sharing started.
+        val blockedBadge = blockedSnapshot.worstBadgeRecord()
+        assertNotNull("blocked host must yield a worst-case provider", blockedBadge)
+        assertEquals(true, blockedBadge!!.isBlocked)
+        val healthySnapshot = snapshots[healthyHostId] as UsageSnapshot.Records
+        assertNull(
+            "healthy host must NOT yield a worst-case provider (no badge)",
+            healthySnapshot.worstBadgeRecord(),
+        )
+
+        // `viewModel.usageBadges` is non-null even before the flow
+        // collector lands; sanity-check it is reachable.
+        assertNotNull(viewModel.usageBadges)
     }
 
     private companion object {

@@ -41,8 +41,10 @@ import com.pocketshell.app.systemsurfaces.ForwardingChooserScreen
 import com.pocketshell.app.systemsurfaces.ForwardingTileService
 import com.pocketshell.app.tmux.TmuxSessionScreen
 import com.pocketshell.app.tmux.TmuxSessionViewModel
+import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageScreen
 import com.pocketshell.app.usage.UsageViewModel
+import com.pocketshell.app.usage.worstBadgeRecord
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellThemeMode
 import dagger.hilt.android.AndroidEntryPoint
@@ -93,6 +95,15 @@ class MainActivity : FragmentActivity() {
     @Inject
     lateinit var settingsRepository: SettingsRepository
 
+    // Issue #116 (usage-panel Fix B): the session screens need the
+    // per-host worst-case usage record so the in-session blocked /
+    // near-limit chip can render in the status area. Injecting the
+    // scheduler at the activity lets the navigator pass a snapshot
+    // map down to each session destination without coupling
+    // SessionViewModel / TmuxSessionViewModel to the scheduler.
+    @Inject
+    lateinit var usageScheduler: UsageScheduler
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedDestination = initialDestinationFromIntent(intent)
@@ -129,6 +140,7 @@ class MainActivity : FragmentActivity() {
                 ) {
                     AppNavigator(
                         sessionViewModel = sessionViewModel,
+                        usageScheduler = usageScheduler,
                         requestedDestination = requestedDestination,
                         pendingImportPayload = pendingImportPayload,
                         onImportPayloadConsumed = { pendingImportPayload = null },
@@ -166,10 +178,21 @@ private fun ThemePreference.toThemeMode(): PocketShellThemeMode = when (this) {
 @Composable
 private fun AppNavigator(
     sessionViewModel: SessionViewModel,
+    usageScheduler: UsageScheduler,
     requestedDestination: AppDestination,
     pendingImportPayload: String? = null,
     onImportPayloadConsumed: () -> Unit = {},
 ) {
+    // Issue #116: per-host worst-case usage record map, derived from
+    // the scheduler's snapshot flow. Session destinations look up the
+    // active host id in this map to decide whether to render the
+    // in-session blocked / near-limit chip.
+    val usageSnapshots by usageScheduler.snapshots.collectAsState()
+    val usageBadgesByHost = remember(usageSnapshots) {
+        usageSnapshots.mapNotNull { (id, snap) ->
+            snap.worstBadgeRecord()?.let { id to it }
+        }.toMap()
+    }
     // Issue #129: the activity scrapes the import payload out of a
     // `pocketshell://import?...` deep link before composition starts
     // and stores it here. We hand it to the host-list view model the
@@ -221,6 +244,12 @@ private fun AppNavigator(
             onOpenCrashReports = { navigate(AppDestination.CrashReports) },
             onOpenSettings = { navigate(AppDestination.Settings) },
             onOpenScan = { navigate(AppDestination.Scan) },
+            // Issue #116 (usage-panel Fix B): wire the cross-host usage
+            // strip's tap target to the same Usage destination the
+            // bootstrap-success CTA opens. The bootstrap path keeps the
+            // existing wiring (the strip uses the same callback so the
+            // two routes always agree).
+            onOpenUsage = { navigate(AppDestination.Usage) },
             onOpenSession = { host, keyPath, passphrase ->
                 navigate(
                     AppDestination.Session(
@@ -370,6 +399,10 @@ private fun AppNavigator(
                 )
             },
             onOpenUsage = { navigate(AppDestination.Usage) },
+            // Issue #116: in-session blocked / near-limit chip for the
+            // active host. Look up by [HostEntity.id]; absence means the
+            // scheduler has no recent record warranting a chip.
+            usageBadgeProvider = usageBadgesByHost[dest.hostId],
         )
 
         is AppDestination.PortForwardPanel -> PortForwardPanelScreen(
@@ -446,6 +479,8 @@ private fun AppNavigator(
                 )
             },
             onOpenUsage = { navigate(AppDestination.Usage) },
+            // Issue #116: same per-host chip as the plain-SSH route.
+            usageBadgeProvider = usageBadgesByHost[dest.hostId],
         )
     }
 }

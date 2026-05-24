@@ -157,6 +157,10 @@ fun HostListScreen(
     val shareMessage by viewModel.shareMessage.collectAsState()
     val recheckMessage by viewModel.recheckMessage.collectAsState()
     val setupStates by viewModel.setupStates.collectAsState()
+    // Issue #116 (usage-panel Fix B): per-card chip + cross-host strip.
+    val usageBadges by viewModel.usageBadges.collectAsState()
+    val usageDashboardRows by viewModel.usageDashboardRows.collectAsState()
+    val hasUsageInstalledHost by viewModel.hasUsageInstalledHost.collectAsState()
     val context = LocalContext.current
     val activity = context as? FragmentActivity
     val hostSharePicker = rememberLauncherForActivityResult(
@@ -356,6 +360,26 @@ fun HostListScreen(
                 )
             }
 
+            // Issue #116 (usage-panel Fix B): cross-host usage strip
+            // sits above the Hosts section header so the user sees the
+            // at-a-glance quota state for every quse-installed host
+            // before scanning individual rows. The strip is gated on
+            // `hasUsageInstalledHost` so a workspace with no quse hosts
+            // never renders an empty rail (AC: "When no host has quse
+            // installed, the dashboard strip is not rendered"). Tapping
+            // routes to `AppDestination.Usage` via `onOpenUsage` — the
+            // same destination the kebab in SessionScreen / TmuxSession
+            // opens.
+            if (hasUsageInstalledHost && onOpenUsage != null) {
+                com.pocketshell.app.usage.UsageDashboardStrip(
+                    rows = usageDashboardRows,
+                    onClick = onOpenUsage,
+                    modifier = Modifier
+                        .padding(top = 8.dp)
+                        .testTag(USAGE_DASHBOARD_STRIP_TAG),
+                )
+            }
+
             SectionLabel(
                 label = "Hosts",
                 count = "${hosts.size} saved",
@@ -390,6 +414,10 @@ fun HostListScreen(
                             // map (race-free fallback while the DAO emission
                             // catches up).
                             val setupState = setupStates[host.id] ?: HostSetupState.Unknown
+                            // Issue #116: per-host usage chip. `null`
+                            // when the scheduler has no record warranting
+                            // a chip — the slot collapses cleanly.
+                            val usageRecord = usageBadges[host.id]
                             HostCard(
                                 name = host.name,
                                 subtitle = "${host.username}@${host.hostname}:${host.port}",
@@ -418,6 +446,22 @@ fun HostListScreen(
                                     // probe re-runs.
                                     { tapRequests.tryEmit(host.id) }
                                 } else null,
+                                // Issue #116: render the blocked /
+                                // near-limit chip when the scheduler has
+                                // a record for this host. The closure is
+                                // hoisted into the `usageBadge` slot so
+                                // the HostCard layout can place the chip
+                                // next to the setup-state badge without
+                                // re-shaping that component.
+                                usageBadge = usageRecord?.let { record ->
+                                    {
+                                        Box(modifier = Modifier.testTag(HOST_USAGE_BADGE_TAG_PREFIX + host.id)) {
+                                            com.pocketshell.app.usage.UsageSessionBlockedBadge(
+                                                provider = record,
+                                            )
+                                        }
+                                    }
+                                },
                                 trailingContent = {
                                     HostOverflowMenuAnchor(
                                         expanded = menuOpen,
@@ -573,6 +617,18 @@ private data class PendingPassphraseRequest(
 )
 
 internal const val HOST_ROW_TAG_PREFIX = "host:row:"
+
+/** Issue #116: stable test tag for the cross-host usage dashboard strip. */
+internal const val USAGE_DASHBOARD_STRIP_TAG = "usage:dashboard-strip"
+
+/**
+ * Issue #116: stable test tag for the per-host blocked / near-limit
+ * chip rendered next to the setup-state badge on [HostCard]. Carried
+ * via the `usageBadge` slot from the host list call site. The setup-
+ * state badge from #120 uses [com.pocketshell.uikit.components.HOST_SETUP_BADGE_TAG]
+ * so the two chips can be targeted independently.
+ */
+internal const val HOST_USAGE_BADGE_TAG_PREFIX = "host:usage-badge:"
 
 /**
  * Top-of-screen banner advertising a newer GitHub Release. Tapping

@@ -13,6 +13,10 @@ import com.pocketshell.app.bootstrap.TmuxStatus
 import com.pocketshell.app.bootstrap.ToolStatus
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
+import com.pocketshell.app.usage.UsageDashboardRow
+import com.pocketshell.app.usage.UsageScheduler
+import com.pocketshell.app.usage.UsageSnapshot
+import com.pocketshell.app.usage.worstBadgeRecord
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -21,6 +25,7 @@ import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.uikit.model.HostSetupState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -81,6 +86,16 @@ class HostListViewModel @Inject constructor(
     private val sshKeyDao: SshKeyDao,
     private val releaseChecker: ReleaseChecker,
     private val bootstrapper: HostBootstrapper,
+    // Issue #116 (usage-panel Fix B): the host list mounts the cross-host
+    // [com.pocketshell.app.usage.UsageDashboardStrip] above its section
+    // header, and each card row may render a blocked/near-limit chip.
+    // Both surfaces read off [UsageScheduler.snapshots] — the singleton
+    // scheduler from #117 already polls every quse-installed host on the
+    // 60s / 5m cadence and caches the result here. Hilt always supplies
+    // the real singleton in production because [UsageScheduler] is
+    // `@Singleton @Inject`; the Robolectric tests construct one with the
+    // same in-memory DAOs they already use.
+    private val usageScheduler: UsageScheduler,
 ) : ViewModel() {
 
     /** Live list of saved hosts, sorted by name (DAO query). */
@@ -112,6 +127,49 @@ class HostListViewModel @Inject constructor(
      */
     val setupStates: StateFlow<Map<Long, HostSetupState>> = hostDao.getAll()
         .map { rows -> rows.associate { it.id to deriveSetupState(it) } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyMap())
+
+    /**
+     * `true` when at least one persisted host has `quseInstalled == true`,
+     * i.e. there is something for the usage panel to surface. Drives the
+     * "render strip / hide strip" gate on [HostListScreen] (issue #116:
+     * "When no host has quse installed, the dashboard strip is not
+     * rendered — no empty rail.").
+     */
+    val hasUsageInstalledHost: StateFlow<Boolean> = hostDao.getAll()
+        .map { rows -> rows.any { it.quseInstalled == true } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), false)
+
+    /**
+     * Rows for the cross-host [com.pocketshell.app.usage.UsageDashboardStrip]
+     * derived from [UsageScheduler.snapshots]. Empty when no quse host has
+     * reported yet — the screen also hides the strip via
+     * [hasUsageInstalledHost] until a record exists, so the strip never
+     * renders an empty rail.
+     */
+    val usageDashboardRows: StateFlow<List<UsageDashboardRow>> = usageScheduler.snapshots
+        .map { snapshots ->
+            val records = snapshots.values
+                .filterIsInstance<UsageSnapshot.Records>()
+                .flatMap { it.records }
+            buildDashboardRows(records)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
+
+    /**
+     * Per-host worst-case provider record — populated only for hosts
+     * whose latest scheduler snapshot warrants the in-app blocked /
+     * near-limit chip (issue #116 AC: "render the badge on each host
+     * card row when the most-recent fetch shows isBlocked or
+     * isNearLimit"). Keyed by [HostEntity.id]; absence means "no
+     * badge".
+     */
+    val usageBadges: StateFlow<Map<Long, UsageProviderRecord>> = usageScheduler.snapshots
+        .map { snapshots ->
+            snapshots.mapNotNull { (id, snap) ->
+                snap.worstBadgeRecord()?.let { id to it }
+            }.toMap()
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyMap())
 
     /**
@@ -838,3 +896,30 @@ internal fun deriveSetupState(host: HostEntity): HostSetupState {
         else -> HostSetupState.Ready
     }
 }
+
+/**
+ * Build [UsageDashboardRow] entries from the union of every host's
+ * fetched [UsageProviderRecord]s. Mirrors the existing extension on
+ * [com.pocketshell.app.usage.UsageScreenState] but operates on a flat
+ * record list so the host list can render the same strip without
+ * shaping a full [com.pocketshell.app.usage.UsageScreenState] from the
+ * scheduler snapshots (issue #116, usage-panel Fix B).
+ *
+ * Rows are sorted by provider so a Claude row consistently appears
+ * above Codex regardless of which host the record came from, and the
+ * most-constrained window is what's shown — the same rule the panel
+ * itself uses for the at-a-glance percent.
+ */
+internal fun buildDashboardRows(records: List<UsageProviderRecord>): List<UsageDashboardRow> =
+    records
+        .sortedWith(compareBy<UsageProviderRecord> { it.provider })
+        .mapNotNull { record ->
+            val window = record.mostConstrainedWindow ?: return@mapNotNull null
+            UsageDashboardRow(
+                provider = record.displayName,
+                status = record.status,
+                percent = window.percent,
+                blocked = record.isBlocked,
+                nearLimit = record.isNearLimit,
+            )
+        }

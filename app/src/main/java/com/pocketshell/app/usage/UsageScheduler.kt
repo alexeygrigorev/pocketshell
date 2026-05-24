@@ -174,6 +174,26 @@ public class UsageScheduler @Inject constructor(
         mutex.withLock { fetchOnce() }
     }
 
+    /**
+     * Merge externally-produced [UsageSnapshot]s into [snapshots]
+     * (issue #116, usage-panel Fix B). The Usage panel's pull-to-
+     * refresh path runs its own SSH fetch via [HostUsageFetcher] and
+     * pushes the result through here so the host list strip + the
+     * per-card / in-session badges pick up the same data without
+     * waiting for the next 60 s tick.
+     *
+     * Snapshots for hosts that no longer have `quseInstalled = true`
+     * are silently dropped on the next [fetchOnce] tick — this method
+     * only adds / overwrites entries, it does not reach into the
+     * `quseInstalled` cache.
+     */
+    public fun updateSnapshots(updates: Map<Long, UsageSnapshot>) {
+        if (updates.isEmpty()) return
+        val merged = _snapshots.value.toMutableMap()
+        merged.putAll(updates)
+        _snapshots.value = merged.toMap()
+    }
+
     private suspend fun runLoop() {
         try {
             while (true) {
@@ -295,4 +315,37 @@ public sealed interface UsageSnapshot {
         val reason: String,
         override val fetchedAt: Instant,
     ) : UsageSnapshot
+}
+
+/**
+ * Pick the worst-case [UsageProviderRecord] for a host's
+ * [UsageSnapshot] — the record that should drive the in-app blocked /
+ * near-limit badge surfaced on the host card and the session screens
+ * (issue #116, usage-panel Fix B).
+ *
+ * Rules, ordered by severity:
+ * - [UsageSnapshot.Records] — return the most-constrained record:
+ *   first any record whose [UsageProviderRecord.isBlocked] is true
+ *   (`status=Blocked` or a window at ≥100%), then any record whose
+ *   [UsageProviderRecord.isNearLimit] is true (a window at
+ *   ≥[UsageProviderRecord.WARN_PERCENT], i.e. 85% — well above the
+ *   ≥90% trigger called out in the issue body, so a 90% window still
+ *   surfaces the badge). When no record warrants a badge the function
+ *   returns `null`, signalling "do not render the chip".
+ * - [UsageSnapshot.ToolMissing] / [UsageSnapshot.Failed] — return
+ *   `null`; the host card is already conveying the issue via the
+ *   setup-state badge from #120 and the missing-tool empty state, and
+ *   the usage chip would just double up the warning surface.
+ *
+ * Returning [UsageProviderRecord] (rather than a boolean) keeps the
+ * caller in control of formatting: the badge composable
+ * [com.pocketshell.app.usage.UsageSessionBlockedBadge] already maps an
+ * `isBlocked` / `isNearLimit` record to "Blocked" / "Near limit"
+ * copy with the matching colour.
+ */
+public fun UsageSnapshot.worstBadgeRecord(): UsageProviderRecord? {
+    if (this !is UsageSnapshot.Records) return null
+    val blocked = records.firstOrNull { it.isBlocked }
+    if (blocked != null) return blocked
+    return records.firstOrNull { it.isNearLimit }
 }

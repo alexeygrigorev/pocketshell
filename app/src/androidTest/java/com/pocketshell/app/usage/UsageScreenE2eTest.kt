@@ -19,6 +19,7 @@ import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
+import com.pocketshell.app.proof.TerminalTestTimeouts
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.settings.USAGE_OPEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
@@ -108,7 +109,7 @@ class UsageScreenE2eTest {
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
 
         // Tap the Settings tab on the host-list top bar.
-        compose.waitUntil(timeoutMillis = 10_000) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
             compose.onAllNodesWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
@@ -117,7 +118,7 @@ class UsageScreenE2eTest {
 
         // Scroll to the Usage row (in case the Settings list is taller
         // than the viewport) and tap it.
-        compose.waitUntil(timeoutMillis = 10_000) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
             compose.onAllNodesWithTag(USAGE_OPEN_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
@@ -126,7 +127,7 @@ class UsageScreenE2eTest {
         compose.onNodeWithTag(USAGE_OPEN_TAG, useUnmergedTree = true).performClick()
 
         // UsageScreen breadcrumb renders "Usage" as the current crumb.
-        compose.waitUntil(timeoutMillis = 20_000) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
             compose.onAllNodesWithText("Usage", useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
@@ -137,7 +138,7 @@ class UsageScreenE2eTest {
         // three providers; the screen renders each as a card with the
         // display name ("Claude" / "Codex" / "Opencode"). Any of those
         // confirms the route + fetch + render path works.
-        compose.waitUntil(timeoutMillis = 30_000) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
             val codex = compose.onAllNodesWithText("Codex", useUnmergedTree = true)
                 .fetchSemanticsNodes()
             val claude = compose.onAllNodesWithText("Claude", useUnmergedTree = true)
@@ -177,14 +178,14 @@ class UsageScreenE2eTest {
         val artifactsDir = ensureArtifactDir()
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
 
-        compose.waitUntil(timeoutMillis = 10_000) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
             compose.onAllNodesWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
         compose.onNodeWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true).performClick()
 
-        compose.waitUntil(timeoutMillis = 10_000) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
             compose.onAllNodesWithTag(USAGE_OPEN_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
@@ -197,7 +198,7 @@ class UsageScreenE2eTest {
         // model is materialised and ran against the seeded host (and
         // gracefully classified it as Skipped — no provider cards, no
         // missing-tool rows).
-        compose.waitUntil(timeoutMillis = 20_000) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
             compose.onAllNodesWithText("Usage", useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()

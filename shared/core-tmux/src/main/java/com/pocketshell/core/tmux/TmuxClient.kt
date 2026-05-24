@@ -1,5 +1,6 @@
 package com.pocketshell.core.tmux
 
+import android.util.Log
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.protocol.ControlEvent
@@ -163,9 +164,10 @@ internal class RealTmuxClient(
             Dispatchers.IO,
     )
 
-    // Shared flow of all events. extraBufferCapacity is generous so a slow
-    // subscriber doesn't back-pressure the reader — dropping a notification
-    // is preferable to stalling the tmux side of the channel.
+    // Shared flow of all events. extraBufferCapacity absorbs short bursts
+    // without blocking the reader. If consumers fall behind for longer than
+    // that, readerLoop suspends instead of dropping terminal bytes; losing a
+    // `%output` chunk corrupts the pane emulator state.
     //
     // replay = 0 because subscribers only care about events that arrive
     // after they start collecting; tmux's structural state (sessions /
@@ -342,9 +344,21 @@ internal class RealTmuxClient(
                 } catch (t: Throwable) {
                     // Channel torn down (close() called, transport drop,
                     // etc.). End the flow rather than re-throw so the
-                    // reader loop completes cleanly.
+                    // reader loop completes cleanly. We surface the
+                    // cause via the diagnostic tag so the reviewer can
+                    // tell an SSH-transport drop apart from a clean
+                    // close — the bare `null` return also covers the
+                    // "EOF without throw" case below.
+                    Log.w(
+                        ISSUE_105_DIAG_TAG,
+                        "ssh-read-failed cause=${t.javaClass.simpleName}: ${t.message}",
+                    )
                     null
-                } ?: break
+                }
+                if (line == null) {
+                    Log.i(ISSUE_105_DIAG_TAG, "ssh-read-eof")
+                    break
+                }
                 emit(line)
             }
         }
@@ -404,9 +418,34 @@ internal class RealTmuxClient(
                 }
                 // Always forward the event to the bus so external
                 // observers (UI, session-list updater, etc.) see the same
-                // events the response-correlator just consumed. tryEmit so
-                // a slow subscriber can't stall the reader.
-                eventBus.tryEmit(event)
+                // events the response-correlator just consumed. Use
+                // suspending emit: tmux pane output is terminal state, not
+                // disposable telemetry.
+                if (event is ControlEvent.Output) {
+                    // Issue #105 diagnostics. We log BEFORE and AFTER the
+                    // emit so a reviewer reading logcat can tell apart:
+                    //   * tmux never produced %output for the external
+                    //     write (no `tmux-output-received` line appears),
+                    //   * the reader saw bytes but the bus emit suspended
+                    //     longer than expected (gap between `received`
+                    //     and `bus-emit`),
+                    //   * downstream (parser + Compose invalidation) is
+                    //     slow (the test's emulator-side checks fire long
+                    //     after `bus-emit`).
+                    // The byte count is enough to correlate with the
+                    // external write without leaking the payload itself.
+                    Log.i(
+                        ISSUE_105_DIAG_TAG,
+                        "tmux-output-received pane=${event.paneId} bytes=${event.data.size}",
+                    )
+                    eventBus.emit(event)
+                    Log.i(
+                        ISSUE_105_DIAG_TAG,
+                        "tmux-output-bus-emit pane=${event.paneId} bytes=${event.data.size}",
+                    )
+                } else {
+                    eventBus.emit(event)
+                }
             }
         } finally {
             // Drain any in-flight pending command — the channel is gone.
@@ -449,6 +488,32 @@ internal class RealTmuxClient(
          * heap.
          */
         private const val EVENT_BUFFER = 256
+
+        /**
+         * Logcat tag for issue #105 live-update diagnostics. Kept short
+         * enough to satisfy `Log.isLoggable`'s 23-char limit on older
+         * Android versions while remaining greppable.
+         *
+         * The reviewer of issue #105 reproduces the "tmux pane does not
+         * repaint when another client writes to it" symptom by attaching
+         * PocketShell to a tmux session and then writing into that
+         * session from a separate SSH client. The four diagnostic
+         * categories spelled out in the issue
+         * (missing tmux output / SSH channel issue / parser issue /
+         * Compose invalidation issue) are distinguished by:
+         *   * `ssh-read-failed` / `ssh-read-eof` from this class — SSH
+         *     channel issues,
+         *   * `tmux-output-received` from this class — tmux DID produce
+         *     bytes for the external write,
+         *   * `tmux-output-bus-emit` from this class — the bytes reached
+         *     the shared event bus (so any subscriber on `outputFor`
+         *     should see them),
+         *   * the absence of corresponding emulator visible-text /
+         *     viewport changes in the issue #105 test harness — parser
+         *     or Compose/View invalidation issue downstream of this
+         *     class.
+         */
+        private const val ISSUE_105_DIAG_TAG = "issue105-diag"
     }
 
     /**

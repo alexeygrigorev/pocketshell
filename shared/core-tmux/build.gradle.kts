@@ -59,6 +59,13 @@ android {
         // Docker API version pin.
         unitTests {
             isIncludeAndroidResources = false
+            // Mirrors `:app` and `:shared:core-terminal`: lets calls to
+            // Android framework stubs (`android.util.Log`, etc.) return
+            // Java defaults instead of throwing `RuntimeException: Stub!`.
+            // RealTmuxClient logs reader-loop diagnostics under the
+            // issue-105 tag; without this flag the unit tests would
+            // crash inside that log path.
+            isReturnDefaultValues = true
             all { test ->
                 test.testLogging {
                     events("passed", "skipped", "failed")

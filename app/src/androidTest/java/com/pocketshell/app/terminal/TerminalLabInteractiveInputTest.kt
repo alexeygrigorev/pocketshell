@@ -204,7 +204,16 @@ class TerminalLabInteractiveInputTest {
         label: String,
         predicate: (String) -> Boolean,
     ) {
-        val deadline = SystemClock.elapsedRealtime() + 20_000
+        // CI fix: the GitHub Actions emulator (Pixel 7, api-34, 2 cores,
+        // swiftshader GPU) is materially slower than the local Linux
+        // emulators we develop against. SSH input → remote PTY render
+        // → TerminalEmulator state round-trips can occasionally take
+        // 25–40 s under load (the backspace step in this test was
+        // observed timing out at the 20 s mark in CI while passing
+        // locally well under 5 s). 60 s gives CI room without slowing
+        // local runs (the predicate polls and exits as soon as it
+        // matches).
+        val deadline = SystemClock.elapsedRealtime() + 60_000
         var lastVisible = ""
         while (SystemClock.elapsedRealtime() < deadline) {
             lastVisible = visibleTerminalText(scenario)

@@ -238,7 +238,18 @@ class TerminalKeyboardStressTest {
                 val expectedCountAfter = baselineTypedCount + charIndex + 1
                 val perCharStart = SystemClock.elapsedRealtime()
                 instr.runOnMainSync { input.commitText(ch.toString(), 1) }
-                val deadline = perCharStart + 5_000
+                // CI fix: the GitHub Actions emulator (Pixel 7, api-34,
+                // 2 cores, swiftshader GPU) is materially slower than
+                // the local Linux emulators we develop against. A
+                // handful of characters per 100-char burst can stall
+                // long enough to miss a 5 s deadline (a recent CI run
+                // observed missed=5 samples=100). The responsiveness
+                // gate is the `median < 200 ms` assertion at the end of
+                // the test; per-character `deadline` is a stall ceiling
+                // and 10 s remains generous against any reasonable
+                // emulator stall. Local runs still hit this branch in
+                // ~20 ms median, so the bump does not slow them.
+                val deadline = perCharStart + 10_000
                 var visibleByDeadline = false
                 while (SystemClock.elapsedRealtime() < deadline) {
                     val text = visibleTerminalText()

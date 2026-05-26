@@ -2,13 +2,14 @@ package com.pocketshell.app.usage
 
 import android.graphics.Bitmap
 import android.os.SystemClock
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -21,6 +22,7 @@ import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.TerminalTestTimeouts
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.app.settings.SETTINGS_LAZY_COLUMN_TAG
 import com.pocketshell.app.settings.USAGE_OPEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -33,7 +35,6 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertTrue
-import org.junit.Assume
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -75,17 +76,6 @@ class UsageScreenE2eTest {
 
     @Test
     fun usagePanel_populatedCell_showsProviderCards() = runBlocking {
-        // Tracked in #132: passes locally, hangs on CI. The first waitUntil
-        // (SETTINGS_BUTTON_TAG on the host-list top bar) succeeds; the second
-        // waitUntil (USAGE_OPEN_TAG inside SettingsScreen, after tapping
-        // Settings) burns the full 180s CI deadline. Activity stays RESUMED
-        // and no app crash / ANR / SSH error appears in logcat. Suspected to
-        // be tied to the dashboard-strip / scheduler wiring from commit
-        // 06dcd81 — investigate separately.
-        Assume.assumeFalse(
-            "Tracked in #132: passes locally, hangs on CI; investigate separately.",
-            TerminalTestTimeouts.isRunningOnCi(),
-        )
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -128,14 +118,13 @@ class UsageScreenE2eTest {
         }
         compose.onNodeWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true).performClick()
 
-        // Scroll to the Usage row (in case the Settings list is taller
-        // than the viewport) and tap it.
-        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
-            compose.onAllNodesWithTag(USAGE_OPEN_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
-        compose.onNodeWithTag(USAGE_OPEN_TAG, useUnmergedTree = true).performScrollTo()
+        // Scroll the Usage row into view (it lives below the fold on
+        // ~854dp CI viewports because LazyColumn only composes children
+        // once they're scrolled near) and tap it. `performScrollToNode`
+        // drives the LazyColumn to materialise the matching item, which
+        // a plain `onNodeWithTag` lookup can't trigger on its own.
+        compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG)
+            .performScrollToNode(hasTestTag(USAGE_OPEN_TAG))
         compose.onNodeWithTag(USAGE_OPEN_TAG, useUnmergedTree = true).performClick()
 
         // UsageScreen breadcrumb renders "Usage" as the current crumb.
@@ -172,13 +161,6 @@ class UsageScreenE2eTest {
 
     @Test
     fun usagePanel_emptyCell_rendersBreadcrumbAndEmptyState() = runBlocking {
-        // Tracked in #132: same CI hang as the populated cell — the
-        // USAGE_OPEN_TAG waitUntil times out on CI even though the path is
-        // identical to a local run that passes within a few seconds.
-        Assume.assumeFalse(
-            "Tracked in #132: passes locally, hangs on CI; investigate separately.",
-            TerminalTestTimeouts.isRunningOnCi(),
-        )
         val key = readFixtureKey()
         // Best-effort probe; an unreachable agents target still lets the
         // empty-cell test prove the panel renders for hosts that can't
@@ -204,12 +186,10 @@ class UsageScreenE2eTest {
         }
         compose.onNodeWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true).performClick()
 
-        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
-            compose.onAllNodesWithTag(USAGE_OPEN_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
-        compose.onNodeWithTag(USAGE_OPEN_TAG, useUnmergedTree = true).performScrollTo()
+        // Scroll the Usage row into view via the parent LazyColumn so
+        // the item is composed on tighter CI viewports (see #141).
+        compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG)
+            .performScrollToNode(hasTestTag(USAGE_OPEN_TAG))
         compose.onNodeWithTag(USAGE_OPEN_TAG, useUnmergedTree = true).performClick()
 
         // The breadcrumb's "Usage" crumb proves the destination

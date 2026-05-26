@@ -100,7 +100,9 @@ fun SettingsScreen(
         SettingsAppBar(onBack = onBack)
 
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag(SETTINGS_LAZY_COLUMN_TAG),
             contentPadding = PaddingValues(vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
@@ -772,6 +774,7 @@ private fun AboutSection(versionName: String) {
     }
 }
 
+internal const val SETTINGS_LAZY_COLUMN_TAG = "settings:lazy-column"
 internal const val SETTINGS_BACK_TAG = "settings:back"
 internal const val SETTINGS_TITLE_TAG = "settings:title"
 internal const val TERMINAL_FONT_SLIDER_TAG = "settings:terminal:font-slider"

@@ -7,6 +7,7 @@ import com.pocketshell.core.storage.dao.AiApiCallLogDao
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.PendingTranscriptionDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
+import com.pocketshell.core.storage.dao.PortUsageDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SessionDao
 import com.pocketshell.core.storage.dao.SnippetDao
@@ -16,6 +17,7 @@ import com.pocketshell.core.storage.entity.AiApiCallEntry
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.core.storage.entity.PortRemappingEntity
+import com.pocketshell.core.storage.entity.PortUsageEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SessionEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
@@ -83,6 +85,16 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
  * existing install base upgrades without data loss. The SQL lives in
  * [com.pocketshell.core.storage.migrations.MIGRATION_8_9].
  *
+ * Version 10 (issue #203 expanded scope) adds the new [PortUsageEntity]
+ * table for per-(host, remote port) usage counters. The table backs the
+ * "frequent ports" indicator and the cumulative-traffic readout on the
+ * Tunnels panel, ported from `ssh-auto-forward-android`. Purely
+ * additive: no existing column or table is touched, so the existing
+ * install base upgrades without data loss. This migration was originally
+ * drafted as `8 → 9`, but #180 claimed that version slot first when it
+ * merged, so the carve-out was renumbered to `9 → 10`. The SQL lives in
+ * [com.pocketshell.core.storage.migrations.MIGRATION_9_10].
+ *
  * `exportSchema = false` matches the reference module. When the schema
  * starts evolving in real users' hands, flip this on and check generated
  * schemas into `schemas/` so migrations are reviewable.
@@ -92,6 +104,7 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
         HostEntity::class,
         SshKeyEntity::class,
         PortRemappingEntity::class,
+        PortUsageEntity::class,
         ProjectRootEntity::class,
         SessionEntity::class,
         SnippetEntity::class,
@@ -99,13 +112,14 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
         AiApiCallEntry::class,
         PendingTranscriptionEntity::class,
     ],
-    version = 9,
+    version = 10,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun hostDao(): HostDao
     abstract fun sshKeyDao(): SshKeyDao
     abstract fun portRemappingDao(): PortRemappingDao
+    abstract fun portUsageDao(): PortUsageDao
     abstract fun projectRootDao(): ProjectRootDao
     abstract fun sessionDao(): SessionDao
     abstract fun snippetDao(): SnippetDao

@@ -119,6 +119,7 @@ class PortForwardPanelLifecycleE2eTest {
                 hostDao = database.hostDao(),
                 sshKeyDao = database.sshKeyDao(),
                 connector = connector,
+                portRemappingDao = database.portRemappingDao(),
             ).also { it.observeProcessLifecycle(ProcessLifecycleOwner.get()) }
         }
 

@@ -46,6 +46,25 @@ import kotlinx.coroutines.sync.withLock
 public class AutoForwarder(
     private val session: SshSession,
     private val config: AutoForwardConfig = AutoForwardConfig(),
+    /**
+     * Persisted remote -> local port remappings (issue #203 expanded
+     * scope). Each entry overrides the natural "mirror remote port
+     * onto same local port" allocation for that remote port. Defaults
+     * to an empty map so existing callers continue to mirror.
+     *
+     * The map is captured at construction; runtime mutation should be
+     * done by tearing down the forwarder and creating a new one with an
+     * updated map (the persistence + reconnect logic lives in the
+     * caller — keeping AutoForwarder DB-free preserves the
+     * `core-portfwd` module's storage independence).
+     *
+     * Ported from `ssh-auto-forward-android`
+     * `AutoForwarder.loadRemappings(hostId)` / `resolveLocalPort`,
+     * where the same map is loaded from
+     * `PortRemappingRepository.getByHostId(hostId).first()` before the
+     * scan loop starts.
+     */
+    private val initialRemappings: Map<Int, Int> = emptyMap(),
     // Wall clock for failed-port TTL bookkeeping. Injectable so unit tests
     // can drive time deterministically alongside the coroutine
     // `TestScope` virtual clock — `System.currentTimeMillis()` doesn't
@@ -72,6 +91,12 @@ public class AutoForwarder(
     // Byte counters from the previous scan tick, keyed by remote port.
     // Used to derive instantaneous throughput in TunnelInfo.speedBps.
     private val priorTotalBytes = mutableMapOf<Int, Long>()
+    // Persisted remote -> local port remappings, captured at
+    // construction from [initialRemappings]. Held as a private mutable
+    // map so future extensions (e.g. runtime `remapPort()` after a
+    // tunnel reconnect) can update entries without re-creating the
+    // forwarder. Today, only [resolveLocalPortLocked] reads from it.
+    private val portRemappings: Map<Int, Int> = initialRemappings.toMap()
     private var nextLocalPort: Int = config.localPortRange.first
 
     @Volatile
@@ -258,6 +283,14 @@ public class AutoForwarder(
     }
 
     private fun resolveLocalPortLocked(remotePort: Int): Int {
+        // Persisted user-defined remapping wins over everything else
+        // (issue #203 expanded scope, ported from
+        // `ssh-auto-forward-android.AutoForwarder.resolveLocalPort`).
+        // The user has explicitly said "I want remote N on local M" —
+        // honour it whether or not N falls inside the auto-forward
+        // window. Without this branch, a user who remapped port 22 to
+        // local 2222 would never see the override take effect.
+        portRemappings[remotePort]?.let { return it }
         // When the remote port is inside the auto-forward window we mirror
         // it locally — much friendlier UX (`localhost:3000` ↔ `remote:3000`)
         // than allocating a random port. Otherwise we hand out the next

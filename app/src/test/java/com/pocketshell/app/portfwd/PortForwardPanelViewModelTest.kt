@@ -658,6 +658,48 @@ class PortForwardPanelViewModelTest {
         assertEquals("2.0 MB", formatBytes(2 * 1024 * 1024))
     }
 
+    @Test
+    fun persistedRemappingOverridesLocalPortMirroring() = runTest {
+        // Issue #203 expanded scope: a persisted PortRemappingEntity on
+        // the host must override the natural "mirror remote port onto
+        // same local port" rule once auto-forward is enabled. The
+        // ViewModel loads the remappings from the DAO before
+        // constructing the AutoForwarder.
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
+        db.portRemappingDao().insert(
+            com.pocketshell.core.storage.entity.PortRemappingEntity(
+                hostId = hostId,
+                remotePort = 3000,
+                localPort = 9000,
+            ),
+        )
+        val session = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val viewModel = newViewModel(FakeConnector(Result.success(session)))
+
+        viewModel.load(hostId, "/tmp/key")
+        runCurrent()
+        viewModel.setAutoForwardEnabled(true)
+        runCurrent()
+
+        val tunnel = viewModel.state.value.tunnels.single()
+        assertEquals(3000, tunnel.remotePort)
+        // 3000 is inside the auto-forward window — without the remap
+        // entry the local port would mirror to 3000. With the remap,
+        // the local port must be 9000.
+        assertEquals(9000, tunnel.localPort)
+        assertEquals(
+            "openLocalPortForward should have been called with the remapped local port",
+            9000,
+            session.openedForwards.single().localPort,
+        )
+
+        viewModel.setAutoForwardEnabled(false)
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
     /**
      * Manual [LifecycleOwner] backed by [LifecycleRegistry]. Tests drive
      * state transitions explicitly via [moveTo] so the panel's lifecycle
@@ -722,11 +764,13 @@ class PortForwardPanelViewModelTest {
         connector: PortForwardConnector,
         hostDao: HostDao = db.hostDao(),
         sshKeyDao: SshKeyDao = db.sshKeyDao(),
+        portRemappingDao: com.pocketshell.core.storage.dao.PortRemappingDao = db.portRemappingDao(),
     ): PortForwardPanelViewModel =
         PortForwardPanelViewModel(
             hostDao = hostDao,
             sshKeyDao = sshKeyDao,
             connector = connector,
+            portRemappingDao = portRemappingDao,
         )
 
     private class FakeConnector(

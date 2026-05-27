@@ -385,6 +385,97 @@ class AutoForwarderTest {
         runCurrent()
     }
 
+    @Test
+    fun `initialRemappings override mirror allocation for an in-window port`() = runTest {
+        // Issue #203 expanded scope: a persisted remapping must override
+        // the natural "mirror remote port onto same local port" rule.
+        val session = FakeSession()
+        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+
+        val forwarder = AutoForwarder(
+            session,
+            smallConfig(),
+            initialRemappings = mapOf(3000 to 9000),
+        )
+        val job = forwarder.start(this)
+        runCurrent()
+
+        val t = forwarder.flowOfTunnels().first().single()
+        assertEquals(3000, t.remotePort)
+        // 3000 is inside the auto-forward window so the default would
+        // be to mirror it to 3000 locally. The remap entry must win.
+        assertEquals(9000, t.localPort)
+        assertEquals(TunnelInfo.Status.FORWARDING, t.status)
+        assertEquals(
+            "openLocalPortForward should have been called with the remapped local port",
+            9000,
+            session.openForwards.values.single().localPort,
+        )
+
+        forwarder.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `initialRemappings override allocator for an out-of-window port`() = runTest {
+        // sshd on port 22 is normally below skipPortsBelow, so the
+        // allocator would hand it a port from localPortRange when
+        // manually toggled. A persisted remap entry must take priority.
+        val session = FakeSession()
+        session.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
+
+        val forwarder = AutoForwarder(
+            session,
+            smallConfig(),
+            initialRemappings = mapOf(22 to 2222),
+        )
+        val job = forwarder.start(this)
+        runCurrent()
+        // First scan reports sshd AVAILABLE (out of auto-forward window).
+        assertEquals(
+            TunnelInfo.Status.AVAILABLE,
+            forwarder.flowOfTunnels().first().single().status,
+        )
+
+        forwarder.togglePort(22)
+
+        val snapshot = forwarder.flowOfTunnels().first()
+        val sshd = snapshot.single { it.remotePort == 22 }
+        assertEquals(TunnelInfo.Status.FORWARDING, sshd.status)
+        // The remap entry must override the allocator's localPortRange
+        // pick (which would otherwise land in 3_500..3_600).
+        assertEquals(2222, sshd.localPort)
+        assertEquals(
+            "openLocalPortForward should have been called with the remapped local port",
+            2222,
+            session.openForwards.values.single().localPort,
+        )
+
+        forwarder.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `empty initialRemappings preserves default mirroring behaviour`() = runTest {
+        // Regression check: existing callers that don't supply a
+        // remappings map must continue to get the mirror behaviour.
+        val session = FakeSession()
+        session.setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))")
+
+        val forwarder = AutoForwarder(session, smallConfig())
+        val job = forwarder.start(this)
+        runCurrent()
+
+        val t = forwarder.flowOfTunnels().first().single()
+        assertEquals(3000, t.localPort)
+
+        forwarder.stop()
+        job.cancel()
+        runCurrent()
+    }
+
     private fun smallConfig() = AutoForwardConfig(
         scanIntervalSec = 1,
         maxAutoPort = 5_000,

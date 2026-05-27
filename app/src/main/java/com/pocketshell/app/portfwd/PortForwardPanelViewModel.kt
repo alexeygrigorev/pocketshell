@@ -11,6 +11,7 @@ import com.pocketshell.core.portfwd.AutoForwarder
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.dao.PortRemappingDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -20,6 +21,7 @@ import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -45,6 +47,12 @@ class PortForwardPanelViewModel @Inject constructor(
     private val hostDao: HostDao,
     private val sshKeyDao: SshKeyDao,
     private val connector: PortForwardConnector,
+    // Issue #203 expanded scope: user-defined per-host port remappings.
+    // The DAO is read once per connect inside `setAutoForwardEnabled` so
+    // the new `AutoForwarder.initialRemappings` map reflects the latest
+    // saved state. Persistence + edit affordances are deferred to the
+    // panel UI in a follow-up round.
+    private val portRemappingDao: PortRemappingDao,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(PortForwardPanelState())
@@ -300,7 +308,20 @@ class PortForwardPanelViewModel @Inject constructor(
             }
 
             session = sshSession
-            val autoForwarder = AutoForwarder(sshSession, host.toAutoForwardConfig())
+            // Load persisted remote->local port remappings before the
+            // scan loop starts so the first round of forwards honours
+            // them. `first()` snapshots the current set; the panel
+            // re-runs `setAutoForwardEnabled` after edits so a runtime
+            // remap isn't lost.
+            val remappings = runCatching {
+                portRemappingDao.getByHostId(host.id).first()
+                    .associate { it.remotePort to it.localPort }
+            }.getOrElse { emptyMap() }
+            val autoForwarder = AutoForwarder(
+                session = sshSession,
+                config = host.toAutoForwardConfig(),
+                initialRemappings = remappings,
+            )
             forwarder = autoForwarder
             tunnelCollection?.cancel()
             tunnelCollection = viewModelScope.launch {

@@ -69,3 +69,5 @@ Canonical role definitions live in [.claude/agents/](.claude/agents/):
 
 - [.claude/agents/implementer.md](.claude/agents/implementer.md) — implementer prompt
 - [.claude/agents/reviewer.md](.claude/agents/reviewer.md) — reviewer prompt
+- [.claude/agents/researcher.md](.claude/agents/researcher.md) — researcher prompt (read-only spikes, audits, JTBD inventories)
+- [.claude/agents/oncall-engineer.md](.claude/agents/oncall-engineer.md) — on-call CI watcher; dispatch after every `git push origin main` to triage failures into issues instead of letting them clog the maintainer's inbox

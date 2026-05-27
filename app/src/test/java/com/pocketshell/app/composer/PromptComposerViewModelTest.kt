@@ -9,6 +9,7 @@ import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
@@ -1355,5 +1356,303 @@ class PromptComposerViewModelTest {
 
         assertEquals(RecordingState.Idle, vm.uiState.value.recording)
         assertEquals(1, mic.stopCount)
+    }
+
+    // -- Issue #211: Send-while-Recording / Transcribing -------------------
+    // (also pins the #210 regression: cancel-then-redictate-then-send sends
+    // the NEW transcript, not the stale draft.)
+
+    /**
+     * Helper: collect every [PromptComposerViewModel.SendRequest] the
+     * ViewModel emits into a thread-safe list so the test can assert
+     * what the sheet would have routed into the host `onSend` callback.
+     * The `replay = 0` SharedFlow means we must subscribe before the
+     * production code emits; the test starts a collector under the
+     * `runTest` scope and `runCurrent()`s once so the subscription is
+     * registered before the action under test.
+     */
+    private fun kotlinx.coroutines.test.TestScope.collectSendRequests(
+        vm: PromptComposerViewModel,
+    ): MutableList<PromptComposerViewModel.SendRequest> {
+        val collected = java.util.Collections.synchronizedList(
+            mutableListOf<PromptComposerViewModel.SendRequest>(),
+        )
+        backgroundScope.launch {
+            vm.sendRequests.collect { collected += it }
+        }
+        runCurrent()
+        return collected
+    }
+
+    @Test
+    fun requestSendInIdleDispatchesDraftImmediatelyAndClearsDraft() = runTest {
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        val sent = collectSendRequests(vm)
+        vm.onDraftChange("hello shell")
+
+        vm.requestSend(withEnter = false)
+        advanceUntilIdle()
+
+        assertEquals(1, sent.size)
+        assertEquals("hello shell", sent[0].text)
+        assertEquals(false, sent[0].withEnter)
+        // After dispatch the draft is cleared so the next composer open
+        // starts blank.
+        assertEquals("", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun requestSendInIdleWithEmptyDraftEmitsNothing() = runTest {
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        val sent = collectSendRequests(vm)
+
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+
+        assertEquals(0, sent.size)
+    }
+
+    @Test
+    fun requestSendWhileRecordingStopsRecorderTranscribesThenSends() = runTest {
+        // Acceptance #211: Send tap during Recording → recorder stops,
+        // transcription runs, transcript is appended to draft, Send fires
+        // with the combined draft.
+        val mic = FakeMicCapture()
+        val vm = newVm(
+            mic = mic,
+            whisper = fakeWhisperClient { Result.success("from dictation") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val sent = collectSendRequests(vm)
+
+        vm.onDraftChange("Tell me ")
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        // The user taps Send while still recording — the FSM owes them a
+        // single-tap send.
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+
+        // Send fired exactly once, with the COMBINED text (existing
+        // draft + transcribed text), and with the user's withEnter flag.
+        assertEquals(1, sent.size)
+        assertEquals("Tell me from dictation", sent[0].text)
+        assertEquals(true, sent[0].withEnter)
+        // Mic was stopped by the queued-send path, not by a separate
+        // mic-tap.
+        assertEquals(1, mic.stopCount)
+        // FSM lands back at Idle with the draft cleared (the SendRequest
+        // is the official transfer of the text out of the composer).
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals("", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun requestSendWhileTranscribingQueuesAndFiresOnSuccess() = runTest {
+        // Acceptance #211: Send tap during Transcribing → send is
+        // queued, fires on Whisper success.
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                release.await()
+                return Result.success("queued result")
+            }
+        }
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val sent = collectSendRequests(vm)
+
+        vm.onMicTap()
+        runCurrent()
+        // Trigger stop → audio is now in Whisper flight; FSM is in
+        // Transcribing until we release the latch.
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+
+        // User taps Send mid-Whisper. The send must NOT fire yet — no
+        // transcript is available.
+        vm.requestSend(withEnter = false)
+        runCurrent()
+        assertEquals(0, sent.size)
+        // FSM still parked on Transcribing — the Send tap during
+        // Transcribing does not auto-stop anything new.
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+
+        // Whisper returns — the queued send fires with the transcript.
+        release.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(1, sent.size)
+        assertEquals("queued result", sent[0].text)
+        assertEquals(false, sent[0].withEnter)
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals("", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun requestSendDuringRecordingWhisperFailureDropsSendAndSurfacesError() = runTest {
+        // Acceptance #211: If Whisper fails, the queued Send is
+        // cancelled and the transcript goes into the retry queue with
+        // an error message.
+        val mic = FakeMicCapture()
+        val (vm, queue) = newVmWithQueue(
+            mic = mic,
+            whisper = fakeWhisperClient {
+                Result.failure(WhisperException.Transport("simulated drop"))
+            },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val sent = collectSendRequests(vm)
+
+        vm.onDraftChange("preface ")
+        vm.onMicTap()
+        runCurrent()
+        vm.requestSend(withEnter = false)
+        advanceUntilIdle()
+
+        // No send was emitted.
+        assertEquals(0, sent.size)
+        // Error banner is set.
+        assertNotNull(vm.uiState.value.error)
+        // Retry queue captured the failure — the user can retry the
+        // audio later via the banner (#180).
+        assertEquals(1, queue.failureIds.size)
+        // FSM is back to Idle, draft preserved verbatim so the user can
+        // resend manually.
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals("preface ", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun requestSendWhileRecordingOfflineDropsQueuedSendAndKeepsDraft() = runTest {
+        // Acceptance #211 corollary: offline path enqueues the audio
+        // for later retry but does not fire the queued Send (no
+        // transcript exists).
+        var whisperCalls = 0
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                whisperCalls++
+                return Result.success("never")
+            }
+        }
+        val (vm, queue) = newVmWithQueue(
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            connectivity = FakeConnectivity(initial = false),
+        )
+        val sent = collectSendRequests(vm)
+
+        vm.onDraftChange("typed prefix ")
+        vm.onMicTap()
+        runCurrent()
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+
+        assertEquals(0, whisperCalls)
+        assertEquals(0, sent.size)
+        // Audio is on disk waiting for network.
+        assertEquals(1, queue.enqueueCount)
+        // Typed draft is preserved.
+        assertEquals("typed prefix ", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun cancelRecordingClearsQueuedSendFlagsAndEmitsNoSend() = runTest {
+        // Acceptance #211: Cancel mid-flight — if user taps Cancel
+        // while a queued Send is pending (or otherwise), no Send fires.
+        // The maintainer-facing guarantee is: cancel always means "do
+        // not send the in-flight buffer". The internal pending-send
+        // flag is implementation detail; we observe the public-surface
+        // contract: zero SendRequest emissions.
+        val mic = FakeMicCapture()
+        val vm = newVm(
+            mic = mic,
+            whisper = fakeWhisperClient { Result.success("must not send") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val sent = collectSendRequests(vm)
+
+        vm.onDraftChange("typed draft")
+        // First cycle: cancel without ever calling requestSend, to
+        // prove the cancel path itself is send-free.
+        vm.onMicTap()
+        runCurrent()
+        vm.cancelRecording()
+        advanceUntilIdle()
+        assertEquals(0, sent.size)
+        assertEquals("typed draft", vm.uiState.value.draft)
+
+        // Second cycle: same shape, fresh recording. The test pin is
+        // belt-and-braces — a future regression that lets the cancel
+        // path leak a SendRequest from a stale flag would be caught
+        // here even if the test above passes by coincidence.
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+        vm.cancelRecording()
+        advanceUntilIdle()
+        assertEquals(0, sent.size)
+        assertEquals("typed draft", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun issue210_cancelThenRedictateThenSendSendsTheNewTranscriptNotTheStaleDraft() = runTest {
+        // Pins the maintainer-reported #210 bug:
+        //
+        //   "I was dictating, and then I clicked cross, so I stopped it,
+        //    then I was dictating another message, I clicked send, and
+        //    then the old message was sent instead of the new one."
+        //
+        // Sequence under test:
+        //   1. User pre-types "old draft text" (or it lands there from a
+        //      previous transcription — the test seeds it directly).
+        //   2. User taps mic → Recording 1.
+        //   3. User taps X cancel → FSM=Idle, draft preserved.
+        //   4. User taps mic again → Recording 2.
+        //   5. User taps Send mid-recording.
+        //
+        // Expected: the SendRequest carries the NEW recording's
+        // transcript appended to the preserved draft, NOT the stale
+        // draft on its own.
+        val mic = FakeMicCapture()
+        val whisper = fakeWhisperClient { Result.success("new dictation") }
+        val vm = newVm(
+            mic = mic,
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val sent = collectSendRequests(vm)
+
+        // 1. Pre-existing draft (could be typed text or a stale
+        //    previous transcription).
+        vm.onDraftChange("old draft text ")
+        // 2. Recording 1.
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+        // 3. Cancel.
+        vm.cancelRecording()
+        runCurrent()
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals("old draft text ", vm.uiState.value.draft)
+        // 4. Recording 2.
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+        // 5. Send while still recording.
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+
+        // The Send carries "old draft text new dictation" — the new
+        // transcription, NOT just "old draft text" (which was the bug).
+        assertEquals(1, sent.size)
+        assertEquals("old draft text new dictation", sent[0].text)
+        assertEquals(true, sent[0].withEnter)
     }
 }

@@ -37,10 +37,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -182,6 +184,28 @@ public fun PromptComposerSheet(
         }
     }
 
+    // Issue #211: collect the ViewModel's one-shot Send dispatch flow
+    // and route every emission into the host's `onSend` callback. The
+    // ViewModel emits here either immediately (the user tapped Send in
+    // Idle with a non-empty draft) or after a queued send fires on
+    // transcription success (Send-while-Recording / Send-while-
+    // Transcribing). Using `rememberUpdatedState` so a recomposition
+    // that changes the host's `onSend` reference does not lose
+    // already-queued sends.
+    val currentOnSend by rememberUpdatedState(onSend)
+    val currentOnDismiss by rememberUpdatedState(onDismiss)
+    LaunchedEffect(viewModel) {
+        viewModel.sendRequests.collect { request ->
+            currentOnSend(request.text, request.withEnter)
+            // Dismiss the sheet so the user lands back on the terminal
+            // with the bytes already flying. Historic behaviour from
+            // pre-#211; the dismiss + draft-clear now lives on the
+            // ViewModel side of the surface so the sheet's role is just
+            // to forward the request.
+            currentOnDismiss()
+        }
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -211,15 +235,13 @@ public fun PromptComposerSheet(
             },
             onCancelRecording = viewModel::cancelRecording,
             onSend = { withEnter ->
-                val text = state.draft
-                if (text.isNotEmpty()) {
-                    onSend(text, withEnter)
-                    // Clear the draft after a successful send. Dismiss
-                    // the sheet so the user lands back on the terminal
-                    // with the bytes already flying.
-                    viewModel.onDraftChange("")
-                    onDismiss()
-                }
+                // Issue #211: route through the ViewModel so the FSM
+                // decides whether to dispatch now (Idle) or queue for
+                // transcription (Recording / Transcribing). The
+                // ViewModel emits via `sendRequests` once the dispatch
+                // is ready; the `LaunchedEffect` above forwards it into
+                // the host's `onSend` + `onDismiss`.
+                viewModel.requestSend(withEnter)
             },
             onSnippets = if (hostId != null) {
                 { showSnippetPicker = true }
@@ -578,21 +600,8 @@ internal fun SheetContent(
             )
         }
 
-        // Issue #185: silence-threshold hint. The watchdog auto-stops the
-        // recording after [PromptComposerViewModel.UiState.silenceThresholdSeconds]
-        // of below-threshold amplitude, but until #185 the user had no
-        // way to know that value short of opening Settings — and one
-        // maintainer dogfood report ("dictation auto-stopped while I was
-        // still talking, I don't know why") proved the missing mental
-        // model was a real problem. Rendering the threshold inline keeps
-        // the user informed without dragging them into the Settings flow.
-        //
-        // Rendered only while [PromptComposerViewModel.RecordingState.Recording]
-        // — Idle hides it (the recording isn't running), Transcribing hides
-        // it (the auto-stop already fired or the user tapped manually).
-        // [PocketShellColors.TextMuted] is the design-system muted token
-        // (see docs/design-system.md): low contrast so the hint never
-        // competes with the accent-tinted status label above.
+        // Issue #185: silence-threshold hint. Rendered only while
+        // RecordingState.Recording. PocketShellColors.TextMuted token.
         if (state.recording == PromptComposerViewModel.RecordingState.Recording &&
             state.silenceThresholdSeconds > 0f
         ) {
@@ -606,8 +615,19 @@ internal fun SheetContent(
             )
         }
 
+        // Issue #211: Send remains tappable while the FSM is in
+        // Recording or Transcribing — the ViewModel queues the send
+        // and fires it after Whisper returns. Collapses the historic
+        // three-tap "stop, wait, send" into a single tap.
+        val isRecording = state.recording == PromptComposerViewModel.RecordingState.Recording
+        val hasQueuedAffordance = isRecording || isTranscribing
+        val sendEnabled = hasQueuedAffordance || state.draft.isNotEmpty()
         // Action row: Snippets (ghost) / Send / Send + Enter (primary).
-        // Matches `.composer-actions` in the mockup.
+        // Matches `.composer-actions` in the mockup. Snippets stays
+        // disabled while a Whisper round-trip is in flight (browsing
+        // snippets during transcription is at best a UX paper-cut and
+        // at worst lands a stale snippet over the about-to-arrive
+        // transcript) but the Send buttons stay live.
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -626,20 +646,26 @@ internal fun SheetContent(
                 enabled = !isTranscribing,
             )
             NeutralButton(
-                label = "Send",
+                // Issue #211: when a Send tap will queue behind the
+                // Whisper round-trip, the label flips to "Send after
+                // transcribe" so the user knows the tap was registered
+                // but the bytes are not yet flying. The legacy Send
+                // copy is preserved for the Idle case so nothing
+                // changes for the common one-tap-with-typed-text path.
+                label = if (hasQueuedAffordance) "Send after transcribe" else "Send",
                 onClick = { onSend(false) },
                 modifier = Modifier
                     .weight(1f)
                     .testTag(COMPOSER_SEND_TAG),
-                enabled = !isTranscribing && state.draft.isNotEmpty(),
+                enabled = sendEnabled,
             )
             PrimaryButton(
-                label = "Send + ↵",
+                label = if (hasQueuedAffordance) "Send + ↵ after" else "Send + ↵",
                 onClick = { onSend(true) },
                 modifier = Modifier
                     .weight(1f)
                     .testTag(COMPOSER_SEND_ENTER_TAG),
-                enabled = !isTranscribing && state.draft.isNotEmpty(),
+                enabled = sendEnabled,
             )
         }
     }

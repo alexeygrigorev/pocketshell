@@ -20,10 +20,14 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -139,6 +143,47 @@ public class PromptComposerViewModel @Inject constructor(
     private var transcribeJob: Job? = null
 
     /**
+     * Issue #211: one-shot Send dispatch surface. The composer sheet
+     * collects this and invokes the host's `onSend` callback whenever
+     * a send is ready to fire — either immediately (the FSM was Idle
+     * when the user tapped Send) or after the in-flight Whisper round-
+     * trip lands (the FSM was Recording or Transcribing when the user
+     * tapped Send and the queued send fires on transcription success).
+     *
+     * The flow is `MutableSharedFlow` with `extraBufferCapacity = 1` so
+     * a send dispatched while no collector is briefly attached (e.g.
+     * mid-recomposition) survives instead of getting silently dropped.
+     * `BufferOverflow.DROP_OLDEST` means a second pending send (which
+     * should never happen in practice — the FSM gates this) replaces
+     * an unconsumed earlier one rather than blocking the producer.
+     */
+    private val _sendRequests = MutableSharedFlow<SendRequest>(
+        replay = 0,
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    public val sendRequests: SharedFlow<SendRequest> = _sendRequests.asSharedFlow()
+
+    /**
+     * Issue #211: one-shot Send queued by the user while the FSM was
+     * Recording or Transcribing. When non-null, the next successful
+     * Whisper round-trip will fire the send via [_sendRequests] with the
+     * combined draft (existing text + just-transcribed text). The flag
+     * is cleared on:
+     *
+     *  - successful dispatch (one-shot semantics)
+     *  - Whisper failure / API key missing / cancel — the send is dropped
+     *    and an error banner explains why (the user's tap reached the
+     *    pipeline but the round-trip did not succeed).
+     *
+     * Lives outside [UiState] because the sheet does not need to render
+     * a separate visual cue beyond the "Send after transcribe" hint that
+     * is already driven by `state.recording` + `state.draft`.
+     */
+    private var pendingSendOnTranscribeSuccess: Boolean = false
+    private var pendingSendWithEnter: Boolean = false
+
+    /**
      * Issue #180: live snapshot of the failed / offline-queued
      * transcriptions. The composer sheet collects this to render the
      * "Transcription failed — retry" banner + expandable list. Always
@@ -211,6 +256,71 @@ public class PromptComposerViewModel @Inject constructor(
             RecordingState.Recording -> stopAndTranscribe()
             RecordingState.Transcribing -> Unit // ignore — wait for Whisper
         }
+    }
+
+    /**
+     * Issue #211: the user tapped Send. Behaviour depends on the FSM
+     * state when the tap arrives:
+     *
+     *  - `Idle`: dispatch the current draft immediately via
+     *    [sendRequests]. The caller (the composer sheet) collects the
+     *    flow and routes the text into the session bridge. This is the
+     *    historic one-tap-to-send path.
+     *  - `Recording`: queue the send and call [stopAndTranscribe]. The
+     *    user's Send tap doubles as a "stop now" override of the silence
+     *    window — the recorder is closed immediately, the buffer goes to
+     *    Whisper, and the success path fires the send with the combined
+     *    (existing-draft + transcript) text. One tap, instead of the
+     *    legacy three-tap "stop, wait, send" sequence.
+     *  - `Transcribing`: the audio is already in flight on the Whisper
+     *    side; we just queue the send flag and let the transcribe
+     *    success path dispatch it. The user pays no extra wait — the
+     *    network round-trip is already happening.
+     *
+     * On Whisper failure (or any cancel) the queued send is dropped and
+     * an error banner is surfaced through [UiState.error]. The user's
+     * intent to send is not silently lost: the audio still lands in the
+     * pending-transcription queue (#180) so retry-after-fix routes the
+     * transcript into the draft.
+     *
+     * The empty-draft Idle case (no text typed, FSM Idle) is filtered
+     * here so the sheet's Send button can stay enabled in Recording /
+     * Transcribing without dispatching nonsense in Idle. Tests and
+     * non-Hilt callers reading the flow get the exact same semantics.
+     */
+    public fun requestSend(withEnter: Boolean) {
+        when (_uiState.value.recording) {
+            RecordingState.Idle -> dispatchSendNow(withEnter)
+            RecordingState.Recording -> {
+                pendingSendOnTranscribeSuccess = true
+                pendingSendWithEnter = withEnter
+                stopAndTranscribe()
+            }
+            RecordingState.Transcribing -> {
+                pendingSendOnTranscribeSuccess = true
+                pendingSendWithEnter = withEnter
+            }
+        }
+    }
+
+    /**
+     * Issue #211: emit a [SendRequest] for the current draft and clear
+     * the draft so the next composer open is a fresh slate. No-op when
+     * the draft is empty — the FSM-Idle case where the user has nothing
+     * to send, which the UI normally already gates via the Send button's
+     * `enabled` predicate. Tests can still call this directly; the empty
+     * guard means a hostile caller cannot fire a blank send.
+     */
+    private fun dispatchSendNow(withEnter: Boolean) {
+        val text = _uiState.value.draft
+        if (text.isEmpty()) return
+        // Clear the draft via the same code path the user's typing
+        // takes so [SavedStateHandle] is mirrored. Order matters: we
+        // emit the SendRequest BEFORE clearing the draft so a slow
+        // collector that re-reads `state.draft` still sees the text
+        // that produced the send.
+        _sendRequests.tryEmit(SendRequest(text = text, withEnter = withEnter))
+        onDraftChange("")
     }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
@@ -357,6 +467,12 @@ public class PromptComposerViewModel @Inject constructor(
             // on top of the real microphone error the user is already
             // seeing.
             savedStateHandle[KEY_WAS_RECORDING] = false
+            // Issue #211: a queued send is dropped if the mic stop fails
+            // — there is no audio buffer to transcribe and therefore no
+            // transcript to send. The user sees the mic error and can
+            // re-record or send manually.
+            pendingSendOnTranscribeSuccess = false
+            pendingSendWithEnter = false
             _uiState.update {
                 it.copy(
                     recording = RecordingState.Idle,
@@ -372,6 +488,10 @@ public class PromptComposerViewModel @Inject constructor(
             // [AudioRecorder.stop] returns the WAV header even for a
             // zero-PCM session, but guard anyway.
             savedStateHandle[KEY_WAS_RECORDING] = false
+            // Issue #211: same reasoning as the AudioRecorderException
+            // branch — no audio means no transcript to send.
+            pendingSendOnTranscribeSuccess = false
+            pendingSendWithEnter = false
             _uiState.update {
                 it.copy(recording = RecordingState.Idle, amplitude = 0f)
             }
@@ -386,6 +506,12 @@ public class PromptComposerViewModel @Inject constructor(
             val client = whisperClientFactory.create()
             if (client == null) {
                 savedStateHandle[KEY_WAS_RECORDING] = false
+                // Issue #211: API key vanished between recording start
+                // and transcribe — drop the queued send for the same
+                // reason the offline path does. No transcript means
+                // nothing to send.
+                pendingSendOnTranscribeSuccess = false
+                pendingSendWithEnter = false
                 _uiState.update {
                     it.copy(
                         recording = RecordingState.Idle,
@@ -432,6 +558,15 @@ public class PromptComposerViewModel @Inject constructor(
                 // The pending entry is already on disk; the user sees
                 // the banner and the FSM returns to Idle so they can
                 // keep typing while waiting for connectivity.
+                //
+                // Issue #211: a queued Send is dropped on the offline
+                // path — there is no transcript to combine with. The
+                // user keeps the typed draft (if any) and the audio is
+                // safely on disk, so retry-after-online routes the
+                // transcript back into the draft and the user can tap
+                // Send manually then.
+                pendingSendOnTranscribeSuccess = false
+                pendingSendWithEnter = false
                 _uiState.update {
                     it.copy(
                         recording = RecordingState.Idle,
@@ -457,18 +592,35 @@ public class PromptComposerViewModel @Inject constructor(
                         // that the next reconcile() will sweep up.
                         runCatching { pendingTranscriptionStore.markSucceeded(pendingId) }
                     }
-                    _uiState.update {
-                        val sep = if (it.draft.isEmpty() || it.draft.endsWith(" ")) "" else " "
-                        val newDraft = it.draft + sep + text
-                        // Mirror the appended draft into [SavedStateHandle]
-                        // immediately so a recreate after a successful
-                        // transcription still shows the dictated text.
-                        savedStateHandle[KEY_DRAFT] = newDraft
-                        it.copy(
-                            recording = RecordingState.Idle,
-                            draft = newDraft,
-                            error = null,
-                        )
+                    // Issue #211: snapshot the queued-send flag BEFORE
+                    // the state update clears the draft via the send
+                    // dispatch. Reads happen on a single thread (the
+                    // viewModelScope's main dispatcher) so this is
+                    // race-free with `requestSend()` arriving here from
+                    // a UI tap — the tap mutates the flag synchronously
+                    // and the success block runs after that.
+                    val pendingSend = pendingSendOnTranscribeSuccess
+                    val pendingWithEnter = pendingSendWithEnter
+                    pendingSendOnTranscribeSuccess = false
+                    pendingSendWithEnter = false
+
+                    val combinedDraft = _uiState.updateAndReturnDraft { current ->
+                        val sep = if (current.isEmpty() || current.endsWith(" ")) "" else " "
+                        current + sep + text
+                    }
+                    // Mirror the appended draft into [SavedStateHandle]
+                    // immediately so a recreate after a successful
+                    // transcription still shows the dictated text.
+                    savedStateHandle[KEY_DRAFT] = combinedDraft
+
+                    if (pendingSend) {
+                        // Issue #211: the user queued a Send while we
+                        // were still recording / transcribing. Fire it
+                        // now with the combined draft (existing text +
+                        // freshly-transcribed text). The
+                        // [dispatchSendNow] call also clears the draft
+                        // so the next composer open starts blank.
+                        dispatchSendNow(pendingWithEnter)
                     }
                 },
                 onFailure = { t ->
@@ -476,12 +628,46 @@ public class PromptComposerViewModel @Inject constructor(
                     if (pendingId != null) {
                         runCatching { pendingTranscriptionStore.markFailure(pendingId, msg) }
                     }
+                    // Issue #211: drop the queued send — the round-trip
+                    // failed, so we have no transcript to send. The user
+                    // sees the error banner and can either retry the
+                    // queued audio (#180) or type + send manually. The
+                    // audio is still in the pending-transcription queue
+                    // (markFailure above stamped it) so the user can
+                    // retry from the banner.
+                    pendingSendOnTranscribeSuccess = false
+                    pendingSendWithEnter = false
                     _uiState.update {
                         it.copy(recording = RecordingState.Idle, error = msg)
                     }
                 },
             )
         }
+    }
+
+    /**
+     * Issue #211 helper: apply [transform] to the current draft, update
+     * [_uiState] (landing the FSM in Idle, clearing the amplitude, and
+     * clearing the error banner), and return the new draft text. Lives
+     * here as a private extension so the success branch of
+     * [stopAndTranscribe] can both update state AND know the resulting
+     * draft for the queued-send dispatch without a second read of the
+     * StateFlow (which would race with another caller mutating between
+     * the update and the read).
+     */
+    private inline fun MutableStateFlow<UiState>.updateAndReturnDraft(
+        transform: (String) -> String,
+    ): String {
+        var newDraft = ""
+        update {
+            newDraft = transform(it.draft)
+            it.copy(
+                recording = RecordingState.Idle,
+                draft = newDraft,
+                error = null,
+            )
+        }
+        return newDraft
     }
 
     /**
@@ -680,6 +866,18 @@ public class PromptComposerViewModel @Inject constructor(
         recordingJob?.cancel()
         recordingJob = null
 
+        // Issue #211: cancel any queued send that was racing the
+        // recorder. A user who hits the X to discard the dictation has
+        // explicitly chosen not to send the in-flight buffer; firing
+        // the queued send anyway would be a hostile misread of the
+        // cancel gesture (worse: it would re-introduce the
+        // cancel-then-send bug #210 was filed to fix). The pre-existing
+        // typed draft is still preserved verbatim below, so the user
+        // can re-tap Send manually if they want to send just the typed
+        // text without a fresh dictation.
+        pendingSendOnTranscribeSuccess = false
+        pendingSendWithEnter = false
+
         // Stop the mic and drop whatever bytes came back. The capture
         // can fail (mic ripped away mid-record, audio focus loss); in
         // that case we still want to land on Idle and surface the error
@@ -806,6 +1004,27 @@ public class PromptComposerViewModel @Inject constructor(
         val error: String? = null,
         val savedAudioPath: String? = null,
         val silenceThresholdSeconds: Float = 0f,
+    )
+
+    /**
+     * Issue #211: one-shot Send dispatched via [sendRequests]. Carries
+     * the exact text the user wanted to send + whether the Enter-key
+     * suffix should be appended remotely. The sheet collects the flow
+     * and forwards each request into the host's `onSend` callback.
+     *
+     * @property text the draft text at the moment the user tapped Send.
+     *   For sends queued mid-recording / mid-transcribe this is the
+     *   combined (existing-draft + just-transcribed) text — the Whisper
+     *   round-trip completed before this request was emitted.
+     * @property withEnter true when the user tapped the `Send + ↵`
+     *   button; the session-bridge interprets this as "submit the
+     *   prompt with a trailing newline so the agent processes it
+     *   immediately". False for the plain Send button (text reaches the
+     *   prompt but the user is still composing).
+     */
+    public data class SendRequest(
+        val text: String,
+        val withEnter: Boolean,
     )
 
     /**

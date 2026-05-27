@@ -4,6 +4,24 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Acquire an exclusive AVD lock so parallel-worktree gate runs serialize on the
+# shared local Android emulator. Sibling `connectedAndroidTest` invocations
+# from individual implementer/reviewer worktrees are intentionally NOT held by
+# this lock — only the release-gate scripts that drive long sequential
+# emulator workflows (see issue #182). Skipped when the caller is just asking
+# for --help so help stays cheap and never blocks on a sibling gate run.
+LOCK_FILE="${POCKETSHELL_AVD_LOCK_FILE:-$ROOT_DIR/build/.avd-lock}"
+if [[ "${1:-}" != "--help" && "${1:-}" != "-h" && -z "${POCKETSHELL_AVD_LOCK_ACQUIRED:-}" ]]; then
+  mkdir -p "$(dirname "$LOCK_FILE")"
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    echo "Another emulator-touching script holds the AVD lock ($LOCK_FILE); waiting..." >&2
+    flock 9
+  fi
+  echo "Acquired AVD lock (fd 9): $LOCK_FILE" >&2
+  export POCKETSHELL_AVD_LOCK_ACQUIRED=1
+fi
+
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/release-emulator-validation}"
 if [[ "$LOG_ROOT" != /* ]]; then
   LOG_ROOT="$ROOT_DIR/$LOG_ROOT"
@@ -40,12 +58,20 @@ Usage: scripts/release-emulator-validation.sh
 Runs the required emulator-only pre-tag release validation from clean, pushed
 main and writes a summary for scripts/push-release-tag.sh.
 
+Acquires an exclusive `flock` on `build/.avd-lock` (relative to the repo
+root) before touching the emulator so that parallel-worktree gate runs
+serialise on the shared local AVD. If another emulator-touching gate script
+is running, this invocation blocks until that script exits. The lock is
+released automatically on script exit. See issue #182.
+
 Required state:
   - current branch is main
   - worktree and index are clean
   - HEAD equals origin/main
 
 Environment overrides:
+  POCKETSHELL_AVD_LOCK_FILE
+      Override the lock file path (default: <repo-root>/build/.avd-lock).
   RELEASE_VALIDATION_SKIP_MAIN_GUARD=1
       Skip the clean pushed-main guard for CI workflow_dispatch runs where the
       checkout is intentionally detached.

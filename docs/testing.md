@@ -305,6 +305,41 @@ Use `--visual-audit-inspected` only after reviewing the visual-audit
 screenshots. Physical phone testing is final user acceptance only; it does not
 replace the emulator/Docker release blockers above.
 
+#### AVD lock for parallel-worktree contention
+
+The release-gate scripts that touch the shared local Android emulator
+(`scripts/release-emulator-validation.sh`,
+`scripts/pre-release-confidence-gate.sh`,
+`scripts/phone-dogfood.sh`,
+`scripts/terminal-workbench.sh`, and
+`scripts/release-terminal-gate.sh`) each acquire an exclusive `flock` on
+`build/.avd-lock` (relative to the repo root) before installing APKs or
+running instrumentation. If a sibling worktree is already running an
+emulator-touching gate, the second invocation prints
+`Another emulator-touching script holds the AVD lock; waiting...` and
+blocks until the first one exits. The lock is released automatically when
+the holding script exits (the open file descriptor closes).
+
+Individual `./gradlew :app:connectedDebugAndroidTest` invocations from
+implementer or reviewer worktrees do NOT take this lock: they are cheap
+to retry on collision and locking them would serialise all parallel
+worktree work. The lock is scoped to the release-gate scripts because
+their long sequential workflows cannot tolerate a sibling `adb install`
+mid-test (see issue #182).
+
+To override the lock-file path (rare; only useful when chaining gates by
+hand under a custom build directory):
+
+```bash
+POCKETSHELL_AVD_LOCK_FILE=/tmp/my-avd-lock scripts/release-emulator-validation.sh
+```
+
+When one gate script invokes another (for example,
+`release-emulator-validation.sh` runs `pre-release-confidence-gate.sh`,
+`phone-dogfood.sh`, and `terminal-workbench.sh` in sequence) the inner
+scripts inherit `POCKETSHELL_AVD_LOCK_ACQUIRED=1` from the outer one and
+skip re-acquiring; the outer lock holds for the entire chain.
+
 Terminal-heavy release candidates can opt into the slower real-agent terminal
 release gate:
 

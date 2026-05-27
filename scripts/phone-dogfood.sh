@@ -4,6 +4,25 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# Acquire an exclusive AVD lock so parallel-worktree gate runs serialize on the
+# shared local Android emulator. Sibling `connectedAndroidTest` invocations
+# from individual implementer/reviewer worktrees are intentionally NOT held by
+# this lock — only the release-gate scripts that drive long sequential
+# emulator workflows (see issue #182). When invoked from a parent gate script
+# that already holds the lock, the env-var guard makes this a no-op. Skipped
+# when the caller is just asking for --help so help stays cheap.
+LOCK_FILE="${POCKETSHELL_AVD_LOCK_FILE:-$ROOT_DIR/build/.avd-lock}"
+if [[ "${1:-}" != "--help" && "${1:-}" != "-h" && -z "${POCKETSHELL_AVD_LOCK_ACQUIRED:-}" ]]; then
+  mkdir -p "$(dirname "$LOCK_FILE")"
+  exec 9>"$LOCK_FILE"
+  if ! flock -n 9; then
+    echo "Another emulator-touching script holds the AVD lock ($LOCK_FILE); waiting..." >&2
+    flock 9
+  fi
+  echo "Acquired AVD lock (fd 9): $LOCK_FILE" >&2
+  export POCKETSHELL_AVD_LOCK_ACQUIRED=1
+fi
+
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 EMULATOR="${EMULATOR:-$ANDROID_SDK/emulator/emulator}"
@@ -106,6 +125,11 @@ Runs fast local phone-dogfood journeys on an already-booted Android emulator
 against deterministic Docker SSH fixtures. Artifacts are written under:
 
   build/phone-dogfood/<run-id>/
+
+Acquires an exclusive `flock` on `build/.avd-lock` (relative to the repo
+root) before touching the emulator so that parallel-worktree gate runs
+serialise on the shared local AVD. Released automatically on script exit.
+See issue #182.
 
 Supported scenarios:
   terminal-lab               isolated terminal lab: connect, type, stress layout/input

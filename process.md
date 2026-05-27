@@ -135,6 +135,8 @@ Parallelism is issue-scoped, not role-skipping:
 - Do not mix fixes for multiple reviewed issues into one unreviewed coordinator patch.
 - Launch agents asynchronously. The orchestrator must not start agents in a blocking mode when there is useful coordinator work available, such as refining issues, reading surrounding code, preparing reviewer briefs, or checking unrelated backlog status.
 - Waiting on an agent is only appropriate when the next required process step depends on that specific agent result and there is no other useful non-overlapping work to do.
+- Concurrent-agent cap: **up to ~10 background agents** can run in parallel under normal load (research spikes + implementers + reviewers combined). When the cap is reached and more work is queued, prefer firing read-only Explore spikes (no filesystem contention) over additional implementers. Drop below the cap only when an agent completes; do not pause running agents to make room.
+- Emulator-touching work is the contention bottleneck, not the agent count itself. Reviewers and implementers that need `connectedAndroidTest` queue politely on the AVD (retry once on SIGKILL) per the workflow set in `emulator_contention.md`. The release-emulator-validation gate scripts hold an exclusive `flock` (#182) and will block sibling worktrees during a release run.
 
 Parallel work is safe when issues touch different modules or paths and
 neither depends on another's unmerged work. Worktree isolation (see next

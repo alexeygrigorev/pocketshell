@@ -333,6 +333,16 @@ public class TmuxSessionViewModel @Inject constructor(
         // inside a launched coroutine, so by the time we touch the SSH
         // transport the only thread interacting with it is us.
         val previousConnectJob = connectJob
+        // Issue #178: snapshot the current active connection before we
+        // flip [connectingTarget] / [_connectionStatus] so the in-flight
+        // connect() coroutine can decide whether to do a full reconnect
+        // (cross-host or no live SSH session) or a fast tmux-client swap
+        // that reuses the existing SSH transport (same host, different
+        // tmux session). The decision MUST be made off the previous
+        // [activeTarget] — connectingTarget is the new target by the time
+        // the coroutine runs.
+        val previousActiveTarget = activeTarget
+        val previousSession = sessionRef
         connectingTarget = target
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
@@ -344,13 +354,57 @@ public class TmuxSessionViewModel @Inject constructor(
             // join itself — that would leave us in the original race window.
             withContext(NonCancellable) {
                 previousConnectJob?.cancelAndJoin()
-                // Then tear the previous connection down properly — joining
-                // the event-loop coroutine before touching the transport.
-                closeCurrentConnectionAndJoin()
+                // Issue #178: when the new target is on the SAME host as
+                // the previously-connected one and we still have a live
+                // SSH session, take the fast-switch path: tear down the
+                // tmux client only (closes the tmux -CC shell channel)
+                // and reuse the existing [SshSession] for the new
+                // [TmuxClient]. Skips the 2-5s SSH handshake the full
+                // teardown path would otherwise re-do.
+                //
+                // Eligibility: same host triple (host, port, user, key
+                // path) AND a live SSH session AND a different tmux
+                // session name. We require a different session name so
+                // we never burn a fast-switch on the no-op re-connect to
+                // the same session — the [activeTarget == target]
+                // early-return above already covers that case, but
+                // keeping the check explicit here documents the
+                // contract.
+                val canFastSwitch = previousActiveTarget != null &&
+                    previousSession != null &&
+                    previousSession.isConnected &&
+                    isSameHost(previousActiveTarget, target) &&
+                    previousActiveTarget.sessionName != target.sessionName
+                if (canFastSwitch) {
+                    // Fast path: keep the SSH session, swap the tmux
+                    // client. No new handshake fires.
+                    closeCurrentClientKeepSession()
+                    runFastSessionSwitch(target, previousSession)
+                } else {
+                    // Slow path: full teardown of both the tmux client
+                    // and the SSH session before the fresh
+                    // [SshConnection.connect] handshake.
+                    closeCurrentConnectionAndJoin()
+                    runConnect(target)
+                }
             }
-            runConnect(target)
         }
     }
+
+    /**
+     * Issue #178: true when [previous] and [target] address the same SSH
+     * endpoint (same host, port, user, key path). Same-host means the
+     * underlying [SshSession] is reusable for an in-channel tmux client
+     * swap. We deliberately exclude `passphrase` and `sessionName` —
+     * passphrase is only used for the initial key load (the live session
+     * is already authenticated), and the session name is the THING we're
+     * switching.
+     */
+    private fun isSameHost(previous: ConnectionTarget, target: ConnectionTarget): Boolean =
+        previous.host == target.host &&
+            previous.port == target.port &&
+            previous.user == target.user &&
+            previous.keyPath == target.keyPath
 
     /**
      * Issue #145: explicit reconnect entry point used by the Compose
@@ -389,6 +443,20 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private suspend fun runConnect(target: ConnectionTarget) {
         try {
+            // Issue #178: instrument the actual SSH handshake call so a
+            // connected test (and humans reading logcat) can see whether
+            // the slow path or the fast tmux-only swap path was taken.
+            // The counter is process-wide so tests can snapshot it
+            // before/after a session-switch and assert "no new
+            // handshake" without grepping logcat. We log under the same
+            // tag the slow-path test already greps for, with a distinct
+            // event prefix so a `grep` matches either.
+            val handshakeNumber = SSH_HANDSHAKE_ATTEMPTS.incrementAndGet()
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-ssh-handshake count=$handshakeNumber host=${target.host} " +
+                    "port=${target.port} user=${target.user} session=${target.sessionName}",
+            )
             val key: SshKey = SshKey.Path(File(target.keyPath))
             val sessionResult = SshConnection.connect(
                 host = target.host,
@@ -441,6 +509,87 @@ public class TmuxSessionViewModel @Inject constructor(
                 target.host,
                 target.port,
                 target.user,
+            )
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            connectingTarget = null
+            refreshReconnectAvailability()
+            _connectionStatus.value = ConnectionStatus.Failed(
+                "error: ${t.javaClass.simpleName}: ${t.message}",
+            )
+        }
+    }
+
+    /**
+     * Issue #178: same-host fast-switch path. Builds a fresh [TmuxClient]
+     * against the already-connected [session] (no new SSH handshake),
+     * attaches it, and updates the registry / target state. Mirrors the
+     * tmux-side wiring inside [runConnect] but skips the entire
+     * [SshConnection.connect] round-trip and reuses [sessionRef].
+     *
+     * Pre-conditions: caller already ran
+     * [closeCurrentClientKeepSession] so the previous tmux client and its
+     * per-pane state are torn down and [clientRef] is null. The caller
+     * also verified [session.isConnected]; we assert it here too because
+     * the SSH socket may have died asynchronously between the eligibility
+     * check and this call (rare but possible — the
+     * [TmuxClient.disconnected] observer in [attachClient] catches the
+     * common case, but a race window of a few ms is unavoidable).
+     */
+    private suspend fun runFastSessionSwitch(
+        target: ConnectionTarget,
+        session: SshSession,
+    ) {
+        try {
+            if (!session.isConnected) {
+                // The previously-live session died between the
+                // eligibility check and now. Fall back to the full
+                // teardown + reconnect path so the user still ends up on
+                // the requested session instead of a Failed state.
+                sessionRef = null
+                runConnect(target)
+                return
+            }
+            sessionRef = session
+            val client = tmuxClientFactory.create(
+                session,
+                sessionName = target.sessionName,
+                startDirectory = target.startDirectory,
+            )
+            activeTarget = target
+            refreshReconnectAvailability()
+            attachClient(client)
+            client.connect()
+            activeTmuxClients.register(
+                hostId = target.hostId,
+                hostName = target.hostName,
+                hostname = target.host,
+                port = target.port,
+                username = target.user,
+                keyPath = target.keyPath,
+                client = client,
+            )
+            registeredHostId = target.hostId
+            bindProjectRootsForHost(target.hostId)
+
+            // Bootstrap the pane list — the new `new-session -A -s`
+            // attach may not fire `%window-add` for windows that already
+            // existed on the remote session, so an explicit list-panes
+            // round-trip is needed to populate the UI on attach. Same
+            // shape as [runConnect].
+            reconcilePanes()
+
+            connectingTarget = null
+            refreshReconnectAvailability()
+            _connectionStatus.value = ConnectionStatus.Connected(
+                target.host,
+                target.port,
+                target.user,
+            )
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-fast-switch host=${target.host} port=${target.port} " +
+                    "user=${target.user} session=${target.sessionName}",
             )
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
@@ -544,6 +693,7 @@ public class TmuxSessionViewModel @Inject constructor(
         keyPath: String,
         sessionName: String,
         client: TmuxClient,
+        session: SshSession? = null,
     ) {
         val target = ConnectionTarget(
             hostId = hostId,
@@ -557,6 +707,16 @@ public class TmuxSessionViewModel @Inject constructor(
             startDirectory = null,
         )
         closeCurrentConnection()
+        // Issue #178: tests for the same-host fast-switch path need a
+        // way to inject a live `SshSession` into the VM so a follow-up
+        // `connect()` to the same host re-uses it instead of going
+        // through the SSH-handshake path (which requires a real
+        // network). Production callers go through `runConnect` /
+        // `runFastSessionSwitch` — those wire the session ref
+        // themselves.
+        if (session != null) {
+            sessionRef = session
+        }
         attachClient(client)
         activeTmuxClients.register(
             hostId = hostId,
@@ -571,6 +731,105 @@ public class TmuxSessionViewModel @Inject constructor(
         activeTarget = target
         bindProjectRootsForHost(hostId)
         _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+    }
+
+    /**
+     * Issue #178 test seam: synchronously run the same-host fast-switch
+     * code path against caller-supplied [session] + [newClient]. Mirrors
+     * what production's connect() does when the eligibility check
+     * passes, but skips the connectJob launch + suspended cancel-and-
+     * join machinery so unit tests can assert against the resulting
+     * state without driving the full coroutine state machine.
+     *
+     * Pre-conditions: the VM must already be "connected" to a target on
+     * the same host (typically via [replaceClientForTest]) so the
+     * eligibility check (`isSameHost(activeTarget, target)`) returns
+     * true. The caller passes a fake [session] that is `isConnected =
+     * true`.
+     */
+    internal suspend fun fastSwitchSessionForTest(
+        hostId: Long,
+        hostName: String,
+        host: String,
+        port: Int,
+        user: String,
+        keyPath: String,
+        sessionName: String,
+        client: TmuxClient,
+        session: SshSession,
+    ) {
+        val target = ConnectionTarget(
+            hostId = hostId,
+            hostName = hostName,
+            host = host,
+            port = port,
+            user = user,
+            keyPath = keyPath,
+            passphrase = null,
+            sessionName = sessionName,
+            startDirectory = null,
+        )
+        connectingTarget = target
+        refreshReconnectAvailability()
+        _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+        // Mirror production's ordering: tear down the previous tmux
+        // client (keeping the session) before binding the new one.
+        closeCurrentClientKeepSession()
+        sessionRef = session
+        // Inline a simplified runFastSessionSwitch: we cannot call the
+        // real method directly because it pulls tmuxClientFactory in,
+        // and the test fakes the [TmuxClient] outright.
+        activeTarget = target
+        refreshReconnectAvailability()
+        attachClient(client)
+        client.connect()
+        activeTmuxClients.register(
+            hostId = hostId,
+            hostName = hostName,
+            hostname = host,
+            port = port,
+            username = user,
+            keyPath = keyPath,
+            client = client,
+        )
+        registeredHostId = hostId
+        bindProjectRootsForHost(hostId)
+        connectingTarget = null
+        refreshReconnectAvailability()
+        _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+    }
+
+    /**
+     * Issue #178 test seam: tells callers whether the eligibility
+     * predicate would treat the supplied target as a same-host fast
+     * switch against the current [activeTarget]. Returns false if
+     * there is no active target or no live SSH session reference. Used
+     * by unit tests to pin the predicate behaviour in isolation from
+     * the rest of the connect() pipeline.
+     */
+    internal fun isFastSwitchEligibleForTest(
+        host: String,
+        port: Int,
+        user: String,
+        keyPath: String,
+        sessionName: String,
+    ): Boolean {
+        val previous = activeTarget ?: return false
+        val previousSession = sessionRef ?: return false
+        if (!previousSession.isConnected) return false
+        val target = ConnectionTarget(
+            hostId = 0L,
+            hostName = "",
+            host = host,
+            port = port,
+            user = user,
+            keyPath = keyPath,
+            passphrase = null,
+            sessionName = sessionName,
+            startDirectory = null,
+        )
+        return isSameHost(previous, target) &&
+            previous.sessionName != target.sessionName
     }
 
     /**
@@ -1592,6 +1851,79 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #178: tear down everything tied to the **tmux client** but
+     * keep the underlying [SshSession] alive so the fast-switch path can
+     * reuse it for a new [TmuxClient].
+     *
+     * Mirrors [closeCurrentConnectionAndJoin] structurally — same
+     * cancel-and-join ordering for the event loop and per-pane jobs to
+     * preserve the issue #151 race-fix — but stops short of
+     * `sessionRef.close()`. We deliberately ALSO leave [sessionRef]
+     * populated; the caller ([runFastSessionSwitch]) consumes it
+     * directly. We DO clear [activeTarget] / [registeredHostId] /
+     * `remoteColumns`/`remoteRows` because the new tmux client will
+     * register a fresh entry, take ownership of the next resize, and
+     * needs a clean slate — same lifecycle reset the slow path uses.
+     *
+     * Bridge / pane / agent / input scratch state is cleared identically
+     * to the slow path: the new tmux session will report its own panes
+     * via `%window-add` and the bootstrap `list-panes`, so retaining
+     * stale per-pane jobs from the previous session would only leak
+     * coroutines onto the now-dead pane IDs.
+     */
+    private suspend fun closeCurrentClientKeepSession() {
+        eventsJob?.cancelAndJoin()
+        eventsJob = null
+        projectRootsJob?.cancelAndJoin()
+        projectRootsJob = null
+        _projectRoots.value = emptyList()
+        val producerJobsToJoin = paneProducerJobs.values.toList()
+        val agentJobsToJoin = paneAgentJobs.values.toList()
+        val inputJobsToJoin = paneInputJobs.values.toList()
+        for (job in producerJobsToJoin) job.cancelAndJoin()
+        for (job in agentJobsToJoin) job.cancelAndJoin()
+        for (job in inputJobsToJoin) job.cancelAndJoin()
+        for ((_, channel) in paneInputChannels) {
+            channel.close()
+        }
+        paneAgentJobs.clear()
+        paneAgentInputs.clear()
+        paneInputJobs.clear()
+        paneInputChannels.clear()
+        _agentConversations.value = emptyMap()
+        // Issue #197: clear conversation-target state so the new session
+        // does not inherit a stale lock or first-send acknowledgement
+        // from the session we're leaving.
+        _lockedConversationPaneId.value = null
+        _firstSendConfirmedPanes.value = emptySet()
+        paneProducerJobs.clear()
+        for ((_, row) in paneRows) {
+            runCatching { row.terminalState.detachExternalProducer() }
+        }
+        paneRows.clear()
+        _panes.value = emptyList()
+        // Close the tmux -CC channel. This tears down only the SSH
+        // shell channel inside the live [SshSession] — the session
+        // itself stays open for the next [TmuxClient].
+        runCatching { clientRef?.close() }
+        clientRef = null
+        registeredHostId?.let { activeTmuxClients.unregister(it) }
+        registeredHostId = null
+        // Intentionally NOT touching [sessionRef] — that is the
+        // contract of this method. The caller will pass the same
+        // session to the next tmux client.
+        activeTarget = null
+        // Keep [connectingTarget] — connect() set it to the new
+        // target before invoking us; clearing it here would lose the
+        // intent.
+        // Issue #102 (reopen): a fresh attach must re-fire
+        // `resize-window` against the new tmux session's pane on the
+        // next layout pass.
+        remoteColumns = 0
+        remoteRows = 0
+    }
+
+    /**
      * Non-suspending teardown used by `onCleared()` and the synchronous
      * test-replacement seam. Cancels the event-loop coroutine (fire and
      * forget) and then tears the rest of the state down sync. Production
@@ -1788,3 +2120,22 @@ internal const val ISSUE_145_RECONNECT_TAG: String = "PsTmuxReconnect"
  * off it; it is purely a test signal.
  */
 internal val TMUX_CONNECT_ATTEMPTS: AtomicInteger = AtomicInteger(0)
+
+/**
+ * Issue #178: process-wide monotonic counter of **SSH handshakes** the
+ * ViewModel actually performed (i.e. trips through
+ * [com.pocketshell.core.ssh.SshConnection.connect]). Distinct from
+ * [TMUX_CONNECT_ATTEMPTS], which counts logical connect() invocations:
+ * a same-host session switch increments TMUX_CONNECT_ATTEMPTS but does
+ * NOT increment this counter because no new SSH handshake fires — the
+ * existing transport is reused.
+ *
+ * The connected `TmuxSessionSwitchSameHostReusesSshE2eTest` snapshots
+ * this value before the second attach and asserts the delta is zero,
+ * which is the structural assertion behind acceptance criterion "Same-
+ * host session switching does NOT open a new SSH socket".
+ *
+ * Internal because callers should never key behaviour off it; it is
+ * purely a test signal.
+ */
+internal val SSH_HANDSHAKE_ATTEMPTS: AtomicInteger = AtomicInteger(0)

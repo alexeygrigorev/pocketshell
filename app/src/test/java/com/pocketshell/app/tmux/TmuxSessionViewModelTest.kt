@@ -1559,6 +1559,353 @@ class TmuxSessionViewModelTest {
         assertEquals("", vm.panes.value.single().paneTty)
     }
 
+    // ─── Issue #178: same-host fast-switch reuses the SSH transport ───
+    //
+    // The connect() path detects "same host, different tmux session"
+    // and routes through [closeCurrentClientKeepSession] +
+    // [runFastSessionSwitch] instead of the full SSH-handshake teardown
+    // + reconnect. Production exercise lives in the connected
+    // TmuxSessionSwitchSameHostReusesSshE2eTest because a unit test
+    // cannot reach into [SshConnection.connect] without a real
+    // network. The unit tests below pin the predicate behaviour, the
+    // teardown-keep-session invariant, and the registry side-effects
+    // through the dedicated test seams the VM exposes.
+
+    @Test
+    fun isFastSwitchEligibleRequiresAnActiveTargetAndSession() {
+        val vm = newVm()
+        assertFalse(
+            "no active target -> not eligible",
+            vm.isFastSwitchEligibleForTest(
+                host = "h",
+                port = 22,
+                user = "u",
+                keyPath = "/k",
+                sessionName = "s",
+            ),
+        )
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            // No session injected — fast switch must require a live
+            // SshSession reference, not just an active target.
+        )
+        assertFalse(
+            "no SshSession reference -> not eligible",
+            vm.isFastSwitchEligibleForTest(
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "other",
+            ),
+        )
+    }
+
+    @Test
+    fun isFastSwitchEligibleRejectsDifferentHostParameters() {
+        val vm = newVm()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = FakeSshSession(),
+        )
+        // Different host
+        assertFalse(
+            vm.isFastSwitchEligibleForTest(
+                host = "bravo.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "other",
+            ),
+        )
+        // Different port
+        assertFalse(
+            vm.isFastSwitchEligibleForTest(
+                host = "alpha.example",
+                port = 2222,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "other",
+            ),
+        )
+        // Different user
+        assertFalse(
+            vm.isFastSwitchEligibleForTest(
+                host = "alpha.example",
+                port = 22,
+                user = "other",
+                keyPath = "/keys/a",
+                sessionName = "other",
+            ),
+        )
+        // Different key path
+        assertFalse(
+            vm.isFastSwitchEligibleForTest(
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/other",
+                sessionName = "other",
+            ),
+        )
+    }
+
+    @Test
+    fun isFastSwitchEligibleRejectsSameSessionName() {
+        val vm = newVm()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = FakeSshSession(),
+        )
+        // Same host + same session name = no-op, not a fast switch.
+        assertFalse(
+            vm.isFastSwitchEligibleForTest(
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+            ),
+        )
+    }
+
+    @Test
+    fun isFastSwitchEligibleAcceptsSameHostDifferentSession() {
+        val vm = newVm()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = FakeSshSession(),
+        )
+        assertTrue(
+            vm.isFastSwitchEligibleForTest(
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "other",
+            ),
+        )
+    }
+
+    @Test
+    fun isFastSwitchEligibleRejectsDeadSshSession() {
+        val vm = newVm()
+        // Inject a session that says it is not connected — the predicate
+        // must not pretend the transport is reusable.
+        val deadSession = FakeSshSession(isConnectedValue = false)
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = deadSession,
+        )
+        assertFalse(
+            vm.isFastSwitchEligibleForTest(
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "other",
+            ),
+        )
+    }
+
+    @Test
+    fun fastSwitchClosesOldClientAndReusesSshSession() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry = registry)
+        val session = FakeSshSession()
+        val oldClient = FakeTmuxClient()
+        val newClient = FakeTmuxClient()
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+            session = session,
+        )
+        assertSame(oldClient, registry.clients.value[1L]?.client)
+        assertFalse("session must not be closed before fast switch", session.closed)
+        assertFalse("old client should still be open before fast switch", oldClient.closed)
+
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = newClient,
+            session = session,
+        )
+        advanceUntilIdle()
+
+        // Old tmux client must be closed; SSH session is reused
+        // (NOT closed). Registry now points at the new client.
+        assertTrue("old tmux client must be closed by fast switch", oldClient.closed)
+        assertFalse(
+            "fast switch must NOT close the underlying SSH session",
+            session.closed,
+        )
+        assertSame(newClient, registry.clients.value[1L]?.client)
+        assertTrue("new tmux client must be connect()ed", newClient.connectCalled)
+        // After the fast switch a same-host probe for yet another
+        // session name should still report eligible, because the
+        // session ref was preserved.
+        assertTrue(
+            vm.isFastSwitchEligibleForTest(
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "third",
+            ),
+        )
+    }
+
+    @Test
+    fun fastSwitchClearsPaneStateBeforeNewSession() = runTest {
+        val vm = newVm()
+        val session = FakeSshSession()
+        val oldClient = FakeTmuxClient()
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+            session = session,
+        )
+
+        // Populate a pane row so we can assert it is dropped during the
+        // fast-switch teardown. The sessionName must match the active
+        // target's session name; otherwise [applyParsedPanes] filters
+        // it out.
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "old",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        assertEquals(1, vm.panes.value.size)
+
+        val newClient = FakeTmuxClient()
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = newClient,
+            session = session,
+        )
+        advanceUntilIdle()
+
+        // Pane list is cleared on fast switch — the new tmux session
+        // will report its own panes.
+        assertTrue(
+            "pane state must be cleared on fast switch, was ${vm.panes.value}",
+            vm.panes.value.isEmpty(),
+        )
+    }
+
+    @Test
+    fun fastSwitchIncrementsTmuxConnectCounterButNotSshHandshakeCounter() = runTest {
+        val vm = newVm()
+        val session = FakeSshSession()
+        val oldClient = FakeTmuxClient()
+        val newClient = FakeTmuxClient()
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+            session = session,
+        )
+
+        // Snapshot the SSH-handshake counter — the fast switch must
+        // NOT increment it (the test seam bypasses runConnect entirely,
+        // matching what production does when the eligibility predicate
+        // passes).
+        val handshakesBefore = SSH_HANDSHAKE_ATTEMPTS.get()
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = newClient,
+            session = session,
+        )
+        advanceUntilIdle()
+
+        val handshakesAfter = SSH_HANDSHAKE_ATTEMPTS.get()
+        assertEquals(
+            "SSH handshakes must not advance when fast-switch reuses the transport",
+            handshakesBefore,
+            handshakesAfter,
+        )
+    }
+
     @Test
     fun closedPaneDropsFirstSendAcknowledgementAndClearsLock() = runTest {
         // A pane that tmux removes between reconciles takes its first-send
@@ -1587,5 +1934,57 @@ class TmuxSessionViewModelTest {
             "lock must be cleared when the locked pane disappears",
             vm.lockedConversationPaneId.value,
         )
+    }
+
+    /**
+     * Issue #178: minimal in-memory [SshSession] double for the
+     * fast-switch unit tests. Mirrors the same shape as
+     * `FakeSshSession` in `SessionViewModelTest` (intentionally a local
+     * private class so that file keeps its own seam) — the production
+     * code only consults [isConnected] / [close] from the fast-switch
+     * path, but we still implement the rest of the interface as no-ops
+     * so any future change to the VM that touches another method on
+     * the session does not silently break this test.
+     */
+    private class FakeSshSession(
+        private val isConnectedValue: Boolean = true,
+    ) : com.pocketshell.core.ssh.SshSession {
+        @Volatile
+        var closed: Boolean = false
+
+        override val isConnected: Boolean
+            get() = isConnectedValue && !closed
+
+        override suspend fun exec(command: String): com.pocketshell.core.ssh.ExecResult =
+            com.pocketshell.core.ssh.ExecResult(stdout = "", stderr = "", exitCode = 0)
+
+        override fun tail(path: String, onLine: (String) -> Unit): kotlinx.coroutines.Job =
+            kotlinx.coroutines.Job()
+
+        override fun openLocalPortForward(
+            remoteHost: String,
+            remotePort: Int,
+            localPort: Int,
+        ): com.pocketshell.core.ssh.SshPortForward {
+            throw NotImplementedError()
+        }
+
+        override fun startShell(): com.pocketshell.core.ssh.SshShell {
+            throw NotImplementedError()
+        }
+
+        override suspend fun uploadFile(file: java.io.File, remotePath: String): String =
+            error("uploadFile not used in this test")
+
+        override suspend fun uploadStream(
+            input: java.io.InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String = error("uploadStream not used in this test")
+
+        override fun close() {
+            closed = true
+        }
     }
 }

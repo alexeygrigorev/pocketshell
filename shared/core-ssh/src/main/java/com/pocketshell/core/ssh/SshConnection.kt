@@ -52,6 +52,20 @@ public object SshConnection {
         timeoutMs: Int = DEFAULT_TIMEOUT_MS,
         keepAliveSeconds: Int = DEFAULT_KEEP_ALIVE_SECONDS,
     ): Result<SshSession> = withContext(Dispatchers.IO) {
+        // Issue #173 round-2: install the process-wide
+        // UncaughtExceptionHandler guard BEFORE we spawn any sshj
+        // background threads. sshj's `SSHClient.connect` starts the
+        // `sshj-Reader` JVM thread (and `KeepAlive` once auth lands);
+        // if those threads die with a transport-level exception (the
+        // CI-reproducible "Broken transport; encountered EOF" path
+        // triggered when the OS tears the TCP socket down underneath
+        // a backgrounded app) the JVM default handler would terminate
+        // the whole process. The guard intercepts only sshj-named
+        // threads with transport-family exceptions and routes the
+        // observable signal through the existing Kotlin coroutine
+        // disconnect machinery instead. Idempotent — only the first
+        // call wraps a real handler. See [SshjTransportThreadGuard].
+        SshjTransportThreadGuard.installIfNecessary()
         val client = SSHClient(createSshConfig())
         try {
             applyKnownHostsPolicy(client, knownHosts)
@@ -77,7 +91,12 @@ public object SshConnection {
      * public [SshSession] surface still get the core transport fixes.
      */
     @JvmStatic
-    public fun createClient(): SSHClient = SSHClient(createSshConfig())
+    public fun createClient(): SSHClient {
+        // Issue #173 round-2: same rationale as [connect] — install
+        // the guard before any sshj thread can start.
+        SshjTransportThreadGuard.installIfNecessary()
+        return SSHClient(createSshConfig())
+    }
 
     private fun createSshConfig(): DefaultConfig {
         ensureBouncyCastleProvider()

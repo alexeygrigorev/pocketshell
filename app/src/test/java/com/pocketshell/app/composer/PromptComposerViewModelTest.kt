@@ -1000,26 +1000,6 @@ class PromptComposerViewModelTest {
     }
 
     @Test
-    fun queueDisabledByVoiceSettingsSkipsPersistence() = runTest {
-        val settings = object : PromptComposerViewModel.VoiceSettingsSnapshot {
-            override fun silenceWindowMs(): Long = PromptComposerViewModel.SILENCE_WINDOW_MS
-            override fun whisperLanguageHint(): String? = null
-            override fun persistFailedTranscriptions(): Boolean = false
-        }
-        val (vm, queue) = newVmWithQueue(
-            whisper = fakeWhisperClient { Result.failure(WhisperException.Transport("offline")) },
-            samplerDispatcher = StandardTestDispatcher(testScheduler),
-            voiceSettings = settings,
-        )
-        vm.onMicTap()
-        runCurrent()
-        vm.onMicTap()
-        advanceUntilIdle()
-
-        assertEquals("queue must not be used when the toggle is off", 0, queue.enqueueCount)
-    }
-
-    @Test
     fun retryPendingSuccessAppendsToDraftAndClearsQueue() = runTest {
         // Seed a queued item without going through the recording path.
         val queue = FakePendingQueue()

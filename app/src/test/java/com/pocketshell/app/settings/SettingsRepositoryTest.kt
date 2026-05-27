@@ -243,36 +243,6 @@ class SettingsRepositoryTest {
         assertEquals(true, SettingsRepository(context).settings.value.showSystemNotes)
     }
 
-    // -- Issue #180: persist-failed-transcriptions toggle -----------------
-
-    @Test
-    fun `persistFailedTranscriptions default is ON`() {
-        val repo = SettingsRepository(context)
-        assertTrue(
-            "Issue #180: default must be ON so the user gets the data-loss " +
-                "protection out of the box",
-            repo.settings.value.persistFailedTranscriptions,
-        )
-    }
-
-    @Test
-    fun `setPersistFailedTranscriptions toggles off and on, persisting across instances`() {
-        val repo = SettingsRepository(context)
-        repo.setPersistFailedTranscriptions(false)
-        assertEquals(false, repo.settings.value.persistFailedTranscriptions)
-        assertEquals(
-            false,
-            SettingsRepository(context).settings.value.persistFailedTranscriptions,
-        )
-
-        repo.setPersistFailedTranscriptions(true)
-        assertEquals(true, repo.settings.value.persistFailedTranscriptions)
-        assertEquals(
-            true,
-            SettingsRepository(context).settings.value.persistFailedTranscriptions,
-        )
-    }
-
     // -- Issue #214: usage warn threshold slider --------------------------
 
     @Test

@@ -115,20 +115,6 @@ class SettingsRepository @Inject constructor(
     }
 
     /**
-     * Persist the "queue failed Whisper transcriptions for retry" toggle.
-     * Issue #180. When `false` the composer drops the audio buffer on a
-     * Whisper failure (pre-#180 behaviour) — the row is never written
-     * and no audio file ever lands in `voice-pending/`. When `true`
-     * (default) the composer persists the audio before the Whisper call
-     * and surfaces a retry affordance on failure.
-     */
-    fun setPersistFailedTranscriptions(enabled: Boolean) {
-        if (_settings.value.persistFailedTranscriptions == enabled) return
-        prefs.edit().putBoolean(KEY_PERSIST_FAILED_TRANSCRIPTIONS, enabled).apply()
-        _settings.value = _settings.value.copy(persistFailedTranscriptions = enabled)
-    }
-
-    /**
      * Persist the user-configurable "approaching limit" threshold for
      * the in-app usage warning surfaces. Issue #214. Clamped to
      * [AppSettings.MIN_USAGE_WARN_PERCENT] /
@@ -169,10 +155,6 @@ class SettingsRepository @Inject constructor(
             KEY_SHOW_SYSTEM_NOTES,
             AppSettings.DEFAULT_SHOW_SYSTEM_NOTES,
         )
-        val persistFailedTranscriptions = prefs.getBoolean(
-            KEY_PERSIST_FAILED_TRANSCRIPTIONS,
-            AppSettings.DEFAULT_PERSIST_FAILED_TRANSCRIPTIONS,
-        )
         val usageWarnPercent = snapUsageWarnThreshold(
             prefs.getInt(
                 KEY_USAGE_WARN_THRESHOLD,
@@ -186,7 +168,6 @@ class SettingsRepository @Inject constructor(
             voiceLanguage = language,
             voiceSilenceThresholdSeconds = silence,
             showSystemNotes = showSystemNotes,
-            persistFailedTranscriptions = persistFailedTranscriptions,
             usageWarnThresholdPercent = usageWarnPercent,
         )
     }
@@ -220,7 +201,6 @@ class SettingsRepository @Inject constructor(
         const val KEY_VOICE_LANGUAGE = "voice_language"
         const val KEY_VOICE_SILENCE_SECONDS = "voice_silence_seconds"
         const val KEY_SHOW_SYSTEM_NOTES = "show_system_notes"
-        const val KEY_PERSIST_FAILED_TRANSCRIPTIONS = "persist_failed_transcriptions"
         const val KEY_USAGE_WARN_THRESHOLD = "usage_warn_threshold_percent"
     }
 }

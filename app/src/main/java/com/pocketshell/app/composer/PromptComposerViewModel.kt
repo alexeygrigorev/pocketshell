@@ -521,30 +521,29 @@ public class PromptComposerViewModel @Inject constructor(
                 return@launch
             }
 
-            val queueEnabled = voiceSettings.persistFailedTranscriptions()
-
             // Issue #180: persist the audio BEFORE the Whisper call so a
             // mid-flight network drop / process kill cannot lose the
             // recording. The store handles its own size cap + IO failure
-            // — returning null means we fall back to the legacy "fail
-            // fast, drop bytes" behaviour. The pending row carries a
-            // sentinel "Waiting for network" message when we know we are
-            // offline so the UI never has to guess.
+            // — `enqueueAudio` returns null on cap/IO failure and the
+            // call site below treats null `pendingId` as "no persisted
+            // row to clean up on success/failure". The pending row
+            // carries a sentinel "Waiting for network" message when we
+            // know we are offline so the UI never has to guess.
+            //
+            // D22 cleanup (#228): the retry queue runs unconditionally —
+            // the pre-#180 fail-fast / `persistFailedTranscriptions`
+            // toggle is gone. There is no path that skips persistence.
             val offline = !connectivity.refresh()
-            val pendingId: String? = if (queueEnabled) {
-                val initialError = if (offline) {
-                    PendingTranscriptionItem.NETWORK_WAITING_MESSAGE
-                } else {
-                    null
-                }
-                pendingTranscriptionStore.enqueueAudio(
-                    audio = audio,
-                    destinationContext = PendingTranscriptionEntity.DESTINATION_COMPOSER,
-                    initialError = initialError,
-                )?.id
+            val initialError = if (offline) {
+                PendingTranscriptionItem.NETWORK_WAITING_MESSAGE
             } else {
                 null
             }
+            val pendingId: String? = pendingTranscriptionStore.enqueueAudio(
+                audio = audio,
+                destinationContext = PendingTranscriptionEntity.DESTINATION_COMPOSER,
+                initialError = initialError,
+            )?.id
 
             // Recording + transcribe round-trip is complete: clear the
             // saved "was recording" flag whichever way it lands so we do
@@ -1073,17 +1072,6 @@ public class PromptComposerViewModel @Inject constructor(
          * [AppSettings.VOICE_LANGUAGE_AUTO] sentinel.
          */
         public fun whisperLanguageHint(): String?
-
-        /**
-         * Issue #180: whether failed Whisper transcriptions should be
-         * persisted to disk so the user can retry them. Default
-         * implementation returns `true` (the post-#180 behaviour) so
-         * older test fakes that don't override the method still see the
-         * documented default-on behaviour. Production wiring reads the
-         * [AppSettings.persistFailedTranscriptions] flag from the
-         * settings repository.
-         */
-        public fun persistFailedTranscriptions(): Boolean = true
     }
 
     /**

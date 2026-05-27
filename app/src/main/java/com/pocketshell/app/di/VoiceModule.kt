@@ -228,9 +228,6 @@ internal class SettingsRepositoryVoiceSnapshot(
         val code = repository.settings.value.voiceLanguage
         return if (code == AppSettings.VOICE_LANGUAGE_AUTO || code.isBlank()) null else code
     }
-
-    override fun persistFailedTranscriptions(): Boolean =
-        repository.settings.value.persistFailedTranscriptions
 }
 
 /**

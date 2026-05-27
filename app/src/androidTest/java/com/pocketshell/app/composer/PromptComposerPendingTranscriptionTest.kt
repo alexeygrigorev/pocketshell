@@ -67,7 +67,6 @@ class PromptComposerPendingTranscriptionTest {
     private class TestVoiceSettings : PromptComposerViewModel.VoiceSettingsSnapshot {
         override fun silenceWindowMs(): Long = PromptComposerViewModel.SILENCE_WINDOW_MS
         override fun whisperLanguageHint(): String? = null
-        override fun persistFailedTranscriptions(): Boolean = true
     }
 
     private class TestConnectivity(initial: Boolean = true) :

@@ -150,15 +150,6 @@ class SettingsViewModel @Inject constructor(
     fun setShowSystemNotes(enabled: Boolean) = repository.setShowSystemNotes(enabled)
 
     /**
-     * Toggle [AppSettings.persistFailedTranscriptions] — issue #180.
-     * When off, a Whisper failure drops the audio buffer (the
-     * pre-#180 behaviour). When on (default), the audio is persisted
-     * so the user can retry.
-     */
-    fun setPersistFailedTranscriptions(enabled: Boolean) =
-        repository.setPersistFailedTranscriptions(enabled)
-
-    /**
      * Persist [percent] as the user's preferred "approaching limit"
      * threshold for the in-app usage warning surfaces (issue #214).
      * Values are clamped + snapped to the slider grid by the

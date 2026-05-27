@@ -11,6 +11,7 @@ Conceptual planning. Captured 2026-05-21, before any code is written.
 | [agent-awareness.md](agent-awareness.md) | Detecting Claude Code in a tmux pane and showing a clean conversation view; Codex/OpenCode parsers are present but runtime-disabled |
 | [usage-panel.md](usage-panel.md) | Provider quota / usage tracking via server-side tools (heru) over SSH — zero credentials on the phone |
 | [design-language.md](design-language.md) | Termius-inspired visual tokens |
+| [ux-rules.md](ux-rules.md) | Placement + transition rules across journeys (codified from #163); cite from every UX-touching issue |
 | [roadmap.md](roadmap.md) | Phased build order with rough sizing |
 | [decisions.md](decisions.md) | Log of what's locked, what's still open |
 | [testing.md](testing.md) | Android emulator + Docker remote-server test environment |

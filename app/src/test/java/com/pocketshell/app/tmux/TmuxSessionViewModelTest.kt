@@ -471,7 +471,17 @@ class TmuxSessionViewModelTest {
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
 
-        vm.writeInputToPane("%0", "ls\n".toByteArray(Charsets.UTF_8))
+        // Submission semantics: a `\r` byte (carriage return) is the
+        // "Enter / submit" signal coming from the terminal emulator
+        // and from the in-app callers (chips, snippets with-Enter,
+        // composer send) — see [TmuxSessionScreen]. The single-line
+        // route keeps the existing two-token send-keys shape so
+        // keyboard typing still submits cleanly.
+        //
+        // A literal `\n` byte is reserved for the bracketed-paste
+        // multi-line route (issue #209); we cover that in
+        // [writeInputToPaneWrapsMultiLineInputInBracketedPaste].
+        vm.writeInputToPane("%0", "ls\r".toByteArray(Charsets.UTF_8))
         advanceUntilIdle()
 
         val sent = client.sentCommands.filter { it.startsWith("send-keys") }
@@ -543,6 +553,168 @@ class TmuxSessionViewModelTest {
             "empty input must not produce a send-keys command",
             client.sentCommands.none { it.startsWith("send-keys") },
         )
+    }
+
+    // ------------------------------------------------------------- Issue #209
+    // Bracketed-paste wrapping for multi-line input. Single-line input
+    // must keep the existing `send-keys -l` + `send-keys ... Enter` shape
+    // so we don't regress per-line named-key routing for normal typing.
+
+    @Test
+    fun writeInputToPaneWrapsMultiLineInputInBracketedPaste() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        val payload = "para one\npara two\npara three"
+        vm.writeInputToPane("%4", payload.toByteArray(Charsets.UTF_8))
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals(
+            "expected exactly one send-keys -H invocation, got $sent",
+            1,
+            sent.size,
+        )
+        val cmd = sent.single()
+        assertTrue(
+            "expected send-keys -H targeting %4, got '$cmd'",
+            cmd.startsWith("send-keys -H -t %4 "),
+        )
+        // The hex payload should begin with the bracketed-paste start
+        // marker bytes (\e[200~ -> 1b 5b 32 30 30 7e) and end with the
+        // matching end marker (\e[201~ -> 1b 5b 32 30 31 7e). The
+        // newlines inside the body must reach tmux as `0a` bytes (i.e.
+        // literal LF), NOT as separate `send-keys ... Enter` calls.
+        assertTrue(
+            "expected bracketed-paste start marker in hex payload, got '$cmd'",
+            cmd.contains("1b 5b 32 30 30 7e"),
+        )
+        assertTrue(
+            "expected bracketed-paste end marker in hex payload, got '$cmd'",
+            cmd.endsWith("1b 5b 32 30 31 7e"),
+        )
+        // Three paragraphs separated by two `\n` bytes inside the
+        // markers.
+        val hexBody = cmd.substringAfter("send-keys -H -t %4 ")
+        val newlineCount = hexBody.split(' ').count { it == "0a" }
+        assertEquals(
+            "expected exactly 2 literal LF bytes inside bracketed paste, got '$hexBody'",
+            2,
+            newlineCount,
+        )
+        // No standalone `send-keys ... Enter` should fire — the whole
+        // block went through `-H`.
+        assertTrue(
+            "multi-line input must not emit a separate Enter named-key, got $sent",
+            sent.none { it.contains(" Enter") },
+        )
+    }
+
+    @Test
+    fun writeInputToPaneNormalisesCrLfToLfInsideBracketedPaste() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        // Windows-style line endings should collapse to LF only — we
+        // never want two paragraph separators where the source had one.
+        vm.writeInputToPane("%0", "alpha\r\nbeta".toByteArray(Charsets.UTF_8))
+        advanceUntilIdle()
+
+        val cmd = client.sentCommands.single { it.startsWith("send-keys") }
+        val hexBody = cmd.substringAfter("send-keys -H -t %0 ")
+        val tokens = hexBody.split(' ')
+        assertEquals(
+            "expected exactly 1 LF (not CR LF) inside the paste, got '$hexBody'",
+            1,
+            tokens.count { it == "0a" },
+        )
+        assertEquals(
+            "expected no CR bytes inside the paste, got '$hexBody'",
+            0,
+            tokens.count { it == "0d" },
+        )
+    }
+
+    @Test
+    fun writeInputToPaneKeepsSingleLineInputOnTheLiteralPath() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        // Single-line input must NOT be wrapped in bracketed-paste.
+        // The existing send-keys -l shape is preserved so the regression
+        // suite around named-key Enter routing (and the per-line Enter
+        // semantics of `writeInputToPaneIssuesSendKeysWithLiteralBytes`)
+        // keeps working.
+        vm.writeInputToPane("%0", "hello".toByteArray(Charsets.UTF_8))
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals(1, sent.size)
+        assertEquals("send-keys -l -t %0 -- 'hello'", sent[0])
+        assertTrue(
+            "single-line input must not use the -H bracketed-paste path, got $sent",
+            sent.none { it.startsWith("send-keys -H") },
+        )
+    }
+
+    @Test
+    fun writeInputToPaneTrailingNewlineGoesThroughBracketedPaste() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        // "text\n" contains a `\n` so we route it through the paste path
+        // even though there is only one line of content. This preserves
+        // the design: any `\n` in the input means "treat as a paste".
+        // Submission of the input is the caller's responsibility (they
+        // can send a separate Enter named-key after the paste lands).
+        vm.writeInputToPane("%0", "ls\n".toByteArray(Charsets.UTF_8))
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals(
+            "expected a single send-keys -H invocation for `\\n`-terminated input, got $sent",
+            1,
+            sent.size,
+        )
+        assertTrue(
+            "expected send-keys -H, got '${sent.single()}'",
+            sent.single().startsWith("send-keys -H -t %0 "),
+        )
+    }
+
+    @Test
+    fun buildBracketedPasteHexEmitsExpectedSequenceForKnownInput() {
+        val vm = newVm()
+        // Body: "a\nb" -> 0x61 0x0a 0x62.
+        // Wrapped with the bracketed-paste markers:
+        //   1b 5b 32 30 30 7e   <- ESC [ 2 0 0 ~
+        //   61                  <- a
+        //   0a                  <- LF
+        //   62                  <- b
+        //   1b 5b 32 30 31 7e   <- ESC [ 2 0 1 ~
+        val hex = vm.buildBracketedPasteHexForTest("a\nb".toByteArray(Charsets.UTF_8))
+        assertEquals(
+            "1b 5b 32 30 30 7e 61 0a 62 1b 5b 32 30 31 7e",
+            hex,
+        )
+    }
+
+    @Test
+    fun containsLineBreakIsTrueOnlyForLf() {
+        val vm = newVm()
+        assertTrue(vm.containsLineBreakForTest("a\nb".toByteArray(Charsets.UTF_8)))
+        assertTrue(vm.containsLineBreakForTest("a\r\nb".toByteArray(Charsets.UTF_8)))
+        assertFalse(vm.containsLineBreakForTest("a b".toByteArray(Charsets.UTF_8)))
+        // A lone `\r` (rare on Android; carriage return without LF) is
+        // intentionally NOT treated as a paragraph break — the input-
+        // tokens path on the single-line route turns it into a tmux
+        // `Enter` named key, which is the right thing for shell prompts.
+        assertFalse(vm.containsLineBreakForTest("a\rb".toByteArray(Charsets.UTF_8)))
+        assertFalse(vm.containsLineBreakForTest(ByteArray(0)))
     }
 
     @Test

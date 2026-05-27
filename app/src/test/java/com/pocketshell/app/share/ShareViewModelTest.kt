@@ -251,6 +251,102 @@ class ShareViewModelTest {
     }
 
     @Test
+    fun pasteIntoSessionUsesBracketedPasteForMultiLineText() = runTest {
+        // Issue #209: a share payload with embedded newlines must route
+        // through `send-keys -H` with the bracketed-paste markers
+        // (\e[200~ ... \e[201~) so Claude Code / readline-based shells
+        // treat the whole block as one paste rather than N submissions.
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = host(id = 21L, name = "multi-line-host")
+        val client = FakeTmuxClient().apply {
+            // display-message resolves the active pane id.
+            responses.addLast(
+                CommandResponse(number = 0L, output = listOf("%7"), isError = false),
+            )
+            // send-keys -H succeeds.
+            responses.addLast(
+                CommandResponse(number = 0L, output = emptyList(), isError = false),
+            )
+        }
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key",
+            client = client,
+        )
+        vm.setItem(ShareableItem.TextItem(text = "para 1\npara 2", displayName = "note"))
+
+        vm.pasteIntoSession(host)
+        advanceUntilIdle()
+
+        val state = vm.uploadState.first { it is UploadState.Success }
+        assertTrue(state is UploadState.Success)
+        assertEquals(2, client.sentCommands.size)
+        val sendKeys = client.sentCommands[1]
+        assertTrue(
+            "expected send-keys -H targeting %7, got '$sendKeys'",
+            sendKeys.startsWith("send-keys -H -t %7 "),
+        )
+        assertTrue(
+            "expected bracketed-paste start marker, got '$sendKeys'",
+            sendKeys.contains("1b 5b 32 30 30 7e"),
+        )
+        assertTrue(
+            "expected bracketed-paste end marker, got '$sendKeys'",
+            sendKeys.endsWith("1b 5b 32 30 31 7e"),
+        )
+        // Exactly one LF inside the body (two paragraphs).
+        val hexBody = sendKeys.substringAfter("send-keys -H -t %7 ")
+        val tokens = hexBody.split(' ')
+        assertEquals(
+            "expected exactly one LF inside the paste body, got '$hexBody'",
+            1,
+            tokens.count { it == "0a" },
+        )
+    }
+
+    @Test
+    fun pasteIntoSessionKeepsSingleLineTextOnTheLiteralPath() = runTest {
+        // Issue #209 (negative case): a one-liner share must keep the
+        // existing `send-keys -l` shape. The single-quote escape (a la
+        // `it'\''s`) must still appear inside the literal argument.
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = host(id = 22L, name = "single-line-host")
+        val client = FakeTmuxClient().apply {
+            responses.addLast(
+                CommandResponse(number = 0L, output = listOf("%3"), isError = false),
+            )
+            responses.addLast(
+                CommandResponse(number = 0L, output = emptyList(), isError = false),
+            )
+        }
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key",
+            client = client,
+        )
+        vm.setItem(ShareableItem.TextItem(text = "echo it's working", displayName = "note"))
+
+        vm.pasteIntoSession(host)
+        advanceUntilIdle()
+
+        val sendKeys = client.sentCommands[1]
+        assertTrue(
+            "single-line text must not use the -H path, got '$sendKeys'",
+            sendKeys.startsWith("send-keys -l -t %3 -- '"),
+        )
+    }
+
+    @Test
     fun pasteIntoSessionRejectsNonTextStagedItems() = runTest {
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)

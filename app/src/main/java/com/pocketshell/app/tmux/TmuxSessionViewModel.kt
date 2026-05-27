@@ -1639,6 +1639,51 @@ public class TmuxSessionViewModel @Inject constructor(
         paneId: String,
         bytes: ByteArray,
     ) {
+        // Issue #209: multi-line input (containing `\n` or `\r\n`) goes
+        // through tmux's bracketed-paste route so the foreground program
+        // (Claude Code CLI, modern bash, zsh, vim, …) treats the entire
+        // block as ONE pasted prompt instead of submitting line-by-line.
+        //
+        // Why this matters: the previous shape split the input on `\n`
+        // and emitted a `send-keys ... Enter` named-key per line break.
+        // Claude Code CLI interprets each Enter as "submit this prompt",
+        // so a multi-paragraph dictation transcript landed as N
+        // independent messages — the bug the maintainer dogfooded on
+        // 2026-05-27.
+        //
+        // Bracketed-paste mode is a terminal protocol: the program tells
+        // its terminal "I want to know when text is pasted" via DECSET
+        // 2004 (`\e[?2004h`), and the terminal then frames pastes with
+        // `\e[200~` / `\e[201~`. Inside the markers, readline-based CLIs
+        // (Claude Code, modern shells with `enable-bracketed-paste` on,
+        // vim, …) treat embedded newlines as literal content, not as
+        // submit signals. If a program does not enable bracketed paste
+        // (handful of niche TUIs, plain `cat`), the markers appear as
+        // literal text — acceptable degradation per #209's design.
+        //
+        // tmux exposes literal byte injection in two flavours:
+        //   - `send-keys -l '<text>'` writes the UTF-8 bytes of the
+        //     argument. tmux's command parser terminates commands at
+        //     `\n`, so we cannot embed a literal newline inside the
+        //     argument — and that's exactly the byte we need to send
+        //     for the paste body.
+        //   - `send-keys -H <hex pairs>` writes the bytes named by the
+        //     space-separated hex pairs. This lets us include 0x0A
+        //     freely. We use this path for the entire bracketed-paste
+        //     block (prefix + body + suffix) so the whole thing reaches
+        //     the pane PTY as one contiguous byte sequence — tmux does
+        //     not buffer between two `send-keys` calls, but using one
+        //     command minimises the chance that the program reads a
+        //     partial block.
+        //
+        // Single-line input still goes through the existing
+        // [inputTokens] path so named keys (arrows, Escape, Tab,
+        // BSpace) keep round-tripping as named keys — bracketed paste
+        // would just confuse the receiving program for a one-liner.
+        if (containsLineBreak(bytes)) {
+            sendBracketedPaste(client, paneId, bytes)
+            return
+        }
         for (token in inputTokens(bytes)) {
             when (token) {
                 is TmuxInputToken.Literal -> {
@@ -1651,6 +1696,30 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    /**
+     * Issue #209: send [bytes] to [paneId] as a single bracketed-paste
+     * block via `send-keys -H`.
+     *
+     * The hex payload is `1b 5b 32 30 30 7e` (`\e[200~`) + the UTF-8
+     * bytes of the input + `1b 5b 32 30 31 7e` (`\e[201~`). `\r\n`
+     * pairs are normalised to `\n` so the inner content uses LF only;
+     * lone `\r` bytes are passed through (they are not paragraph
+     * separators in dictation transcripts and we have no reason to
+     * mangle them).
+     *
+     * Visible-for-test so the unit suite can exercise the encoding
+     * without going through the suspending sendInputBytesToPane path.
+     */
+    private suspend fun sendBracketedPaste(
+        client: TmuxClient,
+        paneId: String,
+        bytes: ByteArray,
+    ) {
+        val hex = buildBracketedPasteHex(bytes)
+        if (hex.isEmpty()) return
+        client.sendCommand("send-keys -H -t $paneId $hex")
     }
 
     private fun inputTokens(bytes: ByteArray): List<TmuxInputToken> {
@@ -2010,6 +2079,23 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun escapeSingleQuoted(input: String): String =
         input.replace("'", "'\\''")
 
+    /**
+     * Issue #209 test seam: drive the bracketed-paste hex builder
+     * without going through the suspending tmux client. Returns the
+     * exact hex payload that [sendBracketedPaste] would pass to
+     * `send-keys -H`. Test-only.
+     */
+    internal fun buildBracketedPasteHexForTest(bytes: ByteArray): String =
+        buildBracketedPasteHex(bytes)
+
+    /**
+     * Issue #209 test seam: predicate the production [sendInputBytesToPane]
+     * uses to decide between the named-key path and the bracketed-paste
+     * path. Test-only.
+     */
+    internal fun containsLineBreakForTest(bytes: ByteArray): Boolean =
+        containsLineBreak(bytes)
+
     override fun onCleared() {
         connectJob?.cancel()
         connectJob = null
@@ -2320,6 +2406,80 @@ public class TmuxSessionViewModel @Inject constructor(
 
 private fun boundedDistinctEvents(events: List<ConversationEvent>): List<ConversationEvent> =
     reconcileAgentEvents(events, maxEvents = MaxAgentEvents)
+
+/**
+ * Issue #209: true when [bytes] contains a `\n` (0x0A) byte. Used by
+ * [TmuxSessionViewModel.sendInputBytesToPane] to gate the bracketed-
+ * paste wrapping path. We only check for LF — a lone `\r` (0x0D) is not
+ * a paragraph separator in dictation transcripts, and the
+ * input-tokenisation path already routes both `\r` and `\n` to a tmux
+ * `Enter` named key when they appear in single-line input.
+ */
+internal fun containsLineBreak(bytes: ByteArray): Boolean {
+    for (b in bytes) if (b == 0x0A.toByte()) return true
+    return false
+}
+
+/**
+ * Issue #209: build the hex payload for a tmux `send-keys -H` call that
+ * delivers [bytes] wrapped in bracketed-paste markers.
+ *
+ * The output is a space-separated list of two-character lowercase hex
+ * pairs (e.g. `1b 5b 32 30 30 7e 61 0a 62 1b 5b 32 30 31 7e` for
+ * `<ESC>[200~a\nb<ESC>[201~`). The prefix is the 6 bytes of `\e[200~`,
+ * the suffix is the 6 bytes of `\e[201~`, and the body is the UTF-8
+ * representation of the input with `\r\n` pairs normalised to `\n`.
+ * Returns an empty string for empty input (the caller skips the
+ * `send-keys -H` invocation entirely in that case).
+ *
+ * Normalisation of `\r\n` -> `\n` keeps the receiving program from
+ * seeing a doubled paragraph break when the source platform happens to
+ * emit Windows line endings (Whisper transcripts on Android use `\n`;
+ * the normalisation is defensive against shares from other apps).
+ */
+internal fun buildBracketedPasteHex(bytes: ByteArray): String {
+    if (bytes.isEmpty()) return ""
+    val normalised = normaliseLineEndingsForPaste(bytes)
+    val builder = StringBuilder(2 * (PASTE_START.size + normalised.size + PASTE_END.size) + 32)
+    appendHex(builder, PASTE_START)
+    appendHex(builder, normalised)
+    appendHex(builder, PASTE_END)
+    return builder.toString()
+}
+
+private fun normaliseLineEndingsForPaste(bytes: ByteArray): ByteArray {
+    // Fast path: no `\r` at all.
+    var sawCr = false
+    for (b in bytes) if (b == 0x0D.toByte()) { sawCr = true; break }
+    if (!sawCr) return bytes
+    val out = java.io.ByteArrayOutputStream(bytes.size)
+    var i = 0
+    while (i < bytes.size) {
+        val b = bytes[i]
+        if (b == 0x0D.toByte() && i + 1 < bytes.size && bytes[i + 1] == 0x0A.toByte()) {
+            // \r\n -> \n
+            out.write(0x0A)
+            i += 2
+        } else {
+            out.write(b.toInt() and 0xFF)
+            i += 1
+        }
+    }
+    return out.toByteArray()
+}
+
+private fun appendHex(builder: StringBuilder, bytes: ByteArray) {
+    for (b in bytes) {
+        if (builder.isNotEmpty() && builder.last() != ' ') builder.append(' ')
+        val v = b.toInt() and 0xFF
+        builder.append(HEX_DIGITS[(v ushr 4) and 0xF])
+        builder.append(HEX_DIGITS[v and 0xF])
+    }
+}
+
+private val PASTE_START: ByteArray = byteArrayOf(0x1B, 0x5B, 0x32, 0x30, 0x30, 0x7E)
+private val PASTE_END: ByteArray = byteArrayOf(0x1B, 0x5B, 0x32, 0x30, 0x31, 0x7E)
+private val HEX_DIGITS: CharArray = "0123456789abcdef".toCharArray()
 
 private fun List<String>.toTerminalViewportBytes(): ByteArray {
     val lines = this

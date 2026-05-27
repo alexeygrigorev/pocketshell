@@ -501,7 +501,8 @@ fun HostListScreen(
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(end = 20.dp, bottom = 20.dp)
-                .size(56.dp),
+                .size(56.dp)
+                .testTag(HOST_LIST_ADD_FAB_TAG),
             shape = CircleShape,
             containerColor = PocketShellColors.Accent,
             contentColor = PocketShellColors.OnAccent,
@@ -617,6 +618,22 @@ private data class PendingPassphraseRequest(
 )
 
 internal const val HOST_ROW_TAG_PREFIX = "host:row:"
+
+/**
+ * Issue #144: stable test tag for the bottom-right "+" FloatingActionButton
+ * that opens the Add Host form. The FAB carries the only primary tap target
+ * for "add a host" — the empty-state copy intentionally has no button — so
+ * the cold-install E2E test depends on this tag rather than locating the
+ * button by its `+` glyph.
+ */
+internal const val HOST_LIST_ADD_FAB_TAG = "host-list:add-fab"
+
+/**
+ * Issue #144: stable test tag wrapping the "No hosts yet" empty state. The
+ * cold-install E2E test asserts the empty state is visible on first launch
+ * (no hosts in the DB) before tapping the FAB.
+ */
+internal const val HOST_LIST_EMPTY_STATE_TAG = "host-list:empty-state"
 
 /** Issue #116: stable test tag for the cross-host usage dashboard strip. */
 internal const val USAGE_DASHBOARD_STRIP_TAG = "usage:dashboard-strip"
@@ -1134,7 +1151,9 @@ private fun sessionsCountLabel(count: Int): String =
 @Composable
 private fun EmptyHostList(modifier: Modifier = Modifier) {
     Box(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag(HOST_LIST_EMPTY_STATE_TAG),
         contentAlignment = Alignment.Center,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {

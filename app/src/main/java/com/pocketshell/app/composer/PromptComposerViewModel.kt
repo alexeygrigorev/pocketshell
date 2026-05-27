@@ -364,6 +364,69 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Issue #174: abort the current recording without transcribing.
+     *
+     * Called by the cancel `X` chip the sheet renders next to the
+     * waveform while the FSM is in [RecordingState.Recording]. Behaviour:
+     *
+     *  - Cancel the silence-watchdog / amplitude-sampler coroutine.
+     *  - Stop the underlying [MicCapture] and discard the captured bytes
+     *    — the audio buffer is never forwarded to Whisper, so there is
+     *    no API cost and no latency wait for a transcription the user
+     *    does not want.
+     *  - Clear the saved-state "was recording" flag (Issue #169 Part 2)
+     *    so a recreate after cancel does not falsely surface the
+     *    [RECORDING_INTERRUPTED_MESSAGE] banner.
+     *  - Land the FSM back on [RecordingState.Idle] with [UiState.draft]
+     *    preserved verbatim — the user explicitly chose to abandon the
+     *    new dictation, not the prompt they had already typed.
+     *
+     * No-op when the FSM is not in [RecordingState.Recording]: cancelling
+     * during [RecordingState.Idle] has nothing to undo, and cancelling
+     * during [RecordingState.Transcribing] is a separate UX surface that
+     * this method intentionally does not handle (the audio has already
+     * been sent — Whisper round-trip is in flight and the cost is paid).
+     */
+    public fun cancelRecording() {
+        if (_uiState.value.recording != RecordingState.Recording) {
+            return
+        }
+
+        recordingJob?.cancel()
+        recordingJob = null
+
+        // Stop the mic and drop whatever bytes came back. The capture
+        // can fail (mic ripped away mid-record, audio focus loss); in
+        // that case we still want to land on Idle and surface the error
+        // rather than leaving the FSM stuck on Recording.
+        val stopError: String? = try {
+            audioRecorder.stop()
+            null
+        } catch (e: AudioRecorderException) {
+            e.message ?: "Microphone error"
+        }
+
+        // Recording is over either way — clear the saved-state flag so
+        // a process-death recreate after cancel does not replay the
+        // "recording interrupted" banner. The user's explicit cancel is
+        // not an interruption.
+        savedStateHandle[KEY_WAS_RECORDING] = false
+
+        _uiState.update {
+            it.copy(
+                recording = RecordingState.Idle,
+                amplitude = 0f,
+                // Existing typed draft must survive. The user's intent
+                // here is "throw away the new dictation, keep what I
+                // already typed" — wiping the draft would be a hostile
+                // misread of the cancel gesture.
+                draft = it.draft,
+                error = stopError,
+            )
+        }
+    }
+
+    /**
      * Called by the sheet when the runtime `RECORD_AUDIO` prompt comes
      * back denied. Surfaces the message in [UiState.error] so the user
      * sees why nothing happened.

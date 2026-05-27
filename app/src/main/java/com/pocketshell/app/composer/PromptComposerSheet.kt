@@ -174,6 +174,7 @@ public fun PromptComposerSheet(
                 }
                 viewModel.onMicTap()
             },
+            onCancelRecording = viewModel::cancelRecording,
             onSend = { withEnter ->
                 val text = state.draft
                 if (text.isNotEmpty()) {
@@ -244,6 +245,12 @@ internal fun SheetContent(
     onSend: (withEnter: Boolean) -> Unit,
     modifier: Modifier = Modifier,
     onSnippets: (() -> Unit)? = null,
+    // Issue #174: dispatched by the cancel `X` chip rendered next to
+    // the mic FAB while [PromptComposerViewModel.RecordingState] is
+    // [PromptComposerViewModel.RecordingState.Recording]. Defaults to a
+    // no-op so existing previews and the legacy connected tests that
+    // bypass the ViewModel keep compiling.
+    onCancelRecording: () -> Unit = {},
 ) {
     val isTranscribing = state.recording == PromptComposerViewModel.RecordingState.Transcribing
 
@@ -390,6 +397,17 @@ internal fun SheetContent(
                 },
                 onClick = { if (!isTranscribing) onMicTap() },
             )
+            // Issue #174: small `X` discard chip rendered only while the
+            // FSM is in Recording so the user can abort a dictation
+            // without paying the Whisper round-trip. Hidden outside
+            // Recording (no buffer to discard during Idle; the audio is
+            // already in flight during Transcribing). The chip uses
+            // `TextSecondary` (the design-system muted-secondary token
+            // from #162) so it never competes for attention with the
+            // accent-tinted mic FAB / waveform.
+            if (state.recording == PromptComposerViewModel.RecordingState.Recording) {
+                CancelRecordingChip(onClick = onCancelRecording)
+            }
             Waveform(
                 amplitude = state.amplitude,
                 active = state.recording == PromptComposerViewModel.RecordingState.Recording,
@@ -528,6 +546,63 @@ internal fun barEnvelopeHeightDp(index: Int): Float {
     // 1 - centred^2 -> 1 at centre, 0 at edges.
     val envelope = 1f - centred * centred
     return 6f + envelope * 22f // [6dp .. 28dp]
+}
+
+/**
+ * Issue #174: 32dp circular "discard recording" affordance rendered next
+ * to the mic FAB while the composer is in `Recording`. Tapping it
+ * dispatches [onClick] which the ViewModel maps to
+ * [PromptComposerViewModel.cancelRecording]: the recorder is stopped,
+ * the captured audio buffer is discarded (no Whisper call, no API cost),
+ * and the FSM lands back on `Idle` with any existing typed draft
+ * preserved.
+ *
+ * Visual recipe:
+ *  - 32dp circular tap target sized to land between the 56dp mic FAB
+ *    and the waveform without crowding either.
+ *  - `SurfaceElev` fill with a 1dp `Border` stroke so the chip reads as
+ *    a secondary affordance, not a primary action — design-system #162
+ *    keeps cancel / dismiss surfaces visually subordinate to accent
+ *    actions like the mic itself.
+ *  - Glyph rendered as a centred `×` in `TextSecondary` (the muted
+ *    secondary token), matching the close `×` rendered in the sheet
+ *    header so the two "dismiss this thing" gestures look consistent.
+ *
+ * A11y: an explicit `contentDescription` so TalkBack reads "Cancel
+ * recording" instead of falling back to the bare glyph.
+ */
+@Composable
+private fun CancelRecordingChip(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .size(32.dp)
+            .background(
+                color = PocketShellColors.SurfaceElev,
+                shape = androidx.compose.foundation.shape.CircleShape,
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.Border,
+                shape = androidx.compose.foundation.shape.CircleShape,
+            )
+            .clickable(
+                role = androidx.compose.ui.semantics.Role.Button,
+                onClick = onClick,
+            )
+            .testTag(COMPOSER_CANCEL_RECORDING_TAG)
+            .semantics { contentDescription = "Cancel recording" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "×",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
 }
 
 @Composable
@@ -669,6 +744,14 @@ internal const val COMPOSER_SEND_TAG = "prompt-composer-send"
 internal const val COMPOSER_SEND_ENTER_TAG = "prompt-composer-send-enter"
 internal const val COMPOSER_STATUS_TAG = "prompt-composer-status"
 internal const val COMPOSER_WAVEFORM_TAG = "prompt-composer-waveform"
+
+/**
+ * Issue #174: test tag for the cancel-recording chip rendered next to
+ * the mic FAB while the composer is in `Recording`. Connected tests use
+ * this tag to locate the affordance, tap it, and assert the resulting
+ * FSM transitions back to `Idle` without a Whisper call.
+ */
+internal const val COMPOSER_CANCEL_RECORDING_TAG = "prompt-composer-cancel-recording"
 
 // -- Previews -----------------------------------------------------------------
 

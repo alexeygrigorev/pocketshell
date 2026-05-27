@@ -440,6 +440,169 @@ class PromptComposerViewModelTest {
         assertNull(vm.uiState.value.error)
     }
 
+    // -- Issue #174: cancel-recording affordance -----------------------------
+
+    @Test
+    fun cancelRecordingStopsRecorderDiscardsBufferAndReturnsToIdle() = runTest {
+        // Counts the calls to the Whisper client so the test can prove
+        // that cancel does NOT trigger a transcription round-trip.
+        val whisperCalls = AtomicReference(0)
+        val mic = FakeMicCapture()
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                whisperCalls.set(whisperCalls.get() + 1)
+                return Result.success("should not be appended")
+            }
+        }
+        val vm = newVm(
+            mic = mic,
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        // Seed a typed draft the user expects to keep around.
+        vm.onDraftChange("partial typed prompt")
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        // Cancel and let any scheduled work drain. The silence watchdog
+        // job is cancelled inline; advanceUntilIdle just confirms no
+        // lingering coroutine resurrected the recording state.
+        vm.cancelRecording()
+        advanceUntilIdle()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        // Recorder was stopped exactly once — by the cancel path.
+        assertEquals(1, mic.stopCount)
+        // Whisper must not have been called: the audio buffer was
+        // discarded, the user explicitly chose to abandon the dictation.
+        assertEquals(0, whisperCalls.get())
+        // Pre-existing typed draft is preserved verbatim.
+        assertEquals("partial typed prompt", vm.uiState.value.draft)
+        // Cancel is a user-driven discard, not an interruption — no
+        // banner.
+        assertNull(vm.uiState.value.error)
+    }
+
+    @Test
+    fun cancelRecordingFromIdleIsNoOp() {
+        val mic = FakeMicCapture()
+        val vm = newVm(mic = mic)
+        vm.cancelRecording()
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals(0, mic.startCount)
+        assertEquals(0, mic.stopCount)
+    }
+
+    @Test
+    fun cancelRecordingDuringTranscribingIsNoOp() = runTest {
+        // The cancel chip is hidden during Transcribing, but even if a
+        // stale tap reaches the ViewModel the FSM must not jump back to
+        // Idle while the Whisper response is in flight — that would
+        // race the success path's draft append and drop the transcript.
+        val mic = FakeMicCapture()
+        // Gate the Whisper response on an explicit signal so the FSM
+        // stays parked on Transcribing across the cancel call. Without
+        // this latch the suspend function would return immediately on
+        // the test scheduler and the FSM would already be back on Idle
+        // by the time we asserted.
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                release.await()
+                return Result.success("hello world")
+            }
+        }
+        val vm = newVm(
+            mic = mic,
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        vm.onMicTap()
+        runCurrent()
+        // Trigger stop-and-transcribe. The Whisper coroutine is now
+        // suspended on the latch.
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+
+        // Stale cancel tap. Must be a no-op: the audio was already sent.
+        vm.cancelRecording()
+        runCurrent()
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
+
+        // Release the gate; the transcript still lands in the draft
+        // because cancel never bumped the FSM out of Transcribing.
+        release.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals("hello world", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun cancelRecordingPreservesExistingDraftIncludingTrailingSpace() = runTest {
+        val whisperCalls = AtomicReference(0)
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                whisperCalls.set(whisperCalls.get() + 1)
+                return Result.success("nope")
+            }
+        }
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        // The recording append logic strips a trailing-space separator;
+        // cancel must not do anything similar — the draft is returned
+        // verbatim, including whitespace.
+        vm.onDraftChange("Tell me ")
+        vm.onMicTap()
+        runCurrent()
+        vm.cancelRecording()
+        advanceUntilIdle()
+        assertEquals("Tell me ", vm.uiState.value.draft)
+        assertEquals(0, whisperCalls.get())
+    }
+
+    @Test
+    fun cancelRecordingSurvivesAudioRecorderStopFailure() = runTest {
+        // If the mic capture throws on stop (focus already gone, etc.)
+        // we still want to land on Idle. The user pressed cancel; a
+        // wedged Recording state would be worse than a small error
+        // banner.
+        val mic = FakeMicCapture(
+            stopFailure = AudioRecorderException.Other("mic gone"),
+        )
+        val whisperCalls = AtomicReference(0)
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                whisperCalls.set(whisperCalls.get() + 1)
+                return Result.success("nope")
+            }
+        }
+        val vm = newVm(
+            mic = mic,
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        vm.onDraftChange("draft kept")
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        vm.cancelRecording()
+        advanceUntilIdle()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals(0, whisperCalls.get())
+        assertEquals("draft kept", vm.uiState.value.draft)
+        assertNotNull(vm.uiState.value.error)
+    }
+
     // -- Issue #125: VoiceSettingsSnapshot integration --------------------
 
     @Test

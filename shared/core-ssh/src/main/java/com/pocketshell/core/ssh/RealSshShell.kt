@@ -1,5 +1,7 @@
 package com.pocketshell.core.ssh
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
 import net.schmizz.sshj.connection.channel.direct.Session
 import java.io.InputStream
 import java.io.OutputStream
@@ -35,7 +37,27 @@ internal class RealSshShell(
         // session channel. sshj's `close` calls are idempotent, so the
         // runCatching guards are belt-and-braces against the channel
         // already being torn down by the remote side.
-        runCatching { shell.close() }
-        runCatching { sessionChannel.close() }
+        //
+        // Issue #166: both `Session.Shell.close()` and
+        // `Session.close()` send `SSH_MSG_CHANNEL_CLOSE` over the live
+        // transport — real socket writes. The non-suspending `close()`
+        // contract comes from `AutoCloseable`, and several call sites
+        // (`TmuxClient.close()` invoked from
+        // `TmuxSessionViewModel.closeCurrentConnection()` under
+        // `onCleared()`, Compose `onDispose` in
+        // `app/.../proof/ProofOfLifeScreen.kt`,
+        // `TerminalLabActivity`) reach this from the Android Main thread.
+        // Without the IO dispatch below, StrictMode
+        // detectNetwork()/`BlockGuard$Policy.onNetwork()` would fire
+        // `NetworkOnMainThreadException` on the channel-close write.
+        // `runBlocking(Dispatchers.IO) { ... }` runs the two close calls
+        // on an IO worker while still blocking the caller until the
+        // channel is torn down, preserving the historical close ordering
+        // (e.g. a follow-up `session.close()` on the parent will not see
+        // a still-live shell channel).
+        runBlocking(Dispatchers.IO) {
+            runCatching { shell.close() }
+            runCatching { sessionChannel.close() }
+        }
     }
 }

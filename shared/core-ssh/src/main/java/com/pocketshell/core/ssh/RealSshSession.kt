@@ -8,6 +8,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import net.schmizz.sshj.SSHClient
@@ -315,8 +316,37 @@ internal class RealSshSession(
         // transport fault" path explicitly so the BY_APPLICATION skip is
         // the only path that silently no-ops, and everything else either
         // succeeds or is logged as best-effort.
+        //
+        // Issue #166: `SSHClient.disconnect()` sends an
+        // `SSH_MSG_DISCONNECT` packet over the live transport — a real
+        // socket write. The non-suspending `close()` contract is dictated
+        // by `AutoCloseable`, and historically several callers
+        // (Compose `onDispose`, `ViewModel.onCleared`,
+        // `HostTmuxSessionsGateway`, screen disposers) invoke this from
+        // the Android Main thread. With Android's StrictMode
+        // detectNetwork() enabled — and on real devices that policy is
+        // always on for the Main thread — that socket write trips
+        // `NetworkOnMainThreadException`. The pre-#166 RuntimeException
+        // catch below hid the crash from the dogfood device but the
+        // policy violation still aborted the disconnect mid-write,
+        // leaving the sshj transport in a half-closed state and producing
+        // logcat noise on every teardown.
+        //
+        // The fix dispatches the network-touching `disconnect()` call onto
+        // `Dispatchers.IO` via `runBlocking(Dispatchers.IO) { ... }`:
+        // the calling thread (which may be Main) still blocks until the
+        // disconnect finishes (preserving the AutoCloseable ordering
+        // contract), but the actual SSH_MSG_DISCONNECT socket write
+        // happens on an IO worker thread, so the
+        // BlockGuard / StrictMode `onNetwork` probe never fires on Main.
+        // Hopping the suspending boundary higher (e.g. making
+        // `SshSession.close()` itself a suspend) would ripple through
+        // every caller; the AutoCloseable-preserving thread hop is the
+        // surgical fix called for by the issue.
         try {
-            client.disconnect()
+            runBlocking(Dispatchers.IO) {
+                client.disconnect()
+            }
         } catch (e: TransportException) {
             if (e.disconnectReason != DisconnectReason.BY_APPLICATION) {
                 throw e
@@ -332,16 +362,12 @@ internal class RealSshSession(
         } catch (e: RuntimeException) {
             // Belt-and-suspenders: the pre-#151 implementation wrapped the
             // whole disconnect in `runCatching`, which silently swallowed
-            // every Throwable. We narrow that to the failure modes that
-            // are actually known to surface from sshj's disconnect path,
-            // but we keep RuntimeException swallowed so we don't regress
-            // call sites that historically tolerated a sloppy teardown
-            // (e.g. close() invoked from a callback whose dispatcher
-            // contract turns a stray socket write into a runtime fault
-            // like `NetworkOnMainThreadException`). Fixing those call
-            // sites is out of scope for #151; this catch preserves the
-            // status quo for them so the BY_APPLICATION-specific fix
-            // does not silently widen the failure surface.
+            // every Throwable. With #166 the socket write now runs on
+            // `Dispatchers.IO` so StrictMode `NetworkOnMainThreadException`
+            // can no longer originate here — but we keep this catch for
+            // any other RuntimeException sshj may surface during teardown
+            // (e.g. an exotic state-machine error) so close() stays
+            // idempotent in the face of unknown teardown failure modes.
         }
     }
 

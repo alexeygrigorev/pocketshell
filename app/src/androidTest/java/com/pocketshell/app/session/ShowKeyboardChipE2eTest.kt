@@ -1,7 +1,6 @@
 package com.pocketshell.app.session
 
 import android.graphics.Bitmap
-import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
@@ -19,7 +18,7 @@ import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
-import com.pocketshell.app.proof.TerminalTestTimeouts
+import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.core.ssh.SshKey
@@ -32,7 +31,6 @@ import com.pocketshell.core.storage.migrations.MIGRATION_4_5
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertTrue
-import org.junit.Assume
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -51,12 +49,15 @@ import java.io.FileOutputStream
  * verifies that tapping it actually surfaces the soft keyboard at the
  * system level (not just routes the click).
  *
- * The IME-visibility check uses `dumpsys input_method | grep mInputShown`,
- * the same authoritative source the keyboard stress harness
- * (`TerminalKeyboardStressTest`) uses. We do not rely on compose-tree
- * inspections of the IME because the IME is a separate process; the
- * compose tree only sees the post-insets layout, not the IME's actual
- * visibility decision.
+ * The IME-visibility check uses `waitForInputMethodVisible` from the
+ * `com.pocketshell.app.proof.signals` package (see #140). That helper
+ * polls `WindowInsetsCompat.Type.ime()` on the activity decor view —
+ * the same signal app code uses for keyboard-aware layouts and the
+ * one the framework propagates as soon as the IME's window attaches
+ * its insets to the focused window. We avoid `dumpsys input_method |
+ * grep mInputShown` because the IME process updates `mInputShown`
+ * asynchronously after the insets have already been attached, which
+ * makes dumpsys lag visibly on swiftshader CI emulators.
  *
  * Artifacts (per run, under
  * `/sdcard/Android/media/com.pocketshell.app/additional_test_output/
@@ -66,12 +67,8 @@ import java.io.FileOutputStream
  *    session with the chip row visible and the IME hidden.
  *  - `02-after-tap-viewport.png`  — full-device screenshot with the IME
  *    raised after the chip tap.
- *  - `dumpsys-before-tap.txt`     — `dumpsys input_method` snapshot
- *    before the tap (`mInputShown=false` expected).
- *  - `dumpsys-after-tap.txt`      — `dumpsys input_method` snapshot
- *    after the tap (`mInputShown=true` expected).
  *  - `summary.txt`                — human-readable run summary with the
- *    parsed `mInputShown` values, latencies, and chip-row tag info.
+ *    observed IME-visibility values, latencies, and chip-row tag info.
  */
 @RunWith(AndroidJUnit4::class)
 class ShowKeyboardChipE2eTest {
@@ -89,25 +86,14 @@ class ShowKeyboardChipE2eTest {
 
     @Test
     fun showKeyboardChipBringsUpSoftInput() = runBlocking {
-        // Tracked in #132: intermittently fails on CI when the IME does not
-        // raise within the 8s deadline after the chip tap. CI run 26375563669
-        // observed shownAfter=false, ime_raised_within_deadline=false,
-        // raisedMs=8065 — the IME show is async (crosses into system_server)
-        // and the swiftshader-backed CI emulator can miss the deadline under
-        // load even though local runs raise the keyboard in well under 1 s.
-        // Skip on CI until #132's investigation finds a structural fix
-        // (longer deadline, retry, or a less timing-sensitive assertion).
-        Assume.assumeFalse(
-            "Tracked in #132: passes locally, IME show is flaky on CI; investigate separately.",
-            TerminalTestTimeouts.isRunningOnCi(),
-        )
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key), port = DEFAULT_PORT)
         val hostName = "ShowKeyboard ${System.currentTimeMillis()}"
         val hostRowTag = seedHost(key, hostName)
         val artifactsDir = ensureArtifactDir()
 
-        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        val scenario = ActivityScenario.launch(MainActivity::class.java)
+        launchedActivity = scenario
 
         // Wait for the host row to render then tap it to start the
         // connect attempt.
@@ -142,9 +128,11 @@ class ShowKeyboardChipE2eTest {
         instrumentation.waitForIdleSync()
         SystemClock.sleep(250)
         captureFullDevice(File(artifactsDir, "01-before-tap-viewport.png"))
-        val dumpBefore = execShellCommand("dumpsys input_method")
-        File(artifactsDir, "dumpsys-before-tap.txt").writeText(dumpBefore)
-        val shownBefore = parseInputShown(dumpBefore)
+        val shownBefore = waitForInputMethodVisible(
+            scenario = scenario,
+            expected = false,
+            timeoutMs = 1_000,
+        )
 
         // Tap the chip. We perform the click via the stable test tag so
         // the assertion stays robust if the caption is later renamed
@@ -153,35 +141,37 @@ class ShowKeyboardChipE2eTest {
         val tapAt = SystemClock.elapsedRealtime()
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true).performClick()
 
-        // Wait for the IME to actually become visible. The IME show is
-        // asynchronous (it crosses a process boundary into system_server
-        // and the IME service), so we poll `mInputShown=true` with a
-        // generous deadline that covers slow CI emulators. Returns the
-        // observed state at deadline.
-        val shown = waitForInputShown(expected = true, timeoutMs = 8_000)
+        // Wait for the IME to actually become visible using the signal
+        // helper from #140. The helper polls
+        // `WindowInsetsCompat.Type.ime()` on the activity decor view —
+        // the same signal app code uses for keyboard-aware layouts and
+        // the one the framework attaches the moment the IME window's
+        // insets land on the focused window. This is the deterministic
+        // source of truth and resolves in well under 1 s on healthy
+        // runs; the 30 s timeout is the "this is broken, not slow"
+        // ceiling for swiftshader CI emulators.
+        val shown = waitForInputMethodVisible(
+            scenario = scenario,
+            expected = true,
+            timeoutMs = 30_000,
+        )
         val raisedMs = SystemClock.elapsedRealtime() - tapAt
 
         instrumentation.waitForIdleSync()
         SystemClock.sleep(250)
         captureFullDevice(File(artifactsDir, "02-after-tap-viewport.png"))
-        val dumpAfter = execShellCommand("dumpsys input_method")
-        File(artifactsDir, "dumpsys-after-tap.txt").writeText(dumpAfter)
-        val shownAfter = parseInputShown(dumpAfter)
 
         File(artifactsDir, "summary.txt").writeText(
             buildString {
                 appendLine("issue=131 scenario=show-keyboard-chip")
                 appendLine("chip_test_tag=$SHOW_KEYBOARD_CHIP_TAG")
-                appendLine("ime_shown_before_tap=$shownBefore")
-                appendLine("ime_shown_after_tap=$shownAfter")
-                appendLine("ime_raised_within_deadline=$shown")
+                appendLine("ime_visible_before_tap=$shownBefore")
+                appendLine("ime_visible_after_tap=$shown")
                 appendLine("tap_to_ime_visible_ms=$raisedMs")
                 appendLine("host=$DEFAULT_HOST port=$DEFAULT_PORT user=$DEFAULT_USER")
                 appendLine("artifacts:")
                 appendLine("  01-before-tap-viewport.png")
                 appendLine("  02-after-tap-viewport.png")
-                appendLine("  dumpsys-before-tap.txt")
-                appendLine("  dumpsys-after-tap.txt")
             },
         )
 
@@ -191,31 +181,11 @@ class ShowKeyboardChipE2eTest {
         // emulator) — the chip's contract is "ensure the IME is up",
         // which is idempotent when the IME is already raised.
         assertTrue(
-            "expected mInputShown=true after tapping the show-keyboard chip; " +
-                "observed shownBefore=$shownBefore shownAfter=$shownAfter " +
-                "ime_raised_within_deadline=$shown raisedMs=$raisedMs",
-            shown && shownAfter == true,
+            "expected the IME to be visible after tapping the show-keyboard chip; " +
+                "observed ime_visible_before_tap=$shownBefore " +
+                "ime_visible_after_tap=$shown raisedMs=$raisedMs",
+            shown,
         )
-    }
-
-    // --- IME helpers -------------------------------------------------------
-
-    private fun waitForInputShown(expected: Boolean, timeoutMs: Long): Boolean {
-        val deadline = SystemClock.elapsedRealtime() + timeoutMs
-        var lastSeen: Boolean? = null
-        while (SystemClock.elapsedRealtime() < deadline) {
-            val dump = execShellCommand("dumpsys input_method")
-            val current = parseInputShown(dump)
-            lastSeen = current
-            if (current == expected) return true
-            SystemClock.sleep(100)
-        }
-        return lastSeen == expected
-    }
-
-    private fun parseInputShown(dump: String): Boolean? {
-        val match = Regex("""mInputShown=(true|false)""").find(dump) ?: return null
-        return match.groupValues[1].toBoolean()
     }
 
     // --- Host seeding ------------------------------------------------------
@@ -290,23 +260,6 @@ class ShowKeyboardChipE2eTest {
             bitmap.recycle()
         }
     }
-
-    private fun execShellCommand(command: String): String {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        val descriptor = instrumentation.uiAutomation.executeShellCommand(command)
-        return descriptor.useReadFully {
-            ParcelFileDescriptor.AutoCloseInputStream(it).bufferedReader().use { reader ->
-                reader.readText()
-            }
-        }
-    }
-
-    private fun ParcelFileDescriptor.useReadFully(block: (ParcelFileDescriptor) -> String): String =
-        try {
-            block(this)
-        } finally {
-            try { close() } catch (_: Throwable) { /* already closed in stream */ }
-        }
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"

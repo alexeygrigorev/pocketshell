@@ -39,7 +39,6 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assume
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -159,16 +158,12 @@ class EmulatorWorkflowE2eTest {
 
     @Test
     fun realAppTmuxJourneyAttachesSessionAndAcceptsTerminalInput() = runBlocking {
-        // Tracked in #132: passes locally, hangs on CI after the resize-window
-        // propagation (commit 39cddd8) made the remote tmux pane match the
-        // Compose-side grid width. The typed command now wraps inside the
-        // terminal viewport and the `command in visibleText` predicate at
-        // sendCommandThroughTerminalInput() no longer matches. The fix is in
-        // the test (wrap-tolerant substring check) — see #132.
-        Assume.assumeFalse(
-            "Tracked in #132: passes locally, hangs on CI; investigate separately.",
-            TerminalTestTimeouts.isRunningOnCi(),
-        )
+        // #134 / #139: this test was previously skipped on CI because the typed
+        // command in sendCommandThroughTerminalInput() wraps at the Compose
+        // grid width after #102's resize-window propagation, breaking the
+        // naive `command in visibleText` predicate. The helper now uses
+        // TerminalTextMatcher.containsWrapTolerant(...) so the test is safe
+        // to run on CI again.
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         val marker = "t${System.currentTimeMillis().toString(36).takeLast(5)}"
@@ -352,8 +347,17 @@ class EmulatorWorkflowE2eTest {
             assertTrue("expected terminal input connection to commit `$chunk` for $label", committed)
             SystemClock.sleep(35)
         }
-        waitForVisibleTerminalText("$label command echo", timeoutMillis = 5_000) {
-            command in it
+        // #134 / #139: after #102's resize-window propagation the remote tmux
+        // pane matches the Compose grid width (~63 cols on Pixel 7), so any
+        // command longer than the grid wraps inside the transcript with a
+        // real `\n`. Use the wrap-tolerant matcher so the assertion still
+        // succeeds across that soft-wrap boundary.
+        waitForVisibleTerminalText("$label command echo", timeoutMillis = 5_000) { transcript ->
+            TerminalTextMatcher.containsWrapTolerant(
+                transcript,
+                command,
+                terminalCols = terminalGridSize().columns,
+            )
         }
         val enterCommitted = terminalInputConnection().commitText("\n", 1)
         assertTrue("expected terminal input connection to submit $label", enterCommitted)

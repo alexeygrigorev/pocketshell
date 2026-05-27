@@ -2,6 +2,38 @@
 
 PocketShell uses a three-actor process: orchestrator + implementer + reviewer. The orchestrator prepares issues, dispatches agents, verifies outcomes, and merges. Implementers write code. Reviewers review code. Agents communicate through GitHub issue comments, with the orchestrator as messenger.
 
+## No backwards-compatibility (locked principle)
+
+The maintainer is the only user of PocketShell today. There is no install
+base to migrate, no third-party API to honor, no SDK consumer to warn.
+**Every implementer and reviewer must assume hard-cut semantics**:
+
+- When a feature replaces or supersedes an older one, **delete the older
+  one in the same PR**. Do NOT keep a "legacy detection" path, a
+  deprecation shim, a settings flag for "use the old behaviour", or a
+  fallback branch.
+- When a schema changes, **either ship a migration or nuke the DB** —
+  but do NOT carry both a migration AND a code-level compatibility
+  branch ("if old shape ..."). The migration is sufficient.
+- The maintainer has explicitly said: "if it means nuking the current
+  settings, it's fine. I also want eventually to test configuring it
+  with QR code, so it should be relatively fast for me to restore."
+  Wiping `fallbackToDestructiveMigration(dropAllTables = false)`
+  → `dropAllTables = true` is acceptable when a feature requires it.
+- When porting code from upstream (e.g. `ssh-auto-forward-android`),
+  **do NOT port legacy-detection shims** the upstream had for its own
+  install-base reasons.
+- When designing new features that span server-side + client (e.g.
+  `pocketshell` daemon, agent detection), **always pick the hard-cut
+  option** unless the maintainer explicitly states otherwise.
+
+This is locked decision **D22** in `docs/decisions.md`. Implementer briefs
+should reference this rule when scope expansion is tempted by "but what
+about existing users."
+
+When in doubt: hard-cut wins. The orchestrator removes legacy code
+proactively as part of every round, not as a separate cleanup task.
+
 ## Non-Negotiable Loop
 
 Every issue moves through this state machine:

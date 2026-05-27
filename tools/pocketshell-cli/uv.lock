@@ -3,7 +3,7 @@ revision = 3
 requires-python = ">=3.11"
 
 [options]
-exclude-newer = "2026-05-20T13:56:21.125647543Z"
+exclude-newer = "2026-05-20T16:04:10.458799802Z"
 exclude-newer-span = "P7D"
 
 [[package]]
@@ -55,7 +55,7 @@ wheels = [
 ]
 
 [[package]]
-name = "pocketshell-cli"
+name = "pocketshell"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

@@ -14,6 +14,7 @@ import com.pocketshell.core.storage.migrations.MIGRATION_3_4
 import com.pocketshell.core.storage.migrations.MIGRATION_4_5
 import com.pocketshell.core.storage.migrations.MIGRATION_5_6
 import com.pocketshell.core.storage.migrations.MIGRATION_6_7
+import com.pocketshell.core.storage.migrations.MIGRATION_7_8
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -62,6 +63,7 @@ object StorageModule {
                 MIGRATION_4_5,
                 MIGRATION_5_6,
                 MIGRATION_6_7,
+                MIGRATION_7_8,
             )
             .fallbackToDestructiveMigration(dropAllTables = false)
             .build()

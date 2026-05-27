@@ -6,13 +6,17 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 
 /**
- * Stub: per-host snippet library (one-tap "send command" or "send prompt"
- * shortcuts surfaced from the quick-send panel). Populated in a later issue
- * when the input-methods work lands (see docs/input-methods.md). The entity
- * exists today so the schema doesn't need a v2 migration when that lands.
+ * Per-host snippet library (one-tap "send command" or "send prompt"
+ * shortcuts surfaced from the quick-send panel).
  *
  * - [hostId] references [HostEntity.id]. ON DELETE CASCADE.
- * - [label] is the user-facing name shown in the panel.
+ * - [label] is the optional user-facing name shown in the panel. When
+ *   `null`, the UI derives a label from the first line of [body] truncated
+ *   to ~40 chars (see issue #190). Pre-#190 rows had a non-null label
+ *   filled in at creation; those rows survive the v7 -> v8 migration with
+ *   their explicit label preserved, while new snippets default to `null`
+ *   and let the UI render the derived label so the user is not asked to
+ *   type the same content twice.
  * - [body] is the literal text sent over tmux when the snippet fires.
  * - [kind] discriminates command (`"command"`) from agent prompt
  *   (`"prompt"`). Stored as String to keep schema migrations open-ended;
@@ -33,7 +37,7 @@ import androidx.room.PrimaryKey
 data class SnippetEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val hostId: Long,
-    val label: String,
+    val label: String?,
     val body: String,
     val kind: String,
 )

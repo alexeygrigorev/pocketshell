@@ -68,6 +68,13 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
  * or table is touched, so v0.2.x users upgrade without data loss. The SQL
  * lives in [com.pocketshell.core.storage.migrations.MIGRATION_6_7].
  *
+ * Version 8 (issue #190) relaxes [SnippetEntity.label] from non-null to
+ * nullable. The snippet creation surface now collects only the body and
+ * derives a label from its first line; users keep the ability to override
+ * the label via the long-press rename affordance. Existing rows survive
+ * the migration with their explicit label preserved. The SQL lives in
+ * [com.pocketshell.core.storage.migrations.MIGRATION_7_8].
+ *
  * `exportSchema = false` matches the reference module. When the schema
  * starts evolving in real users' hands, flip this on and check generated
  * schemas into `schemas/` so migrations are reviewable.
@@ -83,7 +90,7 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
         AgentSessionEntity::class,
         AiApiCallEntry::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {

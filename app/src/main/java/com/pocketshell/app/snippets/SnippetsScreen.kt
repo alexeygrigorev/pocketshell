@@ -1,9 +1,11 @@
 package com.pocketshell.app.snippets
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -90,10 +92,16 @@ public fun SnippetsScreen(
     var editorTarget: SnippetEntity? by remember { mutableStateOf(null) }
     var showAddDialog by remember { mutableStateOf(false) }
     var pendingDelete: SnippetEntity? by remember { mutableStateOf(null) }
+    // Issue #190: long-press surface for renaming a snippet without
+    // editing the body. Reuses the rename text field shape so the user
+    // can clear an override (returning to derived-label behaviour) or
+    // type a new override.
+    var renameTarget: SnippetEntity? by remember { mutableStateOf(null) }
 
     BackHandler {
         when {
             pendingDelete != null -> pendingDelete = null
+            renameTarget != null -> renameTarget = null
             editorTarget != null -> editorTarget = null
             showAddDialog -> showAddDialog = false
             else -> onBack()
@@ -194,6 +202,7 @@ public fun SnippetsScreen(
                                 snippet = snippet,
                                 onEdit = { editorTarget = snippet },
                                 onDelete = { pendingDelete = snippet },
+                                onRename = { renameTarget = snippet },
                             )
                         }
                     }
@@ -209,6 +218,7 @@ public fun SnippetsScreen(
                                 snippet = snippet,
                                 onEdit = { editorTarget = snippet },
                                 onDelete = { pendingDelete = snippet },
+                                onRename = { renameTarget = snippet },
                             )
                         }
                     }
@@ -218,17 +228,22 @@ public fun SnippetsScreen(
     }
 
     if (showAddDialog) {
-        SnippetEditorDialog(
-            initial = null,
+        // Issue #190: add-flow collects ONLY the body + kind. Label is
+        // null at insert time so the read-side renderer derives it from
+        // the body's first line.
+        SnippetAddDialog(
             onDismiss = { showAddDialog = false },
-            onSave = { label, body, kind ->
-                viewModel.addSnippet(label = label, body = body, kind = kind)
+            onSave = { body, kind ->
+                viewModel.addSnippet(label = null, body = body, kind = kind)
                 showAddDialog = false
             },
         )
     }
 
     editorTarget?.let { target ->
+        // Edit flow keeps the full editor: body + kind + optional label
+        // override. Useful when the user wants to change the body
+        // wholesale, not just the displayed name.
         SnippetEditorDialog(
             initial = target,
             onDismiss = { editorTarget = null },
@@ -245,13 +260,27 @@ public fun SnippetsScreen(
         )
     }
 
+    renameTarget?.let { target ->
+        // Issue #190: long-press rename — single text field pre-filled
+        // with the current displayed label. Clearing the field reverts
+        // to derived-label behaviour.
+        SnippetRenameDialog(
+            initial = target,
+            onDismiss = { renameTarget = null },
+            onSave = { newLabel ->
+                viewModel.renameSnippet(target, newLabel)
+                renameTarget = null
+            },
+        )
+    }
+
     pendingDelete?.let { target ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("Delete this snippet?", color = PocketShellColors.Text) },
             text = {
                 Text(
-                    text = "“${target.label}” will be removed permanently.",
+                    text = "“${target.displayLabel()}” will be removed permanently.",
                     color = PocketShellColors.TextSecondary,
                 )
             },
@@ -344,15 +373,20 @@ private fun SectionHeader(label: String, count: Int) {
 
 /**
  * Single snippet row — mirrors the host-card visual treatment. Two
- * trailing text buttons (Edit / Delete) carry the actions.
+ * trailing text buttons (Edit / Delete) carry the primary actions, and
+ * a long-press anywhere on the row opens the rename affordance from
+ * issue #190.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SnippetRow(
     snippet: SnippetEntity,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
+    onRename: () -> Unit,
 ) {
     val kind = SnippetKind.fromStorage(snippet.kind)
+    val explicit = snippet.hasExplicitLabel()
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -362,11 +396,18 @@ private fun SnippetRow(
                 color = PocketShellColors.BorderSoft,
                 shape = RoundedCornerShape(14.dp),
             )
+            // Long-press anywhere on the card opens the rename dialog.
+            // `combinedClickable` carries the regular tap as a no-op so
+            // the surface still ripples on contact.
+            .combinedClickable(
+                onClick = {},
+                onLongClick = onRename,
+            )
             .padding(horizontal = 14.dp, vertical = 12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = snippet.label,
+                text = snippet.displayLabel(),
                 color = PocketShellColors.Text,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -377,15 +418,20 @@ private fun SnippetRow(
             Spacer(modifier = Modifier.width(8.dp))
             KindTag(kind)
         }
-        Spacer(modifier = Modifier.height(6.dp))
-        Text(
-            text = snippet.body,
-            color = PocketShellColors.TextSecondary,
-            fontFamily = JetBrainsMonoFamily,
-            fontSize = 12.sp,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
-        )
+        // Show the body preview only when the label is overridden — when
+        // the label IS the derived first line of the body, the preview
+        // would just repeat the primary text. (Issue #190.)
+        if (explicit) {
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = snippet.body,
+                color = PocketShellColors.TextSecondary,
+                fontFamily = JetBrainsMonoFamily,
+                fontSize = 12.sp,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
         Spacer(modifier = Modifier.height(8.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -402,44 +448,129 @@ private fun SnippetRow(
 }
 
 /**
- * Add / edit dialog. When [initial] is non-null the form is pre-populated
- * from it and the dialog title flips to "Edit snippet". Validation lives
- * upstream in the ViewModel — the dialog only enforces non-blank label /
- * body locally so the Save button can be disabled while the form is
- * incomplete.
+ * Add dialog (issue #190). Single body text input + the command/prompt
+ * kind toggle — no separate label field. The label is auto-derived from
+ * the body's first line at read time; the user can rename via long-press
+ * later if the derived label does not read well.
+ */
+@Composable
+internal fun SnippetAddDialog(
+    onDismiss: () -> Unit,
+    onSave: (body: String, kind: SnippetKind) -> Unit,
+) {
+    var body by remember { mutableStateOf("") }
+    var kind by remember { mutableStateOf(SnippetKind.Command) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(text = "Add snippet", color = PocketShellColors.Text)
+        },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = body,
+                    onValueChange = { body = it },
+                    label = { Text("Snippet text") },
+                    minLines = 3,
+                    maxLines = 6,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = dialogFieldColors(),
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "We'll use the first line as the label. " +
+                        "Long-press a snippet later to rename it.",
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 11.sp,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text = "Kind",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    KindToggle(
+                        target = SnippetKind.Command,
+                        current = kind,
+                        onSelect = { kind = it },
+                    )
+                    KindToggle(
+                        target = SnippetKind.Prompt,
+                        current = kind,
+                        onSelect = { kind = it },
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(body, kind) },
+                enabled = body.isNotBlank(),
+            ) {
+                Text(
+                    text = "Save",
+                    color = if (body.isNotBlank()) {
+                        PocketShellColors.Accent
+                    } else {
+                        PocketShellColors.TextMuted
+                    },
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = PocketShellColors.TextSecondary)
+            }
+        },
+        containerColor = PocketShellColors.Surface,
+        titleContentColor = PocketShellColors.Text,
+        textContentColor = PocketShellColors.TextSecondary,
+    )
+}
+
+/**
+ * Edit dialog. Pre-populated from [initial]; both the body and the
+ * (optional) explicit label override are editable. Clearing the label
+ * field reverts the snippet to derived-label behaviour (see
+ * [SnippetsViewModel.updateSnippet]).
  */
 @Composable
 internal fun SnippetEditorDialog(
-    initial: SnippetEntity?,
+    initial: SnippetEntity,
     onDismiss: () -> Unit,
-    onSave: (label: String, body: String, kind: SnippetKind) -> Unit,
+    onSave: (label: String?, body: String, kind: SnippetKind) -> Unit,
 ) {
-    var label by remember(initial) { mutableStateOf(initial?.label ?: "") }
-    var body by remember(initial) { mutableStateOf(initial?.body ?: "") }
+    var label by remember(initial) { mutableStateOf(initial.label.orEmpty()) }
+    var body by remember(initial) { mutableStateOf(initial.body) }
     var kind by remember(initial) {
-        mutableStateOf(
-            initial?.let { SnippetKind.fromStorage(it.kind) } ?: SnippetKind.Command,
-        )
+        mutableStateOf(SnippetKind.fromStorage(initial.kind))
     }
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Text(
-                text = if (initial == null) "Add snippet" else "Edit snippet",
-                color = PocketShellColors.Text,
-            )
+            Text(text = "Edit snippet", color = PocketShellColors.Text)
         },
         text = {
             Column {
                 OutlinedTextField(
                     value = label,
                     onValueChange = { label = it },
-                    label = { Text("Label") },
+                    label = { Text("Label (optional)") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
                     colors = dialogFieldColors(),
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Leave blank to auto-derive from the first line.",
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 11.sp,
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 OutlinedTextField(
@@ -476,18 +607,76 @@ internal fun SnippetEditorDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    onSave(label.trim(), body, kind)
+                    val normalised = label.trim().ifEmpty { null }
+                    onSave(normalised, body, kind)
                 },
-                enabled = label.isNotBlank() && body.isNotBlank(),
+                enabled = body.isNotBlank(),
             ) {
                 Text(
                     text = "Save",
-                    color = if (label.isNotBlank() && body.isNotBlank()) {
+                    color = if (body.isNotBlank()) {
                         PocketShellColors.Accent
                     } else {
                         PocketShellColors.TextMuted
                     },
                 )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = PocketShellColors.TextSecondary)
+            }
+        },
+        containerColor = PocketShellColors.Surface,
+        titleContentColor = PocketShellColors.Text,
+        textContentColor = PocketShellColors.TextSecondary,
+    )
+}
+
+/**
+ * Rename dialog (issue #190). Single text field pre-filled with the
+ * snippet's current displayed label. Saving an empty string clears any
+ * explicit override and falls back to the derived-label rule.
+ */
+@Composable
+internal fun SnippetRenameDialog(
+    initial: SnippetEntity,
+    onDismiss: () -> Unit,
+    onSave: (newLabel: String?) -> Unit,
+) {
+    var label by remember(initial) {
+        mutableStateOf(initial.label.orEmpty())
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "Rename snippet", color = PocketShellColors.Text) },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = label,
+                    onValueChange = { label = it },
+                    label = { Text("Label") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                    colors = dialogFieldColors(),
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text = "Leave blank to use the first line of the body.",
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 11.sp,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onSave(label.trim().ifEmpty { null })
+                },
+            ) {
+                Text(text = "Save", color = PocketShellColors.Accent)
             }
         },
         dismissButton = {

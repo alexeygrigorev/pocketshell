@@ -132,16 +132,51 @@ class SnippetsViewModelTest {
     }
 
     @Test
-    fun addSnippet_rejectsBlankFields() = runTest {
+    fun addSnippet_nullLabel_storesNullForDerivation() = runTest {
+        // Issue #190: the default add flow passes label = null so the
+        // UI derives the label from the body's first line at read time.
+        val vm = SnippetsViewModel(db.snippetDao())
+        vm.bindHost(hostId)
+        vm.addSnippet(label = null, body = "echo hello", kind = SnippetKind.Command)
+
+        val rows = db.snippetDao().getByHostId(hostId).first()
+        assertEquals(1, rows.size)
+        assertNull(rows[0].label)
+        assertEquals("echo hello", rows[0].body)
+        // The derived-label helper picks up the first line.
+        assertEquals("echo hello", rows[0].displayLabel())
+        assertNull(vm.error.value)
+    }
+
+    @Test
+    fun addSnippet_blankLabel_storesNull() = runTest {
+        // Issue #190: a blank or whitespace-only label is treated as no
+        // override (so the UI falls back to derivation) rather than an
+        // error. This is the path the rename dialog uses to clear an
+        // existing override.
+        val vm = SnippetsViewModel(db.snippetDao())
+        vm.bindHost(hostId)
+        vm.addSnippet(label = "   ", body = "echo hello", kind = SnippetKind.Command)
+
+        val rows = db.snippetDao().getByHostId(hostId).first()
+        assertEquals(1, rows.size)
+        assertNull(rows[0].label)
+        assertNull(vm.error.value)
+    }
+
+    @Test
+    fun addSnippet_rejectsBlankBody() = runTest {
+        // Issue #190: blank labels are allowed (auto-derive), blank
+        // bodies are not (there is nothing to send).
         val vm = SnippetsViewModel(db.snippetDao())
         vm.bindHost(hostId)
 
-        vm.addSnippet(label = "", body = "x", kind = SnippetKind.Command)
+        vm.addSnippet(label = "x", body = "", kind = SnippetKind.Command)
         assertNotNull(vm.error.value)
         assertEquals(0, db.snippetDao().getByHostId(hostId).first().size)
 
         vm.clearError()
-        vm.addSnippet(label = "x", body = "  ", kind = SnippetKind.Command)
+        vm.addSnippet(label = "x", body = "  \n  ", kind = SnippetKind.Command)
         assertNotNull(vm.error.value)
         assertEquals(0, db.snippetDao().getByHostId(hostId).first().size)
     }
@@ -190,7 +225,11 @@ class SnippetsViewModelTest {
     }
 
     @Test
-    fun updateSnippet_rejectsBlankLabel() = runTest {
+    fun updateSnippet_blankLabel_clearsOverride() = runTest {
+        // Issue #190: the Edit dialog clears the explicit label by
+        // submitting an empty string. The ViewModel must normalise that
+        // to a null override (deriving the label at read time) rather
+        // than reject the update.
         val vm = SnippetsViewModel(db.snippetDao())
         vm.bindHost(hostId)
         vm.addSnippet(label = "ok", body = "ok body", kind = SnippetKind.Command)
@@ -198,10 +237,62 @@ class SnippetsViewModelTest {
 
         vm.updateSnippet(written.copy(label = ""))
 
+        assertNull(vm.error.value)
+        val updated = db.snippetDao().getByHostId(hostId).first().single()
+        assertNull(updated.label)
+        // The derived label is the body's first line.
+        assertEquals("ok body", updated.displayLabel())
+    }
+
+    @Test
+    fun updateSnippet_rejectsBlankBody() = runTest {
+        // Issue #190: body remains a required field even though the
+        // label may be cleared.
+        val vm = SnippetsViewModel(db.snippetDao())
+        vm.bindHost(hostId)
+        vm.addSnippet(label = "ok", body = "ok body", kind = SnippetKind.Command)
+        val written = db.snippetDao().getByHostId(hostId).first().single()
+
+        vm.updateSnippet(written.copy(body = ""))
+
         assertNotNull(vm.error.value)
-        // Database row stayed at its pre-edit value.
         val unchanged = db.snippetDao().getByHostId(hostId).first().single()
-        assertEquals("ok", unchanged.label)
+        assertEquals("ok body", unchanged.body)
+    }
+
+    @Test
+    fun renameSnippet_setsExplicitOverride() = runTest {
+        // Issue #190: the long-press rename affordance must persist a
+        // user-chosen label and override the derived one.
+        val vm = SnippetsViewModel(db.snippetDao())
+        vm.bindHost(hostId)
+        vm.addSnippet(label = null, body = "echo first\necho second", kind = SnippetKind.Command)
+        val written = db.snippetDao().getByHostId(hostId).first().single()
+        assertNull(written.label)
+        assertEquals("echo first", written.displayLabel())
+
+        vm.renameSnippet(written, "boot script")
+
+        val renamed = db.snippetDao().getByHostId(hostId).first().single()
+        assertEquals("boot script", renamed.label)
+        assertEquals("boot script", renamed.displayLabel())
+        assertEquals("echo first\necho second", renamed.body)
+    }
+
+    @Test
+    fun renameSnippet_blankInput_clearsOverride() = runTest {
+        // Issue #190: clearing the rename field reverts to the derived
+        // label, mirroring the Edit dialog's empty-label behaviour.
+        val vm = SnippetsViewModel(db.snippetDao())
+        vm.bindHost(hostId)
+        vm.addSnippet(label = "manual", body = "echo automatic", kind = SnippetKind.Command)
+        val written = db.snippetDao().getByHostId(hostId).first().single()
+
+        vm.renameSnippet(written, "   ")
+
+        val reverted = db.snippetDao().getByHostId(hostId).first().single()
+        assertNull(reverted.label)
+        assertEquals("echo automatic", reverted.displayLabel())
     }
 
     @Test
@@ -256,6 +347,76 @@ class SnippetsViewModelTest {
         assertEquals(SnippetKind.Prompt, SnippetKind.fromStorage("PROMPT"))
         // Unknown -> default to Command so the user can edit the row.
         assertEquals(SnippetKind.Command, SnippetKind.fromStorage("mystery"))
+    }
+
+    @Test
+    fun deriveSnippetLabel_explicitOverrideWins() {
+        // Issue #190: a non-blank label wins over derivation, even when
+        // the body has its own first line.
+        assertEquals("My label", deriveSnippetLabel("My label", "echo body"))
+    }
+
+    @Test
+    fun deriveSnippetLabel_trimsExplicitOverride() {
+        // Whitespace-only overrides collapse to derivation. Non-blank
+        // overrides round-trip with surrounding whitespace stripped so
+        // the picker never renders awkward indent.
+        assertEquals("echo body", deriveSnippetLabel("   ", "echo body"))
+        assertEquals("My label", deriveSnippetLabel("  My label  ", "echo body"))
+    }
+
+    @Test
+    fun deriveSnippetLabel_shortFirstLineRoundTrips() {
+        // Issue #190 rule: short lines (<= 20 chars) keep the full line
+        // as the label, no truncation, no ellipsis.
+        assertEquals("ls -la", deriveSnippetLabel(null, "ls -la"))
+        assertEquals(
+            "kubectl get nodes",
+            deriveSnippetLabel(null, "kubectl get nodes"),
+        )
+    }
+
+    @Test
+    fun deriveSnippetLabel_truncatesLongFirstLine() {
+        // First line over the 40-char cap is truncated with an ellipsis.
+        // Pick a deterministic 50-char body so the test does not lean on
+        // exact constants.
+        val longLine = "kubectl logs --since=24h deploy/api-gateway -n production"
+        val derived = deriveSnippetLabel(null, longLine)
+        assertEquals(41, derived.length) // 40 chars + ellipsis (1 codepoint)
+        assertTrue(derived.endsWith("…"))
+        assertTrue(longLine.startsWith(derived.dropLast(1).trimEnd()))
+    }
+
+    @Test
+    fun deriveSnippetLabel_skipsLeadingBlankLines() {
+        // The first NON-EMPTY line wins so a body that starts with a
+        // blank line (a copy-paste artefact) still gets a useful label.
+        assertEquals(
+            "echo hello",
+            deriveSnippetLabel(null, "\n  \n  echo hello\necho world"),
+        )
+    }
+
+    @Test
+    fun deriveSnippetLabel_fallsBackForEmptyBody() {
+        // Defensive: ViewModel-blocks blank bodies on insert, but legacy
+        // rows might still surface here. We never want to render the
+        // empty string as a row label.
+        assertEquals("(empty snippet)", deriveSnippetLabel(null, ""))
+        assertEquals("(empty snippet)", deriveSnippetLabel(null, "   \n  \n"))
+    }
+
+    @Test
+    fun hasExplicitLabel_distinguishesOverrides() {
+        // Picker's secondary-text rule keys off this — null/blank means
+        // derived label, non-blank means user picked the wording.
+        val derived = SnippetEntity(id = 1, hostId = hostId, label = null, body = "echo", kind = "command")
+        val blank = SnippetEntity(id = 2, hostId = hostId, label = "   ", body = "echo", kind = "command")
+        val explicit = SnippetEntity(id = 3, hostId = hostId, label = "named", body = "echo", kind = "command")
+        assertEquals(false, derived.hasExplicitLabel())
+        assertEquals(false, blank.hasExplicitLabel())
+        assertEquals(true, explicit.hasExplicitLabel())
     }
 
     @Test

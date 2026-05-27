@@ -123,14 +123,24 @@ class AppDatabaseTest {
         val hostId = db.hostDao().insert(
             HostEntity(name = "h", hostname = "h", username = "u", keyId = keyId),
         )
+        // Issue #190: insert both an explicit-label row and a derived-
+        // label row (label = null) so the schema round-trip covers both
+        // paths.
         db.snippetDao().insert(
             SnippetEntity(hostId = hostId, label = "ls", body = "ls -la", kind = "command"),
         )
+        db.snippetDao().insert(
+            SnippetEntity(hostId = hostId, label = null, body = "echo derived", kind = "command"),
+        )
         val snippets = db.snippetDao().getByHostId(hostId).first()
-        assertEquals(1, snippets.size)
-        assertEquals("ls", snippets[0].label)
-        assertEquals("ls -la", snippets[0].body)
-        assertEquals("command", snippets[0].kind)
+        assertEquals(2, snippets.size)
+        // The DAO's `ORDER BY label` puts NULLs first under SQLite's
+        // default sort; the explicit-label row comes second.
+        val derived = snippets.first { it.label == null }
+        assertEquals("echo derived", derived.body)
+        val explicit = snippets.first { it.label == "ls" }
+        assertEquals("ls -la", explicit.body)
+        assertEquals("command", explicit.kind)
     }
 
     @Test

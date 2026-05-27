@@ -94,8 +94,11 @@ public fun SnippetPickerSheet(
             snippets
         } else {
             val needle = query.trim().lowercase()
-            snippets.filter {
-                it.label.lowercase().contains(needle) || it.body.lowercase().contains(needle)
+            snippets.filter { snippet ->
+                // Match against the *displayed* label so derived-label
+                // rows (issue #190) are still findable via the search.
+                snippet.displayLabel().lowercase().contains(needle) ||
+                    snippet.body.lowercase().contains(needle)
             }
         }
     }
@@ -283,6 +286,14 @@ private fun SnippetPickerRow(
     onTap: () -> Unit,
 ) {
     val kind = SnippetKind.fromStorage(snippet.kind)
+    val displayLabel = snippet.displayLabel()
+    // Issue #190: only render the one-line body preview when the label
+    // was explicitly overridden AND the body carries content beyond what
+    // the label already shows. When the label IS the derived first line
+    // the preview would be a duplicate.
+    val showBodyPreview = remember(snippet) {
+        shouldShowBodyPreview(snippet, displayLabel)
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -299,7 +310,7 @@ private fun SnippetPickerRow(
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
-                    text = snippet.label,
+                    text = displayLabel,
                     color = PocketShellColors.Text,
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -310,17 +321,37 @@ private fun SnippetPickerRow(
                 Spacer(modifier = Modifier.width(8.dp))
                 KindTag(kind)
             }
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = snippet.body,
-                color = PocketShellColors.TextSecondary,
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 11.sp,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
+            if (showBodyPreview) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = snippet.body,
+                    color = PocketShellColors.TextSecondary,
+                    fontFamily = JetBrainsMonoFamily,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
+}
+
+/**
+ * Returns `true` when the picker row should render the secondary body
+ * preview under the label (issue #190).
+ *
+ * Rule:
+ *  - Hide when the label is derived — the body's first line IS the
+ *    label, repeating it adds nothing.
+ *  - Hide when the explicit label happens to match the body exactly —
+ *    same dedup reasoning.
+ *  - Otherwise, show — the user picked a label that does not directly
+ *    quote the body and a one-line preview clarifies what will be sent.
+ */
+internal fun shouldShowBodyPreview(snippet: SnippetEntity, displayLabel: String): Boolean {
+    if (!snippet.hasExplicitLabel()) return false
+    val firstBodyLine = snippet.body.lineSequence().firstOrNull()?.trim().orEmpty()
+    return firstBodyLine.isNotEmpty() && firstBodyLine != displayLabel.trim()
 }
 
 /**
@@ -415,8 +446,12 @@ private fun SnippetPickerPopulatedPreview() {
         Box(modifier = Modifier.background(PocketShellColors.Surface)) {
             SnippetPickerContent(
                 snippets = listOf(
-                    SnippetEntity(id = 1, hostId = 1, label = "list pods", body = "kubectl get pods -A", kind = "command"),
-                    SnippetEntity(id = 2, hostId = 1, label = "tail logs", body = "kubectl logs -f deploy/api", kind = "command"),
+                    // Derived label: label is null, picker shows the body
+                    // first line and no secondary preview (issue #190).
+                    SnippetEntity(id = 1, hostId = 1, label = null, body = "kubectl get pods -A", kind = "command"),
+                    SnippetEntity(id = 2, hostId = 1, label = null, body = "kubectl logs -f deploy/api", kind = "command"),
+                    // Overridden label: secondary preview shows the body
+                    // because it differs from the chosen label.
                     SnippetEntity(
                         id = 3,
                         hostId = 1,

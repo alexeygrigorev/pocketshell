@@ -73,18 +73,16 @@ class EmulatorWorkflowE2eTest {
 
     @Test
     fun realAppRawSshJourneyRunsShellCommandsAndInteractiveTui() = runBlocking {
-        // Tracked in #132: intermittently times out on CI on
-        // assertRemotePtyMatchesTerminalGrid — the expected `stty size` output
-        // appears in the transcript only after the 180s deadline under CI
-        // emulator load (CI run 26374548443 captured the late arrival
-        // unambiguously). Same family of flakes as the tmux journey above.
-        // Skip on CI until #132 either (a) tightens the wait heuristics so
-        // the output is detected on first paint, or (b) the underlying CI
-        // emulator latency is reduced.
-        Assume.assumeFalse(
-            "Tracked in #132: passes locally, intermittent CI timeout; investigate separately.",
-            TerminalTestTimeouts.isRunningOnCi(),
-        )
+        // Issue #143: the Alpine MOTD ("Welcome to Alpine!" … "/etc/motd")
+        // renders before the remote shell finishes attaching the PTY and
+        // is ready to read stdin. A blank-text readiness predicate matches
+        // the MOTD and races the subsequent `printf 'PTY-...'; stty size`
+        // send, which the remote shell then drops because the input
+        // arrived too early. Wait specifically for a shell prompt sentinel
+        // — the Alpine busybox `ash` default for a non-root login is
+        // `<hostname>:~$ ` (e.g. `b0d42b7bd223:~$`) and switches to
+        // `<hostname>:<cwd>$ ` after `cd`. The regex also accepts `#` for
+        // the root prompt in case the fixture user changes.
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         val marker = "psraw${System.currentTimeMillis()}"
@@ -97,7 +95,7 @@ class EmulatorWorkflowE2eTest {
         compose.onNodeWithText("Continue with SSH").performClick()
         compose.onNodeWithTag(SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
-        waitForVisibleTerminalText("raw ssh prompt") { it.isNotBlank() }
+        waitForVisibleTerminalText("raw ssh prompt") { it.containsShellPrompt() }
         recordTiming("raw_connect_to_prompt_ms", SystemClock.elapsedRealtime() - openStart)
         val prompt = captureAndAssert("raw-01-connected-prompt", minBrightPixels = 1_500)
 
@@ -304,13 +302,42 @@ class EmulatorWorkflowE2eTest {
     }
 
     private fun assertRemotePtyMatchesTerminalGrid(label: String, marker: String) {
-        val grid = terminalGridSize()
+        // Issue #143: under CI emulator load the remote `stty size` reply
+        // can arrive late or arrive after the SIGWINCH from the
+        // Compose-side terminal layout has changed the local grid. Retry
+        // up to 5 times with a 30s per-attempt deadline, re-capturing the
+        // current grid each attempt so we always probe against the latest
+        // local dimensions. Pattern lifted from
+        // `TerminalLabDockerTest.waitForPrompt` + its retry harness.
         val ptyMarker = "PTY-$label-$marker"
-        val expected = "$ptyMarker ${grid.rows} ${grid.columns}"
         val start = SystemClock.elapsedRealtime()
-        sendText("printf '$ptyMarker '; stty size", withEnter = true)
-        waitForVisibleTerminalText("$label pty size") { expected in it }
-        recordTiming("${label}_pty_size_probe_ms", SystemClock.elapsedRealtime() - start)
+        val attempts = 5
+        val perAttemptMs = 30_000L
+        var lastError: Throwable? = null
+        var lastExpected = ""
+        for (attempt in 1..attempts) {
+            val grid = terminalGridSize()
+            val expected = "$ptyMarker ${grid.rows} ${grid.columns}"
+            lastExpected = expected
+            sendText("printf '$ptyMarker '; stty size", withEnter = true)
+            val attemptResult = runCatching {
+                waitForVisibleTerminalText(
+                    "$label pty size (attempt $attempt/$attempts)",
+                    timeoutMillis = perAttemptMs,
+                ) { expected in it }
+            }
+            if (attemptResult.isSuccess) {
+                recordTiming("${label}_pty_size_probe_ms", SystemClock.elapsedRealtime() - start)
+                recordTiming("${label}_pty_size_probe_attempts", attempt.toLong())
+                return
+            }
+            lastError = attemptResult.exceptionOrNull()
+        }
+        throw AssertionError(
+            "expected remote PTY size to match terminal grid for $label after $attempts " +
+                "attempts of ${perAttemptMs}ms each; last expected=`$lastExpected`",
+            lastError,
+        )
     }
 
     private fun sendText(text: String, withEnter: Boolean) {
@@ -571,6 +598,23 @@ class EmulatorWorkflowE2eTest {
         return match.groupValues[1] == expected
     }
 
+    /**
+     * Issue #143: detect a shell prompt sentinel in the visible terminal
+     * transcript so the readiness wait does not race the Alpine MOTD.
+     *
+     * Matches the Alpine busybox `ash` default prompt for the fixture's
+     * `testuser` (shell = `/bin/sh`): `<hostname>:<cwd>$ ` — e.g.
+     * `b0d42b7bd223:~$` at the initial prompt and `b0d42b7bd223:/tmp/...$`
+     * after `cd`. Also accepts `#` for the root prompt in case the fixture
+     * user changes, and tolerates trailing whitespace from the cursor
+     * position. The leading `\S+:` anchor distinguishes the prompt from
+     * MOTD lines like `See <https://wiki.alpinelinux.org/>.` (which has no
+     * `$ ` end-of-line marker) and the `setup-alpine` instruction
+     * (`command: setup-alpine` ends in a letter, not `$`/`#`).
+     */
+    private fun String.containsShellPrompt(): Boolean =
+        SHELL_PROMPT_REGEX.containsMatchIn(this)
+
     private fun String.printableForFailure(): String =
         buildString(length) {
             for (ch in this@printableForFailure) {
@@ -586,6 +630,14 @@ class EmulatorWorkflowE2eTest {
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
+
+        /**
+         * Shell prompt sentinel — Alpine busybox `ash`'s default
+         * `<hostname>:<cwd>$ ` (and `#` for root) at end of line.
+         * See `String.containsShellPrompt`.
+         */
+        val SHELL_PROMPT_REGEX: Regex =
+            Regex("""\S+:[~/][^\n]*[$#]\s*$""", RegexOption.MULTILINE)
     }
 }
 

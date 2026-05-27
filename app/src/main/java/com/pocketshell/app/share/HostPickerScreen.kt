@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -43,6 +42,11 @@ import com.pocketshell.core.storage.entity.HostEntity
  * activity dismisses itself and the system notification carries the
  * result.
  *
+ * Issue #193: when the user picked the "Paste into session" branch
+ * (text/plain shares only), the picker filters to hosts with a
+ * registered live `tmux -CC` client and routes taps through
+ * [ShareViewModel.pasteIntoSession] instead of the SCP uploader.
+ *
  * Empty state: if there are zero hosts, surface a "Set up a host
  * first" message instead of an empty list (issue spec).
  */
@@ -58,6 +62,7 @@ internal fun HostPickerScreen(
     val uploadState by viewModel.uploadState.collectAsStateWithLifecycle()
     val dispatchChoice by viewModel.dispatchChoice.collectAsStateWithLifecycle()
     val hasAttached by viewModel.hasAttachedSession.collectAsStateWithLifecycle()
+    val attachedHostIds by viewModel.hostsWithAttachedSession.collectAsStateWithLifecycle()
 
     Surface(
         modifier = modifier
@@ -77,19 +82,52 @@ internal fun HostPickerScreen(
                         )
                     item == null ->
                         ShareEmptyState(message = "Nothing to share")
+                    dispatchChoice == TextDispatchChoice.PasteIntoSession -> {
+                        // Issue #193: filter the picker to hosts that
+                        // have a live `tmux -CC` client registered.
+                        // Tapping such a host routes through
+                        // `pasteIntoSession` instead of the SCP
+                        // uploader. If no host qualifies (the rare
+                        // race where the user's attached client tore
+                        // down between the dispatch dialog and the
+                        // picker render), fall back to the save-as-file
+                        // surface with a clear message.
+                        val pasteHosts = hosts.filter { it.id in attachedHostIds }
+                        when {
+                            pasteHosts.isEmpty() ->
+                                ShareEmptyState(
+                                    message = "No active session — save to inbox instead",
+                                )
+                            else ->
+                                HostList(
+                                    hosts = pasteHosts,
+                                    title = "Paste into session",
+                                    subtitle =
+                                        "Text lands on the focused pane via tmux send-keys -l",
+                                    onHostClick = { host -> viewModel.pasteIntoSession(host) },
+                                )
+                        }
+                    }
                     hosts.isEmpty() ->
                         ShareEmptyState(message = "Set up a host first")
                     else ->
                         HostList(
                             hosts = hosts,
+                            title = "Send to host",
+                            subtitle = "Files land under ${ShareUploader.INBOX_DISPLAY_PATH}",
                             onHostClick = { host -> viewModel.startUpload(host) },
                         )
                 }
             }
             is UploadState.Running -> UploadingSurface(hostName = state.hostName)
             is UploadState.Success -> {
+                val isPaste = dispatchChoice == TextDispatchChoice.PasteIntoSession
                 UploadResultSurface(
-                    title = "Uploaded to ${state.hostName}",
+                    title = if (isPaste) {
+                        "Pasted into ${state.hostName}"
+                    } else {
+                        "Uploaded to ${state.hostName}"
+                    },
                     detail = state.remotePath,
                     isError = false,
                     onDismiss = {
@@ -99,8 +137,13 @@ internal fun HostPickerScreen(
                 )
             }
             is UploadState.Failed -> {
+                val isPaste = dispatchChoice == TextDispatchChoice.PasteIntoSession
                 UploadResultSurface(
-                    title = "Could not upload to ${state.hostName}",
+                    title = if (isPaste) {
+                        "Could not paste into ${state.hostName}"
+                    } else {
+                        "Could not upload to ${state.hostName}"
+                    },
                     detail = state.message,
                     isError = true,
                     onDismiss = {
@@ -116,6 +159,8 @@ internal fun HostPickerScreen(
 @Composable
 private fun HostList(
     hosts: List<HostEntity>,
+    title: String,
+    subtitle: String,
     onHostClick: (HostEntity) -> Unit,
 ) {
     LazyColumn(
@@ -127,13 +172,13 @@ private fun HostList(
     ) {
         item {
             Text(
-                text = "Send to host",
+                text = title,
                 style = MaterialTheme.typography.headlineSmall,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                text = "Files land under ${ShareUploader.INBOX_DISPLAY_PATH}",
+                text = subtitle,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -184,7 +229,8 @@ private fun ShareEmptyState(message: String) {
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .padding(32.dp),
+            .padding(32.dp)
+            .testTag(SHARE_EMPTY_STATE_TAG),
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -273,7 +319,12 @@ private fun TextDispatchDialog(
                 text = if (hasAttachedSession) {
                     "Paste into the active session or save as a .txt file in the inbox?"
                 } else {
-                    "No session is attached. The text will be saved as a .txt file in the inbox."
+                    // Issue #193: clearer "why paste is disabled" copy
+                    // so the user understands that attaching to a
+                    // session unlocks the paste branch (vs. the old
+                    // "No session is attached" which read like a
+                    // permanent limitation).
+                    "No active session — save to inbox instead."
                 },
             )
         },
@@ -286,10 +337,10 @@ private fun TextDispatchDialog(
             }
         },
         dismissButton = {
-            // The paste option is gated on an attached session. The
-            // first cut never has one (see ShareViewModel.hasAttachedSession
-            // doc); we still surface the button as a disabled state so
-            // the UI shape matches the spec.
+            // Issue #193: the paste option is now wired end-to-end.
+            // Enable iff at least one host in the user's list has a
+            // registered live `tmux -CC` client in
+            // [com.pocketshell.app.sessions.ActiveTmuxClients].
             TextButton(
                 onClick = onPaste,
                 enabled = hasAttachedSession,
@@ -308,3 +359,4 @@ internal const val SHARE_RESULT_FAILURE_TAG: String = "share:result:failure"
 internal const val SHARE_RESULT_DETAIL_TAG: String = "share:result:detail"
 internal const val SHARE_TEXT_PASTE_TAG: String = "share:text:paste"
 internal const val SHARE_TEXT_SAVE_TAG: String = "share:text:save"
+internal const val SHARE_EMPTY_STATE_TAG: String = "share:picker:empty"

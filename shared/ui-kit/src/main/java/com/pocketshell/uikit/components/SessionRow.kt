@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -20,6 +21,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -45,6 +48,25 @@ import com.pocketshell.uikit.theme.PocketShellColors
  *
  * The card chrome (surface, border-soft, 14dp radius, 16dp h / 14dp v
  * padding) matches `.session-row` directly.
+ *
+ * ### Tag vocabulary — issue #202
+ *
+ * The mockup CSS used uppercase letter-spaced labels ("CLAUDE CODE",
+ * "ATTACHED"). Dogfooding on v0.2.8 surfaced that this style reads as
+ * cryptic noise to a first-time user — the maintainer literally said
+ * "the indicators we have for sessions, it's also not clear what these
+ * things are." Per issue #202 we now:
+ *
+ *  - Render tag labels mixed-case ("Claude", "Codex", "Detached") so
+ *    every chip is self-explanatory without consulting a legend.
+ *  - Distinguish *what kind of session this is* (agent / deploy / ml)
+ *    from *what state it is in* (attached / detached). Activity-state
+ *    chips ([TagKind.Attached] / [TagKind.Detached]) lead with a small
+ *    coloured dot so they read visually different from classifier chips
+ *    and cannot be confused with the accent-soft agent badge.
+ *  - Carry a content-description on each chip so TalkBack reads
+ *    "<label> tag" instead of just "<label>" (which on uppercase
+ *    "ATTACHED" rendered as letter-by-letter noise).
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -78,14 +100,21 @@ fun SessionRow(
         // middle of the multi-line body.
         verticalAlignment = Alignment.Top,
     ) {
-        // Accent badge — 38dp, accent-soft fill, accent foreground, mono.
+        // Accent badge — 38dp, accent-soft fill, accent foreground,
+        // mono. The badge carries the first letter of the session name
+        // and is a purely visual anchor (it does NOT encode agent kind
+        // or activity state — those live in the tag row below). Per
+        // issue #202, the legend at the top of the dashboard spells
+        // this out so a first-time user does not assume the cyan badge
+        // means "Claude" — agent-kind has its own labelled chip.
         Box(
             modifier = Modifier
                 .size(38.dp)
                 .background(
                     color = PocketShellColors.AccentSoft,
                     shape = RoundedCornerShape(10.dp),
-                ),
+                )
+                .semantics { contentDescription = "Session initial $badge" },
             contentAlignment = Alignment.Center,
         ) {
             Text(
@@ -153,10 +182,25 @@ fun SessionRow(
 }
 
 /**
- * Uppercase tag pill rendered inside a `SessionRow`. Matches `.tag` and
- * its `.agent` / `.deploy` / `.ml` variants. Kept private to this file
- * because tags only render in this context — if a downstream caller
- * needs standalone tag rendering later, promote this.
+ * Tag pill rendered inside a `SessionRow`. Originally matched the
+ * uppercase `.tag` block in `docs/mockups/styles.css`; per issue #202
+ * the label is now rendered mixed-case so a first-time user can read
+ * it without decoding letter-spaced ALL-CAPS.
+ *
+ * Two slot categories:
+ *
+ *  - Classifier chips ([TagKind.Default] / [Agent] / [Deploy] / [Ml])
+ *    describe *what kind of session this is*. Plain coloured pill.
+ *  - Activity-state chips ([TagKind.Attached] / [TagKind.Detached])
+ *    describe *what state the session is in right now*. These lead
+ *    with a small coloured dot so they read as visually distinct from
+ *    classifier chips. The dot is intentionally non-pulsing — pulsing
+ *    is reserved for "connecting" per design-system §6.2, and the
+ *    activity state here is a snapshot, not a transition.
+ *
+ * Kept private to this file because tags only render in this context.
+ * If a downstream caller needs standalone tag rendering later, promote
+ * this.
  */
 @Composable
 private fun TagChip(tag: Tag) {
@@ -165,16 +209,37 @@ private fun TagChip(tag: Tag) {
         TagKind.Agent -> PocketShellColors.Accent to PocketShellColors.AccentSoft
         TagKind.Deploy -> PocketShellColors.Amber to PocketShellColors.Amber.copy(alpha = 0.12f)
         TagKind.Ml -> PocketShellColors.Purple to PocketShellColors.Purple.copy(alpha = 0.12f)
+        TagKind.Attached -> PocketShellColors.Green to PocketShellColors.Green.copy(alpha = 0.12f)
+        TagKind.Detached -> PocketShellColors.TextMuted to PocketShellColors.SurfaceElev
     }
 
-    Text(
-        text = tag.label.uppercase(),
-        color = textColor,
-        fontSize = 10.sp,
-        fontWeight = FontWeight.SemiBold,
-        letterSpacing = 0.5.sp,
+    val showLeadingDot: Boolean = tag.kind == TagKind.Attached || tag.kind == TagKind.Detached
+    val dotColor: Color = if (tag.kind == TagKind.Attached) {
+        PocketShellColors.Green
+    } else {
+        PocketShellColors.TextMuted
+    }
+
+    Row(
         modifier = Modifier
             .background(color = bgColor, shape = RoundedCornerShape(6.dp))
-            .padding(horizontal = 8.dp, vertical = 2.dp),
-    )
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+            .semantics { contentDescription = "${tag.label} tag" },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (showLeadingDot) {
+            Box(
+                modifier = Modifier
+                    .size(6.dp)
+                    .background(color = dotColor, shape = CircleShape),
+            )
+            Spacer(modifier = Modifier.width(5.dp))
+        }
+        Text(
+            text = tag.label,
+            color = textColor,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
 }

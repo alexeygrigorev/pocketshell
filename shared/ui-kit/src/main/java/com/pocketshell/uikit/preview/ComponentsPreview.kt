@@ -115,6 +115,9 @@ fun ComponentsPreview() {
                 }
 
                 Section("SessionRow") {
+                    // Issue #202: mixed-case labels and a distinct
+                    // activity-state slot (Attached / Detached) so the
+                    // preview reflects what dogfooders will see in v0.2.9+.
                     SessionRow(
                         badge = "A",
                         name = "agent-main",
@@ -122,8 +125,8 @@ fun ComponentsPreview() {
                         preview = "I'll check the deploy logs and find what...",
                         time = "2m",
                         tags = listOf(
-                            Tag("claude code", TagKind.Agent),
-                            Tag("scheduled", TagKind.Default),
+                            Tag("Claude", TagKind.Agent),
+                            Tag("Attached", TagKind.Attached),
                         ),
                         onClick = {},
                     )
@@ -133,7 +136,10 @@ fun ComponentsPreview() {
                         host = "gpu-box",
                         preview = "epoch 14/50  loss=0.232  val=0.847",
                         time = "8m",
-                        tags = listOf(Tag("ml", TagKind.Ml)),
+                        tags = listOf(
+                            Tag("ML", TagKind.Ml),
+                            Tag("Detached", TagKind.Detached),
+                        ),
                         onClick = {},
                     )
                     SessionRow(
@@ -142,7 +148,10 @@ fun ComponentsPreview() {
                         host = "hetzner",
                         preview = "waiting for CI to finish build #2031...",
                         time = "14m",
-                        tags = listOf(Tag("deploy", TagKind.Deploy)),
+                        tags = listOf(
+                            Tag("Deploy", TagKind.Deploy),
+                            Tag("Detached", TagKind.Detached),
+                        ),
                         onClick = {},
                     )
                 }
@@ -308,8 +317,8 @@ fun SessionRowPreview() {
                 preview = "I'll check the deploy logs and find what...",
                 time = "2m",
                 tags = listOf(
-                    Tag("claude code", TagKind.Agent),
-                    Tag("scheduled", TagKind.Default),
+                    Tag("Claude", TagKind.Agent),
+                    Tag("Attached", TagKind.Attached),
                 ),
                 onClick = {},
             )

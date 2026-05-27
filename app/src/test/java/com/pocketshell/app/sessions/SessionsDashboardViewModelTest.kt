@@ -411,6 +411,11 @@ class SessionsDashboardViewModelTest {
 
     @Test
     fun dashboardRowUiSurfacesAgentAndAttachedState() {
+        // Per issue #202 the labels are now mixed-case ("Codex" rather
+        // than "codex") and the activity-state has its own slot
+        // (TagKind.Attached / TagKind.Detached) instead of riding on
+        // TagKind.Default. A first-time user can read "Codex" /
+        // "Attached" without consulting the legend.
         val row = SessionSummary(
             hostId = 1L,
             hostName = "hetzner",
@@ -421,8 +426,8 @@ class SessionsDashboardViewModelTest {
 
         assertEquals("C", row.badge)
         assertEquals("codex conversation active", row.preview)
-        assertEquals(listOf("codex", "attached"), row.tags.map { it.label })
-        assertEquals(listOf(TagKind.Agent, TagKind.Default), row.tags.map { it.kind })
+        assertEquals(listOf("Codex", "Attached"), row.tags.map { it.label })
+        assertEquals(listOf(TagKind.Agent, TagKind.Attached), row.tags.map { it.kind })
     }
 
     @Test
@@ -442,9 +447,134 @@ class SessionsDashboardViewModelTest {
             attached = false,
         ).dashboardRowUi()
 
-        assertEquals("tmux session idle", deploy.preview)
-        assertEquals(listOf(TagKind.Deploy), deploy.tags.map { it.kind })
-        assertEquals(listOf(TagKind.Ml), training.tags.map { it.kind })
+        // Per issue #202: "Detached" replaces the ambiguous "idle"
+        // word (consistent with #201 removing "idle" from host-card
+        // vocabulary). The preview prose updates in lockstep so the
+        // synthetic preview never contradicts the chip label.
+        assertEquals("tmux session detached", deploy.preview)
+        assertEquals(
+            listOf(TagKind.Deploy, TagKind.Detached),
+            deploy.tags.map { it.kind },
+        )
+        assertEquals(listOf("Deploy", "Detached"), deploy.tags.map { it.label })
+        assertEquals(
+            listOf(TagKind.Ml, TagKind.Detached),
+            training.tags.map { it.kind },
+        )
+        assertEquals(listOf("ML", "Detached"), training.tags.map { it.label })
+    }
+
+    @Test
+    fun dashboardRowUiAlwaysSurfacesActivityState() {
+        // Issue #202 acceptance: a first-time user can interpret every
+        // session-row indicator without external help. That requires
+        // the activity-state to always be present so the user never
+        // sees a row with no state context.
+        val bare = SessionSummary(
+            hostId = 1L,
+            hostName = "h",
+            sessionName = "scratch",
+            lastActivity = 100L,
+            attached = false,
+        ).dashboardRowUi()
+        assertEquals(listOf("Detached"), bare.tags.map { it.label })
+        assertEquals(listOf(TagKind.Detached), bare.tags.map { it.kind })
+
+        val bareAttached = SessionSummary(
+            hostId = 1L,
+            hostName = "h",
+            sessionName = "scratch",
+            lastActivity = 100L,
+            attached = true,
+        ).dashboardRowUi()
+        assertEquals(listOf("Attached"), bareAttached.tags.map { it.label })
+        assertEquals(listOf(TagKind.Attached), bareAttached.tags.map { it.kind })
+    }
+
+    @Test
+    fun dashboardRowUiClaudeAndOpenCodeUseProperBrandLabels() {
+        // Issue #202: labels match the docs/agent-awareness.md
+        // canonical brand strings ("Claude" / "OpenCode") rather than
+        // the previous lower-case "claude code" / "opencode" smush.
+        val claude = SessionSummary(
+            hostId = 1L,
+            hostName = "h",
+            sessionName = "claude-deploy",
+            lastActivity = 100L,
+            attached = false,
+        ).dashboardRowUi()
+        // "claude-deploy" matches both the agent heuristic AND the
+        // deploy heuristic. We keep both classifier chips so the user
+        // sees what the session is and what it's for; activity-state
+        // trails. Order matters for legend consistency: classifier
+        // chips first, activity-state last.
+        assertEquals(
+            listOf("Claude", "Deploy", "Detached"),
+            claude.tags.map { it.label },
+        )
+
+        val open = SessionSummary(
+            hostId = 1L,
+            hostName = "h",
+            sessionName = "opencode-1",
+            lastActivity = 100L,
+            attached = true,
+        ).dashboardRowUi()
+        assertEquals(
+            listOf("OpenCode", "Attached"),
+            open.tags.map { it.label },
+        )
+    }
+
+    @Test
+    fun dashboardRowUiAndLegendStayInSync() {
+        // Issue #202: the legend (rendered in the Sessions section) is
+        // the user-facing decoder for every emittable Tag kind. If
+        // dashboardRowUi() can emit a kind that's missing from
+        // SESSIONS_LEGEND_ENTRIES, the user sees an undecodable chip.
+        val emittableKinds: Set<TagKind> = buildSet {
+            // Walk the full set of names that the heuristic in
+            // dashboardRowUi() recognises so the test fails loud if a
+            // new classifier is added without a matching legend entry.
+            listOf(
+                "claude-main",
+                "codex-1",
+                "opencode-1",
+                "agent-poc",
+                "deploy-watch",
+                "prod-shell",
+                "training",
+                "gpu-bench",
+                "ml-eval",
+                "scratch",
+            ).forEach { name ->
+                addAll(
+                    SessionSummary(
+                        hostId = 1L,
+                        hostName = "h",
+                        sessionName = name,
+                        lastActivity = 100L,
+                        attached = false,
+                    ).dashboardRowUi().tags.map { it.kind },
+                )
+                addAll(
+                    SessionSummary(
+                        hostId = 1L,
+                        hostName = "h",
+                        sessionName = name,
+                        lastActivity = 100L,
+                        attached = true,
+                    ).dashboardRowUi().tags.map { it.kind },
+                )
+            }
+        }
+        val documentedKinds = SESSIONS_LEGEND_ENTRIES.map { it.kind }.toSet()
+        val undocumented = emittableKinds - documentedKinds
+        assertTrue(
+            "Every TagKind emittable by dashboardRowUi() must have a " +
+                "matching legend entry. Missing: $undocumented",
+            undocumented.isEmpty(),
+        )
     }
 
     @Test

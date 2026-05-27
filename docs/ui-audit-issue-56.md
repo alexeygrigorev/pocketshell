@@ -5,7 +5,7 @@
 Reference screenshots inspected:
 
 ```text
-build/dogfood-visual-pass/issue76-followup-final-20260523-160539/screenshots/dogfood-visual-pass/
+build/walkthrough-visual-pass/issue76-followup-final-20260523-160539/screenshots/walkthrough-visual-pass/
 ```
 
 Highest-impact issues observed against `docs/design-language.md` and
@@ -42,8 +42,8 @@ Reviewer-requested evidence was recaptured after tightening the system-bar
 styling and screenshot host:
 
 ```text
-build/dogfood-visual-pass/issue56-main-final-20260523-192903/screenshots/dogfood-visual-pass/
-build/dogfood-visual-pass/issue56-composer-final6-20260523-194201/screenshots/dogfood-visual-pass/
+build/walkthrough-visual-pass/issue56-main-final-20260523-192903/screenshots/walkthrough-visual-pass/
+build/walkthrough-visual-pass/issue56-composer-final6-20260523-194201/screenshots/walkthrough-visual-pass/
 ```
 
 Follow-up defects confirmed and addressed:

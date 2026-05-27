@@ -1291,7 +1291,7 @@ class PromptComposerViewModelTest {
 
             // 1.5s of silence — still inside the 2s minimum-floor window.
             // This is the regression scenario the maintainer reported in
-            // the v0.2.8 dogfood note: a natural mid-sentence pause that
+            // the v0.2.8 feedback note: a natural mid-sentence pause that
             // should not auto-stop.
             advanceTimeBy(1_500L)
             runCurrent()

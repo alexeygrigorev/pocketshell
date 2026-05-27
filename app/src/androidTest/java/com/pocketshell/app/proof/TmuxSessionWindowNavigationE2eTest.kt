@@ -50,7 +50,7 @@ import java.io.FileOutputStream
 /**
  * Issue #158 — regression test for tmux window + session navigation UX.
  *
- * The maintainer's v0.2.7 dogfood pass reported that after creating
+ * The maintainer's v0.2.7 walkthrough pass reported that after creating
  * "new" inside a tmux session, the user landed on a cryptically-labeled
  * window (`@137`) with no obvious way back. #158 unifies four fixes:
  *

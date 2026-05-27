@@ -55,7 +55,7 @@ flow, inspects the visible result, and records the command, artifact path, Docke
 involvement when relevant, and observed result in the issue.
 
 1. Start from the latest implementer status for the scoped issue
-2. `./gradlew installDebug`, or use the issue's documented dogfood command
+2. `./gradlew installDebug`, or use the issue's documented walkthrough command
 3. Compare side-by-side with `docs/mockups/<screen>.html` open in Chrome at
    412 × 915
 4. Capture reviewer evidence:
@@ -193,29 +193,29 @@ The smoke test authenticates with `tests/docker/test_key`, connects to
 `heru usage --json`, runs `tmuxctl jobs list`, checks `agent-log-explorer`, and
 uses PocketShell's Claude JSONL detection/read path over SSH. It also seeds a
 deterministic saved host in the debug app, opens it through the real host-list
-UI, sends dogfood shell commands through the prompt composer, verifies visible
+UI, sends walkthrough shell commands through the prompt composer, verifies visible
 terminal transcript output for `ls`, `pwd`, and tmux, verifies the remote
 artifacts, and cleans up the remote temp directory and tmux session.
 
-### Local phone dogfood reproduction
+### Local phone walkthrough reproduction
 
 For fast visual feedback without installing an APK on a physical phone, run the
-local phone-dogfood harness against an already-booted emulator:
+local phone-walkthrough harness against an already-booted emulator:
 
 ```bash
-scripts/phone-dogfood.sh terminal-lab
+scripts/phone-walkthrough.sh terminal-lab
 ```
 
 The harness verifies the explicit SDK paths from `agents.md`, fails clearly if
 no booted emulator is connected, starts/verifies the Docker `agents` SSH
 fixture, builds and installs the debug app/test APKs, runs only the selected
 scenario, and writes one artifact bundle under
-`build/phone-dogfood/<run-id>/`.
-By default it uses `build/phone-dogfood/gradle-home` as an isolated
+`build/phone-walkthrough/<run-id>/`.
+By default it uses `build/phone-walkthrough/gradle-home` as an isolated
 `GRADLE_USER_HOME`, disables the Gradle build cache and parallel execution for
 the APK build, and removes the app module's generated build output directory so
 stale KSP/Hilt/Javac transaction state cannot be reused. Set
-`PHONE_DOGFOOD_CLEAN_GENERATED=0` only when investigating those generated
+`PHONE_WALKTHROUGH_CLEAN_GENERATED=0` only when investigating those generated
 outputs directly.
 
 The first supported scenario is `terminal-lab`. It opens the isolated terminal
@@ -226,7 +226,7 @@ timings, and crash diagnostics. Use `BUILD_APKS=0` to reuse existing debug APKs
 when iterating on harness behavior:
 
 ```bash
-BUILD_APKS=0 scripts/phone-dogfood.sh terminal-lab
+BUILD_APKS=0 scripts/phone-walkthrough.sh terminal-lab
 ```
 
 For terminal reviewer approval, use the stricter terminal workbench commands in
@@ -247,34 +247,34 @@ for each profile, and stores per-profile screenshots, UI assertion output,
 remote probes, timings, logcat, Docker logs, and crash diagnostics:
 
 ```bash
-scripts/phone-dogfood.sh setup-detection
-scripts/phone-dogfood.sh setup-detection:uv-install
+scripts/phone-walkthrough.sh setup-detection
+scripts/phone-walkthrough.sh setup-detection:uv-install
 ```
 
 For release visual review without a physical phone, run:
 
 ```bash
-scripts/phone-dogfood.sh visual-audit
+scripts/phone-walkthrough.sh visual-audit
 ```
 
 This runs the Docker-backed visual screenshot instrumentation and the composer
 state renderer, then writes reviewer-facing PNGs under
-`build/phone-dogfood/<run-id>/screenshots/visual-audit/`. The normalized set is
+`build/phone-walkthrough/<run-id>/screenshots/visual-audit/`. The normalized set is
 `01-host-list.png`, `02-host-setup-session-picker.png`,
 `03-terminal-session-input-controls.png`, `04-snippets.png`,
 `05-composer-draft.png`, `06-composer-recording.png`, and
 `07-composer-transcribing.png`; raw pulled device output remains under
-`build/phone-dogfood/<run-id>/device-artifacts/dogfood-visual-pass/`.
+`build/phone-walkthrough/<run-id>/device-artifacts/walkthrough-visual-pass/`.
 
 This differs from CI and the pre-release confidence gate: it is a local
-reproduction loop for one dogfood journey and reviewer-visible artifacts. It
+reproduction loop for one walkthrough journey and reviewer-visible artifacts. It
 does not replace unit tests, connected CI, or the slower release gate. A
 physical phone is not required for basic release confidence; emulator + Docker
 evidence is the release blocker, and phone testing is final user acceptance.
 
-### APK dogfood pre-release confidence gate
+### APK pre-release confidence gate
 
-Before tagging an APK for dogfood testing, run the documented local gate from
+Before tagging a release APK, run the documented local gate from
 the repository root:
 
 ```bash
@@ -290,9 +290,9 @@ scripts/release-emulator-validation.sh
 ```
 
 That wrapper requires `HEAD == origin/main`, then runs the confidence gate,
-`scripts/phone-dogfood.sh terminal-lab`,
-`scripts/phone-dogfood.sh tmux-existing-session`,
-`scripts/phone-dogfood.sh setup-detection`, and visual-audit screenshot
+`scripts/phone-walkthrough.sh terminal-lab`,
+`scripts/phone-walkthrough.sh tmux-existing-session`,
+`scripts/phone-walkthrough.sh setup-detection`, and visual-audit screenshot
 capture. It writes `build/release-emulator-validation/<run-id>/summary.md`
 with the artifact directories that must be attached or linked in the issue and
 tag notes. Push the tag only through:
@@ -310,7 +310,7 @@ replace the emulator/Docker release blockers above.
 The release-gate scripts that touch the shared local Android emulator
 (`scripts/release-emulator-validation.sh`,
 `scripts/pre-release-confidence-gate.sh`,
-`scripts/phone-dogfood.sh`,
+`scripts/phone-walkthrough.sh`,
 `scripts/terminal-workbench.sh`, and
 `scripts/release-terminal-gate.sh`) each acquire an exclusive `flock` on
 `build/.avd-lock` (relative to the repo root) before installing APKs or
@@ -336,7 +336,7 @@ POCKETSHELL_AVD_LOCK_FILE=/tmp/my-avd-lock scripts/release-emulator-validation.s
 
 When one gate script invokes another (for example,
 `release-emulator-validation.sh` runs `pre-release-confidence-gate.sh`,
-`phone-dogfood.sh`, and `terminal-workbench.sh` in sequence) the inner
+`phone-walkthrough.sh`, and `terminal-workbench.sh` in sequence) the inner
 scripts inherit `POCKETSHELL_AVD_LOCK_ACQUIRED=1` from the outer one and
 skip re-acquiring; the outer lock holds for the entire chain.
 
@@ -426,7 +426,7 @@ does not relax the stable-main tag rule.
 
 This combines the normal compile/unit check, deterministic Docker `agents`
 target verification, explicit-path emulator readiness checks, focused connected
-dogfood journeys for keyboard/input, snippets/composer, dictation, planner, and
+walkthrough journeys for keyboard/input, snippets/composer, dictation, planner, and
 Docker SSH/tmux smoke, then builds and installs
 `app/build/outputs/apk/debug/app-debug.apk` on the emulator. Logs are written
 under `build/pre-release-confidence-gate/<run-id>/`. By default the gate also
@@ -438,7 +438,7 @@ generated-source races, and local resource oversubscription. The
 compile/check phase pre-generates focused app KSP/Hilt sources for debug,
 release, androidTest, and unit-test variants before `check`, which keeps lint
 from depending on stale generated files in the checkout without building a full
-release APK inside the fast gate. Lint is excluded from this local dogfood gate
+release APK inside the fast gate. Lint is excluded from this local pre-release gate
 so unrelated dirty-worktree lint issues cannot prevent the install and focused
 instrumentation checks from running; run lint separately before release when the
 checkout is clean.
@@ -456,7 +456,7 @@ and the final pass/fail result. On failures, start review from that summary:
 it names the failing step and, for focused instrumentation failures, the
 diagnostics and bounded logcat artifact paths.
 
-The focused app dogfood selectors run through direct
+The focused app walkthrough selectors run through direct
 `adb shell am instrument -e class <selector>` invocations after one app/test
 package reset and one explicit app/test APK install for the whole focused
 phase. This makes the gate repeatable on a reused emulator, avoids stale Gradle
@@ -486,7 +486,7 @@ instrumentation crashes or reports a non-success code, the step log includes
 filtered crash context and points to the bounded full logcat artifact in the same
 run directory.
 
-See [docker-emulator-runbook.md](docker-emulator-runbook.md#apk-dogfood-pre-release-gate)
+See [docker-emulator-runbook.md](docker-emulator-runbook.md#apk-pre-release-gate)
 for the exact steps, SDK paths, focused test list, APK location, and slower
 opt-in suites that remain outside the fast gate.
 

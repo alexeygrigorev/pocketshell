@@ -28,7 +28,7 @@ ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 EMULATOR="${EMULATOR:-$ANDROID_SDK/emulator/emulator}"
 AVD_NAME="${AVD_NAME:-test}"
 COMPOSE_FILE="${COMPOSE_FILE:-tests/docker/docker-compose.yml}"
-LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/phone-dogfood}"
+LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/phone-walkthrough}"
 if [[ "$LOG_ROOT" != /* ]]; then
   LOG_ROOT="$ROOT_DIR/$LOG_ROOT"
 fi
@@ -40,7 +40,7 @@ TIMING_DIR="$RUN_DIR/timings"
 DEVICE_ARTIFACT_ROOT="$RUN_DIR/device-artifacts"
 export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$LOG_ROOT/gradle-home}"
 BUILD_APKS="${BUILD_APKS:-1}"
-PHONE_DOGFOOD_CLEAN_GENERATED="${PHONE_DOGFOOD_CLEAN_GENERATED:-1}"
+PHONE_WALKTHROUGH_CLEAN_GENERATED="${PHONE_WALKTHROUGH_CLEAN_GENERATED:-1}"
 LOGCAT_LINES="${LOGCAT_LINES:-4000}"
 SSH_KEY="${SSH_KEY:-$ROOT_DIR/tests/docker/test_key}"
 SSH_HOST="${SSH_HOST:-127.0.0.1}"
@@ -58,9 +58,9 @@ TERMINAL_LAB_SCREENSHOTS=(
   "03-long-path-git-status.png"
   "04-backspace-repeat.png"
 )
-VISUAL_AUDIT_MAIN_TEST_CLASS="com.pocketshell.app.proof.DogfoodVisualScreenshotTest"
+VISUAL_AUDIT_MAIN_TEST_CLASS="com.pocketshell.app.proof.WalkthroughVisualScreenshotTest"
 VISUAL_AUDIT_COMPOSER_TEST_CLASS="com.pocketshell.app.composer.PromptComposerVisualScreenshotTest"
-VISUAL_AUDIT_DEVICE_DIR="$DEVICE_OUTPUT_DIR/dogfood-visual-pass"
+VISUAL_AUDIT_DEVICE_DIR="$DEVICE_OUTPUT_DIR/walkthrough-visual-pass"
 VISUAL_AUDIT_SCREENSHOTS=(
   "01-host-list.png"
   "02-host-setup-session-picker.png"
@@ -70,8 +70,8 @@ VISUAL_AUDIT_SCREENSHOTS=(
   "06-composer-recording.png"
   "07-composer-transcribing.png"
 )
-TMUX_EXISTING_SESSION_TEST_SELECTOR="com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#dogfoodJourneyOpensAppSessionAndRunsShellAndTmuxCommands"
-TMUX_EXISTING_SESSION_DEVICE_DIR="$DEVICE_OUTPUT_DIR/issue78-phone-dogfood"
+TMUX_EXISTING_SESSION_TEST_SELECTOR="com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#walkthroughJourneyOpensAppSessionAndRunsShellAndTmuxCommands"
+TMUX_EXISTING_SESSION_DEVICE_DIR="$DEVICE_OUTPUT_DIR/issue78-phone-walkthrough"
 TMUX_EXISTING_SESSION_REMOTE_NAME="claude-main"
 TMUX_EXISTING_SESSION_SCREENSHOT="existing-tmux-output.png"
 TMUX_EXISTING_SESSION_TRANSCRIPT="existing-tmux-output-visible-terminal.txt"
@@ -125,12 +125,12 @@ source "$ROOT_DIR/tests/docker/lib/wait-for-healthy.sh"
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/phone-dogfood.sh [scenario...]
+Usage: scripts/phone-walkthrough.sh [scenario...]
 
-Runs fast local phone-dogfood journeys on an already-booted Android emulator
+Runs fast local phone-walkthrough journeys on an already-booted Android emulator
 against deterministic Docker SSH fixtures. Artifacts are written under:
 
-  build/phone-dogfood/<run-id>/
+  build/phone-walkthrough/<run-id>/
 
 Acquires an exclusive `flock` on `build/.avd-lock` (relative to the repo
 root) before touching the emulator so that parallel-worktree gate runs
@@ -160,11 +160,11 @@ Environment overrides:
   AVD_NAME=test
   ANDROID_SERIAL=<adb serial> or ADB_SERIAL=<adb serial>
   COMPOSE_FILE=tests/docker/docker-compose.yml
-  LOG_ROOT=build/phone-dogfood
-  GRADLE_USER_HOME=build/phone-dogfood/gradle-home
+  LOG_ROOT=build/phone-walkthrough
+  GRADLE_USER_HOME=build/phone-walkthrough/gradle-home
   RUN_ID=<custom artifact directory name>
   BUILD_APKS=0            reuse existing debug APKs
-  PHONE_DOGFOOD_CLEAN_GENERATED=0
+  PHONE_WALKTHROUGH_CLEAN_GENERATED=0
                           skip generated-output cleanup before APK build
   LOGCAT_LINES=4000       bounded logcat lines collected at exit
   SSH_KEY=tests/docker/test_key
@@ -185,7 +185,7 @@ relpath() {
 
 fail() {
   local message="$1"
-  printf '\nFAIL %s\n' "${CURRENT_SCENARIO:-phone-dogfood}" >&2
+  printf '\nFAIL %s\n' "${CURRENT_SCENARIO:-phone-walkthrough}" >&2
   printf 'reason: %s\n' "$message" >&2
   printf 'artifacts: %s\n' "$(relpath "$RUN_DIR")" >&2
   exit 1
@@ -430,7 +430,7 @@ ensure_remote_tmux_existing_session() {
         -o StrictHostKeyChecking=no \
         -o UserKnownHostsFile=/dev/null \
         "$SSH_USER@$SSH_HOST" \
-        "tmux has-session -t '$session_name' 2>/dev/null || tmux new-session -d -s '$session_name' 'printf \"PocketShell dogfood tmux fixture ready\\\\n\"; exec sh'; tmux display-message -p -t '$session_name' '#S'; tmux list-sessions"
+        "tmux has-session -t '$session_name' 2>/dev/null || tmux new-session -d -s '$session_name' 'printf \"PocketShell walkthrough tmux fixture ready\\\\n\"; exec sh'; tmux display-message -p -t '$session_name' '#S'; tmux list-sessions"
     } >> "$log_file" 2>&1 && {
       printf '\n[06b-docker-tmux-existing-session]\nLog: %s\n' "$(relpath "$log_file")"
       tail -n 30 "$log_file"
@@ -591,7 +591,7 @@ run_visual_audit() {
   local scenario_start_ms scenario_end_ms scenario_elapsed_ms
   local main_status=0
   local composer_status=0
-  local device_artifact_dir="$DEVICE_ARTIFACT_ROOT/dogfood-visual-pass"
+  local device_artifact_dir="$DEVICE_ARTIFACT_ROOT/walkthrough-visual-pass"
   local screenshot_dir="$SCREENSHOT_ROOT/visual-audit"
   local timing_file="$TIMING_DIR/visual-audit.txt"
 
@@ -639,7 +639,7 @@ run_visual_audit() {
     printf 'composer_instrumentation_ms=%s\n' "$((composer_end_ms - composer_start_ms))"
   } > "$timing_file"
   "$ADB" logcat -d -v threadtime -t "$LOGCAT_LINES" > "$LOG_DIR/logcat.txt" 2>&1 || true
-  rg -n 'DOGFOOD_SCREENSHOT|DogfoodVisualScreenshotTest|PromptComposerVisualScreenshotTest' \
+  rg -n 'WALKTHROUGH_SCREENSHOT|WalkthroughVisualScreenshotTest|PromptComposerVisualScreenshotTest' \
     "$LOG_DIR/logcat.txt" \
     "$LOG_DIR/visual-audit-main-instrumentation.txt" \
     "$LOG_DIR/visual-audit-composer-instrumentation.txt" > "$LOG_DIR/visual-audit-filtered-log.txt" 2>&1 || true
@@ -699,7 +699,7 @@ run_tmux_existing_session() {
   CURRENT_SCENARIO="tmux-existing-session"
   local scenario_start_ms scenario_end_ms scenario_elapsed_ms
   local instrumentation_status=0
-  local pulled_artifact_dir="$DEVICE_ARTIFACT_ROOT/issue78-phone-dogfood"
+  local pulled_artifact_dir="$DEVICE_ARTIFACT_ROOT/issue78-phone-walkthrough"
   local scenario_artifact_dir="$DEVICE_ARTIFACT_ROOT/tmux-existing-session"
   local screenshot_dir="$SCREENSHOT_ROOT/tmux-existing-session"
   local timing_file="$TIMING_DIR/$TMUX_EXISTING_SESSION_TIMINGS"
@@ -724,7 +724,7 @@ run_tmux_existing_session() {
 
   cp "$LOG_DIR/14-run-tmux-existing-session-instrumentation.log" "$LOG_DIR/instrumentation.txt"
   "$ADB" logcat -d -v threadtime -t "$LOGCAT_LINES" > "$LOG_DIR/logcat.txt" 2>&1 || true
-  rg -n 'ISSUE78_|PocketShellDogfood' \
+  rg -n 'ISSUE78_|PocketShellWalkthrough' \
     "$LOG_DIR/logcat.txt" "$LOG_DIR/instrumentation.txt" > "$LOG_DIR/tmux-existing-session-filtered-log.txt" 2>&1 || true
   rg -n 'FATAL EXCEPTION|Process: com[.]pocketshell[.]app|Crash of app com[.]pocketshell[.]app|ANR in com[.]pocketshell[.]app|INSTRUMENTATION_RESULT: shortMsg=Process crashed' \
     "$LOG_DIR/logcat.txt" "$LOG_DIR/instrumentation.txt" > "$LOG_DIR/crash-diagnostics.txt" 2>&1 || true
@@ -903,7 +903,7 @@ run_unimplemented() {
 
 select_scenarios "$@"
 
-printf 'PocketShell phone dogfood\n'
+printf 'PocketShell phone walkthrough\n'
 printf 'run-id: %s\n' "$RUN_ID"
 printf 'artifacts: %s\n' "$(relpath "$RUN_DIR")"
 printf 'scenarios: %s\n' "${SCENARIOS[*]}"

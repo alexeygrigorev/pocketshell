@@ -11,19 +11,19 @@ SSH_KEY="${SSH_KEY:-tests/docker/test_key}"
 SSH_HOST="${SSH_HOST:-127.0.0.1}"
 SSH_PORT="${SSH_PORT:-2222}"
 SSH_USER="${SSH_USER:-testuser}"
-LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/issue78-phone-dogfood}"
+LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/issue78-phone-walkthrough}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
-TEST_SELECTOR="com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#dogfoodJourneyOpensAppSessionAndRunsShellAndTmuxCommands"
+TEST_SELECTOR="com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#walkthroughJourneyOpensAppSessionAndRunsShellAndTmuxCommands"
 DEVICE_OUTPUT_DIR="/sdcard/Android/media/com.pocketshell.app/additional_test_output"
-DEVICE_ISSUE78_DIR="$DEVICE_OUTPUT_DIR/issue78-phone-dogfood"
+DEVICE_ISSUE78_DIR="$DEVICE_OUTPUT_DIR/issue78-phone-walkthrough"
 VERIFY_ROOT=""
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/issue78-phone-dogfood.sh
+Usage: scripts/issue78-phone-walkthrough.sh
 
-Runs the focused issue #78 phone dogfood loop:
+Runs the focused issue #78 phone walkthrough loop:
   - starts/verifies the Docker agent SSH fixture
   - builds debug app + androidTest APKs
   - installs APKs on the emulator
@@ -39,7 +39,7 @@ Environment overrides:
   SSH_HOST=127.0.0.1
   SSH_PORT=2222
   SSH_USER=testuser
-  LOG_ROOT=build/issue78-phone-dogfood
+  LOG_ROOT=build/issue78-phone-walkthrough
   RUN_ID=<custom artifact directory name>
 USAGE
 }
@@ -192,7 +192,7 @@ run_issue78_test() {
     -e class "$TEST_SELECTOR" \
     com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner
   "$ADB" logcat -d -v threadtime > "$RUN_DIR/10-full-logcat.log" 2>&1 || true
-  rg -n 'ISSUE78_|PocketShellDogfood|AndroidRuntime|FATAL|Process: com[.]pocketshell[.]app' \
+  rg -n 'ISSUE78_|PocketShellWalkthrough|AndroidRuntime|FATAL|Process: com[.]pocketshell[.]app' \
     "$RUN_DIR/10-full-logcat.log" "$instrumentation_log" > "$RUN_DIR/11-issue78-filtered-log.txt" 2>&1 || true
   grep -q 'INSTRUMENTATION_CODE: -1' "$instrumentation_log" &&
     grep -q 'OK (' "$instrumentation_log" &&
@@ -203,7 +203,7 @@ run_issue78_test() {
 pull_artifacts() {
   mkdir -p "$RUN_DIR/device-artifacts"
   run_logged "12-pull-issue78-artifacts" "$ADB" pull "$DEVICE_ISSUE78_DIR" "$RUN_DIR/device-artifacts/"
-  local artifact_dir="$RUN_DIR/device-artifacts/issue78-phone-dogfood"
+  local artifact_dir="$RUN_DIR/device-artifacts/issue78-phone-walkthrough"
   [[ -s "$artifact_dir/issue78-existing-tmux-output.png" ]] ||
     fail "expected terminal screenshot was not pulled from $DEVICE_ISSUE78_DIR"
   [[ -s "$artifact_dir/issue78-existing-tmux-transcript.txt" ]] ||
@@ -214,7 +214,7 @@ pull_artifacts() {
     fail "terminal transcript did not include the completed issue #78 marker"
 }
 
-printf 'PocketShell issue #78 phone dogfood loop\n'
+printf 'PocketShell issue #78 phone walkthrough loop\n'
 printf 'Artifacts: %s\n' "$RUN_DIR"
 printf 'ADB: %s\n' "$ADB"
 
@@ -237,11 +237,11 @@ wait_for_pocketshell_idle "06c-wait-before-issue78-instrumentation"
 run_issue78_test
 pull_artifacts
 
-printf '\nPASS: issue #78 phone dogfood loop completed\n'
+printf '\nPASS: issue #78 phone walkthrough loop completed\n'
 printf 'Artifacts: %s\n' "$RUN_DIR"
-printf 'Screenshot: %s/device-artifacts/issue78-phone-dogfood/issue78-existing-tmux-output.png\n' "$RUN_DIR"
-printf 'Transcript: %s/device-artifacts/issue78-phone-dogfood/issue78-existing-tmux-transcript.txt\n' "$RUN_DIR"
+printf 'Screenshot: %s/device-artifacts/issue78-phone-walkthrough/issue78-existing-tmux-output.png\n' "$RUN_DIR"
+printf 'Transcript: %s/device-artifacts/issue78-phone-walkthrough/issue78-existing-tmux-transcript.txt\n' "$RUN_DIR"
 printf 'Timings:\n'
-cat "$RUN_DIR/device-artifacts/issue78-phone-dogfood/issue78-timings.txt"
+cat "$RUN_DIR/device-artifacts/issue78-phone-walkthrough/issue78-timings.txt"
 printf 'Filtered log: %s/11-issue78-filtered-log.txt\n' "$RUN_DIR"
 printf 'Full logcat: %s/10-full-logcat.log\n' "$RUN_DIR"

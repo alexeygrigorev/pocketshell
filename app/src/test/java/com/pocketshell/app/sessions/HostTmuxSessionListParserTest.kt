@@ -41,7 +41,7 @@ class HostTmuxSessionListParserTest {
      * printf padding for the SESSION column, the row separator collapses
      * to a single space before the trailing CREATED timestamp. The
      * previous regex required `\s{2,}` between the name and the
-     * timestamp, so these rows were silently dropped — the dogfooder
+     * timestamp, so these rows were silently dropped — the maintainer
      * with 11 sessions on the host saw only the short-named subset.
      * This test pins the parser against the verbatim Hetzner output so
      * we don't regress on the same printf-padding edge.

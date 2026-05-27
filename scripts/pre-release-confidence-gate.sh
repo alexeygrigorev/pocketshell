@@ -41,7 +41,7 @@ SSH_KEY="${SSH_KEY:-tests/docker/test_key}"
 APK_PATH="${APK_PATH:-app/build/outputs/apk/debug/app-debug.apk}"
 TEST_APK_PATH="${TEST_APK_PATH:-app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"
 
-APP_DOGFOOD_TESTS=(
+APP_WALKTHROUGH_TESTS=(
   "com.pocketshell.app.composer.PromptComposerSmokeTest#recordingAndTranscribingStatesAreVisible"
   "com.pocketshell.app.composer.PromptComposerSmokeTest#typedDraftSendEnterReachesDockerShell"
   "com.pocketshell.app.snippets.SnippetTerminalE2eTest#tappingCommandSnippetSendsInputToDockerShell"
@@ -49,18 +49,18 @@ APP_DOGFOOD_TESTS=(
   "com.pocketshell.app.session.InlineDictationUiTest#transcribingStateShowsSpinnerAndBlocksDuplicateTap"
   "com.pocketshell.app.session.VoiceCommandPlannerE2eTest#fakePlannerEndpointProducesReviewableCommandThatRunsThroughTerminalBridge"
   "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias"
-  "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#dogfoodJourneyOpensAppSessionAndRunsShellAndTmuxCommands"
+  "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#walkthroughJourneyOpensAppSessionAndRunsShellAndTmuxCommands"
 )
 
 usage() {
   cat <<'USAGE'
 Usage: scripts/pre-release-confidence-gate.sh
 
-Runs the local APK dogfood release-confidence gate:
+Runs the local APK pre-release-confidence gate:
   - compile/unit checks
   - deterministic Docker agent target
   - emulator readiness with explicit Android SDK paths
-  - focused connected dogfood tests
+  - focused connected walkthrough tests
   - debug APK build and emulator install sanity
 
 Acquires an exclusive `flock` on `build/.avd-lock` (relative to the repo
@@ -114,13 +114,13 @@ FAILING_LOG_PATH=""
 FAILURE_DIAGNOSTICS_PATH=""
 FAILURE_LOGCAT_PATH=""
 EMULATOR_SERIAL="unknown"
-APP_DOGFOOD_INSTALL_STATUS="not_run"
+APP_WALKTHROUGH_INSTALL_STATUS="not_run"
 FINAL_INSTALL_STATUS="not_run"
 STEP_NAMES=()
 STEP_STATUSES=()
 STEP_LOGS=()
 STEP_COMMANDS=()
-FOCUSED_SELECTORS=("${APP_DOGFOOD_TESTS[@]}")
+FOCUSED_SELECTORS=("${APP_WALKTHROUGH_TESTS[@]}")
 FOCUSED_STATUSES=()
 FOCUSED_LOGS=()
 FOCUSED_DIAGNOSTICS=()
@@ -200,7 +200,7 @@ write_summary() {
     printf 'Docker compose file: %s\n' "$COMPOSE_FILE"
     printf 'Docker profile/service: agents\n'
     printf 'Docker SSH target: 127.0.0.1:2222\n'
-    printf 'Focused app APK install status: %s\n' "$APP_DOGFOOD_INSTALL_STATUS"
+    printf 'Focused app APK install status: %s\n' "$APP_WALKTHROUGH_INSTALL_STATUS"
     printf 'Final install status: %s\n' "$FINAL_INSTALL_STATUS"
     if [[ "$GATE_RESULT" != "PASS" ]]; then
       printf 'Failing step: %s\n' "${FAILING_STEP:-unknown}"
@@ -284,8 +284,8 @@ run_step() {
   if [[ "$status" -eq 0 ]]; then
     STEP_STATUSES[$step_array_index]="passed"
     case "$name" in
-      install-app-dogfood-apks)
-        APP_DOGFOOD_INSTALL_STATUS="passed"
+      install-app-walkthrough-apks)
+        APP_WALKTHROUGH_INSTALL_STATUS="passed"
         ;;
       install-debug-apk)
         FINAL_INSTALL_STATUS="passed"
@@ -297,8 +297,8 @@ run_step() {
     FAILING_LOG_PATH="$log_file"
     FAILURE_MESSAGE="step '$name' failed with status $status"
     case "$name" in
-      install-app-dogfood-apks)
-        APP_DOGFOOD_INSTALL_STATUS="failed"
+      install-app-walkthrough-apks)
+        APP_WALKTHROUGH_INSTALL_STATUS="failed"
         ;;
       install-debug-apk)
         FINAL_INSTALL_STATUS="failed"
@@ -353,11 +353,11 @@ wait_package_manager_idle
 for package in com.pocketshell.app.test com.pocketshell.app; do
   '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
 done
-printf 'Focused app dogfood package state reset without package deletion\n'
+printf 'Focused app walkthrough package state reset without package deletion\n'
 RESET_SCRIPT
 }
 
-install_app_dogfood_apks_script() {
+install_app_walkthrough_apks_script() {
   cat <<INSTALL_SCRIPT
 set -euo pipefail
 wait_package_manager_idle() {
@@ -419,7 +419,7 @@ install_pair() {
   wait_package_manager_idle
 }
 for attempt in {1..3}; do
-  printf 'Focused app dogfood APK install attempt %s\n' "\$attempt"
+  printf 'Focused app walkthrough APK install attempt %s\n' "\$attempt"
   '$ADB' logcat -c || true
   install_pair
   stable=true
@@ -438,7 +438,7 @@ for attempt in {1..3}; do
     sleep 1
   done
   if [ "\$stable" = true ]; then
-    printf 'Focused app dogfood APK install is package-manager idle and stable\n'
+    printf 'Focused app walkthrough APK install is package-manager idle and stable\n'
     exit 0
   fi
   printf 'Recent package removal context before reinstall:\n' >&2
@@ -447,12 +447,12 @@ for attempt in {1..3}; do
   wait_package_manager_idle
   sleep 3
 done
-printf 'Focused app dogfood APK install did not stabilize after retries.\n' >&2
+printf 'Focused app walkthrough APK install did not stabilize after retries.\n' >&2
 exit 1
 INSTALL_SCRIPT
 }
 
-quiesce_app_dogfood_processes_script() {
+quiesce_app_walkthrough_processes_script() {
   cat <<QUIESCE_SCRIPT
 set -euo pipefail
 packages_stopped() {
@@ -529,7 +529,7 @@ safe_step_name() {
   printf '%s' "$1" | tr '#.' '--'
 }
 
-run_app_dogfood_script() {
+run_app_walkthrough_script() {
   local selector="$1"
   local diagnostics_file="$2"
   local full_logcat_file="$3"
@@ -645,28 +645,28 @@ run_step "build-app-test-apks" \
 [[ -f "$APK_PATH" ]] || fail "APK artifact was not created at $APK_PATH"
 [[ -f "$TEST_APK_PATH" ]] || fail "Android test APK artifact was not created at $TEST_APK_PATH"
 
-run_bash_step "reset-app-packages-before-app-dogfood" "$(reset_app_packages_script)"
-run_bash_step "install-app-dogfood-apks" "$(install_app_dogfood_apks_script)"
+run_bash_step "reset-app-packages-before-app-walkthrough" "$(reset_app_packages_script)"
+run_bash_step "install-app-walkthrough-apks" "$(install_app_walkthrough_apks_script)"
 
-for app_dogfood_index in "${!APP_DOGFOOD_TESTS[@]}"; do
-  app_dogfood_selector="${APP_DOGFOOD_TESTS[$app_dogfood_index]}"
-  app_dogfood_safe_name="$(safe_step_name "$app_dogfood_selector")"
-  set_focused_status "$app_dogfood_selector" "pending"
-  if ! run_bash_step "quiesce-app-dogfood-processes-$app_dogfood_safe_name" "$(quiesce_app_dogfood_processes_script)"; then
-    set_focused_status "$app_dogfood_selector" "blocked"
+for app_walkthrough_index in "${!APP_WALKTHROUGH_TESTS[@]}"; do
+  app_walkthrough_selector="${APP_WALKTHROUGH_TESTS[$app_walkthrough_index]}"
+  app_walkthrough_safe_name="$(safe_step_name "$app_walkthrough_selector")"
+  set_focused_status "$app_walkthrough_selector" "pending"
+  if ! run_bash_step "quiesce-app-walkthrough-processes-$app_walkthrough_safe_name" "$(quiesce_app_walkthrough_processes_script)"; then
+    set_focused_status "$app_walkthrough_selector" "blocked"
     exit 1
   fi
 
-  app_dogfood_step_index=$((STEP_INDEX + 1))
-  app_dogfood_diagnostics_file="$(printf '%s/%02d-connected-app-dogfood-%s-diagnostics.log' "$RUN_DIR" "$app_dogfood_step_index" "$app_dogfood_safe_name")"
-  app_dogfood_full_logcat_file="$(printf '%s/%02d-connected-app-dogfood-%s-full-logcat.log' "$RUN_DIR" "$app_dogfood_step_index" "$app_dogfood_safe_name")"
-  set_focused_status "$app_dogfood_selector" "running" "" "$app_dogfood_diagnostics_file" "$app_dogfood_full_logcat_file"
-  if run_bash_step "connected-app-dogfood-$app_dogfood_safe_name" "$(run_app_dogfood_script "$app_dogfood_selector" "$app_dogfood_diagnostics_file" "$app_dogfood_full_logcat_file")"; then
-    set_focused_status "$app_dogfood_selector" "passed" "$RUN_DIR/$(printf '%02d-connected-app-dogfood-%s.log' "$app_dogfood_step_index" "$app_dogfood_safe_name")" "$app_dogfood_diagnostics_file" "$app_dogfood_full_logcat_file"
+  app_walkthrough_step_index=$((STEP_INDEX + 1))
+  app_walkthrough_diagnostics_file="$(printf '%s/%02d-connected-app-walkthrough-%s-diagnostics.log' "$RUN_DIR" "$app_walkthrough_step_index" "$app_walkthrough_safe_name")"
+  app_walkthrough_full_logcat_file="$(printf '%s/%02d-connected-app-walkthrough-%s-full-logcat.log' "$RUN_DIR" "$app_walkthrough_step_index" "$app_walkthrough_safe_name")"
+  set_focused_status "$app_walkthrough_selector" "running" "" "$app_walkthrough_diagnostics_file" "$app_walkthrough_full_logcat_file"
+  if run_bash_step "connected-app-walkthrough-$app_walkthrough_safe_name" "$(run_app_walkthrough_script "$app_walkthrough_selector" "$app_walkthrough_diagnostics_file" "$app_walkthrough_full_logcat_file")"; then
+    set_focused_status "$app_walkthrough_selector" "passed" "$RUN_DIR/$(printf '%02d-connected-app-walkthrough-%s.log' "$app_walkthrough_step_index" "$app_walkthrough_safe_name")" "$app_walkthrough_diagnostics_file" "$app_walkthrough_full_logcat_file"
   else
-    set_focused_status "$app_dogfood_selector" "failed" "$RUN_DIR/$(printf '%02d-connected-app-dogfood-%s.log' "$app_dogfood_step_index" "$app_dogfood_safe_name")" "$app_dogfood_diagnostics_file" "$app_dogfood_full_logcat_file"
-    FAILURE_DIAGNOSTICS_PATH="$app_dogfood_diagnostics_file"
-    FAILURE_LOGCAT_PATH="$app_dogfood_full_logcat_file"
+    set_focused_status "$app_walkthrough_selector" "failed" "$RUN_DIR/$(printf '%02d-connected-app-walkthrough-%s.log' "$app_walkthrough_step_index" "$app_walkthrough_safe_name")" "$app_walkthrough_diagnostics_file" "$app_walkthrough_full_logcat_file"
+    FAILURE_DIAGNOSTICS_PATH="$app_walkthrough_diagnostics_file"
+    FAILURE_LOGCAT_PATH="$app_walkthrough_full_logcat_file"
     exit 1
   fi
 done

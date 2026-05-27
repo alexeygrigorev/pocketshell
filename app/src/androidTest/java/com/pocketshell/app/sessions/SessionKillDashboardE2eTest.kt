@@ -47,7 +47,7 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Issue #168 — regression test for the v0.2.7 dogfood report
+ * Issue #168 — regression test for the v0.2.7 feedback report
  * "killed tmux session still visible in dashboard after kill".
  *
  * The user reproduced the symptom on a real phone: tap "Kill" on a tmux

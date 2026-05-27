@@ -161,7 +161,7 @@ internal class AgentConversationRepository(
      * register as a detection on a plain-shell pane that just happens to
      * share the same cwd.
      *
-     * Concretely: the maintainer's v0.2.8 dogfood report had a 3-window
+     * Concretely: the maintainer's v0.2.8 feedback report had a 3-window
      * tmux session where only Window 1 ran Claude. Pre-#186, Windows 2
      * and 3 also saw the Conversation tab + "Claude Code session
      * detected" hint because [detect] runs a host-wide process scan and

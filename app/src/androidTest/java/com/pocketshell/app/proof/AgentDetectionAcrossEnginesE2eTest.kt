@@ -86,7 +86,7 @@ class AgentDetectionAcrossEnginesE2eTest {
 
     @Test
     fun codexDetectionFiresOnAttachToExistingSession() = runBlocking {
-        // Issue #183 primary regression: the v0.2.7 dogfood report was
+        // Issue #183 primary regression: the v0.2.7 maintainer report was
         // specifically a Codex session whose Conversation tab refused
         // to appear. Before the fix this test would fail at the
         // `assertNotNull(detection)` step because the detector dropped

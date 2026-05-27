@@ -176,7 +176,7 @@ class EmulatorDockerSshSmokeTest {
     }
 
     @Test
-    fun dogfoodJourneyOpensAppSessionAndRunsShellAndTmuxCommands() = runBlocking {
+    fun walkthroughJourneyOpensAppSessionAndRunsShellAndTmuxCommands() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val appContext = instrumentation.targetContext
         val key = instrumentation.context
@@ -185,7 +185,7 @@ class EmulatorDockerSshSmokeTest {
             .bufferedReader()
             .use { it.readText() }
         waitForSshFixtureReady(SshKey.Pem(key))
-        val marker = "psdogfood${System.currentTimeMillis()}"
+        val marker = "pswalkthrough${System.currentTimeMillis()}"
         val tmpDir = "/tmp/pocketshell-$marker"
         val sessionName = "pocketshell-$marker"
         val existingTmuxSessionName = "claude-main"
@@ -206,12 +206,12 @@ class EmulatorDockerSshSmokeTest {
             val storedKey = SshKeyStorage.persistKey(
                 context = appContext,
                 sshKeyDao = db.sshKeyDao(),
-                name = "dogfood-test-key-$marker",
+                name = "walkthrough-test-key-$marker",
                 content = key,
             )
             val hostId = db.hostDao().insert(
                 HostEntity(
-                    name = "Dogfood Docker",
+                    name = "Walkthrough Docker",
                     hostname = DEFAULT_HOST,
                     port = DEFAULT_PORT,
                     username = DEFAULT_USER,
@@ -239,8 +239,8 @@ class EmulatorDockerSshSmokeTest {
             "expected SSH connection to Docker target before launching app, got ${setupCheck.exceptionOrNull()}",
             setupCheck.isSuccess,
         )
-        cleanupRemoteDogfoodArtifacts(key, tmpDir, sessionName)
-        prepareRemoteDogfoodScript(
+        cleanupRemoteWalkthroughArtifacts(key, tmpDir, sessionName)
+        prepareRemoteWalkthroughScript(
             key = key,
             tmpDir = tmpDir,
             shellVisibleMarker = shellVisibleMarker,
@@ -256,7 +256,7 @@ class EmulatorDockerSshSmokeTest {
                     .isNotEmpty()
             }
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).assertExists()
-            compose.onNodeWithText("Dogfood Docker", useUnmergedTree = true).assertExists()
+            compose.onNodeWithText("Walkthrough Docker", useUnmergedTree = true).assertExists()
             compose.onNodeWithText(DEFAULT_HOST, substring = true, useUnmergedTree = true).assertExists()
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
             compose.waitUntil(timeoutMillis = 20_000) {
@@ -267,7 +267,7 @@ class EmulatorDockerSshSmokeTest {
             // Issue #216: the visible "Terminal" tab label is only
             // rendered when the consolidated tab pill (#189) has 2+
             // entries — i.e. an agent has been detected. For a
-            // shell-only / single-tab dogfood session no "Terminal"
+            // shell-only / single-tab walkthrough session no "Terminal"
             // text node exists. Use [TMUX_SESSION_SCREEN_TAG] (root of
             // [TmuxSessionScreen]) as the universal "route swapped to
             // the tmux session screen" sentinel.
@@ -358,7 +358,7 @@ class EmulatorDockerSshSmokeTest {
                 ),
             )
         } finally {
-            cleanupRemoteDogfoodArtifacts(key, tmpDir, sessionName)
+            cleanupRemoteWalkthroughArtifacts(key, tmpDir, sessionName)
         }
         Unit
     }
@@ -498,7 +498,7 @@ class EmulatorDockerSshSmokeTest {
         return null
     }
 
-    private suspend fun cleanupRemoteDogfoodArtifacts(
+    private suspend fun cleanupRemoteWalkthroughArtifacts(
         key: String,
         tmpDir: String,
         sessionName: String,
@@ -531,12 +531,12 @@ class EmulatorDockerSshSmokeTest {
             }
         }.isSuccess
         assertTrue(
-            "expected dogfood cleanup to succeed, got $lastError",
+            "expected walkthrough cleanup to succeed, got $lastError",
             cleaned,
         )
     }
 
-    private suspend fun prepareRemoteDogfoodScript(
+    private suspend fun prepareRemoteWalkthroughScript(
         key: String,
         tmpDir: String,
         shellVisibleMarker: String,
@@ -698,8 +698,8 @@ class EmulatorDockerSshSmokeTest {
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
-        const val LOG_TAG: String = "PocketShellDogfood"
-        const val ISSUE78_DEVICE_DIR_NAME: String = "issue78-phone-dogfood"
+        const val LOG_TAG: String = "PocketShellWalkthrough"
+        const val ISSUE78_DEVICE_DIR_NAME: String = "issue78-phone-walkthrough"
         const val MAX_ATTACH_READY_MS: Long = 15_000L
         const val MIN_TERMINAL_FOREGROUND_PIXELS: Int = 2_000
     }

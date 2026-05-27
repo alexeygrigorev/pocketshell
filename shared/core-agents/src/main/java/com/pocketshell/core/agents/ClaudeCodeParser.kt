@@ -234,7 +234,7 @@ public class ClaudeCodeParser : ConversationParser {
          * `<html>` reference or a literal angle-bracket aside is not
          * accidentally hidden.
          *
-         * Sourced from the issue body (#176) plus observed dogfood
+         * Sourced from the issue body (#176) plus observed maintainer
          * payloads: `system-reminder`, `command-name`, `command-args`,
          * `command-message`, `command-stdout`, and
          * `local-command-stdout`.

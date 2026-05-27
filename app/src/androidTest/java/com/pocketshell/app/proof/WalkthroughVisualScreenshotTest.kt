@@ -45,7 +45,7 @@ import org.junit.runner.RunWith
 import java.io.File
 
 @RunWith(AndroidJUnit4::class)
-class DogfoodVisualScreenshotTest {
+class WalkthroughVisualScreenshotTest {
 
     @get:Rule
     val compose = createEmptyComposeRule()
@@ -59,7 +59,7 @@ class DogfoodVisualScreenshotTest {
     }
 
     @Test
-    fun capturesMainDogfoodScreens() {
+    fun capturesMainWalkthroughScreens() {
         runBlocking {
             val instrumentation = InstrumentationRegistry.getInstrumentation()
             val key = instrumentation.context.assets
@@ -70,7 +70,7 @@ class DogfoodVisualScreenshotTest {
             val tmuxSessionName = "visual-$marker"
             val sshKey = SshKey.Pem(key)
 
-            val hostRowTag = seedDogfoodHostAndSnippets(key)
+            val hostRowTag = seedWalkthroughHostAndSnippets(key)
             waitForSshFixtureReady(sshKey)
             prepareRemoteTmuxSession(key, tmuxSessionName)
 
@@ -80,8 +80,8 @@ class DogfoodVisualScreenshotTest {
                     .fetchSemanticsNodes()
                     .isNotEmpty()
             }
-            compose.onNodeWithText("Dogfood Docker", useUnmergedTree = true).assertExists()
-            val hostListScreenshot = DogfoodScreenshotArtifacts.capture("01-host-list")
+            compose.onNodeWithText("Walkthrough Docker", useUnmergedTree = true).assertExists()
+            val hostListScreenshot = WalkthroughScreenshotArtifacts.capture("01-host-list")
             // Issue #112 swapped the "Crashes" top-bar tab for "Settings"
             // (crash reports were relocated under Settings → Diagnostics).
             // Keep this assertion in sync with the current TabRow layout
@@ -97,7 +97,7 @@ class DogfoodVisualScreenshotTest {
                 compose.onAllNodesWithText("Tmux sessions").fetchSemanticsNodes().isNotEmpty() &&
                     compose.onAllNodesWithText("Continue with SSH").fetchSemanticsNodes().isNotEmpty()
             }
-            val sessionPickerScreenshot = DogfoodScreenshotArtifacts.capture("02-host-setup-session-picker")
+            val sessionPickerScreenshot = WalkthroughScreenshotArtifacts.capture("02-host-setup-session-picker")
             assertTextsClearOfNavigationBar(
                 texts = listOf("Tmux sessions", "+ New session", "Continue with SSH"),
                 screenshotName = "02-host-setup-session-picker.png",
@@ -107,7 +107,7 @@ class DogfoodVisualScreenshotTest {
             compose.onNodeWithText("Continue with SSH").performClick()
             // Issue #216: the visible "Terminal" tab label is only
             // rendered when the consolidated tab pill (#189) has 2+
-            // entries — i.e. an agent has been detected. The dogfood
+            // entries — i.e. an agent has been detected. The walkthrough
             // shell session has no agent, so we assert on the
             // screen-root tag instead.
             compose.waitUntil(timeoutMillis = 10_000) {
@@ -120,23 +120,23 @@ class DogfoodVisualScreenshotTest {
             waitForSessionConnectUiToSettle()
 
             sendCommandViaComposer("printf '%s\\n' '$marker'")
-            waitForTerminalTranscript("dogfood marker") { transcript ->
+            waitForTerminalTranscript("walkthrough marker") { transcript ->
                 transcript.lineSequence().map { it.trim() }.any { it == marker }
             }
             waitForComposerAndKeyboardToClear()
             assertTerminalViewportUncovered()
-            DogfoodScreenshotArtifacts.capture("03-terminal-session-input-controls")
+            WalkthroughScreenshotArtifacts.capture("03-terminal-session-input-controls")
 
             compose.onNodeWithText("+ snippet").performClick()
             compose.waitUntil(timeoutMillis = 10_000) {
                 compose.onAllNodesWithText("Snippets").fetchSemanticsNodes().isNotEmpty()
             }
             compose.onNodeWithText("visual echo").assertExists()
-            DogfoodScreenshotArtifacts.capture("04-snippets")
+            WalkthroughScreenshotArtifacts.capture("04-snippets")
         }
     }
 
-    private suspend fun seedDogfoodHostAndSnippets(key: String): String {
+    private suspend fun seedWalkthroughHostAndSnippets(key: String): String {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
             .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
@@ -147,12 +147,12 @@ class DogfoodVisualScreenshotTest {
             val storedKey = SshKeyStorage.persistKey(
                 context = appContext,
                 sshKeyDao = db.sshKeyDao(),
-                name = "dogfood-visual-key",
+                name = "walkthrough-visual-key",
                 content = key,
             )
             val hostId = db.hostDao().insert(
                 HostEntity(
-                    name = "Dogfood Docker",
+                    name = "Walkthrough Docker",
                     hostname = DEFAULT_HOST,
                     port = DEFAULT_PORT,
                     username = DEFAULT_USER,
@@ -222,7 +222,7 @@ class DogfoodVisualScreenshotTest {
         compose.onNodeWithTag(SESSION_MIC_FAB_TAG).performClick()
         compose.onNodeWithText("Prompt Composer").assertExists()
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(command)
-        DogfoodScreenshotArtifacts.capture("05-composer-draft")
+        WalkthroughScreenshotArtifacts.capture("05-composer-draft")
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).performClick()
         hideSoftKeyboard()
     }

@@ -116,10 +116,10 @@ jobs:
             build/terminal-workbench/${{ steps.validation.outputs.run_id }}-terminal-release/
             build/pre-release-confidence-gate/${{ steps.validation.outputs.run_id }}-pre-release/
             !build/pre-release-confidence-gate/${{ steps.validation.outputs.run_id }}-pre-release/worktree/
-            build/phone-dogfood/${{ steps.validation.outputs.run_id }}-terminal-lab/
-            build/phone-dogfood/${{ steps.validation.outputs.run_id }}-tmux-existing-session/
-            build/phone-dogfood/${{ steps.validation.outputs.run_id }}-setup-detection/
-            build/dogfood-visual-pass/${{ steps.validation.outputs.run_id }}-visual-audit/
+            build/phone-walkthrough/${{ steps.validation.outputs.run_id }}-terminal-lab/
+            build/phone-walkthrough/${{ steps.validation.outputs.run_id }}-tmux-existing-session/
+            build/phone-walkthrough/${{ steps.validation.outputs.run_id }}-setup-detection/
+            build/walkthrough-visual-pass/${{ steps.validation.outputs.run_id }}-visual-audit/
             **/build/reports/
             **/build/test-results/
             **/build/outputs/androidTest-results/

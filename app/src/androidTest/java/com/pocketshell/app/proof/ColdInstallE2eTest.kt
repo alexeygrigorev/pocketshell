@@ -429,7 +429,7 @@ class ColdInstallE2eTest {
      * [androidx.room.InvalidationTracker], schema cache, and live `Flow`s
      * stay coherent. This is the pattern used by
      * [com.pocketshell.app.proof.EmulatorDockerSshSmokeTest] and
-     * [com.pocketshell.app.proof.DogfoodVisualScreenshotTest] (where they
+     * [com.pocketshell.app.proof.WalkthroughVisualScreenshotTest] (where they
      * use a freshly-built standalone Room handle); we go one step further
      * and clear directly through the singleton Hilt already manages,
      * removing the second connection entirely.

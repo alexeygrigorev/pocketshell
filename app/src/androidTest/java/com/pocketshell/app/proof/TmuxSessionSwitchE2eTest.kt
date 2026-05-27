@@ -45,7 +45,7 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Issue #151 — regression test for the v0.2.7 dogfood crash on tmux session
+ * Issue #151 — regression test for the v0.2.7 crash on tmux session
  * switch.
  *
  * The crash happened when the user, already attached to one tmux session

@@ -557,9 +557,9 @@ Release build steps:
    any tag.
 5. From that stable pushed `main`, run the emulator-only release validation:
    - `scripts/pre-release-confidence-gate.sh`
-   - `scripts/phone-dogfood.sh terminal-lab`
-   - `scripts/phone-dogfood.sh tmux-existing-session`
-   - `scripts/phone-dogfood.sh setup-detection`
+   - `scripts/phone-walkthrough.sh terminal-lab`
+   - `scripts/phone-walkthrough.sh tmux-existing-session`
+   - `scripts/phone-walkthrough.sh setup-detection`
    - visual-audit screenshot capture, then inspect the screenshots
 6. Prefer the wrapper that runs that sequence and writes the required summary:
    `scripts/release-emulator-validation.sh`.
@@ -593,10 +593,10 @@ The release issue and tag notes must attach or link all emulator-only evidence
 directories:
 
 - `build/pre-release-confidence-gate/<run-id>-pre-release/`
-- `build/phone-dogfood/<run-id>-terminal-lab/`
-- `build/phone-dogfood/<run-id>-tmux-existing-session/`
-- `build/phone-dogfood/<run-id>-setup-detection/`
-- `build/dogfood-visual-pass/<run-id>-visual-audit/`
+- `build/phone-walkthrough/<run-id>-terminal-lab/`
+- `build/phone-walkthrough/<run-id>-tmux-existing-session/`
+- `build/phone-walkthrough/<run-id>-setup-detection/`
+- `build/walkthrough-visual-pass/<run-id>-visual-audit/`
 
 Release tags must come from stable `main`. Do not create release commits from a
 detached HEAD, a tag checkout, or a temporary worktree that is not first pushed

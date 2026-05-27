@@ -43,7 +43,7 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Issue #173 — regression test for the v0.2.7 dogfood crash on resume after
+ * Issue #173 — regression test for the v0.2.7 crash on resume after
  * backgrounding.
  *
  * Reproduces the user-reported sequence on the deterministic Docker `agents`

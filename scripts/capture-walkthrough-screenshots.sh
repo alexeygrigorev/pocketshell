@@ -9,12 +9,12 @@ ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 EMULATOR="${EMULATOR:-$ANDROID_SDK/emulator/emulator}"
 AVD_NAME="${AVD_NAME:-test}"
 COMPOSE_FILE="${COMPOSE_FILE:-tests/docker/docker-compose.yml}"
-LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/dogfood-visual-pass}"
+LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/walkthrough-visual-pass}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
 DEVICE_OUTPUT_DIR="/sdcard/Android/media/com.pocketshell.app/additional_test_output"
-DEVICE_SCREENSHOT_DIR="$DEVICE_OUTPUT_DIR/dogfood-visual-pass"
-MAIN_TEST_CLASS="com.pocketshell.app.proof.DogfoodVisualScreenshotTest"
+DEVICE_SCREENSHOT_DIR="$DEVICE_OUTPUT_DIR/walkthrough-visual-pass"
+MAIN_TEST_CLASS="com.pocketshell.app.proof.WalkthroughVisualScreenshotTest"
 COMPOSER_TEST_CLASS="com.pocketshell.app.composer.PromptComposerVisualScreenshotTest"
 MAIN_SCREENSHOTS=(
   "01-host-list.png"
@@ -37,9 +37,9 @@ TEST_APK="$ROOT_DIR/app/build/outputs/apk/androidTest/debug/app-debug-androidTes
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/capture-dogfood-screenshots.sh
+Usage: scripts/capture-walkthrough-screenshots.sh
 
-Captures emulator screenshots for the main PocketShell dogfood visual pass.
+Captures emulator screenshots for the main PocketShell walkthrough visual pass.
 Defaults use explicit Android SDK paths:
 
   adb      /home/alexey/Android/Sdk/platform-tools/adb
@@ -51,7 +51,7 @@ Environment overrides:
   EMULATOR=$ANDROID_SDK/emulator/emulator
   AVD_NAME=test
   COMPOSE_FILE=tests/docker/docker-compose.yml
-  LOG_ROOT=build/dogfood-visual-pass
+  LOG_ROOT=build/walkthrough-visual-pass
   RUN_ID=<custom artifact directory name>
   SSH_KEY=tests/docker/test_key
   SSH_HOST=127.0.0.1
@@ -223,7 +223,7 @@ pull_device_screenshots() {
 assert_screenshots_exist() {
   local step_name="$1"
   shift
-  local screenshot_dir="$RUN_DIR/screenshots/dogfood-visual-pass"
+  local screenshot_dir="$RUN_DIR/screenshots/walkthrough-visual-pass"
   local missing=()
   local file_name
   for file_name in "$@"; do
@@ -231,11 +231,11 @@ assert_screenshots_exist() {
   done
   if [[ "${#missing[@]}" -ne 0 ]]; then
     printf '%s\n' "Missing screenshots after $step_name:" "${missing[@]}" >&2
-    fail "Expected dogfood screenshots were not pulled"
+    fail "Expected walkthrough screenshots were not pulled"
   fi
 }
 
-printf 'PocketShell dogfood visual screenshot pass\n'
+printf 'PocketShell walkthrough visual screenshot pass\n'
 printf 'Artifacts: %s\n' "$RUN_DIR"
 printf 'ADB: %s\n' "$ADB"
 printf 'Emulator: %s\n' "$EMULATOR"
@@ -262,16 +262,16 @@ run_logged "06-reset-emulator-app-state" bash -lc \
 run_logged "07-clear-logcat" "$ADB" logcat -c
 run_logged "08-clear-device-screenshots" "$ADB" shell rm -rf "$DEVICE_OUTPUT_DIR"
 run_logged "09-stop-gradle-daemons" ./gradlew --stop
-run_logged "10-build-dogfood-visual-apks" \
+run_logged "10-build-walkthrough-visual-apks" \
   ./gradlew --no-daemon --no-build-cache :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
-install_apks "11-install-dogfood-visual-apks"
-run_instrumentation_class "12-run-main-dogfood-visual-instrumentation" "$MAIN_TEST_CLASS"
+install_apks "11-install-walkthrough-visual-apks"
+run_instrumentation_class "12-run-main-walkthrough-visual-instrumentation" "$MAIN_TEST_CLASS"
 pull_device_screenshots "13-collect-main-device-screenshots"
-assert_screenshots_exist "main dogfood visual pass" "${MAIN_SCREENSHOTS[@]}"
+assert_screenshots_exist "main walkthrough visual pass" "${MAIN_SCREENSHOTS[@]}"
 
 run_instrumentation_class "14-run-composer-visual-instrumentation" "$COMPOSER_TEST_CLASS"
 pull_device_screenshots "15-collect-composer-device-screenshots"
 assert_screenshots_exist "composer visual pass" "${MAIN_SCREENSHOTS[@]}" "${COMPOSER_SCREENSHOTS[@]}"
 
-printf '\nPASS: dogfood visual screenshots captured\n'
-printf 'Screenshots: %s/screenshots/dogfood-visual-pass\n' "$RUN_DIR"
+printf '\nPASS: walkthrough visual screenshots captured\n'
+printf 'Screenshots: %s/screenshots/walkthrough-visual-pass\n' "$RUN_DIR"

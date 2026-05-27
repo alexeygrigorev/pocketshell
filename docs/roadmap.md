@@ -27,7 +27,7 @@ Goal: even *without* tmux awareness, the terminal experience must clear the Term
 - Breadcrumb path bar (parses `pwd` from PTY)
 - Host management screens (reuse / adapt from `ssh-auto-forward-android`)
 
-Checkpoint: dogfood for a few days. Does it beat Termius for your workflow? If not, fix before continuing.
+Checkpoint: use it daily for a few days. Does it beat Termius for your workflow? If not, fix before continuing.
 
 ## Phase 2 — Tmux control mode (3–4 weeks)
 

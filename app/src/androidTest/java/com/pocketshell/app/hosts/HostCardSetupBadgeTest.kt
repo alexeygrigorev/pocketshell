@@ -47,7 +47,7 @@ import java.io.FileOutputStream
  * The suite is opt-in (`-Pandroid.testInstrumentationRunnerArguments.
  * pocketshellBootstrapScenarios=true`) so the Docker-dependent run
  * only fires when the orchestrator opts in via
- * `scripts/phone-dogfood.sh setup-detection`.
+ * `scripts/phone-walkthrough.sh setup-detection`.
  */
 @RunWith(AndroidJUnit4::class)
 class HostCardSetupBadgeTest {

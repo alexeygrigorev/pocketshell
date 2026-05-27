@@ -1,4 +1,4 @@
-# Dogfood Visual Pass
+# Walkthrough Visual Pass
 
 Issue #76 tracks the screenshot-backed visual confidence pass for the next
 phone APK release.
@@ -8,19 +8,19 @@ phone APK release.
 Start or reuse the local `test` AVD, then run:
 
 ```bash
-scripts/capture-dogfood-screenshots.sh
+scripts/capture-walkthrough-screenshots.sh
 ```
 
-The same screenshot set is also available through the phone dogfood harness:
+The same screenshot set is also available through the phone walkthrough harness:
 
 ```bash
-scripts/phone-dogfood.sh visual-audit
+scripts/phone-walkthrough.sh visual-audit
 ```
 
 That scenario writes normalized review artifacts under
-`build/phone-dogfood/<run-id>/screenshots/visual-audit/` while preserving the
+`build/phone-walkthrough/<run-id>/screenshots/visual-audit/` while preserving the
 raw pulled device directory under
-`build/phone-dogfood/<run-id>/device-artifacts/dogfood-visual-pass/`.
+`build/phone-walkthrough/<run-id>/device-artifacts/walkthrough-visual-pass/`.
 
 The script uses explicit SDK paths unless overridden:
 
@@ -34,7 +34,7 @@ AVD_NAME=test
 Artifacts are written under:
 
 ```text
-build/dogfood-visual-pass/<run-id>/screenshots/dogfood-visual-pass/
+build/walkthrough-visual-pass/<run-id>/screenshots/walkthrough-visual-pass/
 ```
 
 The script intentionally runs the connected pass through explicit APK build,
@@ -47,7 +47,7 @@ each phase, so a process restart in one phase cannot drop screenshots from the
 other.
 
 On-device screenshots are staged under
-`/sdcard/Android/media/com.pocketshell.app/additional_test_output/dogfood-visual-pass`
+`/sdcard/Android/media/com.pocketshell.app/additional_test_output/walkthrough-visual-pass`
 and pulled directly into the run artifact directory.
 
 Each run also writes command logs, Docker SSH fixture logs, Docker container
@@ -72,7 +72,7 @@ The connected screenshot pass captures:
 The screenshots include the emulator display capture, so system bars and bottom
 controls are visible in the artifact.
 
-The main dogfood screenshot test also asserts system-bar guards after the
+The main walkthrough screenshot test also asserts system-bar guards after the
 evidence screenshots are written:
 
 - `01-host-list.png`: the `PocketShell`, `Crashes`, `Import`, and `Keys` app-bar
@@ -105,7 +105,7 @@ work should get a separate issue with screenshots attached.
 Latest passing artifact set:
 
 ```text
-build/dogfood-visual-pass/issue76-reviewer-fix-20260523-194202/screenshots/dogfood-visual-pass/
+build/walkthrough-visual-pass/issue76-reviewer-fix-20260523-194202/screenshots/walkthrough-visual-pass/
 ```
 
 Observed coverage:
@@ -154,10 +154,10 @@ test source after broadening the status/navigation bar assertions.
 Fresh wrapper capture:
 
 ```text
-RUN_ID=issue76-reviewer-fix-20260523-194202 scripts/capture-dogfood-screenshots.sh
+RUN_ID=issue76-reviewer-fix-20260523-194202 scripts/capture-walkthrough-screenshots.sh
 ```
 
-Result: `PASS: dogfood visual screenshots captured`.
+Result: `PASS: walkthrough visual screenshots captured`.
 
 ```text
 Main visual instrumentation: OK (1 test)
@@ -167,13 +167,13 @@ Composer visual instrumentation: OK (1 test)
 Artifacts and logs are under:
 
 ```text
-build/dogfood-visual-pass/issue76-reviewer-fix-20260523-194202/
+build/walkthrough-visual-pass/issue76-reviewer-fix-20260523-194202/
 ```
 
 The prior wrapper crash was investigated in
-`build/dogfood-visual-pass/issue76-reviewer-followup2-20260523-184308/adb-logcat.txt`.
+`build/walkthrough-visual-pass/issue76-reviewer-followup2-20260523-184308/adb-logcat.txt`.
 Logcat showed PackageManager replacing `com.pocketshell.app` while
-`DogfoodVisualScreenshotTest` was running:
+`WalkthroughVisualScreenshotTest` was running:
 
 ```text
 Killing ... com.pocketshell.app ... stop com.pocketshell.app due to installPackageLI

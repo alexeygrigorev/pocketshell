@@ -49,7 +49,7 @@ import java.io.FileOutputStream
  * reuses the existing SSH transport instead of opening a fresh socket.
  *
  * The user-visible motivation: full SSH handshake on every attach was
- * 2-5s on dogfood, dominated by `kex_exchange_identification` + key
+ * 2-5s in real use, dominated by `kex_exchange_identification` + key
  * exchange. The transport is reusable, so a same-host session switch
  * should be near-instant.
  *
@@ -58,7 +58,7 @@ import java.io.FileOutputStream
  * [SshConnection.connect]. A same-host switch must not increment it.
  *
  * Timing assertion: end-to-end switch latency below 500ms. The full
- * teardown path used to be 2-5s on dogfood; the new path skips both
+ * teardown path used to be 2-5s in real use; the new path skips both
  * the SSH handshake AND the previous SSH `disconnect()` thread hop,
  * so 500ms is a comfortable ceiling even on a slow emulator.
  *
@@ -183,7 +183,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         )
 
         // Acceptance criterion: < 500ms. The slow path was 2-5s on
-        // dogfood; this is a comfortable ceiling on the emulator.
+        // in real use; this is a comfortable ceiling on the emulator.
         assertTrue(
             "same-host session switch must complete in under ${SWITCH_BUDGET_MS}ms, " +
                 "took ${switchMs}ms",

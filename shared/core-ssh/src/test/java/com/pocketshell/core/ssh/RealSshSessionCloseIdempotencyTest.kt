@@ -13,7 +13,7 @@ import org.junit.Test
 /**
  * Issue #151 — `RealSshSession.close()` must be idempotent.
  *
- * The v0.2.7 dogfood crash report showed:
+ * The v0.2.7 crash report showed:
  *
  * ```
  * TransportException: [BY_APPLICATION] Disconnected

@@ -64,7 +64,7 @@ Reusable compose services:
   contains OpenSSH, tmux, `procps`, deterministic `claude`, `codex`,
   `opencode`, `heru`, `agent-log-explorer`, `tmuxctl`, `uv`, and `systemctl`
   shims plus seeded agent fixtures. Use it for normal connected Android smoke,
-  dogfood journeys, usage/jobs/agent fixture checks, and the APK dogfood gate.
+  walkthrough journeys, usage/jobs/agent fixture checks, and the APK pre-release gate.
 - `bootstrap-ready`: builds `pocketshell-test:bootstrap-ready`, maps host port
   `2230`, and contains the shared bootstrap base plus `tmuxctl`, `heru`,
   `agent-log-explorer`, and `systemctl` shims in `/usr/local/bin`; the
@@ -241,26 +241,26 @@ CLASS_ARG="-Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.ap
   "$CLASS_ARG"
 ```
 
-Run the fast local phone-dogfood reproduction harness on an already-booted
+Run the fast local phone-walkthrough reproduction harness on an already-booted
 emulator:
 
 ```bash
-scripts/phone-dogfood.sh terminal-lab
-scripts/phone-dogfood.sh visual-audit
-scripts/phone-dogfood.sh setup-detection
-scripts/phone-dogfood.sh setup-detection:ready
+scripts/phone-walkthrough.sh terminal-lab
+scripts/phone-walkthrough.sh visual-audit
+scripts/phone-walkthrough.sh setup-detection
+scripts/phone-walkthrough.sh setup-detection:ready
 ```
 
 The harness starts/verifies the Docker `agents` target, checks emulator boot
 state with the explicit `adb` path, runs only the selected scenario, and writes
 screenshots, timings, logcat, instrumentation output, Docker logs, command
-logs, and crash diagnostics under `build/phone-dogfood/<run-id>/`.
+logs, and crash diagnostics under `build/phone-walkthrough/<run-id>/`.
 `setup-detection` starts the `bootstrap-*` services on ports `2230` through
 `2235`; use `setup-detection:<profile>` to run one profile.
 `visual-audit` writes normalized reviewer screenshots under
-`build/phone-dogfood/<run-id>/screenshots/visual-audit/` and raw pulled device
+`build/phone-walkthrough/<run-id>/screenshots/visual-audit/` and raw pulled device
 output under
-`build/phone-dogfood/<run-id>/device-artifacts/dogfood-visual-pass/`.
+`build/phone-walkthrough/<run-id>/device-artifacts/walkthrough-visual-pass/`.
 
 Run the deterministic terminal reviewer workbench:
 
@@ -324,7 +324,7 @@ TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh
 
 That command runs the normal pre-release confidence gate first, then runs the
 real-agent terminal workbench from the emulator over SSH into Docker, validates
-the artifact bundle, and continues with the standard phone-dogfood and visual
+the artifact bundle, and continues with the standard phone-walkthrough and visual
 audit release evidence. The terminal gate is intentionally manual/optional and
 is not part of every local or CI release validation run unless
 `TERMINAL_RELEASE_GATE=1` is set or the matching GitHub Actions workflow input
@@ -339,8 +339,8 @@ scripts/release-emulator-validation.sh
 scripts/push-release-tag.sh --visual-audit-inspected v0.2.1 build/release-emulator-validation/<run-id>/summary.md
 ```
 
-The wrapper runs the pre-release confidence gate, terminal-lab phone dogfood,
-tmux existing-session phone dogfood, the setup-detection matrix, and visual
+The wrapper runs the pre-release confidence gate, terminal-lab phone walkthrough,
+tmux existing-session phone walkthrough, the setup-detection matrix, and visual
 screenshot capture. Attach or link every artifact directory listed in
 `build/release-emulator-validation/<run-id>/summary.md` in the release issue
 and tag notes. Pass `--visual-audit-inspected` only after inspecting the
@@ -358,9 +358,9 @@ Inspect the visual-audit screenshots before using the artifact as release
 evidence. The manual workflow does not push the tag and does not relax the
 stable-main tag rule.
 
-## APK Dogfood Pre-Release Gate
+## APK Pre-Release Gate
 
-Before pushing a version tag for APK dogfood, run the local confidence gate from
+Before pushing a version tag, run the local confidence gate from
 the repository root:
 
 ```bash
@@ -398,14 +398,14 @@ outputs while still validating the current source files. Set
 `GATE_ISOLATED_WORKTREE=0` only when the checkout is idle and direct in-place
 execution is intentional.
 
-The fast dogfood gate does all of the following:
+The fast pre-release gate does all of the following:
 
 1. Runs normal compile/unit checks. In a fresh isolated Gradle home, the gate
    first runs focused app KSP/Hilt generated-source tasks for debug, release,
    androidTest, and unit-test variants so lint has deterministic generated
    source inputs, then runs
    `./gradlew --no-daemon --no-build-cache --no-parallel --max-workers=2 assembleDebug check -x lint -x lintDebug --stacktrace`.
-   Lint is intentionally excluded from this local dogfood gate so unrelated
+   Lint is intentionally excluded from this local pre-release gate so unrelated
    dirty-worktree lint findings do not block the install and focused
    instrumentation checks; run lint separately from a clean checkout before
    release.
@@ -416,7 +416,7 @@ The fast dogfood gate does all of the following:
    `tmuxctl`, and `uv`.
 4. Verifies emulator readiness with the explicit `adb` path and
    `sys.boot_completed`.
-5. Runs focused connected dogfood journeys:
+5. Runs focused connected walkthrough journeys:
    - `:shared:core-terminal:connectedDebugAndroidTest` for keyboard/input.
    - Builds the app and Android test APKs, clears existing app/test package
      data once, replace-installs both APKs once with explicit-path
@@ -490,7 +490,7 @@ export ANDROID_SDK ADB EMULATOR AVD_NAME LOG_ROOT GRADLE_USER_HOME GRADLE_FLAGS 
 scripts/pre-release-confidence-gate.sh
 ```
 
-Slower opt-in suites are not part of the fast APK dogfood gate:
+Slower opt-in suites are not part of the fast APK pre-release gate:
 
 - Full connected Android sweep:
   `./gradlew --no-daemon connectedDebugAndroidTest --stacktrace`. Run this

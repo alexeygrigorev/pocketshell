@@ -49,13 +49,13 @@ internal const val DEFAULT_DOWNSAMPLE_SIDE: Int = 64
  * Counting distinct ARGB values is a cheap, decode-once gate that
  * catches all of these without trying to assert on specific content.
  * It does not (and should not) verify the screenshot shows the
- * "correct" UI — the dogfood / visual-audit tests already do that
+ * "correct" UI — the walkthrough / visual-audit tests already do that
  * with text and bounds assertions. The function's only job is to
  * reject obviously-blank artifacts before they're treated as release
  * evidence.
  *
  * Expected upper bound on CI: <100 ms per call (PNG decode + 4096
- * pixel hashmap insert + assert). The dogfood / release artifact
+ * pixel hashmap insert + assert). The walkthrough / release artifact
  * passes call it once per captured screenshot.
  *
  * @param file PNG file to inspect. Must exist and be a decodable PNG.

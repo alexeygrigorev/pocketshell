@@ -111,7 +111,7 @@ class HostListViewModel @Inject constructor(
     private val activeClients: ActiveTmuxClients,
     // Issue #214: the cross-host strip + per-host badge + dismissible
     // banner all consult the user-configurable "approaching limit"
-    // threshold so a dogfood user can decide whether 80 % or 90 % is
+    // threshold so the user can decide whether 80 % or 90 % is
     // the right place to start surfacing warnings. The repository is
     // hot-cached and reading `.value` from it costs no I/O.
     private val settingsRepository: SettingsRepository,
@@ -167,7 +167,7 @@ class HostListViewModel @Inject constructor(
      * renders an empty rail.
      *
      * Issue #214: each row's `thresholdState` is computed against the
-     * user-configurable `usageWarnThresholdPercent` so a dogfood user
+     * user-configurable `usageWarnThresholdPercent` so a user
      * who pulled the slider down to 50 % sees the amber tint earlier.
      */
     val usageDashboardRows: StateFlow<List<UsageDashboardRow>> = combine(
@@ -530,7 +530,7 @@ class HostListViewModel @Inject constructor(
      * Implemented as a one-shot `first()` over the existing list flow
      * rather than a dedicated DAO query to keep this issue from
      * extending the Room schema / DAO surface — the host list is small
-     * (single-digit rows is the dogfood norm) so the in-memory scan
+     * (single-digit rows is the norm during active development) so the in-memory scan
      * has no practical cost.
      */
     private suspend fun findHostByEndpoint(hostname: String, port: Int): HostEntity? {

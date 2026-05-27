@@ -102,10 +102,10 @@ Artifacts:
   build/terminal-workbench/<run-id>-terminal-release/ (optional)
   build/real-agent-release-gate/<run-id>-real-agent-release-gate/ (optional)
   build/long-running-session/<run-id>-long-running/ (optional)
-  build/phone-dogfood/<run-id>-terminal-lab/
-  build/phone-dogfood/<run-id>-tmux-existing-session/
-  build/phone-dogfood/<run-id>-setup-detection/
-  build/dogfood-visual-pass/<run-id>-visual-audit/
+  build/phone-walkthrough/<run-id>-terminal-lab/
+  build/phone-walkthrough/<run-id>-tmux-existing-session/
+  build/phone-walkthrough/<run-id>-setup-detection/
+  build/walkthrough-visual-pass/<run-id>-visual-audit/
 USAGE
 }
 
@@ -383,24 +383,24 @@ if [[ "$LONG_RUNNING_TEST" == "1" ]]; then
 fi
 
 run_required \
-  "terminal-lab phone dogfood" \
-  "build/phone-dogfood/$RUN_ID-terminal-lab/" \
-  env RUN_ID="$RUN_ID-terminal-lab" scripts/phone-dogfood.sh terminal-lab
+  "terminal-lab phone walkthrough" \
+  "build/phone-walkthrough/$RUN_ID-terminal-lab/" \
+  env RUN_ID="$RUN_ID-terminal-lab" scripts/phone-walkthrough.sh terminal-lab
 
 run_required \
-  "tmux existing-session phone dogfood" \
-  "build/phone-dogfood/$RUN_ID-tmux-existing-session/" \
-  env RUN_ID="$RUN_ID-tmux-existing-session" scripts/phone-dogfood.sh tmux-existing-session
+  "tmux existing-session phone walkthrough" \
+  "build/phone-walkthrough/$RUN_ID-tmux-existing-session/" \
+  env RUN_ID="$RUN_ID-tmux-existing-session" scripts/phone-walkthrough.sh tmux-existing-session
 
 run_required \
-  "setup-detection phone dogfood matrix" \
-  "build/phone-dogfood/$RUN_ID-setup-detection/" \
-  env RUN_ID="$RUN_ID-setup-detection" scripts/phone-dogfood.sh setup-detection
+  "setup-detection phone walkthrough matrix" \
+  "build/phone-walkthrough/$RUN_ID-setup-detection/" \
+  env RUN_ID="$RUN_ID-setup-detection" scripts/phone-walkthrough.sh setup-detection
 
 run_required \
   "visual-audit screenshot capture" \
-  "build/dogfood-visual-pass/$RUN_ID-visual-audit/" \
-  env RUN_ID="$RUN_ID-visual-audit" scripts/capture-dogfood-screenshots.sh
+  "build/walkthrough-visual-pass/$RUN_ID-visual-audit/" \
+  env RUN_ID="$RUN_ID-visual-audit" scripts/capture-walkthrough-screenshots.sh
 
 publish_validated_apk
 
@@ -419,7 +419,7 @@ publish_validated_apk
     printf -- '- [ ] Optional long-running session hold was skipped. Run `LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh` when extended-foreground stability is in release scope.\n'
   fi
   printf -- '- [ ] Download the tested debug APK from `release-emulator-validation/%s/app-debug.apk` inside the validation artifact, or `build/release-emulator-validation/%s/app-debug.apk` locally.\n' "$RUN_ID" "$RUN_ID"
-  printf -- '- [ ] Inspect `build/dogfood-visual-pass/%s-visual-audit/screenshots/dogfood-visual-pass/` for release blockers.\n' "$RUN_ID"
+  printf -- '- [ ] Inspect `build/walkthrough-visual-pass/%s-visual-audit/screenshots/walkthrough-visual-pass/` for release blockers.\n' "$RUN_ID"
   printf -- '- [ ] Treat physical phone testing as final user acceptance only; emulator/Docker validation catches basic release blockers before tagging.\n'
 } >> "$SUMMARY_PATH"
 

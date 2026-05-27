@@ -392,7 +392,7 @@ public fun TmuxSessionScreen(
         ) {
             // Issue #186: gate the inline Conversation tab on the
             // CURRENTLY-VISIBLE window's detection state — not the
-            // session-wide one. v0.2.8 dogfood reported "Claude
+            // session-wide one. v0.2.8 feedback reported "Claude
             // detected" lighting up on plain-shell windows that shared
             // a cwd with the agent window; per-window detection
             // ([TmuxSessionViewModel.agentForWindow]) fixes the data
@@ -3139,7 +3139,7 @@ internal fun ConsolidatedTopChrome(
         // Reference [hostLabel] so the parameter does not show as
         // unused — kept on the API for forward compatibility (and so
         // the screen can revive a host crumb segment cheaply if the
-        // dogfood feedback ever asks for it back).
+        // user feedback ever asks for it back).
         @Suppress("UNUSED_EXPRESSION") hostLabel
     }
 }

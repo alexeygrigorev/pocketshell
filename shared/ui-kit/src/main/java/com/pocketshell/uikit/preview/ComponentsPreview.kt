@@ -118,7 +118,7 @@ fun ComponentsPreview() {
                 Section("SessionRow") {
                     // Issue #202: mixed-case labels and a distinct
                     // activity-state slot (Attached / Detached) so the
-                    // preview reflects what dogfooders will see in v0.2.9+.
+                    // preview reflects what users will see in v0.2.9+.
                     SessionRow(
                         badge = "A",
                         name = "agent-main",

@@ -35,7 +35,7 @@ runs ON this box — so `pwd` showing `/home/alexey/git/pocketshell` and
 `hostname` showing `RMTHZ` means we ARE Hetzner, not connected to it.
 
 PocketShell on the maintainer's phone connects TO this same box for
-real-device dogfood (alongside the Docker `agents` fixture used by the
+real-device daily use (alongside the Docker `agents` fixture used by the
 emulator tests on `10.0.2.2:2222`). Agent JSONL logs live in
 `~/.claude/projects/-home-alexey-git-pocketshell/`. Files the
 maintainer shares from another Android app via the PocketShell

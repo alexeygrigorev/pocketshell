@@ -724,7 +724,7 @@ internal data class DashboardSessionRowUi(
  * Labels are mixed-case ("Claude", "Detached") — issue #202 explicitly
  * replaces the original uppercase letter-spaced styling ("CLAUDE
  * CODE", "ATTACHED") that the maintainer reported as cryptic during
- * dogfooding on v0.2.8.
+ * active development on v0.2.8.
  *
  * The "Detached" wording was picked deliberately over the ambiguous
  * "Idle" that issue #201 is removing from the host-card vocabulary —

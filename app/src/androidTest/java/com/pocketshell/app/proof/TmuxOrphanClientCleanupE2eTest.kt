@@ -42,7 +42,7 @@ import java.io.FileOutputStream
 import java.nio.charset.StandardCharsets
 
 /**
- * Issue #215 — regression test for the v0.2.8 maintainer dogfood report:
+ * Issue #215 — regression test for the v0.2.8 maintainer feedback:
  *
  *  > "right now I am entered the shell from my phone from a pocket shell
  *  >  right so then I dictate and then I close it right so so I did it I

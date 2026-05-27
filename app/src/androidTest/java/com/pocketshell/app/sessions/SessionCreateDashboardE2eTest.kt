@@ -45,7 +45,7 @@ import java.io.FileOutputStream
 /**
  * Issue #204 — connected E2E for the dashboard's "+ New session" affordance.
  *
- * The user reported (v0.2.8 dogfood, 2026-05-27) that tapping `+` while
+ * The user reported (v0.2.8 feedback, 2026-05-27) that tapping `+` while
  * looking at the sessions list on a connected host opened the "Add new
  * host" sheet instead of creating a new tmux session on the current
  * host. The fix moves the create-session call inside the dashboard

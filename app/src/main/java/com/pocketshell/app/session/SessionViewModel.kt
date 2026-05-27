@@ -291,7 +291,7 @@ public class SessionViewModel @Inject constructor(
                     // (Issue #173). The phrasing also matches the
                     // tmux-CC [TmuxSessionViewModel.attachClient]
                     // path's invokeOnCompletion so both UI surfaces
-                    // align in dogfood reports.
+                    // align in feedback reports.
                     val reason = when (cause) {
                         null -> "connection lost: remote shell closed"
                         is CancellationException -> return@invokeOnCompletion

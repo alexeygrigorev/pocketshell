@@ -45,7 +45,7 @@ import org.junit.runner.RunWith
  * Connected E2E for issue #193: the share-target "paste into active
  * session" branch.
  *
- * The journey under test mirrors the dogfood report that opened the
+ * The journey under test mirrors the feedback report that opened the
  * issue:
  *
  *  1. The user already has a live `tmux -CC` client attached on their

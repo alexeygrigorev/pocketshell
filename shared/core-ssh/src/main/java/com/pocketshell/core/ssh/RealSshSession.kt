@@ -294,7 +294,7 @@ internal class RealSshSession(
         // `TransportException` with `DisconnectReason.BY_APPLICATION`
         // ("Disconnected") because it tries to send a disconnect packet over
         // a transport that has already gone down. That exception was
-        // surfaced to the user as a crash on the v0.2.7 dogfood device.
+        // surfaced to the user as a crash on the v0.2.7 maintainer device.
         //
         // The orthogonal `TmuxSessionViewModel` fix joins the event-loop
         // job before calling `close()`, which closes the race in the normal
@@ -327,7 +327,7 @@ internal class RealSshSession(
         // detectNetwork() enabled — and on real devices that policy is
         // always on for the Main thread — that socket write trips
         // `NetworkOnMainThreadException`. The pre-#166 RuntimeException
-        // catch below hid the crash from the dogfood device but the
+        // catch below hid the crash from the maintainer device but the
         // policy violation still aborted the disconnect mid-write,
         // leaving the sshj transport in a half-closed state and producing
         // logcat noise on every teardown.

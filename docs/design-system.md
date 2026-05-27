@@ -289,7 +289,7 @@ to the point of invisibility.
 
 ```
 ┌─────────────────────────────────────────────────┐  ← Surface (radius medium = 14 dp)
-│ Avatar │  Dogfood          [● connected] [⋮]   │    ← md (12 dp) internal padding
+│ Avatar │  Walkthrough      [● connected] [⋮]   │    ← md (12 dp) internal padding
 │ (40dp) │  testuser@10.0.2:2222                  │
 │ 'D'    │  (12 sp mono, TextMuted)               │
 └─────────────────────────────────────────────────┘

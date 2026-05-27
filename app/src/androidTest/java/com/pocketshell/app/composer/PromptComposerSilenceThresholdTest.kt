@@ -32,7 +32,7 @@ import org.junit.runner.RunWith
  *     pinned at 2s, a 1.5s pause followed by more speech keeps the
  *     composer in Recording — the watchdog must NOT have auto-stopped
  *     during the pause. This is the canonical reproduction of the
- *     v0.2.8 dogfood report.
+ *     v0.2.8 feedback report.
  *
  * The connected runner exercises the same code path the user hits — a
  * real `PromptComposerViewModel` driving the live `SheetContent`
@@ -296,7 +296,7 @@ class PromptComposerSilenceThresholdTest {
         // shown up as an auto-transition into Transcribing/Idle by now.
         assertEquals(
             "1.4s of silence under a 2s window must NOT auto-stop the recording — " +
-                "this is the canonical regression scenario from the v0.2.8 dogfood report",
+                "this is the canonical regression scenario from the v0.2.8 feedback report",
             PromptComposerViewModel.RecordingState.Recording,
             vm.uiState.value.recording,
         )

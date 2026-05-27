@@ -151,7 +151,7 @@ class SettingsRepositoryTest {
     @Test
     fun `voice silence minimum bound is two seconds`() {
         // Issue #185 raised the floor from 0.5s to 2s after a v0.2.8
-        // dogfood report where natural mid-sentence pauses were
+        // feedback report where natural mid-sentence pauses were
         // auto-stopping the recorder. Pin the constant explicitly so a
         // future tweak to the bound is caught here rather than letting
         // a sub-2s default slip back in.

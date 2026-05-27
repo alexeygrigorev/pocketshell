@@ -317,7 +317,7 @@ class TerminalSurfaceComposeIntegrationTest {
             // already proves the production code path.
             //
             // Tested manually on a Pixel 7 (API 34) by the maintainer
-            // per the issue's dogfood feedback; the recording-subclass
+            // per the issue's feedback; the recording-subclass
             // assertion above is the deterministic-in-CI equivalent.
             if (waitForActivityWindowFocus(timeoutMs = 1_000)) {
                 val ctx = composeTestRule.activity.applicationContext

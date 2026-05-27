@@ -341,7 +341,7 @@ class TerminalRendererBoldCellPinningInstrumentedTest {
      * Saves a rendered bitmap to the test app's external media dir under
      * `additional_test_output/issue-172/` so the reviewer / orchestrator can
      * pull it via `adb pull` after the connected test run. This is the same
-     * convention `phone-dogfood.sh` and friends use for visual artifacts.
+     * convention `phone-walkthrough.sh` and friends use for visual artifacts.
      * Failures during save are non-fatal — the assertions are the test
      * contract; the image is diagnostic only.
      */

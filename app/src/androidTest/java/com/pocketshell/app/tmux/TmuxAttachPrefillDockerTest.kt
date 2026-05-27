@@ -117,7 +117,7 @@ class TmuxAttachPrefillDockerTest {
         // visible-content assertion meaningfully covers more than "first few".
         check(SEED_LINE_COUNT >= 10) { "SEED_LINE_COUNT must be >= 10 to meaningfully exercise full-screen prefill" }
 
-        // Persist the host row exactly the way the dogfood smoke test does so
+        // Persist the host row exactly the way the walkthrough smoke test does so
         // the picker reaches the existing session list immediately.
         val hostRowTag = persistDockerHost(appContext, key)
         try {

@@ -83,7 +83,7 @@ suspend fun waitForSshFixtureReady(
         }
         val execResult = result.getOrNull()
         if (execResult?.exitCode == 0) {
-            println("DOGFOOD_SSH_FIXTURE_READY attempt=$attempt output=${execResult.stdout.trim()}")
+            println("WALKTHROUGH_SSH_FIXTURE_READY attempt=$attempt output=${execResult.stdout.trim()}")
             return
         }
         failures += "attempt $attempt: " +
@@ -93,8 +93,8 @@ suspend fun waitForSshFixtureReady(
     error("SSH fixture on $DEFAULT_HOST:$port was not ready after $attempt attempts:\n${failures.takeLast(10).joinToString("\n")}")
 }
 
-object DogfoodScreenshotArtifacts {
-    const val DEVICE_DIR_NAME: String = "dogfood-visual-pass"
+object WalkthroughScreenshotArtifacts {
+    const val DEVICE_DIR_NAME: String = "walkthrough-visual-pass"
 
     fun capture(name: String): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -115,7 +115,7 @@ object DogfoodScreenshotArtifacts {
             }
         }
         bitmap.recycle()
-        println("DOGFOOD_SCREENSHOT ${file.absolutePath}")
+        println("WALKTHROUGH_SCREENSHOT ${file.absolutePath}")
         return file
     }
 }

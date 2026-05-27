@@ -16,7 +16,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.core.view.WindowCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.pocketshell.app.proof.DogfoodScreenshotArtifacts
+import com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellThemeMode
@@ -35,7 +35,7 @@ class PromptComposerVisualScreenshotTest {
         // Issue #195: the visual `Recording` state now splits into two
         // sub-states (pre-speech "LISTENING" + idle waveform, then
         // post-speech "CAPTURING" + active waveform). Capture both so
-        // the dogfood screenshot strip reflects what the user sees end
+        // the walkthrough screenshot strip reflects what the user sees end
         // to end during a single dictation.
         var state by mutableStateOf(
             PromptComposerViewModel.UiState(
@@ -48,14 +48,15 @@ class PromptComposerVisualScreenshotTest {
         renderComposer { state }
 
         // Issue #153 fix 1: capture the idle "composer-draft" state too
-        // so the dogfood pass has authoritative evidence the idle
-        // waveform's subtle pulse is rendering. The DogfoodVisualScreenshotTest
-        // also produces a `05-composer-draft.png` from inside the real
-        // app journey; this lab-render variant under `05b-` lets the
-        // reviewer compare the two surfaces without standing up the
-        // whole emulator + SSH journey.
+        // so the walkthrough visual pass has authoritative evidence the
+        // idle waveform's subtle pulse is rendering. The
+        // [WalkthroughVisualScreenshotTest] also produces a
+        // `05-composer-draft.png` from inside the real app journey; this
+        // lab-render variant under `05b-` lets the reviewer compare the
+        // two surfaces without standing up the whole emulator + SSH
+        // journey.
         compose.waitForIdle()
-        DogfoodScreenshotArtifacts.capture("05b-composer-idle-draft")
+        WalkthroughScreenshotArtifacts.capture("05b-composer-idle-draft")
 
         // Pre-speech sub-state: mic is open, no amplitude has crossed
         // the threshold yet — waveform stays in its idle rest pose.
@@ -71,9 +72,9 @@ class PromptComposerVisualScreenshotTest {
         // New for issue #195: dedicated screenshot of the pre-speech
         // sub-state. The historic `06-composer-recording.png` is kept
         // below for the active-speech (capturing) view so the existing
-        // dogfood-visual-pass scripts and docs still resolve their
+        // walkthrough-visual-pass scripts and docs still resolve their
         // expected filenames.
-        DogfoodScreenshotArtifacts.capture("06b-composer-listening")
+        WalkthroughScreenshotArtifacts.capture("06b-composer-listening")
 
         // Active-speech sub-state: the sampler loop saw at least one
         // amplitude sample over `SILENCE_AMPLITUDE_THRESHOLD`; the
@@ -90,11 +91,11 @@ class PromptComposerVisualScreenshotTest {
         compose.waitForIdle()
         // `06-composer-recording.png` historically captured what the user
         // sees while actively dictating — that's the "capturing" sub-state
-        // post issue #195. The scripts/dogfood-visual-pass list refers
+        // post issue #195. The scripts/walkthrough-visual-pass list refers
         // to this exact filename so we keep it stable; the new
         // pre-speech screenshot lives under `06b-composer-listening.png`
         // above.
-        DogfoodScreenshotArtifacts.capture("06-composer-recording")
+        WalkthroughScreenshotArtifacts.capture("06-composer-recording")
 
         compose.runOnIdle {
             state = state.copy(
@@ -105,7 +106,7 @@ class PromptComposerVisualScreenshotTest {
         }
         compose.onNodeWithText("TRANSCRIBING").assertExists()
         compose.waitForIdle()
-        DogfoodScreenshotArtifacts.capture("07-composer-transcribing")
+        WalkthroughScreenshotArtifacts.capture("07-composer-transcribing")
     }
 
     private fun renderComposer(state: () -> PromptComposerViewModel.UiState) {

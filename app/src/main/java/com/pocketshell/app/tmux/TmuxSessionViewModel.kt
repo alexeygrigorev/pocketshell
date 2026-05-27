@@ -344,7 +344,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // event-loop coroutine and `SSHClient.disconnect()` threw
         // `TransportException [BY_APPLICATION] Disconnected` because the
         // transport was already half-down from the cancellation. That
-        // crash was reproduced on the v0.2.7 dogfood device. The new shape
+        // crash was reproduced on the v0.2.7 maintainer device. The new shape
         // cancels-and-joins the prior connect job AND the event-loop job
         // inside a launched coroutine, so by the time we touch the SSH
         // transport the only thread interacting with it is us.
@@ -1176,7 +1176,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // session-scoped [detect] is intentionally NOT called here
             // — its host-wide process scan was the root cause of the
             // "Claude detected" misattribution reported in the v0.2.8
-            // dogfood.
+            // feedback.
             //
             // When `tty` is blank (older tmux that does not emit
             // `#{pane_tty}`, or a freshly-discovered pane between
@@ -1650,8 +1650,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // and emitted a `send-keys ... Enter` named-key per line break.
         // Claude Code CLI interprets each Enter as "submit this prompt",
         // so a multi-paragraph dictation transcript landed as N
-        // independent messages — the bug the maintainer dogfooded on
-        // 2026-05-27.
+        // independent messages — the bug the maintainer found in daily use
+        // on 2026-05-27.
         //
         // Bracketed-paste mode is a terminal protocol: the program tells
         // its terminal "I want to know when text is pasted" via DECSET

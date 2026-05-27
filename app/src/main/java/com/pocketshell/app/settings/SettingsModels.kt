@@ -110,7 +110,7 @@ data class AppSettings(
 
         /**
          * Lowest silence window the user is allowed to configure. Issue
-         * #185 raised this from 0.5s to 2.0s after a v0.2.8 dogfood
+         * #185 raised this from 0.5s to 2.0s after a v0.2.8 feedback
          * report where dictation auto-stopped mid-sentence. A natural
          * mid-utterance pause routinely exceeds 0.5s — anything below
          * ~2s makes the watchdog feel hostile rather than helpful — so

@@ -42,7 +42,7 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Issue #188 — regression test for the v0.2.8 dogfood report
+ * Issue #188 — regression test for the v0.2.8 feedback
  * "Kill window doesn't actually close the window".
  *
  * The user reproduced the symptom on a real phone: three tmux windows
@@ -73,7 +73,7 @@ import java.io.FileOutputStream
  * After #189 the inline `WindowStrip` was retired in favour of the
  * kebab `Switch window` entry and the [WindowSwitcherOverlay]. There is
  * no per-window long-press kill any more — `Kill window` in the kebab
- * always targets the CURRENT window. The dogfood-reported bug was "any
+ * always targets the CURRENT window. The user-reported bug was "any
  * window kill silently fails"; killing the currently-active window is
  * sufficient to exercise the fixed code path.
  *

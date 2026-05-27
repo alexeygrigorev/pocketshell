@@ -52,7 +52,7 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * ### Tag vocabulary — issue #202
  *
  * The mockup CSS used uppercase letter-spaced labels ("CLAUDE CODE",
- * "ATTACHED"). Dogfooding on v0.2.8 surfaced that this style reads as
+ * "ATTACHED"). Active development on v0.2.8 surfaced that this style reads as
  * cryptic noise to a first-time user — the maintainer literally said
  * "the indicators we have for sessions, it's also not clear what these
  * things are." Per issue #202 we now:

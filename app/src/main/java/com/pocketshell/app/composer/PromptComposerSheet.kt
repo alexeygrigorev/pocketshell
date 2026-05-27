@@ -798,7 +798,7 @@ private fun Waveform(
             // still read as "recording" at a glance, so we replace it
             // outright. The three dots are an in-house indeterminate
             // indicator (always at least two dots painted at any phase)
-            // so the static dogfood screenshot 07 reliably captures the
+            // so the static walkthrough screenshot 07 reliably captures the
             // distinct state even if the spinner's arc happens to be at
             // a low-visibility angle in the frame.
             Row(
@@ -853,7 +853,7 @@ private fun Waveform(
  * Issue #153 fix 2: three-dot pulse indicator rendered alongside the
  * spinner during Transcribing. Each dot's alpha cycles on a 900ms loop
  * staggered by 300ms — so at any frame at least two of the three dots
- * are painted with non-trivial alpha. This makes the static dogfood
+ * are painted with non-trivial alpha. This makes the static walkthrough
  * screenshot 07 visibly distinct from 06b (LISTENING) regardless of
  * which moment the capture lands on.
  */
@@ -1052,7 +1052,7 @@ private fun PendingTranscriptionRow(
         // #208 follow-up move #2: right-align the action row so the
         // primary button (Retry or Save audio) lands closest to the
         // right thumb. Discard (secondary) renders to its left.
-        // Maintainer dogfood 2026-05-27 + audit comment-4554970633
+        // Maintainer feedback 2026-05-27 + audit comment-4554970633
         // call this out — Retry was previously leftmost under the
         // default Arrangement.Start.
         Row(

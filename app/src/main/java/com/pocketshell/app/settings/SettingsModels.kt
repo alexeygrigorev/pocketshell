@@ -72,6 +72,16 @@ data class AppSettings(
      * audio buffer the same way pre-#180 builds did.
      */
     val persistFailedTranscriptions: Boolean = DEFAULT_PERSIST_FAILED_TRANSCRIPTIONS,
+    /**
+     * Issue #214: the percent at which the in-app usage warning surfaces
+     * start firing ("approaching limit"). Default 80%; configurable
+     * between [MIN_USAGE_WARN_PERCENT] and [MAX_USAGE_WARN_PERCENT] via
+     * the Settings → Usage slider. Only the lower "approaching" band is
+     * user-configurable — the "critical" (95%) and "exceeded" (100%)
+     * thresholds are fixed by design so a 99% Claude quota still shows
+     * as red regardless of where the slider sits.
+     */
+    val usageWarnThresholdPercent: Int = DEFAULT_USAGE_WARN_PERCENT,
 ) {
     companion object {
         const val MIN_TERMINAL_FONT_SP: Float = 10f
@@ -154,6 +164,39 @@ data class AppSettings(
          * opt out via the Voice section toggle.
          */
         const val DEFAULT_PERSIST_FAILED_TRANSCRIPTIONS: Boolean = true
+
+        /**
+         * Lowest "approaching limit" threshold the user is allowed to
+         * configure via Settings → Usage. 50 % matches issue #214's
+         * slider spec — anything lower would surface the warning
+         * banner for routine quota use and lose its signal value.
+         */
+        const val MIN_USAGE_WARN_PERCENT: Int = 50
+
+        /**
+         * Highest "approaching limit" threshold the user can configure.
+         * 95 % matches the fixed "critical" cutoff: pulling the slider
+         * all the way to 95 % collapses the approaching band entirely,
+         * which the issue spec explicitly allows. Values >= 95 % would
+         * just duplicate the critical state.
+         */
+        const val MAX_USAGE_WARN_PERCENT: Int = 95
+
+        /**
+         * Default "approaching limit" threshold on fresh installs.
+         * Matches the issue #214 spec — "percent >= 80% →
+         * approaching" — and mirrors the
+         * [com.pocketshell.core.usage.UsageProviderRecord.DEFAULT_WARN_PERCENT]
+         * constant from `core-usage` so the two stays in sync.
+         */
+        const val DEFAULT_USAGE_WARN_PERCENT: Int = 80
+
+        /**
+         * Increment for the Settings → Usage slider. 5 % gives the
+         * user nine stops between 50 % and 95 %, which is finer than
+         * any meaningful interpretation difference.
+         */
+        const val USAGE_WARN_PERCENT_STEP: Int = 5
     }
 }
 

@@ -3,8 +3,11 @@ package com.pocketshell.app.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.usage.UsageScheduler
+import com.pocketshell.app.usage.UsageSnapshot
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.usage.UsageProviderRecord
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -38,6 +41,7 @@ class SettingsViewModel @Inject constructor(
     private val repository: SettingsRepository,
     private val apiKeyStorage: PromptComposerViewModel.ApiKeyVault,
     hostDao: HostDao,
+    usageScheduler: UsageScheduler,
 ) : ViewModel() {
 
     val state: StateFlow<AppSettings> = repository.settings
@@ -71,6 +75,36 @@ class SettingsViewModel @Inject constructor(
      * for the discover-from-remote button.
      */
     val hosts: StateFlow<List<HostEntity>> = hostDao.getAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
+
+    /**
+     * Issue #214: aggregated per-provider records the Settings → Usage
+     * section's "per-provider state" list renders. Picks the worst-case
+     * record per provider across every host the scheduler has snapped,
+     * so a 96 % Claude on host A and a 50 % Claude on host B collapse
+     * into a single "Claude — 96 %" row.
+     *
+     * Records are sorted by provider so the row order stays stable
+     * across snapshot refreshes. Empty when the scheduler hasn't
+     * reported any usage data yet.
+     */
+    val usageProviderRecords: StateFlow<List<UsageProviderRecord>> = usageScheduler.snapshots
+        .map { snapshots ->
+            val byProvider = mutableMapOf<String, UsageProviderRecord>()
+            snapshots.values
+                .filterIsInstance<UsageSnapshot.Records>()
+                .flatMap { it.records }
+                .forEach { record ->
+                    val key = record.provider.lowercase()
+                    val current = byProvider[key]
+                    val currentPercent = current?.mostConstrainedWindow?.percent ?: -1.0
+                    val candidatePercent = record.mostConstrainedWindow?.percent ?: -1.0
+                    if (current == null || candidatePercent > currentPercent) {
+                        byProvider[key] = record
+                    }
+                }
+            byProvider.values.sortedBy { it.provider.lowercase() }
+        }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
 
     private val _keyStatus: MutableStateFlow<WhisperKeyStatus> =
@@ -123,6 +157,17 @@ class SettingsViewModel @Inject constructor(
      */
     fun setPersistFailedTranscriptions(enabled: Boolean) =
         repository.setPersistFailedTranscriptions(enabled)
+
+    /**
+     * Persist [percent] as the user's preferred "approaching limit"
+     * threshold for the in-app usage warning surfaces (issue #214).
+     * Values are clamped + snapped to the slider grid by the
+     * repository, so a slider drag that lands on a fractional value
+     * snaps to a multiple of
+     * [AppSettings.USAGE_WARN_PERCENT_STEP].
+     */
+    fun setUsageWarnThresholdPercent(percent: Int) =
+        repository.setUsageWarnThresholdPercent(percent)
 
     /**
      * Persist [key] through the keystore-backed vault. The caller still

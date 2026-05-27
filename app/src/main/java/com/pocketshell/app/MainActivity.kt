@@ -144,6 +144,7 @@ class MainActivity : FragmentActivity() {
                     AppNavigator(
                         sessionViewModel = sessionViewModel,
                         usageScheduler = usageScheduler,
+                        usageWarnPercent = settings.usageWarnThresholdPercent.toDouble(),
                         requestedDestination = requestedDestination,
                         pendingImportPayload = pendingImportPayload,
                         onImportPayloadConsumed = { pendingImportPayload = null },
@@ -182,6 +183,7 @@ private fun ThemePreference.toThemeMode(): PocketShellThemeMode = when (this) {
 private fun AppNavigator(
     sessionViewModel: SessionViewModel,
     usageScheduler: UsageScheduler,
+    usageWarnPercent: Double,
     requestedDestination: AppDestination,
     pendingImportPayload: String? = null,
     onImportPayloadConsumed: () -> Unit = {},
@@ -190,10 +192,15 @@ private fun AppNavigator(
     // the scheduler's snapshot flow. Session destinations look up the
     // active host id in this map to decide whether to render the
     // in-session blocked / near-limit chip.
+    //
+    // Issue #214: the worst-case derivation now consults the user-
+    // configurable warn threshold so the in-session chip respects the
+    // same "approaching limit" point as the cross-host strip + Settings
+    // surface.
     val usageSnapshots by usageScheduler.snapshots.collectAsState()
-    val usageBadgesByHost = remember(usageSnapshots) {
+    val usageBadgesByHost = remember(usageSnapshots, usageWarnPercent) {
         usageSnapshots.mapNotNull { (id, snap) ->
-            snap.worstBadgeRecord()?.let { id to it }
+            snap.worstBadgeRecord(warnPercent = usageWarnPercent)?.let { id to it }
         }.toMap()
     }
     // Issue #129: the activity scrapes the import payload out of a

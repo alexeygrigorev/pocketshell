@@ -94,6 +94,7 @@ fun SettingsScreen(
     val keyStatus by viewModel.keyStatus.collectAsState()
     val hasUsageInstalledHost by viewModel.hasUsageInstalledHost.collectAsState()
     val hosts by viewModel.hosts.collectAsState()
+    val usageProviderRecords by viewModel.usageProviderRecords.collectAsState()
     val context = LocalContext.current
 
     val versionName = remember {
@@ -157,6 +158,9 @@ fun SettingsScreen(
                 UsageSection(
                     onOpenUsage = onOpenUsage,
                     hasUsageInstalledHost = hasUsageInstalledHost,
+                    providerRecords = usageProviderRecords,
+                    warnThresholdPercent = settings.usageWarnThresholdPercent,
+                    onWarnThresholdChange = viewModel::setUsageWarnThresholdPercent,
                 )
             }
             item {
@@ -820,6 +824,9 @@ internal fun formatThresholdLabel(seconds: Float): String {
 private fun UsageSection(
     onOpenUsage: () -> Unit,
     hasUsageInstalledHost: Boolean,
+    providerRecords: List<com.pocketshell.core.usage.UsageProviderRecord> = emptyList(),
+    warnThresholdPercent: Int = AppSettings.DEFAULT_USAGE_WARN_PERCENT,
+    onWarnThresholdChange: (Int) -> Unit = {},
 ) {
     val context = LocalContext.current
     Column {
@@ -852,6 +859,78 @@ private fun UsageSection(
                     color = PocketShellColors.TextSecondary,
                     fontSize = 22.sp,
                     fontWeight = FontWeight.Bold,
+                )
+            }
+
+            // Issue #214: per-provider state list rendered inline in
+            // the Settings → Usage section. Surfaces the same threshold
+            // tint the host card / sessions chip use so a user opening
+            // Settings sees, at a glance, which providers are
+            // approaching / critical / exceeded their reported limits.
+            // The list is keyed off the user-configurable warn
+            // threshold so dragging the slider below updates the row
+            // tints live.
+            if (providerRecords.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(12.dp))
+                com.pocketshell.app.usage.UsageProviderStateList(
+                    records = providerRecords,
+                    warnPercent = warnThresholdPercent.toDouble(),
+                    modifier = Modifier.padding(vertical = 4.dp),
+                )
+            }
+
+            // Issue #214: "Warn me when usage exceeds X%" slider.
+            // Only rendered when at least one quse-installed host
+            // exists — adjusting the threshold for an empty workspace
+            // is meaningless (the warning surfaces would have nothing
+            // to threshold against).
+            if (hasUsageInstalledHost) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Warn me when usage exceeds",
+                        color = PocketShellColors.Text,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = "$warnThresholdPercent%",
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        modifier = Modifier.testTag(USAGE_WARN_THRESHOLD_VALUE_TAG),
+                    )
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "Default 80%. Critical (95%) and exceeded (100%) are fixed.",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 12.sp,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                val sliderRange = AppSettings.MIN_USAGE_WARN_PERCENT.toFloat()..
+                    AppSettings.MAX_USAGE_WARN_PERCENT.toFloat()
+                val step = AppSettings.USAGE_WARN_PERCENT_STEP
+                val sliderSteps = (
+                    (AppSettings.MAX_USAGE_WARN_PERCENT - AppSettings.MIN_USAGE_WARN_PERCENT) / step
+                    ).coerceAtLeast(1) - 1
+                Slider(
+                    value = warnThresholdPercent.toFloat(),
+                    onValueChange = { onWarnThresholdChange(it.roundToInt()) },
+                    valueRange = sliderRange,
+                    steps = sliderSteps,
+                    colors = SliderDefaults.colors(
+                        thumbColor = PocketShellColors.Accent,
+                        activeTrackColor = PocketShellColors.Accent,
+                        inactiveTrackColor = PocketShellColors.Border,
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(USAGE_WARN_THRESHOLD_SLIDER_TAG),
                 )
             }
 
@@ -1079,6 +1158,15 @@ internal const val DIAGNOSTICS_CRASHES_TAG = "settings:diagnostics:crashes"
 internal const val USAGE_OPEN_TAG = "settings:usage:open"
 internal const val USAGE_EMPTY_HINT_TAG = "settings:usage:empty-hint"
 internal const val USAGE_EMPTY_HINT_DOCS_LINK_TAG = "settings:usage:empty-hint:docs-link"
+
+/**
+ * Issue #214: stable test tags for the "Warn me when usage exceeds X%"
+ * slider added to Settings → Usage. Value tag rides on the right-aligned
+ * `XX%` label so a connected test can assert the displayed value
+ * without depending on the slider widget's accessibility tree.
+ */
+internal const val USAGE_WARN_THRESHOLD_SLIDER_TAG = "settings:usage:warn-threshold-slider"
+internal const val USAGE_WARN_THRESHOLD_VALUE_TAG = "settings:usage:warn-threshold-value"
 
 /**
  * GitHub web URL to the in-repo usage panel docs (the local mirror is

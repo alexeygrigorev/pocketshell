@@ -184,6 +184,11 @@ fun HostListScreen(
     val usageBadges by viewModel.usageBadges.collectAsState()
     val usageDashboardRows by viewModel.usageDashboardRows.collectAsState()
     val hasUsageInstalledHost by viewModel.hasUsageInstalledHost.collectAsState()
+    // Issue #214: per-provider warning records + dismissed-this-session
+    // set. The host list renders one banner per provider that warrants
+    // a warning AND that the user hasn't dismissed for this app session.
+    val usageWarningProviders by viewModel.usageWarningProviders.collectAsState()
+    val dismissedBanners by viewModel.dismissedBanners.collectAsState()
     val context = LocalContext.current
     val activity = context as? FragmentActivity
     val hostSharePicker = rememberLauncherForActivityResult(
@@ -411,6 +416,31 @@ fun HostListScreen(
                     viewModel = sessionsViewModel,
                     onOpenTmuxSession = onOpenTmuxSession,
                 )
+            }
+
+            // Issue #214: dismissible in-app usage warnings, one per
+            // provider that crossed the approaching / critical /
+            // exceeded threshold AND that the user hasn't dismissed
+            // for this app session. Banners sit above the Usage strip
+            // so they read as the most prominent quota signal on the
+            // host list. Tapping a banner routes to the Usage panel
+            // (same destination as the strip).
+            val activeBanners = remember(usageWarningProviders, dismissedBanners) {
+                usageWarningProviders
+                    .filterKeys { it !in dismissedBanners }
+                    .entries
+                    .sortedBy { it.key }
+            }
+            if (activeBanners.isNotEmpty() && onOpenUsage != null) {
+                Column(modifier = Modifier.padding(top = 8.dp)) {
+                    activeBanners.forEach { (providerId, record) ->
+                        com.pocketshell.app.usage.UsageWarningBanner(
+                            provider = record,
+                            onDismiss = { viewModel.dismissUsageBanner(providerId) },
+                            onTap = onOpenUsage,
+                        )
+                    }
+                }
             }
 
             // Issue #116 (usage-panel Fix B): cross-host usage strip

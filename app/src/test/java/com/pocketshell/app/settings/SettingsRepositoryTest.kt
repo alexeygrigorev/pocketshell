@@ -272,4 +272,57 @@ class SettingsRepositoryTest {
             SettingsRepository(context).settings.value.persistFailedTranscriptions,
         )
     }
+
+    // -- Issue #214: usage warn threshold slider --------------------------
+
+    @Test
+    fun `usageWarnThresholdPercent default is 80`() {
+        val repo = SettingsRepository(context)
+        assertEquals(
+            "issue #214: fresh install must default to 80% per spec",
+            AppSettings.DEFAULT_USAGE_WARN_PERCENT,
+            repo.settings.value.usageWarnThresholdPercent,
+        )
+        assertEquals(80, repo.settings.value.usageWarnThresholdPercent)
+    }
+
+    @Test
+    fun `setUsageWarnThresholdPercent persists and round-trips`() {
+        val repo = SettingsRepository(context)
+        repo.setUsageWarnThresholdPercent(70)
+        assertEquals(70, repo.settings.value.usageWarnThresholdPercent)
+        assertEquals(
+            70,
+            SettingsRepository(context).settings.value.usageWarnThresholdPercent,
+        )
+    }
+
+    @Test
+    fun `setUsageWarnThresholdPercent clamps below minimum`() {
+        val repo = SettingsRepository(context)
+        repo.setUsageWarnThresholdPercent(10)
+        assertEquals(
+            AppSettings.MIN_USAGE_WARN_PERCENT,
+            repo.settings.value.usageWarnThresholdPercent,
+        )
+    }
+
+    @Test
+    fun `setUsageWarnThresholdPercent clamps above maximum`() {
+        val repo = SettingsRepository(context)
+        repo.setUsageWarnThresholdPercent(150)
+        assertEquals(
+            AppSettings.MAX_USAGE_WARN_PERCENT,
+            repo.settings.value.usageWarnThresholdPercent,
+        )
+    }
+
+    @Test
+    fun `setUsageWarnThresholdPercent snaps to slider step`() {
+        // The slider grain is 5 % per [AppSettings.USAGE_WARN_PERCENT_STEP],
+        // so an arbitrary 73 value should snap to 75.
+        val repo = SettingsRepository(context)
+        repo.setUsageWarnThresholdPercent(73)
+        assertEquals(75, repo.settings.value.usageWarnThresholdPercent)
+    }
 }

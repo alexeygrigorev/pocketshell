@@ -15,6 +15,8 @@ import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.SessionSummary
+import com.pocketshell.app.settings.AppSettings
+import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.usage.UsageDashboardRow
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
@@ -37,6 +39,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -106,6 +109,12 @@ class HostListViewModel @Inject constructor(
     // the derived [HostStatus] can flip to `Attached` the moment a
     // `tmux -CC` client registers.
     private val activeClients: ActiveTmuxClients,
+    // Issue #214: the cross-host strip + per-host badge + dismissible
+    // banner all consult the user-configurable "approaching limit"
+    // threshold so a dogfood user can decide whether 80 % or 90 % is
+    // the right place to start surfacing warnings. The repository is
+    // hot-cached and reading `.value` from it costs no I/O.
+    private val settingsRepository: SettingsRepository,
 ) : ViewModel() {
 
     /** Live list of saved hosts, sorted by name (DAO query). */
@@ -156,14 +165,23 @@ class HostListViewModel @Inject constructor(
      * reported yet — the screen also hides the strip via
      * [hasUsageInstalledHost] until a record exists, so the strip never
      * renders an empty rail.
+     *
+     * Issue #214: each row's `thresholdState` is computed against the
+     * user-configurable `usageWarnThresholdPercent` so a dogfood user
+     * who pulled the slider down to 50 % sees the amber tint earlier.
      */
-    val usageDashboardRows: StateFlow<List<UsageDashboardRow>> = usageScheduler.snapshots
-        .map { snapshots ->
-            val records = snapshots.values
-                .filterIsInstance<UsageSnapshot.Records>()
-                .flatMap { it.records }
-            buildDashboardRows(records)
-        }
+    val usageDashboardRows: StateFlow<List<UsageDashboardRow>> = combine(
+        usageScheduler.snapshots,
+        settingsRepository.settings,
+    ) { snapshots, settings ->
+        val records = snapshots.values
+            .filterIsInstance<UsageSnapshot.Records>()
+            .flatMap { it.records }
+        buildDashboardRows(
+            records = records,
+            warnPercent = settings.usageWarnThresholdPercent.toDouble(),
+        )
+    }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
 
     /**
@@ -182,18 +200,84 @@ class HostListViewModel @Inject constructor(
     /**
      * Per-host worst-case provider record — populated only for hosts
      * whose latest scheduler snapshot warrants the in-app blocked /
-     * near-limit chip (issue #116 AC: "render the badge on each host
-     * card row when the most-recent fetch shows isBlocked or
-     * isNearLimit"). Keyed by [HostEntity.id]; absence means "no
-     * badge".
+     * near-limit chip (issue #116 AC). Keyed by [HostEntity.id]; absence
+     * means "no badge".
+     *
+     * Issue #214: the worst-case derivation now consults the
+     * user-configurable warn threshold so the in-app warning state
+     * stays in sync with the cross-host strip + Settings → Usage list.
      */
-    val usageBadges: StateFlow<Map<Long, UsageProviderRecord>> = usageScheduler.snapshots
-        .map { snapshots ->
-            snapshots.mapNotNull { (id, snap) ->
-                snap.worstBadgeRecord()?.let { id to it }
-            }.toMap()
-        }
+    val usageBadges: StateFlow<Map<Long, UsageProviderRecord>> = combine(
+        usageScheduler.snapshots,
+        settingsRepository.settings,
+    ) { snapshots, settings ->
+        val warn = settings.usageWarnThresholdPercent.toDouble()
+        snapshots.mapNotNull { (id, snap) ->
+            snap.worstBadgeRecord(warnPercent = warn)?.let { id to it }
+        }.toMap()
+    }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyMap())
+
+    /**
+     * Records that should drive a dismissible in-app banner above the
+     * host list (issue #214). One entry per provider keyed by the
+     * provider string (lower-cased — `quse` emits e.g. `"claude"`),
+     * picking the worst-case record across all hosts so a 96 % Claude
+     * on host A and a 50 % Claude on host B surface a single banner
+     * representing the 96 % state. Empty when no provider warrants a
+     * warning.
+     *
+     * Dismissals live on [dismissedBanners] and are intentionally
+     * in-memory only (the issue spec: "Dismissible; survives until app
+     * restart OR until percentage drops back below threshold").
+     */
+    val usageWarningProviders: StateFlow<Map<String, UsageProviderRecord>> = combine(
+        usageScheduler.snapshots,
+        settingsRepository.settings,
+    ) { snapshots, settings ->
+        val warn = settings.usageWarnThresholdPercent.toDouble()
+        val recordsByProvider = mutableMapOf<String, Pair<UsageProviderRecord, Int>>()
+        snapshots.values
+            .filterIsInstance<UsageSnapshot.Records>()
+            .flatMap { it.records }
+            .forEach { record ->
+                val state = record.thresholdState(warnPercent = warn)
+                if (!state.warrantsWarning) return@forEach
+                val key = record.provider.lowercase()
+                val current = recordsByProvider[key]
+                if (current == null || state.ordinal > current.second) {
+                    recordsByProvider[key] = record to state.ordinal
+                }
+            }
+        recordsByProvider.mapValues { it.value.first }
+    }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyMap())
+
+    /**
+     * Set of provider ids the user has dismissed for this app session.
+     * Reset on every fresh `HostListViewModel` instance (i.e. cold
+     * launch), matching the issue spec: "Dismissible; survives until
+     * app restart OR until percentage drops back below threshold".
+     * Also cleared whenever a provider's record drops back to
+     * [com.pocketshell.core.usage.UsageThresholdState.Ok] — the latter
+     * is handled implicitly by [usageWarningProviders] no longer
+     * surfacing the provider, so the host list filters dismissed
+     * providers against the live warning set and a re-cross-threshold
+     * brings the banner back automatically.
+     */
+    private val _dismissedBanners = MutableStateFlow<Set<String>>(emptySet())
+    val dismissedBanners: StateFlow<Set<String>> = _dismissedBanners.asStateFlow()
+
+    /**
+     * Mark [providerId] as dismissed for this app session so the
+     * banner stops rendering. `providerId` is normalised to lowercase
+     * to match the keying on [usageWarningProviders].
+     */
+    fun dismissUsageBanner(providerId: String) {
+        val key = providerId.lowercase()
+        if (_dismissedBanners.value.contains(key)) return
+        _dismissedBanners.value = _dismissedBanners.value + key
+    }
 
     /**
      * Transient one-shot acknowledgement message for the manual
@@ -1224,7 +1308,10 @@ internal fun resolveHostStatus(
  * most-constrained window is what's shown — the same rule the panel
  * itself uses for the at-a-glance percent.
  */
-internal fun buildDashboardRows(records: List<UsageProviderRecord>): List<UsageDashboardRow> =
+internal fun buildDashboardRows(
+    records: List<UsageProviderRecord>,
+    warnPercent: Double = UsageProviderRecord.DEFAULT_WARN_PERCENT,
+): List<UsageDashboardRow> =
     records
         .sortedWith(compareBy<UsageProviderRecord> { it.provider })
         .mapNotNull { record ->
@@ -1235,5 +1322,6 @@ internal fun buildDashboardRows(records: List<UsageProviderRecord>): List<UsageD
                 percent = window.percent,
                 blocked = record.isBlocked,
                 nearLimit = record.isNearLimit,
+                thresholdState = record.thresholdState(warnPercent = warnPercent),
             )
         }

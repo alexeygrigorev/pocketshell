@@ -128,6 +128,23 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(persistFailedTranscriptions = enabled)
     }
 
+    /**
+     * Persist the user-configurable "approaching limit" threshold for
+     * the in-app usage warning surfaces. Issue #214. Clamped to
+     * [AppSettings.MIN_USAGE_WARN_PERCENT] /
+     * [AppSettings.MAX_USAGE_WARN_PERCENT] so a hand-edited prefs file
+     * or a slider rounding error can't push the threshold outside the
+     * useful range. The slider's UI grain is
+     * [AppSettings.USAGE_WARN_PERCENT_STEP], so the persisted value is
+     * snapped to a multiple of that step on the way in.
+     */
+    fun setUsageWarnThresholdPercent(percent: Int) {
+        val snapped = snapUsageWarnThreshold(percent)
+        if (_settings.value.usageWarnThresholdPercent == snapped) return
+        prefs.edit().putInt(KEY_USAGE_WARN_THRESHOLD, snapped).apply()
+        _settings.value = _settings.value.copy(usageWarnThresholdPercent = snapped)
+    }
+
     private fun readSnapshot(): AppSettings {
         val themeName = prefs.getString(KEY_THEME, ThemePreference.System.name)
             ?: ThemePreference.System.name
@@ -156,6 +173,12 @@ class SettingsRepository @Inject constructor(
             KEY_PERSIST_FAILED_TRANSCRIPTIONS,
             AppSettings.DEFAULT_PERSIST_FAILED_TRANSCRIPTIONS,
         )
+        val usageWarnPercent = snapUsageWarnThreshold(
+            prefs.getInt(
+                KEY_USAGE_WARN_THRESHOLD,
+                AppSettings.DEFAULT_USAGE_WARN_PERCENT,
+            ),
+        )
         return AppSettings(
             theme = theme,
             terminalFontSizeSp = font,
@@ -164,6 +187,28 @@ class SettingsRepository @Inject constructor(
             voiceSilenceThresholdSeconds = silence,
             showSystemNotes = showSystemNotes,
             persistFailedTranscriptions = persistFailedTranscriptions,
+            usageWarnThresholdPercent = usageWarnPercent,
+        )
+    }
+
+    /**
+     * Snap [percent] to the nearest [AppSettings.USAGE_WARN_PERCENT_STEP]
+     * grid point within [AppSettings.MIN_USAGE_WARN_PERCENT] /
+     * [AppSettings.MAX_USAGE_WARN_PERCENT]. Persistence and UI both
+     * route through this helper so a legacy prefs file with a 73 value
+     * shows up as 75 in the slider, and a slider drag that lands on
+     * 82.7 % gets stored as 80 %.
+     */
+    private fun snapUsageWarnThreshold(percent: Int): Int {
+        val clamped = percent.coerceIn(
+            AppSettings.MIN_USAGE_WARN_PERCENT,
+            AppSettings.MAX_USAGE_WARN_PERCENT,
+        )
+        val step = AppSettings.USAGE_WARN_PERCENT_STEP
+        val snapped = ((clamped + step / 2) / step) * step
+        return snapped.coerceIn(
+            AppSettings.MIN_USAGE_WARN_PERCENT,
+            AppSettings.MAX_USAGE_WARN_PERCENT,
         )
     }
 
@@ -176,5 +221,6 @@ class SettingsRepository @Inject constructor(
         const val KEY_VOICE_SILENCE_SECONDS = "voice_silence_seconds"
         const val KEY_SHOW_SYSTEM_NOTES = "show_system_notes"
         const val KEY_PERSIST_FAILED_TRANSCRIPTIONS = "persist_failed_transcriptions"
+        const val KEY_USAGE_WARN_THRESHOLD = "usage_warn_threshold_percent"
     }
 }

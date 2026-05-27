@@ -5,6 +5,8 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.hosts.MainDispatcherRule
+import com.pocketshell.app.usage.UsageRemoteSource
+import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
@@ -74,15 +76,23 @@ class SettingsViewModelTest {
         db.close()
     }
 
+    /**
+     * Inert UsageScheduler the view model can read snapshots off without
+     * standing up an SSH transport. Each call returns a fresh
+     * scheduler so test isolation is preserved.
+     */
+    private fun newUsageScheduler(): UsageScheduler =
+        UsageScheduler(db.hostDao(), db.sshKeyDao(), UsageRemoteSource())
+
     @Test
     fun `state exposes repository snapshot`() {
-        val vm = SettingsViewModel(repo, FakeVault(), hostDao)
+        val vm = SettingsViewModel(repo, FakeVault(), hostDao, newUsageScheduler())
         assertEquals(repo.settings.value, vm.state.value)
     }
 
     @Test
     fun `setTheme flows through to repository`() {
-        val vm = SettingsViewModel(repo, FakeVault(), hostDao)
+        val vm = SettingsViewModel(repo, FakeVault(), hostDao, newUsageScheduler())
         vm.setTheme(ThemePreference.Dark)
         assertEquals(ThemePreference.Dark, repo.settings.value.theme)
         assertEquals(ThemePreference.Dark, vm.state.value.theme)
@@ -90,14 +100,14 @@ class SettingsViewModelTest {
 
     @Test
     fun `setTerminalFontSizeSp flows through to repository`() {
-        val vm = SettingsViewModel(repo, FakeVault(), hostDao)
+        val vm = SettingsViewModel(repo, FakeVault(), hostDao, newUsageScheduler())
         vm.setTerminalFontSizeSp(18f)
         assertEquals(18f, repo.settings.value.terminalFontSizeSp, 0f)
     }
 
     @Test
     fun `setTmuxOnAttachByDefault flows through to repository`() {
-        val vm = SettingsViewModel(repo, FakeVault(), hostDao)
+        val vm = SettingsViewModel(repo, FakeVault(), hostDao, newUsageScheduler())
         vm.setTmuxOnAttachByDefault(false)
         assertEquals(false, repo.settings.value.tmuxOnAttachByDefault)
     }
@@ -106,14 +116,14 @@ class SettingsViewModelTest {
 
     @Test
     fun `setVoiceLanguage flows through to repository`() {
-        val vm = SettingsViewModel(repo, FakeVault(), hostDao)
+        val vm = SettingsViewModel(repo, FakeVault(), hostDao, newUsageScheduler())
         vm.setVoiceLanguage("es")
         assertEquals("es", repo.settings.value.voiceLanguage)
     }
 
     @Test
     fun `setVoiceSilenceThresholdSeconds flows through to repository`() {
-        val vm = SettingsViewModel(repo, FakeVault(), hostDao)
+        val vm = SettingsViewModel(repo, FakeVault(), hostDao, newUsageScheduler())
         vm.setVoiceSilenceThresholdSeconds(2.0f)
         assertEquals(2.0f, repo.settings.value.voiceSilenceThresholdSeconds, 0.01f)
     }
@@ -121,14 +131,14 @@ class SettingsViewModelTest {
     @Test
     fun `key status is Unset when vault is empty`() {
         val vault = FakeVault()
-        val vm = SettingsViewModel(repo, vault, hostDao)
+        val vm = SettingsViewModel(repo, vault, hostDao, newUsageScheduler())
         assertEquals(WhisperKeyStatus.Unset, vm.keyStatus.value)
     }
 
     @Test
     fun `key status reports masked tail when vault has key`() {
         val vault = FakeVault(initial = "sk-test-AbCd1234".toCharArray())
-        val vm = SettingsViewModel(repo, vault, hostDao)
+        val vm = SettingsViewModel(repo, vault, hostDao, newUsageScheduler())
         val status = vm.keyStatus.value
         assertTrue("expected Set status, got $status", status is WhisperKeyStatus.Set)
         assertEquals("1234", (status as WhisperKeyStatus.Set).maskedTail)
@@ -137,7 +147,7 @@ class SettingsViewModelTest {
     @Test
     fun `saveApiKey persists to vault and flips status to Set`() {
         val vault = FakeVault()
-        val vm = SettingsViewModel(repo, vault, hostDao)
+        val vm = SettingsViewModel(repo, vault, hostDao, newUsageScheduler())
 
         vm.saveApiKey("sk-aBcDeFgH9999".toCharArray())
 
@@ -151,7 +161,7 @@ class SettingsViewModelTest {
     @Test
     fun `clearApiKey drops vault entry and flips status to Unset`() {
         val vault = FakeVault(initial = "sk-aaaaaaaa".toCharArray())
-        val vm = SettingsViewModel(repo, vault, hostDao)
+        val vm = SettingsViewModel(repo, vault, hostDao, newUsageScheduler())
         assertTrue(vm.keyStatus.value is WhisperKeyStatus.Set)
 
         vm.clearApiKey()

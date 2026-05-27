@@ -472,3 +472,27 @@ public fun UsageSnapshot.worstBadgeRecord(): UsageProviderRecord? {
     if (blocked != null) return blocked
     return records.firstOrNull { it.isNearLimit }
 }
+
+/**
+ * Threshold-aware variant of [worstBadgeRecord] (issue #214). Picks the
+ * provider whose [UsageProviderRecord.thresholdState] is the most severe,
+ * with ties broken in declared-order (Exceeded > Critical > Approaching
+ * > Ok). Returns `null` when no provider in the snapshot warrants a
+ * warning at the supplied [warnPercent].
+ *
+ * Why a second function rather than overloading the existing one: the
+ * 85-percent constant on [UsageProviderRecord.WARN_PERCENT] is still
+ * used by surfaces that haven't migrated yet (e.g. the pill kind on
+ * the per-card progress bar), so the old function stays for callers
+ * that explicitly want the legacy band.
+ */
+public fun UsageSnapshot.worstBadgeRecord(
+    warnPercent: Double,
+): com.pocketshell.core.usage.UsageProviderRecord? {
+    if (this !is UsageSnapshot.Records) return null
+    return records
+        .map { it to it.thresholdState(warnPercent = warnPercent) }
+        .filter { (_, state) -> state.warrantsWarning }
+        .maxByOrNull { (_, state) -> state.ordinal }
+        ?.first
+}

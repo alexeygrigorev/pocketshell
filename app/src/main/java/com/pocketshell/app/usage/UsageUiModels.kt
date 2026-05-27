@@ -1,6 +1,7 @@
 package com.pocketshell.app.usage
 
 import com.pocketshell.core.usage.UsageProviderRecord
+import com.pocketshell.core.usage.UsageThresholdState
 import java.time.Instant
 
 public data class UsageHostSnapshot(
@@ -32,7 +33,9 @@ public data class UsageScreenState(
         get() = hosts.flatMap { it.records }
 }
 
-public fun UsageScreenState.dashboardRows(): List<UsageDashboardRow> =
+public fun UsageScreenState.dashboardRows(
+    warnPercent: Double = UsageProviderRecord.DEFAULT_WARN_PERCENT,
+): List<UsageDashboardRow> =
     allRecords
         .sortedWith(compareBy<UsageProviderRecord> { it.provider })
         .mapNotNull { record ->
@@ -43,13 +46,23 @@ public fun UsageScreenState.dashboardRows(): List<UsageDashboardRow> =
                 percent = window.percent,
                 blocked = record.isBlocked,
                 nearLimit = record.isNearLimit,
+                thresholdState = record.thresholdState(warnPercent = warnPercent),
             )
         }
 
+/**
+ * One row in the cross-host usage dashboard strip.
+ *
+ * Issue #214 added [thresholdState] so the row tint stays in sync with
+ * the rest of the in-app warning surfaces. `blocked` and `nearLimit`
+ * are kept on the data class for the existing call sites until they
+ * migrate (the strip itself now reads [thresholdState]).
+ */
 public data class UsageDashboardRow(
     val provider: String,
     val status: com.pocketshell.core.usage.UsageStatus,
     val percent: Double,
     val blocked: Boolean,
     val nearLimit: Boolean,
+    val thresholdState: UsageThresholdState = UsageThresholdState.Ok,
 )

@@ -193,23 +193,40 @@ public fun PromptComposerSheet(
     }
 
     if (showSnippetPicker && hostId != null) {
-        // Issue #17: opens the snippet picker over the composer sheet.
-        // The chosen snippet's body is appended to the live draft so the
-        // user can review / edit before tapping Send. We never auto-fire
-        // the prompt — that would let a stray tap commit the wrong text.
+        // Issue #17 / #187: opens the snippet picker over the composer
+        // sheet.
+        //
+        // Composer-specific invariant: a snippet pick in this context
+        // appends to the live draft so the user can review/edit before
+        // tapping the composer's own Send button. We deliberately do NOT
+        // auto-fire the draft from here — that would let a stray tap
+        // commit the wrong text and defeats the whole point of the
+        // composer ("compose, then send").
+        //
+        // For issue #187 that means BOTH the row-body tap (legacy
+        // `onSnippetPicked`) AND the explicit `Send` / `Send + ↵` chips
+        // (`onSnippetSend`) route to the same draft-append path here.
+        // The `withEnter` signal is intentionally ignored: the
+        // composer's own `Send + ↵` button is the surface that submits
+        // with Enter, so the snippet's chip becomes "paste this template
+        // into the draft" in this context. The chip labels still read
+        // "Send" / "Send + ↵" because they reflect what *would* happen
+        // outside the composer; inside it the safety rule wins.
+        val appendToDraft: (com.pocketshell.core.storage.entity.SnippetEntity) -> Unit = { snippet ->
+            val current = viewModel.uiState.value.draft
+            val separator = when {
+                current.isEmpty() -> ""
+                current.endsWith("\n") || current.endsWith(" ") -> ""
+                else -> " "
+            }
+            viewModel.onDraftChange(current + separator + snippet.body)
+            showSnippetPicker = false
+        }
         SnippetPickerSheet(
             hostId = hostId,
             onDismiss = { showSnippetPicker = false },
-            onSnippetPicked = { snippet ->
-                val current = viewModel.uiState.value.draft
-                val separator = when {
-                    current.isEmpty() -> ""
-                    current.endsWith("\n") || current.endsWith(" ") -> ""
-                    else -> " "
-                }
-                viewModel.onDraftChange(current + separator + snippet.body)
-                showSnippetPicker = false
-            },
+            onSnippetPicked = appendToDraft,
+            onSnippetSend = { snippet, _ -> appendToDraft(snippet) },
         )
     }
 

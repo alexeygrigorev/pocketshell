@@ -936,9 +936,13 @@ public fun TmuxSessionScreen(
     }
 
     if (showSnippetPicker && hostId != 0L) {
-        // Mirrors SessionScreen's snippet wiring. Command snippets execute
-        // immediately (CR appended); Prompt snippets are inserted without
-        // CR so the user can continue editing before pressing Enter.
+        // Mirrors SessionScreen's snippet wiring.
+        //  - Row-body tap (`onSnippetPicked`) keeps the kind-aware smart
+        //    default: command snippets execute immediately (CR appended);
+        //    prompt snippets paste so the user can keep typing context.
+        //  - Explicit `Send` / `Send + ↵` chips (`onSnippetSend`) honour
+        //    the user's overt Enter intent for issue #187. The trailing
+        //    `\r` is appended when `withEnter == true` and only then.
         SnippetPickerSheet(
             hostId = hostId,
             onDismiss = { showSnippetPicker = false },
@@ -948,6 +952,16 @@ public fun TmuxSessionScreen(
                         SnippetKind.Command -> snippet.body + "\r"
                         SnippetKind.Prompt -> snippet.body
                     }
+                    viewModel.writeInputToPane(
+                        pane.paneId,
+                        payload.toByteArray(Charsets.UTF_8),
+                    )
+                }
+                showSnippetPicker = false
+            },
+            onSnippetSend = { snippet, withEnter ->
+                currentPane?.let { pane ->
+                    val payload = if (withEnter) snippet.body + "\r" else snippet.body
                     viewModel.writeInputToPane(
                         pane.paneId,
                         payload.toByteArray(Charsets.UTF_8),

@@ -414,15 +414,23 @@ public fun SessionScreen(
     }
 
     if (showSnippetPicker && hostId != null) {
-        // Issue #17: chip-row entry to the snippet library. Picking a
-        // snippet routes through the ViewModel's terminal input path.
-        // Commands send Enter explicitly; prompt templates paste only so the
-        // user can keep typing context before pressing Enter manually.
+        // Issue #17 / #187: chip-row entry to the snippet library.
+        //  - Row-body tap routes through the kind-aware smart default
+        //    (`onSnippetPicked` → command runs, prompt pastes).
+        //  - Explicit `Send` / `Send + ↵` chips route through
+        //    `sendSnippet(snippet, withEnter)` so the user's overt Enter
+        //    intent is honoured directly. This is the production wiring
+        //    for issue #187 — tapping `Send + ↵` on a prompt snippet
+        //    now actually presses Enter.
         SnippetPickerSheet(
             hostId = hostId,
             onDismiss = { showSnippetPicker = false },
             onSnippetPicked = { snippet ->
                 viewModel.onSnippetPicked(snippet)
+                showSnippetPicker = false
+            },
+            onSnippetSend = { snippet, withEnter ->
+                viewModel.sendSnippet(snippet, withEnter)
                 showSnippetPicker = false
             },
         )

@@ -109,20 +109,20 @@ jobs:
         run: python -m pip install --upgrade build
 
       - name: Build sdist and wheel
-        working-directory: tools/pocketshell-cli
+        working-directory: tools/pocketshell
         run: python -m build
 
       - name: Upload built distributions as workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: pocketshell-pypi-${{ github.ref_name }}
-          path: tools/pocketshell-cli/dist/*
+          path: tools/pocketshell/dist/*
           if-no-files-found: error
 
       - name: Publish to PyPI via trusted publishing
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          packages-dir: tools/pocketshell-cli/dist
+          packages-dir: tools/pocketshell/dist
           # Default is `https://upload.pypi.org/legacy/`; leave as-is for
           # production PyPI. The action picks up the OIDC token from the
           # `id-token: write` permission above.

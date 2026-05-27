@@ -81,7 +81,7 @@ and **also** builds the Python sdist + wheel and publishes them to PyPI.
 Two files must agree on the release version:
 
 - `app/build.gradle.kts` -> `versionName = "X.Y.Z"`
-- `tools/pocketshell-cli/pyproject.toml` -> `version = "X.Y.Z"`
+- `tools/pocketshell/pyproject.toml` -> `version = "X.Y.Z"`
 
 [`scripts/check-pypi-version.sh`](../../scripts/check-pypi-version.sh)
 enforces this. The release workflow runs it with `--check-tag vX.Y.Z`
@@ -100,7 +100,7 @@ scripts/check-pypi-version.sh --check-tag v0.3.0
 1. Pick the next semantic version after the latest GitHub Release/tag.
 2. Update **both** version sources in the same commit:
    - `app/build.gradle.kts` -> bump `versionName` (and `versionCode`).
-   - `tools/pocketshell-cli/pyproject.toml` -> bump `version` to the
+   - `tools/pocketshell/pyproject.toml` -> bump `version` to the
      same value as `versionName`.
 3. Run `scripts/check-pypi-version.sh` to confirm they match.
 4. Commit the bump on `main`, push, and run the emulator release
@@ -162,7 +162,7 @@ If trusted publishing is ever unavailable for a tag (e.g. PyPI outage
 on the OIDC verifier), the recommended manual escape hatch is:
 
 ```bash
-cd tools/pocketshell-cli
+cd tools/pocketshell
 python -m build
 python -m twine upload dist/*
 ```

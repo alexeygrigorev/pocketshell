@@ -4,7 +4,7 @@ set -euo pipefail
 # Version coupling guard for issue #223.
 #
 # Compares the Android `versionName` (app/build.gradle.kts) against the
-# `pocketshell` Python package `version` (tools/pocketshell-cli/pyproject.toml).
+# `pocketshell` Python package `version` (tools/pocketshell/pyproject.toml).
 # Optionally also compares both against a release tag passed as $1
 # (with or without the leading `v`). Exits non-zero on mismatch.
 #
@@ -32,7 +32,7 @@ Usage: scripts/check-pypi-version.sh [--dry-run] [--check-tag <tag>]
 
 Verifies that the Android `versionName` in app/build.gradle.kts equals
 the `pocketshell` Python package `version` in
-tools/pocketshell-cli/pyproject.toml. When --check-tag <vX.Y.Z> is
+tools/pocketshell/pyproject.toml. When --check-tag <vX.Y.Z> is
 passed, also asserts that both equal the tag (with the leading `v`
 stripped).
 
@@ -77,7 +77,7 @@ fail() {
 }
 
 GRADLE_FILE="app/build.gradle.kts"
-PYPROJECT_FILE="tools/pocketshell-cli/pyproject.toml"
+PYPROJECT_FILE="tools/pocketshell/pyproject.toml"
 
 [[ -f "$GRADLE_FILE" ]] || fail "missing $GRADLE_FILE"
 [[ -f "$PYPROJECT_FILE" ]] || fail "missing $PYPROJECT_FILE"

@@ -50,11 +50,11 @@ jobs:
           if-no-files-found: ignore
 
   python:
-    name: Python utility tests (pocketshell-cli)
+    name: Python utility tests (pocketshell)
     runs-on: ubuntu-latest
 
     # Issue #170 (first PR): the unified `pocketshell` server-side
-    # utility lives under `tools/pocketshell-cli/` as a standalone Python
+    # utility lives under `tools/pocketshell/` as a standalone Python
     # package. It does not participate in the Gradle build, so a separate
     # CI job exercises its pytest suite. Cheap (~5 s including install)
     # so it runs on every push without gating downstream Android jobs.
@@ -70,18 +70,18 @@ jobs:
       - name: Install uv
         run: pip install --upgrade uv
 
-      - name: Install pocketshell-cli + dev deps
-        working-directory: tools/pocketshell-cli
+      - name: Install pocketshell + dev deps
+        working-directory: tools/pocketshell
         run: |
           uv venv
           uv pip install -e ".[dev]"
 
       - name: Run pytest
-        working-directory: tools/pocketshell-cli
+        working-directory: tools/pocketshell
         run: uv run pytest -v
 
       - name: Smoke-test installed CLI
-        working-directory: tools/pocketshell-cli
+        working-directory: tools/pocketshell
         run: |
           .venv/bin/pocketshell --version
           .venv/bin/pocketshell --help

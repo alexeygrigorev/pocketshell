@@ -7,7 +7,7 @@ name = "pocketshell"
 # Must equal `versionName` in app/build.gradle.kts on every release tag.
 # scripts/check-pypi-version.sh enforces this; .github/workflows/build.yml
 # runs that check before publishing to PyPI. See
-# tools/pocketshell-cli/README.md ("Release flow") for the bump procedure.
+# tools/pocketshell/README.md ("Release flow") for the bump procedure.
 version = "0.2.8"
 description = "Unified server-side Python utility for the PocketShell Android client."
 readme = "README.md"

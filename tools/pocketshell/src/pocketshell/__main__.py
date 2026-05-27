@@ -1,7 +1,7 @@
 """Allow `python -m pocketshell` as an alternative to the installed entry point.
 
 Used in CI and developer environments where the console-script shim from
-`pip install -e .` / `uv tool install pocketshell-cli` is not on PATH.
+`pip install -e .` / `uv tool install pocketshell` is not on PATH.
 """
 
 from __future__ import annotations

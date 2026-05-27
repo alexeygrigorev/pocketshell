@@ -33,8 +33,8 @@ Why subprocess instead of `import quse`:
 
 - `quse` is currently not published to PyPI; declaring it as a normal
   `pyproject.toml` dependency would break `uv tool install
-  pocketshell-cli` for any user (including the maintainer's dev box).
-- Subprocess delegation keeps `pocketshell-cli` decoupled from `quse`'s
+  pocketshell` for any user (including the maintainer's dev box).
+- Subprocess delegation keeps `pocketshell` decoupled from `quse`'s
   internal module layout, so updates to `quse` don't break the wrapper.
 - The PATH-discovery story for `quse` is already solved on the app side
   (see issue #41 + the `pathOverride` column on `HostEntity`). Wrapping
@@ -42,7 +42,7 @@ Why subprocess instead of `import quse`:
   working without re-implementation.
 
 Later PRs will fold the provider-detection logic in directly so
-`pocketshell-cli` is the canonical implementation and the subprocess
+`pocketshell` is the canonical implementation and the subprocess
 hop disappears, but that is explicit non-scope here per the brief on
 issue [#170](https://github.com/alexeygrigorev/pocketshell/issues/170).
 """

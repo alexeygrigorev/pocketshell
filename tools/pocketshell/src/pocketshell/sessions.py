@@ -14,9 +14,9 @@ Why subprocess instead of `import tmuxctl`:
 
 - `tmuxctl` is the maintainer's standalone library/CLI and is not
   published to PyPI. Declaring it as a normal `pyproject.toml`
-  dependency would break `uv tool install pocketshell-cli` and
-  `pipx install pocketshell-cli` for any user.
-- Subprocess delegation keeps `pocketshell-cli` decoupled from
+  dependency would break `uv tool install pocketshell` and
+  `pipx install pocketshell` for any user.
+- Subprocess delegation keeps `pocketshell` decoupled from
   `tmuxctl`'s internal module layout, so updates to `tmuxctl` do not
   break the wrapper.
 - The PATH-discovery story for `tmuxctl` is already solved on the app

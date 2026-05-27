@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pocketshell-cli"
+name = "pocketshell"
 version = "0.1.0"
 description = "Unified server-side Python utility for the PocketShell Android client."
 readme = "README.md"

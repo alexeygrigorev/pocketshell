@@ -1,4 +1,4 @@
-# pocketshell-cli
+# pocketshell
 
 Unified server-side Python utility for the [PocketShell](https://github.com/alexeygrigorev/pocketshell)
 Android client. Replaces the separately-installed `quse` and `tmuxctl`
@@ -16,19 +16,19 @@ The recommended path is `uv tool install`, which lands the binary on PATH
 under `~/.local/bin/`:
 
 ```bash
-uv tool install pocketshell-cli
+uv tool install pocketshell
 ```
 
 For local development from a clone:
 
 ```bash
-cd tools/pocketshell-cli
+cd tools/pocketshell
 uv venv
 uv pip install -e .
 pocketshell --help
 ```
 
-`pipx install pocketshell-cli` works the same way for users who prefer
+`pipx install pocketshell` works the same way for users who prefer
 pipx. Both install paths produce a `pocketshell` binary that the
 PocketShell app's bootstrap probe detects.
 
@@ -53,7 +53,7 @@ prints an install hint to stderr.
 ## Development
 
 ```bash
-cd tools/pocketshell-cli
+cd tools/pocketshell
 uv venv
 uv pip install -e ".[dev]"
 uv run pytest

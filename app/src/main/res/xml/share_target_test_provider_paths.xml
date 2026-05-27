@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Issue #138 connected-emulator test. Exposes the test app's
+    external cache directory so the temp file staged for the share
+    intent can be delivered via FileProvider URIs. We use
+    external-cache because the test instrumentation context's
+    internal cache directory is not reliably created on some API
+    levels — by contrast, the external cache directory is part of
+    a world-writable storage area and instrumentation contexts can
+    consistently mkdirs into it.
+-->
+<paths>
+    <external-cache-path
+        name="share-target-tests"
+        path="share-target-tests/" />
+    <cache-path
+        name="share-target-tests-internal"
+        path="share-target-tests/" />
+</paths>

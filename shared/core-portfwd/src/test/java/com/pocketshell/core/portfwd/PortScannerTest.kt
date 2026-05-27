@@ -147,6 +147,16 @@ class PortScannerTest {
         ): SshPortForward = error("openLocalPortForward not used by PortScanner tests")
         override fun startShell(): com.pocketshell.core.ssh.SshShell =
             error("startShell not used by PortScanner tests")
+        override suspend fun uploadFile(file: java.io.File, remotePath: String): String =
+            error("uploadFile not used in this test")
+
+        override suspend fun uploadStream(
+            input: java.io.InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String = error("uploadStream not used in this test")
+
         override fun close() = Unit
     }
 }

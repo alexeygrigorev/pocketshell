@@ -15,7 +15,9 @@ import net.schmizz.sshj.common.DisconnectReason
 import net.schmizz.sshj.connection.channel.direct.Session.Command
 import net.schmizz.sshj.transport.TransportException
 import java.io.BufferedReader
+import java.io.File
 import java.io.IOException
+import java.io.InputStream
 import java.io.InputStreamReader
 
 /**
@@ -174,6 +176,111 @@ internal class RealSshSession(
         } catch (t: Throwable) {
             runCatching { sessionChannel.close() }
             throw SshException("Failed to start remote shell: ${t.message}", t)
+        }
+    }
+
+    override suspend fun uploadFile(file: File, remotePath: String): String =
+        withContext(Dispatchers.IO) {
+            ensureConnected()
+            if (!file.exists()) {
+                throw SshException("Local file does not exist: ${file.absolutePath}")
+            }
+            file.inputStream().use { input ->
+                uploadStreamInternal(
+                    input = input,
+                    length = file.length(),
+                    name = file.name,
+                    remotePath = remotePath,
+                )
+            }
+            remotePath
+        }
+
+    override suspend fun uploadStream(
+        input: InputStream,
+        length: Long,
+        name: String,
+        remotePath: String,
+    ): String = withContext(Dispatchers.IO) {
+        ensureConnected()
+        uploadStreamInternal(input, length, name, remotePath)
+        remotePath
+    }
+
+    /**
+     * Stream-to-remote-file primitive shared by [uploadFile] and
+     * [uploadStream]. Uploads via an `exec` channel that runs
+     * `cat > <path>` on the remote and pipes bytes through stdin.
+     *
+     * Why not SCP or SFTP? Both require an extra binary on the remote
+     * (`scp` from `openssh-client`, `sftp-server` from
+     * `openssh-sftp-server`). The Alpine-based Docker fixtures used
+     * by the connected emulator tests ship the SSH server alone, and
+     * minimal real-world servers often do too. The exec-channel +
+     * `cat` approach only needs a POSIX shell and `cat`, which are
+     * universally present.
+     *
+     * The remote `cat` reads stdin until EOF, then writes to
+     * [remotePath]. We close stdin (via `sendEOF`) to signal completion
+     * and then `join` the command, checking the exit status.
+     *
+     * Stream + length are taken so the caller can pass either —
+     * length is informational only; `cat` does not need it.
+     */
+    private fun uploadStreamInternal(
+        input: InputStream,
+        @Suppress("UNUSED_PARAMETER") length: Long,
+        name: String,
+        remotePath: String,
+    ) {
+        val sessionChannel = try {
+            client.startSession()
+        } catch (t: Throwable) {
+            throw SshException(
+                "Could not open session channel for upload of $name to $remotePath: ${t.message}",
+                t,
+            )
+        }
+        try {
+            val quoted = remotePath.replace("'", "'\\''")
+            val command: Command = try {
+                sessionChannel.exec("cat > '$quoted'")
+            } catch (t: Throwable) {
+                throw SshException(
+                    "Could not start remote `cat` for upload of $name to $remotePath: ${t.message}",
+                    t,
+                )
+            }
+            try {
+                command.outputStream.use { output ->
+                    input.copyTo(output)
+                }
+                // `outputStream.close()` sends EOF on the channel, but
+                // sshj also exposes `signal()` to nudge a stuck remote.
+                // The remote `cat` exits on EOF; `join()` waits for the
+                // command to finish so we can read the exit code.
+                command.join()
+                val exit = command.exitStatus ?: -1
+                if (exit != 0) {
+                    val stderr = runCatching {
+                        command.errorStream.readBytes().toString(Charsets.UTF_8)
+                    }.getOrDefault("")
+                    throw SshException(
+                        "Remote `cat` exited with status $exit while writing $remotePath: ${stderr.trim()}",
+                    )
+                }
+            } finally {
+                runCatching { command.close() }
+            }
+        } catch (e: SshException) {
+            throw e
+        } catch (t: Throwable) {
+            throw SshException(
+                "Upload of $name to $remotePath failed: ${t.message}",
+                t,
+            )
+        } finally {
+            runCatching { sessionChannel.close() }
         }
     }
 

@@ -446,6 +446,14 @@ class AutoForwarderTest {
             openForwards[remotePort] = f
             return f
         }
+        override suspend fun uploadFile(file: java.io.File, remotePath: String): String =
+            error("uploadFile not used by AutoForwarder tests")
+        override suspend fun uploadStream(
+            input: java.io.InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String = error("uploadStream not used by AutoForwarder tests")
         override fun close() = Unit
     }
 

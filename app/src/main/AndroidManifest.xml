@@ -84,6 +84,92 @@
             android:exported="false"
             android:theme="@style/Theme.PocketShell" />
 
+        <!--
+            Issue #138: Android share-target. PocketShell appears in the
+            system share sheet for files (image / audio / video / text /
+            generic) and short text payloads. The activity is launched
+            with `singleTop` so a back-to-back share from the same
+            source app re-uses the existing task instead of stacking
+            multiple ShareActivity instances. `excludeFromRecents` keeps
+            the share intent out of the recents stack — a share is a
+            transactional surface, not something the user expects to
+            resume from the launcher.
+        -->
+        <activity
+            android:name=".share.ShareActivity"
+            android:exported="true"
+            android:label="@string/share_target_label"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:noHistory="false"
+            android:theme="@style/Theme.PocketShell">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="application/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="application/*" />
+            </intent-filter>
+            <!--
+                Generic catch-all so the activity still appears for
+                MIME types the well-known wildcards above don't cover
+                (e.g. an arbitrary `*/*` from a poorly-configured
+                source app).
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            Issue #138: receiver invoked when the user taps the
+            share-success notification. Copies the full remote path to
+            the system clipboard. Not exported — only PocketShell's own
+            PendingIntent triggers it.
+        -->
+        <receiver
+            android:name=".notifications.CopyRemotePathReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.pocketshell.app.notifications.action.COPY_REMOTE_PATH" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+            Issue #138 connected-emulator test: the share-target end-to-end
+            test stages a temp file under the target app's cache and hands
+            its URI to `ShareActivity`. The FileProvider is declared here
+            (production manifest) because the FileProvider component must
+            run in the same process as the file it serves, and the
+            androidTest harness exercises the target app's process. The
+            component is not exported, so production builds carry an
+            inert FileProvider with no attack surface — it can only ever
+            serve files under the `share-target-tests/` subdirectory of
+            the app's cache, which production code never writes to.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.shareprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/share_target_test_provider_paths" />
+        </provider>
+
         <receiver
             android:name=".systemsurfaces.ActiveSessionsWidgetProvider"
             android:exported="true"

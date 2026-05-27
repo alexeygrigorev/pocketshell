@@ -543,6 +543,16 @@ class PortForwardPanelViewModelTest {
 
         override fun startShell(): SshShell = error("shell not used")
 
+        override suspend fun uploadFile(file: java.io.File, remotePath: String): String =
+            error("uploadFile not used in this test")
+
+        override suspend fun uploadStream(
+            input: java.io.InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String = error("uploadStream not used in this test")
+
         override fun close() {
             closed = true
             openedForwards.forEach { it.close() }

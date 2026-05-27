@@ -17,4 +17,7 @@
     <string name="qr_scanner_error_generic">Could not decode that QR. Hold the phone steady and try again.</string>
     <string name="qr_scanner_retry">Retry</string>
     <string name="qr_scanner_close">Close</string>
+
+    <!-- Issue #138: label shown in the system share sheet for the PocketShell upload target. -->
+    <string name="share_target_label">Send to PocketShell host</string>
 </resources>

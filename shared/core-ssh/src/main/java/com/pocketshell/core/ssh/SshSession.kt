@@ -1,6 +1,8 @@
 package com.pocketshell.core.ssh
 
 import kotlinx.coroutines.Job
+import java.io.File
+import java.io.InputStream
 
 /**
  * Live SSH connection to a single host. Obtain instances via
@@ -81,6 +83,48 @@ public interface SshSession : AutoCloseable {
      * failure, PTY allocation refused by the server, shell start refused).
      */
     public fun startShell(): SshShell
+
+    /**
+     * Upload a local [file] to [remotePath] via SCP. The remote path is
+     * absolute (or tilde-expanded by the remote login shell — SCP runs
+     * the receiving command through the user's default shell). Returns
+     * the remote path that was written so the caller doesn't have to
+     * round-trip a separate query.
+     *
+     * Used by the Android share-target flow (issue #138) to land files
+     * at `~/inbox/pocketshell/<timestamp>-<sanitised-name>`. Throws
+     * [SshException] on transport errors (connection lost, auth lost
+     * mid-transfer), SCP-protocol errors (permission denied, no such
+     * directory), or local I/O errors reading [file].
+     *
+     * This is a blocking call wrapped to play well with coroutines via
+     * `kotlinx.coroutines.Dispatchers.IO`.
+     */
+    public suspend fun uploadFile(file: File, remotePath: String): String
+
+    /**
+     * Upload [length] bytes from [input] to [remotePath] via SCP under
+     * the display name [name]. Mirrors [uploadFile] but lets the caller
+     * stream from a non-file source (Android `ContentResolver`
+     * URIs, in-memory text payloads). Returns the remote path that was
+     * written.
+     *
+     * Both [name] and [remotePath] must already be sanitised by the
+     * caller (the SCP protocol itself doesn't escape filenames; we
+     * rely on `core-ssh`'s callers to pass values that are safe at the
+     * shell layer). [length] must be the exact stream length in bytes;
+     * SCP needs the size up front and an under-count would leave the
+     * remote file truncated.
+     *
+     * This is a blocking call wrapped to play well with coroutines via
+     * `kotlinx.coroutines.Dispatchers.IO`.
+     */
+    public suspend fun uploadStream(
+        input: InputStream,
+        length: Long,
+        name: String,
+        remotePath: String,
+    ): String
 
     /** Disconnect and free all resources. Idempotent. */
     override fun close()

@@ -57,6 +57,15 @@ dev = [
     "pytest>=8.4.0",
     "ruff>=0.15.0",
 ]
+# Optional extra for `pocketshell qr-share`. The `qrcode[pil]` chain is
+# heavy (Pillow) and is only needed for QR rendering, so we keep it out
+# of the default install. Without this extra, `pocketshell qr-share`
+# exits 127 with a friendly install hint; every other subcommand keeps
+# working unchanged. Install with `pip install pocketshell[qr]` or
+# `uv tool install pocketshell --with qrcode[pil]`.
+qr = [
+    "qrcode[pil]>=7.4",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pocketshell"]

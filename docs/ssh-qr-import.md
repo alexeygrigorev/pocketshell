@@ -76,7 +76,53 @@ A payload below 1500 bytes still encodes as a single envelope with `part=1/1` so
 
 ## Desktop Emitter
 
-The companion CLI lives at [`tools/qr-share/`](../tools/qr-share/) and reads `~/.ssh/config` (or accepts `--host` / `--user` / `--port` / `--key` flags) to produce a payload and emit QR(s). It prints QRs inline in the terminal when stdout is a TTY and writes a numbered PNG sequence (`qr-share-01.png`, ...) otherwise. For multi-QR payloads it pauses between codes so the user can scan each in turn.
+The companion CLI is `pocketshell qr-share`, part of the unified
+[`pocketshell`](../tools/pocketshell/) Python tool. It reads `~/.ssh/config` (or accepts `--host` / `--user` / `--port` / `--key` flags) to produce a payload and emit QR(s). It prints QRs inline in the terminal when stdout is a TTY and writes a numbered PNG sequence (`qr-share-01.png`, ...) otherwise. For multi-QR payloads it pauses between codes so the user can scan each in turn.
+
+Install the optional `qr` extra so QR rendering is available:
+
+```bash
+uv tool install pocketshell --with qrcode[pil]
+# or
+pip install pocketshell[qr]
+```
+
+From an ssh-config alias (resolves host, port, user, identity file via `ssh -G`):
+
+```bash
+pocketshell qr-share prod
+```
+
+From explicit flags (skip ssh-config):
+
+```bash
+pocketshell qr-share \
+  --host prod.example.com \
+  --user ubuntu \
+  --port 22 \
+  --key ~/.ssh/id_ed25519 \
+  --name prod
+```
+
+Write a numbered PNG sequence to disk instead of rendering inline:
+
+```bash
+pocketshell qr-share prod --png --out-dir /tmp/qr
+ls /tmp/qr
+# qr-share-01.png
+# qr-share-02.png
+```
+
+For a smoke test of the envelope encoding without rendering:
+
+```bash
+pocketshell qr-share --host h --user u --key /dev/null --name h \
+  --print-only --id deadbeef
+```
+
+The output lines are the envelope strings the phone scanner expects.
+
+Without the optional `qr` extra installed, `pocketshell qr-share` exits 127 with a friendly install hint; every other `pocketshell` subcommand keeps working.
 
 ## Deep Link
 

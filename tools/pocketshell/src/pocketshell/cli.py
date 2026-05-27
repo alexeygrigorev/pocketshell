@@ -24,6 +24,7 @@ import click
 from pocketshell import __version__
 from pocketshell.agent_log import agent_log_command
 from pocketshell.jobs import jobs_group
+from pocketshell.qr_share import qr_share_command
 from pocketshell.repos import repos_group
 from pocketshell.sessions import sessions_group
 from pocketshell.usage import usage_command
@@ -33,10 +34,10 @@ from pocketshell.usage import usage_command
     context_settings={"help_option_names": ["-h", "--help"]},
     help=(
         "Unified server-side helper for the PocketShell Android client.\n\n"
-        "Subcommands replace the separately-installed `quse` and `tmuxctl` "
-        "CLIs. Today `usage`, `jobs`, `sessions`, `agent-log`, `repos`, "
-        "and `daemon` are wired up; more subcommands will land in "
-        "follow-up rounds."
+        "Subcommands replace the separately-installed `quse`, `tmuxctl`, "
+        "and `qr-share` CLIs. Today `usage`, `jobs`, `sessions`, "
+        "`agent-log`, `repos`, `daemon`, and `qr-share` are wired up; "
+        "more subcommands will land in follow-up rounds."
     ),
 )
 @click.version_option(__version__, "-V", "--version", prog_name="pocketshell")
@@ -49,6 +50,7 @@ cli.add_command(jobs_group, name="jobs")
 cli.add_command(sessions_group, name="sessions")
 cli.add_command(agent_log_command, name="agent-log")
 cli.add_command(repos_group, name="repos")
+cli.add_command(qr_share_command, name="qr-share")
 
 
 # ---------------------------------------------------------------------------

@@ -52,6 +52,36 @@ fun showTerminalSoftKeyboard(rootView: View): Boolean {
 }
 
 /**
+ * Issue #184: snap the embedded [TerminalView]'s scrollback viewport back
+ * to the latest line (`mTopRow = 0`) so the cursor row — which always sits
+ * inside the live emulator window, not in transcript history — is visible
+ * to the user. The session screen calls this when the soft keyboard
+ * becomes visible: even if the user had scrolled the transcript up
+ * earlier, the moment they ask for the IME they have committed to typing
+ * at the prompt and the prompt's cursor row needs to be inside the
+ * visible viewport.
+ *
+ * Returns `true` when a [TerminalView] descendant was found and its
+ * scroll position was reset, `false` when no terminal view is mounted
+ * yet (e.g. the screen has not finished its first composition). The
+ * caller treats `false` as a no-op rather than an error — the same
+ * defensive contract as [showTerminalSoftKeyboard].
+ *
+ * Implementation is intentionally a one-call shot of `setTopRow(0) +
+ * onScreenUpdated()`. The vendored [TerminalView] already pins the
+ * viewport to bottom whenever the emulator size changes (see
+ * `TerminalView.updateSize` → `mTopRow = 0`); this helper handles the
+ * orthogonal "user scrolled then tapped IME" case where the size has
+ * not changed but the visible viewport no longer covers the cursor row.
+ */
+fun pinTerminalToBottom(rootView: View): Boolean {
+    val terminalView = rootView.findTerminalViewDescendant() ?: return false
+    terminalView.setTopRow(0)
+    terminalView.onScreenUpdated()
+    return true
+}
+
+/**
  * Depth-first search for the first [TerminalView] under this view. The
  * embedded [TerminalView] sits inside an `AndroidView` wrapper that the
  * Compose hierarchy nests several layers deep, so a one-step `children`

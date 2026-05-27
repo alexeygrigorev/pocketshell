@@ -7,8 +7,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
@@ -206,6 +208,13 @@ public fun TmuxSessionScreen(
     val isImeVisible = WindowInsets.ime.getBottom(
         LocalDensity.current,
     ) > 0
+    // Issue #184: while the soft keyboard is up, the user is in
+    // "typing-focus" mode — the breadcrumb / window-strip / tabs chrome
+    // up top eats vertical room that the terminal viewport (and the
+    // cursor row inside it) desperately needs. We drop the top chrome
+    // when the IME is visible and restore it on hide. Mirrors Telegram's
+    // chrome-while-typing behaviour and matches issue #184's Layer 2.
+    val chromeCompressed = isImeVisible
 
     val currentPane = panes.getOrNull(pagerState.currentPage)
     val currentAgentConversation = currentPane?.paneId?.let { agentConversations[it] }
@@ -236,6 +245,23 @@ public fun TmuxSessionScreen(
     // renders one pane at a time, so the helper's recursive search lands
     // on the visible pane's `TerminalView`.
     val composeRootView = LocalView.current
+
+    // Issue #184 Layer 1: when the IME comes up, snap the active
+    // pane's terminal viewport back to the bottom so the cursor row
+    // (which lives at the latest line of the emulator buffer) is
+    // guaranteed to be inside the visible window. Without this, a
+    // user who scrolled the transcript up and then opened the
+    // keyboard would type into a viewport that no longer shows the
+    // prompt they're typing into — the canonical "where am I
+    // typing?" failure. We reach the [TerminalView] through the
+    // [pinTerminalToBottom] helper which lives in core-terminal next
+    // to the show-keyboard helper so the [TerminalView] import does
+    // not leak into the app module.
+    LaunchedEffect(isImeVisible) {
+        if (isImeVisible) {
+            com.pocketshell.core.terminal.ui.pinTerminalToBottom(composeRootView)
+        }
+    }
 
     // Route inline-dictation transcripts into the currently focused pane.
     // The collector re-binds whenever the focused pane or dictation mode
@@ -325,11 +351,57 @@ public fun TmuxSessionScreen(
                         onSwipeDown = { showSessionDrawer = true },
                     ),
             ) {
-                Breadcrumb(
-                    crumbs = crumbs,
-                    onBack = onBack,
-                    onMore = { moreExpanded = true },
-                )
+                // Issue #184 Layer 2: breadcrumb chrome flips between the
+                // full four-segment chain (IME hidden) and the slim
+                // session-name strip (IME visible). The pair is wrapped
+                // in a Column so the AnimatedVisibility entries do not
+                // overlap visually mid-transition — the hidden one
+                // collapses to zero height and the other claims the row.
+                // The kebab-menu owner remains local screen state so its
+                // dropdown reaches into the session-lifecycle dialog
+                // routes below.
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    AnimatedVisibility(
+                        visible = !chromeCompressed,
+                        enter = expandVertically(
+                            animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                        ) + fadeIn(
+                            animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                        ),
+                        exit = shrinkVertically(
+                            animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                        ) + fadeOut(
+                            animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                        ),
+                    ) {
+                        Breadcrumb(
+                            crumbs = crumbs,
+                            onBack = onBack,
+                            onMore = { moreExpanded = true },
+                            modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
+                        )
+                    }
+                    AnimatedVisibility(
+                        visible = chromeCompressed,
+                        enter = expandVertically(
+                            animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                        ) + fadeIn(
+                            animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                        ),
+                        exit = shrinkVertically(
+                            animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                        ) + fadeOut(
+                            animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                        ),
+                    ) {
+                        CompactBreadcrumb(
+                            sessionName = sessionName,
+                            onBack = onBack,
+                            onMore = { moreExpanded = true },
+                            modifier = Modifier.testTag(TMUX_COMPACT_BREADCRUMB_TAG),
+                        )
+                    }
+                }
                 TmuxMoreMenu(
                     expanded = moreExpanded,
                     currentWindowId = currentWindowId,
@@ -418,18 +490,39 @@ public fun TmuxSessionScreen(
             } else {
                 listOf("Terminal")
             }
-            Tabs(
-                labels = tabs,
-                selectedIndex = if (currentAgentConversation?.selectedTab == SessionTab.Conversation) 1 else 0,
-                onSelected = { index ->
-                    currentPane?.let { pane ->
-                        viewModel.selectSessionTab(
-                            pane.paneId,
-                            if (index == 1) SessionTab.Conversation else SessionTab.Terminal,
-                        )
-                    }
-                },
-            )
+            // Issue #184 Layer 2: Tabs and WindowStrip hide on IME up
+            // because the user is mid-type — they cannot tap a tab pill
+            // without first dismissing the keyboard anyway, and giving
+            // those ~80dp back to the terminal viewport keeps the cursor
+            // row visible. Both restore on IME-hide via the
+            // AnimatedVisibility exit pass.
+            AnimatedVisibility(
+                visible = !chromeCompressed,
+                enter = expandVertically(
+                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                ) + fadeIn(
+                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                ),
+                exit = shrinkVertically(
+                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                ) + fadeOut(
+                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                ),
+            ) {
+                Tabs(
+                    labels = tabs,
+                    selectedIndex = if (currentAgentConversation?.selectedTab == SessionTab.Conversation) 1 else 0,
+                    onSelected = { index ->
+                        currentPane?.let { pane ->
+                            viewModel.selectSessionTab(
+                                pane.paneId,
+                                if (index == 1) SessionTab.Conversation else SessionTab.Terminal,
+                            )
+                        }
+                    },
+                    modifier = Modifier.testTag(TMUX_TABS_TAG),
+                )
+            }
 
             // Per #158: only surface the WindowStrip when there are
             // multiple windows in this session. In the (very common)
@@ -437,7 +530,24 @@ public fun TmuxSessionScreen(
             // users about what the trailing "+" creates (window vs
             // session). For the single-window case the "+ New window"
             // affordance remains reachable from the kebab dropdown.
-            if (windows.size > 1) {
+            //
+            // Issue #184 Layer 2: also hide while the IME is up — the
+            // user has committed to typing into the current pane and
+            // doesn't need a window-picker rail eating vertical space
+            // above the cursor row.
+            AnimatedVisibility(
+                visible = windows.size > 1 && !chromeCompressed,
+                enter = expandVertically(
+                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                ) + fadeIn(
+                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                ),
+                exit = shrinkVertically(
+                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                ) + fadeOut(
+                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                ),
+            ) {
                 WindowStrip(
                     windows = windows,
                     currentWindowId = currentWindowId,
@@ -1034,6 +1144,27 @@ internal const val TMUX_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX = "tmux:conversa
 internal const val TMUX_AGENT_HINT_TAG = "tmux:agent-hint"
 /** Issue #116: stable test tag for the in-tmux-session blocked / near-limit chip. */
 internal const val TMUX_SESSION_USAGE_BADGE_TAG = "tmux:usage-badge"
+
+/**
+ * Issue #184: stable test tags for the IME-aware top chrome on the tmux
+ * session screen.
+ *
+ * - [TMUX_FULL_BREADCRUMB_TAG] is on the regular four-segment
+ *   `host › session › window › pane` strip and is visible only while the
+ *   soft keyboard is hidden.
+ * - [TMUX_COMPACT_BREADCRUMB_TAG] is on the slimmed-down session-name
+ *   strip that replaces the full breadcrumb while the IME is up so the
+ *   terminal viewport can claim the freed vertical space.
+ * - [TMUX_TABS_TAG] is on the Terminal/Conversation tab row. Hidden
+ *   while the IME is up.
+ *
+ * The window-strip already carries [TMUX_WINDOW_STRIP_TAG] from #158; we
+ * reuse it for the "WindowStrip hidden while IME up" assertion in
+ * [TmuxSessionScreenImeChromeTest].
+ */
+internal const val TMUX_FULL_BREADCRUMB_TAG = "tmux:breadcrumb:full"
+internal const val TMUX_COMPACT_BREADCRUMB_TAG = "tmux:breadcrumb:compact"
+internal const val TMUX_TABS_TAG = "tmux:tabs"
 
 /**
  * Issue #145: stable test tags for the mid-session SSH disconnect band
@@ -1869,6 +2000,171 @@ private fun DropdownMenuSectionHeader(text: String) {
         fontWeight = FontWeight.Medium,
         modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
     )
+}
+
+/**
+ * Issue #184 Layer 2: IME-aware top chrome — the breadcrumb + tabs +
+ * window-strip cluster that sits above the terminal viewport on the tmux
+ * session screen. Exposed as its own composable so the chrome's behaviour
+ * under the soft keyboard (Layer 2 of issue #184) can be unit-tested
+ * without spinning up a Hilt graph or a live tmux connect — the test
+ * drives [chromeCompressed] directly and asserts the right elements are
+ * present / hidden.
+ *
+ * When [chromeCompressed] is `false` (IME hidden) we render:
+ * - The full [Breadcrumb] with `host › session › window › pane` and the
+ *   tagged [TMUX_FULL_BREADCRUMB_TAG] root.
+ * - The [Tabs] row tagged with [TMUX_TABS_TAG].
+ * - The [WindowStrip] (tagged [TMUX_WINDOW_STRIP_TAG]), but only when
+ *   the session has more than one window — single-window sessions never
+ *   render the strip, regardless of IME state.
+ *
+ * When [chromeCompressed] is `true` (IME visible) we replace the full
+ * breadcrumb with [CompactBreadcrumb] (tagged
+ * [TMUX_COMPACT_BREADCRUMB_TAG]) and hide both the tabs and the window
+ * strip so the freed vertical space goes to the terminal viewport.
+ * Transitions are wrapped in [AnimatedVisibility] with the 200ms motion
+ * tokens from `docs/design-system.md` §5.
+ *
+ * The screen passes [chromeCompressed] from `WindowInsets.isImeVisible`;
+ * tests pass it directly.
+ */
+@Composable
+internal fun TmuxImeAwareTopChrome(
+    chromeCompressed: Boolean,
+    crumbs: List<Crumb>,
+    sessionName: String,
+    onBack: () -> Unit,
+    onMore: () -> Unit,
+    tabLabels: List<String>,
+    selectedTabIndex: Int,
+    onTabSelected: (Int) -> Unit,
+    windows: List<WindowSummary>,
+    currentWindowId: String?,
+    onSelectWindow: (WindowSummary) -> Unit,
+    onOpenWindowMenu: (WindowSummary) -> Unit,
+    onNewWindow: () -> Unit,
+) {
+    val animEnter = expandVertically(
+        animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+    ) + fadeIn(
+        animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+    )
+    val animExit = shrinkVertically(
+        animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+    ) + fadeOut(
+        animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+    )
+    Column(modifier = Modifier.fillMaxWidth()) {
+        AnimatedVisibility(visible = !chromeCompressed, enter = animEnter, exit = animExit) {
+            Breadcrumb(
+                crumbs = crumbs,
+                onBack = onBack,
+                onMore = onMore,
+                modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
+            )
+        }
+        AnimatedVisibility(visible = chromeCompressed, enter = animEnter, exit = animExit) {
+            CompactBreadcrumb(
+                sessionName = sessionName,
+                onBack = onBack,
+                onMore = onMore,
+                modifier = Modifier.testTag(TMUX_COMPACT_BREADCRUMB_TAG),
+            )
+        }
+        AnimatedVisibility(visible = !chromeCompressed, enter = animEnter, exit = animExit) {
+            Tabs(
+                labels = tabLabels,
+                selectedIndex = selectedTabIndex,
+                onSelected = onTabSelected,
+                modifier = Modifier.testTag(TMUX_TABS_TAG),
+            )
+        }
+        AnimatedVisibility(
+            visible = windows.size > 1 && !chromeCompressed,
+            enter = animEnter,
+            exit = animExit,
+        ) {
+            WindowStrip(
+                windows = windows,
+                currentWindowId = currentWindowId,
+                onSelectWindow = onSelectWindow,
+                onOpenWindowMenu = onOpenWindowMenu,
+                onNewWindow = onNewWindow,
+            )
+        }
+    }
+}
+
+/**
+ * Issue #184 Layer 2: a slim replacement for the full
+ * [com.pocketshell.uikit.components.Breadcrumb] that is shown while the
+ * soft keyboard is up. The user is in typing-focus and does not need the
+ * full `host › session › window › pane` chain — they already know what
+ * pane they are typing into. We surface just the session name so the
+ * screen still answers "where am I?" at a glance, and keep the back and
+ * kebab-menu affordances so the user can bail out or open the more-menu
+ * without first dismissing the IME.
+ *
+ * Layout matches the chrome-tightening rules from issue #184:
+ * - 40dp tall (vs. 56dp for the full breadcrumb), recovering 16dp of
+ *   vertical space for the terminal viewport.
+ * - Same back + more icon buttons at the leading / trailing edges as the
+ *   full breadcrumb so the touch targets stay consistent across the
+ *   IME-open / IME-closed transition (no surprise reflow of tap zones).
+ * - Session name only — no live dot, no separators, no host / window /
+ *   pane crumbs. The full breadcrumb returns on IME-hide.
+ */
+@Composable
+private fun CompactBreadcrumb(
+    sessionName: String,
+    onBack: () -> Unit,
+    onMore: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Background)
+            .height(40.dp)
+            .padding(start = 4.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clickable(onClick = onBack),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "‹",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 20.sp,
+            )
+        }
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = sessionName,
+            color = PocketShellColors.Text,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clickable(onClick = onMore),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "⋮",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 20.sp,
+            )
+        }
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)

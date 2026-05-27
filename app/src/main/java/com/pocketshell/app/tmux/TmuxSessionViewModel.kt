@@ -44,9 +44,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
@@ -168,6 +170,18 @@ public class TmuxSessionViewModel @Inject constructor(
     /** Coarse-grained status the screen surfaces above the terminal. */
     public val connectionStatus: StateFlow<ConnectionStatus> =
         _connectionStatus.asStateFlow()
+
+    /**
+     * Issue #188: one-shot user-facing message for a failed `kill-window`
+     * lifecycle command. Mirrors the [killError] pattern that issue #168
+     * established for the sessions dashboard so the user can tell a
+     * silent transport / tmux failure apart from "kill happened but the
+     * WindowStrip refresh hasn't caught up yet". The screen renders this
+     * via a banner slot and clears it via [clearWindowKillError] once
+     * the user dismisses it. Stays null while killing a window succeeds.
+     */
+    private val _windowKillError: MutableStateFlow<String?> = MutableStateFlow(null)
+    public val windowKillError: StateFlow<String?> = _windowKillError.asStateFlow()
 
     // Voice Command-mode planner state — mirrors
     // [com.pocketshell.app.session.SessionViewModel]'s voice planner so the
@@ -1720,9 +1734,149 @@ public class TmuxSessionViewModel @Inject constructor(
         sendLifecycleCommand("rename-window -t $windowId '${escapeSingleQuoted(trimmed)}'")
     }
 
+    /**
+     * Kill the tmux window identified by [windowId] (e.g. `@5`) and let the
+     * reconcile path refresh the WindowStrip once tmux acknowledges the
+     * death.
+     *
+     * ## Why this looks different from [killCurrentSession] / [renameWindow]
+     *
+     * Per issue #188, the original implementation wrapped `sendCommand`
+     * inside [sendLifecycleCommand]'s plain [runCatching] and never refreshed
+     * after the kill. That gave the user two visible failure modes:
+     *
+     *  1. **Silent failures.** A transport error (closed client, dropped
+     *     channel) or a tmux `%error` (window already gone, wrong target
+     *     syntax, …) was swallowed — the user kept seeing the kill-target
+     *     window pill in the WindowStrip with no indication of why their tap
+     *     had no effect ("Kill window … but then it will not close it").
+     *  2. **No deterministic refresh.** Even on a successful kill the
+     *     WindowStrip relied on the `%window-close` event eventually
+     *     reaching [onControlEvent] → [reconcilePanes]. If the event fired
+     *     between our launch yielding and our subscriber installing — a
+     *     race on a hot SharedFlow — we'd miss it entirely.
+     *
+     * The fix mirrors issue #168 for `kill-session`:
+     *
+     *  - Install an UNDISPATCHED subscriber on [TmuxClient.events] for the
+     *    matching [ControlEvent.WindowClose] BEFORE issuing the kill, so we
+     *    can never miss the notification.
+     *  - On transport throw or tmux `%error` response, surface a
+     *    user-facing [windowKillError] message and SKIP the refresh — a
+     *    refresh would just re-render the still-alive window and look like
+     *    the bug from #188.
+     *  - On a successful kill, await the `%window-close` event (with a 2s
+     *    fallback so a degenerate tmux can never wedge the UI) and then
+     *    force a [reconcilePanes] round-trip even though the event-handler
+     *    would have done one too — belt-and-braces against the
+     *    "subscription installed but event already past" edge case under
+     *    SharedFlow buffer pressure.
+     *
+     * Debug logging (`windowId` + `client.hashCode()`) covers the
+     * "wrong client" hypothesis the same way it did for #168, so a future
+     * triage of "kill silently does nothing" can grep logcat and confirm
+     * the same client instance issued the kill and saw the event.
+     */
     public fun killWindow(windowId: String) {
         if (windowId.isBlank()) return
-        sendLifecycleCommand("kill-window -t $windowId")
+        val client = clientRef ?: return
+        val label = labelFor(windowId)
+        bridgeScope.launch {
+            val clientHash = System.identityHashCode(client)
+            Log.i(
+                ISSUE_188_DIAG_TAG,
+                "kill-window-start windowId=$windowId label=$label clientHash=$clientHash",
+            )
+
+            // Subscribe to the deterministic post-kill notification BEFORE
+            // sending the command so we don't miss the event in the race
+            // window between sendCommand returning and our collector
+            // installing. `events` is a hot SharedFlow — late subscription
+            // would drop the notification we care about.
+            //
+            // `start = UNDISPATCHED` guarantees the inner coroutine runs
+            // up to its first suspension point (the `events.first { … }`
+            // collector install) before this launch call returns — same
+            // pattern as the issue #168 kill-session fix.
+            val eventDeferred = bridgeScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                withTimeoutOrNull(KILL_WINDOW_EVENT_WAIT_MS) {
+                    client.events.first { event ->
+                        event is ControlEvent.WindowClose && event.windowId == windowId
+                    }
+                }
+                Unit
+            }
+
+            val sendResult = runCatching {
+                client.sendCommand("kill-window -t $windowId")
+            }
+            val response = sendResult.getOrNull()
+            val transportFailure = sendResult.exceptionOrNull()
+            if (transportFailure != null) {
+                eventDeferred.cancel()
+                Log.w(
+                    ISSUE_188_DIAG_TAG,
+                    "kill-window-transport-failed windowId=$windowId label=$label " +
+                        "clientHash=$clientHash err=${transportFailure.javaClass.simpleName}: " +
+                        transportFailure.message,
+                )
+                _windowKillError.value = "Couldn't close $label: " +
+                    (transportFailure.message ?: "transport error")
+                return@launch
+            }
+            if (response != null && response.isError) {
+                eventDeferred.cancel()
+                val detail = response.output.joinToString(separator = " ").trim()
+                Log.w(
+                    ISSUE_188_DIAG_TAG,
+                    "kill-window-tmux-error windowId=$windowId label=$label " +
+                        "clientHash=$clientHash detail=$detail",
+                )
+                _windowKillError.value = "Couldn't close $label" +
+                    if (detail.isNotEmpty()) ": $detail" else ""
+                return@launch
+            }
+
+            // Wait up to KILL_WINDOW_EVENT_WAIT_MS for tmux's
+            // `%window-close` notification. The reconcile path
+            // (onControlEvent → reconcilePanes) will already run from the
+            // event-loop side, but we also kick off an explicit
+            // reconcilePanes() afterwards: SharedFlow with replay=0 means a
+            // pathological scheduling order could deliver the event to
+            // *this* collector while skipping the production
+            // [eventsJob] subscriber, and we want the WindowStrip to
+            // refresh deterministically either way.
+            eventDeferred.join()
+            Log.i(
+                ISSUE_188_DIAG_TAG,
+                "kill-window-refresh windowId=$windowId label=$label clientHash=$clientHash",
+            )
+            reconcilePanes()
+        }
+    }
+
+    /**
+     * Issue #188: clear the kill-window error banner. Wired to the
+     * screen's banner dismiss action.
+     */
+    public fun clearWindowKillError() {
+        _windowKillError.value = null
+    }
+
+    /**
+     * Issue #188: derive the human-readable label for [windowId] using the
+     * same 1-based indexing rule [com.pocketshell.app.tmux.toWindowSummaries]
+     * applies, so the error banner reads as "Window 2" rather than
+     * the raw tmux `@5`. Falls back to the raw id when the panes list
+     * doesn't yet know about [windowId] (e.g. kill issued before the
+     * first reconcile completed).
+     */
+    private fun labelFor(windowId: String): String {
+        val ordered = _panes.value
+            .map { it.windowId }
+            .distinct()
+        val index = ordered.indexOf(windowId)
+        return if (index >= 0) "Window ${index + 1}" else windowId
     }
 
     private fun sendLifecycleCommand(command: String) {
@@ -2107,6 +2261,22 @@ private const val MaxAgentEvents: Int = 500
  * thrash.
  */
 internal const val ISSUE_145_RECONNECT_TAG: String = "PsTmuxReconnect"
+
+/**
+ * Issue #188: logcat tag for kill-window diagnostics. Mirrors the
+ * `issue168-kill` tag the dashboard side uses for `kill-session`. Kept
+ * under the 23-character Log.isLoggable cap.
+ */
+internal const val ISSUE_188_DIAG_TAG: String = "issue188-killwindow"
+
+/**
+ * Issue #188: max time we wait for tmux to emit the post-kill
+ * `%window-close` notification before falling back to an unconditional
+ * reconcile. 2s mirrors the acceptance criterion in the issue body —
+ * tmux's actual window-cleanup latency on a healthy localhost / Docker
+ * server is sub-100ms.
+ */
+internal const val KILL_WINDOW_EVENT_WAIT_MS: Long = 2_000L
 
 /**
  * Issue #145: process-wide monotonic counter of `connect()` calls that

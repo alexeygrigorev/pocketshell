@@ -61,26 +61,13 @@ import com.pocketshell.uikit.theme.PocketShellThemeMode
  *
  * Caller wiring:
  *
- *  - [onSnippetPicked]: invoked when the user taps a row's body area
- *    (label + body preview). The caller decides what to do with the
- *    snippet's `body` (append to a composer text area, write to the
- *    terminal's stdin with `\n`, etc). Callers that route through the
- *    session terminal typically inspect [SnippetEntity.kind] and append
- *    Enter for commands but not for prompts (see
- *    [com.pocketshell.app.session.SessionViewModel.onSnippetPicked]).
- *    This is the "smart default" tap surface that preserves backward
- *    compatibility with the pre-#187 contract.
  *  - [onSnippetSend]: issue #187. Invoked when the user taps one of the
- *    new explicit `Send` / `Send + ↵` trailing buttons on a row. The
+ *    explicit `Send` / `Send + ↵` trailing buttons on a row. The
  *    `withEnter` flag carries the user's *explicit* intent: `true` for
- *    `Send + ↵`, `false` for plain `Send`. Defaults to a fallback that
- *    delegates to [onSnippetPicked] so existing callers (e.g.
- *    `TmuxSessionScreen`, `PromptComposerSheet`) keep working without a
- *    coordinated update — they'll just route both new buttons through
- *    their existing kind-aware logic until the caller picks up the
- *    explicit signal. Migrated callers (`SessionScreen` via the
- *    `withEnter`-aware viewmodel overload) honour the explicit intent
- *    and unblock the prompt-on-Enter workflow that motivated the issue.
+ *    `Send + ↵`, `false` for plain `Send`. This is the only send path —
+ *    per D22 (locked decision in `docs/decisions.md`) the legacy dual
+ *    callback (`onSnippetPicked` row-body smart-default) was deleted in
+ *    issue #227; every row routes through the explicit-intent chips.
  *  - [onDismiss]: invoked when the sheet's grabber drag or scrim tap
  *    closes the sheet. Callers should clear their `showSheet` state.
  *
@@ -98,16 +85,10 @@ import com.pocketshell.uikit.theme.PocketShellThemeMode
 public fun SnippetPickerSheet(
     hostId: Long,
     onDismiss: () -> Unit,
-    onSnippetPicked: (SnippetEntity) -> Unit,
+    onSnippetSend: (SnippetEntity, withEnter: Boolean) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: SnippetsViewModel = hiltViewModel(),
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-    // Issue #187: explicit Send / Send+↵ affordances. Default falls back
-    // to [onSnippetPicked] so callers that haven't been migrated yet keep
-    // working (they'll route both new buttons through their pre-existing
-    // kind-aware path).
-    onSnippetSend: (SnippetEntity, withEnter: Boolean) -> Unit =
-        { snippet, _ -> onSnippetPicked(snippet) },
 ) {
     LaunchedEffect(hostId) {
         viewModel.bindHost(hostId)
@@ -143,10 +124,6 @@ public fun SnippetPickerSheet(
             totalCount = snippets.size,
             query = query,
             onQueryChange = { query = it },
-            onSnippetTap = { snippet ->
-                onSnippetPicked(snippet)
-                onDismiss()
-            },
             onSnippetSend = { snippet, withEnter ->
                 onSnippetSend(snippet, withEnter)
                 onDismiss()
@@ -186,18 +163,10 @@ internal fun SnippetPickerContent(
     totalCount: Int,
     query: String,
     onQueryChange: (String) -> Unit,
-    onSnippetTap: (SnippetEntity) -> Unit,
+    onSnippetSend: (SnippetEntity, withEnter: Boolean) -> Unit,
     onManageTap: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
-    // Issue #187: explicit send buttons in the row trailing area. The
-    // default forwards to [onSnippetTap] so callers that don't
-    // distinguish Enter intent keep their existing kind-aware behaviour
-    // through the row-body smart-default path; the buttons fire the same
-    // callback but with the user-visible label still indicating Send vs
-    // Send+↵ so the affordance reads correctly.
-    onSnippetSend: (SnippetEntity, withEnter: Boolean) -> Unit =
-        { snippet, _ -> onSnippetTap(snippet) },
 ) {
     Column(
         modifier = modifier
@@ -315,7 +284,6 @@ internal fun SnippetPickerContent(
                 items(snippets, key = { it.id }) { snippet ->
                     SnippetPickerRow(
                         snippet = snippet,
-                        onTap = { onSnippetTap(snippet) },
                         onSend = { withEnter -> onSnippetSend(snippet, withEnter) },
                     )
                 }
@@ -327,7 +295,6 @@ internal fun SnippetPickerContent(
 @Composable
 private fun SnippetPickerRow(
     snippet: SnippetEntity,
-    onTap: () -> Unit,
     onSend: (withEnter: Boolean) -> Unit,
 ) {
     val kind = SnippetKind.fromStorage(snippet.kind)
@@ -352,16 +319,12 @@ private fun SnippetPickerRow(
             )
             .padding(horizontal = 14.dp, vertical = 12.dp),
     ) {
-        // Row-body tap surface: keeps the legacy "smart default" path so
-        // unmigrated callers (TmuxSessionScreen / PromptComposerSheet)
-        // continue to honour their kind-aware behaviour. The trailing
-        // explicit buttons below carry the user's overt intent for
-        // callers that have wired the new (snippet, withEnter) callback.
+        // Row body: label + kind tag + optional one-line body preview.
+        // No tap surface here — per D22 (issue #227) the only interactive
+        // affordances on a row are the explicit Send / Send + ↵ chips
+        // below. The row body is purely informational.
         Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onTap)
-                .testTag(snippetPickerRowTag(snippet.id)),
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(modifier = Modifier.weight(1f)) {
@@ -480,14 +443,6 @@ private fun SnippetSendChip(
         )
     }
 }
-
-/**
- * Test tag for the row's smart-default tap surface (the label / body
- * preview area). Used by Compose tests to drive the legacy
- * [onSnippetPicked] path without going through the new explicit chips.
- */
-internal fun snippetPickerRowTag(snippetId: Long): String =
-    "snippet-picker-row-$snippetId"
 
 /**
  * Test tag for a row's explicit send chip. Two flavours per snippet:
@@ -658,7 +613,7 @@ private fun SnippetPickerPopulatedPreview() {
                 totalCount = 3,
                 query = "",
                 onQueryChange = {},
-                onSnippetTap = {},
+                onSnippetSend = { _, _ -> },
                 onManageTap = {},
                 onClose = {},
             )
@@ -676,7 +631,7 @@ private fun SnippetPickerEmptyPreview() {
                 totalCount = 0,
                 query = "",
                 onQueryChange = {},
-                onSnippetTap = {},
+                onSnippetSend = { _, _ -> },
                 onManageTap = {},
                 onClose = {},
             )

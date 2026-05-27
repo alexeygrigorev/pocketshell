@@ -95,7 +95,6 @@ import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.app.snippets.SnippetPickerSheet
-import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
@@ -1001,28 +1000,15 @@ public fun TmuxSessionScreen(
 
     if (showSnippetPicker && hostId != 0L) {
         // Mirrors SessionScreen's snippet wiring.
-        //  - Row-body tap (`onSnippetPicked`) keeps the kind-aware smart
-        //    default: command snippets execute immediately (CR appended);
-        //    prompt snippets paste so the user can keep typing context.
         //  - Explicit `Send` / `Send + ↵` chips (`onSnippetSend`) honour
         //    the user's overt Enter intent for issue #187. The trailing
         //    `\r` is appended when `withEnter == true` and only then.
+        //  - Per D22 (issue #227) the legacy row-body smart-default tap
+        //    surface was removed; the picker only routes through the
+        //    explicit-intent chip callback.
         SnippetPickerSheet(
             hostId = hostId,
             onDismiss = { showSnippetPicker = false },
-            onSnippetPicked = { snippet ->
-                currentPane?.let { pane ->
-                    val payload = when (SnippetKind.fromStorage(snippet.kind)) {
-                        SnippetKind.Command -> snippet.body + "\r"
-                        SnippetKind.Prompt -> snippet.body
-                    }
-                    viewModel.writeInputToPane(
-                        pane.paneId,
-                        payload.toByteArray(Charsets.UTF_8),
-                    )
-                }
-                showSnippetPicker = false
-            },
             onSnippetSend = { snippet, withEnter ->
                 currentPane?.let { pane ->
                     val payload = if (withEnter) snippet.body + "\r" else snippet.body

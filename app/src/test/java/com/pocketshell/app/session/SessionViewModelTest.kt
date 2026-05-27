@@ -353,7 +353,12 @@ class SessionViewModelTest {
     }
 
     @Test
-    fun commandSnippetWritesBodyWithKeyboardEnterThroughTerminalBridge() = runBlocking {
+    fun sendSnippetWithEnterWritesBodyAndCarriageReturnThroughTerminalBridge() = runBlocking {
+        // Issue #187 / #227: the explicit-intent picker chip `Send + ↵`
+        // routes through SessionViewModel.sendSnippet(snippet, withEnter
+        // = true), which must append the same carriage return Termux
+        // emits for keyboard Enter so the command actually executes on
+        // the remote shell.
         val vm = newVm()
         val stdin = ByteArrayOutputStream()
         val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -365,7 +370,7 @@ class SessionViewModelTest {
         )
 
         try {
-            vm.onSnippetPicked(
+            vm.sendSnippet(
                 SnippetEntity(
                     id = 1,
                     hostId = 1,
@@ -373,6 +378,7 @@ class SessionViewModelTest {
                     body = "printf marker",
                     kind = "command",
                 ),
+                withEnter = true,
             )
 
             waitForStdin(stdin, "printf marker\r")
@@ -384,7 +390,12 @@ class SessionViewModelTest {
     }
 
     @Test
-    fun promptSnippetPastesBodyWithoutEnterThroughTerminalBridge() = runBlocking {
+    fun sendSnippetWithoutEnterPastesBodyOnlyThroughTerminalBridge() = runBlocking {
+        // Issue #187 / #227: the explicit-intent picker chip `Send`
+        // (no Enter) routes through SessionViewModel.sendSnippet(
+        // snippet, withEnter = false), which must paste the body alone
+        // so the user can continue editing on the input line before
+        // pressing Enter manually.
         val vm = newVm()
         val stdin = ByteArrayOutputStream()
         val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -396,7 +407,7 @@ class SessionViewModelTest {
         )
 
         try {
-            vm.onSnippetPicked(
+            vm.sendSnippet(
                 SnippetEntity(
                     id = 2,
                     hostId = 1,
@@ -404,6 +415,7 @@ class SessionViewModelTest {
                     body = "explain this diff",
                     kind = "prompt",
                 ),
+                withEnter = false,
             )
 
             waitForStdin(stdin, "explain this diff")

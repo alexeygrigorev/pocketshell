@@ -9,7 +9,6 @@ import com.pocketshell.app.proof.SshShellHandle
 import com.pocketshell.app.proof.createStdoutFlow
 import com.pocketshell.app.proof.openShell
 import com.pocketshell.app.proof.readKeyFromRawResource
-import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -569,30 +568,13 @@ public class SessionViewModel @Inject constructor(
     }
 
     /**
-     * Route a picked snippet through the same terminal input bridge as the
-     * key bar and command chips.
-     *
-     * Command snippets execute immediately by appending the same carriage
-     * return byte Termux emits for keyboard Enter. Prompt snippets paste only
-     * so the user can continue editing before pressing Enter manually.
-     *
-     * Kept for the row-body smart-default tap surface in
-     * [com.pocketshell.app.snippets.SnippetPickerSheet]. The explicit
-     * `Send` / `Send + ↵` chips route through [sendSnippet] instead so the
-     * user's intent (Enter or no Enter) is honoured directly.
-     */
-    public fun onSnippetPicked(snippet: SnippetEntity) {
-        when (SnippetKind.fromStorage(snippet.kind)) {
-            SnippetKind.Command -> sendText(snippet.body, withEnter = true)
-            SnippetKind.Prompt -> sendText(snippet.body, withEnter = false)
-        }
-    }
-
-    /**
-     * Issue #187: explicit-intent snippet send. Bypasses the kind-aware
-     * smart default of [onSnippetPicked] and uses the caller-supplied
+     * Issue #187: explicit-intent snippet send. Uses the caller-supplied
      * [withEnter] flag directly — `true` for `Send + ↵`, `false` for
      * plain `Send`. Wired by the snippet picker's chip row.
+     *
+     * Per D22 (issue #227) this is the only snippet entry point — the
+     * legacy kind-aware `onSnippetPicked` smart default was removed
+     * along with the picker's `onSnippetPicked` callback.
      */
     public fun sendSnippet(snippet: SnippetEntity, withEnter: Boolean) {
         sendText(snippet.body, withEnter = withEnter)

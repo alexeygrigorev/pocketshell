@@ -52,7 +52,7 @@ class SnippetPickerBodyPreviewTest {
                     totalCount = 1,
                     query = "",
                     onQueryChange = {},
-                    onSnippetTap = {},
+                    onSnippetSend = { _, _ -> },
                     onManageTap = {},
                     onClose = {},
                 )
@@ -76,7 +76,7 @@ class SnippetPickerBodyPreviewTest {
                     totalCount = 1,
                     query = "",
                     onQueryChange = {},
-                    onSnippetTap = {},
+                    onSnippetSend = { _, _ -> },
                     onManageTap = {},
                     onClose = {},
                 )
@@ -104,7 +104,7 @@ class SnippetPickerBodyPreviewTest {
                     totalCount = 1,
                     query = "",
                     onQueryChange = {},
-                    onSnippetTap = {},
+                    onSnippetSend = { _, _ -> },
                     onManageTap = {},
                     onClose = {},
                 )
@@ -130,7 +130,7 @@ class SnippetPickerBodyPreviewTest {
                     totalCount = 1,
                     query = "",
                     onQueryChange = {},
-                    onSnippetTap = {},
+                    onSnippetSend = { _, _ -> },
                     onManageTap = {},
                     onClose = {},
                 )
@@ -160,15 +160,17 @@ class SnippetPickerBodyPreviewTest {
                     totalCount = 3,
                     query = "",
                     onQueryChange = {},
-                    onSnippetTap = {},
+                    onSnippetSend = { _, _ -> },
                     onManageTap = {},
                     onClose = {},
                 )
             }
         }
 
-        // The clickable row wrapper merges semantics for its children, so
-        // the preview Text nodes are only visible via the unmerged tree.
+        // Per #227 the row body is no longer clickable, but the row's
+        // explicit Send / Send + ↵ chips below still merge semantics
+        // through their `clickable` modifiers, so the preview Text nodes
+        // are only reliably visible via the unmerged tree on tag lookup.
         // Suppression cases ("deduped") use the merged tree on purpose —
         // `assertDoesNotExist` is satisfied either way and exercises the
         // production path the user actually sees.

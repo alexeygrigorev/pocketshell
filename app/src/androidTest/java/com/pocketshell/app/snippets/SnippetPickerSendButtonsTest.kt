@@ -15,9 +15,15 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Issue #187: Compose-level coverage that the picker row exposes both
- * `Send` and `Send + ↵` affordances per row and that each chip dispatches
- * the right `(snippet, withEnter)` intent through the new callback.
+ * Issue #187 / #227: Compose-level coverage that the picker row exposes
+ * both `Send` and `Send + ↵` affordances per row and that each chip
+ * dispatches the right `(snippet, withEnter)` intent through the
+ * single (post-#227) [SnippetPickerContent.onSnippetSend] callback.
+ *
+ * Per D22 (issue #227) the legacy dual contract was deleted: the picker
+ * exposes a single `onSnippetSend` callback, and the row body is purely
+ * informational — only the explicit chips dispatch intent. The tests
+ * here guard that single-contract invariant.
  *
  * This test does NOT need Docker — it inspects only the picker's local
  * callback wiring, so it runs in the same connectedAndroidTest task as
@@ -54,7 +60,7 @@ class SnippetPickerSendButtonsTest {
                     totalCount = 2,
                     query = "",
                     onQueryChange = {},
-                    onSnippetTap = {},
+                    onSnippetSend = { _, _ -> },
                     onManageTap = {},
                     onClose = {},
                 )
@@ -84,7 +90,6 @@ class SnippetPickerSendButtonsTest {
             kind = "command",
         )
         val sends = mutableListOf<Pair<Long, Boolean>>()
-        var rowTaps = 0
 
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
@@ -93,7 +98,6 @@ class SnippetPickerSendButtonsTest {
                     totalCount = 1,
                     query = "",
                     onQueryChange = {},
-                    onSnippetTap = { rowTaps++ },
                     onSnippetSend = { picked, withEnter -> sends += picked.id to withEnter },
                     onManageTap = {},
                     onClose = {},
@@ -105,10 +109,8 @@ class SnippetPickerSendButtonsTest {
             .performClick()
 
         // Send (no Enter) chip must fire onSnippetSend with withEnter
-        // = false and must NOT collapse to the legacy smart-default
-        // onSnippetTap path.
+        // = false.
         assertEquals(listOf(snippet.id to false), sends)
-        assertEquals(0, rowTaps)
     }
 
     @Test
@@ -129,7 +131,6 @@ class SnippetPickerSendButtonsTest {
                     totalCount = 1,
                     query = "",
                     onQueryChange = {},
-                    onSnippetTap = {},
                     onSnippetSend = { picked, withEnter -> sends += picked.id to withEnter },
                     onManageTap = {},
                     onClose = {},
@@ -144,51 +145,15 @@ class SnippetPickerSendButtonsTest {
     }
 
     @Test
-    fun rowBodyTap_stillRoutesThroughLegacyOnSnippetPickedCallback() {
-        // Issue #187 must not regress the row-body smart-default tap
-        // surface that pre-existing callers (TmuxSessionScreen,
-        // PromptComposerSheet) depend on.
-        val snippet = SnippetEntity(
-            id = 13,
-            hostId = 1,
-            label = "restart svc",
-            body = "sudo systemctl restart pocketshell",
-            kind = "command",
-        )
-        var lastPicked: SnippetEntity? = null
-
-        compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
-                SnippetPickerContent(
-                    snippets = listOf(snippet),
-                    totalCount = 1,
-                    query = "",
-                    onQueryChange = {},
-                    onSnippetTap = { lastPicked = it },
-                    onManageTap = {},
-                    onClose = {},
-                )
-            }
-        }
-
-        compose.onNodeWithTag(snippetPickerRowTag(snippet.id))
-            .performClick()
-
-        assertEquals(snippet.id, lastPicked?.id)
-    }
-
-    @Test
-    fun defaultDelegationContract_chipFallsBackToOnSnippetPicked() {
-        // Safety-net contract for the picker's public API: when a
-        // caller has NOT supplied an explicit [onSnippetSend] (e.g.
-        // previews, future call sites, third-party Compose hosts), the
-        // new Send / Send + ↵ chips must fall back to the row's
-        // legacy [onSnippetPicked] path so the user is never stranded
-        // on a chip that does nothing. All three production callers
-        // (SessionScreen, TmuxSessionScreen, PromptComposerSheet) now
-        // wire `onSnippetSend` explicitly — this test guards the
-        // documented default-delegation behaviour of the component
-        // itself, not the production wiring.
+    fun onSnippetSendContract_isTheOnlyDispatchSurface() {
+        // Issue #227 contract test: replaces the deleted
+        // `defaultDelegationContract_chipFallsBackToOnSnippetPicked`
+        // test. Per D22 the picker has a single send callback —
+        // every chip tap routes through `onSnippetSend` with the
+        // explicit `withEnter` flag, no fallback path. This test
+        // pins that single-contract invariant: both chips dispatch
+        // through the same callback and carry the chip's `withEnter`
+        // flag verbatim, in order.
         val snippet = SnippetEntity(
             id = 14,
             hostId = 1,
@@ -196,7 +161,7 @@ class SnippetPickerSendButtonsTest {
             body = "tail -F /var/log/syslog",
             kind = "command",
         )
-        val tapped = mutableListOf<Long>()
+        val sends = mutableListOf<Pair<Long, Boolean>>()
 
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
@@ -205,17 +170,25 @@ class SnippetPickerSendButtonsTest {
                     totalCount = 1,
                     query = "",
                     onQueryChange = {},
-                    onSnippetTap = { tapped += it.id },
+                    onSnippetSend = { picked, withEnter -> sends += picked.id to withEnter },
                     onManageTap = {},
                     onClose = {},
                 )
             }
         }
 
-        // Tap the Send + ↵ chip without supplying onSnippetSend.
+        // Tap both chips in order. Each must route through
+        // `onSnippetSend` with the matching `withEnter` flag — no
+        // legacy row-body tap path, no default-delegation fallback.
+        compose.onNodeWithTag(snippetSendChipTag(snippet.id, withEnter = false))
+            .performClick()
         compose.onNodeWithTag(snippetSendChipTag(snippet.id, withEnter = true))
             .performClick()
-        assertEquals(listOf(snippet.id), tapped)
+
+        assertEquals(
+            listOf(snippet.id to false, snippet.id to true),
+            sends,
+        )
     }
 
     @Test
@@ -239,7 +212,7 @@ class SnippetPickerSendButtonsTest {
                     totalCount = 1,
                     query = "",
                     onQueryChange = {},
-                    onSnippetTap = {},
+                    onSnippetSend = { _, _ -> },
                     onManageTap = {},
                     onClose = {},
                 )

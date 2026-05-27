@@ -462,21 +462,18 @@ public fun SessionScreen(
     }
 
     if (showSnippetPicker && hostId != null) {
-        // Issue #17 / #187: chip-row entry to the snippet library.
-        //  - Row-body tap routes through the kind-aware smart default
-        //    (`onSnippetPicked` → command runs, prompt pastes).
+        // Issue #17 / #187 / #227: chip-row entry to the snippet library.
         //  - Explicit `Send` / `Send + ↵` chips route through
         //    `sendSnippet(snippet, withEnter)` so the user's overt Enter
         //    intent is honoured directly. This is the production wiring
         //    for issue #187 — tapping `Send + ↵` on a prompt snippet
         //    now actually presses Enter.
+        //  - Per D22 (issue #227) the legacy row-body smart-default tap
+        //    surface was removed; the picker only routes through the
+        //    explicit-intent chip callback.
         SnippetPickerSheet(
             hostId = hostId,
             onDismiss = { showSnippetPicker = false },
-            onSnippetPicked = { snippet ->
-                viewModel.onSnippetPicked(snippet)
-                showSnippetPicker = false
-            },
             onSnippetSend = { snippet, withEnter ->
                 viewModel.sendSnippet(snippet, withEnter)
                 showSnippetPicker = false

@@ -1,0 +1,209 @@
+package com.pocketshell.app.portfwd
+
+import android.content.Context
+import android.content.Intent
+import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.app.portfwd.service.ForwardingService
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Before
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows
+import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowApplication
+
+/**
+ * Unit tests for [ForwardingController] — the singleton that bridges
+ * [PortForwardPanelViewModel] and [ForwardingService] (issue #203
+ * expanded scope, foreground-service slice).
+ *
+ * The controller is responsible for starting / stopping the service
+ * on the 0 → 1 / 1 → 0 active-host transitions and for fanning out
+ * the network-recovery reconnect hint to every registered host's
+ * supervisor.
+ *
+ * We assert the intent fan-out via [ShadowApplication.getNextStartedService]
+ * which records every `startService` / `startForegroundService` call
+ * made through the Robolectric application context.
+ */
+@RunWith(RobolectricTestRunner::class)
+@Config(manifest = Config.NONE, sdk = [33])
+@OptIn(ExperimentalCoroutinesApi::class)
+class ForwardingControllerTest {
+
+    private lateinit var context: Context
+    private lateinit var shadow: ShadowApplication
+
+    @Before
+    fun setUp() {
+        context = ApplicationProvider.getApplicationContext()
+        shadow = Shadows.shadowOf(context.applicationContext as android.app.Application)
+        // Drain anything Robolectric queued from prior tests.
+        drainStartedServices()
+    }
+
+    @Test
+    fun `first registerActiveHost starts the foreground service`() {
+        val controller = ForwardingController(context)
+
+        controller.registerActiveHost(hostId = 1, hostName = "alpha")
+
+        val started = shadow.nextStartedService
+        assertNotNull("ForwardingController must start ForwardingService on first registration", started)
+        assertEquals(
+            ForwardingService::class.java.name,
+            started.component?.className,
+        )
+        assertEquals(ForwardingService.ACTION_START, started.action)
+        assertEquals(1, controller.flowOfActiveHostCount().value)
+        assertEquals("alpha", controller.flowOfPrimaryHostName().value)
+    }
+
+    @Test
+    fun `second registerActiveHost does not start the service again`() {
+        val controller = ForwardingController(context)
+
+        controller.registerActiveHost(hostId = 1, hostName = "alpha")
+        drainStartedServices()
+        controller.registerActiveHost(hostId = 2, hostName = "beta")
+
+        // No new service intent — only the host count + sum change.
+        assertNull(
+            "second registration must not re-issue startForegroundService",
+            shadow.nextStartedService,
+        )
+        assertEquals(2, controller.flowOfActiveHostCount().value)
+        // primaryHostName stays on the first registered host so the
+        // notification text is stable.
+        assertEquals("alpha", controller.flowOfPrimaryHostName().value)
+    }
+
+    @Test
+    fun `unregisterActiveHost stops service when last host departs`() {
+        val controller = ForwardingController(context)
+
+        controller.registerActiveHost(hostId = 1, hostName = "alpha")
+        drainStartedServices()
+
+        controller.unregisterActiveHost(hostId = 1)
+
+        val stopped = shadow.nextStartedService
+        assertNotNull("last unregister must request service stop", stopped)
+        assertEquals(ForwardingService.ACTION_STOP, stopped.action)
+        assertEquals(0, controller.flowOfActiveHostCount().value)
+        assertEquals(0, controller.flowOfTotalTunnelCount().value)
+        assertEquals("", controller.flowOfPrimaryHostName().value)
+    }
+
+    @Test
+    fun `unregisterActiveHost keeps service running while other hosts remain`() {
+        val controller = ForwardingController(context)
+
+        controller.registerActiveHost(hostId = 1, hostName = "alpha")
+        controller.registerActiveHost(hostId = 2, hostName = "beta")
+        drainStartedServices()
+
+        controller.unregisterActiveHost(hostId = 1)
+
+        assertNull(
+            "unregistering one of two hosts must not stop the service",
+            shadow.nextStartedService,
+        )
+        assertEquals(1, controller.flowOfActiveHostCount().value)
+        // Primary host name should follow the remaining registration.
+        assertEquals("beta", controller.flowOfPrimaryHostName().value)
+    }
+
+    @Test
+    fun `unregisterActiveHost is idempotent on an unknown id`() {
+        val controller = ForwardingController(context)
+
+        // No registrations. Unregistering nothing must not crash and
+        // must not start/stop the service.
+        controller.unregisterActiveHost(hostId = 99)
+
+        assertNull(shadow.nextStartedService)
+        assertEquals(0, controller.flowOfActiveHostCount().value)
+    }
+
+    @Test
+    fun `updateTunnelCount surfaces sum across registered hosts`() {
+        val controller = ForwardingController(context)
+
+        controller.registerActiveHost(hostId = 1, hostName = "alpha")
+        controller.registerActiveHost(hostId = 2, hostName = "beta")
+        controller.updateTunnelCount(hostId = 1, count = 3)
+        controller.updateTunnelCount(hostId = 2, count = 5)
+
+        assertEquals(8, controller.flowOfTotalTunnelCount().value)
+
+        controller.updateTunnelCount(hostId = 1, count = 0)
+        assertEquals(5, controller.flowOfTotalTunnelCount().value)
+    }
+
+    @Test
+    fun `reconnectNow fans out hints to every registered host hook`() {
+        val controller = ForwardingController(context)
+        val calls1 = java.util.concurrent.atomic.AtomicInteger(0)
+        val calls2 = java.util.concurrent.atomic.AtomicInteger(0)
+
+        controller.registerActiveHost(
+            hostId = 1,
+            hostName = "alpha",
+            reconnectHook = { calls1.incrementAndGet() },
+        )
+        controller.registerActiveHost(
+            hostId = 2,
+            hostName = "beta",
+            reconnectHook = { calls2.incrementAndGet() },
+        )
+
+        controller.reconnectNow()
+
+        assertEquals(1, calls1.get())
+        assertEquals(1, calls2.get())
+
+        // Unregister one; reconnectNow now only fires the remaining hook.
+        controller.unregisterActiveHost(hostId = 1)
+        controller.reconnectNow()
+        assertEquals(1, calls1.get())
+        assertEquals(2, calls2.get())
+    }
+
+    @Test
+    fun `registerActiveHost twice with same id updates fields and does not duplicate`() {
+        val controller = ForwardingController(context)
+        controller.registerActiveHost(hostId = 1, hostName = "alpha")
+        controller.updateTunnelCount(1, 3)
+        controller.registerActiveHost(hostId = 1, hostName = "alpha-renamed")
+
+        assertEquals(1, controller.flowOfActiveHostCount().value)
+        // Renamed host's name reflected in the primary name.
+        assertEquals("alpha-renamed", controller.flowOfPrimaryHostName().value)
+        // Re-registration must preserve the cached tunnel count (we
+        // don't want a panel re-build to reset the count to zero between
+        // the register and the first tunnel snapshot).
+        assertEquals(3, controller.flowOfTotalTunnelCount().value)
+    }
+
+    private fun drainStartedServices() {
+        while (shadow.nextStartedService != null) {
+            // Iterate to clear the queue.
+        }
+    }
+
+    @Suppress("unused")
+    private fun assertActionIs(intent: Intent?, expected: String) {
+        assertEquals(expected, intent?.action)
+    }
+
+    @Suppress("unused")
+    private fun debugSize() {
+        assertTrue("placeholder", true)
+    }
+}

@@ -50,6 +50,26 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+        Issue #203 expanded scope (round 3, foreground-service slice):
+        the auto-forward feature carve-out (D21, see `docs/decisions.md`)
+        allows a foreground service while ≥1 SSH tunnel is active so the
+        device-side SSH transport survives backgrounding. PocketShell's
+        usage doesn't fit any of the pre-defined service types
+        (`dataSync`, `mediaPlayback`, `connectedDevice`, ...): we're
+        holding a user-initiated network transport open without doing
+        media playback or device-to-device communication, so we use
+        the catch-all `specialUse` type with a `propertyName` value
+        that documents the use case for store review.
+
+        `FOREGROUND_SERVICE` is the basic permission required on all
+        SDK levels; `FOREGROUND_SERVICE_SPECIAL_USE` is the
+        per-type permission required on Android 14+ when the service
+        declares `foregroundServiceType="specialUse"`.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
     <application
         android:name=".App"
         android:allowBackup="true"
@@ -236,6 +256,37 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
+
+        <!--
+            Issue #203 expanded scope (round 3): foreground service for
+            the SSH port-forwarding feature. See
+            `com.pocketshell.app.portfwd.service.ForwardingService` for
+            the runtime behaviour and `docs/decisions.md` D21 for the
+            background-work carve-out rationale.
+
+            `foregroundServiceType="specialUse"` is required on Android
+            14+ because PocketShell's use case (keep a user-initiated
+            SSH transport alive while the app is backgrounded so port
+            forwards survive) doesn't match any of the pre-defined
+            types like `dataSync` (we're not syncing data on a schedule)
+            or `connectedDevice` (we're not communicating with a
+            companion device). The accompanying
+            `FOREGROUND_SERVICE_SPECIAL_USE.subtype` property is
+            informational metadata that helps Google Play reviewers
+            understand the intent if/when the app ships to the store.
+
+            `android:exported="false"` because the service is started
+            from PocketShell's own code only — third-party apps must
+            not be able to wake it.
+        -->
+        <service
+            android:name=".portfwd.service.ForwardingService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keeps SSH port-forwarding tunnels alive while the app is backgrounded, scoped to hosts the user explicitly enabled auto-forward on." />
+        </service>
 
     </application>
 

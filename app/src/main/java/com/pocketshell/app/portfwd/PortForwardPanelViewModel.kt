@@ -8,6 +8,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.portfwd.AutoForwardConfig
 import com.pocketshell.core.portfwd.AutoForwarder
+import com.pocketshell.core.portfwd.AutoForwarderSupervisor
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.dao.HostDao
@@ -53,6 +54,14 @@ class PortForwardPanelViewModel @Inject constructor(
     // saved state. Persistence + edit affordances are deferred to the
     // panel UI in a follow-up round.
     private val portRemappingDao: PortRemappingDao,
+    // Issue #203 expanded scope (round 3, foreground-service slice):
+    // rendezvous for starting / stopping the persistent foreground
+    // service. The ViewModel calls `registerActiveHost` when
+    // auto-forward succeeds and `unregisterActiveHost` on disable. The
+    // controller starts the [com.pocketshell.app.portfwd.service.ForwardingService]
+    // when the first host registers and stops it when the last
+    // unregisters.
+    private val forwardingController: ForwardingController,
 ) : ViewModel() {
 
     private val _state = MutableStateFlow(PortForwardPanelState())
@@ -69,6 +78,15 @@ class PortForwardPanelViewModel @Inject constructor(
     private var loadGeneration: Long = 0
     private var connectJob: Job? = null
     private var connectGeneration: Long = 0
+
+    /**
+     * Host id we have registered with [forwardingController]. Non-null
+     * means the foreground service is being kept alive for us. We hold
+     * this so [stopForwarding] / [leavePanel] / [onCleared] can call
+     * `unregisterActiveHost` even when [_state.value.host] has already
+     * been replaced (e.g. user navigated to a different host's panel).
+     */
+    private var registeredHostId: Long? = null
 
     /**
      * Snapshot of whether auto-forward was active immediately before the
@@ -327,9 +345,38 @@ class PortForwardPanelViewModel @Inject constructor(
             tunnelCollection = viewModelScope.launch {
                 autoForwarder.flowOfTunnels().collect { tunnels ->
                     _state.value = _state.value.copy(tunnels = tunnels)
+                    // Issue #203 expanded scope (foreground-service
+                    // slice): mirror the tunnel count out to the
+                    // controller so the persistent notification can
+                    // render `N tunnels active`. Count only FORWARDING
+                    // tunnels — AVAILABLE / FAILED / STOPPED rows
+                    // shouldn't inflate the notification count.
+                    val forwardingCount = tunnels.count { tunnel ->
+                        tunnel.status == TunnelInfo.Status.FORWARDING
+                    }
+                    forwardingController.updateTunnelCount(host.id, forwardingCount)
                 }
             }
             autoForwarder.start(viewModelScope)
+            // Foreground-service rendezvous: tell the controller this
+            // host is now actively forwarding. The controller starts
+            // [ForwardingService] when this is the first registered
+            // host. Reconnect-on-network-recovery is not yet wired
+            // through to the bare [AutoForwarder] — a follow-up round
+            // swaps the forwarder for [AutoForwarderSupervisor] and
+            // passes the supervisor's `reconnectNow()` as the
+            // reconnect hook below. For now we register without a
+            // hook so the service still tracks the host (and keeps
+            // the process alive), but the network callback's
+            // `controller.reconnectNow()` becomes a no-op for this
+            // host. The supervisor exists and is fully unit-tested
+            // (see `AutoForwarderSupervisorTest`) for that follow-up.
+            forwardingController.registerActiveHost(
+                hostId = host.id,
+                hostName = host.name,
+                reconnectHook = null,
+            )
+            registeredHostId = host.id
             _state.value = _state.value.copy(connectionState = PortForwardConnectionState.Connected)
             // User-driven enable: persist only after the SSH connect +
             // forwarder bring-up succeeded. A failed enable leaves the
@@ -383,6 +430,16 @@ class PortForwardPanelViewModel @Inject constructor(
         forwarder = null
         session?.close()
         session = null
+        // Foreground-service rendezvous: tell the controller this host
+        // is no longer forwarding. The controller stops
+        // [com.pocketshell.app.portfwd.service.ForwardingService] when
+        // this was the last registered host. Idempotent on the
+        // controller side — safe to call when nothing was registered
+        // (e.g. teardown after a failed connect).
+        registeredHostId?.let { hostId ->
+            forwardingController.unregisterActiveHost(hostId)
+        }
+        registeredHostId = null
     }
 
     private fun clearPassphrase() {

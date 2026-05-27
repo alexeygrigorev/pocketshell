@@ -765,12 +765,14 @@ class PortForwardPanelViewModelTest {
         hostDao: HostDao = db.hostDao(),
         sshKeyDao: SshKeyDao = db.sshKeyDao(),
         portRemappingDao: com.pocketshell.core.storage.dao.PortRemappingDao = db.portRemappingDao(),
+        forwardingController: ForwardingController = ForwardingController(context),
     ): PortForwardPanelViewModel =
         PortForwardPanelViewModel(
             hostDao = hostDao,
             sshKeyDao = sshKeyDao,
             connector = connector,
             portRemappingDao = portRemappingDao,
+            forwardingController = forwardingController,
         )
 
     private class FakeConnector(

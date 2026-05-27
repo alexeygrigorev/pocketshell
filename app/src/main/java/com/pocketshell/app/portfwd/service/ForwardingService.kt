@@ -1,0 +1,356 @@
+package com.pocketshell.app.portfwd.service
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.os.Build
+import android.os.IBinder
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import com.pocketshell.app.MainActivity
+import com.pocketshell.app.portfwd.ForwardingController
+import dagger.hilt.android.AndroidEntryPoint
+import javax.inject.Inject
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
+
+/**
+ * Foreground service that keeps the app process alive while at least
+ * one SSH port-forward tunnel is active.
+ *
+ * Issue #203 expanded scope, ported (and adapted to sshj +
+ * PocketShell architecture) from
+ * `ssh-auto-forward-android/.../service/ForwardingService.kt`.
+ *
+ * D21 carve-out (see `docs/decisions.md`): PocketShell otherwise runs
+ * strictly foreground-only, but tunnels are bound to the device-side
+ * SSH transport and die the moment the app process is backgrounded.
+ * Without a foreground service the user loses the entire auto-forward
+ * feature on backgrounding — incompatible with the "supervise long
+ * running agents from your phone" core JTBD. The service exists ONLY
+ * while ≥1 host has auto-forward enabled; it tears itself down the
+ * moment the last tunnel goes away.
+ *
+ * Responsibilities:
+ *  - Promote the process to foreground state with a persistent,
+ *    user-visible notification (so the OS doesn't kill us)
+ *  - Mirror connection / tunnel state from [ForwardingController] into
+ *    the notification text so the user sees host name + tunnel count
+ *  - Register a network-availability callback and call
+ *    [ForwardingController.reconnectNow] on network recovery, so the
+ *    [com.pocketshell.core.portfwd.AutoForwarderSupervisor] in the
+ *    ViewModel skips its exponential-backoff sleep
+ *  - Stop itself when [ForwardingController.flowOfActiveHostCount]
+ *    drops to zero (all hosts disabled their auto-forward toggle)
+ *
+ * Non-goals for this round:
+ *  - The service does NOT own the SSH session or the supervisor.
+ *    Those still live inside `PortForwardPanelViewModel`. The service
+ *    is a "process keeper" + UI shim; the panel is in charge of the
+ *    actual forwarding logic. A future refactor MAY move the
+ *    supervisor into the service, but doing so today would require a
+ *    binder/IPC layer that the current ViewModel-centric design does
+ *    not yet have.
+ */
+@AndroidEntryPoint
+class ForwardingService : Service() {
+
+    @Inject
+    lateinit var controller: ForwardingController
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var observeJob: Job? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var hasStartedForeground = false
+
+    companion object {
+        private const val CHANNEL_ID = "pocketshell_forwarding"
+        private const val NOTIFICATION_ID = 0x70_46_53_56 // "pFSV" — unique within app
+
+        const val ACTION_START = "com.pocketshell.app.portfwd.action.START_FORWARDING"
+        const val ACTION_STOP = "com.pocketshell.app.portfwd.action.STOP_FORWARDING"
+
+        /**
+         * Start the service in foreground mode. Idempotent — Android
+         * will route the intent to the existing [ForwardingService]
+         * instance if one is already running. Callers (typically
+         * [com.pocketshell.app.portfwd.PortForwardPanelViewModel])
+         * invoke this when the first tunnel goes active.
+         *
+         * Uses [ContextCompat.startForegroundService] so it works
+         * across SDK levels — the platform requires `startForeground()`
+         * to be called within ~5 s of starting, which we do in
+         * [onStartCommand].
+         */
+        fun start(context: Context) {
+            val intent = Intent(context, ForwardingService::class.java).apply {
+                action = ACTION_START
+            }
+            ContextCompat.startForegroundService(context, intent)
+        }
+
+        /**
+         * Request that the service stop. Routed through `startService`
+         * (not `stopService`) so we can use the same `onStartCommand`
+         * dispatch path; the service then calls `stopForeground` +
+         * `stopSelf` from there.
+         */
+        fun stop(context: Context) {
+            val intent = Intent(context, ForwardingService::class.java).apply {
+                action = ACTION_STOP
+            }
+            context.startService(intent)
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        createNotificationChannel()
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopForwarding()
+                return START_NOT_STICKY
+            }
+            else -> {
+                // ACTION_START or null (restart-after-kill). Even on a
+                // null intent — Android can restart a STICKY service
+                // without an intent — we promote to foreground because
+                // a STARTED foreground service that doesn't call
+                // startForeground() fast enough crashes the process
+                // with ForegroundServiceDidNotStartInTimeException.
+                promoteToForegroundIfNeeded(initialNotification())
+                if (observeJob == null || observeJob?.isActive != true) {
+                    startObserving()
+                    registerNetworkCallback()
+                }
+            }
+        }
+        // START_STICKY: if Android kills us under memory pressure, the
+        // system tries to recreate us — useful if the user has tunnels
+        // open and the OS reclaims memory. We re-render the
+        // notification on recreate from the current
+        // [ForwardingController] state.
+        return START_STICKY
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onDestroy() {
+        observeJob?.cancel()
+        observeJob = null
+        unregisterNetworkCallback()
+        scope.cancel()
+        super.onDestroy()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        // User swiped the app away from recents. The auto-forward
+        // carve-out is scoped to "while the user explicitly has it
+        // enabled" — swiping the task is closer to "I'm done with
+        // this for now" than "keep running invisibly", so we tear the
+        // service down. The controller's per-host enable state is
+        // persisted in [HostEntity.enabled], so the next launch will
+        // restore the user's intent.
+        stopForwarding()
+        super.onTaskRemoved(rootIntent)
+    }
+
+    private fun startObserving() {
+        observeJob = scope.launch {
+            // Combine active-host count + tunnel count so a single
+            // collector renders both into the notification. Dropping
+            // duplicates means we don't churn the notification on
+            // every byte-counter update — only when the topology or
+            // host name changes.
+            combine(
+                controller.flowOfActiveHostCount(),
+                controller.flowOfTotalTunnelCount(),
+                controller.flowOfPrimaryHostName(),
+            ) { activeHosts, tunnels, primaryHost ->
+                Triple(activeHosts, tunnels, primaryHost)
+            }
+                .distinctUntilChanged()
+                .collect { (activeHosts, tunnels, primaryHost) ->
+                    if (activeHosts == 0) {
+                        // All hosts disabled — tear down. The
+                        // controller is responsible for posting the
+                        // initial zero-count snapshot, so this also
+                        // covers the edge case where the user toggled
+                        // off before the service finished promoting to
+                        // foreground.
+                        stopForwarding()
+                    } else {
+                        updateNotification(primaryHost, activeHosts, tunnels)
+                    }
+                }
+        }
+    }
+
+    private fun registerNetworkCallback() {
+        if (networkCallback != null) return
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return
+        val cb = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                // Network came back. Nudge the supervisor(s) so any
+                // in-flight backoff sleep cancels and a reconnect
+                // attempt happens immediately. Idempotent inside the
+                // supervisor.
+                controller.reconnectNow()
+            }
+        }
+        try {
+            cm.registerDefaultNetworkCallback(cb)
+            networkCallback = cb
+        } catch (_: SecurityException) {
+            // Some restricted profiles disallow registering network
+            // callbacks. Reconnect-on-network-recovery becomes a
+            // best-effort feature in that case; the underlying
+            // supervisor still retries on its own backoff schedule.
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val cb = networkCallback ?: return
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        try {
+            cm?.unregisterNetworkCallback(cb)
+        } catch (_: IllegalArgumentException) {
+            // Already unregistered (e.g. service was stop/started
+            // quickly). Safe to ignore.
+        }
+        networkCallback = null
+    }
+
+    private fun stopForwarding() {
+        observeJob?.cancel()
+        observeJob = null
+        unregisterNetworkCallback()
+        // STOP_FOREGROUND_REMOVE makes the notification disappear
+        // immediately. The constant has been stable since API 24.
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        hasStartedForeground = false
+        stopSelf()
+    }
+
+    private fun promoteToForegroundIfNeeded(notification: Notification) {
+        if (hasStartedForeground) return
+        // On Android 14+ (API 34) the service type must be supplied
+        // explicitly to `startForeground()`. We declare the type in
+        // the manifest as `specialUse` because PocketShell's
+        // foreground-service usage is not "data sync" or "media
+        // playback" — it's keeping a user-initiated SSH transport
+        // alive while the app is backgrounded. `specialUse` is the
+        // catch-all category for use cases not covered by the other
+        // pre-defined types and requires the `propertyName` attribute
+        // in the manifest, which we supply.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
+        hasStartedForeground = true
+    }
+
+    private fun updateNotification(hostName: String, hostCount: Int, tunnelCount: Int) {
+        val notification = buildNotification(hostName, hostCount, tunnelCount)
+        if (!hasStartedForeground) {
+            promoteToForegroundIfNeeded(notification)
+            return
+        }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.notify(NOTIFICATION_ID, notification)
+    }
+
+    private fun initialNotification(): Notification = buildNotification(
+        hostName = "",
+        hostCount = 0,
+        tunnelCount = 0,
+        contentTextOverride = "Connecting…",
+    )
+
+    private fun buildNotification(
+        hostName: String,
+        hostCount: Int,
+        tunnelCount: Int,
+        contentTextOverride: String? = null,
+    ): Notification {
+        val contentIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val stopIntent = Intent(this, ForwardingService::class.java).apply {
+            action = ACTION_STOP
+        }
+        val stopPendingIntent = PendingIntent.getService(
+            this,
+            1,
+            stopIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+
+        val contentText = contentTextOverride ?: buildString {
+            if (hostName.isNotEmpty()) {
+                append(hostName)
+                if (hostCount > 1) append(" + ${hostCount - 1} more")
+                append(" • ")
+            }
+            append("$tunnelCount tunnel")
+            if (tunnelCount != 1) append("s")
+            append(" active")
+        }
+
+        return NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("PocketShell Port Forwarding")
+            .setContentText(contentText)
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentIntent(contentIntent)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "Stop",
+                stopPendingIntent,
+            )
+            .build()
+    }
+
+    private fun createNotificationChannel() {
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "Port Forwarding",
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            description = "Shows active SSH port forwarding tunnels"
+            setShowBadge(false)
+        }
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
+    }
+}

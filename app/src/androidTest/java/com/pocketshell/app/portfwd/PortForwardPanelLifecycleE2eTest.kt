@@ -114,12 +114,14 @@ class PortForwardPanelLifecycleE2eTest {
 
         // 4. Build the ViewModel on the main thread (Lifecycle.addObserver
         //    requirement) and attach ProcessLifecycleOwner.
+        val forwardingController = ForwardingController(targetContext)
         val viewModel = withContext(Dispatchers.Main) {
             PortForwardPanelViewModel(
                 hostDao = database.hostDao(),
                 sshKeyDao = database.sshKeyDao(),
                 connector = connector,
                 portRemappingDao = database.portRemappingDao(),
+                forwardingController = forwardingController,
             ).also { it.observeProcessLifecycle(ProcessLifecycleOwner.get()) }
         }
 

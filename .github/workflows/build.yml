@@ -69,3 +69,60 @@ jobs:
           files: |
             app/build/outputs/apk/debug/*.apk
           generate_release_notes: true
+
+  publish-pypi:
+    # Build and publish the `pocketshell` Python package alongside the APK
+    # release. Only fires on tag pushes; workflow_dispatch builds are
+    # APK-only (matching the existing `Create Release` gate above).
+    name: Publish pocketshell to PyPI
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    # OIDC trusted publishing — no PYPI_API_TOKEN secret to rotate.
+    # See https://docs.pypi.org/trusted-publishers/ and the README's
+    # "PyPI trusted publishing setup" section for the one-time pypi.org
+    # configuration the maintainer must complete.
+    environment:
+      name: pypi
+      url: https://pypi.org/p/pocketshell
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify Android versionName matches pyproject.toml and tag
+        # Hard cut (D22): publish must abort if the maintainer bumps one
+        # version-source-of-truth but forgets the other before tagging.
+        run: |
+          chmod +x scripts/check-pypi-version.sh
+          scripts/check-pypi-version.sh --check-tag "${{ github.ref_name }}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build backend
+        run: python -m pip install --upgrade build
+
+      - name: Build sdist and wheel
+        working-directory: tools/pocketshell-cli
+        run: python -m build
+
+      - name: Upload built distributions as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocketshell-pypi-${{ github.ref_name }}
+          path: tools/pocketshell-cli/dist/*
+          if-no-files-found: error
+
+      - name: Publish to PyPI via trusted publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: tools/pocketshell-cli/dist
+          # Default is `https://upload.pypi.org/legacy/`; leave as-is for
+          # production PyPI. The action picks up the OIDC token from the
+          # `id-token: write` permission above.

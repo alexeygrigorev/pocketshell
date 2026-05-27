@@ -22,10 +22,10 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
-import com.pocketshell.app.tmux.TMUX_NEW_WINDOW_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
-import com.pocketshell.app.tmux.TMUX_WINDOW_STRIP_PILL_TAG_PREFIX
 import com.pocketshell.app.tmux.TMUX_WINDOW_STRIP_TAG
+import com.pocketshell.app.tmux.TMUX_WINDOW_SWITCHER_OVERLAY_TAG
+import com.pocketshell.app.tmux.TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -139,8 +139,13 @@ class TmuxSessionWindowNavigationE2eTest {
         // any pane shows up.
         waitForTerminalReady()
         SystemClock.sleep(SETTLE_MS)
+        // Issue #189: the WindowStrip is no longer rendered as part of
+        // the default chrome — its assertion is now an unconditional
+        // "must not exist". The previous single-window-only behaviour
+        // from #158 still holds: there is nothing to switch to and the
+        // user sees just the consolidated top chrome's session label.
         assertFalse(
-            "WindowStrip should be hidden when the session has a single window (#158)",
+            "WindowStrip should never be rendered as default chrome (#189)",
             compose.onAllNodesWithTag(TMUX_WINDOW_STRIP_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty(),
@@ -148,8 +153,8 @@ class TmuxSessionWindowNavigationE2eTest {
         captureViewport("issue158-02-windowstrip-hidden")
 
         // ===== Step 3 — Add a window from the kebab + window menu =====
-        // The strip is hidden, so the user reaches "+ New window" via the
-        // kebab dropdown. We tap that entry directly.
+        // Single source of truth for the "+ New window" affordance — the
+        // strip is gone (#189), so the kebab is the discoverable path.
         compose.onNodeWithText("⋮").performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithText("+ New window", useUnmergedTree = true)
@@ -159,33 +164,47 @@ class TmuxSessionWindowNavigationE2eTest {
         val newWindowAt = SystemClock.elapsedRealtime()
         compose.onNodeWithText("+ New window").performClick()
 
-        // ===== Step 4 — WindowStrip MUST become visible with two entries =====
-        // Targets are stable test tags on each pill: we don't probe via
-        // text because "Window N" also appears in the breadcrumb crumb,
-        // which would make plain `onNodeWithText("Window 2")` ambiguous.
+        // ===== Step 4 — "Switch window" surfaces in the kebab now that windows.size > 1 =====
+        // Post-#189 the WindowStrip is gone; the kebab gains a
+        // "Switch window" item when there are multiple windows, and
+        // the consolidated chrome's window crumb is tappable. We use
+        // the kebab path here so we can assert the entry actually
+        // shows up as expected (the alternative — tap the "Window N"
+        // crumb directly — is exercised implicitly later in this test
+        // via the [TMUX_WINDOW_SWITCHER_OVERLAY_TAG] assertions).
         compose.waitUntil(timeoutMillis = 20_000) {
-            compose.onAllNodesWithTag(TMUX_WINDOW_STRIP_TAG, useUnmergedTree = true)
+            // Open the kebab; close it after the first probe so we
+            // can re-open it freshly for the switcher launch below.
+            // We use onAllNodesWithText so we can probe without
+            // throwing while the dropdown is animating in.
+            compose.onAllNodesWithText("⋮").fetchSemanticsNodes().isNotEmpty()
+        }
+        recordTiming("add_window_ms", SystemClock.elapsedRealtime() - newWindowAt)
+        compose.onNodeWithText("⋮").performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("Switch window").performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(TMUX_WINDOW_SWITCHER_OVERLAY_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty() &&
                 compose.onAllNodesWithTag(
-                    "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}1",
+                    "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}1",
                     useUnmergedTree = true,
                 ).fetchSemanticsNodes().isNotEmpty() &&
                 compose.onAllNodesWithTag(
-                    "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}2",
+                    "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}2",
                     useUnmergedTree = true,
                 ).fetchSemanticsNodes().isNotEmpty()
         }
-        recordTiming("add_window_ms", SystemClock.elapsedRealtime() - newWindowAt)
-        compose.onNodeWithTag(TMUX_WINDOW_STRIP_TAG, useUnmergedTree = true).assertExists()
-        captureViewport("issue158-03-windowstrip-two-entries")
+        captureViewport("issue158-03-window-switcher-two-entries")
 
-        // The pager does not auto-scroll on `%window-add`, so we
-        // explicitly tap window 2's pill to swap the visible pane. This
-        // is the same code path a real user takes after creating a new
-        // window and seeing the strip flip from 0 to 1 sibling.
+        // Tap window 2's page in the overlay to swap the visible pane.
         compose.onNodeWithTag(
-            "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}2",
+            "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}2",
             useUnmergedTree = true,
         ).performClick()
         waitForTerminalReady()
@@ -206,10 +225,23 @@ class TmuxSessionWindowNavigationE2eTest {
         }
         captureViewport("issue158-04-win2-marker-visible")
 
-        // ===== Step 6 — Switch to window 1, marker MUST NOT be visible =====
+        // ===== Step 6 — Switch to window 1 via the kebab, marker MUST NOT be visible =====
         val switchToWinOneAt = SystemClock.elapsedRealtime()
+        compose.onNodeWithText("⋮").performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("Switch window").performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(
+                "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}1",
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isNotEmpty()
+        }
         compose.onNodeWithTag(
-            "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}1",
+            "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}1",
             useUnmergedTree = true,
         ).performClick()
         // The pager animates to the first pane of window 1. Wait for the
@@ -230,10 +262,23 @@ class TmuxSessionWindowNavigationE2eTest {
         )
         captureViewport("issue158-05-switched-to-window-1")
 
-        // ===== Step 7 — Switch back to window 2, marker MUST reappear =====
+        // ===== Step 7 — Switch back to window 2 via the kebab, marker MUST reappear =====
         val switchBackAt = SystemClock.elapsedRealtime()
+        compose.onNodeWithText("⋮").performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("Switch window").performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(
+                "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}2",
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isNotEmpty()
+        }
         compose.onNodeWithTag(
-            "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}2",
+            "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}2",
             useUnmergedTree = true,
         ).performClick()
         waitForVisibleTerminal("switched back to window 2 (marker present)") { transcript ->
@@ -308,17 +353,33 @@ class TmuxSessionWindowNavigationE2eTest {
         recordTiming("reattach_claude_main_ms", SystemClock.elapsedRealtime() - reattachAt)
         captureViewport("issue158-08-reattached-claude-main")
 
-        // The reattached session has two windows; the strip MUST be back.
+        // The reattached session has two windows. The strip is gone
+        // post-#189; the discoverable switcher path is the kebab's
+        // "Switch window" entry, which the kebab only renders when
+        // there are siblings to switch to.
         compose.waitUntil(timeoutMillis = 20_000) {
-            compose.onAllNodesWithTag(TMUX_WINDOW_STRIP_TAG, useUnmergedTree = true)
+            compose.onAllNodesWithText("⋮", useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
+        compose.onNodeWithText("⋮").performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("Switch window").performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(
+                "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}2",
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isNotEmpty()
+        }
         // After reattach, the user could land on either window — what
         // matters is that the win-2 marker is reachable. Tap window 2's
-        // strip pill explicitly to land on it deterministically.
+        // overlay page explicitly to land on it deterministically.
         compose.onNodeWithTag(
-            "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}2",
+            "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}2",
             useUnmergedTree = true,
         ).performClick()
         waitForVisibleTerminal("marker preserved across reattach") { transcript ->
@@ -330,10 +391,17 @@ class TmuxSessionWindowNavigationE2eTest {
         }
         captureViewport("issue158-09-marker-preserved-after-reattach")
 
-        // ===== Bonus assertion — labels are readable in the strip =====
-        // Sanity: the strip's "+ window" button (testTag) exists and the
-        // bare tmux IDs do NOT leak into the visible labels.
-        compose.onNodeWithTag(TMUX_NEW_WINDOW_BUTTON_TAG, useUnmergedTree = true).assertExists()
+        // ===== Bonus assertion — strip is *never* rendered post-#189 =====
+        // Sanity: the consolidated chrome carries the same affordances
+        // without the strip. We re-assert the strip is gone after the
+        // reattach so a future regression that flips the chrome back
+        // is caught.
+        assertFalse(
+            "WindowStrip must remain hidden after reattach (#189)",
+            compose.onAllNodesWithTag(TMUX_WINDOW_STRIP_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty(),
+        )
 
         writeTimings()
         Unit

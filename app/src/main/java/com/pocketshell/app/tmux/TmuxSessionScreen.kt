@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -109,9 +110,6 @@ import androidx.compose.foundation.layout.width
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
-import com.pocketshell.uikit.components.Breadcrumb
-import com.pocketshell.uikit.components.KeyBar
-import com.pocketshell.uikit.components.Tabs
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
@@ -392,6 +390,73 @@ public fun TmuxSessionScreen(
                 .fillMaxSize()
                 .imePadding(),
         ) {
+            // Issue #186: gate the inline Conversation tab on the
+            // CURRENTLY-VISIBLE window's detection state — not the
+            // session-wide one. v0.2.8 dogfood reported "Claude
+            // detected" lighting up on plain-shell windows that shared
+            // a cwd with the agent window; per-window detection
+            // ([TmuxSessionViewModel.agentForWindow]) fixes the data
+            // layer, and this gating change keeps the tab in sync with
+            // the per-window verdict.
+            //
+            // Issue #197 co-existence: when the user has explicitly
+            // opened the conversation pane ([lockedConversationPaneId]
+            // is non-null), the tab stays visible from any window so
+            // the locked composer remains reachable. The cross-window
+            // mismatch banner inside [TmuxConversationPane] already
+            // tells the user they are away from the agent window.
+            val currentWindowAgent: com.pocketshell.core.agents.AgentKind? =
+                remember(panes, agentConversations, currentWindowId) {
+                    viewModel.agentForWindow(currentWindowId)
+                }
+            val showConversationTab = currentWindowAgent != null ||
+                lockedConversationPaneId != null
+            val tabs = if (showConversationTab) {
+                listOf("Terminal", "Conversation")
+            } else {
+                listOf("Terminal")
+            }
+            // Issue #197: Conversation tab reads as "selected" whenever
+            // the lock is active — that includes the case where the
+            // user has navigated to a non-agent window while the
+            // conversation pane is locked on the agent pane.
+            val conversationTabSelected = lockedConversationPaneId != null ||
+                currentAgentConversation?.selectedTab == SessionTab.Conversation
+            val selectedTabIndex = if (conversationTabSelected) 1 else 0
+            val onTabSelected: (Int) -> Unit = { index ->
+                if (index == 1) {
+                    // Prefer the currently-viewed pane if it has a
+                    // detection; otherwise fall back to the agent pane
+                    // already known to the session (so the user can
+                    // re-enter the conversation from a sibling window
+                    // without having to navigate back to the agent's
+                    // window first).
+                    val target = currentPane
+                        ?.takeIf { agentConversations[it.paneId]?.detection != null }
+                        ?: panes.firstOrNull { agentConversations[it.paneId]?.detection != null }
+                    target?.let { pane ->
+                        viewModel.selectSessionTab(pane.paneId, SessionTab.Conversation)
+                    }
+                } else {
+                    // Terminal tab: unlock the conversation and flip
+                    // the locked pane's tab back so the pager re-takes
+                    // the viewport. We go through
+                    // [returnToTerminalFromConversation] (rather than
+                    // per-pane selectSessionTab) because the
+                    // currently-visible pane may not be the locked
+                    // pane — and if it is not, it has no
+                    // AgentConversationUiState for selectSessionTab to
+                    // mutate.
+                    if (lockedConversationPaneId != null) {
+                        viewModel.returnToTerminalFromConversation()
+                    } else {
+                        currentPane?.let { pane ->
+                            viewModel.selectSessionTab(pane.paneId, SessionTab.Terminal)
+                        }
+                    }
+                }
+            }
+
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -401,15 +466,23 @@ public fun TmuxSessionScreen(
                         onSwipeDown = { showSessionDrawer = true },
                     ),
             ) {
-                // Issue #184 Layer 2: breadcrumb chrome flips between the
-                // full four-segment chain (IME hidden) and the slim
-                // session-name strip (IME visible). The pair is wrapped
-                // in a Column so the AnimatedVisibility entries do not
-                // overlap visually mid-transition — the hidden one
-                // collapses to zero height and the other claims the row.
-                // The kebab-menu owner remains local screen state so its
-                // dropdown reaches into the session-lifecycle dialog
-                // routes below.
+                // Issue #189: the IME-down chrome is now a single 56dp
+                // row — back chevron + status dot + session › Window N
+                // crumb + inline Terminal/Conversation tab pill + kebab
+                // — instead of the three stacked rows (breadcrumb +
+                // tabs + window strip). The reduction recovers ~80dp of
+                // vertical space for the terminal viewport on a Pixel 7
+                // 854dp height. Window switching still discoverable:
+                // tapping the "Window N" segment opens the
+                // WindowSwitcherOverlay, the page-indicator swipe-up
+                // gesture (further down this Column) opens the same
+                // overlay, and the kebab menu surfaces "Switch window"
+                // when windows.size > 1.
+                //
+                // Issue #184 Layer 2 continues to apply on top: the
+                // IME-up state still collapses the consolidated row to
+                // [CompactBreadcrumb] (40dp, session-name only) so the
+                // user has even more room while typing.
                 Column(modifier = Modifier.fillMaxWidth()) {
                     AnimatedVisibility(
                         visible = !chromeCompressed,
@@ -424,10 +497,33 @@ public fun TmuxSessionScreen(
                             animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
                         ),
                     ) {
-                        Breadcrumb(
-                            crumbs = crumbs,
+                        // Issue #154 (acceptance criterion #2): fire a
+                        // 2-second pulse overlay over the inline
+                        // Conversation tab pill when the tab newly
+                        // appears, so the user notices the new affordance
+                        // instead of missing it. The pulse is keyed on
+                        // the false → true transition of
+                        // [showConversationTab] inside
+                        // [ConsolidatedTopChrome]'s [ConsolidatedTabPill]
+                        // wrapper, and re-arms only when the agent
+                        // disappears and a fresh detection lights the
+                        // tab again.
+                        ConsolidatedTopChrome(
+                            hostLabel = host,
+                            sessionName = sessionName,
+                            windowLabel = currentWindowLabel(currentPane, windows),
+                            multipleWindows = windows.size > 1,
+                            tabLabels = tabs,
+                            selectedTabIndex = selectedTabIndex,
+                            onTabSelected = onTabSelected,
+                            pulseConversationTab = showConversationTab,
                             onBack = onBack,
                             onMore = { moreExpanded = true },
+                            onOpenWindowSwitcher = {
+                                if (windows.size > 1) {
+                                    showWindowSwitcher = true
+                                }
+                            },
                             modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
                         )
                     }
@@ -455,6 +551,7 @@ public fun TmuxSessionScreen(
                 TmuxMoreMenu(
                     expanded = moreExpanded,
                     currentWindowId = currentWindowId,
+                    multipleWindows = windows.size > 1,
                     onDismiss = { moreExpanded = false },
                     onCreateSession = {
                         moreExpanded = false
@@ -491,6 +588,10 @@ public fun TmuxSessionScreen(
                     onKillWindow = {
                         moreExpanded = false
                         dialogMode = TmuxDialogMode.KillWindow
+                    },
+                    onSwitchWindow = {
+                        moreExpanded = false
+                        showWindowSwitcher = true
                     },
                 )
             }
@@ -535,142 +636,20 @@ public fun TmuxSessionScreen(
                 }
             }
 
-            // Issue #186: the Conversation tab keys off the
-            // CURRENTLY-VISIBLE window's detection state — not the
-            // session-wide one. v0.2.8 dogfood reported "Claude
-            // detected" lighting up on plain-shell windows that shared
-            // a cwd with the agent window; per-window detection
-            // ([TmuxSessionViewModel.agentForWindow]) fixes the data
-            // layer, and this gating change keeps the tab in sync with
-            // the per-window verdict.
-            //
-            // Issue #197 co-existence: when the user has explicitly
-            // opened the conversation pane ([lockedConversationPaneId]
-            // is non-null), the tab stays visible from any window so
-            // the locked composer remains reachable. The cross-window
-            // mismatch banner inside [TmuxConversationPane] already
-            // tells the user they are away from the agent window.
-            val currentWindowAgent: com.pocketshell.core.agents.AgentKind? =
-                remember(panes, agentConversations, currentWindowId) {
-                    viewModel.agentForWindow(currentWindowId)
-                }
-            val showConversationTab = currentWindowAgent != null ||
-                lockedConversationPaneId != null
-            val tabs = if (showConversationTab) {
-                listOf("Terminal", "Conversation")
-            } else {
-                listOf("Terminal")
-            }
-            // Issue #184 Layer 2: Tabs and WindowStrip hide on IME up
-            // because the user is mid-type — they cannot tap a tab pill
-            // without first dismissing the keyboard anyway, and giving
-            // those ~80dp back to the terminal viewport keeps the cursor
-            // row visible. Both restore on IME-hide via the
-            // AnimatedVisibility exit pass.
-            AnimatedVisibility(
-                visible = !chromeCompressed,
-                enter = expandVertically(
-                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
-                ) + fadeIn(
-                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
-                ),
-                exit = shrinkVertically(
-                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
-                ) + fadeOut(
-                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
-                ),
-            ) {
-                // Issue #197: Conversation tab reads as "selected" whenever
-                // the lock is active — that includes the case where the
-                // user has navigated to a non-agent window while the
-                // conversation pane is locked on the agent pane.
-                val conversationTabSelected = lockedConversationPaneId != null ||
-                    currentAgentConversation?.selectedTab == SessionTab.Conversation
-                // Issue #154 (acceptance criterion #2): fire a 2-second
-                // pulse overlay above the Tabs strip when the
-                // Conversation tab newly appears so the user notices
-                // the new affordance instead of missing it entirely.
-                // The pulse is keyed on a transition false → true on
-                // [showConversationTab]; once it has rendered (and
-                // automatically expired) it does not re-fire until the
-                // user disconnects and a fresh detection lights up the
-                // tab again.
-                TabsRowWithPulse(
-                    pulseVisible = showConversationTab,
-                ) {
-                    Tabs(
-                        labels = tabs,
-                        selectedIndex = if (conversationTabSelected) 1 else 0,
-                        onSelected = { index ->
-                            if (index == 1) {
-                                // Prefer the currently-viewed pane if it has a
-                                // detection; otherwise fall back to the agent
-                                // pane already known to the session (so the
-                                // user can re-enter the conversation from a
-                                // sibling window without having to navigate
-                                // back to the agent's window first).
-                                val target = currentPane
-                                    ?.takeIf { agentConversations[it.paneId]?.detection != null }
-                                    ?: panes.firstOrNull { agentConversations[it.paneId]?.detection != null }
-                                target?.let { pane ->
-                                    viewModel.selectSessionTab(pane.paneId, SessionTab.Conversation)
-                                }
-                            } else {
-                                // Terminal tab: unlock the conversation and
-                                // flip the locked pane's tab back so the
-                                // pager re-takes the viewport. We go
-                                // through [returnToTerminalFromConversation]
-                                // (rather than per-pane selectSessionTab)
-                                // because the currently-visible pane may
-                                // not be the locked pane — and if it is
-                                // not, it has no AgentConversationUiState
-                                // for selectSessionTab to mutate.
-                                if (lockedConversationPaneId != null) {
-                                    viewModel.returnToTerminalFromConversation()
-                                } else {
-                                    currentPane?.let { pane ->
-                                        viewModel.selectSessionTab(pane.paneId, SessionTab.Terminal)
-                                    }
-                                }
-                            }
-                        },
-                        modifier = Modifier.testTag(TMUX_TABS_TAG),
-                    )
-                }
-            }
-
-            // Per #158: only surface the WindowStrip when there are
-            // multiple windows in this session. In the (very common)
-            // single-window case the strip was pure chrome and confused
-            // users about what the trailing "+" creates (window vs
-            // session). For the single-window case the "+ New window"
-            // affordance remains reachable from the kebab dropdown.
-            //
-            // Issue #184 Layer 2: also hide while the IME is up — the
-            // user has committed to typing into the current pane and
-            // doesn't need a window-picker rail eating vertical space
-            // above the cursor row.
-            AnimatedVisibility(
-                visible = windows.size > 1 && !chromeCompressed,
-                enter = expandVertically(
-                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
-                ) + fadeIn(
-                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
-                ),
-                exit = shrinkVertically(
-                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
-                ) + fadeOut(
-                    animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
-                ),
-            ) {
-                WindowStrip(
-                    windows = windows,
-                    currentWindowId = currentWindowId,
-                    onSelectWindow = ::selectWindow,
-                    onOpenWindowMenu = { windowMenuFor = it },
-                    onNewWindow = viewModel::newWindow,
-                )
-            }
+            // Issue #189: WindowStrip removed from the default IME-down
+            // chrome — its window-pill row was the single biggest
+            // contributor (~40dp) to "three rows of chrome above my
+            // terminal" feedback. Window switching is still discoverable
+            // via three paths:
+            //  1. The "Window N" segment in the consolidated top chrome
+            //     (taps open WindowSwitcherOverlay).
+            //  2. The page-indicator swipe-up gesture further down this
+            //     Column (same overlay).
+            //  3. The kebab menu's "Switch window" item (added in #189),
+            //     surfaced only when windows.size > 1.
+            // The per-window rename/kill long-press affordance moves to
+            // the kebab too — "Rename window" / "Kill window" stay where
+            // they were under "In this session".
 
             // Per [D6]: render exactly one pane at a time. The
             // HorizontalPager renders only the visible page eagerly by
@@ -1356,25 +1335,35 @@ internal const val TMUX_CONVERSATION_TAB_PULSE_TAG =
 internal const val TMUX_SESSION_USAGE_BADGE_TAG = "tmux:usage-badge"
 
 /**
- * Issue #184: stable test tags for the IME-aware top chrome on the tmux
- * session screen.
+ * Issue #184 + #189: stable test tags for the IME-aware top chrome on
+ * the tmux session screen.
  *
- * - [TMUX_FULL_BREADCRUMB_TAG] is on the regular four-segment
- *   `host › session › window › pane` strip and is visible only while the
- *   soft keyboard is hidden.
+ * - [TMUX_FULL_BREADCRUMB_TAG] is on the IME-down consolidated 56dp
+ *   toolbar (back chevron + status dot + `session › Window N` crumb +
+ *   inline tab pill + kebab — all in one row, per issue #189). Pre-#189
+ *   this tag was on the legacy 4-segment Breadcrumb that has been
+ *   removed in favour of the consolidated row; the tag is preserved so
+ *   the IME compression test in [TmuxSessionScreenImeChromeTest] keeps
+ *   its "non-compressed chrome is displayed" assertion intact.
  * - [TMUX_COMPACT_BREADCRUMB_TAG] is on the slimmed-down session-name
- *   strip that replaces the full breadcrumb while the IME is up so the
+ *   strip that replaces the consolidated row while the IME is up so the
  *   terminal viewport can claim the freed vertical space.
- * - [TMUX_TABS_TAG] is on the Terminal/Conversation tab row. Hidden
- *   while the IME is up.
- *
- * The window-strip already carries [TMUX_WINDOW_STRIP_TAG] from #158; we
- * reuse it for the "WindowStrip hidden while IME up" assertion in
- * [TmuxSessionScreenImeChromeTest].
+ * - [TMUX_TABS_TAG] is on the inline Terminal/Conversation tab pill
+ *   inside the consolidated toolbar (rendered only when an agent has
+ *   been detected on the current window or a conversation is locked).
+ * - [TMUX_CONSOLIDATED_SESSION_LABEL_TAG] and
+ *   [TMUX_CONSOLIDATED_WINDOW_CRUMB_TAG] tag the per-segment text inside
+ *   the consolidated row so screenshot tests and future audits can find
+ *   them without relying on translatable text.
+ * - [TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX] is the prefix for per-tab
+ *   pill segments (index 0 = Terminal, index 1 = Conversation).
  */
 internal const val TMUX_FULL_BREADCRUMB_TAG = "tmux:breadcrumb:full"
 internal const val TMUX_COMPACT_BREADCRUMB_TAG = "tmux:breadcrumb:compact"
 internal const val TMUX_TABS_TAG = "tmux:tabs"
+internal const val TMUX_CONSOLIDATED_SESSION_LABEL_TAG = "tmux:chrome:session-label"
+internal const val TMUX_CONSOLIDATED_WINDOW_CRUMB_TAG = "tmux:chrome:window-crumb"
+internal const val TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX = "tmux:chrome:tab-pill:"
 
 /**
  * Issue #145: stable test tags for the mid-session SSH disconnect band
@@ -1396,6 +1385,16 @@ internal const val TMUX_WINDOW_STRIP_TAG = "tmux:window-strip"
 internal const val TMUX_WINDOW_STRIP_PILL_TAG_PREFIX = "tmux:window-strip-pill:"
 /** Issue #158: trailing "+ window" button inside the WindowStrip. */
 internal const val TMUX_NEW_WINDOW_BUTTON_TAG = "tmux:new-window-button"
+/**
+ * Issue #189: stable test tag for the WindowSwitcherOverlay root, and
+ * a prefix for per-page tap-targets inside the overlay's HorizontalPager.
+ * Now that the WindowStrip is hidden in the default chrome, the overlay
+ * is the primary tap-driven window switcher; the E2E navigation test
+ * drives it via [TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX] entries (1-based
+ * to mirror the previous strip-pill convention).
+ */
+internal const val TMUX_WINDOW_SWITCHER_OVERLAY_TAG = "tmux:window-switcher"
+internal const val TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX = "tmux:window-switcher-page:"
 
 private fun Modifier.verticalSwipeInput(
     thresholdPx: Float,
@@ -1648,7 +1647,8 @@ private fun WindowSwitcherOverlay(
                 .fillMaxSize()
                 .background(PocketShellColors.Background.copy(alpha = 0.92f))
                 .clickable(onClick = onDismiss)
-                .padding(16.dp),
+                .padding(16.dp)
+                .testTag(TMUX_WINDOW_SWITCHER_OVERLAY_TAG),
         ) {
             Column(
                 modifier = Modifier
@@ -1699,7 +1699,13 @@ private fun WindowSwitcherOverlay(
                                 role = androidx.compose.ui.semantics.Role.Tab,
                                 onClick = { onSelectWindow(window) },
                             )
-                            .padding(16.dp),
+                            .padding(16.dp)
+                            // Issue #189: per-window stable test tag so
+                            // the E2E switch test can address Window 2
+                            // directly without depending on horizontal
+                            // pager swipe gymnastics. Index is 1-based
+                            // to match TMUX_WINDOW_STRIP_PILL_TAG_PREFIX.
+                            .testTag("$TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX${page + 1}"),
                         verticalArrangement = Arrangement.Center,
                     ) {
                         Text(
@@ -1821,76 +1827,6 @@ private fun TmuxAgentHintChip(
  * (`docs/design-system.md` §6.3).
  */
 internal const val AGENT_HINT_AUTO_DISMISS_MS: Long = 8_000L
-
-/**
- * Issue #154 (acceptance criterion #2): how long the Conversation-tab
- * pulse overlay stays visible after the tab newly appears. Long enough
- * for the user to register the new affordance, short enough that it
- * does not feel like sticky chrome.
- */
-internal const val TAB_PULSE_DURATION_MS: Long = 2_000L
-
-/**
- * Wraps the [Tabs] strip and overlays a brief accent ring + fade-in
- * highlight the first time the Conversation tab joins the row. The
- * overlay is a sibling Box pinned to the Tabs container; it does not
- * intercept taps because the underlying [Tabs] sits in the same Box
- * and gets pointer input first. The pulse is keyed on the false → true
- * transition of [pulseVisible] (which the call site drives off
- * `showConversationTab`); once the timer fires it does not re-trigger
- * until the tab disappears and reappears (e.g. after a fresh agent
- * detection on a new session).
- */
-@Composable
-private fun TabsRowWithPulse(
-    pulseVisible: Boolean,
-    content: @Composable () -> Unit,
-) {
-    var showPulse by remember { mutableStateOf(false) }
-    // Track whether we have *seen* the conversation tab at least once
-    // since the screen mounted — without this, the initial composition
-    // would fire the pulse for every session that boots with a live
-    // agent (i.e. a reconnect to an already-running Claude pane).
-    // Initial-load animation belongs to the entry transition; the pulse
-    // is reserved for the "new agent detected mid-session" transition.
-    var hasSeenConversationTab by remember { mutableStateOf(pulseVisible) }
-    LaunchedEffect(pulseVisible) {
-        if (pulseVisible && !hasSeenConversationTab) {
-            hasSeenConversationTab = true
-            showPulse = true
-            kotlinx.coroutines.delay(TAB_PULSE_DURATION_MS)
-            showPulse = false
-        } else if (!pulseVisible) {
-            // Tab disappeared (agent process died, etc.) — reset so a
-            // future re-appearance fires the pulse again.
-            hasSeenConversationTab = false
-            showPulse = false
-        }
-    }
-    Box(modifier = Modifier.fillMaxWidth()) {
-        content()
-        androidx.compose.animation.AnimatedVisibility(
-            visible = showPulse,
-            enter = fadeIn(
-                animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
-            ),
-            exit = fadeOut(
-                animationSpec = tween(durationMillis = TAB_PULSE_DURATION_MS.toInt(), easing = MotionEasing),
-            ),
-            modifier = Modifier.matchParentSize(),
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .border(
-                        width = 2.dp,
-                        color = PocketShellColors.Accent,
-                    )
-                    .testTag(TMUX_CONVERSATION_TAB_PULSE_TAG),
-            )
-        }
-    }
-}
 
 @Composable
 internal fun TmuxConversationPane(
@@ -2173,6 +2109,81 @@ internal fun androidx.compose.foundation.lazy.LazyListState.isScrolledToBottom(
     if (lastVisible.index < itemCount - 1) return false
     val viewportEnd = info.viewportEndOffset - info.afterContentPadding
     return lastVisible.offset + lastVisible.size <= viewportEnd + 1
+}
+
+/**
+ * Issue #154 (acceptance criterion #2): how long the Conversation-tab
+ * pulse overlay stays visible after the tab newly appears. Long enough
+ * for the user to register the new affordance, short enough that it
+ * does not feel like sticky chrome.
+ */
+internal const val TAB_PULSE_DURATION_MS: Long = 2_000L
+
+/**
+ * Wraps the inline Conversation tab pill ([ConsolidatedTabPill]) and
+ * overlays a brief accent ring + fade-in highlight the first time the
+ * Conversation tab joins the row. The overlay is a sibling Box sized to
+ * the pill (`matchParentSize`); it does not intercept taps because the
+ * underlying pill sits in the same Box and gets pointer input first.
+ * The pulse is keyed on the false → true transition of [pulseVisible]
+ * (which the call site drives off `showConversationTab`); once the
+ * timer fires it does not re-trigger until the tab disappears and
+ * reappears (e.g. after a fresh agent detection on a new session).
+ *
+ * The wrapper uses [wrapContentSize] so it does not stretch within the
+ * 56dp consolidated chrome row — the pill claims its natural width and
+ * the pulse matches it. (#189 inlined the tab pill into the toolbar; in
+ * the previous standalone Tabs row this wrapper used `fillMaxWidth`.)
+ */
+@Composable
+private fun TabsRowWithPulse(
+    pulseVisible: Boolean,
+    content: @Composable () -> Unit,
+) {
+    var showPulse by remember { mutableStateOf(false) }
+    // Track whether we have *seen* the conversation tab at least once
+    // since the screen mounted — without this, the initial composition
+    // would fire the pulse for every session that boots with a live
+    // agent (i.e. a reconnect to an already-running Claude pane).
+    // Initial-load animation belongs to the entry transition; the pulse
+    // is reserved for the "new agent detected mid-session" transition.
+    var hasSeenConversationTab by remember { mutableStateOf(pulseVisible) }
+    LaunchedEffect(pulseVisible) {
+        if (pulseVisible && !hasSeenConversationTab) {
+            hasSeenConversationTab = true
+            showPulse = true
+            kotlinx.coroutines.delay(TAB_PULSE_DURATION_MS)
+            showPulse = false
+        } else if (!pulseVisible) {
+            // Tab disappeared (agent process died, etc.) — reset so a
+            // future re-appearance fires the pulse again.
+            hasSeenConversationTab = false
+            showPulse = false
+        }
+    }
+    Box(modifier = Modifier.wrapContentSize()) {
+        content()
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showPulse,
+            enter = fadeIn(
+                animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+            ),
+            exit = fadeOut(
+                animationSpec = tween(durationMillis = TAB_PULSE_DURATION_MS.toInt(), easing = MotionEasing),
+            ),
+            modifier = Modifier.matchParentSize(),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .border(
+                        width = 2.dp,
+                        color = PocketShellColors.Accent,
+                    )
+                    .testTag(TMUX_CONVERSATION_TAB_PULSE_TAG),
+            )
+        }
+    }
 }
 
 /**
@@ -2639,6 +2650,13 @@ private fun TmuxMoreMenu(
     onNewWindow: () -> Unit,
     onRenameWindow: () -> Unit,
     onKillWindow: () -> Unit,
+    // Issue #189: now that the WindowStrip is hidden in the default
+    // chrome, the kebab is one of the discoverable paths into the
+    // window switcher. Surfaced only when the session actually has
+    // more than one window — single-window sessions get nothing to
+    // switch to.
+    multipleWindows: Boolean = false,
+    onSwitchWindow: () -> Unit = {},
 ) {
     Box(
         modifier = Modifier.fillMaxWidth(),
@@ -2655,6 +2673,15 @@ private fun TmuxMoreMenu(
             // on-this-host session ops, and cross-host shortcuts.
             DropdownMenuSectionHeader(text = "In this session")
             DropdownMenuItem(text = { Text("+ New window") }, onClick = onNewWindow)
+            if (multipleWindows) {
+                // Issue #189: WindowStrip is gone, so the kebab is one
+                // of the three paths into the switcher. Only shown when
+                // there is actually somewhere to switch to.
+                DropdownMenuItem(
+                    text = { Text("Switch window") },
+                    onClick = onSwitchWindow,
+                )
+            }
             DropdownMenuItem(
                 text = { Text("Rename window") },
                 onClick = onRenameWindow,
@@ -2692,28 +2719,32 @@ private fun DropdownMenuSectionHeader(text: String) {
 }
 
 /**
- * Issue #184 Layer 2: IME-aware top chrome — the breadcrumb + tabs +
- * window-strip cluster that sits above the terminal viewport on the tmux
- * session screen. Exposed as its own composable so the chrome's behaviour
- * under the soft keyboard (Layer 2 of issue #184) can be unit-tested
- * without spinning up a Hilt graph or a live tmux connect — the test
- * drives [chromeCompressed] directly and asserts the right elements are
- * present / hidden.
+ * Issue #189 + #184 Layer 2: IME-aware top chrome for the tmux session
+ * screen. Exposed as its own composable so chrome behaviour under the
+ * soft keyboard can be unit-tested without spinning up a Hilt graph or
+ * a live tmux connect — the test drives [chromeCompressed] directly and
+ * asserts the right elements are present / hidden.
  *
- * When [chromeCompressed] is `false` (IME hidden) we render:
- * - The full [Breadcrumb] with `host › session › window › pane` and the
- *   tagged [TMUX_FULL_BREADCRUMB_TAG] root.
- * - The [Tabs] row tagged with [TMUX_TABS_TAG].
- * - The [WindowStrip] (tagged [TMUX_WINDOW_STRIP_TAG]), but only when
- *   the session has more than one window — single-window sessions never
- *   render the strip, regardless of IME state.
+ * When [chromeCompressed] is `false` (IME hidden) we render a single
+ * 56dp consolidated toolbar (tagged [TMUX_FULL_BREADCRUMB_TAG]) that
+ * collapses the previous three-row stack (breadcrumb + tabs +
+ * window-strip) into one row:
+ * - Back chevron + status dot at the leading edge.
+ * - `session › Window N` crumb (the Window N segment is tappable and
+ *   opens the [WindowSwitcherOverlay] via [onOpenWindowSwitcher]).
+ * - Inline Terminal/Conversation tab pill (tagged [TMUX_TABS_TAG]).
+ * - Kebab affordance at the trailing edge.
  *
- * When [chromeCompressed] is `true` (IME visible) we replace the full
- * breadcrumb with [CompactBreadcrumb] (tagged
- * [TMUX_COMPACT_BREADCRUMB_TAG]) and hide both the tabs and the window
- * strip so the freed vertical space goes to the terminal viewport.
- * Transitions are wrapped in [AnimatedVisibility] with the 200ms motion
- * tokens from `docs/design-system.md` §5.
+ * When [chromeCompressed] is `true` (IME visible) we replace the
+ * consolidated row with [CompactBreadcrumb] (tagged
+ * [TMUX_COMPACT_BREADCRUMB_TAG], 40dp, session-name only) so the freed
+ * vertical space goes to the terminal viewport. Transitions are wrapped
+ * in [AnimatedVisibility] with the 200ms motion tokens from
+ * `docs/design-system.md` §5.
+ *
+ * The WindowStrip is no longer rendered in the default chrome — see the
+ * comment in [TmuxSessionScreen] for the alternate window-switching
+ * paths the issue replaces it with.
  *
  * The screen passes [chromeCompressed] from `WindowInsets.isImeVisible`;
  * tests pass it directly.
@@ -2730,9 +2761,8 @@ internal fun TmuxImeAwareTopChrome(
     onTabSelected: (Int) -> Unit,
     windows: List<WindowSummary>,
     currentWindowId: String?,
-    onSelectWindow: (WindowSummary) -> Unit,
-    onOpenWindowMenu: (WindowSummary) -> Unit,
-    onNewWindow: () -> Unit,
+    onOpenWindowSwitcher: () -> Unit,
+    hostLabel: String = crumbs.firstOrNull()?.label.orEmpty(),
 ) {
     val animEnter = expandVertically(
         animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
@@ -2744,12 +2774,26 @@ internal fun TmuxImeAwareTopChrome(
     ) + fadeOut(
         animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
     )
+    val windowLabel = remember(crumbs) {
+        // The crumbs list is `host › session › Window N › Pane N` — the
+        // window segment is index 2 by construction (see
+        // [breadcrumbCrumbs]). Fall back to "Window ?" defensively if a
+        // caller passes a non-tmux crumb list.
+        crumbs.getOrNull(2)?.label ?: "Window ?"
+    }
     Column(modifier = Modifier.fillMaxWidth()) {
         AnimatedVisibility(visible = !chromeCompressed, enter = animEnter, exit = animExit) {
-            Breadcrumb(
-                crumbs = crumbs,
+            ConsolidatedTopChrome(
+                hostLabel = hostLabel,
+                sessionName = sessionName,
+                windowLabel = windowLabel,
+                multipleWindows = windows.size > 1,
+                tabLabels = tabLabels,
+                selectedTabIndex = selectedTabIndex,
+                onTabSelected = onTabSelected,
                 onBack = onBack,
                 onMore = onMore,
+                onOpenWindowSwitcher = onOpenWindowSwitcher,
                 modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
             )
         }
@@ -2761,28 +2805,247 @@ internal fun TmuxImeAwareTopChrome(
                 modifier = Modifier.testTag(TMUX_COMPACT_BREADCRUMB_TAG),
             )
         }
-        AnimatedVisibility(visible = !chromeCompressed, enter = animEnter, exit = animExit) {
-            Tabs(
-                labels = tabLabels,
-                selectedIndex = selectedTabIndex,
-                onSelected = onTabSelected,
-                modifier = Modifier.testTag(TMUX_TABS_TAG),
+    }
+}
+
+/**
+ * Issue #189: a single-row 56dp consolidated top chrome that replaces
+ * the previous three-row (breadcrumb + tabs + window-strip) stack on
+ * [TmuxSessionScreen]. Recovers ~80dp of vertical space for the
+ * terminal viewport on a Pixel 7.
+ *
+ * Layout (left → right inside one 56dp [Row]):
+ * - 36dp circular back affordance (chevron). Mirrors the leading slot
+ *   on the full [Breadcrumb] so the tap zone does not move when the
+ *   IME comes and goes.
+ * - 8dp connected status dot (only when the chrome reads as "live" —
+ *   we render it unconditionally here because [TmuxSessionScreen]
+ *   already renders an inline [StatusLine] for the Connecting / Failed
+ *   states above the terminal viewport).
+ * - `session › Window N` crumb. The window segment is tappable and
+ *   opens the [WindowSwitcherOverlay] via [onOpenWindowSwitcher] when
+ *   [multipleWindows] is true. Single-window sessions show just
+ *   `session` and skip the separator + window crumb entirely.
+ * - Inline Terminal / Conversation tab pill (only rendered when
+ *   [tabLabels] has more than one entry — i.e. an agent has been
+ *   detected on the current window, or the conversation pane is
+ *   locked). The pill carries [TMUX_TABS_TAG] so the existing
+ *   conversation-tab UI tests keep working against the new chrome.
+ * - 36dp circular more affordance (kebab).
+ *
+ * The host segment is intentionally not surfaced in the consolidated
+ * row — the host name is already visible on the host list, the
+ * pre-session status line, and (when not connected) on
+ * [StatusLine]/[FailedConnectionRow]. Reintroducing it here on every
+ * tmux screen would eat the same horizontal budget the issue is trying
+ * to free.
+ */
+@Composable
+internal fun ConsolidatedTopChrome(
+    hostLabel: String,
+    sessionName: String,
+    windowLabel: String,
+    multipleWindows: Boolean,
+    tabLabels: List<String>,
+    selectedTabIndex: Int,
+    onTabSelected: (Int) -> Unit,
+    onBack: () -> Unit,
+    onMore: () -> Unit,
+    onOpenWindowSwitcher: () -> Unit,
+    modifier: Modifier = Modifier,
+    // Issue #154 (acceptance criterion #2): when this transitions
+    // false → true the inline tab pill is wrapped in a brief accent
+    // pulse so the user notices the new Conversation affordance.
+    // Default `false` keeps the pill un-pulsed for callers that do not
+    // wire detection state (the screenshot harness and unit tests pass
+    // the labels directly without driving the pulse).
+    pulseConversationTab: Boolean = false,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Background)
+            .height(56.dp)
+            .padding(start = 4.dp, end = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // Back chevron — 36dp circular tap target, matching the
+        // [Breadcrumb] leading slot recipe (`docs/design-system.md`
+        // §6.1) so the tap zone stays put across the IME transition.
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clickable(onClick = onBack),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "‹",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 20.sp,
             )
         }
-        AnimatedVisibility(
-            visible = windows.size > 1 && !chromeCompressed,
-            enter = animEnter,
-            exit = animExit,
+        Spacer(modifier = Modifier.width(4.dp))
+        com.pocketshell.uikit.components.StatusDot(
+            status = com.pocketshell.uikit.model.ConnectionStatus.Connected,
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+
+        // Crumb body: session [› Window N]. The session segment is
+        // non-interactive (current destination); the window segment is
+        // tappable when there are siblings to switch to. The whole
+        // crumb takes `weight(1f)` so the trailing tab pill + kebab sit
+        // flush right.
+        Row(
+            modifier = Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            WindowStrip(
-                windows = windows,
-                currentWindowId = currentWindowId,
-                onSelectWindow = onSelectWindow,
-                onOpenWindowMenu = onOpenWindowMenu,
-                onNewWindow = onNewWindow,
+            Text(
+                text = sessionName,
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier.testTag(TMUX_CONSOLIDATED_SESSION_LABEL_TAG),
             )
+            if (multipleWindows) {
+                Text(
+                    text = "›",
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 11.sp,
+                )
+                Text(
+                    text = windowLabel,
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .clickable(
+                            role = androidx.compose.ui.semantics.Role.Button,
+                            onClick = onOpenWindowSwitcher,
+                        )
+                        .padding(horizontal = 4.dp, vertical = 4.dp)
+                        .testTag(TMUX_CONSOLIDATED_WINDOW_CRUMB_TAG),
+                )
+            }
+        }
+
+        // Inline tab pill — only when an agent has been detected
+        // (Conversation label present). Empty / single-entry tab lists
+        // suppress the pill entirely so the row stays uncluttered for
+        // shell-only panes.
+        //
+        // Issue #154 (acceptance criterion #2): wrap the pill in
+        // [TabsRowWithPulse] so the brief accent overlay fires when
+        // the Conversation tab newly appears. The wrapper itself uses
+        // [wrapContentWidth] / [wrapContentHeight] so it doesn't push
+        // the surrounding 56dp toolbar row taller (the pulse Box uses
+        // `matchParentSize`, which sizes against the underlying pill).
+        if (tabLabels.size > 1) {
+            TabsRowWithPulse(pulseVisible = pulseConversationTab) {
+                ConsolidatedTabPill(
+                    labels = tabLabels,
+                    selectedIndex = selectedTabIndex,
+                    onSelected = onTabSelected,
+                    modifier = Modifier.testTag(TMUX_TABS_TAG),
+                )
+            }
+            Spacer(modifier = Modifier.width(4.dp))
+        }
+
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clickable(onClick = onMore),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "⋮",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 20.sp,
+            )
+        }
+        // Reference [hostLabel] so the parameter does not show as
+        // unused — kept on the API for forward compatibility (and so
+        // the screen can revive a host crumb segment cheaply if the
+        // dogfood feedback ever asks for it back).
+        @Suppress("UNUSED_EXPRESSION") hostLabel
+    }
+}
+
+/**
+ * Issue #189: the inline Terminal / Conversation toggle inside
+ * [ConsolidatedTopChrome]. Visually a slim segmented pill — both labels
+ * inside one bordered, rounded container — so the user reads it as a
+ * single co-located control rather than two separate buttons. The
+ * selected segment takes [PocketShellColors.Accent] fill; the
+ * unselected segments sit on transparent background and lean on
+ * [PocketShellColors.TextSecondary].
+ *
+ * Sized to fit inside the 56dp toolbar row with room for two short
+ * labels — the only call site today is the two-label "Terminal /
+ * Conversation" toggle. Three or more labels keep working but will
+ * push the layout wider.
+ */
+@Composable
+private fun ConsolidatedTabPill(
+    labels: List<String>,
+    selectedIndex: Int,
+    onSelected: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val shape = RoundedCornerShape(10.dp)
+    Row(
+        modifier = modifier
+            .height(32.dp)
+            .background(color = PocketShellColors.SurfaceElev, shape = shape)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = shape)
+            .padding(2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        labels.forEachIndexed { index, label ->
+            val selected = index == selectedIndex
+            Box(
+                modifier = Modifier
+                    .background(
+                        color = if (selected) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    .clickable(
+                        role = androidx.compose.ui.semantics.Role.Tab,
+                        onClick = { onSelected(index) },
+                    )
+                    .padding(horizontal = 10.dp, vertical = 4.dp)
+                    .testTag(TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX + index),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = label,
+                    color = if (selected) PocketShellColors.Background else PocketShellColors.TextSecondary,
+                    fontSize = 12.sp,
+                    fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+                )
+            }
         }
     }
+}
+
+/**
+ * Issue #189: derive the "Window N" label for the consolidated chrome.
+ * Mirrors the indexing rule used by [breadcrumbCrumbs] and
+ * [agentWindowLabelFor] so the same pane always reads the same label
+ * across the chrome, the breadcrumb (when shown), and the conversation
+ * pane's target indicator.
+ */
+internal fun currentWindowLabel(
+    currentPane: TmuxPaneState?,
+    windows: List<WindowSummary>,
+): String {
+    val pane = currentPane ?: return "Window ?"
+    return windows.firstOrNull { it.windowId == pane.windowId }?.title
+        ?: "Window ?"
 }
 
 /**

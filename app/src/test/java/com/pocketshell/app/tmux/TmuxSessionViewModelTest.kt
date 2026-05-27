@@ -19,7 +19,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.advanceUntilIdle
-import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.TestScope
 import org.junit.After
@@ -1560,7 +1559,6 @@ class TmuxSessionViewModelTest {
         assertEquals("", vm.panes.value.single().paneTty)
     }
 
-<<<<<<< ours
     // ─── Issue #178: same-host fast-switch reuses the SSH transport ───
     //
     // The connect() path detects "same host, different tmux session"
@@ -1664,70 +1662,10 @@ class TmuxSessionViewModelTest {
                 keyPath = "/keys/other",
                 sessionName = "other",
             ),
-=======
-    // ----- Issue #188: killWindow error surfacing + deterministic refresh.
-
-    @Test
-    fun killWindowStartsAtNullWindowKillErrorAndStaysNullOnHappyPath() = runTest {
-        val vm = newVm()
-        val client = FakeTmuxClient()
-        vm.attachClientForTest(client)
-
-        // Seed an initial pane so the WindowStrip / panes list is non-empty
-        // before the kill. The kill command targets @0.
-        client.responses.addLast(
-            CommandResponse(
-                number = 1L,
-                output = listOf("%0\t@0\t\$0\twork\ta\t0"),
-                isError = false,
-            ),
-        )
-        client.emittedEvents.emit(
-            ControlEvent.WindowAdd(sessionId = "", windowId = "@0", name = ""),
-        )
-        advanceUntilIdle()
-        assertEquals(1, vm.panes.value.size)
-        assertNull(
-            "windowKillError must default to null before any kill is attempted",
-            vm.windowKillError.value,
-        )
-
-        // Reconcile after the kill returns no rows — the window is gone.
-        client.responses.addLast(
-            CommandResponse(number = 2L, output = emptyList(), isError = false),
-        )
-
-        // Issue the kill, then deliver tmux's deterministic
-        // %window-close event the view model is waiting on.
-        vm.killWindow("@0")
-        // Yield so the UNDISPATCHED subscriber installs and the
-        // sendCommand call records on `sentCommands`.
-        advanceUntilIdle()
-        client.emittedEvents.emit(
-            ControlEvent.WindowClose(sessionId = "", windowId = "@0"),
-        )
-        advanceUntilIdle()
-
-        // The command actually went out.
-        assertTrue(
-            "expected kill-window dispatch, got ${client.sentCommands}",
-            client.sentCommands.contains("kill-window -t @0"),
-        )
-        // The post-kill reconcile dropped the pane.
-        assertTrue(
-            "panes must be empty once the killed window's reconcile lands",
-            vm.panes.value.isEmpty(),
-        )
-        // Happy path stays silent.
-        assertNull(
-            "windowKillError must remain null after a successful kill",
-            vm.windowKillError.value,
->>>>>>> theirs
         )
     }
 
     @Test
-<<<<<<< ours
     fun isFastSwitchEligibleRejectsSameSessionName() {
         val vm = newVm()
         vm.replaceClientForTest(
@@ -1775,107 +1713,10 @@ class TmuxSessionViewModelTest {
                 keyPath = "/keys/a",
                 sessionName = "other",
             ),
-=======
-    fun killWindowSurfacesTransportFailureAndSkipsRefresh() = runTest {
-        // sendCommand throws → user must see a banner-targetable error
-        // string AND no reconcile must fire (a reconcile after a failed
-        // kill would re-render the still-alive window and look like the
-        // very bug #188 fixes).
-        val vm = newVm()
-        val client = ThrowingTmuxClient(
-            throwOnCommand = "kill-window",
-            exception = IllegalStateException("transport gone"),
-        )
-        vm.attachClientForTest(client)
-        // Seed a pane named "@5" so the label says "Window 1".
-        vm.applyParsedPanesForTest(
-            listOf(
-                TmuxSessionViewModel.ParsedPane("%0", "@5", "$0", "work", paneIndex = 0),
-            ),
-        )
-        advanceUntilIdle()
-        val sentBefore = client.sentCommands.toList()
-
-        vm.killWindow("@5")
-        advanceUntilIdle()
-
-        // sendCommand fired and threw; no follow-up list-panes was issued
-        // (which the kill-window code skips on transport failure).
-        val newCommands = client.sentCommands.drop(sentBefore.size)
-        assertTrue(
-            "expected a kill-window dispatch, got $newCommands",
-            newCommands.any { it.startsWith("kill-window") },
-        )
-        assertTrue(
-            "must NOT refresh after a failed kill — found ${newCommands}",
-            newCommands.none { it.startsWith("list-panes") },
-        )
-        val msg = vm.windowKillError.value
-        assertNotNull("expected windowKillError to surface transport failure", msg)
-        assertTrue(
-            "expected error message to name the window, got '$msg'",
-            msg!!.contains("Window 1"),
-        )
-        assertTrue(
-            "expected error message to carry the exception detail, got '$msg'",
-            msg.contains("transport gone"),
         )
     }
 
     @Test
-    fun killWindowSurfacesTmuxErrorResponseAndSkipsRefresh() = runTest {
-        // tmux responds with %error — same skip-refresh rule.
-        val vm = newVm()
-        val client = FakeTmuxClient().apply {
-            // First response is the seeding list-panes triggered by
-            // WindowAdd below — happy.
-            responses.addLast(
-                CommandResponse(
-                    number = 1L,
-                    output = listOf("%0\t@5\t\$0\twork\ta\t0"),
-                    isError = false,
-                ),
-            )
-            // Second response: the kill-window command itself, returning
-            // an isError=true block with a tmux-style detail line.
-            responses.addLast(
-                CommandResponse(
-                    number = 2L,
-                    output = listOf("can't find window @5"),
-                    isError = true,
-                ),
-            )
-        }
-        vm.attachClientForTest(client)
-        client.emittedEvents.emit(
-            ControlEvent.WindowAdd(sessionId = "", windowId = "@5", name = ""),
-        )
-        advanceUntilIdle()
-        val sentBefore = client.sentCommands.toList()
-
-        vm.killWindow("@5")
-        advanceUntilIdle()
-
-        val newCommands = client.sentCommands.drop(sentBefore.size)
-        assertTrue(
-            "expected kill-window dispatch, got $newCommands",
-            newCommands.any { it.startsWith("kill-window") },
-        )
-        assertTrue(
-            "no refresh must run after a tmux %error response — found $newCommands",
-            newCommands.none { it.startsWith("list-panes") },
-        )
-        val msg = vm.windowKillError.value
-        assertNotNull("expected windowKillError to surface tmux %error", msg)
-        assertTrue(
-            "expected tmux error message to carry the detail, got '$msg'",
-            msg!!.contains("can't find window"),
->>>>>>> theirs
-        )
-    }
-
-    @Test
-<<<<<<< ours
     fun isFastSwitchEligibleRejectsDeadSshSession() {
         val vm = newVm()
         // Inject a session that says it is not connected — the predicate
@@ -1959,85 +1800,10 @@ class TmuxSessionViewModelTest {
                 keyPath = "/keys/a",
                 sessionName = "third",
             ),
-=======
-    fun killWindowRefreshesAfterDeterministicWindowCloseEvent() = runTest {
-        // Happy path: sendCommand succeeds → view model waits for
-        // %window-close → fires an explicit reconcile. Asserting the
-        // ordering: until the event arrives no reconcile fires; once the
-        // event arrives the reconcile lands.
-        val vm = newVm()
-        val client = FakeTmuxClient()
-        // Seeding list-panes for the WindowAdd below.
-        client.responses.addLast(
-            CommandResponse(
-                number = 1L,
-                output = listOf("%0\t@9\t\$0\twork\ta\t0"),
-                isError = false,
-            ),
-        )
-        // kill-window's own response: empty success.
-        client.responses.addLast(
-            CommandResponse(number = 2L, output = emptyList(), isError = false),
-        )
-        // Post-kill reconcile list-panes returns no rows.
-        client.responses.addLast(
-            CommandResponse(number = 3L, output = emptyList(), isError = false),
-        )
-        vm.attachClientForTest(client)
-        client.emittedEvents.emit(
-            ControlEvent.WindowAdd(sessionId = "", windowId = "@9", name = ""),
-        )
-        advanceUntilIdle()
-        val listPanesCountBefore = client.sentCommands.count { it.startsWith("list-panes") }
-
-        vm.killWindow("@9")
-        // runCurrent (NOT advanceUntilIdle) so the test scheduler does NOT
-        // auto-roll virtual time past the 2s fallback — we want to assert
-        // ordering: WITHOUT the %window-close event the kill-window
-        // refresh is gated on the event-deferred join. runCurrent pumps
-        // already-scheduled tasks at the current virtual time, so the
-        // sendCommand fires and the post-kill collector installs, but the
-        // 2s timeout has NOT yet popped.
-        runCurrent()
-
-        // sendCommand fired.
-        assertTrue(
-            "expected kill-window dispatch on the wire",
-            client.sentCommands.any { it == "kill-window -t @9" },
-        )
-        // Before the %window-close arrives the kill-window-side reconcile
-        // is gated on the event-deferred join. The production
-        // [onControlEvent] subscriber sees only WindowAdd / WindowClose /
-        // LayoutChange so a successful kill response on its own won't
-        // trigger a refresh.
-        assertEquals(
-            "kill-window must NOT refresh until %window-close arrives or " +
-                "the 2s fallback fires",
-            listPanesCountBefore,
-            client.sentCommands.count { it.startsWith("list-panes") },
-        )
-
-        client.emittedEvents.emit(
-            ControlEvent.WindowClose(sessionId = "", windowId = "@9"),
-        )
-        advanceUntilIdle()
-
-        // Two reconciles can fire: one from the event-loop's
-        // onControlEvent and one from kill-window's explicit refresh.
-        // Either way it MUST be at least one more than before.
-        assertTrue(
-            "expected at least one post-kill list-panes refresh",
-            client.sentCommands.count { it.startsWith("list-panes") } > listPanesCountBefore,
-        )
-        assertNull(
-            "happy path must not raise a windowKillError",
-            vm.windowKillError.value,
->>>>>>> theirs
         )
     }
 
     @Test
-<<<<<<< ours
     fun fastSwitchClearsPaneStateBeforeNewSession() = runTest {
         val vm = newVm()
         val session = FakeSshSession()
@@ -2138,117 +1904,6 @@ class TmuxSessionViewModelTest {
             handshakesBefore,
             handshakesAfter,
         )
-=======
-    fun killWindowRefreshesAfterFallbackTimeoutWhenEventNeverArrives() = runTest {
-        // A degenerate tmux that swallows the %window-close notification
-        // must not wedge the UI indefinitely — the view model falls back
-        // to an unconditional reconcile after KILL_WINDOW_EVENT_WAIT_MS.
-        val vm = newVm()
-        val client = FakeTmuxClient()
-        client.responses.addLast(
-            CommandResponse(
-                number = 1L,
-                output = listOf("%0\t@7\t\$0\twork\ta\t0"),
-                isError = false,
-            ),
-        )
-        client.responses.addLast(
-            CommandResponse(number = 2L, output = emptyList(), isError = false),
-        )
-        client.responses.addLast(
-            CommandResponse(number = 3L, output = emptyList(), isError = false),
-        )
-        vm.attachClientForTest(client)
-        client.emittedEvents.emit(
-            ControlEvent.WindowAdd(sessionId = "", windowId = "@7", name = ""),
-        )
-        advanceUntilIdle()
-        val listPanesCountBefore = client.sentCommands.count { it.startsWith("list-panes") }
-
-        vm.killWindow("@7")
-        // advanceUntilIdle on the test scheduler will roll virtual time
-        // past the 2s fallback because nothing else is pending.
-        advanceUntilIdle()
-
-        assertTrue(
-            "expected fallback reconcile after the 2s wait — got " +
-                "${client.sentCommands}",
-            client.sentCommands.count { it.startsWith("list-panes") } > listPanesCountBefore,
-        )
-        assertNull(
-            "fallback path must not surface an error",
-            vm.windowKillError.value,
-        )
-    }
-
-    @Test
-    fun clearWindowKillErrorRemovesPriorMessage() = runTest {
-        // The screen's banner dismiss action wires to this method; it must
-        // null out the StateFlow so subsequent recompositions hide the band.
-        val vm = newVm()
-        val client = ThrowingTmuxClient(
-            throwOnCommand = "kill-window",
-            exception = IllegalStateException("broken"),
-        )
-        vm.attachClientForTest(client)
-        vm.applyParsedPanesForTest(
-            listOf(
-                TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "work", paneIndex = 0),
-            ),
-        )
-        vm.killWindow("@0")
-        advanceUntilIdle()
-        assertNotNull(vm.windowKillError.value)
-
-        vm.clearWindowKillError()
-
-        assertNull(vm.windowKillError.value)
-    }
-
-    @Test
-    fun killWindowIgnoresBlankWindowIdAndNeverDispatches() = runTest {
-        // Defensive: the screen passes `currentWindowId.orEmpty()` so a
-        // pre-attach kill tap must be a no-op rather than a wire
-        // request for `kill-window -t `.
-        val vm = newVm()
-        val client = FakeTmuxClient()
-        vm.attachClientForTest(client)
-
-        vm.killWindow("")
-        vm.killWindow("   ")
-        advanceUntilIdle()
-
-        assertTrue(
-            "blank windowId must not dispatch — got ${client.sentCommands}",
-            client.sentCommands.none { it.startsWith("kill-window") },
-        )
-        assertNull(vm.windowKillError.value)
-    }
-
-    /**
-     * Test double that throws on a chosen command — exercises the
-     * "sendCommand throws" branch of [TmuxSessionViewModel.killWindow]
-     * without touching SSH. Mirrors the same-named fake in
-     * `SessionsDashboardViewModelTest` so the two ViewModels' error
-     * surfacing stays comparable.
-     */
-    private class ThrowingTmuxClient(
-        private val throwOnCommand: String,
-        private val exception: Throwable,
-    ) : com.pocketshell.core.tmux.TmuxClient {
-        private val delegate = FakeTmuxClient()
-        override val events = delegate.events
-        override val disconnected = delegate.disconnected
-        val sentCommands: MutableList<String> get() = delegate.sentCommands
-        override suspend fun connect() = delegate.connect()
-        override suspend fun sendCommand(cmd: String): CommandResponse {
-            delegate.sentCommands += cmd
-            if (cmd.startsWith(throwOnCommand)) throw exception
-            return CommandResponse(0L, emptyList(), false)
-        }
-        override fun outputFor(paneId: String) = delegate.outputFor(paneId)
-        override fun close() = delegate.close()
->>>>>>> theirs
     }
 
     @Test

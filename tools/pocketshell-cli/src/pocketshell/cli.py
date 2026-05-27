@@ -2,8 +2,9 @@
 
 This is the skeleton landed in the first PR of issue
 [#170](https://github.com/alexeygrigorev/pocketshell/issues/170). The
-second PR adds the `jobs` subgroup. Later PRs will add `agent-log`,
-`sessions`, `repos`, and an IPC `daemon`.
+second PR adds the `jobs` subgroup; the third PR (issue #218) adds the
+`sessions` subgroup. Later PRs will add `agent-log`, `repos`, and an
+IPC `daemon`.
 
 Per the D22 locked principle (no backwards compatibility, hard cuts only)
 the eventual goal is for the PocketShell Android app to probe for this
@@ -21,6 +22,7 @@ import click
 
 from pocketshell import __version__
 from pocketshell.jobs import jobs_group
+from pocketshell.sessions import sessions_group
 from pocketshell.usage import usage_command
 
 
@@ -29,8 +31,8 @@ from pocketshell.usage import usage_command
     help=(
         "Unified server-side helper for the PocketShell Android client.\n\n"
         "Subcommands replace the separately-installed `quse` and `tmuxctl` "
-        "CLIs. Today `usage` and `jobs` are wired up; more subcommands will "
-        "land in follow-up rounds."
+        "CLIs. Today `usage`, `jobs`, and `sessions` are wired up; more "
+        "subcommands will land in follow-up rounds."
     ),
 )
 @click.version_option(__version__, "-V", "--version", prog_name="pocketshell")
@@ -40,6 +42,7 @@ def cli() -> None:
 
 cli.add_command(usage_command, name="usage")
 cli.add_command(jobs_group, name="jobs")
+cli.add_command(sessions_group, name="sessions")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

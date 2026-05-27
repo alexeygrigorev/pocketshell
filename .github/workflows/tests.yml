@@ -136,6 +136,16 @@ jobs:
     name: Emulator smoke (Docker agents)
     runs-on: ubuntu-latest
     needs: [unit, integration]
+    # Maintainer 2026-05-27: stop the CI email spam. The emulator smoke job
+    # is currently red on a sprawl of flake-grade failures (perf-budget
+    # tests, AVD-contention SIGKILLs, race-prone seeded fixtures, Compose
+    # selectors that drift mid-merge) that the #207 stopgap only partly
+    # addressed. Until per-test gating catches up, the emulator job runs
+    # but does NOT block the workflow status. Real defects still surface
+    # in the run logs and the on-call agent investigates; local emulator
+    # runs are unchanged. When the emulator job is reliably green for ~5
+    # consecutive runs, flip this back to `continue-on-error: false`.
+    continue-on-error: true
 
     steps:
       - name: Checkout

@@ -370,6 +370,15 @@ public class SessionViewModel @Inject constructor(
     public fun selectSessionTab(tab: SessionTab) {
         val current = _agentConversation.value
         if (tab == SessionTab.Conversation && current.detection == null) return
+        // Issue #179: tapping the Conversation tab is treated as the
+        // user visiting the hint's destination. Record the dismissal
+        // key so a later JSONL event re-detecting the same agent
+        // cannot resurrect the hint chip on the terminal tab.
+        if (tab == SessionTab.Conversation) {
+            current.detection?.let { detection ->
+                dismissedAgentHints += detection.sessionId ?: detection.sourcePath
+            }
+        }
         _agentConversation.value = current.copy(selectedTab = tab, hintVisible = false)
     }
 
@@ -379,6 +388,13 @@ public class SessionViewModel @Inject constructor(
         dismissedAgentHints += detection.sessionId ?: detection.sourcePath
         _agentConversation.value = current.copy(hintVisible = false)
     }
+
+    /**
+     * Issue #179: snapshot of the dismissed-hint keys for unit tests.
+     * The set is private — tests need a read-only seam to prove the
+     * explicit-dismiss and visit-to-dismiss paths both populate it.
+     */
+    internal fun dismissedHintKeysForTest(): Set<String> = dismissedAgentHints.toSet()
 
     /**
      * Handle a tap on the key bar.

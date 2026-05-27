@@ -284,13 +284,23 @@ public fun SessionScreen(
                     )
                     val detection = agentConversation.detection
                     if (agentConversation.hintVisible && detection != null) {
+                        // Issue #179: auto-dismiss the chip after a fixed
+                        // delay so a JSONL append that retriggered
+                        // hintVisible cannot keep it on-screen
+                        // indefinitely. Keyed on the detection identity
+                        // so a fresh agent detection re-arms the timer.
+                        val detectionKey = detection.sessionId ?: detection.sourcePath
+                        LaunchedEffect(detectionKey) {
+                            kotlinx.coroutines.delay(AGENT_HINT_AUTO_DISMISS_MS)
+                            viewModel.dismissAgentHint()
+                        }
                         AgentHintChip(
                             label = "${detection.agent.displayName} session detected",
                             onOpen = { viewModel.selectSessionTab(SessionTab.Conversation) },
                             onDismiss = viewModel::dismissAgentHint,
                             modifier = Modifier
-                                .align(Alignment.TopCenter)
-                                .padding(12.dp)
+                                .align(Alignment.BottomCenter)
+                                .padding(horizontal = 12.dp, vertical = 12.dp)
                                 .testTag(SESSION_AGENT_HINT_TAG),
                         )
                     }
@@ -477,12 +487,16 @@ private fun AgentHintChip(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Issue #179: muted bottom banner per docs/design-system.md §6.3.
+    // Replaces the previous opaque top-center overlay so the hint does
+    // not dominate the terminal viewport on every JSONL event.
+    val shape = RoundedCornerShape(10.dp)
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .border(width = 1.dp, color = PocketShellColors.AccentDim)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .background(color = PocketShellColors.AccentSoft, shape = shape)
+            .border(width = 1.dp, color = PocketShellColors.AccentDim, shape = shape)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -508,6 +522,13 @@ private fun AgentHintChip(
         }
     }
 }
+
+/**
+ * Issue #179: auto-dismiss delay for the agent hint banner. 8 seconds
+ * matches the UX audit (#154 finding 9.1) and the design-system spec
+ * (`docs/design-system.md` §6.3).
+ */
+internal const val AGENT_HINT_AUTO_DISMISS_MS: Long = 8_000L
 
 // Issue #160 round 2: `internal` visibility (was `private`) so the
 // connected `ConversationInteractE2eTest` can drive the composer

@@ -195,6 +195,22 @@ public class TmuxSessionViewModel @Inject constructor(
     private val paneInputChannels: MutableMap<String, Channel<ByteArray>> = ConcurrentHashMap()
     private val paneInputJobs: MutableMap<String, Job> = ConcurrentHashMap()
 
+    // Issue #179: per-(pane, hint-key) record of "the user has already
+    // dismissed this hint for this detected agent session, do not show it
+    // again". Without this set, the production hint composable in
+    // [TmuxSessionScreen] kept re-mounting because [appendAgentEvents]
+    // (called on every parsed JSONL event from
+    // [agentRepository.tailEventsFromLine]) does not clear `hintVisible`
+    // and [startAgentConversationForPane] re-runs whenever
+    // [reconcilePanes] sees the same pane with the same `(cwd, command)`
+    // tuple after a tmux reconcile. The set is keyed on the agent
+    // detection's `sessionId ?: sourcePath` so re-detecting the same
+    // file/session never resurrects a hint the user explicitly dismissed
+    // or auto-dismissed. Survives ViewModel lifetime (process lifetime
+    // for the foreground tmux screen). The companion field on
+    // [SessionViewModel] is the raw-SSH mirror of this same idea.
+    private val dismissedAgentHints: MutableSet<String> = mutableSetOf()
+
     // Bridge scope: a child of viewModelScope (parented via the
     // viewModelScope's Job) but with its own SupervisorJob so that a
     // producer-cancellation on one pane's TerminalSurfaceState (e.g. the
@@ -726,13 +742,20 @@ public class TmuxSessionViewModel @Inject constructor(
         val initialEvents = runCatching {
             agentRepository.readInitialEvents(session, detection)
         }.getOrDefault(emptyList())
+        // Issue #179: a fresh `startAgentConversationForPane` call
+        // (e.g. because [reconcilePanes] cycled and the existing pane
+        // got re-detected) must NOT resurrect a hint the user
+        // already dismissed for the same (pane, session) key. We
+        // therefore initialise `hintVisible` from [dismissedAgentHints]
+        // rather than unconditionally to `true`.
+        val hintKey = hintKeyFor(paneId, detection)
         setAgentConversation(
             paneId,
             AgentConversationUiState(
                 detection = detection,
                 events = boundedDistinctEvents(initialEvents),
                 selectedTab = SessionTab.Terminal,
-                hintVisible = true,
+                hintVisible = hintKey !in dismissedAgentHints,
             ),
         )
         // Issue #160: OpenCode now tails its JSONL via `session.tail`
@@ -781,13 +804,48 @@ public class TmuxSessionViewModel @Inject constructor(
     public fun selectSessionTab(paneId: String, tab: SessionTab) {
         val current = _agentConversations.value[paneId] ?: return
         if (tab == SessionTab.Conversation && current.detection == null) return
+        // Issue #179: tapping the Conversation tab counts as the user
+        // visiting the hint's destination — record the dismissal so a
+        // later JSONL append + reconcile cannot resurrect the chip.
+        if (tab == SessionTab.Conversation) {
+            current.detection?.let { detection ->
+                dismissedAgentHints += hintKeyFor(paneId, detection)
+            }
+        }
         setAgentConversation(paneId, current.copy(selectedTab = tab, hintVisible = false))
     }
 
     public fun dismissAgentHint(paneId: String) {
         val current = _agentConversations.value[paneId] ?: return
+        // Issue #179: record the dismissal key so subsequent JSONL
+        // events or reconciles never re-set `hintVisible = true` for
+        // this pane's detected agent session within the process
+        // lifetime. The key matches the one
+        // [startAgentConversationForPane] reads at construction time.
+        current.detection?.let { detection ->
+            dismissedAgentHints += hintKeyFor(paneId, detection)
+        }
         setAgentConversation(paneId, current.copy(hintVisible = false))
     }
+
+    /**
+     * Issue #179: the per-pane hint dismissal key. Composed of the
+     * pane id plus the detected agent's `sessionId ?: sourcePath` so a
+     * second pane independently detecting Claude in the same project
+     * still gets its own (un-dismissed) hint chip on first detection.
+     */
+    private fun hintKeyFor(paneId: String, detection: AgentDetection): String {
+        val sessionKey = detection.sessionId ?: detection.sourcePath
+        return "$paneId|$sessionKey"
+    }
+
+    /**
+     * Issue #179: snapshot the dismissed-hint keys for unit tests.
+     * The set is otherwise private — tests need a read-only seam so
+     * they can prove the explicit-dismiss and visit-to-dismiss paths
+     * both populate it.
+     */
+    internal fun dismissedHintKeysForTest(): Set<String> = dismissedAgentHints.toSet()
 
     private fun appendAgentEvents(paneId: String, events: List<ConversationEvent>) {
         if (events.isEmpty()) return
@@ -797,6 +855,45 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private fun setAgentConversation(paneId: String, state: AgentConversationUiState) {
         _agentConversations.value = _agentConversations.value + (paneId to state)
+    }
+
+    /**
+     * Issue #179 test seam: synthesize a freshly-detected agent
+     * conversation on [paneId] without going through the production SSH
+     * + JSONL path. The state mirrors what
+     * [startAgentConversationForPane] produces (initial events, terminal
+     * tab selected, hint visible iff the (pane, detection) key has not
+     * been dismissed). Tests use this to drive the hint-dismiss state
+     * machine deterministically: stamp the detection, dismiss, then
+     * replay this seam to mimic the next JSONL-driven re-detection and
+     * assert the hint stays gone.
+     */
+    internal fun startAgentConversationForTest(
+        paneId: String,
+        detection: AgentDetection,
+        initialEvents: List<ConversationEvent> = emptyList(),
+    ) {
+        val hintKey = hintKeyFor(paneId, detection)
+        setAgentConversation(
+            paneId,
+            AgentConversationUiState(
+                detection = detection,
+                events = boundedDistinctEvents(initialEvents),
+                selectedTab = SessionTab.Terminal,
+                hintVisible = hintKey !in dismissedAgentHints,
+            ),
+        )
+    }
+
+    /**
+     * Issue #179 test seam: replay an append of new JSONL events for
+     * [paneId] without going through the production tail loop. Mirrors
+     * what [agentRepository.tailEventsFromLine] would do — i.e. invokes
+     * the same internal [appendAgentEvents] so the dedup + bounding
+     * pass runs identically.
+     */
+    internal fun appendAgentEventsForTest(paneId: String, events: List<ConversationEvent>) {
+        appendAgentEvents(paneId, events)
     }
 
     /**

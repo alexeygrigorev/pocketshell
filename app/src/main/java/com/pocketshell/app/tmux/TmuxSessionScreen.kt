@@ -78,6 +78,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.composer.PromptComposerSheet
+import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.settings.SettingsViewModel
 import com.pocketshell.app.session.KeyBarWithMic
@@ -610,26 +611,15 @@ public fun TmuxSessionScreen(
                         )
                     }
                 }
-                if (
-                    currentPane != null &&
-                    currentAgentConversation?.hintVisible == true &&
-                    currentAgentConversation.detection != null &&
-                    currentAgentConversation.selectedTab == SessionTab.Terminal
-                ) {
-                    TmuxAgentHintChip(
-                        label = "${currentAgentConversation.detection.agent.displayName} session detected",
-                        onOpen = {
-                            viewModel.selectSessionTab(currentPane.paneId, SessionTab.Conversation)
-                        },
-                        onDismiss = {
-                            viewModel.dismissAgentHint(currentPane.paneId)
-                        },
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .padding(12.dp)
-                            .testTag(TMUX_AGENT_HINT_TAG),
-                    )
-                }
+                TmuxAgentHintBanner(
+                    pane = currentPane,
+                    conversation = currentAgentConversation,
+                    onOpen = { paneId ->
+                        viewModel.selectSessionTab(paneId, SessionTab.Conversation)
+                    },
+                    onDismiss = viewModel::dismissAgentHint,
+                    modifier = Modifier.align(Alignment.BottomCenter),
+                )
             }
 
             // Voice-related strips sit above the input band so they remain
@@ -1463,6 +1453,58 @@ private fun WindowSwitcherOverlay(
     }
 }
 
+/**
+ * Issue #179: chip-display block extracted out of [TmuxSessionScreen]'s
+ * main column so the dismiss state machine is unit-testable in
+ * isolation. The composable owns the auto-dismiss [LaunchedEffect] keyed
+ * on (paneId, detectionKey) — when [conversation]'s `hintVisible` flips
+ * to false (explicit dismiss, visit-to-dismiss, or auto-dismiss), the
+ * effect is torn down with the chip.
+ *
+ * Public visibility is [internal] so an instrumentation test in the
+ * same module can mount the chip against a real [TmuxSessionViewModel]
+ * and the production dismissed-set wiring without standing up the full
+ * tmux-CC connection.
+ */
+@Composable
+internal fun TmuxAgentHintBanner(
+    pane: TmuxPaneState?,
+    conversation: AgentConversationUiState?,
+    onOpen: (paneId: String) -> Unit,
+    onDismiss: (paneId: String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val detection = conversation?.detection
+    val visible = pane != null &&
+        conversation?.hintVisible == true &&
+        detection != null &&
+        conversation.selectedTab == SessionTab.Terminal
+    if (!visible) return
+    val hintPaneId = pane!!.paneId
+    val hintDetectionKey = detection!!.sessionId ?: detection.sourcePath
+    // Auto-dismiss after [AGENT_HINT_AUTO_DISMISS_MS] of continuous
+    // visibility for the same (pane, detection) pair. The keyed
+    // LaunchedEffect restarts only when the user navigates to a
+    // different pane or the detection changes — within a single
+    // sighting the timer runs once and either fires (auto-dismiss) or
+    // is cancelled by the user explicitly dismissing / visiting the
+    // Conversation tab (both clear `hintVisible`, which makes
+    // `visible` false above and removes the composable + its
+    // LaunchedEffect).
+    LaunchedEffect(hintPaneId, hintDetectionKey) {
+        kotlinx.coroutines.delay(AGENT_HINT_AUTO_DISMISS_MS)
+        onDismiss(hintPaneId)
+    }
+    TmuxAgentHintChip(
+        label = "${detection.agent.displayName} session detected",
+        onOpen = { onOpen(hintPaneId) },
+        onDismiss = { onDismiss(hintPaneId) },
+        modifier = modifier
+            .padding(horizontal = 12.dp, vertical = 12.dp)
+            .testTag(TMUX_AGENT_HINT_TAG),
+    )
+}
+
 @Composable
 private fun TmuxAgentHintChip(
     label: String,
@@ -1470,12 +1512,17 @@ private fun TmuxAgentHintChip(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Issue #179: muted bottom banner per docs/design-system.md §6.3.
+    // Replaces the previous opaque top-center overlay. AccentSoft fill +
+    // 1 dp AccentDim border + 10 dp corner radius keeps the chip visible
+    // without dominating the terminal viewport.
+    val shape = RoundedCornerShape(10.dp)
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .border(width = 1.dp, color = PocketShellColors.AccentDim)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .background(color = PocketShellColors.AccentSoft, shape = shape)
+            .border(width = 1.dp, color = PocketShellColors.AccentDim, shape = shape)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -1501,6 +1548,13 @@ private fun TmuxAgentHintChip(
         }
     }
 }
+
+/**
+ * Issue #179: auto-dismiss delay for the agent hint banner. 8 seconds
+ * matches the UX audit (#154 finding 9.1) and the design-system spec
+ * (`docs/design-system.md` §6.3).
+ */
+internal const val AGENT_HINT_AUTO_DISMISS_MS: Long = 8_000L
 
 @Composable
 internal fun TmuxConversationPane(

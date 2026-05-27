@@ -53,6 +53,9 @@ enum class ThemePreference {
  *   [MAX_VOICE_SILENCE_SECONDS]; default
  *   [DEFAULT_VOICE_SILENCE_SECONDS] matches the historic 5-second
  *   constant in `PromptComposerViewModel.SILENCE_WINDOW_MS`. Issue #125.
+ *   Issue #185 raised the minimum bound to 2s so a hand-edited or stray
+ *   slider drag cannot leave the user with a sub-2s threshold that
+ *   auto-stops on natural mid-sentence pauses.
  */
 data class AppSettings(
     val theme: ThemePreference = ThemePreference.System,
@@ -103,8 +106,32 @@ data class AppSettings(
             VoiceLanguageOption(code = "ru", label = "Russian"),
         )
 
-        const val MIN_VOICE_SILENCE_SECONDS: Float = 0.5f
+        /**
+         * Lowest silence window the user is allowed to configure. Issue
+         * #185 raised this from 0.5s to 2.0s after a v0.2.8 dogfood
+         * report where dictation auto-stopped mid-sentence. A natural
+         * mid-utterance pause routinely exceeds 0.5s — anything below
+         * ~2s makes the watchdog feel hostile rather than helpful — so
+         * the floor is now 2s. Users who want a tighter window are out
+         * of luck on purpose; the failure mode (auto-stop mid-speech)
+         * was uniformly worse than waiting an extra second.
+         *
+         * Persisted values predating #185 that fell below the new floor
+         * are clamped on read by [SettingsRepository.readSnapshot], so a
+         * fresh app launch always sees a >= 2s window even when the
+         * SharedPreferences blob carries a legacy sub-2s value.
+         */
+        const val MIN_VOICE_SILENCE_SECONDS: Float = 2f
         const val MAX_VOICE_SILENCE_SECONDS: Float = 10f
+
+        /**
+         * Default silence window used on fresh installs. Issue #185
+         * documents the chosen value as 5 seconds — well above the 2s
+         * floor — so a user who never visits Settings still gets a
+         * forgiving window. The historic constant
+         * `PromptComposerViewModel.SILENCE_WINDOW_MS` (5000 ms) is the
+         * same value expressed in milliseconds.
+         */
         const val DEFAULT_VOICE_SILENCE_SECONDS: Float = 5f
         const val VOICE_SILENCE_STEP_SECONDS: Float = 0.5f
 

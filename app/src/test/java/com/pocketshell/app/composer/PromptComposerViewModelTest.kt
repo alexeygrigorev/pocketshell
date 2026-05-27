@@ -1196,6 +1196,135 @@ class PromptComposerViewModelTest {
         assertEquals("must not burn quota while offline", 0, whisperCalls)
     }
 
+    // -- Issue #185: silence-threshold surfacing + stricter floor --------
+
+    @Test
+    fun startRecordingStampsSilenceThresholdSecondsFromVoiceSettings() = runTest {
+        // The composer sheet renders the "Auto-stops after Xs silence"
+        // hint from [UiState.silenceThresholdSeconds]. Stamping the
+        // value at recording start (rather than reading the settings
+        // every frame) keeps the displayed hint stable for the lifetime
+        // of one recording — a slider drag during dictation must not
+        // shorten the in-flight window underfoot, the watchdog and the
+        // displayed value must agree.
+        val customWindowMs = 4_000L
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            voiceSettings = FakeVoiceSettings(window = customWindowMs),
+        )
+        assertEquals(
+            "Idle state must not surface a threshold — the hint hides outside Recording",
+            0f,
+            vm.uiState.value.silenceThresholdSeconds,
+            0f,
+        )
+
+        try {
+            vm.onMicTap()
+            runCurrent()
+            assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+            assertEquals(
+                "stamped threshold must equal voiceSettings.silenceWindowMs / 1000",
+                4f,
+                vm.uiState.value.silenceThresholdSeconds,
+                0.001f,
+            )
+        } finally {
+            vm.cancelRecording()
+            advanceUntilIdle()
+        }
+    }
+
+    @Test
+    fun watchdogHonoursThresholdStampedOnUiState() = runTest {
+        // Issue #185: the watchdog reads its window from the UiState
+        // snapshot, not from the live VoiceSettingsSnapshot, so a slider
+        // drag during recording cannot shorten the in-flight window.
+        // The fake reports a generous 8s window at recording start, then
+        // flips to a hostile 1s window. The watchdog must still wait the
+        // 8s it committed to.
+        val mic = FakeMicCapture(amplitudes = listOf(0.5f, 0.5f, 0.5f) + List(500) { 0f })
+        val voice = FakeVoiceSettings(window = 8_000L)
+        val vm = newVm(
+            mic = mic,
+            whisper = fakeWhisperClient { Result.success("stable") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { testScheduler.currentTime },
+            voiceSettings = voice,
+        )
+
+        vm.onMicTap()
+        runCurrent()
+        // Mid-recording slider tug — must NOT affect the in-flight window.
+        voice.setWindow(1_000L)
+
+        // Burn loud polls to seed the lastLoud timer.
+        advanceTimeBy(3L * PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+        runCurrent()
+
+        // At 2s well below the original 8s window AND above the new 1s
+        // window the user tried to apply — proves the watchdog ignored
+        // the live edit and is still counting against the stamped 8s.
+        advanceTimeBy(2_000L)
+        runCurrent()
+        assertEquals(
+            "watchdog must use the threshold stamped at recording start, " +
+                "not the live VoiceSettingsSnapshot value",
+            RecordingState.Recording,
+            vm.uiState.value.recording,
+        )
+
+        // Advance past the originally-stamped 8s window — auto-stop
+        // fires now because the watchdog committed to 8s, not 1s.
+        advanceTimeBy(8_000L)
+        advanceUntilIdle()
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+    }
+
+    @Test
+    fun silenceWindowAtMinimumFloorTwoSecondsKeepsRecordingThroughOneAndAHalfSecondSilence() = runTest {
+        // Issue #185 raised the minimum bound to 2s. A 1.5s mid-sentence
+        // pause is the canonical regression scenario: with a 2s floor
+        // it stays inside the window and the recording continues.
+        val mic = FakeMicCapture(
+            amplitudes = listOf(0.5f, 0.5f, 0.5f) + List(35) { 0f } + List(200) { 0.5f },
+        )
+        val vm = newVm(
+            mic = mic,
+            whisper = fakeWhisperClient { Result.success("never") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { testScheduler.currentTime },
+            voiceSettings = FakeVoiceSettings(window = 2_000L),
+        )
+
+        try {
+            vm.onMicTap()
+            runCurrent()
+            assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+            // Burn 3 loud polls so the lastLoud clock is seeded inside
+            // the window.
+            advanceTimeBy(3L * PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+            runCurrent()
+
+            // 1.5s of silence — still inside the 2s minimum-floor window.
+            // This is the regression scenario the maintainer reported in
+            // the v0.2.8 dogfood note: a natural mid-sentence pause that
+            // should not auto-stop.
+            advanceTimeBy(1_500L)
+            runCurrent()
+            assertEquals(
+                "recording must survive a 1.5s pause when the threshold floor is 2s",
+                RecordingState.Recording,
+                vm.uiState.value.recording,
+            )
+        } finally {
+            vm.cancelRecording()
+            advanceUntilIdle()
+        }
+    }
+
     @Test
     fun voiceSettingsCustomSilenceWindowAutoStopsAtConfiguredThreshold() = runTest {
         // Configure a 1.5s window — well below the historic 5s default —

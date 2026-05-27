@@ -146,6 +146,64 @@ class SettingsRepositoryTest {
         )
     }
 
+    // -- Issue #185: stricter 2s minimum floor ----------------------------
+
+    @Test
+    fun `voice silence minimum bound is two seconds`() {
+        // Issue #185 raised the floor from 0.5s to 2s after a v0.2.8
+        // dogfood report where natural mid-sentence pauses were
+        // auto-stopping the recorder. Pin the constant explicitly so a
+        // future tweak to the bound is caught here rather than letting
+        // a sub-2s default slip back in.
+        assertEquals(
+            "minimum silence threshold must be 2s — anything below makes the watchdog hostile to natural speech",
+            2f,
+            AppSettings.MIN_VOICE_SILENCE_SECONDS,
+            0f,
+        )
+    }
+
+    @Test
+    fun `default voice silence threshold is at least two seconds`() {
+        // Issue #185 acceptance: "Default silence threshold raised to >=
+        // 2000ms (document the chosen value)." The chosen default is 5s.
+        // Lock it in as both the documented value and the >= 2s
+        // contract so a future tweak below 2s gets caught.
+        assertTrue(
+            "default silence threshold (${AppSettings.DEFAULT_VOICE_SILENCE_SECONDS}s) must be >= 2s",
+            AppSettings.DEFAULT_VOICE_SILENCE_SECONDS >= 2f,
+        )
+        assertEquals(
+            "issue #185 documents the default as 5s; raise or lower with care",
+            5f,
+            AppSettings.DEFAULT_VOICE_SILENCE_SECONDS,
+            0f,
+        )
+    }
+
+    @Test
+    fun `legacy sub-two-second prefs blob is lifted to the floor on read`() {
+        // A user on a pre-#185 build could have dragged the slider to
+        // 0.5s. After they update, the SharedPreferences blob still
+        // carries that value. Issue #185 fixes the regression by
+        // clamping on read in [SettingsRepository.readSnapshot] so the
+        // first launch under the new minimum surfaces the floor, not
+        // the stored sub-floor value.
+        context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+            .edit()
+            .putFloat("voice_silence_seconds", 0.5f)
+            .commit()
+
+        val repo = SettingsRepository(context)
+
+        assertEquals(
+            "legacy sub-2s value must be lifted to the new minimum on first read",
+            AppSettings.MIN_VOICE_SILENCE_SECONDS,
+            repo.settings.value.voiceSilenceThresholdSeconds,
+            0f,
+        )
+    }
+
     @Test
     fun `setVoiceSilenceThresholdSeconds clamps above maximum`() {
         val repo = SettingsRepository(context)

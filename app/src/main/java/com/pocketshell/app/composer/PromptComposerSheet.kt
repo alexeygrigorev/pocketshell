@@ -578,6 +578,34 @@ internal fun SheetContent(
             )
         }
 
+        // Issue #185: silence-threshold hint. The watchdog auto-stops the
+        // recording after [PromptComposerViewModel.UiState.silenceThresholdSeconds]
+        // of below-threshold amplitude, but until #185 the user had no
+        // way to know that value short of opening Settings — and one
+        // maintainer dogfood report ("dictation auto-stopped while I was
+        // still talking, I don't know why") proved the missing mental
+        // model was a real problem. Rendering the threshold inline keeps
+        // the user informed without dragging them into the Settings flow.
+        //
+        // Rendered only while [PromptComposerViewModel.RecordingState.Recording]
+        // — Idle hides it (the recording isn't running), Transcribing hides
+        // it (the auto-stop already fired or the user tapped manually).
+        // [PocketShellColors.TextMuted] is the design-system muted token
+        // (see docs/design-system.md): low contrast so the hint never
+        // competes with the accent-tinted status label above.
+        if (state.recording == PromptComposerViewModel.RecordingState.Recording &&
+            state.silenceThresholdSeconds > 0f
+        ) {
+            Text(
+                text = "Auto-stops after ${formatSilenceThresholdLabel(state.silenceThresholdSeconds)}s silence",
+                color = PocketShellColors.TextMuted,
+                fontSize = 11.sp,
+                modifier = Modifier
+                    .padding(bottom = 8.dp)
+                    .testTag(COMPOSER_SILENCE_THRESHOLD_HINT_TAG),
+            )
+        }
+
         // Action row: Snippets (ghost) / Send / Send + Enter (primary).
         // Matches `.composer-actions` in the mockup.
         Row(
@@ -1158,6 +1186,29 @@ internal const val COMPOSER_STATUS_TAG = "prompt-composer-status"
 internal const val COMPOSER_WAVEFORM_TAG = "prompt-composer-waveform"
 
 /**
+ * Issue #185: test tag for the inline "auto-stops after Xs silence"
+ * hint rendered below the mic row while the composer is in `Recording`.
+ * The hint surfaces the current threshold from
+ * [PromptComposerViewModel.UiState.silenceThresholdSeconds] so the user
+ * can see how long a silence will trigger the watchdog auto-stop.
+ */
+internal const val COMPOSER_SILENCE_THRESHOLD_HINT_TAG = "prompt-composer-silence-hint"
+
+/**
+ * Issue #185: pretty-format the silence threshold for the composer's
+ * inline hint. Drops the trailing `.0` for whole-second values so the
+ * hint reads `Auto-stops after 5s silence` rather than `5.0s`; renders
+ * one decimal otherwise (`2.5s`). Mirrors the same rounding rule used
+ * by `SettingsScreen.formatThresholdLabel` so the Settings slider value
+ * and the composer hint never disagree by a rounding artifact.
+ */
+internal fun formatSilenceThresholdLabel(seconds: Float): String {
+    val rounded = kotlin.math.round(seconds * 10f) / 10f
+    val asInt = rounded.toInt()
+    return if (rounded == asInt.toFloat()) asInt.toString() else "%.1f".format(rounded)
+}
+
+/**
  * Issue #174: test tag for the cancel-recording chip rendered next to
  * the mic FAB while the composer is in `Recording`. Connected tests use
  * this tag to locate the affordance, tap it, and assert the resulting
@@ -1231,6 +1282,10 @@ private fun PromptComposerRecordingListeningPreview() {
                     recording = PromptComposerViewModel.RecordingState.Recording,
                     amplitude = 0f,
                     hasDetectedSpeech = false,
+                    // Issue #185: show the inline "auto-stops after 5s
+                    // silence" hint so the design surface reflects what
+                    // the user sees while the mic is open.
+                    silenceThresholdSeconds = 5f,
                     error = null,
                 ),
                 onClose = {},
@@ -1260,6 +1315,10 @@ private fun PromptComposerRecordingCapturingPreview() {
                     recording = PromptComposerViewModel.RecordingState.Recording,
                     amplitude = 0.7f,
                     hasDetectedSpeech = true,
+                    // Issue #185: hint stays visible across the
+                    // listening -> capturing sub-state flip so the user
+                    // keeps the auto-stop mental model while speaking.
+                    silenceThresholdSeconds = 5f,
                     error = null,
                 ),
                 onClose = {},

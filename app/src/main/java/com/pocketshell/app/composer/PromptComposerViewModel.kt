@@ -246,6 +246,17 @@ public class PromptComposerViewModel @Inject constructor(
         // the flag and surface the "recording interrupted" banner.
         savedStateHandle[KEY_WAS_RECORDING] = true
 
+        // Issue #185: snapshot the user-configured silence window once at
+        // recording start. Both the watchdog (below) AND the sheet's
+        // "auto-stops after Xs silence" hint read this value from
+        // [UiState.silenceThresholdSeconds] so they are guaranteed to be
+        // consistent — there is no way for the displayed value to drift
+        // away from what the watchdog actually waits for. Rounded to one
+        // decimal so the rendered label reads `5s` / `1.5s` rather than
+        // `4.999s`.
+        val windowMs = voiceSettings.silenceWindowMs()
+        val thresholdSeconds = windowMs / 1000f
+
         _uiState.update {
             it.copy(
                 recording = RecordingState.Recording,
@@ -256,6 +267,7 @@ public class PromptComposerViewModel @Inject constructor(
                 // so the status label can switch from "LISTENING" (waiting)
                 // to "CAPTURING" (active speech) within one poll cycle.
                 hasDetectedSpeech = false,
+                silenceThresholdSeconds = thresholdSeconds,
                 error = null,
             )
         }
@@ -280,12 +292,19 @@ public class PromptComposerViewModel @Inject constructor(
     private suspend fun sampleAmplitudeAndAutoStopOnSilence() {
         var lastLoudAtMs: Long = clock()
         var triggerAutoStop = false
-        // Snapshot the user-configured silence window at recording start.
-        // Reading it once here (rather than on every loop iteration)
-        // matches the issue's intent: the next recording picks up the
-        // latest setting, but a slider drag mid-recording does not
-        // shorten the current window underfoot.
-        val silenceWindowMs = voiceSettings.silenceWindowMs()
+        // Read the snapshot the FSM stamped onto [UiState] in
+        // [startRecording]. Both this watchdog AND the sheet's
+        // "auto-stops after Xs silence" hint share the same source so
+        // the user-visible threshold and the actual auto-stop bound are
+        // guaranteed to match — see [UiState.silenceThresholdSeconds]
+        // for the rationale. The watchdog falls back to the raw
+        // [VoiceSettingsSnapshot] read if the threshold field is unset
+        // for any reason (defensive against a future caller that
+        // bypasses [startRecording]).
+        val silenceWindowMs = run {
+            val stamped = _uiState.value.silenceThresholdSeconds
+            if (stamped > 0f) (stamped * 1000f).toLong() else voiceSettings.silenceWindowMs()
+        }
         while (kotlinx.coroutines.currentCoroutineContext().isActive) {
             val amp = audioRecorder.currentAmplitude()
             // Issue #195: flip `hasDetectedSpeech` on the first amplitude
@@ -769,6 +788,15 @@ public class PromptComposerViewModel @Inject constructor(
      *   confirmation surfacing the path; tapping it (or any other
      *   interaction) calls [clearSavedAudioConfirmation] to clear the
      *   field.
+     * @param silenceThresholdSeconds issue #185: the silence window
+     *   (seconds) that the watchdog will use for the *current* recording.
+     *   Stamped on [startRecording] from
+     *   [VoiceSettingsSnapshot.silenceWindowMs] so the value is stable
+     *   across the recording even if the user drags the Settings slider
+     *   while the mic is open. Used by the sheet to render the "auto-stops
+     *   after Xs silence" hint so the user has a mental model. Zero while
+     *   the FSM is in [RecordingState.Idle] / [RecordingState.Transcribing]
+     *   so the hint is hidden outside an active recording.
      */
     public data class UiState(
         val draft: String = "",
@@ -777,6 +805,7 @@ public class PromptComposerViewModel @Inject constructor(
         val hasDetectedSpeech: Boolean = false,
         val error: String? = null,
         val savedAudioPath: String? = null,
+        val silenceThresholdSeconds: Float = 0f,
     )
 
     /**

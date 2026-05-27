@@ -70,6 +70,18 @@ fun PortForwardPanelScreen(
         onDispose { viewModel.leavePanel() }
     }
 
+    // D21 / issue #161 — pause the scan loop + close active tunnels
+    // when the app backgrounds, restore on the next ON_START. The
+    // ViewModel does the actual work; the panel just opts in to the
+    // process-wide lifecycle here (mirrors the
+    // [UsageScheduler.observeProcessLifecycle] hook in `App.onCreate`,
+    // but scoped to the panel since the port-forward path is the only
+    // surface that opens a phone-side ServerSocket + an SSH session
+    // for tunnels).
+    LaunchedEffect(viewModel) {
+        viewModel.observeProcessLifecycle()
+    }
+
     LaunchedEffect(hostId, keyPath, passphrase) {
         viewModel.load(hostId, keyPath, passphrase)
     }

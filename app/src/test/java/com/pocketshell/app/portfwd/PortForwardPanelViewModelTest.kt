@@ -1,6 +1,9 @@
 package com.pocketshell.app.portfwd
 
 import android.content.Context
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
@@ -27,6 +30,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -381,10 +385,295 @@ class PortForwardPanelViewModelTest {
     }
 
     @Test
+    fun userToggleOnPersistsHostEnabledTrueOnSuccess() = runTest {
+        val hostId = insertHost(enabled = false)
+        val session = FakeSshSession(ssOutput = "")
+        val viewModel = newViewModel(FakeConnector(Result.success(session)))
+
+        viewModel.load(hostId, "/tmp/key")
+        runCurrent()
+        viewModel.setAutoForwardEnabled(true)
+        runCurrent()
+
+        val stored = db.hostDao().getById(hostId)
+        assertNotNull(stored)
+        assertTrue(
+            "user-driven toggle on must persist HostEntity.enabled=true",
+            stored!!.enabled,
+        )
+        assertEquals(true, viewModel.state.value.host?.enabled)
+
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
+    fun userToggleOffPersistsHostEnabledFalse() = runTest {
+        val hostId = insertHost(enabled = true)
+        val session = FakeSshSession(ssOutput = "")
+        val viewModel = newViewModel(FakeConnector(Result.success(session)))
+
+        viewModel.load(hostId, "/tmp/key")
+        runCurrent()
+        // load() autostarts because enabled=true; baseline check.
+        assertTrue(viewModel.state.value.autoForwardEnabled)
+
+        viewModel.setAutoForwardEnabled(false)
+        runCurrent()
+
+        val stored = db.hostDao().getById(hostId)
+        assertNotNull(stored)
+        assertFalse(
+            "user-driven toggle off must persist HostEntity.enabled=false",
+            stored!!.enabled,
+        )
+        assertEquals(false, viewModel.state.value.host?.enabled)
+
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
+    fun userToggleOnConnectionFailureLeavesHostEnabledUnchanged() = runTest {
+        val hostId = insertHost(enabled = false)
+        val viewModel = newViewModel(FakeConnector(Result.failure(RuntimeException("no route"))))
+
+        viewModel.load(hostId, "/tmp/key")
+        runCurrent()
+        viewModel.setAutoForwardEnabled(true)
+        runCurrent()
+
+        val stored = db.hostDao().getById(hostId)
+        assertNotNull(stored)
+        assertFalse(
+            "failed connect on a never-enabled host must NOT persist enabled=true",
+            stored!!.enabled,
+        )
+    }
+
+    @Test
+    fun lifecycleStopPausesScanAndClosesActiveTunnels() = runTest {
+        val hostId = insertHost(enabled = false)
+        val session = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val viewModel = newViewModel(FakeConnector(Result.success(session)))
+        val owner = ManualLifecycleOwner().also { it.moveTo(Lifecycle.State.RESUMED) }
+        viewModel.observeProcessLifecycle(owner)
+        runCurrent()
+
+        viewModel.load(hostId, "/tmp/key")
+        runCurrent()
+        viewModel.setAutoForwardEnabled(true)
+        runCurrent()
+
+        assertTrue(viewModel.state.value.autoForwardEnabled)
+        assertEquals(1, session.openedForwards.size)
+        assertTrue(session.openedForwards.single().isActive)
+
+        owner.moveTo(Lifecycle.State.CREATED) // dispatches ON_PAUSE then ON_STOP
+        runCurrent()
+
+        assertFalse(
+            "ON_STOP must pause the scan/forwarding loop",
+            viewModel.state.value.autoForwardEnabled,
+        )
+        assertEquals(emptyList<com.pocketshell.core.portfwd.TunnelInfo>(), viewModel.state.value.tunnels)
+        assertTrue("active tunnels must close on ON_STOP", session.closed)
+        assertFalse(session.openedForwards.single().isActive)
+
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
+    fun lifecycleStopDoesNotPersistHostEnabledFalse() = runTest {
+        val hostId = insertHost(enabled = false)
+        val session = FakeSshSession(ssOutput = "")
+        val viewModel = newViewModel(FakeConnector(Result.success(session)))
+        val owner = ManualLifecycleOwner().also { it.moveTo(Lifecycle.State.RESUMED) }
+        viewModel.observeProcessLifecycle(owner)
+        runCurrent()
+
+        viewModel.load(hostId, "/tmp/key")
+        runCurrent()
+        viewModel.setAutoForwardEnabled(true)
+        runCurrent()
+
+        // Baseline: user toggle persisted enabled=true.
+        assertEquals(true, db.hostDao().getById(hostId)?.enabled)
+
+        owner.moveTo(Lifecycle.State.CREATED)
+        runCurrent()
+
+        val stored = db.hostDao().getById(hostId)
+        assertNotNull(stored)
+        assertTrue(
+            "lifecycle ON_STOP must NOT clear HostEntity.enabled; user intent preserved",
+            stored!!.enabled,
+        )
+    }
+
+    @Test
+    fun lifecycleStartResumesPreviouslyActiveTunnels() = runTest {
+        val hostId = insertHost(enabled = false)
+        val firstSession = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val resumedSession = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val connector = QueueConnector(
+            listOf(Result.success(firstSession), Result.success(resumedSession)),
+        )
+        val viewModel = newViewModel(connector)
+        val owner = ManualLifecycleOwner().also { it.moveTo(Lifecycle.State.RESUMED) }
+        viewModel.observeProcessLifecycle(owner)
+        runCurrent()
+
+        viewModel.load(hostId, "/tmp/key")
+        runCurrent()
+        viewModel.setAutoForwardEnabled(true)
+        runCurrent()
+        assertTrue(viewModel.state.value.autoForwardEnabled)
+
+        owner.moveTo(Lifecycle.State.CREATED)
+        runCurrent()
+        assertFalse(viewModel.state.value.autoForwardEnabled)
+        assertTrue(firstSession.closed)
+
+        owner.moveTo(Lifecycle.State.RESUMED) // dispatches ON_START then ON_RESUME
+        runCurrent()
+
+        assertTrue(
+            "ON_START must re-open tunnels that were active before background",
+            viewModel.state.value.autoForwardEnabled,
+        )
+        assertEquals(PortForwardConnectionState.Connected, viewModel.state.value.connectionState)
+        assertFalse(resumedSession.closed)
+        assertEquals(2, connector.hosts.size)
+
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
+    fun lifecycleStartDoesNotResumeWhenWasIdleBeforeBackground() = runTest {
+        val hostId = insertHost(enabled = false)
+        val session = FakeSshSession(ssOutput = "")
+        val connector = QueueConnector(listOf(Result.success(session)))
+        val viewModel = newViewModel(connector)
+        val owner = ManualLifecycleOwner().also { it.moveTo(Lifecycle.State.RESUMED) }
+        viewModel.observeProcessLifecycle(owner)
+        runCurrent()
+
+        viewModel.load(hostId, "/tmp/key")
+        runCurrent()
+        // Never enabled.
+        assertFalse(viewModel.state.value.autoForwardEnabled)
+
+        owner.moveTo(Lifecycle.State.CREATED)
+        runCurrent()
+        owner.moveTo(Lifecycle.State.RESUMED)
+        runCurrent()
+
+        assertFalse(
+            "ON_START on a host that was idle before background must not autostart",
+            viewModel.state.value.autoForwardEnabled,
+        )
+        assertEquals(emptyList<String>(), connector.hosts)
+    }
+
+    @Test
+    fun lifecycleStartDoesNotResumeAfterLeavePanel() = runTest {
+        val hostId = insertHost(enabled = false)
+        val firstSession = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val connector = QueueConnector(listOf(Result.success(firstSession)))
+        val viewModel = newViewModel(connector)
+        val owner = ManualLifecycleOwner().also { it.moveTo(Lifecycle.State.RESUMED) }
+        viewModel.observeProcessLifecycle(owner)
+        runCurrent()
+
+        viewModel.load(hostId, "/tmp/key")
+        runCurrent()
+        viewModel.setAutoForwardEnabled(true)
+        runCurrent()
+
+        owner.moveTo(Lifecycle.State.CREATED)
+        runCurrent()
+        viewModel.leavePanel()
+        runCurrent()
+        owner.moveTo(Lifecycle.State.RESUMED)
+        runCurrent()
+
+        assertFalse(viewModel.state.value.autoForwardEnabled)
+        assertNull(viewModel.state.value.host)
+        // No second connect was attempted on resume.
+        assertEquals(1, connector.hosts.size)
+    }
+
+    @Test
+    fun observeProcessLifecycleIsIdempotent() = runTest {
+        val hostId = insertHost(enabled = false)
+        val session = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val viewModel = newViewModel(FakeConnector(Result.success(session)))
+        val owner = ManualLifecycleOwner().also { it.moveTo(Lifecycle.State.RESUMED) }
+        viewModel.observeProcessLifecycle(owner)
+        viewModel.observeProcessLifecycle(owner)
+        runCurrent()
+
+        viewModel.load(hostId, "/tmp/key")
+        runCurrent()
+        viewModel.setAutoForwardEnabled(true)
+        runCurrent()
+        assertTrue(viewModel.state.value.autoForwardEnabled)
+        // The fake session opened one forward for the discovered port.
+        assertEquals(1, session.openedForwards.size)
+
+        // Triggering ON_STOP must fire stop exactly once even though the
+        // owner was observed twice.
+        owner.moveTo(Lifecycle.State.CREATED)
+        runCurrent()
+        assertFalse(viewModel.state.value.autoForwardEnabled)
+        // The single opened forward is now closed; observing the owner
+        // twice did not double-close anything (a double close on a
+        // FakeSshSession is harmless but the assertion is on the
+        // count of unique closed forwards, which stays at exactly one).
+        assertEquals(1, session.openedForwards.size)
+        assertFalse(session.openedForwards.single().isActive)
+        assertTrue(session.closed)
+
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
     fun formatBytesUsesCompactUnits() {
         assertEquals("999 B", formatBytes(999))
         assertEquals("1.5 KB", formatBytes(1536))
         assertEquals("2.0 MB", formatBytes(2 * 1024 * 1024))
+    }
+
+    /**
+     * Manual [LifecycleOwner] backed by [LifecycleRegistry]. Tests drive
+     * state transitions explicitly via [moveTo] so the panel's lifecycle
+     * observer fires deterministically. `LifecycleRegistry.handleLifecycleEvent`
+     * dispatches synchronously while the registry's state is advanced,
+     * which combined with [UnconfinedTestDispatcher] makes the
+     * subsequent assertions see the post-event state without scheduler
+     * shenanigans.
+     */
+    private class ManualLifecycleOwner : LifecycleOwner {
+        private val registry = LifecycleRegistry(this).apply { currentState = Lifecycle.State.INITIALIZED }
+        override val lifecycle: Lifecycle = registry
+
+        fun moveTo(state: Lifecycle.State) {
+            registry.currentState = state
+        }
     }
 
     private suspend fun insertHost(

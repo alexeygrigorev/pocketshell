@@ -28,13 +28,63 @@ import com.termux.terminal.WcWidth;
  */
 public final class TerminalRenderer {
 
+    /**
+     * Multiplier applied to the glyph-bounding-box height (descent - ascent)
+     * when computing {@link #mFontLineSpacing} — the per-cell row pitch.
+     *
+     * <p>Upstream Termux derived row pitch from {@link Paint#getFontSpacing()},
+     * which Android computes as {@code descent - ascent + leading} where
+     * "leading" is the font's recommended extra space between lines. For the
+     * default monospace and the bundled JetBrainsMono that extra leading is
+     * generous enough that the terminal felt vertically stretched on Pixel-
+     * class viewports (issue #241): fewer rows fit, and individual glyphs
+     * read as if they had been scaled vertically.
+     *
+     * <p>Switching the base metric to {@code -ascent + descent} (i.e.
+     * dropping the built-in leading) produces a tighter cell that hugs the
+     * glyph bounding box. Tuning multiplier {@code 1.0f} = pure glyph
+     * bounding box (no extra row gap). Bumping above {@code 1.0f} re-adds
+     * proportional row gap for readability if dogfood asks for it; below
+     * {@code 1.0f} compresses the row pitch tighter than the glyph
+     * bounding box, which is safe for fonts whose descent and ascent are
+     * conservative (JetBrainsMono Regular has small descent, so the next
+     * row's ascender region absorbs a modest compression cleanly).
+     *
+     * <p>Empirical pick of {@code 0.85f}: at the project's chosen
+     * {@code textSize = 28px} JetBrainsMono Regular's raw glyph bounding
+     * box ({@code -ascent + descent}) renders at ~36 px, whereas the
+     * pre-#241 baseline (Roboto Mono + {@code Paint#getFontSpacing()})
+     * rendered ~32 px per row. At multiplier {@code 1.0f} the net effect
+     * is {\em fewer} visible rows than baseline (deterministic terminal
+     * workbench: 65 → 58 rows on a Pixel-class AVD viewport), contrary
+     * to issue #241's explicit "fit more lines" dogfood requirement.
+     * Compressing by 15% brings the row pitch back to ~31 px (≈67 rows
+     * on the same viewport) so density beats baseline while leaving the
+     * descender → next-row-ascender region uncluttered.
+     *
+     * <p>The locked design decision D22 (no backwards-compat shims, no
+     * user-facing preference flags) means this is a single tunable constant
+     * the maintainer adjusts in source — there is no settings slider for
+     * line spacing. See issue #241 for the dogfood rationale.
+     */
+    private static final float LINE_SPACING_MULTIPLIER = 0.85f;
+
     final int mTextSize;
     final Typeface mTypeface;
     private final Paint mTextPaint = new Paint();
 
     /** The width of a single mono spaced character obtained by {@link Paint#measureText(String)} on a single 'X'. */
     final float mFontWidth;
-    /** The {@link Paint#getFontSpacing()}. See http://www.fampennings.nl/maarten/android/08numgrid/font.png */
+    /**
+     * Per-cell row pitch in pixels — distance between the baseline of one
+     * row and the baseline of the next. Computed as
+     * {@code ceil((-ascent + descent) * LINE_SPACING_MULTIPLIER)} so the cell
+     * tracks the glyph bounding box rather than {@link Paint#getFontSpacing()}'s
+     * looser "recommended line spacing" (which includes the font's built-in
+     * leading and felt vertically stretched on PocketShell's phone viewport —
+     * issue #241). See {@link #LINE_SPACING_MULTIPLIER} for the multiplier
+     * rationale.
+     */
     final int mFontLineSpacing;
     /** The {@link Paint#ascent()}. See http://www.fampennings.nl/maarten/android/08numgrid/font.png */
     private final int mFontAscent;
@@ -53,8 +103,13 @@ public final class TerminalRenderer {
         mTextPaint.setLinearText(true);
         mTextPaint.setTextSize(textSize);
 
-        mFontLineSpacing = (int) Math.ceil(mTextPaint.getFontSpacing());
+        // Issue #241 — derive the row pitch from the glyph bounding box
+        // (descent - ascent) rather than Paint#getFontSpacing(), which adds
+        // the font's recommended leading on top and produced a visibly
+        // stretched terminal on Pixel-class viewports.
+        final float mFontDescent = mTextPaint.descent();
         mFontAscent = (int) Math.ceil(mTextPaint.ascent());
+        mFontLineSpacing = (int) Math.ceil((-mTextPaint.ascent() + mFontDescent) * LINE_SPACING_MULTIPLIER);
         mFontLineSpacingAndAscent = mFontLineSpacing + mFontAscent;
         mFontWidth = mTextPaint.measureText("X");
 

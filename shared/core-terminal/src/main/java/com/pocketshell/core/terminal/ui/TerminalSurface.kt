@@ -76,6 +76,45 @@ internal const val TERMINAL_CURSOR_ARGB: Int = -0x00DD2C12 // 0xFF22D3EE
 internal const val DEFAULT_TEXT_SIZE_RAW_PX: Int = 28
 
 /**
+ * Asset path (relative to the APK's `assets/` root) for the bundled
+ * JetBrainsMono Regular TTF used by the terminal renderer. Vendored under
+ * this module's own `src/main/assets/fonts/` so a host that depends on
+ * `core-terminal` always has the font available without needing
+ * `:shared:ui-kit` on its classpath — and so emulator instrumentation
+ * tests run inside `:shared:core-terminal` itself (e.g.
+ * [TerminalRendererBoldCellPinningInstrumentedTest]) can load the same
+ * face the production app uses.
+ *
+ * See issue #241 — switching the terminal typeface from the system
+ * default monospace to JetBrainsMono Regular gives a tighter, more
+ * deliberate glyph that pairs with the new cell-height metric in
+ * [com.termux.view.TerminalRenderer].
+ */
+internal const val TERMINAL_FONT_ASSET_PATH: String = "fonts/JetBrainsMono-Regular.ttf"
+
+/**
+ * Loads the bundled JetBrainsMono Regular [Typeface] for the embedded
+ * terminal. Falls back to the system monospace if the asset is somehow
+ * missing (e.g. a stripped APK in a misconfigured build) — the fallback
+ * preserves a usable terminal rather than crashing on the IO error a
+ * direct [Typeface.createFromAsset] would throw.
+ *
+ * Cached on [Context.getApplicationContext] so all [TerminalView]
+ * instances share one face; [Typeface.createFromAsset] parses the TTF on
+ * every call otherwise.
+ */
+private var cachedTerminalTypeface: Typeface? = null
+internal fun terminalTypeface(context: Context): Typeface {
+    val cached = cachedTerminalTypeface
+    if (cached != null) return cached
+    val loaded = runCatching {
+        Typeface.createFromAsset(context.applicationContext.assets, TERMINAL_FONT_ASSET_PATH)
+    }.getOrNull() ?: Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL)
+    cachedTerminalTypeface = loaded
+    return loaded
+}
+
+/**
  * Clipboard label used when the terminal selection-action mode's COPY action
  * pushes text into the system clipboard. Not shown to the user on modern
  * Android but surfaced to accessibility services. Kept short and identifiable
@@ -411,7 +450,11 @@ internal fun TerminalView.applyPocketShellDefaults(viewClient: TerminalViewClien
     // Termux's setTypeface reads mRenderer.mTextSize, so text size must create
     // the renderer before we swap in the app typeface.
     setTextSize(DEFAULT_TEXT_SIZE_RAW_PX)
-    setTypeface(Typeface.create(Typeface.MONOSPACE, Typeface.NORMAL))
+    // Issue #241 — switch to the bundled JetBrainsMono Regular face. The
+    // renderer applies bold / italic / underline per-cell from terminal
+    // attributes, so we load the plain regular face here; do NOT pre-bake a
+    // bold style into the Typeface or every cell would render bold.
+    setTypeface(terminalTypeface(context))
     setDefaultBackgroundColor(DefaultTerminalBackground.toArgb())
     isFocusable = true
     isFocusableInTouchMode = true

@@ -25,10 +25,29 @@ class HostTmuxSessionListParser @Inject constructor() {
         ) {
             return null
         }
-        val match = TMUXCTL_ROW.matchEntire(line) ?: return null
-        val name = match.groupValues[2].trim()
+        // Issue #200: anchor on the deterministic trailing
+        // `YYYY-MM-DD HH:MM:SS` timestamp rather than requiring 2+ spaces
+        // between the session-name column and the timestamp column. On
+        // hosts with long session names (e.g. `git-ai-shipping-labs-workshops-raw-guard`),
+        // tmuxctl's printf layout overflows the column padding and emits
+        // only a single space before the timestamp. The previous regex
+        // (`\s{2,}` between name and date) silently dropped those rows,
+        // showing the user a partial list instead of the full set of
+        // tmux sessions present on the host.
+        val timestampMatch = TRAILING_TIMESTAMP.find(line) ?: return null
+        val timestampText = timestampMatch.groupValues[1]
+        // Reject rows where the timestamp isn't the trailing content
+        // (after optional whitespace): anything else past it would mean
+        // the line isn't a session row and the "timestamp" matched
+        // something embedded in a hint/help blurb.
+        if (line.substring(timestampMatch.range.last + 1).isNotBlank()) return null
+
+        val beforeTimestamp = line.substring(0, timestampMatch.range.first)
+        val idxMatch = LEADING_IDX.find(beforeTimestamp) ?: return null
+        val name = beforeTimestamp.substring(idxMatch.range.last + 1).trim()
         if (name.isEmpty()) return null
-        val created = parseDisplayTimestamp(match.groupValues[3].trim())
+
+        val created = parseDisplayTimestamp(timestampText)
         return HostTmuxSessionRow(
             name = name,
             createdAt = created,
@@ -59,7 +78,18 @@ class HostTmuxSessionListParser @Inject constructor() {
         }.getOrNull()
 
     private companion object {
-        val TMUXCTL_ROW: Regex = Regex("""^\s*(\d+)\s+(.+?)\s{2,}(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*$""")
+        /**
+         * Matches the trailing `YYYY-MM-DD HH:MM:SS` timestamp printed by
+         * `tmuxctl list --by activity`. Used as a deterministic anchor so
+         * the session-name column can absorb arbitrary intermediate
+         * whitespace (including the single-space case when long names
+         * overflow tmuxctl's printf padding). See issue #200.
+         */
+        val TRAILING_TIMESTAMP: Regex = Regex("""(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})""")
+
+        /** Matches the leading numeric IDX column on a tmuxctl row. */
+        val LEADING_IDX: Regex = Regex("""^\s*\d+\s+""")
+
         val DISPLAY_TIMESTAMP: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
     }
 }

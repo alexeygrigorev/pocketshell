@@ -145,6 +145,11 @@ dependencies {
     debugImplementation(libs.compose.ui.test.manifest)
 
     implementation(libs.lifecycle.runtime.compose)
+    implementation(libs.lifecycle.runtime.ktx)
+    // Issue #161: `ProcessLifecycleOwner` for the no-background-work
+    // principle — `UsageScheduler` pauses its polling loop when the
+    // whole process is in `STOPPED`.
+    implementation(libs.lifecycle.process)
 
     implementation(libs.hilt.android)
     ksp(libs.hilt.compiler)

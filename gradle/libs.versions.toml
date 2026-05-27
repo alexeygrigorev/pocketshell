@@ -87,6 +87,13 @@ compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-mani
 compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 
 lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
+# Issue #161: ProcessLifecycleOwner gives us a single process-wide
+# `Lifecycle.State.STARTED` / `STOPPED` signal so background-only schedulers
+# (UsageScheduler) can pause their polling loop without each ViewModel having
+# to wire its own Activity-lifecycle observer. Tracks the existing
+# `lifecycle` version pin.
+lifecycle-process = { group = "androidx.lifecycle", name = "lifecycle-process", version.ref = "lifecycle" }
+lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
 
 hilt-android = { group = "com.google.dagger", name = "hilt-android", version.ref = "hilt" }
 hilt-compiler = { group = "com.google.dagger", name = "hilt-compiler", version.ref = "hilt" }

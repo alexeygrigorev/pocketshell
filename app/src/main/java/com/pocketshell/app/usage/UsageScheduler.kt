@@ -1,5 +1,9 @@
 package com.pocketshell.app.usage
 
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -22,8 +26,10 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.Instant
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -32,23 +38,29 @@ import javax.inject.Singleton
  * `quse`-installed host for its usage payload (issue #117, usage-panel
  * Fix C; renamed from heru → quse in issue #128).
  *
+ * **No background work** (issue #161, decision D21).
+ *
+ * The scheduler hooks [ProcessLifecycleOwner] so the polling loop is
+ * gated on the whole-process lifecycle state. Each tick only runs while
+ * the process is at least [Lifecycle.State.STARTED] (at least one
+ * Activity is in the started state — i.e. the user has the app
+ * visible). When the user backgrounds the app the lifecycle drops to
+ * [Lifecycle.State.CREATED] and the loop awaits the next `STARTED`
+ * resume; nothing is polled in the meantime. On resume the loop
+ * coalesces a single catch-up tick rather than replaying every missed
+ * cadence.
+ *
  * **Why a coroutine on a Singleton scope, not WorkManager?**
  *
  * `docs/usage-panel.md` calls for a 60-second cadence while the usage
  * panel is in the foreground. WorkManager's minimum periodic interval is
  * 15 minutes (`PeriodicWorkRequest.MIN_PERIODIC_INTERVAL_MILLIS`), so it
  * cannot model the foreground cadence. A long-running coroutine on an
- * application-singleton scope is the right shape: it runs only while the
- * process is alive (which is exactly when the screens that consume it
- * are visible), and it can switch between 60 s / 5 m cadence on the fly
- * by reading [foregroundActive].
- *
- * The background 5-minute poll is *also* in-process — we do not attempt
- * to wake the device when PocketShell is fully backgrounded. This
- * matches the doc's guidance ("60s while open, 5m background") which the
- * planning notes describe as the in-app cadence, not a system-level
- * doze-respecting one. A WorkManager-driven daily refresh could be
- * layered on later if cold-start data freshness becomes a concern.
+ * application-singleton scope is the right shape: while the process is
+ * alive AND foregrounded, it can switch between 60 s / 5 m cadence on
+ * the fly by reading [foregroundActive]. When backgrounded it parks on
+ * [ProcessLifecycleOwner] — no battery drain, no wakelocks, no doze
+ * coordination required.
  *
  * **Inputs & outputs.**
  *
@@ -100,6 +112,48 @@ public class UsageScheduler @Inject constructor(
     private val _foregroundActive = MutableStateFlow(false)
     public val foregroundActive: StateFlow<Boolean> = _foregroundActive.asStateFlow()
 
+    /**
+     * Whole-process foreground signal driven by [ProcessLifecycleOwner].
+     * `true` when the process is at least [Lifecycle.State.STARTED] —
+     * i.e. an Activity is visible to the user. The polling loop reads
+     * this flag and refuses to tick while it is `false`, satisfying the
+     * no-background-work principle (D21 / issue #161).
+     *
+     * Visible-for-testing seam: connected tests flip the flag directly
+     * via [setProcessStartedForTest] when they can't easily drive
+     * [ProcessLifecycleOwner] from the instrumentation thread (the
+     * standard `ActivityScenario.moveToState(CREATED)` path *does* drive
+     * it, and is what the production wiring relies on).
+     */
+    private val _processStarted = MutableStateFlow(false)
+    public val processStarted: StateFlow<Boolean> = _processStarted.asStateFlow()
+
+    /**
+     * Monotonically-increasing counter incremented at the start of each
+     * fetch round (whether or not any hosts are eligible). Exposed so
+     * the `NoBackgroundWorkE2eTest` instrumentation can prove the loop
+     * did not tick while the app was backgrounded. Production code does
+     * not read this — it is purely a test seam.
+     */
+    private val _tickCount = AtomicLong(0L)
+    public val tickCount: Long
+        get() = _tickCount.get()
+
+    /**
+     * Lifecycle observer kept as a field so a paired `removeObserver`
+     * is safe even when the scheduler is reused across multiple
+     * `observeProcessLifecycle()` calls (the second call is a no-op).
+     */
+    private val processLifecycleObserver = LifecycleEventObserver { _: LifecycleOwner, event ->
+        when (event) {
+            Lifecycle.Event.ON_START -> _processStarted.value = true
+            Lifecycle.Event.ON_STOP -> _processStarted.value = false
+            else -> Unit
+        }
+    }
+
+    private var lifecycleAttached: Boolean = false
+
     private val _snapshots = MutableStateFlow<Map<Long, UsageSnapshot>>(emptyMap())
 
     /**
@@ -114,9 +168,53 @@ public class UsageScheduler @Inject constructor(
     public val snapshots: StateFlow<Map<Long, UsageSnapshot>> = _snapshots.asStateFlow()
 
     /**
+     * Attach a [ProcessLifecycleOwner] (or any [LifecycleOwner]) to the
+     * scheduler so [processStarted] tracks the owner's `STARTED` /
+     * `STOPPED` events. Called once from [com.pocketshell.app.App.onCreate];
+     * subsequent calls are no-ops so it is safe to invoke from tests.
+     *
+     * The observer is registered on the main thread because
+     * `Lifecycle.addObserver` requires it; the scheduler's polling
+     * coroutine stays on [Dispatchers.IO] and only reads the resulting
+     * [StateFlow].
+     */
+    public fun observeProcessLifecycle(
+        owner: LifecycleOwner = ProcessLifecycleOwner.get(),
+    ) {
+        synchronized(this) {
+            if (lifecycleAttached) return
+            lifecycleAttached = true
+        }
+        scope.launch {
+            withContext(Dispatchers.Main) {
+                // Seed the current state so a scheduler attached late
+                // (e.g. after the first `ON_START`) does not block at a
+                // stale `false`.
+                _processStarted.value = owner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+                owner.lifecycle.addObserver(processLifecycleObserver)
+            }
+        }
+    }
+
+    /**
+     * Visible-for-testing seam: flip the [processStarted] flag without
+     * needing a real lifecycle owner. The production wiring uses
+     * [observeProcessLifecycle] exclusively.
+     */
+    internal fun setProcessStartedForTest(started: Boolean) {
+        _processStarted.value = started
+    }
+
+    /**
      * Start the polling loop. Idempotent — calling twice is a no-op so
      * a screen `LaunchedEffect` can call it on every recomposition.
      * Must be paired with [stop] or process death.
+     *
+     * The loop is gated on [processStarted] (D21 / issue #161): if the
+     * process is currently `STOPPED`, ticks are suspended until the
+     * next `ON_START`. No catch-up burst is fired on resume — a single
+     * fetch happens once `processStarted` flips to `true`, then the
+     * normal cadence resumes.
      */
     public fun start() {
         synchronized(this) {
@@ -194,11 +292,29 @@ public class UsageScheduler @Inject constructor(
         _snapshots.value = merged.toMap()
     }
 
+    /**
+     * Override hook for [NoBackgroundWorkE2eTest]: the test lowers the
+     * cadence to a sub-second value so a regression that ignored the
+     * lifecycle gate would burst many ticks during the 30 s background
+     * window, making the "tick count did not move" assertion meaningful.
+     * Production code leaves this at `null` and reads
+     * [FOREGROUND_INTERVAL_MS] / [BACKGROUND_INTERVAL_MS] instead.
+     */
+    internal var loopIntervalOverrideMs: Long? = null
+
     private suspend fun runLoop() {
         try {
             while (true) {
+                // Gate every tick on the whole-process lifecycle. If the
+                // user has the app backgrounded we park here — `first { it }`
+                // suspends until the StateFlow re-emits `true` on `ON_START`.
+                // This is the core of the no-background-work principle
+                // (D21 / issue #161).
+                _processStarted.first { it }
+
                 mutex.withLock { fetchOnce() }
-                val intervalMs = if (_foregroundActive.value) FOREGROUND_INTERVAL_MS else BACKGROUND_INTERVAL_MS
+                val intervalMs = loopIntervalOverrideMs
+                    ?: if (_foregroundActive.value) FOREGROUND_INTERVAL_MS else BACKGROUND_INTERVAL_MS
                 delay(intervalMs)
             }
         } catch (e: CancellationException) {
@@ -207,6 +323,7 @@ public class UsageScheduler @Inject constructor(
     }
 
     private suspend fun fetchOnce() {
+        _tickCount.incrementAndGet()
         val hosts = hostDao.getAll().first()
         val quseHosts = hosts.filter { it.quseInstalled == true }
         if (quseHosts.isEmpty()) {
@@ -280,7 +397,13 @@ public class UsageScheduler @Inject constructor(
         /** 60-second cadence while the usage panel is foregrounded. */
         public const val FOREGROUND_INTERVAL_MS: Long = 60_000L
 
-        /** 5-minute cadence when the panel is not foregrounded. */
+        /**
+         * 5-minute cadence while the process is foregrounded but the
+         * usage panel itself is not (e.g. user is on the host list or
+         * inside a session). The loop never ticks while the *process*
+         * is `STOPPED` — see [processStarted] — so this is no longer
+         * a "background while backgrounded" cadence (D21).
+         */
         public const val BACKGROUND_INTERVAL_MS: Long = 5L * 60L * 1000L
     }
 }

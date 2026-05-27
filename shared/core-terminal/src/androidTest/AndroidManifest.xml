@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Issue #175 — register a custom ComponentActivity subclass for the
+  TerminalSurfaceComposeIntegrationTest that pre-declares
+  `android:showWhenLocked="true"`, `android:turnScreenOn="true"`, and
+  `android:resumeWhilePausing="true"` so the AOSP API 35 emulator's
+  launcher (QuickstepLauncher) cannot retain window focus when the
+  ActivityScenario launches the activity. Without this manifest, the
+  vanilla `androidx.activity.ComponentActivity` from compose-ui-test-
+  manifest is launched without those flags and the system clipboard
+  policy (foreground-focus check) silently no-ops `setPrimaryClip` calls
+  from our DisposableEffect.
+
+  We register the activity under the test apk's namespace
+  (`com.termux.view.test`) so the `am start ... <pkg>/<class>` form
+  resolves it; the class itself is the runtime-generated
+  `androidx.activity.ComponentActivity` instance returned by
+  composeTestRule.activity, with a Material theme so Compose can render
+  its layout chrome the same way the production app does.
+
+  This file is the standard pattern recommended by androidx.test docs for
+  tests that need an Activity host with different window flags than the
+  default empty ComponentActivity.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <application>
+        <activity
+            android:name="androidx.activity.ComponentActivity"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            tools:replace="android:showWhenLocked,android:turnScreenOn" />
+    </application>
+
+</manifest>

@@ -53,6 +53,23 @@ androidx-test-core = "1.6.1"
 androidx-test-ext-junit = "1.2.1"
 androidx-test-runner = "1.6.2"
 
+# espresso-intents (issue #175). Used by the connected
+# TerminalSurfaceComposeIntegrationTest to assert that tapping a URL in the
+# terminal scrollback fires an `Intent.ACTION_VIEW` with the URL as data.
+# Recording-callback fakes are not enough — the reviewer requires that the
+# full production path (PocketShellTerminalViewClient.onSingleTapUp →
+# onTapMaybeUrl → openUrlWithFallback → Context.startActivity) be exercised,
+# and the only way to assert ACTION_VIEW vs ACTION_DIAL non-trivially is via
+# Espresso's intent stubbing/recording. 3.6.1 is the latest stable on the
+# androidx.test.espresso 3.6.x line and aligns with the
+# androidx-test-* versions already pinned above.
+androidx-espresso-intents = "3.6.1"
+# androidx.activity 1.10.1 is already on the classpath via activity-compose;
+# we still declare an explicit entry for `androidx.activity:activity` so the
+# core-terminal connected tests can host TerminalSurface on a real
+# `ComponentActivity` via createAndroidComposeRule (issue #175).
+androidx-activity = "1.10.1"
+
 # core-terminal (issue #7). Termux's vendored sources reference
 # `androidx.annotation.NonNull` / `@Nullable` on public APIs. Version mirrors
 # the upstream Termux pin recorded in `shared/core-terminal/VENDORED.md` so a
@@ -116,6 +133,8 @@ robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "
 androidx-test-core = { group = "androidx.test", name = "core", version.ref = "androidx-test-core" }
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidx-test-ext-junit" }
 androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidx-test-runner" }
+androidx-espresso-intents = { group = "androidx.test.espresso", name = "espresso-intents", version.ref = "androidx-espresso-intents" }
+androidx-activity = { group = "androidx.activity", name = "activity", version.ref = "androidx-activity" }
 
 # core-terminal (issue #7). Used by the vendored Termux sources.
 androidx-annotation = { group = "androidx.annotation", name = "annotation", version.ref = "androidx-annotation" }

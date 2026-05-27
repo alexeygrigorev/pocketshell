@@ -139,6 +139,32 @@ class TerminalSurfaceState {
     )
     internal val renderRequests: SharedFlow<Unit> get() = _renderRequests.asSharedFlow()
 
+    /**
+     * Callback fired when the embedded text-selection action mode's "Copy"
+     * button is tapped. Issue #175 wires the [TerminalSurface] composable to
+     * install a default sink that copies the selected text into the system
+     * clipboard, but tests substitute a recording fake so they can assert
+     * what bytes flowed without standing up a real
+     * [android.content.ClipboardManager].
+     *
+     * `null` (the default) means: drop the text on the floor — matching the
+     * pre-#175 behaviour where the vendored `TextSelectionCursorController`
+     * called into the session's client but the client was a no-op. New
+     * surfaces should install a sink via [setOnCopySelection] before
+     * presenting the surface to the user.
+     */
+    @Volatile
+    private var onCopySelection: ((String) -> Unit)? = null
+
+    /**
+     * Install or replace the [onCopySelection] callback. Pass `null` to
+     * detach. Called by [TerminalSurface] on composition to wire the
+     * system clipboard; tests override with a recording fake.
+     */
+    public fun setOnCopySelection(callback: ((String) -> Unit)?) {
+        onCopySelection = callback
+    }
+
     private val sessionClient = object : TerminalSessionClient {
         override fun onTextChanged(changedSession: TerminalSession) {
             _renderRequests.tryEmit(Unit)
@@ -146,7 +172,15 @@ class TerminalSurfaceState {
 
         override fun onTitleChanged(changedSession: TerminalSession) = Unit
         override fun onSessionFinished(finishedSession: TerminalSession) = Unit
-        override fun onCopyTextToClipboard(session: TerminalSession, text: String) = Unit
+        override fun onCopyTextToClipboard(session: TerminalSession, text: String) {
+            // The vendored TextSelectionCursorController's COPY action calls
+            // TerminalSession.onCopyTextToClipboard(selectedText). Forward to
+            // the host-provided sink so the selected text actually reaches
+            // the system clipboard (issue #175). A null sink (pre-#175
+            // behaviour) silently drops the text — kept for tests that do not
+            // care about clipboard side effects.
+            onCopySelection?.invoke(text)
+        }
         override fun onPasteTextFromClipboard(session: TerminalSession?) = Unit
         override fun onBell(session: TerminalSession) = Unit
 

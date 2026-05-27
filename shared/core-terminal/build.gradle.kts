@@ -142,4 +142,17 @@ dependencies {
     androidTestImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.junit)
+    // Issue #175 — the round-2 connected coverage closes the reviewer's
+    // AC2/AC5/AC6/AC7 gaps. We host TerminalSurface on a real
+    // ComponentActivity via createAndroidComposeRule (compose-ui-test-junit4)
+    // so the DisposableEffect that wires the system ClipboardManager actually
+    // runs, and we assert the URL-tap path fires Intent.ACTION_VIEW via
+    // espresso-intents instead of a recording callback. compose-ui-test
+    // requires the manifest companion (so the implicit empty Activity used
+    // by `createAndroidComposeRule` is registered).
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation(libs.compose.ui.test.junit4)
+    debugImplementation(libs.compose.ui.test.manifest)
+    androidTestImplementation(libs.androidx.espresso.intents)
+    androidTestImplementation(libs.androidx.activity)
 }

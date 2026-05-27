@@ -1,11 +1,17 @@
 package com.pocketshell.core.terminal.ui
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.graphics.Typeface
+import android.net.Uri
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.inputmethod.InputMethodManager
+import android.widget.Toast
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -18,9 +24,13 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.key.KeyEvent as ComposeKeyEvent
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import com.pocketshell.core.terminal.selection.SelectionOverlay
 import com.pocketshell.core.terminal.selection.TerminalMatch
+import com.pocketshell.core.terminal.selection.UrlOverlay
+import com.pocketshell.core.terminal.selection.UrlRegion
+import com.pocketshell.core.terminal.selection.hitTestUrl
 import com.termux.terminal.TextStyle
 import com.termux.terminal.TerminalSessionClient
 import com.termux.terminal.TerminalSession
@@ -64,6 +74,50 @@ internal const val TERMINAL_CURSOR_ARGB: Int = -0x00DD2C12 // 0xFF22D3EE
  * autocomplete and search results.
  */
 internal const val DEFAULT_TEXT_SIZE_RAW_PX: Int = 28
+
+/**
+ * Clipboard label used when the terminal selection-action mode's COPY action
+ * pushes text into the system clipboard. Not shown to the user on modern
+ * Android but surfaced to accessibility services. Kept short and identifiable
+ * so a clipboard-manager surface (e.g. Gboard's clipboard history) can label
+ * the entry as "from PocketShell terminal".
+ */
+internal const val CLIPBOARD_LABEL_TERMINAL: String = "PocketShell terminal"
+
+/**
+ * Maximum length of the text included in the "Copied: …" toast after a COPY
+ * action. A multi-line selection of a stack trace can be hundreds of bytes;
+ * truncating to a sane prefix keeps the toast on-screen for a single line.
+ */
+internal const val TOAST_PREVIEW_CHARS: Int = 60
+
+/**
+ * Fire `Intent.ACTION_VIEW` for [url] from [context]. We add
+ * `FLAG_ACTIVITY_NEW_TASK` so the call is safe from a non-activity context
+ * (the LocalContext in a Compose surface is typically an
+ * `androidx.activity.ComponentActivity`, but a configuration-change
+ * recomposition can briefly hand us the application context). If no
+ * activity can handle the URL — the user has no browser installed, or
+ * Android's verified-link policy denies access — fall back to copying the
+ * URL to the system clipboard so the user can paste it elsewhere.
+ *
+ * We deliberately catch [android.content.ActivityNotFoundException] rather
+ * than pre-checking with `resolveActivity`, because the pre-check requires
+ * the `QUERY_ALL_PACKAGES` permission on API 30+. The exception path is
+ * cheap on the common case where a browser is present.
+ */
+internal fun openUrlWithFallback(context: Context, url: String) {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    try {
+        context.startActivity(intent)
+    } catch (_: android.content.ActivityNotFoundException) {
+        val clipboard = context.applicationContext.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        clipboard?.setPrimaryClip(ClipData.newPlainText(CLIPBOARD_LABEL_TERMINAL, url))
+        Toast.makeText(context.applicationContext, "Copied URL: $url", Toast.LENGTH_SHORT).show()
+    }
+}
 
 /**
  * Hosts the vendored [TerminalView] inside a Compose tree via
@@ -119,6 +173,8 @@ fun TerminalSurface(
     matchListener: ((TerminalMatch) -> Unit)? = null,
     onTerminalSizeChanged: ((columns: Int, rows: Int) -> Unit)? = null,
     onKeyEvent: ((ComposeKeyEvent) -> Boolean)? = null,
+    onUrlTap: ((String) -> Unit)? = null,
+    urlsEnabled: Boolean = true,
 ) {
     // Hoist the bridge so the same instance survives recompositions and we
     // do not leak listeners across configuration changes. AndroidView's
@@ -126,6 +182,39 @@ fun TerminalSurface(
     val viewClient = remember { PocketShellTerminalViewClient() }
     viewClient.onTerminalSizeChanged = onTerminalSizeChanged
     var terminalView by remember { mutableStateOf<TerminalView?>(null) }
+
+    val context = LocalContext.current
+
+    // Issue #175 — install the system-clipboard sink for the vendored
+    // selection action mode's COPY button. When the user long-presses, drags,
+    // and taps Copy, the vendored TextSelectionCursorController calls
+    // `session.onCopyTextToClipboard(selectedText)` which routes through the
+    // TerminalSessionClient set at session-construction time. By default that
+    // client (TerminalSurfaceState.sessionClient) drops the text on the floor;
+    // wiring a real sink here is what makes Copy actually copy.
+    //
+    // We use a DisposableEffect tied to the context (and the app context
+    // alone, since the activity context would re-create the closure on
+    // every recomposition) so the sink is installed once per composition
+    // and detached cleanly when the surface leaves the tree. Toast feedback
+    // matches the smart-selection MatchActions UX so users get visual
+    // confirmation the copy succeeded.
+    DisposableEffect(state, context.applicationContext) {
+        val appContext = context.applicationContext
+        state.setOnCopySelection { selectedText ->
+            val clipboard = appContext.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+            clipboard?.setPrimaryClip(ClipData.newPlainText(CLIPBOARD_LABEL_TERMINAL, selectedText))
+            // Truncate the toast preview so a multi-line selection does not
+            // produce a giant toast — the clipboard still has the full text.
+            val preview = if (selectedText.length > TOAST_PREVIEW_CHARS) {
+                selectedText.substring(0, TOAST_PREVIEW_CHARS) + "…"
+            } else {
+                selectedText
+            }
+            Toast.makeText(appContext, "Copied: $preview", Toast.LENGTH_SHORT).show()
+        }
+        onDispose { state.setOnCopySelection(null) }
+    }
 
     // Subscribe to the detector flow only when the caller actually wants
     // match callbacks. The empty-flow fallback avoids spinning up a debounce
@@ -154,17 +243,71 @@ fun TerminalSurface(
         modifier
     }
 
-    // Layer the vendored TerminalView under the optional SelectionOverlay.
-    // We use `androidx.compose.ui.layout.Layout` rather than `Box` because
-    // this module does not depend on `compose-foundation`. The Layout
-    // measures both children with the incoming constraints and places them
-    // at origin so they perfectly overlap.
+    // Resolve the URL-tap callback once. If the caller did not supply one and
+    // URL overlay is enabled, default to firing Intent.ACTION_VIEW from the
+    // app context — which is the behaviour every reasonable host would want.
+    // Suppressing the overlay entirely (urlsEnabled = false) is what tests
+    // and code paths that explicitly do not want URL detection should use.
+    val effectiveUrlTap: ((String) -> Unit)? = remember(onUrlTap, urlsEnabled, context) {
+        if (!urlsEnabled) {
+            null
+        } else if (onUrlTap != null) {
+            onUrlTap
+        } else {
+            { url -> openUrlWithFallback(context, url) }
+        }
+    }
+
+    // The list of URL regions currently visible on the embedded TerminalView.
+    // Updated by UrlOverlay on each render request. The state holder lives in
+    // this composable (and not in TerminalSurfaceState) because URLs are a
+    // view-coordinate concept, not a transcript-bytes concept — the same
+    // session can render different URL sets at different sizes.
+    var visibleUrls by remember { mutableStateOf<List<UrlRegion>>(emptyList()) }
+
+    // Install the tap-hook on the view client every time `visibleUrls`,
+    // `terminalView`, or `effectiveUrlTap` changes. The hook receives a tap
+    // in view-local pixels and returns true if the tap landed on a URL —
+    // PocketShellTerminalViewClient.onSingleTapUp then suppresses the
+    // keyboard summon for that gesture and the host's onUrlTap callback
+    // fires.
+    DisposableEffect(viewClient, terminalView, visibleUrls, effectiveUrlTap) {
+        val view = terminalView
+        val tap = effectiveUrlTap
+        if (view == null || tap == null) {
+            viewClient.onTapMaybeUrl = null
+        } else {
+            val urlsSnapshot = visibleUrls
+            viewClient.onTapMaybeUrl = { x, y ->
+                val hit = hitTestUrl(view, urlsSnapshot, x, y)
+                if (hit != null) {
+                    tap(hit.url)
+                    true
+                } else {
+                    false
+                }
+            }
+        }
+        onDispose { viewClient.onTapMaybeUrl = null }
+    }
+
+    // Layer the vendored TerminalView under the optional SelectionOverlay
+    // and UrlOverlay. We use `androidx.compose.ui.layout.Layout` rather than
+    // `Box` because this module does not depend on `compose-foundation`. The
+    // Layout measures each child with the incoming constraints and places
+    // them at origin so they perfectly overlap. Painting order matches
+    // source order: AndroidView paints first (background), then any
+    // SelectionOverlay (above the View), then the UrlOverlay on top so the
+    // URL underlines are visible above other overlays. URL tap-routing
+    // happens inside the View's gesture pipeline via
+    // [PocketShellTerminalViewClient.onTapMaybeUrl], not in the overlay —
+    // see [UrlOverlay]'s KDoc for the rationale.
     Layout(
         modifier = keyAwareModifier,
         content = {
             AndroidView(
-                factory = { context ->
-                    TerminalView(context, /* attributes = */ null)
+                factory = { ctx ->
+                    TerminalView(ctx, /* attributes = */ null)
                         .applyPocketShellDefaults(viewClient)
                         .also { terminalView = it }
                 },
@@ -196,6 +339,13 @@ fun TerminalSurface(
                 SelectionOverlay(
                     matches = matches,
                     onTap = matchListener,
+                )
+            }
+            if (effectiveUrlTap != null) {
+                UrlOverlay(
+                    view = terminalView,
+                    renderRequests = state.renderRequests,
+                    onUrlsChanged = { visibleUrls = it },
                 )
             }
         },
@@ -288,6 +438,20 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
     private var terminalView: TerminalView? = null
     var onTerminalSizeChanged: ((columns: Int, rows: Int) -> Unit)? = null
 
+    /**
+     * Hook installed by [TerminalSurface] when URL detection is enabled.
+     * Called from [onSingleTapUp] for every confirmed single tap; given the
+     * tap coordinates in view-local pixels, the host returns `true` if the
+     * tap landed on a URL (in which case the keyboard is NOT summoned), or
+     * `false` otherwise.
+     *
+     * Splitting the URL hit-test out of this class (which lives in
+     * `core-terminal`) means the host can swap in a stub for tests and lets
+     * the design-system color used to underline URLs live alongside the
+     * matching overlay code rather than being hard-coded in this client.
+     */
+    var onTapMaybeUrl: ((tapX: Float, tapY: Float) -> Boolean)? = null
+
     fun bind(view: TerminalView) {
         terminalView = view
     }
@@ -314,6 +478,14 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
     override fun onScale(scale: Float): Float = 1f
     override fun onSingleTapUp(e: MotionEvent?) {
         val view = terminalView ?: return
+        // Issue #175 — give the URL-tap host first crack at the gesture. If
+        // the host says "yes, this hit a URL", suppress the keyboard summon
+        // entirely; the host is responsible for the follow-up (typically
+        // firing Intent.ACTION_VIEW).
+        if (e != null) {
+            val handled = onTapMaybeUrl?.invoke(e.x, e.y) == true
+            if (handled) return
+        }
         view.requestFocus()
         val inputMethodManager = view.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         inputMethodManager?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)

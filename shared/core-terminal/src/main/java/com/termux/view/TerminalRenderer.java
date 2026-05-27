@@ -335,4 +335,18 @@ public final class TerminalRenderer {
     public int getFontLineSpacing() {
         return mFontLineSpacing;
     }
+
+    /**
+     * Distance in pixels from the top of the canvas to the top of row 0's
+     * cell. Equals {@code mFontLineSpacing + mFontAscent} (Paint's ascent is
+     * negative, so this value is slightly less than {@link #mFontLineSpacing}).
+     * Exposed so external Compose overlays (PocketShell's {@code UrlOverlay})
+     * can compute pixel rectangles in the same row-aligned coordinate space
+     * the renderer itself paints into, without duplicating the Paint metrics
+     * math. The renderer uses this value as the top-of-row offset for the
+     * first row in {@link #render}.
+     */
+    public int getFontLineSpacingAndAscent() {
+        return mFontLineSpacingAndAscent;
+    }
 }

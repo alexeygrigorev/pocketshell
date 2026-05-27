@@ -619,16 +619,15 @@ class HostListViewModelTest {
             activeClients = ActiveTmuxClients(),
             settingsRepository = newSettingsRepository(),
         )
-        val payload = """
-            {
-              "type": "pocketshell.host.v1",
-              "name": "shared",
-              "hostname": "shared.example.com",
-              "port": 2222,
-              "username": "ubuntu",
-              "keyName": "shared-key"
-            }
-        """.trimIndent()
+        val payload = SshImportPayloadCodec.encode(
+            SshImportConfig(
+                name = "shared",
+                host = "shared.example.com",
+                port = 2222,
+                username = "ubuntu",
+                auth = SshImportAuth.KeyReference("shared-key"),
+            ),
+        )
 
         viewModel.importSharedHostPayload(payload).join()
 
@@ -654,15 +653,15 @@ class HostListViewModelTest {
             activeClients = ActiveTmuxClients(),
             settingsRepository = newSettingsRepository(),
         )
-        val payload = """
-            {
-              "type": "pocketshell.host.v1",
-              "name": "shared",
-              "hostname": "shared.example.com",
-              "username": "ubuntu",
-              "keyName": "missing-key"
-            }
-        """.trimIndent()
+        val payload = SshImportPayloadCodec.encode(
+            SshImportConfig(
+                name = "shared",
+                host = "shared.example.com",
+                port = 22,
+                username = "ubuntu",
+                auth = SshImportAuth.KeyReference("missing-key"),
+            ),
+        )
 
         viewModel.importSharedHostPayload(payload).join()
 
@@ -1068,16 +1067,15 @@ class HostListViewModelTest {
             activeClients = ActiveTmuxClients(),
             settingsRepository = newSettingsRepository(),
         )
-        val payload = """
-            {
-              "type": "pocketshell.host.v1",
-              "name": "shared",
-              "hostname": "shared.example.com",
-              "port": 2222,
-              "username": "ubuntu",
-              "keyName": "shared-key"
-            }
-        """.trimIndent()
+        val payload = SshImportPayloadCodec.encode(
+            SshImportConfig(
+                name = "shared",
+                host = "shared.example.com",
+                port = 2222,
+                username = "ubuntu",
+                auth = SshImportAuth.KeyReference("shared-key"),
+            ),
+        )
 
         viewModel.importSharedHostPayload(payload).join()
 
@@ -1122,16 +1120,15 @@ class HostListViewModelTest {
             activeClients = ActiveTmuxClients(),
             settingsRepository = newSettingsRepository(),
         )
-        val payload = """
-            {
-              "type": "pocketshell.host.v1",
-              "name": "shared-new-label",
-              "hostname": "shared.example.com",
-              "port": 2222,
-              "username": "new-user",
-              "keyName": "shared-key"
-            }
-        """.trimIndent()
+        val payload = SshImportPayloadCodec.encode(
+            SshImportConfig(
+                name = "shared-new-label",
+                host = "shared.example.com",
+                port = 2222,
+                username = "new-user",
+                auth = SshImportAuth.KeyReference("shared-key"),
+            ),
+        )
         viewModel.importSharedHostPayload(payload).join()
 
         viewModel.resolveImportConflict(ImportConflictResolution.Overwrite).join()
@@ -1174,16 +1171,15 @@ class HostListViewModelTest {
             activeClients = ActiveTmuxClients(),
             settingsRepository = newSettingsRepository(),
         )
-        val payload = """
-            {
-              "type": "pocketshell.host.v1",
-              "name": "incoming",
-              "hostname": "shared.example.com",
-              "port": 2222,
-              "username": "ubuntu",
-              "keyName": "shared-key"
-            }
-        """.trimIndent()
+        val payload = SshImportPayloadCodec.encode(
+            SshImportConfig(
+                name = "incoming",
+                host = "shared.example.com",
+                port = 2222,
+                username = "ubuntu",
+                auth = SshImportAuth.KeyReference("shared-key"),
+            ),
+        )
         viewModel.importSharedHostPayload(payload).join()
 
         viewModel.resolveImportConflict(ImportConflictResolution.Skip).join()
@@ -1219,16 +1215,15 @@ class HostListViewModelTest {
             activeClients = ActiveTmuxClients(),
             settingsRepository = newSettingsRepository(),
         )
-        val payload = """
-            {
-              "type": "pocketshell.host.v1",
-              "name": "incoming",
-              "hostname": "shared.example.com",
-              "port": 2222,
-              "username": "ubuntu",
-              "keyName": "shared-key"
-            }
-        """.trimIndent()
+        val payload = SshImportPayloadCodec.encode(
+            SshImportConfig(
+                name = "incoming",
+                host = "shared.example.com",
+                port = 2222,
+                username = "ubuntu",
+                auth = SshImportAuth.KeyReference("shared-key"),
+            ),
+        )
         viewModel.importSharedHostPayload(payload).join()
 
         viewModel.resolveImportConflict(ImportConflictResolution.AddAsNew).join()
@@ -1265,16 +1260,15 @@ class HostListViewModelTest {
             activeClients = ActiveTmuxClients(),
             settingsRepository = newSettingsRepository(),
         )
-        val payload = """
-            {
-              "type": "pocketshell.host.v1",
-              "name": "fresh",
-              "hostname": "fresh.example.com",
-              "port": 22,
-              "username": "ubuntu",
-              "keyName": "shared-key"
-            }
-        """.trimIndent()
+        val payload = SshImportPayloadCodec.encode(
+            SshImportConfig(
+                name = "fresh",
+                host = "fresh.example.com",
+                port = 22,
+                username = "ubuntu",
+                auth = SshImportAuth.KeyReference("shared-key"),
+            ),
+        )
         viewModel.importSharedHostPayload(payload).join()
 
         // No conflict — direct insert, two rows.

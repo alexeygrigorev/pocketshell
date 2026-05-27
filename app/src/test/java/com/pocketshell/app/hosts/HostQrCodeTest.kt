@@ -11,7 +11,7 @@ import org.robolectric.annotation.Config
 class HostQrCodeTest {
     @Test
     fun qrEncodeDecode_roundTrip() {
-        val payload = """{"type":"pocketshell.host.v1","name":"dev"}"""
+        val payload = """{"type":"pocketshell.ssh-import.v1","name":"dev"}"""
         val bitmap = HostQrCode.encode(payload, sizePx = 320)
 
         assertEquals(payload, HostQrCode.decode(bitmap))

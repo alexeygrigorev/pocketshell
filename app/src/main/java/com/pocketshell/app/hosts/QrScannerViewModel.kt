@@ -134,10 +134,9 @@ class QrScannerViewModel @Inject constructor() : ViewModel() {
             }
             return
         }
-        // Non-envelope path: a legacy single-QR import payload (the
-        // existing `pocketshell.ssh-import.v1` JSON or a
-        // `pocketshell.host.v1` URI). Treat it as complete on the
-        // first decode.
+        // Non-envelope path: a raw single-QR import payload
+        // (`pocketshell.ssh-import.v1` JSON). Treat it as complete on
+        // the first decode.
         _state.value = State.Decoded(payload = payload)
     }
 

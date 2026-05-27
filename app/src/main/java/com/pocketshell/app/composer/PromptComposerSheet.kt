@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -135,7 +136,15 @@ public fun PromptComposerSheet(
     modifier: Modifier = Modifier,
     hostId: Long? = null,
     viewModel: PromptComposerViewModel = hiltViewModel(),
-    sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    // Issue #234: the composer is partial-expand by default so the terminal
+    // viewport behind it stays visible. With `skipPartiallyExpanded = false`,
+    // Material 3 lands the sheet at `SheetValue.PartiallyExpanded` (≈ half the
+    // screen height) on first composition; the user can still swipe upward
+    // to reach `Expanded` if they want the keyboard + draft area centred.
+    // Tapping the scrim above the sheet's top edge calls `onDismissRequest`
+    // and routes back through the host's `onDismiss` lambda — that is the
+    // "tap outside to dismiss" affordance D22 / #191 asked for.
+    sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = false),
 ) {
     val state by viewModel.uiState.collectAsState()
     val pendingItems by viewModel.pendingItems.collectAsState()
@@ -228,7 +237,30 @@ public fun PromptComposerSheet(
         contentColor = PocketShellColors.Text,
         modifier = modifier,
     ) {
+        // Issue #234: force the sheet content to be tall enough that
+        // Material 3 actually populates the `PartiallyExpanded` anchor.
+        //
+        // M3 1.3.2's `ModalBottomSheet` only assigns a partial-expand
+        // anchor when the sheet's intrinsic content height is greater
+        // than half the screen height; otherwise the partial state is
+        // suppressed and the sheet lands at `Expanded` regardless of
+        // `skipPartiallyExpanded`. The composer's natural content
+        // (~300dp on a Pixel 7) sits well under that threshold, so
+        // without an explicit minimum we keep the legacy "always
+        // full-content / Expanded" behaviour and the AC #1 partial-
+        // expand resting state never fires.
+        //
+        // `fillMaxHeight(0.65f)` makes the sheet content 65% of the
+        // available height. That's tall enough on every phone in our
+        // supported range (Pixel 4 at 800dp → 65% = 520dp; Pixel 7 at
+        // 891dp → 65% = ~580dp) to trip the > halfHeight check, which
+        // means M3 will create the PartiallyExpanded anchor at
+        // `fullHeight / 2`. The sheet then rests at PartiallyExpanded
+        // by default, occupying the bottom ~50% of the screen and
+        // leaving the top ~50% scrim + visible terminal — the
+        // composer-modal-inversion fix the #191 UX audit asked for.
         SheetContent(
+            modifier = Modifier.fillMaxHeight(0.65f),
             state = state,
             onClose = onDismiss,
             onDraftChange = viewModel::onDraftChange,

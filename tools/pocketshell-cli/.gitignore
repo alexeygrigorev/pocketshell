@@ -1,0 +1,11 @@
+# Python build / cache artifacts produced by `uv pip install -e .`,
+# `pytest`, and `ruff`. These never want to be checked in.
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+dist/
+build/

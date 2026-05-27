@@ -631,6 +631,178 @@ class HostBootstrapperTest {
         )
     }
 
+    // ---- Issue #170 (first PR): unified `pocketshell` parallel probe. ----
+
+    @Test
+    fun checkPocketshell_returnsInstalled_whenCommandSucceeds() = runTest {
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'pocketshell'") to
+                    ExecResult("/home/u/.local/bin/pocketshell\n", "", 0),
+            ),
+        )
+
+        val status = bootstrapper.checkPocketshell(session)
+
+        assertTrue(status is ToolStatus.Installed)
+        assertEquals("/home/u/.local/bin/pocketshell", (status as ToolStatus.Installed).path)
+    }
+
+    @Test
+    fun checkPocketshell_returnsMissing_whenCommandFails() = runTest {
+        val session = FakeSshSession(
+            mapOf(pathAware("command -v 'pocketshell'") to ExecResult("", "", 1)),
+        )
+
+        val status = bootstrapper.checkPocketshell(session)
+
+        assertEquals(ToolStatus.Missing, status)
+    }
+
+    @Test
+    fun checkPocketshell_honoursPathOverride() = runTest {
+        // Mirrors the issue #41 PATH-discovery case: a venv-style install
+        // of `pocketshell` is hidden from /bin/sh -lc unless the user's
+        // pathOverride is prepended ahead of the default augmentation.
+        val override = "/home/u/.pocketshell/.venv/bin"
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'pocketshell'") to ExecResult("", "", 1),
+                pathAwareWithOverride("command -v 'pocketshell'", override) to
+                    ExecResult("/home/u/.pocketshell/.venv/bin/pocketshell\n", "", 0),
+            ),
+        )
+
+        val missing = bootstrapper.checkPocketshell(session, pathOverride = null)
+        assertEquals(ToolStatus.Missing, missing)
+
+        val installed = bootstrapper.checkPocketshell(session, pathOverride = override)
+        assertTrue(installed is ToolStatus.Installed)
+        assertEquals(
+            "/home/u/.pocketshell/.venv/bin/pocketshell",
+            (installed as ToolStatus.Installed).path,
+        )
+    }
+
+    @Test
+    fun checkServerSetup_populatesPocketshellField_inParallelWithLegacyProbes() = runTest {
+        // The unified probe is parallel detection, not legacy detection
+        // (D22). A host with all of tmuxctl + quse + pocketshell installed
+        // surfaces every status on the same report, with the host still
+        // marked `isReady` from the legacy required-tools set.
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
+                pathAware("command -v 'quse'") to ExecResult("/home/u/.local/bin/quse\n", "", 0),
+                pathAware("command -v 'pocketshell'") to
+                    ExecResult("/home/u/.local/bin/pocketshell\n", "", 0),
+                pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
+                pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
+                systemdAware("systemctl --user is-active tmuxctl-jobs.service") to
+                    ExecResult("active\n", "", 0),
+                systemdAware("systemctl --user is-enabled tmuxctl-jobs.service") to
+                    ExecResult("enabled\n", "", 0),
+            ),
+        )
+
+        val report = bootstrapper.checkServerSetup(session)
+
+        assertTrue(report.isReady)
+        assertEquals(
+            ToolStatus.Installed("/home/u/.local/bin/pocketshell"),
+            report.pocketshell,
+        )
+        // Legacy probes still populated and counted toward isReady.
+        assertEquals(
+            ToolStatus.Installed("/home/u/.local/bin/quse"),
+            report.tools[BootstrapTool.Quse],
+        )
+        assertEquals(
+            ToolStatus.Installed("/home/u/.local/bin/tmuxctl"),
+            report.tools[BootstrapTool.Tmuxctl],
+        )
+    }
+
+    @Test
+    fun checkServerSetup_leavesReadyTrue_whenPocketshellMissingButLegacyToolsPresent() = runTest {
+        // Critical D22 / parallel-detection invariant: a host without
+        // `pocketshell` is still considered ready as long as the legacy
+        // `quse` + `tmuxctl` probes succeed. Otherwise this PR would
+        // force every existing host to install the new utility to keep
+        // working, which the brief explicitly forbids ("do NOT remove
+        // the existing probes in this PR").
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
+                pathAware("command -v 'quse'") to ExecResult("/home/u/.local/bin/quse\n", "", 0),
+                pathAware("command -v 'pocketshell'") to ExecResult("", "", 1),
+                pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
+                pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
+                systemdAware("systemctl --user is-active tmuxctl-jobs.service") to
+                    ExecResult("active\n", "", 0),
+                systemdAware("systemctl --user is-enabled tmuxctl-jobs.service") to
+                    ExecResult("enabled\n", "", 0),
+            ),
+        )
+
+        val report = bootstrapper.checkServerSetup(session)
+
+        assertTrue(
+            "pocketshell missing must NOT block isReady while legacy probes succeed",
+            report.isReady,
+        )
+        assertEquals(ToolStatus.Missing, report.pocketshell)
+        assertTrue(
+            "pocketshell missing must NOT enter the required-tools missingTools set",
+            report.missingTools.isEmpty(),
+        )
+    }
+
+    @Test
+    fun checkServerSetup_pocketshellProbeUsesPosixShellWithPathAugmentation() = runTest {
+        // The probe wraps in /bin/sh -lc with the standard PATH
+        // augmentation so venv-style installs that already work for
+        // `quse`/`tmuxctl` discovery are inherited automatically.
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'tmuxctl'") to ExecResult("/home/u/.local/bin/tmuxctl\n", "", 0),
+                pathAware("command -v 'quse'") to ExecResult("/home/u/.local/bin/quse\n", "", 0),
+                pathAware("command -v 'pocketshell'") to
+                    ExecResult("/home/u/.local/bin/pocketshell\n", "", 0),
+                pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
+                pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
+                systemdAware("systemctl --user is-active tmuxctl-jobs.service") to
+                    ExecResult("active\n", "", 0),
+                systemdAware("systemctl --user is-enabled tmuxctl-jobs.service") to
+                    ExecResult("enabled\n", "", 0),
+            ),
+        )
+
+        bootstrapper.checkServerSetup(session)
+
+        // The recorded command contains the binary name re-escaped
+        // through the outer /bin/sh -lc single-quote wrapper, so
+        // `'pocketshell'` becomes `'"'"'pocketshell'"'"'` after escaping.
+        // Match via the un-quoted substring `pocketshell` instead, then
+        // assert the wrapper + PATH augmentation around it.
+        val pocketshellProbe = session.recorded.firstOrNull {
+            it.contains("command -v ") && it.contains("pocketshell")
+        }
+        assertNotNull("expected a pocketshell probe to be recorded", pocketshellProbe)
+        assertTrue(
+            "pocketshell probe must be wrapped in /bin/sh -lc",
+            pocketshellProbe!!.startsWith("/bin/sh -lc "),
+        )
+        assertTrue(
+            "pocketshell probe must carry the standard PATH augmentation",
+            pocketshellProbe.contains("PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\""),
+        )
+        // The exact recorded form matches the pathAware() helper output
+        // for any other tool — confirming the probe goes through the
+        // same shell-quoting and PATH wrapper the legacy probes use.
+        assertEquals(pathAware("command -v 'pocketshell'"), pocketshellProbe)
+    }
+
     @Test
     fun installServerSetup_reprobesBeforeInstallingStaleMissingTools() = runTest {
         val session = FakeSshSession(

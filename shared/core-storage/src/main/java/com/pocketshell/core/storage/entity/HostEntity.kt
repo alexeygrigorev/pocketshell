@@ -44,6 +44,15 @@ import androidx.room.PrimaryKey
  * type the venv directories once on the Add/Edit Host screen and have
  * every probe see them. `null` and the empty string both mean
  * "no override, use the default augmentation only".
+ *
+ * Issue #170 (first PR) added [pocketshellInstalled]: the bootstrap
+ * probe now also looks for the unified `pocketshell` CLI in addition
+ * to the existing `quse` / `tmuxctl` probes. `null` means "never
+ * probed", `true` / `false` mean "verified at [lastBootstrapAt]". Once
+ * `pocketshell` reaches feature parity with `quse` + `tmuxctl` a
+ * follow-up issue will remove the legacy probe columns; per D22 this
+ * is a hard cut, not a deprecation. For now the three columns coexist
+ * because the new utility is parallel-detected, not a replacement.
  */
 @Entity(
     tableName = "hosts",
@@ -76,4 +85,5 @@ data class HostEntity(
     val quseLastDetectedAt: Long? = null,
     val usageCommandOverride: String? = null,
     val pathOverride: String? = null,
+    val pocketshellInstalled: Boolean? = null,
 )

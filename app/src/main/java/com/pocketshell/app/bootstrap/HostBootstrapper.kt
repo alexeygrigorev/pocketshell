@@ -98,6 +98,15 @@ public data class HostBootstrapReport(
     val installer: PythonToolInstaller?,
     val daemon: TmuxctlDaemonStatus,
     val mosh: MoshStatus = MoshStatus.Unsupported(MOSH_UNSUPPORTED_REASON),
+    // Issue #170 (first PR): the parallel `pocketshell` probe result. It
+    // is NOT in [tools] / [BootstrapTool.entries] on purpose — the
+    // unified utility is parallel-detected today, not required. Keeping
+    // it off the required-tools map means a host without `pocketshell`
+    // is still [isReady] as long as the legacy `quse` + `tmuxctl` probes
+    // succeed; only the follow-up "remove legacy probes" issue will
+    // promote `pocketshell` to a required entry (and remove the others
+    // in the same PR per D22).
+    val pocketshell: ToolStatus = ToolStatus.Unknown(POCKETSHELL_NOT_PROBED_REASON),
 ) {
     public val missingTools: List<BootstrapTool>
         get() = BootstrapTool.entries.filter { tools[it] is ToolStatus.Missing }
@@ -111,6 +120,17 @@ public data class HostBootstrapReport(
             daemon is TmuxctlDaemonStatus.Running &&
             daemon.enabled
 }
+
+/**
+ * Reason string carried on the default [HostBootstrapReport.pocketshell]
+ * value when the report was constructed without a real probe (e.g. from
+ * test fixtures that pre-date issue #170). Surfacing it as a named
+ * constant keeps the placeholder discoverable and lets the UI layer
+ * filter it out when deciding whether to render a "pocketshell"
+ * bootstrap-sheet row.
+ */
+public const val POCKETSHELL_NOT_PROBED_REASON: String =
+    "pocketshell probe not run for this report"
 
 /**
  * Detects whether `tmux` is installed on a remote host and offers a
@@ -190,13 +210,40 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         } else {
             TmuxctlDaemonStatus.Missing
         }
+        // Issue #170 (first PR): also probe for the unified `pocketshell`
+        // CLI. The result rides on the report next to the existing
+        // `quse` / `tmuxctl` entries — parallel detection, NOT legacy
+        // detection. The legacy probes stay in [BootstrapTool.entries]
+        // until the follow-up "remove legacy probes" issue hard-cuts them
+        // per D22.
+        val pocketshell = checkPocketshell(session, pathOverride)
         return HostBootstrapReport(
             tools = tools,
             installer = installer,
             daemon = daemon,
             mosh = MoshStatus.Unsupported(MOSH_UNSUPPORTED_REASON),
+            pocketshell = pocketshell,
         )
     }
+
+    /**
+     * Probe whether the unified `pocketshell` CLI is on the remote PATH.
+     *
+     * Mirrors [checkTool] semantics — `command -v pocketshell` wrapped in
+     * the standard PATH-augmenting `/bin/sh -lc` shell — so the override
+     * mechanism from issue #41 and the venv-style PATH layout used by
+     * `quse` / `tmuxctl` is automatically inherited.
+     *
+     * The result is independent of [BootstrapTool.entries]: a host
+     * without `pocketshell` is still [HostBootstrapReport.isReady] as
+     * long as the legacy `quse` + `tmuxctl` probes succeed. The
+     * pocketshell-only world begins with the follow-up issue that
+     * removes the legacy probes (per D22, hard cut).
+     */
+    public suspend fun checkPocketshell(
+        session: SshSession,
+        pathOverride: String? = null,
+    ): ToolStatus = checkTool(session, BINARY_POCKETSHELL, pathOverride)
 
     public suspend fun installServerSetup(
         session: SshSession,
@@ -562,5 +609,14 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             output.contains("not been booted with systemd") ||
             output.contains("system has not been booted") ||
             output.contains("transport endpoint is not connected")
+    }
+
+    public companion object {
+        /**
+         * Binary name of the unified `pocketshell` CLI probed by
+         * [checkPocketshell]. Centralised so the probe + future install
+         * paths agree on the spelling.
+         */
+        public const val BINARY_POCKETSHELL: String = "pocketshell"
     }
 }

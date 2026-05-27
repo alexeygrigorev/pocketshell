@@ -95,6 +95,16 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
  * merged, so the carve-out was renumbered to `9 → 10`. The SQL lives in
  * [com.pocketshell.core.storage.migrations.MIGRATION_9_10].
  *
+ * Version 11 (issue #170, first PR) adds a `pocketshellInstalled`
+ * column to [HostEntity] so the bootstrap probe can cache whether the
+ * unified `pocketshell` CLI is present on the remote. The new column
+ * is nullable and sits alongside the existing `quseInstalled` /
+ * `tmuxInstalled` columns — per D22 this is parallel detection
+ * (`pocketshell` ramps to parity), not legacy detection. A follow-up
+ * issue will remove the legacy probe columns once parity is reached.
+ * The SQL lives in
+ * [com.pocketshell.core.storage.migrations.MIGRATION_10_11].
+ *
  * `exportSchema = false` matches the reference module. When the schema
  * starts evolving in real users' hands, flip this on and check generated
  * schemas into `schemas/` so migrations are reviewable.
@@ -112,7 +122,7 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
         AiApiCallEntry::class,
         PendingTranscriptionEntity::class,
     ],
-    version = 10,
+    version = 11,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {

@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pocketshell-cli"
+version = "0.1.0"
+description = "Unified server-side Python utility for the PocketShell Android client."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Alexey Grigorev" }]
+license = { text = "MIT" }
+keywords = ["pocketshell", "ssh", "tmux", "agents", "usage"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development",
+    "Topic :: System :: Monitoring",
+]
+# First PR delegates `pocketshell usage` to the existing `quse` CLI via
+# subprocess (see `pocketshell/usage.py`) so the new utility does not need
+# `quse` published on PyPI. Later PRs will fold the provider-detection
+# implementation in directly. Pin lower-bound only.
+dependencies = [
+    "click>=8.2.0",
+]
+
+[project.scripts]
+pocketshell = "pocketshell.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/alexeygrigorev/pocketshell"
+Issues = "https://github.com/alexeygrigorev/pocketshell/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4.0",
+    "ruff>=0.15.0",
+]
+
+[project.optional-dependencies]
+# Mirror of the dev `dependency-groups` so `pip install -e ".[dev]"` and
+# `uv pip install -e ".[dev]"` both work for CI and ad-hoc local setups.
+# `uv sync --group dev` reads `dependency-groups`; PEP-621 tooling reads
+# `optional-dependencies`. Keeping both in lock-step is cheap.
+dev = [
+    "pytest>=8.4.0",
+    "ruff>=0.15.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pocketshell"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.github",
+    "/.pytest_cache",
+    "/.ruff_cache",
+    "/.venv",
+    "/dist",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

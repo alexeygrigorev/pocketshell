@@ -104,6 +104,15 @@ Does:
 
 - Reads the implementer's latest status comment and the working-tree diff
 - Runs the relevant build and tests
+- **Verifies CI compatibility**: when a connected test depends on a Docker
+  service or port beyond the default `agents:2222` (e.g. `flaky-agent:2226`,
+  `tmux` fixture, etc.), opens `.github/workflows/tests.yml` and confirms the
+  service is started by the emulator job. If the workflow doesn't bring it
+  up, that's a blocker — local emulator green is NOT sufficient. Either
+  the workflow must be patched in the same PR OR the test must be gated
+  with `Assume.assumeFalse(isRunningOnCi())`. Reviewer rounds must close
+  the loop between "passes locally" and "passes on CI"; otherwise the
+  maintainer gets red-CI email spam after merge.
 - For mobile, UI, terminal, SSH, tmux, agent, setup, and release-gate issues,
   runs the relevant emulator check too; code inspection alone is not enough for
   approval

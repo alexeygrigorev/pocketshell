@@ -26,6 +26,19 @@ You are the reviewer for the PocketShell project. You are triggered after an imp
    issues, run the relevant Android emulator validation too. Code inspection
    and JVM tests are not enough for approval. Use the explicit SDK paths from
    `agents.md` before claiming `adb` or `emulator` is unavailable.
+
+   **CI-environment compatibility (locked rule 2026-05-27)** — when a
+   connected test depends on a Docker service, a port, or a fixture
+   beyond the default `agents` (port 2222), you MUST verify the CI
+   workflow brings it up. Open `.github/workflows/tests.yml` and confirm
+   the service is started by the emulator job before approving. If the
+   test references port 2226 (`flaky-agent`), 2227 (the `tmux` chain),
+   or any other fixture the workflow doesn't currently start, that's a
+   blocker — file a follow-up to patch the workflow or mark the test
+   `Assume.assumeFalse(isRunningOnCi())` until the workflow catches up.
+   Local emulator green is NOT sufficient evidence the test will pass
+   on CI. The maintainer is getting CI-failure email spam — every
+   reviewer round must close this loop.
 6. For user-facing journeys, reproduce the actual journey yourself. Do not
    approve based only on an implementer's screenshots, node assertions, or
    claims. The reviewed artifact must prove the flow is usable, not merely

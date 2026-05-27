@@ -36,6 +36,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -244,6 +246,33 @@ internal fun SheetContent(
     onSnippets: (() -> Unit)? = null,
 ) {
     val isTranscribing = state.recording == PromptComposerViewModel.RecordingState.Transcribing
+
+    // Issue #169 Part 1: hold the screen on while we are actively
+    // capturing audio or waiting for Whisper. Without this, the system's
+    // screen-timeout will fire mid-dictation, the lock screen tears down
+    // audio focus, and the in-flight audio buffer is dropped before it
+    // ever reaches Whisper. Lifecycle-bound via [DisposableEffect] so the
+    // flag is *only* held during Recording / Transcribing — never
+    // permanently, never after the sheet dismisses, and never while the
+    // composer is just sitting idle waiting for the user to type.
+    //
+    // We toggle the View flag rather than the Window flag so the setting
+    // is scoped to the composer's view subtree (a View owns its own
+    // `keepScreenOn` bit which the WindowManager ORs across all attached
+    // views to decide whether to suppress the screen-off timer). The
+    // [onDispose] branch resets the bit regardless of why this
+    // composition tore down — recreate, process kill, sheet dismiss, mic
+    // tap that lands the FSM back in Idle — so we never leak the flag
+    // past active capture.
+    val keepScreenOnActive =
+        state.recording == PromptComposerViewModel.RecordingState.Recording ||
+            state.recording == PromptComposerViewModel.RecordingState.Transcribing
+    val view = LocalView.current
+    DisposableEffect(view, keepScreenOnActive) {
+        view.keepScreenOn = keepScreenOnActive
+        onDispose { view.keepScreenOn = false }
+    }
+
     Column(
         modifier = modifier
             .fillMaxWidth()

@@ -2,6 +2,7 @@ package com.pocketshell.app.composer
 
 import android.Manifest
 import androidx.annotation.RequiresPermission
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.di.WhisperClientFactory
@@ -73,9 +74,43 @@ public class PromptComposerViewModel @Inject constructor(
     internal val whisperClientFactory: WhisperClientFactory,
     internal val apiKeyStorage: ApiKeyVault,
     internal val voiceSettings: VoiceSettingsSnapshot,
+    private val savedStateHandle: SavedStateHandle = SavedStateHandle(),
 ) : ViewModel() {
 
-    private val _uiState: MutableStateFlow<UiState> = MutableStateFlow(UiState())
+    private val _uiState: MutableStateFlow<UiState> = MutableStateFlow(
+        UiState(
+            // Issue #169 Part 2: restore the typed/dictated draft so a
+            // process-death recreate (the worst-case "screen-lock kills
+            // the activity" path) lands the user back on the same text
+            // they had before. `SavedStateHandle` survives both
+            // configuration-change recreate (where the ViewModel itself
+            // is retained anyway) and process death (where it isn't), so
+            // it's the single state holder that closes both gaps.
+            draft = savedStateHandle.get<String>(KEY_DRAFT).orEmpty(),
+            // If the saved state shows we were mid-recording (or mid-
+            // transcribing) at the last state save, the audio buffer is
+            // already gone — Whisper takes a complete buffer per request
+            // and there is nothing to resume from. Surface an explicit
+            // "interrupted" banner instead of silently dropping back to
+            // Idle. The flag is cleared below so a second recreate does
+            // not keep replaying the message.
+            error = if (savedStateHandle.get<Boolean>(KEY_WAS_RECORDING) == true) {
+                RECORDING_INTERRUPTED_MESSAGE
+            } else {
+                null
+            },
+        ),
+    )
+
+    init {
+        // Consume the one-shot "was recording" flag now that we have read
+        // it into [UiState.error]. Without this, every subsequent saved-
+        // state restore (e.g. another recreate while the banner is still
+        // visible) would re-stamp the same banner.
+        if (savedStateHandle.get<Boolean>(KEY_WAS_RECORDING) == true) {
+            savedStateHandle[KEY_WAS_RECORDING] = false
+        }
+    }
 
     /**
      * Current composer state — the screen `collectAsState`s this to drive
@@ -104,6 +139,13 @@ public class PromptComposerViewModel @Inject constructor(
      * unaffected.
      */
     public fun onDraftChange(newText: String) {
+        // Issue #169 Part 2: mirror the live draft into [SavedStateHandle]
+        // so it survives both configuration-change recreate and process
+        // death. Configuration-change recreate would already keep the
+        // ViewModel (and therefore [_uiState]) alive, but a long screen
+        // lock + low-memory device can still tear the process down, and
+        // the dictated text deserves to come back either way.
+        savedStateHandle[KEY_DRAFT] = newText
         _uiState.update { it.copy(draft = newText, error = null) }
     }
 
@@ -152,6 +194,13 @@ public class PromptComposerViewModel @Inject constructor(
             }
             return
         }
+
+        // Issue #169 Part 2: stamp the "was recording" flag into
+        // [SavedStateHandle] now, *before* the user can possibly leave the
+        // app. If a screen lock / low-memory kill happens between here
+        // and [stopAndTranscribe] the next ViewModel instance will see
+        // the flag and surface the "recording interrupted" banner.
+        savedStateHandle[KEY_WAS_RECORDING] = true
 
         _uiState.update {
             it.copy(
@@ -217,6 +266,12 @@ public class PromptComposerViewModel @Inject constructor(
         val audio = try {
             audioRecorder.stop()
         } catch (e: AudioRecorderException) {
+            // Issue #169 Part 2: recording is over (even though it failed),
+            // so the "was recording" flag must be cleared. Otherwise the
+            // next recreate would replay a misleading "interrupted" banner
+            // on top of the real microphone error the user is already
+            // seeing.
+            savedStateHandle[KEY_WAS_RECORDING] = false
             _uiState.update {
                 it.copy(
                     recording = RecordingState.Idle,
@@ -231,6 +286,7 @@ public class PromptComposerViewModel @Inject constructor(
             // No bytes captured — never happens in practice because
             // [AudioRecorder.stop] returns the WAV header even for a
             // zero-PCM session, but guard anyway.
+            savedStateHandle[KEY_WAS_RECORDING] = false
             _uiState.update {
                 it.copy(recording = RecordingState.Idle, amplitude = 0f)
             }
@@ -244,6 +300,7 @@ public class PromptComposerViewModel @Inject constructor(
         transcribeJob = viewModelScope.launch {
             val client = whisperClientFactory.create()
             if (client == null) {
+                savedStateHandle[KEY_WAS_RECORDING] = false
                 _uiState.update {
                     it.copy(
                         recording = RecordingState.Idle,
@@ -259,13 +316,24 @@ public class PromptComposerViewModel @Inject constructor(
             // virtual scheduler in charge — wrapping with a real
             // dispatcher would make `runTest`'s `advanceUntilIdle` hang.
             val result = client.transcribe(audio, voiceSettings.whisperLanguageHint())
+            // Recording + transcribe round-trip is complete: clear the
+            // saved "was recording" flag whichever way it lands so we do
+            // not falsely surface "recording interrupted" on the next
+            // recreate. Done before the state update so the saved blob is
+            // already coherent if the process is killed mid-update.
+            savedStateHandle[KEY_WAS_RECORDING] = false
             result.fold(
                 onSuccess = { text ->
                     _uiState.update {
                         val sep = if (it.draft.isEmpty() || it.draft.endsWith(" ")) "" else " "
+                        val newDraft = it.draft + sep + text
+                        // Mirror the appended draft into [SavedStateHandle]
+                        // immediately so a recreate after a successful
+                        // transcription still shows the dictated text.
+                        savedStateHandle[KEY_DRAFT] = newDraft
                         it.copy(
                             recording = RecordingState.Idle,
-                            draft = it.draft + sep + text,
+                            draft = newDraft,
                             error = null,
                         )
                     }
@@ -464,5 +532,35 @@ public class PromptComposerViewModel @Inject constructor(
          * feel laggy.
          */
         public const val SAMPLE_INTERVAL_MS: Long = 50L
+
+        /**
+         * Issue #169 Part 2: [SavedStateHandle] key for the current
+         * composer draft text. Survives both configuration-change recreate
+         * (ViewModel retained) and process death (ViewModel rebuilt from
+         * the saved bundle) so a screen-lock-triggered tear-down does not
+         * silently discard the dictated text.
+         */
+        internal const val KEY_DRAFT: String = "prompt-composer-draft"
+
+        /**
+         * Issue #169 Part 2: [SavedStateHandle] key for the one-shot
+         * "was recording at last save" flag. The recording state machine
+         * itself does not survive a recreate (the audio buffer is gone,
+         * Whisper cannot resume from a partial capture), so the new
+         * ViewModel reads this flag in its initialiser, surfaces the
+         * [RECORDING_INTERRUPTED_MESSAGE] banner once, and resets it.
+         */
+        internal const val KEY_WAS_RECORDING: String = "prompt-composer-was-recording"
+
+        /**
+         * Issue #169 Part 2: user-facing message surfaced via
+         * [UiState.error] when the composer is rebuilt and the saved-state
+         * blob shows recording was in flight at the time the state was
+         * last captured. The audio buffer cannot be resumed (Whisper takes
+         * a complete buffer per request), so we explicitly tell the user
+         * to record again rather than silently dropping back to Idle.
+         */
+        public const val RECORDING_INTERRUPTED_MESSAGE: String =
+            "Recording was interrupted. Tap the mic to record again."
     }
 }

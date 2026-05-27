@@ -6,12 +6,17 @@ import androidx.annotation.RequiresPermission
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
+import com.pocketshell.core.storage.dao.AiApiCallLogDao
+import com.pocketshell.core.storage.entity.AiApiCallEntry
+import com.pocketshell.core.voice.AiCostRecord
+import com.pocketshell.core.voice.AiCostRecorder
 import com.pocketshell.core.voice.AndroidKeystoreApiKeyStorage
 import com.pocketshell.core.voice.AudioRecorder
 import com.pocketshell.core.voice.CommandPlannerClient
 import com.pocketshell.core.voice.CommandPlannerConfig
 import com.pocketshell.core.voice.OkHttpWhisperClient
 import com.pocketshell.core.voice.OkHttpOpenAiCommandPlannerClient
+import com.pocketshell.core.voice.PriceCatalogue
 import com.pocketshell.core.voice.WhisperClient
 import dagger.Module
 import dagger.Provides
@@ -103,10 +108,36 @@ object VoiceModule {
     ): PromptComposerViewModel.VoiceSettingsSnapshot =
         SettingsRepositoryVoiceSnapshot(repository)
 
+    /**
+     * Issue #181: shared [PriceCatalogue] for the bundled `ai-pricing.json`.
+     * Singleton because parsing the bundled JSON is a fixed cost we don't
+     * want to repeat per Whisper call. Edits to the resource file ship as
+     * a new app version — there's nothing to invalidate at runtime.
+     */
+    @Provides
+    @Singleton
+    fun providePriceCatalogue(): PriceCatalogue = PriceCatalogue.fromBundledResource()
+
+    /**
+     * Issue #181: client-side AI cost log sink. Forwards into the Room
+     * [AiApiCallLogDao] so the costs screen can stream the rows. The
+     * recorder is `@Singleton` so a single DAO reference is shared across
+     * every recreated [WhisperClient]; the cost-recorder doesn't hold
+     * mutable state.
+     */
+    @Provides
+    @Singleton
+    fun provideAiCostRecorder(dao: AiApiCallLogDao): AiCostRecorder =
+        AiApiCallLogCostRecorder(dao)
+
     @Provides
     fun provideWhisperClientFactory(
         storage: AndroidKeystoreApiKeyStorage,
-    ): WhisperClientFactory = WhisperClientFactory { reloadWhisperClient(storage) }
+        priceCatalogue: PriceCatalogue,
+        costRecorder: AiCostRecorder,
+    ): WhisperClientFactory = WhisperClientFactory {
+        reloadWhisperClient(storage, priceCatalogue, costRecorder)
+    }
 
     @Provides
     fun provideCommandPlannerClientFactory(
@@ -179,15 +210,52 @@ internal class SettingsRepositoryVoiceSnapshot(
  * [CharArray] before returning — the caller never sees the plaintext key
  * after this function returns.
  */
-private fun reloadWhisperClient(storage: AndroidKeystoreApiKeyStorage): WhisperClient? {
+private fun reloadWhisperClient(
+    storage: AndroidKeystoreApiKeyStorage,
+    priceCatalogue: PriceCatalogue,
+    costRecorder: AiCostRecorder,
+): WhisperClient? {
     val key = storage.load() ?: return null
     return try {
-        OkHttpWhisperClient(apiKey = key)
+        OkHttpWhisperClient(
+            apiKey = key,
+            priceCatalogue = priceCatalogue,
+            costRecorder = costRecorder,
+        )
     } finally {
         // Zero our copy of the plaintext key. The Whisper client made its
         // own defensive copy on construction, so this does not affect
         // in-flight requests.
         java.util.Arrays.fill(key, ' ')
+    }
+}
+
+/**
+ * Adapter that forwards [AiCostRecord] entries into the Room
+ * [AiApiCallLogDao]. Lives in the app layer so the voice module stays
+ * free of Room/storage dependencies (the recorder seam is just a small
+ * data class). Catches everything: a DB write failure here must never
+ * propagate up into [OkHttpWhisperClient] — the surrounding transcription
+ * already completed successfully and the user shouldn't see an error.
+ */
+internal class AiApiCallLogCostRecorder(
+    private val dao: AiApiCallLogDao,
+) : AiCostRecorder {
+    override suspend fun record(record: AiCostRecord) {
+        runCatching {
+            dao.insert(
+                AiApiCallEntry(
+                    timestampMillis = record.timestampMillis,
+                    provider = record.provider,
+                    feature = record.feature,
+                    inputUnits = record.inputUnits,
+                    outputUnits = record.outputUnits,
+                    unitCostUsdMillicents = record.unitCostUsdMillicents,
+                    computedCostUsdMillicents = record.computedCostUsdMillicents,
+                    metadataJson = record.metadataJson,
+                ),
+            )
+        }
     }
 }
 

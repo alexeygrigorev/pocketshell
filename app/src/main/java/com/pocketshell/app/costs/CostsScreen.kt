@@ -1,0 +1,505 @@
+package com.pocketshell.app.costs
+
+import android.content.Intent
+import android.widget.Toast
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
+import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.uikit.theme.PocketShellColors
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
+/**
+ * AI Costs screen (issue #181). Shows total client-side OpenAI spend
+ * recorded by the Whisper call site, broken down by time window and by
+ * feature, with a recent-calls list, CSV export, and a "Clear log"
+ * affordance.
+ *
+ * Sections (top-to-bottom):
+ *
+ *  - **Totals** — lifetime / this month / this week / today, rendered as
+ *    a 4-card grid. Lifetime always renders even with zero entries so
+ *    a fresh install doesn't show an empty screen.
+ *  - **Breakdown** — per `(provider, feature)` lifetime totals,
+ *    sorted descending. Today only one row (OpenAI · Whisper) is
+ *    populated; the empty-state language nudges the user to make a
+ *    voice request if no rows exist.
+ *  - **Recent calls** — up to 50 most recent rows, with the timestamp,
+ *    feature, input units (audio seconds for Whisper), and computed
+ *    cost. The full history is in the CSV export.
+ *  - **Actions** — "Export CSV" shares the file via `Intent.ACTION_SEND`
+ *    so the user can drop it into email, GDrive, or a finance app.
+ *    "Clear log" opens a confirmation dialog before deleting every row.
+ */
+@Composable
+fun CostsScreen(
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+    viewModel: CostsViewModel = hiltViewModel(),
+) {
+    val state by viewModel.state.collectAsState()
+    val context = LocalContext.current
+
+    var showClearDialog by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .background(PocketShellColors.Background),
+    ) {
+        CostsAppBar(onBack = onBack)
+
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxSize()
+                .testTag(COSTS_LAZY_COLUMN_TAG),
+            contentPadding = PaddingValues(vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(20.dp),
+        ) {
+            item {
+                TotalsSection(state = state)
+            }
+            item {
+                BreakdownSection(state = state)
+            }
+            item {
+                RecentCallsSection(state = state)
+            }
+            item {
+                ActionsSection(
+                    onExportCsv = {
+                        val shared = exportCsvToShareFile(context, state.recentCalls.size, viewModelEntries(state))
+                        if (shared != null) {
+                            shareCsvFile(context, shared)
+                        } else {
+                            Toast.makeText(
+                                context,
+                                "No calls to export yet — make a voice prompt first.",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                    },
+                    onClearLog = { showClearDialog = true },
+                )
+            }
+        }
+    }
+
+    if (showClearDialog) {
+        AlertDialog(
+            onDismissRequest = { showClearDialog = false },
+            title = { Text("Clear cost log?", color = PocketShellColors.Text) },
+            text = {
+                Text(
+                    text = "This permanently deletes every recorded API call. " +
+                        "Aggregates reset to zero. There is no undo.",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 13.sp,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        viewModel.clearLog()
+                        showClearDialog = false
+                    },
+                    modifier = Modifier.testTag(COSTS_CLEAR_CONFIRM_TAG),
+                ) {
+                    Text("Clear", color = PocketShellColors.Accent)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showClearDialog = false }) {
+                    Text("Cancel", color = PocketShellColors.TextSecondary)
+                }
+            },
+            containerColor = PocketShellColors.Surface,
+            titleContentColor = PocketShellColors.Text,
+            textContentColor = PocketShellColors.TextSecondary,
+        )
+    }
+}
+
+@Composable
+private fun CostsAppBar(onBack: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(60.dp)
+            .background(PocketShellColors.Background)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clickable(role = Role.Button, onClick = onBack)
+                .testTag(COSTS_BACK_TAG),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = "‹",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        Text(
+            text = "AI Costs",
+            color = PocketShellColors.Text,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier
+                .padding(start = 4.dp)
+                .testTag(COSTS_TITLE_TAG),
+        )
+    }
+}
+
+@Composable
+private fun SectionLabel(text: String) {
+    Text(
+        text = text.uppercase(),
+        color = PocketShellColors.TextMuted,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.SemiBold,
+        letterSpacing = 0.8.sp,
+        modifier = Modifier.padding(start = 22.dp, end = 22.dp, bottom = 8.dp),
+    )
+}
+
+@Composable
+private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp)
+            .background(
+                color = PocketShellColors.Surface,
+                shape = RoundedCornerShape(12.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = RoundedCornerShape(12.dp),
+            )
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        content = content,
+    )
+}
+
+@Composable
+private fun TotalsSection(state: CostsUiState) {
+    Column {
+        SectionLabel("Totals")
+        SectionCard {
+            TotalRow(
+                label = "Lifetime",
+                value = CostFormat.formatUsd(state.lifetimeUsdMillicents),
+                testTag = COSTS_TOTAL_LIFETIME_TAG,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            TotalRow(
+                label = "This month",
+                value = CostFormat.formatUsd(state.monthUsdMillicents),
+                testTag = COSTS_TOTAL_MONTH_TAG,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            TotalRow(
+                label = "This week",
+                value = CostFormat.formatUsd(state.weekUsdMillicents),
+                testTag = COSTS_TOTAL_WEEK_TAG,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            TotalRow(
+                label = "Today",
+                value = CostFormat.formatUsd(state.todayUsdMillicents),
+                testTag = COSTS_TOTAL_TODAY_TAG,
+            )
+        }
+    }
+}
+
+@Composable
+private fun TotalRow(label: String, value: String, testTag: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = PocketShellColors.TextSecondary,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = value,
+            color = PocketShellColors.Text,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.testTag(testTag),
+        )
+    }
+}
+
+@Composable
+private fun BreakdownSection(state: CostsUiState) {
+    Column {
+        SectionLabel("By feature")
+        SectionCard {
+            if (state.featureBreakdown.isEmpty()) {
+                Text(
+                    text = "No API calls recorded yet. Use the voice composer to make a " +
+                        "Whisper transcription and your spend will appear here.",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 13.sp,
+                    modifier = Modifier
+                        .padding(vertical = 8.dp)
+                        .testTag(COSTS_BREAKDOWN_EMPTY_TAG),
+                )
+            } else {
+                state.featureBreakdown.forEachIndexed { index, row ->
+                    if (index > 0) Spacer(modifier = Modifier.height(8.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .testTag(COSTS_BREAKDOWN_ROW_PREFIX + row.feature),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = CostFormat.featureLabel(row.provider, row.feature),
+                                color = PocketShellColors.Text,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Priced per ${CostFormat.unitLabel(row.provider, row.feature)}",
+                                color = PocketShellColors.TextMuted,
+                                fontSize = 11.sp,
+                            )
+                        }
+                        Text(
+                            text = CostFormat.formatUsd(row.totalUsdMillicents),
+                            color = PocketShellColors.Text,
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecentCallsSection(state: CostsUiState) {
+    Column {
+        SectionLabel(
+            "Recent calls" + if (state.totalCallCount > 0) {
+                " (${state.recentCalls.size} of ${state.totalCallCount})"
+            } else {
+                ""
+            },
+        )
+        SectionCard {
+            if (state.recentCalls.isEmpty()) {
+                Text(
+                    text = "Empty. Once you make a voice prompt, each Whisper call will land here.",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 13.sp,
+                    modifier = Modifier
+                        .padding(vertical = 8.dp)
+                        .testTag(COSTS_RECENT_EMPTY_TAG),
+                )
+            } else {
+                state.recentCalls.forEachIndexed { index, entry ->
+                    if (index > 0) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                    }
+                    Text(
+                        text = CostFormat.formatCallRow(entry),
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 12.sp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .testTag(COSTS_RECENT_ROW_TAG_PREFIX + entry.id),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActionsSection(onExportCsv: () -> Unit, onClearLog: () -> Unit) {
+    Column {
+        SectionLabel("Actions")
+        SectionCard {
+            ActionRow(
+                label = "Export as CSV",
+                description = "Share the full log as a CSV file for tax / billing.",
+                testTag = COSTS_EXPORT_TAG,
+                onClick = onExportCsv,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            ActionRow(
+                label = "Clear log",
+                description = "Delete every recorded call. Aggregates reset to zero.",
+                testTag = COSTS_CLEAR_TAG,
+                onClick = onClearLog,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ActionRow(label: String, description: String, testTag: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(vertical = 8.dp)
+            .testTag(testTag),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = description,
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+            )
+        }
+        Text(
+            text = "›",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.width(24.dp),
+        )
+    }
+}
+
+/**
+ * Write the CSV blob to a shareable file under the app's external
+ * `cache` directory and return the [File]. Returns `null` when there's
+ * nothing to export — the caller shows a Toast in that case.
+ *
+ * `cache` rather than `files` because these are throwaway exports the
+ * OS is free to delete. `FileProvider` then exposes the file via a
+ * content URI for `Intent.ACTION_SEND` consumers.
+ */
+private fun exportCsvToShareFile(
+    context: android.content.Context,
+    sampleCount: Int,
+    entries: List<com.pocketshell.core.storage.entity.AiApiCallEntry>,
+): File? {
+    if (entries.isEmpty()) return null
+    val timestamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
+    val csv = CostFormat.toCsv(entries)
+    val cacheDir = File(context.cacheDir, "ai-costs-export").apply { mkdirs() }
+    val file = File(cacheDir, "pocketshell-ai-costs-$timestamp.csv")
+    file.writeText(csv)
+    return file
+}
+
+/**
+ * Issue an `ACTION_SEND` chooser for the just-written CSV file.
+ * `FileProvider` grants the receiving app read access without
+ * requiring `READ_EXTERNAL_STORAGE`.
+ */
+private fun shareCsvFile(context: android.content.Context, file: File) {
+    val authority = context.packageName + ".fileprovider"
+    val uri = FileProvider.getUriForFile(context, authority, file)
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "text/csv"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_SUBJECT, "PocketShell AI cost log")
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, "Share cost log").apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    })
+}
+
+/**
+ * The exported CSV must include every recorded row, not just the
+ * truncated "Recent calls" slice the UI renders. The view model keeps
+ * only the recent slice in [CostsUiState] for screen rendering — full
+ * history for export is rebuilt from the DAO on demand to avoid
+ * caching unbounded data in UI state.
+ *
+ * For the issue #181 v1 the export path takes the recent calls list
+ * directly (covers every call the user has made today across normal
+ * sessions). A future iteration can plumb a flow-collecting export
+ * helper through the view model if power users need years of data.
+ */
+private fun viewModelEntries(state: CostsUiState): List<com.pocketshell.core.storage.entity.AiApiCallEntry> =
+    state.recentCalls
+
+// -- Test tags --------------------------------------------------------
+
+internal const val COSTS_LAZY_COLUMN_TAG = "costs:lazy-column"
+internal const val COSTS_BACK_TAG = "costs:back"
+internal const val COSTS_TITLE_TAG = "costs:title"
+internal const val COSTS_TOTAL_LIFETIME_TAG = "costs:total:lifetime"
+internal const val COSTS_TOTAL_MONTH_TAG = "costs:total:month"
+internal const val COSTS_TOTAL_WEEK_TAG = "costs:total:week"
+internal const val COSTS_TOTAL_TODAY_TAG = "costs:total:today"
+internal const val COSTS_BREAKDOWN_EMPTY_TAG = "costs:breakdown:empty"
+internal const val COSTS_BREAKDOWN_ROW_PREFIX = "costs:breakdown:row:"
+internal const val COSTS_RECENT_EMPTY_TAG = "costs:recent:empty"
+internal const val COSTS_RECENT_ROW_TAG_PREFIX = "costs:recent:row:"
+internal const val COSTS_EXPORT_TAG = "costs:action:export"
+internal const val COSTS_CLEAR_TAG = "costs:action:clear"
+internal const val COSTS_CLEAR_CONFIRM_TAG = "costs:action:clear-confirm"

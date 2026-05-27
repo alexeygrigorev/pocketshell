@@ -67,6 +67,9 @@ public class OkHttpWhisperClient(
     apiKey: CharArray,
     private val baseUrl: String = "https://api.openai.com/v1",
     private val client: OkHttpClient = defaultClient(),
+    private val priceCatalogue: PriceCatalogue = PriceCatalogue.fromBundledResource(),
+    private val costRecorder: AiCostRecorder = AiCostRecorder.NoOp,
+    private val clock: () -> Long = { System.currentTimeMillis() },
 ) : WhisperClient {
 
     // Defensive copy: callers who pass a `CharArray` typically want to zero it
@@ -125,6 +128,17 @@ public class OkHttpWhisperClient(
                                 "Whisper response did not contain a `text` field",
                             ),
                         )
+
+                    // Issue #181: log this call's snapshot price + computed
+                    // cost. Done at success-only because Whisper documents
+                    // that 4xx/5xx requests are not billed. Audio duration
+                    // is derived from the WAV header — the same code that
+                    // produced these bytes (AudioRecorder.wrapInWav) writes
+                    // a canonical RIFF/WAVE header, so the math is exact.
+                    // Errors here must never block the user — recordCostSafely
+                    // swallows everything.
+                    recordCostSafely(audio = audio, transcript = text)
+
                     Result.success(text)
                 }
             } catch (io: IOException) {
@@ -135,7 +149,34 @@ public class OkHttpWhisperClient(
             }
         }
 
+    private suspend fun recordCostSafely(audio: ByteArray, transcript: String) {
+        try {
+            val audioSeconds = audioDurationSecondsFromWav(audio)
+            val unitCost = priceCatalogue.unitCost(PROVIDER_OPENAI, FEATURE_WHISPER)
+            // `inputUnits * unitCost` is integer-exact: Whisper bills per
+            // audio-second and our unit is millicents/second.
+            val computedCost = audioSeconds * unitCost
+            costRecorder.record(
+                AiCostRecord(
+                    timestampMillis = clock(),
+                    provider = PROVIDER_OPENAI,
+                    feature = FEATURE_WHISPER,
+                    inputUnits = audioSeconds,
+                    outputUnits = transcript.length.toLong(),
+                    unitCostUsdMillicents = unitCost,
+                    computedCostUsdMillicents = computedCost,
+                    metadataJson = null,
+                ),
+            )
+        } catch (_: Throwable) {
+            // Cost tracking is best-effort: a failure here must never make
+            // a successful transcription look broken to the user.
+        }
+    }
+
     private companion object {
+        const val PROVIDER_OPENAI = "openai"
+        const val FEATURE_WHISPER = "whisper"
         private val WAV_MEDIA_TYPE = "audio/wav".toMediaType()
 
         fun defaultClient(): OkHttpClient = OkHttpClient.Builder()
@@ -149,6 +190,52 @@ public class OkHttpWhisperClient(
             .writeTimeout(60, TimeUnit.SECONDS)
             .build()
     }
+}
+
+/**
+ * Approximate audio duration in seconds for the canonical WAV produced by
+ * [AudioRecorder.wrapInWav]. Reads the sample-rate, channel-count, and
+ * bits-per-sample fields directly out of the RIFF header so the math is
+ * exact for any reasonable PCM input — not just the 16 kHz mono 16-bit
+ * shape `core-voice` records today.
+ *
+ * Returns `0` when the buffer is too short to be a valid WAV, when the
+ * "data" chunk size is missing or invalid, or when the format declares a
+ * zero block-align (would otherwise divide by zero). The Whisper
+ * call-site treats the `0` as "we don't know how long the audio was" and
+ * logs a zero-cost row — better than crashing the request.
+ *
+ * Exposed `internal` for direct unit testing.
+ */
+internal fun audioDurationSecondsFromWav(wav: ByteArray): Long {
+    // Canonical RIFF/WAVE header is at least 44 bytes (see AudioRecorder.buildWav).
+    if (wav.size < 44) return 0L
+    if (!wav.copyOfRange(0, 4).contentEquals("RIFF".toByteArray(Charsets.US_ASCII))) return 0L
+    if (!wav.copyOfRange(8, 12).contentEquals("WAVE".toByteArray(Charsets.US_ASCII))) return 0L
+
+    fun le16(offset: Int): Int =
+        (wav[offset].toInt() and 0xFF) or ((wav[offset + 1].toInt() and 0xFF) shl 8)
+    fun le32(offset: Int): Long =
+        ((wav[offset].toInt() and 0xFF).toLong()) or
+            (((wav[offset + 1].toInt() and 0xFF).toLong()) shl 8) or
+            (((wav[offset + 2].toInt() and 0xFF).toLong()) shl 16) or
+            (((wav[offset + 3].toInt() and 0xFF).toLong()) shl 24)
+
+    val channels = le16(22)
+    val sampleRate = le32(24)
+    val bitsPerSample = le16(34)
+    val dataSize = le32(40)
+
+    if (sampleRate <= 0 || channels <= 0 || bitsPerSample <= 0) return 0L
+    val bytesPerSecond = sampleRate * channels * bitsPerSample / 8L
+    if (bytesPerSecond <= 0) return 0L
+
+    // Round to nearest whole second so a 4.6 s recording bills as 5 s
+    // (matching how Whisper rounds on its end — short clips are billed at
+    // minimum granularity). Half-up rounding feels intuitive for the
+    // cost-tracking surface: a "just under a second" recording still
+    // shows as the unit the user expects.
+    return (dataSize + bytesPerSecond / 2) / bytesPerSecond
 }
 
 /**

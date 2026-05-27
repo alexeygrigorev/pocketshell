@@ -1,0 +1,15 @@
+{
+  "version": "2026-01-01",
+  "note": "Prices are stored per-input-unit in USD millicents (1/1000 of a cent). See PriceCatalogue and AiApiCallEntry KDoc for why. Update this file when OpenAI changes its rates. Historical AiApiCallEntry rows are NEVER recomputed.",
+  "providers": {
+    "openai": {
+      "whisper": {
+        "unit": "audio_second",
+        "unitCostUsdMillicents": 10,
+        "outputUnit": "transcript_character",
+        "outputUnitCostUsdMillicents": 0,
+        "source": "https://openai.com/api/pricing/ — $0.006 per audio minute = 10 millicents per second as of 2026-01"
+      }
+    }
+  }
+}

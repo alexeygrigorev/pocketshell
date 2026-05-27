@@ -170,6 +170,27 @@
                 android:resource="@xml/share_target_test_provider_paths" />
         </provider>
 
+        <!--
+            Issue #181: AI Costs CSV export. The "Export as CSV" action
+            on the AI Costs screen writes a timestamped file under
+            `cacheDir/ai-costs-export/` and hands its content URI to
+            `ACTION_SEND` so the user can drop it into email / GDrive /
+            a finance app. The authority is `.fileprovider` (matching
+            the broader Android convention) so the export code stays
+            independent of the test-only `.shareprovider` above —
+            keeping the two authorities separate means a future change
+            to either one can't accidentally widen the other's surface.
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/ai_costs_export_paths" />
+        </provider>
+
         <receiver
             android:name=".systemsurfaces.ActiveSessionsWidgetProvider"
             android:exported="true"

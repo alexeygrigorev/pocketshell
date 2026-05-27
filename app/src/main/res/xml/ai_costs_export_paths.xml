@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Issue #181: AI cost log export.
+
+    The "Export as CSV" affordance on the AI Costs screen writes a
+    timestamped file under `cacheDir/ai-costs-export/` and hands its
+    content URI to `ACTION_SEND` so the user can drop it into email /
+    GDrive / a finance app. This paths file scopes the FileProvider to
+    just that subdirectory so we can't accidentally expose anything
+    else from the app's cache through the new authority.
+-->
+<paths>
+    <cache-path
+        name="ai-costs-export"
+        path="ai-costs-export/" />
+</paths>

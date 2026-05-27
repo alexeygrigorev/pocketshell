@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.core.view.WindowCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.fragment.app.FragmentActivity
+import com.pocketshell.app.costs.CostsScreen
 import com.pocketshell.app.crash.CrashReportsScreen
 import com.pocketshell.app.hosts.AddEditHostScreen
 import com.pocketshell.app.hosts.HostListScreen
@@ -341,7 +342,13 @@ private fun AppNavigator(
             onBack = ::back,
             onOpenCrashReports = { navigate(AppDestination.CrashReports) },
             onOpenUsage = { navigate(AppDestination.Usage) },
+            onOpenAiCosts = { navigate(AppDestination.AiCosts) },
         )
+
+        // Issue #181: AI Costs screen — client-side OpenAI spend
+        // tracker. Sister of the Usage screen but sourced from the
+        // local Room log rather than server-side `quse` output.
+        AppDestination.AiCosts -> CostsScreen(onBack = ::back)
 
         // Issue #114 Fix A: Usage / quota panel. The view model loads
         // every bootstrapped host on construction and pull-to-refresh

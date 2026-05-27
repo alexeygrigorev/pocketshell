@@ -3,6 +3,7 @@ package com.pocketshell.core.storage
 import androidx.room.Database
 import androidx.room.RoomDatabase
 import com.pocketshell.core.storage.dao.AgentSessionDao
+import com.pocketshell.core.storage.dao.AiApiCallLogDao
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.PortRemappingDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
@@ -10,6 +11,7 @@ import com.pocketshell.core.storage.dao.SessionDao
 import com.pocketshell.core.storage.dao.SnippetDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.AgentSessionEntity
+import com.pocketshell.core.storage.entity.AiApiCallEntry
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.PortRemappingEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -61,6 +63,11 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
  * the probe prepends ahead of its built-in augmentation. The SQL lives
  * in [com.pocketshell.core.storage.migrations.MIGRATION_5_6].
  *
+ * Version 7 (issue #181) added the new [AiApiCallEntry] table for
+ * client-side AI API cost tracking. Purely additive: no existing column
+ * or table is touched, so v0.2.x users upgrade without data loss. The SQL
+ * lives in [com.pocketshell.core.storage.migrations.MIGRATION_6_7].
+ *
  * `exportSchema = false` matches the reference module. When the schema
  * starts evolving in real users' hands, flip this on and check generated
  * schemas into `schemas/` so migrations are reviewable.
@@ -74,8 +81,9 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
         SessionEntity::class,
         SnippetEntity::class,
         AgentSessionEntity::class,
+        AiApiCallEntry::class,
     ],
-    version = 6,
+    version = 7,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -86,4 +94,5 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun sessionDao(): SessionDao
     abstract fun snippetDao(): SnippetDao
     abstract fun agentSessionDao(): AgentSessionDao
+    abstract fun aiApiCallLogDao(): AiApiCallLogDao
 }

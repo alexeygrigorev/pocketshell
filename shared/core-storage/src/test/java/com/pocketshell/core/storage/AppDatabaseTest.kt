@@ -4,6 +4,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.storage.entity.AgentSessionEntity
+import com.pocketshell.core.storage.entity.AiApiCallEntry
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.PortRemappingEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -146,6 +147,51 @@ class AppDatabaseTest {
         assertEquals(1, roots.size)
         assertEquals("work", roots[0].label)
         assertEquals("~/work", roots[0].path)
+    }
+
+    @Test
+    fun aiApiCallLog_insert_then_streams_all() = runTest {
+        val dao = db.aiApiCallLogDao()
+        val firstId = dao.insert(
+            AiApiCallEntry(
+                timestampMillis = 1_000L,
+                provider = "openai",
+                feature = "whisper",
+                inputUnits = 12,
+                outputUnits = 84,
+                unitCostUsdMillicents = 10,
+                computedCostUsdMillicents = 120,
+                metadataJson = null,
+            ),
+        )
+        val secondId = dao.insert(
+            AiApiCallEntry(
+                timestampMillis = 5_000L,
+                provider = "openai",
+                feature = "whisper",
+                inputUnits = 3,
+                outputUnits = 20,
+                unitCostUsdMillicents = 10,
+                computedCostUsdMillicents = 30,
+                metadataJson = """{"requestId":"abc"}""",
+            ),
+        )
+
+        val all = dao.getAll().first()
+        assertEquals(2, all.size)
+        // Newest first.
+        assertEquals(secondId, all[0].id)
+        assertEquals(firstId, all[1].id)
+        assertEquals(120L, all[1].computedCostUsdMillicents)
+        assertEquals("""{"requestId":"abc"}""", all[0].metadataJson)
+
+        // Range query: only the second row falls inside (timestamp >= 2_000).
+        val recent = dao.getSince(2_000L).first()
+        assertEquals(1, recent.size)
+        assertEquals(secondId, recent[0].id)
+
+        dao.deleteAll()
+        assertEquals(0, dao.getAll().first().size)
     }
 
     @Test

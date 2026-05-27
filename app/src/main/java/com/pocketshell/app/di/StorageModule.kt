@@ -3,6 +3,7 @@ package com.pocketshell.app.di
 import android.content.Context
 import androidx.room.Room
 import com.pocketshell.core.storage.AppDatabase
+import com.pocketshell.core.storage.dao.AiApiCallLogDao
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SnippetDao
@@ -12,6 +13,7 @@ import com.pocketshell.core.storage.migrations.MIGRATION_2_3
 import com.pocketshell.core.storage.migrations.MIGRATION_3_4
 import com.pocketshell.core.storage.migrations.MIGRATION_4_5
 import com.pocketshell.core.storage.migrations.MIGRATION_5_6
+import com.pocketshell.core.storage.migrations.MIGRATION_6_7
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -53,7 +55,14 @@ object StorageModule {
             // app. `dropAllTables = false` keeps user data on the safer
             // path; once we ship to real users this fallback should be
             // removed and missing migrations should hard-fail.
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+            .addMigrations(
+                MIGRATION_1_2,
+                MIGRATION_2_3,
+                MIGRATION_3_4,
+                MIGRATION_4_5,
+                MIGRATION_5_6,
+                MIGRATION_6_7,
+            )
             .fallbackToDestructiveMigration(dropAllTables = false)
             .build()
 
@@ -69,4 +78,9 @@ object StorageModule {
     // Issue #17: snippet library DAO consumed by SnippetsViewModel.
     @Provides
     fun provideSnippetDao(db: AppDatabase): SnippetDao = db.snippetDao()
+
+    // Issue #181: per-call cost log consumed by CostsViewModel and the
+    // Whisper instrumentation in VoiceModule.
+    @Provides
+    fun provideAiApiCallLogDao(db: AppDatabase): AiApiCallLogDao = db.aiApiCallLogDao()
 }

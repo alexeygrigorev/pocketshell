@@ -64,6 +64,14 @@ sealed interface AppDestination {
      */
     data object Usage : AppDestination
 
+    /**
+     * Issue #181: client-side AI cost tracker. Sister to [Usage] (which
+     * surfaces server-side `quse` quotas) — shows lifetime / windowed
+     * spend per OpenAI feature based on rows in `ai_api_call_log`.
+     * Reachable from Settings → Voice → "AI Costs".
+     */
+    data object AiCosts : AppDestination
+
     /** Host chooser opened from Android system forwarding surfaces such as the QS tile. */
     data object PortForwardChooser : AppDestination
 

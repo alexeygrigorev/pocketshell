@@ -277,6 +277,124 @@ class OkHttpWhisperClientTest {
         assertEquals("дa", extractTextField("{\"text\":\"" + backslashU + "a\"}"))
     }
 
+    @Test
+    fun successful_call_records_cost_with_snapshot_price() = runTest {
+        // 16 kHz mono 16-bit PCM, 5 seconds of silence → 160 000 bytes
+        // PCM + 44 byte RIFF header. The recorder is the seam that issue
+        // #181 introduces; on success we expect exactly one record with
+        // the snapshot unit-cost from the bundled catalogue.
+        val wav = buildWav(
+            pcm = ByteArray(16_000 * 2 * 5),
+            sampleRateHz = 16_000,
+            bitsPerSample = 16,
+            channels = 1,
+        )
+
+        val captured = mutableListOf<AiCostRecord>()
+        val recorder = object : AiCostRecorder {
+            override suspend fun record(record: AiCostRecord) {
+                captured += record
+            }
+        }
+        val pricingClient = OkHttpWhisperClient(
+            apiKey = "sk-test".toCharArray(),
+            baseUrl = server.url("/v1").toString(),
+            client = OkHttpClient.Builder()
+                .connectTimeout(2, TimeUnit.SECONDS)
+                .callTimeout(5, TimeUnit.SECONDS)
+                .build(),
+            priceCatalogue = PriceCatalogue.fromBundledResource(),
+            costRecorder = recorder,
+            clock = { 123_456_789L },
+        )
+
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"text":"hello"}"""))
+
+        val result = pricingClient.transcribe(wav, language = "en")
+        assertTrue("expected success, got $result", result.isSuccess)
+
+        assertEquals(1, captured.size)
+        val row = captured.single()
+        assertEquals("openai", row.provider)
+        assertEquals("whisper", row.feature)
+        assertEquals(5L, row.inputUnits)
+        assertEquals(5L, row.outputUnits) // "hello" = 5 chars
+        // Whisper @ $0.006/min = 10 millicents / second; 5 seconds = 50.
+        assertEquals(10L, row.unitCostUsdMillicents)
+        assertEquals(50L, row.computedCostUsdMillicents)
+        assertEquals(123_456_789L, row.timestampMillis)
+    }
+
+    @Test
+    fun failed_call_does_not_record_cost() = runTest {
+        val captured = mutableListOf<AiCostRecord>()
+        val recorder = object : AiCostRecorder {
+            override suspend fun record(record: AiCostRecord) {
+                captured += record
+            }
+        }
+        val pricingClient = OkHttpWhisperClient(
+            apiKey = "sk-test".toCharArray(),
+            baseUrl = server.url("/v1").toString(),
+            client = OkHttpClient.Builder()
+                .connectTimeout(2, TimeUnit.SECONDS)
+                .callTimeout(5, TimeUnit.SECONDS)
+                .build(),
+            costRecorder = recorder,
+        )
+
+        server.enqueue(MockResponse().setResponseCode(401).setBody("nope"))
+
+        val result = pricingClient.transcribe(audioBytes("a"))
+        assertTrue("expected failure, got $result", result.isFailure)
+        assertTrue(
+            "no cost row should be recorded for a 4xx Whisper failure",
+            captured.isEmpty(),
+        )
+    }
+
+    @Test
+    fun recorder_throwing_does_not_break_transcription() = runTest {
+        val recorder = object : AiCostRecorder {
+            override suspend fun record(record: AiCostRecord) {
+                throw RuntimeException("recorder went boom")
+            }
+        }
+        val pricingClient = OkHttpWhisperClient(
+            apiKey = "sk-test".toCharArray(),
+            baseUrl = server.url("/v1").toString(),
+            client = OkHttpClient.Builder()
+                .connectTimeout(2, TimeUnit.SECONDS)
+                .callTimeout(5, TimeUnit.SECONDS)
+                .build(),
+            costRecorder = recorder,
+        )
+
+        server.enqueue(MockResponse().setResponseCode(200).setBody("""{"text":"ok"}"""))
+
+        val result = pricingClient.transcribe(audioBytes("a"))
+        // Even though the recorder threw, the transcription is reported
+        // as success — cost tracking must never block the user.
+        assertTrue("expected success despite recorder error, got $result", result.isSuccess)
+        assertEquals("ok", result.getOrNull())
+    }
+
+    @Test
+    fun audio_duration_from_wav_handles_canonical_header() {
+        // 16 kHz mono 16-bit, 3 seconds of silence → 3 seconds rounded.
+        val wav = buildWav(
+            pcm = ByteArray(16_000 * 2 * 3),
+            sampleRateHz = 16_000,
+            bitsPerSample = 16,
+            channels = 1,
+        )
+        assertEquals(3L, audioDurationSecondsFromWav(wav))
+
+        // Empty / too-short input gives 0.
+        assertEquals(0L, audioDurationSecondsFromWav(ByteArray(0)))
+        assertEquals(0L, audioDurationSecondsFromWav(ByteArray(10)))
+    }
+
     private fun audioBytes(seed: String): ByteArray =
         // Real WAV bytes aren't needed — the server is a mock and just echoes
         // the multipart wrapper. We hand the client a small payload to keep

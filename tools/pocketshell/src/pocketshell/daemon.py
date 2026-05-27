@@ -80,6 +80,11 @@ METHOD_TTLS: Mapping[str, float] = {
     # filesystem walk off the hot path without showing stale state for
     # more than a couple of seconds.
     "repos.list_local": 10.0,
+    # `repos.list_remote` hits the GitHub REST API (5000 req/hour for
+    # authenticated calls) so we cache for 5 min. Remote repositories
+    # rarely change minute-to-minute; the longer window keeps the
+    # Android picker fast without burning rate-limit quota.
+    "repos.list_remote": 300.0,
 }
 
 # Length-prefix is a 4-byte unsigned big-endian integer. ``struct``
@@ -387,8 +392,8 @@ def _usage_fetch_handler(params: Mapping[str, Any]) -> dict[str, Any]:
 def _repos_list_local_handler(params: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Scan configured roots for cloned git repos and return them as JSON.
 
-    Thin shim around :func:`pocketshell.repos.daemon_handler`. The shim
-    exists so the daemon module does not need to import
+    Thin shim around :func:`pocketshell.repos.daemon_handler_local`. The
+    shim exists so the daemon module does not need to import
     :mod:`pocketshell.repos` at module load time (which would create a
     circular dependency: ``repos`` imports ``daemon`` lazily for the
     client-side probe). Lazy import keeps the daemon's cold-start cost
@@ -396,7 +401,22 @@ def _repos_list_local_handler(params: Mapping[str, Any]) -> list[dict[str, Any]]
     """
     from pocketshell import repos as _repos
 
-    return _repos.daemon_handler(dict(params))
+    return _repos.daemon_handler_local(dict(params))
+
+
+def _repos_list_remote_handler(params: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Enumerate the authenticated user's GitHub repositories via ``gh api``.
+
+    Same lazy-import pattern as :func:`_repos_list_local_handler` so
+    the daemon's cold-start cost is paid only when actually invoked.
+    Exceptions raised by the underlying ``gh`` call (missing binary,
+    non-zero exit) propagate up so the daemon wrapper translates them
+    into a JSON-RPC error envelope — the CLI's fall-through path then
+    handles the user-visible exit code.
+    """
+    from pocketshell import repos as _repos
+
+    return _repos.daemon_handler_remote(dict(params))
 
 
 # Single shared registry; tests can register additional methods via
@@ -405,6 +425,7 @@ def _repos_list_local_handler(params: Mapping[str, Any]) -> list[dict[str, Any]]
 DEFAULT_METHODS: Mapping[str, RpcHandler] = {
     "usage.fetch": _usage_fetch_handler,
     "repos.list_local": _repos_list_local_handler,
+    "repos.list_remote": _repos_list_remote_handler,
 }
 
 

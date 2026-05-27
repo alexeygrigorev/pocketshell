@@ -1,31 +1,35 @@
 """Unit tests for `pocketshell repos`.
 
-Scope (issue #220 first PR — Python-side only):
+Scope (issue #242 — first slice of #205):
 
-- Top-level CLI registration: ``pocketshell --help`` lists ``repos``.
-- ``pocketshell repos list --help`` shows the flags and does not scan.
-- Synthetic-tmpdir scans: a `git init`-style ``.git`` directory is
-  picked up; a non-repo directory is not.
-- ``--json`` output shape: array of dicts with ``name``/``path``/``remote``/
-  ``head`` fields, sorted by name.
-- Human-readable output is three-column with ``-`` for missing remotes.
-- Skip-pattern: ``node_modules`` under a root must not pollute the scan
-  and must NOT be descended into.
-- Depth limit: a repo deeper than ``--max-depth`` is excluded.
-- Non-existent root: warning to stderr + exit 0, other roots still scan.
-- Empty root: ``[]`` JSON, no human output.
-- Env-var roots: ``POCKETSHELL_REPOS_ROOTS`` honoured when ``--root``
-  is absent; ``--root`` wins when both are set.
-- Name rule: repo name is derived from the directory basename, not from
-  the ``remote.origin.url``.
-- Symlinks are not followed.
-- Daemon integration: ``repos.list_local`` round-trips, falls through
-  when no daemon, and respects ``--no-daemon``.
+- Existing ``--local`` coverage (carried from #220):
 
-Tests use tmpdir-driven synthetic repos: ``.git/`` is created as a
-directory (no real ``git init`` needed for detection), plus an explicit
-``git init`` + ``git config remote.origin.url`` for the few tests that
-need the remote / HEAD fields to be populated.
+  - Top-level CLI registration: ``pocketshell --help`` lists ``repos``.
+  - ``pocketshell repos list --help`` shows the flags and does not scan.
+  - Synthetic-tmpdir scans: a `git init`-style ``.git`` directory is
+    picked up; a non-repo directory is not.
+  - Skip-pattern: ``node_modules`` under a root must not pollute the
+    scan and must NOT be descended into.
+  - Depth limit: a repo deeper than ``--max-depth`` is excluded.
+  - Non-existent root: warning to stderr + exit 0, other roots still
+    scan.
+  - Symlinks are not followed.
+  - Daemon integration: ``repos.list_local`` round-trips, falls through
+    when no daemon, and respects ``--no-daemon``.
+
+- New schema (per D22 hard cut): every entry is the unified shape
+  ``{owner, name, full_name, local?, remote?}``. The local-scan path
+  populates ``owner``/``full_name`` from the parsed
+  ``remote.origin.url`` (GitHub SSH/HTTPS forms only), and always
+  populates ``local.path`` + ``local.head``.
+
+- ``--remote`` coverage (new in #242):
+
+  - Stubbed ``gh api user/repos --paginate`` round-trip (single page
+    + multi-page) produces the unified ``RemoteInfo`` shape.
+  - Missing ``gh`` exits 127 with the friendly install hint.
+  - Non-zero ``gh`` exit propagates returncode and stderr.
+  - Daemon round-trip for ``repos.list_remote`` with the 5-min TTL.
 """
 
 from __future__ import annotations
@@ -35,18 +39,26 @@ import os
 import shutil
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
 
 from pocketshell import daemon as daemon_mod
+from pocketshell import repos as repos_mod
 from pocketshell.cli import cli
 from pocketshell.repos import (
     DAEMON_CACHE_TTL_SECS,
+    DAEMON_REMOTE_CACHE_TTL_SECS,
     DEFAULT_MAX_DEPTH,
     DEFAULT_ROOT_PATHS,
-    daemon_handler,
+    GhCommandError,
+    GhMissingError,
+    daemon_handler_local,
+    daemon_handler_remote,
+    fetch_remote_repos,
+    parse_github_remote,
     repos_group,
     resolve_scan_roots,
     scan_roots,
@@ -59,11 +71,7 @@ from pocketshell.repos import (
 
 
 def _make_bare_repo(parent: Path, name: str) -> Path:
-    """Create a bare directory with an empty ``.git/`` subdir.
-
-    Detection only requires the ``.git`` entry to exist; we use this
-    for the fast-path tests that do not need remote/HEAD population.
-    """
+    """Create a bare directory with an empty ``.git/`` subdir."""
     repo = parent / name
     repo.mkdir(parents=True, exist_ok=True)
     (repo / ".git").mkdir(exist_ok=True)
@@ -76,12 +84,7 @@ def _make_real_repo(
     *,
     remote_url: str | None = None,
 ) -> Path:
-    """Run ``git init`` and optionally configure ``remote.origin.url``.
-
-    Used by the tests that need ``remote`` / ``head`` populated. Skips
-    via ``pytest.skip`` if the ``git`` binary is not on PATH (CI matrix
-    that strips it).
-    """
+    """Run ``git init`` and optionally configure ``remote.origin.url``."""
     if shutil.which("git") is None:
         pytest.skip("git binary not available")
     repo = parent / name
@@ -91,15 +94,12 @@ def _make_real_repo(
         check=True,
         capture_output=True,
     )
-    # Some older git versions ignore -b; force the branch via update-ref.
     if remote_url is not None:
         subprocess.run(
             ["git", "-C", str(repo), "config", "remote.origin.url", remote_url],
             check=True,
             capture_output=True,
         )
-    # Set user identity for git so commits/branches work in case future
-    # tests need it; keeps the test isolated from the host's ~/.gitconfig.
     subprocess.run(
         ["git", "-C", str(repo), "config", "user.email", "test@example.com"],
         check=True,
@@ -111,6 +111,81 @@ def _make_real_repo(
         capture_output=True,
     )
     return repo
+
+
+def _write_fake_gh(
+    target_dir: Path,
+    *,
+    pages: list[list[dict]] | None = None,
+    payload: str | None = None,
+    exit_code: int = 0,
+    stderr: str = "",
+) -> Path:
+    """Write a fake ``gh`` shell script under ``target_dir``.
+
+    Two modes:
+
+    - ``pages`` is a list of JSON arrays — the script concatenates them
+      (matching ``gh api --paginate`` which merges pages into one array).
+    - ``payload`` is the raw stdout body verbatim.
+
+    ``exit_code`` lets us simulate auth failures and rate limits.
+    """
+    if pages is not None and payload is not None:
+        raise ValueError("pass exactly one of pages / payload")
+    script = target_dir / "gh"
+    payload_file = target_dir / "_gh_payload.txt"
+
+    if pages is not None:
+        # `gh --paginate` returns ONE merged JSON array on stdout for
+        # repository-list endpoints (verified empirically against
+        # gh 2.87.0). Concatenate pages into a single array.
+        merged: list[dict] = []
+        for page in pages:
+            merged.extend(page)
+        payload_file.write_text(json.dumps(merged))
+    elif payload is not None:
+        payload_file.write_text(payload)
+    else:
+        payload_file.write_text("[]")
+
+    stderr_file = target_dir / "_gh_stderr.txt"
+    stderr_file.write_text(stderr)
+
+    body = textwrap.dedent(
+        f"""\
+        #!/bin/sh
+        # Stub `gh` used by pocketshell tests. Emits a fixed JSON
+        # payload on stdout and exits with the configured code.
+        cat {payload_file}
+        if [ -s {stderr_file} ]; then
+            cat {stderr_file} >&2
+        fi
+        exit {exit_code}
+        """
+    )
+    script.write_text(body)
+    script.chmod(0o755)
+    return script
+
+
+def _gh_repo_entry(
+    *,
+    owner: str,
+    name: str,
+    default_branch: str = "main",
+    updated_at: str = "2026-05-27T00:00:00Z",
+) -> dict:
+    """Build one ``gh api user/repos`` shaped dict for stub input."""
+    return {
+        "name": name,
+        "full_name": f"{owner}/{name}",
+        "owner": {"login": owner},
+        "default_branch": default_branch,
+        "html_url": f"https://github.com/{owner}/{name}",
+        "ssh_url": f"git@github.com:{owner}/{name}.git",
+        "updated_at": updated_at,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -138,9 +213,53 @@ def test_repos_list_help_does_not_scan(tmp_path: Path) -> None:
     result = runner.invoke(repos_group, ["list", "--help"])
     assert result.exit_code == 0, result.output
     assert "--local" in result.output
+    assert "--remote" in result.output
     assert "--json" in result.output
     assert "--root" in result.output
     assert "--max-depth" in result.output
+    assert "--limit" in result.output
+
+
+# ---------------------------------------------------------------------------
+# parse_github_remote
+# ---------------------------------------------------------------------------
+
+
+def test_parse_github_remote_ssh() -> None:
+    parsed = parse_github_remote("git@github.com:alexeygrigorev/pocketshell.git")
+    assert parsed == ("alexeygrigorev", "pocketshell")
+
+
+def test_parse_github_remote_ssh_without_suffix() -> None:
+    parsed = parse_github_remote("git@github.com:alexeygrigorev/pocketshell")
+    assert parsed == ("alexeygrigorev", "pocketshell")
+
+
+def test_parse_github_remote_https() -> None:
+    parsed = parse_github_remote("https://github.com/alexeygrigorev/pocketshell.git")
+    assert parsed == ("alexeygrigorev", "pocketshell")
+
+
+def test_parse_github_remote_https_without_suffix() -> None:
+    parsed = parse_github_remote("https://github.com/alexeygrigorev/pocketshell")
+    assert parsed == ("alexeygrigorev", "pocketshell")
+
+
+def test_parse_github_remote_dotted_owner() -> None:
+    # GitHub allows ``.`` in user/org slugs; the regex must accept it.
+    parsed = parse_github_remote("git@github.com:foo.bar/baz-qux.git")
+    assert parsed == ("foo.bar", "baz-qux")
+
+
+def test_parse_github_remote_non_github_returns_none() -> None:
+    assert parse_github_remote("git@gitlab.com:owner/repo.git") is None
+    assert parse_github_remote("https://gitlab.com/owner/repo.git") is None
+    assert parse_github_remote("git@internal.example.com:owner/repo.git") is None
+
+
+def test_parse_github_remote_none_and_empty() -> None:
+    assert parse_github_remote(None) is None
+    assert parse_github_remote("") is None
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +272,6 @@ def test_resolve_scan_roots_default_to_home_git(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("HOME", "/home/test")
     roots = resolve_scan_roots()
     assert roots == [Path("/home/test/git")]
-    # Sanity-check the default constant agrees with the resolved path.
     assert DEFAULT_ROOT_PATHS == ("~/git",)
 
 
@@ -198,6 +316,10 @@ def test_scan_roots_detects_repo(tmp_path: Path) -> None:
     names = [r.name for r in repos]
     # Sorted by name (case-insensitive) per spec.
     assert names == ["alpha", "beta"]
+    # Every entry has `local` populated and `remote` is None on a local scan.
+    for repo in repos:
+        assert repo.local is not None
+        assert repo.remote is None
 
 
 def test_scan_roots_ignores_non_repo_directories(tmp_path: Path) -> None:
@@ -208,7 +330,6 @@ def test_scan_roots_ignores_non_repo_directories(tmp_path: Path) -> None:
 
 
 def test_scan_roots_skips_node_modules(tmp_path: Path) -> None:
-    # A node_modules dir containing a phantom repo must not be scanned.
     _make_bare_repo(tmp_path / "node_modules", "evil-dep")
     _make_bare_repo(tmp_path, "real-app")
     repos = scan_roots([tmp_path])
@@ -224,9 +345,6 @@ def test_scan_roots_skips_all_default_skip_dirs(tmp_path: Path) -> None:
 
 
 def test_scan_roots_depth_limit_excludes_deep_repos(tmp_path: Path) -> None:
-    # `--max-depth 2` allows tmp_path/a/.git (depth 1) and
-    # tmp_path/group/repo/.git (depth 2), but excludes
-    # tmp_path/a/b/c/.git (depth 3).
     _make_bare_repo(tmp_path, "shallow")
     _make_bare_repo(tmp_path / "group", "mid")
     _make_bare_repo(tmp_path / "a" / "b", "deep")
@@ -237,7 +355,6 @@ def test_scan_roots_depth_limit_excludes_deep_repos(tmp_path: Path) -> None:
 
 
 def test_scan_roots_default_depth_is_4(tmp_path: Path) -> None:
-    # Repos at depths 1..4 are included; depth 5 is excluded.
     paths = [
         tmp_path / "d1",
         tmp_path / "a" / "d2",
@@ -254,12 +371,6 @@ def test_scan_roots_default_depth_is_4(tmp_path: Path) -> None:
 
 
 def test_scan_roots_does_not_descend_into_detected_repo(tmp_path: Path) -> None:
-    """A nested .git inside an outer repo's working tree must not be reported.
-
-    Avoids monorepo / submodule double-counting. The outer repo is
-    enough; the inner one is considered part of the outer's working
-    tree by ``git`` and surfacing it would confuse the picker.
-    """
     outer = _make_bare_repo(tmp_path, "outer")
     nested = outer / "submodule"
     nested.mkdir()
@@ -269,8 +380,6 @@ def test_scan_roots_does_not_descend_into_detected_repo(tmp_path: Path) -> None:
 
 
 def test_scan_roots_does_not_follow_symlinks(tmp_path: Path) -> None:
-    # A symlink to the same root would cause infinite recursion under
-    # follow_symlinks=True. Make sure os.scandir's symlink follow is off.
     real = _make_bare_repo(tmp_path, "real")
     link = tmp_path / "link-to-real"
     try:
@@ -278,7 +387,6 @@ def test_scan_roots_does_not_follow_symlinks(tmp_path: Path) -> None:
     except (OSError, NotImplementedError):
         pytest.skip("symlinks not supported on this platform")
     repos = scan_roots([tmp_path])
-    # Only the real repo is detected; the symlink is skipped.
     assert [r.name for r in repos] == ["real"]
 
 
@@ -298,20 +406,19 @@ def test_scan_roots_warns_on_missing_root(tmp_path: Path) -> None:
 
 
 def test_scan_roots_dedupes_via_resolved_paths(tmp_path: Path) -> None:
-    """Two roots that resolve to the same dir yield each repo once."""
     repo = _make_bare_repo(tmp_path, "uniq")
-    # Pass the same root twice; the scan must still report the repo once.
     repos = scan_roots([tmp_path, tmp_path])
     assert [r.name for r in repos] == ["uniq"]
-    assert repos[0].path == str(repo)
+    assert repos[0].local is not None
+    assert repos[0].local.path == str(repo)
 
 
 # ---------------------------------------------------------------------------
-# Remote + HEAD population (real git init)
+# Local scan: unified schema population
 # ---------------------------------------------------------------------------
 
 
-def test_scan_roots_reads_remote_and_head(tmp_path: Path) -> None:
+def test_scan_roots_populates_local_path_and_head(tmp_path: Path) -> None:
     repo = _make_real_repo(
         tmp_path,
         "with-remote",
@@ -321,18 +428,59 @@ def test_scan_roots_reads_remote_and_head(tmp_path: Path) -> None:
     assert len(repos) == 1
     only = repos[0]
     assert only.name == "with-remote"
-    assert only.path == str(repo)
-    assert only.remote == "git@github.com:owner/with-remote.git"
+    assert only.local is not None
+    assert only.local.path == str(repo)
     # Branch is `main` (we forced -b main on `git init`); some older git
     # versions stick to `master` though, so accept either.
-    assert only.head in ("main", "master")
+    assert only.local.head in ("main", "master")
 
 
-def test_scan_roots_remote_is_none_when_unset(tmp_path: Path) -> None:
-    _make_real_repo(tmp_path, "no-remote")  # no remote URL configured
+def test_scan_roots_populates_owner_from_github_ssh_remote(tmp_path: Path) -> None:
+    _make_real_repo(
+        tmp_path,
+        "with-remote",
+        remote_url="git@github.com:alexeygrigorev/with-remote.git",
+    )
     repos = scan_roots([tmp_path])
     assert len(repos) == 1
-    assert repos[0].remote is None
+    only = repos[0]
+    assert only.owner == "alexeygrigorev"
+    assert only.full_name == "alexeygrigorev/with-remote"
+
+
+def test_scan_roots_populates_owner_from_github_https_remote(tmp_path: Path) -> None:
+    _make_real_repo(
+        tmp_path,
+        "with-remote",
+        remote_url="https://github.com/alexeygrigorev/with-remote.git",
+    )
+    repos = scan_roots([tmp_path])
+    only = repos[0]
+    assert only.owner == "alexeygrigorev"
+    assert only.full_name == "alexeygrigorev/with-remote"
+
+
+def test_scan_roots_owner_none_for_non_github_remote(tmp_path: Path) -> None:
+    _make_real_repo(
+        tmp_path,
+        "with-gitlab",
+        remote_url="git@gitlab.com:owner/with-gitlab.git",
+    )
+    repos = scan_roots([tmp_path])
+    only = repos[0]
+    assert only.owner is None
+    assert only.full_name is None
+    # ``name`` still falls back to the directory basename.
+    assert only.name == "with-gitlab"
+
+
+def test_scan_roots_owner_none_when_remote_unset(tmp_path: Path) -> None:
+    _make_real_repo(tmp_path, "no-remote")
+    repos = scan_roots([tmp_path])
+    only = repos[0]
+    assert only.owner is None
+    assert only.full_name is None
+    assert only.local is not None
 
 
 def test_name_derives_from_directory_not_remote(tmp_path: Path) -> None:
@@ -340,6 +488,7 @@ def test_name_derives_from_directory_not_remote(tmp_path: Path) -> None:
     directory's basename is the source of truth for the ``name`` field.
 
     Justification: forks and locally-renamed clones keep stable identity.
+    ``full_name`` carries the canonical GitHub identity separately.
     """
     _make_real_repo(
         tmp_path,
@@ -348,12 +497,15 @@ def test_name_derives_from_directory_not_remote(tmp_path: Path) -> None:
     )
     repos = scan_roots([tmp_path])
     assert len(repos) == 1
-    assert repos[0].name == "my-fork"
-    assert repos[0].remote == "git@github.com:upstream-org/upstream-name.git"
+    only = repos[0]
+    assert only.name == "my-fork"
+    # owner/full_name reflect the canonical GitHub identity.
+    assert only.owner == "upstream-org"
+    assert only.full_name == "upstream-org/upstream-name"
 
 
 # ---------------------------------------------------------------------------
-# CLI output: --json + human
+# CLI output: --json + human (local mode)
 # ---------------------------------------------------------------------------
 
 
@@ -371,11 +523,14 @@ def test_cli_list_local_json_shape(tmp_path: Path) -> None:
     payload = json.loads(result.output)
     assert isinstance(payload, list)
     assert len(payload) == 2
-    # Sorted by name.
     assert [entry["name"] for entry in payload] == ["alpha", "beta"]
-    # Every entry has the documented four fields.
+    # Unified schema: every entry has owner/name/full_name/local/remote
+    # at the top level. ``local`` is populated; ``remote`` is None.
     for entry in payload:
-        assert set(entry.keys()) == {"name", "path", "remote", "head"}
+        assert set(entry.keys()) == {"owner", "name", "full_name", "local", "remote"}
+        assert entry["remote"] is None
+        assert isinstance(entry["local"], dict)
+        assert set(entry["local"].keys()) == {"path", "head"}
 
 
 def test_cli_list_local_json_empty_when_no_repos(tmp_path: Path) -> None:
@@ -399,11 +554,10 @@ def test_cli_list_local_human_three_columns(tmp_path: Path) -> None:
     )
     assert result.exit_code == 0, result.output
     line = result.output.strip()
-    # Three whitespace-separated columns: name, path, remote-or-dash.
     parts = line.split()
     assert parts[0] == "alpha"
     assert parts[1] == str(tmp_path / "alpha")
-    # Remote missing => `-` placeholder so the column stays aligned.
+    # full_name missing => `-` placeholder.
     assert parts[-1] == "-"
 
 
@@ -415,7 +569,6 @@ def test_cli_list_local_human_empty_emits_nothing(tmp_path: Path) -> None:
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
-    # Empty output (no header line) so pipelines see `wc -l == 0`.
     assert result.output == ""
 
 
@@ -430,26 +583,33 @@ def test_cli_list_local_warns_on_missing_root_but_exits_zero(
         catch_exceptions=False,
     )
     assert result.exit_code == 0, result.output
-    # In click>=8.2 ``mix_stderr`` was removed and CliRunner merges
-    # stderr into ``result.output`` by default; the warning hint and the
-    # empty JSON array both land in the merged buffer.
     combined = result.output
-    # The empty JSON array should be present somewhere in the output.
     assert "[]" in combined
-    # And the warning text should have been emitted.
     assert "does-not-exist" in combined
 
 
-def test_cli_list_local_requires_local_flag() -> None:
+def test_cli_list_defaults_to_local_with_hint() -> None:
+    """No --local / --remote: must default to local and emit a hint."""
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["repos", "list", "--no-daemon"],
+        ["repos", "list", "--no-daemon", "--json", "--root", "/nonexistent-root"],
         catch_exceptions=False,
     )
-    # --local is required in this PR; absence is exit 2.
+    # Exit 0 with a warning about the missing root + the hint mentioning --remote.
+    assert result.exit_code == 0, result.output
+    assert "--remote" in result.output
+
+
+def test_cli_list_local_and_remote_mutually_exclusive() -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["repos", "list", "--local", "--remote", "--no-daemon"],
+        catch_exceptions=False,
+    )
     assert result.exit_code == 2, result.output
-    assert "--local" in result.output
+    assert "mutually exclusive" in result.output
 
 
 def test_cli_list_local_rejects_negative_max_depth(tmp_path: Path) -> None:
@@ -489,18 +649,267 @@ def test_cli_list_local_env_var_used_when_no_root_flag(
 
 
 # ---------------------------------------------------------------------------
+# fetch_remote_repos (subprocess stub)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_remote_repos_single_page(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_gh(
+        bin_dir,
+        pages=[
+            [
+                _gh_repo_entry(
+                    owner="alexeygrigorev",
+                    name="pocketshell",
+                    updated_at="2026-05-27T12:00:00Z",
+                ),
+                _gh_repo_entry(
+                    owner="alexeygrigorev",
+                    name="quse",
+                    updated_at="2026-05-20T08:00:00Z",
+                ),
+            ]
+        ],
+    )
+    repos = fetch_remote_repos(gh_binary=str(bin_dir / "gh"))
+    # Sorted by updated_at descending: pocketshell (newer) first.
+    assert [r.name for r in repos] == ["pocketshell", "quse"]
+    first = repos[0]
+    assert first.owner == "alexeygrigorev"
+    assert first.full_name == "alexeygrigorev/pocketshell"
+    assert first.local is None
+    assert first.remote is not None
+    assert first.remote.default_branch == "main"
+    assert first.remote.html_url == "https://github.com/alexeygrigorev/pocketshell"
+    assert first.remote.ssh_url == "git@github.com:alexeygrigorev/pocketshell.git"
+    assert first.remote.updated_at == "2026-05-27T12:00:00Z"
+
+
+def test_fetch_remote_repos_multi_page_concat(tmp_path: Path) -> None:
+    """`gh --paginate` for list endpoints emits a single merged array.
+
+    Verified empirically against gh 2.87.0; the stub reflects that
+    behaviour. Walking multiple pages must therefore still produce one
+    flat array of repos.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    page_one = [
+        _gh_repo_entry(owner="alexeygrigorev", name=f"page1-{i}", updated_at=f"2026-05-2{i}T00:00:00Z")
+        for i in range(3)
+    ]
+    page_two = [
+        _gh_repo_entry(owner="alexeygrigorev", name=f"page2-{i}", updated_at=f"2026-05-1{i}T00:00:00Z")
+        for i in range(2)
+    ]
+    _write_fake_gh(bin_dir, pages=[page_one, page_two])
+    repos = fetch_remote_repos(gh_binary=str(bin_dir / "gh"))
+    assert len(repos) == 5
+    # Sorted by updated_at descending; page-one rows are newer than page-two rows.
+    assert repos[0].name == "page1-2"
+    assert repos[-1].name == "page2-0"
+
+
+def test_fetch_remote_repos_respects_limit(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    pages = [
+        [
+            _gh_repo_entry(owner="o", name=f"r{i}", updated_at=f"2026-05-{i:02d}T00:00:00Z")
+            for i in range(1, 11)
+        ]
+    ]
+    _write_fake_gh(bin_dir, pages=pages)
+    repos = fetch_remote_repos(gh_binary=str(bin_dir / "gh"), limit=3)
+    assert len(repos) == 3
+    # Top 3 by updated_at descending.
+    assert [r.name for r in repos] == ["r10", "r9", "r8"]
+
+
+def test_fetch_remote_repos_missing_gh_raises() -> None:
+    # Override _resolve_gh_binary via the public API: pass gh_binary=None
+    # while ensuring shutil.which can't find ``gh``. Easiest: stub the
+    # resolver function directly.
+    original = repos_mod._resolve_gh_binary
+    repos_mod._resolve_gh_binary = lambda: None
+    try:
+        with pytest.raises(GhMissingError) as excinfo:
+            fetch_remote_repos()
+        assert "gh auth login" in str(excinfo.value)
+    finally:
+        repos_mod._resolve_gh_binary = original
+
+
+def test_fetch_remote_repos_nonzero_exit_raises(tmp_path: Path) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_gh(
+        bin_dir,
+        payload="",
+        exit_code=4,
+        stderr="gh: not authenticated. Run `gh auth login`.\n",
+    )
+    with pytest.raises(GhCommandError) as excinfo:
+        fetch_remote_repos(gh_binary=str(bin_dir / "gh"))
+    err = excinfo.value
+    assert err.returncode == 4
+    assert "not authenticated" in err.stderr
+
+
+def test_fetch_remote_repos_empty_stdout(tmp_path: Path) -> None:
+    """A whitespace-only stdout body must produce an empty list, not crash."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_gh(bin_dir, payload="   \n")
+    repos = fetch_remote_repos(gh_binary=str(bin_dir / "gh"))
+    assert repos == []
+
+
+# ---------------------------------------------------------------------------
+# CLI output: --remote
+# ---------------------------------------------------------------------------
+
+
+def test_cli_list_remote_json_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_gh(
+        bin_dir,
+        pages=[
+            [
+                _gh_repo_entry(owner="o", name="r1", updated_at="2026-05-26T00:00:00Z"),
+                _gh_repo_entry(owner="o", name="r2", updated_at="2026-05-27T00:00:00Z"),
+            ]
+        ],
+    )
+    monkeypatch.setattr(repos_mod, "_resolve_gh_binary", lambda: str(bin_dir / "gh"))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["repos", "list", "--remote", "--json", "--no-daemon"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert isinstance(payload, list)
+    assert [entry["name"] for entry in payload] == ["r2", "r1"]
+    for entry in payload:
+        assert set(entry.keys()) == {"owner", "name", "full_name", "local", "remote"}
+        assert entry["local"] is None
+        assert isinstance(entry["remote"], dict)
+        assert set(entry["remote"].keys()) == {
+            "default_branch",
+            "html_url",
+            "ssh_url",
+            "updated_at",
+        }
+        assert entry["owner"] == "o"
+
+
+def test_cli_list_remote_missing_gh_exits_127(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(repos_mod, "_resolve_gh_binary", lambda: None)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["repos", "list", "--remote", "--json", "--no-daemon"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 127, result.output
+    assert "gh" in result.output
+    assert "gh auth login" in result.output
+
+
+def test_cli_list_remote_nonzero_exit_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_gh(
+        bin_dir,
+        payload="",
+        exit_code=4,
+        stderr="gh: rate limit exceeded\n",
+    )
+    monkeypatch.setattr(repos_mod, "_resolve_gh_binary", lambda: str(bin_dir / "gh"))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["repos", "list", "--remote", "--json", "--no-daemon"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 4, result.output
+    assert "rate limit" in result.output
+
+
+def test_cli_list_remote_human_format(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_gh(
+        bin_dir,
+        pages=[
+            [_gh_repo_entry(owner="o", name="r", updated_at="2026-05-27T00:00:00Z")]
+        ],
+    )
+    monkeypatch.setattr(repos_mod, "_resolve_gh_binary", lambda: str(bin_dir / "gh"))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["repos", "list", "--remote", "--no-daemon"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    line = result.output.strip()
+    parts = line.split()
+    assert parts[0] == "o/r"
+    assert parts[1] == "main"
+    assert parts[2] == "2026-05-27T00:00:00Z"
+
+
+def test_cli_list_remote_limit_passthrough(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_gh(
+        bin_dir,
+        pages=[
+            [
+                _gh_repo_entry(owner="o", name=f"r{i}", updated_at=f"2026-05-{i:02d}T00:00:00Z")
+                for i in range(1, 6)
+            ]
+        ],
+    )
+    monkeypatch.setattr(repos_mod, "_resolve_gh_binary", lambda: str(bin_dir / "gh"))
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["repos", "list", "--remote", "--json", "--limit", "2", "--no-daemon"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert len(payload) == 2
+
+
+# ---------------------------------------------------------------------------
 # Daemon integration
 # ---------------------------------------------------------------------------
 
 
 @pytest.fixture()
 def sandbox_socket(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Isolate the test from the real user-runtime daemon socket.
-
-    Mirrors the fixture in ``test_daemon.py`` so the daemon-integration
-    tests here do not have to import a fixture from a sibling test
-    module.
-    """
     socket_path = tmp_path / "pocketshell-test.sock"
     monkeypatch.setenv("POCKETSHELL_DAEMON_SOCKET", str(socket_path))
     yield socket_path
@@ -570,9 +979,11 @@ def test_repos_list_local_round_trips_via_daemon(
         assert len(result) == 2
         names = [entry["name"] for entry in result]
         assert names == ["alpha", "beta"]
-        # Each entry has the four documented fields.
+        # Each entry has the unified-schema fields.
         for entry in result:
-            assert set(entry.keys()) == {"name", "path", "remote", "head"}
+            assert set(entry.keys()) == {"owner", "name", "full_name", "local", "remote"}
+            assert entry["remote"] is None
+            assert isinstance(entry["local"], dict)
     finally:
         _terminate(proc)
 
@@ -594,8 +1005,6 @@ def test_repos_list_local_caches_within_ttl(
         )
         assert [entry["name"] for entry in first] == ["first"]
 
-        # Add a second repo on disk; without --no-cache the daemon should
-        # serve the stale cached result.
         _make_bare_repo(work, "second")
         cached = daemon_mod.call(
             "repos.list_local",
@@ -604,7 +1013,6 @@ def test_repos_list_local_caches_within_ttl(
         )
         assert [entry["name"] for entry in cached] == ["first"]
 
-        # With no_cache the daemon must re-scan and pick up the new dir.
         fresh = daemon_mod.call(
             "repos.list_local",
             params={
@@ -622,7 +1030,6 @@ def test_repos_list_local_caches_within_ttl(
 def test_cli_repos_list_falls_through_when_daemon_absent(
     sandbox_socket: Path, tmp_path: Path
 ) -> None:
-    """No daemon on disk => CLI must use the in-process scan."""
     work = tmp_path / "work"
     work.mkdir()
     _make_bare_repo(work, "no-daemon-needed")
@@ -643,7 +1050,6 @@ def test_cli_repos_list_falls_through_when_daemon_absent(
 def test_cli_repos_list_no_daemon_flag_skips_daemon(
     sandbox_socket: Path, tmp_path: Path
 ) -> None:
-    """`--no-daemon` skips the daemon even when one is up."""
     work_daemon = tmp_path / "daemon-only"
     work_daemon.mkdir()
     _make_bare_repo(work_daemon, "in-daemon-root")
@@ -657,8 +1063,6 @@ def test_cli_repos_list_no_daemon_flag_skips_daemon(
         assert daemon_mod.is_daemon_running(sandbox_socket)
 
         runner = CliRunner()
-        # Even though a daemon is up, --no-daemon must force the
-        # in-process scan against work_cli (and ignore work_daemon).
         result = runner.invoke(
             cli,
             [
@@ -676,28 +1080,138 @@ def test_cli_repos_list_no_daemon_flag_skips_daemon(
         payload = json.loads(result.output)
         names = [entry["name"] for entry in payload]
         assert names == ["in-cli-root"]
-        # Sanity-check the daemon-only root is not present.
         assert "in-daemon-root" not in names
     finally:
         _terminate(proc)
 
 
-def test_daemon_handler_with_invalid_params_falls_back_to_defaults(
+def test_daemon_handler_local_with_invalid_params_falls_back_to_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A malformed `roots` payload must not crash the handler.
-
-    The robustness contract: degrade to defaults rather than throw.
-    """
     monkeypatch.setenv("HOME", str(tmp_path))
-    # No ~/git directory exists, but the handler must still return a
-    # well-shaped (empty) list rather than raising.
-    result = daemon_handler({"roots": "not-a-list", "max_depth": "wat"})
+    result = daemon_handler_local({"roots": "not-a-list", "max_depth": "wat"})
     assert isinstance(result, list)
 
 
+def test_daemon_handler_remote_returns_unified_shape(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_gh(
+        bin_dir,
+        pages=[
+            [_gh_repo_entry(owner="o", name="r", updated_at="2026-05-27T00:00:00Z")]
+        ],
+    )
+    monkeypatch.setattr(repos_mod, "_resolve_gh_binary", lambda: str(bin_dir / "gh"))
+    payload = daemon_handler_remote({})
+    assert isinstance(payload, list)
+    assert len(payload) == 1
+    entry = payload[0]
+    assert set(entry.keys()) == {"owner", "name", "full_name", "local", "remote"}
+    assert entry["local"] is None
+    assert entry["remote"]["default_branch"] == "main"
+
+
 def test_method_ttl_for_repos_list_local_is_ten_seconds() -> None:
-    # Pin the cache TTL in test so the spec lives in the suite, not
-    # only in the daemon source.
     assert daemon_mod.METHOD_TTLS["repos.list_local"] == DAEMON_CACHE_TTL_SECS
     assert DAEMON_CACHE_TTL_SECS == 10.0
+
+
+def test_method_ttl_for_repos_list_remote_is_five_minutes() -> None:
+    assert daemon_mod.METHOD_TTLS["repos.list_remote"] == DAEMON_REMOTE_CACHE_TTL_SECS
+    assert DAEMON_REMOTE_CACHE_TTL_SECS == 300.0
+
+
+def test_repos_list_remote_round_trips_via_daemon(
+    sandbox_socket: Path, tmp_path: Path
+) -> None:
+    """`repos.list_remote` RPC returns the unified shape via the daemon."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_gh(
+        bin_dir,
+        pages=[
+            [
+                _gh_repo_entry(owner="o", name="r1", updated_at="2026-05-26T00:00:00Z"),
+                _gh_repo_entry(owner="o", name="r2", updated_at="2026-05-27T00:00:00Z"),
+            ]
+        ],
+    )
+    # Inject the fake gh into the daemon child's PATH so its
+    # ``_resolve_gh_binary()`` lookup finds the stub.
+    env = {"PATH": f"{bin_dir}:{os.environ.get('PATH', '')}"}
+    proc = _spawn_daemon(sandbox_socket, extra_env=env)
+    try:
+        result = daemon_mod.call(
+            "repos.list_remote",
+            params={},
+            socket_path=sandbox_socket,
+            timeout=15.0,
+        )
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert [entry["name"] for entry in result] == ["r2", "r1"]
+        for entry in result:
+            assert set(entry.keys()) == {"owner", "name", "full_name", "local", "remote"}
+            assert entry["local"] is None
+            assert entry["remote"]["default_branch"] == "main"
+    finally:
+        _terminate(proc)
+
+
+def test_repos_list_remote_caches_within_ttl(
+    sandbox_socket: Path, tmp_path: Path
+) -> None:
+    """Within the 5-min TTL a second call must serve the cached envelope."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    counter_file = tmp_path / "counter"
+    counter_file.write_text("0")
+    script = bin_dir / "gh"
+    # Each invocation bumps the counter and emits a single repo with the
+    # incremented name so the test can tell apart cached vs. fresh.
+    script.write_text(
+        "#!/bin/sh\n"
+        f"n=$(cat {counter_file})\n"
+        "n=$((n+1))\n"
+        f'echo "$n" > {counter_file}\n'
+        'printf \'[{"name":"r%s","full_name":"o/r%s","owner":{"login":"o"},'
+        '"default_branch":"main","html_url":"https://x","ssh_url":"git@x:o/r%s.git",'
+        '"updated_at":"2026-05-27T00:00:00Z"}]\' "$n" "$n" "$n"\n'
+    )
+    script.chmod(0o755)
+
+    env = {"PATH": f"{bin_dir}:{os.environ.get('PATH', '')}"}
+    proc = _spawn_daemon(sandbox_socket, extra_env=env)
+    try:
+        first = daemon_mod.call(
+            "repos.list_remote",
+            params={},
+            socket_path=sandbox_socket,
+            timeout=15.0,
+        )
+        assert first[0]["name"] == "r1"
+
+        # Within TTL: must serve cached r1, not re-run gh.
+        cached = daemon_mod.call(
+            "repos.list_remote",
+            params={},
+            socket_path=sandbox_socket,
+            timeout=15.0,
+        )
+        assert cached[0]["name"] == "r1"
+        assert counter_file.read_text().strip() == "1"
+
+        # With no_cache: must re-run gh.
+        fresh = daemon_mod.call(
+            "repos.list_remote",
+            params={"no_cache": True},
+            socket_path=sandbox_socket,
+            timeout=15.0,
+        )
+        assert fresh[0]["name"] == "r2"
+        assert counter_file.read_text().strip() == "2"
+    finally:
+        _terminate(proc)

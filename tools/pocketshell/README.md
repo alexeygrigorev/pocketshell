@@ -65,6 +65,61 @@ hop.
 If `quse` is not installed, `pocketshell usage` exits with code 127 and
 prints an install hint to stderr.
 
+### `pocketshell repos list`
+
+Enumerate git repositories — either cloned on this host (`--local`) or
+owned by the authenticated GitHub user (`--remote`). The two modes
+share one unified JSON schema so a future merged view can interleave
+them transparently.
+
+```bash
+pocketshell repos list --local            # scan ~/git for clones (human)
+pocketshell repos list --local --json     # same, JSON output
+pocketshell repos list --remote --json    # via `gh api user/repos --paginate`
+pocketshell repos list --remote --limit 20
+```
+
+Schema (every entry):
+
+```json
+{
+  "owner": "alexeygrigorev",          // null when remote URL is non-GitHub
+  "name": "pocketshell",              // local dir basename, or GH repo name
+  "full_name": "alexeygrigorev/pocketshell",  // null when owner unknown
+  "local": {                          // populated by --local scans
+    "path": "/home/alexey/git/pocketshell",
+    "head": "main"
+  },
+  "remote": {                         // populated by --remote scans
+    "default_branch": "main",
+    "html_url": "https://github.com/alexeygrigorev/pocketshell",
+    "ssh_url": "git@github.com:alexeygrigorev/pocketshell.git",
+    "updated_at": "2026-05-27T12:00:00Z"
+  }
+}
+```
+
+`--local` scans `~/git` by default (override with one or more `--root`
+flags or the colon-separated `POCKETSHELL_REPOS_ROOTS` env var) and
+populates `local` for every entry. `owner` and `full_name` are
+best-effort from the parsed `remote.origin.url`; non-GitHub remotes
+leave them `null`.
+
+`--remote` delegates to `gh api user/repos --paginate`. Requires `gh`
+on PATH (`apt install gh` on Debian/Ubuntu, `brew install gh` on
+macOS) authenticated via `gh auth login -s repo:read`. Sorted by
+`updated_at` descending so the picker shows the most-recently-touched
+repos first. Missing `gh` exits 127 with an install hint; a non-zero
+`gh` exit (auth missing, rate-limit, etc.) propagates the exit code
+and stderr verbatim.
+
+With neither flag, defaults to `--local` and prints a one-line
+discoverability hint mentioning `--remote`.
+
+Daemon mode caches `repos.list_local` for 10 s and `repos.list_remote`
+for 5 min. `--no-daemon` forces the in-process path; `--no-cache`
+forces the daemon to re-run upstream on the next call.
+
 ### `pocketshell qr-share`
 
 Builds a `pocketshell.ssh-import.v1` payload from an `~/.ssh/config`

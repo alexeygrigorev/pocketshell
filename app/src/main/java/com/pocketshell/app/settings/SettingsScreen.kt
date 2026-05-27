@@ -78,12 +78,22 @@ fun SettingsScreen(
     onOpenCrashReports: () -> Unit,
     onOpenUsage: () -> Unit = {},
     onOpenAiCosts: () -> Unit = {},
+    /**
+     * Issue #206: per-host watched-folders config entry. The Settings
+     * surface routes through a host picker (no decrypted passphrase
+     * is available here) so the destination it opens omits SSH
+     * credentials — the discover-from-remote button is hidden in
+     * that case. The host-list kebab keeps the full-credential
+     * route.
+     */
+    onOpenWatchedFoldersForHost: (hostId: Long, hostName: String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
     val settings by viewModel.state.collectAsState()
     val keyStatus by viewModel.keyStatus.collectAsState()
     val hasUsageInstalledHost by viewModel.hasUsageInstalledHost.collectAsState()
+    val hosts by viewModel.hosts.collectAsState()
     val context = LocalContext.current
 
     val versionName = remember {
@@ -120,6 +130,12 @@ fun SettingsScreen(
                     onFontSizeChange = viewModel::setTerminalFontSizeSp,
                     tmuxOnAttach = settings.tmuxOnAttachByDefault,
                     onTmuxOnAttachChange = viewModel::setTmuxOnAttachByDefault,
+                )
+            }
+            item {
+                WatchedFoldersSection(
+                    hosts = hosts,
+                    onPickHost = onOpenWatchedFoldersForHost,
                 )
             }
             item {
@@ -942,6 +958,86 @@ private fun DiagnosticsSection(onOpenCrashReports: () -> Unit) {
     }
 }
 
+/**
+ * Issue #206: per-host "Watched folders" picker. Renders a row per
+ * saved host that routes the user to the per-host config screen.
+ *
+ * Lives under Settings (not host-detail) because the per-host detail
+ * screen does not exist as a stand-alone surface today — host editing
+ * is gated behind the QR import / add-host form. Surfacing the
+ * watched-folders entry here gives users a discoverable entry that
+ * doesn't depend on remembering the kebab.
+ *
+ * Discovery (the SSH probe of `~/git` etc.) is only available from
+ * the host-list kebab path because Settings has no decrypted
+ * passphrase to authenticate the one-shot SSH session.
+ */
+@Composable
+private fun WatchedFoldersSection(
+    hosts: List<com.pocketshell.core.storage.entity.HostEntity>,
+    onPickHost: (Long, String) -> Unit,
+) {
+    Column {
+        SectionLabel("Watched folders")
+        SectionCard {
+            Text(
+                text = "Per-host quick-access roots",
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Configure folders the new-session sheet offers as cwd chips.",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            if (hosts.isEmpty()) {
+                Text(
+                    text = "Add a host first to configure watched folders.",
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 12.sp,
+                    modifier = Modifier.testTag(WATCHED_FOLDERS_SETTINGS_EMPTY_TAG),
+                )
+            } else {
+                hosts.forEach { host ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable(role = Role.Button) {
+                                onPickHost(host.id, host.name)
+                            }
+                            .padding(vertical = 10.dp)
+                            .testTag(watchedFoldersSettingsHostRowTag(host.id)),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = host.name,
+                                color = PocketShellColors.Text,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                            Text(
+                                text = "${host.username}@${host.hostname}:${host.port}",
+                                color = PocketShellColors.TextSecondary,
+                                fontSize = 12.sp,
+                            )
+                        }
+                        Text(
+                            text = "›",
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun AboutSection(versionName: String) {
     Column {
@@ -1001,6 +1097,16 @@ internal const val VOICE_SILENCE_SLIDER_TAG = "settings:voice:silence-slider"
 internal const val VOICE_SILENCE_VALUE_TAG = "settings:voice:silence-value"
 internal const val VOICE_AI_COSTS_ROW_TAG = "settings:voice:ai-costs-row"
 internal const val VOICE_PERSIST_FAILED_SWITCH_TAG = "settings:voice:persist-failed-switch"
+
+// Issue #206: stable tags for the per-host watched-folders picker in
+// Settings. The empty-state tag fires when the user has no hosts
+// configured yet; per-host row tags include the host id so the
+// connected E2E test can drive a specific host without depending on
+// list ordering.
+const val WATCHED_FOLDERS_SETTINGS_EMPTY_TAG: String = "settings:watched-folders:empty"
+
+fun watchedFoldersSettingsHostRowTag(hostId: Long): String =
+    "settings:watched-folders:host:$hostId"
 
 internal fun themeOptionTestTag(theme: ThemePreference): String =
     "settings:appearance:theme:" + theme.name.lowercase()

@@ -101,6 +101,41 @@ sealed interface AppDestination {
     ) : AppDestination
 
     /**
+     * Per-host "Watched folders" configuration screen — issue #206. Lists
+     * [com.pocketshell.core.storage.entity.ProjectRootEntity] rows for
+     * the host and lets the user add / edit / delete / reorder them.
+     * Reachable from the host overflow menu on the host list and from
+     * the Settings → "Watched folders" host picker.
+     *
+     * SSH connection parameters are optional — they only enable the
+     * "Discover from remote" affordance which queries
+     * `~/git`, `~/code`, `~/projects` on the remote. When opened from
+     * Settings (which has no decrypted passphrase) the destination
+     * carries them as null and the discover button degrades to an
+     * inline hint that asks the user to connect through the host card
+     * first.
+     *
+     * @property hostId persistent host identifier the screen scopes to.
+     * @property hostName user-facing saved-host label shown in the title.
+     * @property hostname / [port] / [username] / [keyPath] resolved SSH
+     *   connection parameters used by the optional discover button.
+     *   Null means "no SSH credentials are available in this navigator
+     *   slot" — see [Session] for the analogous routing.
+     * @property passphrase already-unlocked key passphrase, if the key is
+     *   passphrase-protected. The caller is responsible for zeroing it
+     *   after navigation per the existing host-list contract.
+     */
+    data class WatchedFolders(
+        val hostId: Long,
+        val hostName: String,
+        val hostname: String? = null,
+        val port: Int? = null,
+        val username: String? = null,
+        val keyPath: String? = null,
+        val passphrase: CharArray? = null,
+    ) : AppDestination
+
+    /**
      * Open a live `tmux -CC` session — see [com.pocketshell.app.tmux.TmuxSessionScreen].
      *
      * Distinct from [Session] (which is plain-SSH per #18). Per

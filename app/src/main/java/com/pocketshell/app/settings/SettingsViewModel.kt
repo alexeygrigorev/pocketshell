@@ -4,6 +4,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.entity.HostEntity
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -60,6 +61,17 @@ class SettingsViewModel @Inject constructor(
     val hasUsageInstalledHost: StateFlow<Boolean> = hostDao.getAll()
         .map { rows -> rows.any { it.quseInstalled == true } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), false)
+
+    /**
+     * Issue #206: surface every saved host so the new "Watched folders"
+     * section in Settings can render a host picker. The picker lets the
+     * user pick a host without first opening it for a session — useful
+     * for pre-configuring a host's watched folders before the first
+     * connection. The host-list kebab keeps the credential-rich route
+     * for the discover-from-remote button.
+     */
+    val hosts: StateFlow<List<HostEntity>> = hostDao.getAll()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
 
     private val _keyStatus: MutableStateFlow<WhisperKeyStatus> =
         MutableStateFlow(readKeyStatus())

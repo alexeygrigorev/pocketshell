@@ -35,6 +35,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.app.projects.WatchedFoldersChipRow
 import com.pocketshell.uikit.theme.PocketShellColors
 
 // Issue #109: tags used by the connect-error connected test to drive
@@ -151,6 +152,9 @@ fun HostTmuxSessionPickerSheet(
     }
     if (showCreateDialog && request != null) {
         CreateTmuxSessionDialog(
+            // Issue #206 + #204: thread the host id so the create
+            // dialog can render the watched-folders chip row.
+            hostId = request.host.id,
             onDismiss = { showCreateDialog = false },
             onCreate = { creation ->
                 showCreateDialog = false
@@ -312,6 +316,7 @@ private fun HostTmuxSessionRowView(row: HostTmuxSessionRow, onClick: () -> Unit)
 
 @Composable
 private fun CreateTmuxSessionDialog(
+    hostId: Long? = null,
     onDismiss: () -> Unit,
     onCreate: (TmuxSessionCreation) -> Unit,
 ) {
@@ -327,6 +332,11 @@ private fun CreateTmuxSessionDialog(
                     onValueChange = { text = it },
                     singleLine = true,
                     label = { Text("Session name") },
+                )
+                // Issue #206 + #204: watched-folders chip row.
+                WatchedFoldersChipRow(
+                    hostId = hostId,
+                    onChipTap = { path -> startDirectory = path },
                 )
                 OutlinedTextField(
                     value = startDirectory,

@@ -33,6 +33,8 @@ import com.pocketshell.app.jobs.RecurringJobsScreen
 import com.pocketshell.app.jobs.RecurringJobsViewModel
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.portfwd.PortForwardPanelScreen
+import com.pocketshell.app.projects.WatchedFoldersScreen
+import com.pocketshell.app.projects.WatchedFoldersViewModel
 import com.pocketshell.app.session.SessionScreen
 import com.pocketshell.app.session.SessionViewModel
 import com.pocketshell.app.settings.SettingsRepository
@@ -282,6 +284,24 @@ private fun AppNavigator(
             onOpenPortForwardPanel = { host, keyPath, passphrase ->
                 navigate(AppDestination.PortForwardPanel(hostId = host.id, keyPath = keyPath, passphrase = passphrase))
             },
+            // Issue #206: kebab → "Watched folders". Pass the SSH
+            // connection parameters so the discover-from-remote
+            // probe can authenticate. The destination carries them
+            // as optional fields because the Settings host-picker
+            // path arrives without them.
+            onOpenWatchedFolders = { host, keyPath, passphrase ->
+                navigate(
+                    AppDestination.WatchedFolders(
+                        hostId = host.id,
+                        hostName = host.name,
+                        hostname = host.hostname,
+                        port = host.port,
+                        username = host.username,
+                        keyPath = keyPath,
+                        passphrase = passphrase,
+                    ),
+                )
+            },
             onOpenTmuxSession = { entry, sessionName, startDirectory ->
                 navigate(
                     AppDestination.TmuxSession(
@@ -343,6 +363,19 @@ private fun AppNavigator(
             onOpenCrashReports = { navigate(AppDestination.CrashReports) },
             onOpenUsage = { navigate(AppDestination.Usage) },
             onOpenAiCosts = { navigate(AppDestination.AiCosts) },
+            // Issue #206: Settings → Watched folders host picker routes
+            // here without SSH credentials. The destination's SSH
+            // fields stay null so the discover-from-remote button is
+            // hidden — the user can still add / edit / delete / reorder
+            // folders manually.
+            onOpenWatchedFoldersForHost = { hostId, hostName ->
+                navigate(
+                    AppDestination.WatchedFolders(
+                        hostId = hostId,
+                        hostName = hostName,
+                    ),
+                )
+            },
         )
 
         // Issue #181: AI Costs screen — client-side OpenAI spend
@@ -418,6 +451,37 @@ private fun AppNavigator(
             passphrase = dest.passphrase,
             onBack = ::back,
         )
+
+        // Issue #206: per-host watched-folders config screen. SSH
+        // connection parameters are optional on the destination — only
+        // the host-list kebab path supplies them (so the discover
+        // probe can authenticate); the Settings host-picker path
+        // arrives with them null and the screen hides the discover
+        // button accordingly.
+        is AppDestination.WatchedFolders -> {
+            val creds = if (
+                dest.hostname != null &&
+                dest.port != null &&
+                dest.username != null &&
+                dest.keyPath != null
+            ) {
+                WatchedFoldersViewModel.SshCredentials(
+                    hostname = dest.hostname,
+                    port = dest.port,
+                    username = dest.username,
+                    keyPath = dest.keyPath,
+                    passphrase = dest.passphrase,
+                )
+            } else {
+                null
+            }
+            WatchedFoldersScreen(
+                hostId = dest.hostId,
+                hostName = dest.hostName,
+                sshCredentials = creds,
+                onBack = ::back,
+            )
+        }
 
         is AppDestination.RecurringJobs -> {
             val jobsViewModel = hiltViewModel<RecurringJobsViewModel>()

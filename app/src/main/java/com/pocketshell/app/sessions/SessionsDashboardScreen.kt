@@ -33,6 +33,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.app.projects.WatchedFoldersChipRow
 import com.pocketshell.uikit.components.SessionRow
 import com.pocketshell.uikit.model.Tag
 import com.pocketshell.uikit.model.TagKind
@@ -222,6 +223,11 @@ fun SessionsSection(
         DashboardLifecycleDialog(
             mode = currentDialog,
             sessionName = currentSession.sessionName,
+            // Issue #206: thread the host id so the create-session
+            // dialog can render the watched-folders chip row above
+            // the start-folder field. The id is null for rename /
+            // kill modes which don't render the chip row anyway.
+            hostId = currentSession.hostId,
             text = dialogText,
             onTextChange = { dialogText = it },
             startDirectory = dialogStartDirectory,
@@ -288,6 +294,7 @@ private fun DashboardSessionMenu(
 private fun DashboardLifecycleDialog(
     mode: DashboardDialogMode,
     sessionName: String,
+    hostId: Long? = null,
     text: String,
     onTextChange: (String) -> Unit,
     startDirectory: String,
@@ -316,6 +323,14 @@ private fun DashboardLifecycleDialog(
                         onValueChange = onTextChange,
                         singleLine = true,
                         label = { Text("Session name") },
+                    )
+                    // Issue #206 + #204: watched-folders chip row.
+                    // Lives above the start-folder field so tapping a
+                    // chip pre-populates the field — no further input
+                    // needed before pressing Save.
+                    WatchedFoldersChipRow(
+                        hostId = hostId,
+                        onChipTap = { path -> onStartDirectoryChange(path) },
                     )
                     OutlinedTextField(
                         value = startDirectory,

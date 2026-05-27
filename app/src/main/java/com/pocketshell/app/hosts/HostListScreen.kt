@@ -131,6 +131,14 @@ fun HostListScreen(
     ) -> Unit = { _, _, _, _, _ -> },
     onOpenPortForwardPanel: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit = { _, _, _ -> },
     /**
+     * Issue #206: per-host watched-folders config screen. The kebab path
+     * supplies SSH connection parameters so the discover-from-remote
+     * probe can authenticate — this is the only navigation surface that
+     * lights up the discover button. The Settings host picker provides
+     * the same route minus credentials.
+     */
+    onOpenWatchedFolders: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit = { _, _, _ -> },
+    /**
      * Issue #117 (usage Fix C): the bootstrap sheet's Success state can
      * route the user to the usage panel when `quse` was just installed.
      * The callback is optional because Fix A owns the actual
@@ -212,10 +220,16 @@ fun HostListScreen(
     val tapRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
     val portPanelRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
     val recheckRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
+    // Issue #206: kebab → "Watched folders" follows the same resolve-
+    // key-then-navigate pattern as Ports so the discover probe can
+    // authenticate with the same one-shot biometric / passphrase
+    // unlock the user already cleared for a session start.
+    val watchedFoldersRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
     val currentHosts by rememberUpdatedState(hosts)
     val currentOpenSession by rememberUpdatedState(onOpenSession)
     val currentOpenTmuxHostSession by rememberUpdatedState(onOpenTmuxHostSession)
     val currentOpenPortForwardPanel by rememberUpdatedState(onOpenPortForwardPanel)
+    val currentOpenWatchedFolders by rememberUpdatedState(onOpenWatchedFolders)
     var pendingPassphrase by remember { mutableStateOf<PendingPassphraseRequest?>(null) }
     var passphraseText by remember { mutableStateOf("") }
     var passphraseUnlockError by remember { mutableStateOf<String?>(null) }
@@ -233,6 +247,11 @@ fun HostListScreen(
                 passphrase = passphrase,
             )
             PendingPassphraseAction.OpenPorts -> currentOpenPortForwardPanel(
+                host,
+                key.privateKeyPath,
+                passphrase,
+            )
+            PendingPassphraseAction.OpenWatchedFolders -> currentOpenWatchedFolders(
                 host,
                 key.privateKeyPath,
                 passphrase,
@@ -275,6 +294,15 @@ fun HostListScreen(
             val host = currentHosts.find { it.id == hostId } ?: return@collect
             val key = viewModel.keyFor(host.keyId) ?: return@collect
             requestProtectedConnection(host, key, PendingPassphraseAction.OpenPorts)
+        }
+    }
+    // Issue #206: watched-folders kebab item — same resolve-key-then-
+    // navigate flow as Ports above.
+    LaunchedEffect(Unit) {
+        watchedFoldersRequests.collect { hostId ->
+            val host = currentHosts.find { it.id == hostId } ?: return@collect
+            val key = viewModel.keyFor(host.keyId) ?: return@collect
+            requestProtectedConnection(host, key, PendingPassphraseAction.OpenWatchedFolders)
         }
     }
     // Issue #120: "Re-check setup" kebab item. Resolves the host's key
@@ -499,6 +527,10 @@ fun HostListScreen(
                                             menuOpen = false
                                             portPanelRequests.tryEmit(host.id)
                                         },
+                                        onOpenWatchedFolders = {
+                                            menuOpen = false
+                                            watchedFoldersRequests.tryEmit(host.id)
+                                        },
                                         onShare = {
                                             menuOpen = false
                                             viewModel.createSharePayload(host)
@@ -653,6 +685,14 @@ fun HostListScreen(
 private enum class PendingPassphraseAction {
     OpenSession,
     OpenPorts,
+
+    /**
+     * Issue #206: route to the per-host watched-folders config screen.
+     * Same passphrase-protected unlock as [OpenPorts] so the user only
+     * has to authenticate once for all per-host destinations that need
+     * SSH credentials.
+     */
+    OpenWatchedFolders,
 }
 
 private data class PendingPassphraseRequest(
@@ -984,6 +1024,7 @@ private fun HostOverflowMenuAnchor(
     usageRecord: com.pocketshell.core.usage.UsageProviderRecord?,
     usageBadgeTestTag: String,
     onOpenPorts: () -> Unit,
+    onOpenWatchedFolders: () -> Unit,
     onShare: () -> Unit,
     onRecheckSetup: () -> Unit,
 ) {
@@ -1035,6 +1076,15 @@ private fun HostOverflowMenuAnchor(
                 text = { Text("Ports") },
                 onClick = onOpenPorts,
             )
+            // Issue #206: per-host watched-folders configuration.
+            // Placed above Share so the quick-access config row sits
+            // next to Ports (other per-host config) rather than mixed
+            // with sharing / diagnostics affordances.
+            DropdownMenuItem(
+                text = { Text("Watched folders") },
+                onClick = onOpenWatchedFolders,
+                modifier = Modifier.testTag(HOST_WATCHED_FOLDERS_ITEM_TAG),
+            )
             DropdownMenuItem(
                 text = { Text("Share") },
                 onClick = onShare,
@@ -1053,6 +1103,10 @@ private fun HostOverflowMenuAnchor(
 
 internal const val HOST_OVERFLOW_BUTTON_TAG: String = "host:overflow:button"
 internal const val HOST_RECHECK_SETUP_ITEM_TAG: String = "host:overflow:recheck-setup"
+// Issue #206: stable tag for the kebab → "Watched folders" entry so
+// the connected E2E test can navigate from the host list to the
+// config screen without depending on free-form text.
+const val HOST_WATCHED_FOLDERS_ITEM_TAG: String = "host:overflow:watched-folders"
 internal const val RECHECK_SETUP_LABEL: String = "Re-check setup"
 
 /**

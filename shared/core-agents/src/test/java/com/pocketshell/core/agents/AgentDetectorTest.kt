@@ -298,6 +298,76 @@ class AgentDetectorTest {
     }
 
     @Test
+    fun defaultRecencyWindowAcceptsCodexJsonlFlushedThirtyMinutesAgo() {
+        // Issue #236: the previous 5-minute window dropped real-world
+        // Codex sessions because Codex flushes its rollout JSONL only on
+        // turn completion. A user reattaching to an idle Codex TUI 30
+        // minutes after the last turn must still see the Conversation
+        // tab. The default `recentWindowMillis` was bumped from 5 to
+        // 120 minutes to fix this; the test pins the new contract
+        // against a future regression that would tighten the window
+        // again.
+        val defaultDetector = AgentDetector()
+        val now = 7_200_000L // arbitrary anchor
+        val thirtyMinutesAgo = now - (30L * 60L * 1000L)
+
+        val detection = defaultDetector.detect(
+            cwd = "/workspace/pocketshell",
+            nowMillis = now,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.Codex,
+                    path = "/home/testuser/.codex/sessions/2026/05/27/rollout-old.jsonl",
+                    modifiedAtMillis = thirtyMinutesAgo,
+                    sessionId = "codex-stale",
+                ),
+            ),
+            processLines = listOf("1234 pts/0 00:00:01 codex"),
+        )
+
+        assertNotNull(
+            "a 30-minute-old Codex JSONL must still register on the default detector " +
+                "(post-#236 the freshness window is 120 min). If this fails the window " +
+                "has regressed below the realistic Codex turn-flush cadence.",
+            detection,
+        )
+        assertEquals(AgentKind.Codex, detection?.agent)
+        assertEquals(AgentDetection.Confidence.ProcessConfirmed, detection?.confidence)
+    }
+
+    @Test
+    fun defaultRecencyWindowRejectsCodexJsonlFlushedThreeHoursAgo() {
+        // Counter-pin: the 120-minute window is not unbounded. A Codex
+        // rollout last touched 3 hours ago is almost certainly from a
+        // finished session and must NOT light up the Conversation tab
+        // on a current pane.
+        val defaultDetector = AgentDetector()
+        val now = 14_400_000L
+        val threeHoursAgo = now - (3L * 60L * 60L * 1000L)
+
+        val detection = defaultDetector.detect(
+            cwd = "/workspace/pocketshell",
+            nowMillis = now,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.Codex,
+                    path = "/home/testuser/.codex/sessions/2026/05/27/rollout-ancient.jsonl",
+                    modifiedAtMillis = threeHoursAgo,
+                    sessionId = "codex-ancient",
+                ),
+            ),
+            processLines = listOf("1234 pts/0 00:00:01 codex"),
+        )
+
+        assertNull(
+            "a 3-hour-old Codex JSONL must be rejected by the default detector " +
+                "(post-#236 the freshness window is bounded at 120 min). A null result " +
+                "means the upper bound is still honoured.",
+            detection,
+        )
+    }
+
+    @Test
     fun picksMostRecentAcrossMultipleEnginesWhenAllPathsMatch() {
         // When more than one engine has a recent matching candidate
         // (e.g. user briefly switched agents in the same pane), the

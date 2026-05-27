@@ -26,9 +26,12 @@ What works today on `main`:
   rendering (one pane at a time, swipe between panes/windows).
 - Voice prompt composer (Whisper) + inline dictation, key bar for
   Esc/Tab/Ctrl/Alt/arrows, snippet library, command chips.
-- Agent-aware conversation view for Claude Code (Codex/OpenCode parsers
-  exist but runtime detection is intentionally disabled — see
-  [docs/agent-awareness.md](docs/agent-awareness.md)).
+- Agent-aware conversation view for Claude Code, Codex, and OpenCode.
+  Codex/OpenCode detection lights up after the agent's first
+  turn-completion flush of its rollout JSONL (the per-pane detector
+  scans within a 2-hour freshness window); real-world OpenCode that
+  persists to SQLite instead of JSONL is still pending a dedicated
+  reader. See [docs/agent-awareness.md](docs/agent-awareness.md).
 - Usage dashboard surfaced from the server-side `pocketshell usage`
   helper. Zero provider credentials on the phone.
 - Share-target dispatch: paste from any app into the active session, or
@@ -146,12 +149,16 @@ background work on the phone).
   dictation into the terminal, key bar for keys phones lack, snippet
   library, command chips. See
   [docs/input-methods.md](docs/input-methods.md).
-- **Agent-aware conversation view.** Detects Claude Code in the active
-  tmux pane and renders a clean read-only conversation surface by tailing
-  the JSONL log over SSH. Tool calls collapsible, search within session,
-  long-press to quote-reply. Codex and OpenCode parsers ship but are
-  intentionally runtime-disabled until pane/session correlation is
-  safe. See [docs/agent-awareness.md](docs/agent-awareness.md).
+- **Agent-aware conversation view.** Detects Claude Code, Codex, and
+  OpenCode in the active tmux pane and renders a clean read-only
+  conversation surface by tailing the JSONL log over SSH. Tool calls
+  collapsible, search within session, long-press to quote-reply. Codex
+  and OpenCode detection fires once the agent has flushed at least one
+  turn to its rollout JSONL (the per-pane detector uses a 2-hour
+  freshness window so a mid-session Codex pane still registers after a
+  pause between turns). Real-world OpenCode that persists to a SQLite
+  `opencode.db` rather than JSONL is still pending a dedicated reader.
+  See [docs/agent-awareness.md](docs/agent-awareness.md).
 - **Usage dashboard.** Per-provider quota (Claude, Codex, Copilot, Z.AI)
   via the server-side `pocketshell usage` helper. Zero credentials on the
   phone — the helper polls each provider on the host and the phone is a

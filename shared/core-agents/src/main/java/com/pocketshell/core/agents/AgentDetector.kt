@@ -18,7 +18,28 @@ public data class AgentDetection(
 }
 
 public class AgentDetector(
-    private val recentWindowMillis: Long = 5 * 60 * 1000L,
+    // Issue #236: the previous 5-minute recency window killed real-world
+    // Codex/OpenCode detection. Codex flushes its rollout JSONL only on
+    // turn completion, so a user attached to an idle Codex TUI for >5
+    // minutes had zero candidates surviving the recency filter and the
+    // Conversation tab never appeared. The Docker fixture papered over
+    // this by `touch`ing the JSONL inside the test, so #183's "3/3 pass"
+    // was real but unrealistic.
+    //
+    // 120 minutes (2 h) is long enough to cover the common attach-to-
+    // existing scenarios (reattaching after a break, multi-tool turn
+    // running for >5 min, long stretches of TUI idle without a turn
+    // completion) while short enough that an abandoned tmux pane from
+    // earlier in the day doesn't ghost-detect once its agent has long
+    // since exited. The matching `-mmin -120` in the shell-side `find`
+    // bounds the candidate set the same way.
+    //
+    // Claude Code is unaffected by this bump in practice — its candidate
+    // discovery is already cwd-scoped under `~/.claude/projects/<cwd>/`,
+    // and Claude streams JSONL writes continuously (not only at turn
+    // completion). The wider window simply doesn't filter anything out
+    // for Claude that the tighter window did.
+    private val recentWindowMillis: Long = 120 * 60 * 1000L,
 ) {
     /**
      * Returns the most-recent matching JSONL candidate as an

@@ -111,6 +111,39 @@ class AgentDetectionAcrossEnginesE2eTest {
         )
     }
 
+    /**
+     * Issue #236 regression test — the previous 5-minute freshness gate
+     * killed real-world Codex/OpenCode detection because both engines
+     * flush their rollout JSONL only on turn completion. A user
+     * reattaching to an idle Codex TUI 30 minutes after the last turn
+     * had every candidate filtered out by `find ... -mmin -5`, so
+     * `detectForPane` returned null before the path-hint or process-scan
+     * logic ran.
+     *
+     * The fix bumped the freshness window to 120 minutes (both the
+     * shell-side `find -mmin -120` and the in-process
+     * [com.pocketshell.core.agents.AgentDetector.recentWindowMillis]
+     * default). This test backdates the seeded Codex JSONL by 30
+     * minutes — well beyond the old 5-minute gate, comfortably inside
+     * the new 120-minute one — and asserts that detection still fires.
+     *
+     * Locks the contract against a future regression that would tighten
+     * the window. The `touch -d` form is widely supported on the GNU
+     * coreutils inside the Docker fixture, so the mtime arithmetic is
+     * portable.
+     */
+    @Test
+    fun codexDetectionFiresWhenJsonlMtimeIsThirtyMinutesAgo() = runBlocking {
+        runStaleJsonlDetectionTest(
+            agent = AgentKind.Codex,
+            processCommand = "codex",
+            sessionLabel = "codex-stale",
+            seededJsonlPath = CODEX_PATH,
+            expectedPathSubstring = ".codex/sessions/",
+            stalenessMinutes = 30,
+        )
+    }
+
     private suspend fun runDetectionTest(
         agent: AgentKind,
         processCommand: String,
@@ -221,6 +254,174 @@ class AgentDetectionAcrossEnginesE2eTest {
             recordTiming("${agent.name}_total_ms", System.currentTimeMillis() - started)
         } finally {
             // Clean up the spawned sleep so the next run starts clean.
+            runCatching {
+                processSession.exec(
+                    "pkill -f ${shellQuote(processCommand)} 2>/dev/null || true",
+                )
+            }
+            runCatching { processSession.close() }
+        }
+
+        writeTimings(agent)
+    }
+
+    /**
+     * Issue #236: same flow as [runDetectionTest] but explicitly
+     * backdates the seeded JSONL's mtime to `stalenessMinutes` ago
+     * instead of `touch`ing it to "now". This exercises the realistic
+     * "Codex flushed its rollout 30 minutes ago and is now idle"
+     * scenario — the original Docker fixture always touched to "now",
+     * which artificially satisfied the freshness gate.
+     */
+    private suspend fun runStaleJsonlDetectionTest(
+        agent: AgentKind,
+        processCommand: String,
+        sessionLabel: String,
+        seededJsonlPath: String,
+        expectedPathSubstring: String,
+        stalenessMinutes: Int,
+    ) {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        val started = System.currentTimeMillis()
+        val sshKey = SshKey.Pem(key)
+
+        withSshSession(sshKey) { session ->
+            // First ensure the JSONL still exists (the fixture seeds it
+            // at container build time; if the fixture regressed we want
+            // a clearer error than the detection assertion would give).
+            val lsCheck = session.exec("ls ${shellQuote(seededJsonlPath)}")
+            assertEquals(
+                "seeded JSONL missing for $agent at $seededJsonlPath: stdout='${lsCheck.stdout}' stderr='${lsCheck.stderr}'",
+                0,
+                lsCheck.exitCode,
+            )
+            // Stale out every other engine's JSONL so the most-recent
+            // candidate after backdating belongs to the engine under
+            // test. Without this, the previous test in the class (which
+            // `touch`es its JSONL to "now") leaves a fresher competing
+            // candidate that the detector's "newest wins" rule picks
+            // instead. We push them well past the 120-minute window
+            // (3 hours) so they're filtered out entirely.
+            val competingPaths = listOf(CLAUDE_PATH, CODEX_PATH, OPENCODE_PATH)
+                .filterNot { it == seededJsonlPath }
+            for (competing in competingPaths) {
+                val staleOut = session.exec(
+                    "ancient=$(( $(date +%s) - 10800 )); " +
+                        "touch -d \"@${'$'}ancient\" ${shellQuote(competing)} 2>/dev/null || true",
+                )
+                // Best-effort — if the file is missing on the fixture,
+                // the `|| true` swallows the error.
+                println(
+                    "AGENT_DETECTION_STALE_PEER agent=$agent peer=$competing exit=${staleOut.exitCode}",
+                )
+            }
+            // Backdate the mtime to `stalenessMinutes` minutes ago.
+            // Busybox `date` (the fixture container) rejects the GNU
+            // form `-d "30 minutes ago"`, so we compute the epoch
+            // arithmetic inline and use `touch -d "@<epoch>"` which
+            // every BusyBox + GNU coreutils version accepts.
+            val backdateSeconds = stalenessMinutes * 60
+            val touch = session.exec(
+                "past=$(( $(date +%s) - $backdateSeconds )); " +
+                    "touch -d \"@${'$'}past\" ${shellQuote(seededJsonlPath)}",
+            )
+            assertEquals(
+                "expected to backdate seeded JSONL mtime by $stalenessMinutes minutes " +
+                    "for $agent at $seededJsonlPath, stderr='${touch.stderr}'",
+                0,
+                touch.exitCode,
+            )
+            // Sanity: confirm the backdate actually moved the mtime. We
+            // expect the seconds-since-epoch to be at least
+            // (stalenessMinutes * 60) - 120 seconds in the past, with a
+            // little slack for shell + SSH round-trip jitter.
+            val stat = session.exec(
+                "stat -c '%Y' ${shellQuote(seededJsonlPath)}",
+            )
+            assertEquals(
+                "expected stat to return mtime for $seededJsonlPath, stderr='${stat.stderr}'",
+                0,
+                stat.exitCode,
+            )
+            val nowEpoch = session.exec("date +%s").stdout.trim().toLongOrNull()
+                ?: error("could not read remote epoch via `date +%s`")
+            val fileEpoch = stat.stdout.trim().toLongOrNull()
+                ?: error("could not parse stat output '${stat.stdout}' as epoch seconds")
+            val ageSeconds = nowEpoch - fileEpoch
+            val minimumExpectedSeconds = stalenessMinutes * 60L - 120L
+            assertTrue(
+                "backdated JSONL mtime must actually be ~$stalenessMinutes minutes old; " +
+                    "observed ageSeconds=$ageSeconds (expected >= $minimumExpectedSeconds)",
+                ageSeconds >= minimumExpectedSeconds,
+            )
+        }
+
+        val processSshKey = sshKey
+        val processSession = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = processSshKey,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).getOrThrow()
+        try {
+            val spawn = processSession.exec(
+                "(setsid sh -c \"exec -a ${shellQuote(processCommand)} " +
+                    "sleep 30\" >/dev/null 2>&1 &); sleep 0.2; " +
+                    "ps -eo comm,args | grep -F ${shellQuote(processCommand)} | grep -v grep || true",
+            )
+            assertTrue(
+                "expected fake process named '$processCommand' to be running for $agent detection; " +
+                    "ps stdout='${spawn.stdout}' stderr='${spawn.stderr}'",
+                spawn.stdout.contains(processCommand),
+            )
+
+            val repo = AgentConversationRepository()
+            val detection: AgentDetection? = withTimeout(15_000) {
+                repo.detect(
+                    session = processSession,
+                    cwd = REMOTE_CWD,
+                    processHints = emptyList(),
+                )
+            }
+            recordTiming("${agent.name}_stale_detect_ms", System.currentTimeMillis() - started)
+
+            assertNotNull(
+                "Issue #236 regression: expected AgentConversationRepository.detect to " +
+                    "return a non-null detection for $agent when the JSONL mtime is " +
+                    "$stalenessMinutes minutes ago — comfortably inside the 120-minute " +
+                    "freshness window. Seeded JSONL: $seededJsonlPath; cwd: $REMOTE_CWD",
+                detection,
+            )
+            assertEquals(
+                "detection.agent mismatch for $sessionLabel session (stale-JSONL flow); " +
+                    "detection=$detection",
+                agent,
+                detection!!.agent,
+            )
+            assertTrue(
+                "detection.sourcePath for $agent must live under the engine's conventional " +
+                    "directory tree ('$expectedPathSubstring'); got '${detection.sourcePath}'",
+                detection.sourcePath.contains(expectedPathSubstring),
+            )
+            assertTrue(
+                "detection.sourcePath should equal the seeded JSONL for $agent (stale-JSONL flow); " +
+                    "expected $seededJsonlPath, got ${detection.sourcePath}",
+                detection.sourcePath == seededJsonlPath,
+            )
+            assertEquals(
+                "process scan with '$processCommand' fake process running should produce " +
+                    "ProcessConfirmed confidence even when the JSONL is $stalenessMinutes minutes " +
+                    "old; detection=$detection",
+                AgentDetection.Confidence.ProcessConfirmed,
+                detection.confidence,
+            )
+
+            recordTiming("${agent.name}_stale_total_ms", System.currentTimeMillis() - started)
+        } finally {
             runCatching {
                 processSession.exec(
                     "pkill -f ${shellQuote(processCommand)} 2>/dev/null || true",

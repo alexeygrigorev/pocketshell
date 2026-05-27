@@ -307,6 +307,23 @@ internal class AgentConversationRepository(
         // `opencode.db` SQLite (filtered out — only `*.jsonl` are
         // tailable). Each branch is best-effort: missing directories
         // (e.g. user has never run Codex) silently emit nothing.
+        //
+        // Issue #236: freshness windows differ per engine.
+        //  - Claude (`-mmin -5`): Claude streams JSONL writes
+        //    continuously while the CLI is active, so a tight window
+        //    correctly rejects logs from a session that has already
+        //    exited (no streaming heartbeats anymore).
+        //  - Codex / OpenCode (`-mmin -120`): Codex flushes its rollout
+        //    JSONL only on turn completion. A user attached to an idle
+        //    Codex TUI between turns can easily sit beyond 5 minutes
+        //    without any new write, but the agent is still live. The
+        //    2-hour window matches the detector's recency gate
+        //    ([AgentDetector.recentWindowMillis]) so a stale-yet-active
+        //    Codex/OpenCode rollout survives both filters. The same
+        //    bound applies on the OpenCode branch even though real
+        //    OpenCode persists to SQLite — that mismatch is a separate
+        //    follow-up (real-world OpenCode JSONL discovery is
+        //    aspirational).
         return """
             cwd=$quotedCwd
             claude_dir="${'$'}HOME/.claude/projects/$encodedClaudeCwd"
@@ -316,11 +333,11 @@ internal class AgentConversationRepository(
               mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
               printf 'claude|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
             done
-            find "${'$'}codex_dir" -type f -name '*.jsonl' -mmin -5 -print 2>/dev/null | while IFS= read -r f; do
+            find "${'$'}codex_dir" -type f -name '*.jsonl' -mmin -120 -print 2>/dev/null | while IFS= read -r f; do
               mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
               printf 'codex|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
             done
-            find "${'$'}opencode_dir" -maxdepth 1 -type f -name '*.jsonl' -mmin -5 -print 2>/dev/null | while IFS= read -r f; do
+            find "${'$'}opencode_dir" -maxdepth 1 -type f -name '*.jsonl' -mmin -120 -print 2>/dev/null | while IFS= read -r f; do
               mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
               printf 'opencode|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
             done

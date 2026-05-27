@@ -2128,6 +2128,13 @@ class TmuxSessionViewModelTest {
         }
         override fun outputFor(paneId: String) = delegate.outputFor(paneId)
         override fun close() = delegate.close()
+        // Issue #215: detachCleanly added to the interface; the
+        // throwing fake delegates to FakeTmuxClient so kill-window
+        // tests don't have to reason about the new method's
+        // semantics — they only care that sendCommand throws on the
+        // configured command name.
+        override suspend fun detachCleanly(timeoutMs: Long) =
+            delegate.detachCleanly(timeoutMs)
     }
 
     // ─── Issue #178: same-host fast-switch reuses the SSH transport ───

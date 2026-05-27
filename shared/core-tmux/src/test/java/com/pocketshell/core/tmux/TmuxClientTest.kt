@@ -438,6 +438,137 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `detachCleanly writes detach-client and then closes the shell`() = runBlocking {
+        // Issue #215: the production teardown path now sends
+        // `detach-client` so tmux removes the `-CC` control client
+        // server-side before we close the SSH transport. The unit
+        // assertion is "the bytes for `detach-client` reach the fake
+        // shell, then the shell is closed and the disconnected
+        // StateFlow latches to true". The fake server also responds
+        // with `%begin`/`%end` so the production [sendCommand]'s
+        // response-correlation logic does not hang the call.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        client.connect()
+        // Eat the spawn line so the assertion below sees only the
+        // detach traffic.
+        withTimeout(2_000) {
+            while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+        }
+        shell.resetStdin()
+
+        // Drive the detach + the canned response on background coroutines
+        // so the test thread can observe the byte sequence.
+        val detachJob = scope.async { client.detachCleanly() }
+        withTimeout(2_000) {
+            while (shell.stdinAsString() != "detach-client\n") { yield(); delay(10) }
+        }
+        // tmux's response to `detach-client` (in control mode) is a
+        // standard `%begin`/`%end` block. The server then emits
+        // `%exit` and closes the channel. The unit harness drives
+        // both — the canned response unblocks [sendCommand], and the
+        // pipe close drives the reader to EOF so [_disconnected]
+        // flips before [withTimeoutOrNull] expires.
+        shell.feed(
+            "%begin 1 1 0\n" +
+                "%end 1 1 0\n" +
+                "%exit\n",
+        )
+        // Close the fake shell's input pipe so the reader sees EOF.
+        // In a real session tmux would close the stdio when the
+        // control client exits; the fake mirrors that semantic.
+        shell.closeStdoutPipe()
+        withTimeout(3_000) { detachJob.await() }
+
+        assertTrue("expected detachCleanly to close the shell", shell.closed)
+        assertTrue(
+            "expected client.disconnected to latch true after detachCleanly",
+            client.disconnected.value,
+        )
+    }
+
+    @Test
+    fun `detachCleanly tolerates a non-responsive server within timeout`() = runBlocking {
+        // Issue #215: a server that accepts the `detach-client` bytes
+        // but never responds (broken transport, OS dropped the socket)
+        // must still result in a fully torn-down client within the
+        // configured timeout. We assert detachCleanly returns inside
+        // the timeout budget and the local close() side-effects took
+        // hold.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        client.connect()
+        withTimeout(2_000) {
+            while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+        }
+        shell.resetStdin()
+
+        val started = System.currentTimeMillis()
+        // 400ms budget. detachCleanly splits it 200/200 between
+        // command and disconnected-wait, so the call should unblock
+        // within ~400ms even with no server response. We assert with
+        // a generous ceiling to avoid CI swiftshader flake.
+        withTimeout(3_000) { client.detachCleanly(timeoutMs = 400L) }
+        val elapsed = System.currentTimeMillis() - started
+
+        assertTrue("expected detachCleanly under 2s, took ${elapsed}ms", elapsed < 2_000L)
+        assertTrue("expected shell closed after timed-out detachCleanly", shell.closed)
+        assertTrue(
+            "expected client.disconnected latched true after timed-out detachCleanly",
+            client.disconnected.value,
+        )
+    }
+
+    @Test
+    fun `detachCleanly is a no-op when the client never connected`() = runBlocking {
+        // Issue #215: callers wire detachCleanly into a single
+        // teardown entry point regardless of whether [connect] ever
+        // ran. We assert no bytes are written to tmux and the call
+        // returns promptly, with the local state flipped to closed.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        // Do not call connect().
+        client.detachCleanly()
+        assertEquals(0, shell.stdinBytes().size)
+        // close() runs unconditionally, which on a not-yet-connected
+        // client still flips the closed flag (no-op semantics for the
+        // shell teardown branch).
+        assertTrue(
+            "expected client.disconnected latched true after no-op detachCleanly",
+            client.disconnected.value,
+        )
+    }
+
+    @Test
+    fun `detachCleanly after close is idempotent`() = runBlocking {
+        // Issue #215: defensive — the suspending teardown paths in
+        // TmuxSessionViewModel run both detachCleanly and close
+        // through a runCatching, but the contract is also that a
+        // second detachCleanly does not crash and does not write
+        // anything extra to tmux.
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        client.connect()
+        withTimeout(2_000) {
+            while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+        }
+        shell.resetStdin()
+        client.close()
+        val before = shell.stdinBytes().size
+        client.detachCleanly()
+        val after = shell.stdinBytes().size
+        assertEquals(
+            "expected detachCleanly on an already-closed client to be a no-op",
+            before,
+            after,
+        )
+    }
+
+    @Test
     fun `output events are not lost between begin and end response framing`() = runBlocking {
         // tmux can interleave `%output` (a notification) with response
         // payload as long as it's not inside the response block. We make
@@ -567,6 +698,17 @@ class TmuxClientTest {
             check(!closed) { "shell closed" }
             pipeOut.write(data.toByteArray(StandardCharsets.UTF_8))
             pipeOut.flush()
+        }
+
+        /**
+         * Issue #215: close the producer side of the input pipe so the
+         * client's reader sees EOF. Mirrors the real-server flow when
+         * tmux closes the control channel after emitting `%exit`. Tests
+         * use this to drive the [TmuxClient.disconnected] latch from the
+         * reader's `finally` block.
+         */
+        fun closeStdoutPipe() {
+            runCatching { pipeOut.close() }
         }
 
         fun stdinBytes(): ByteArray = stdinCapture.snapshot()

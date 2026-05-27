@@ -35,6 +35,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
@@ -47,6 +48,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
@@ -2156,7 +2158,21 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         paneRows.clear()
         _panes.value = emptyList()
-        runCatching { clientRef?.close() }
+        // Issue #215: ask tmux to detach this `-CC` control client before
+        // we drop the SSH transport. Without the detach round-trip,
+        // tmux keeps the client listed in `tmux list-clients` until it
+        // independently observes the socket die — which on Android (a
+        // backgrounded app + a phone-side TCP close) can lag long
+        // enough that another client (`tmux attach` from a laptop)
+        // attaches alongside the orphan and finds the session in a
+        // state where input is being routed to the dead control
+        // client. [TmuxClient.detachCleanly] sends `detach-client`,
+        // waits for tmux to close the control channel, then calls
+        // [TmuxClient.close] unconditionally so a wedged server cannot
+        // block the teardown. The `runCatching` is belt-and-suspenders
+        // — the implementation already swallows transport drops mid-
+        // detach.
+        runCatching { clientRef?.detachCleanly() }
         clientRef = null
         registeredHostId?.let { activeTmuxClients.unregister(it) }
         registeredHostId = null
@@ -2229,7 +2245,17 @@ public class TmuxSessionViewModel @Inject constructor(
         // Close the tmux -CC channel. This tears down only the SSH
         // shell channel inside the live [SshSession] — the session
         // itself stays open for the next [TmuxClient].
-        runCatching { clientRef?.close() }
+        //
+        // Issue #215: the same orphan-control-client problem the slow
+        // teardown path fixes applies here too — when a same-host
+        // session switch tears down the previous tmux `-CC` channel
+        // without notifying tmux, the previous client lingers in
+        // `tmux list-clients` for the previous session until tmux
+        // notices the SSH shell channel close on its own. Sending
+        // `detach-client` first removes that delay window and matches
+        // the slow path's contract for "PocketShell promises to leave
+        // a clean server when it tears a tmux client down".
+        runCatching { clientRef?.detachCleanly() }
         clientRef = null
         registeredHostId?.let { activeTmuxClients.unregister(it) }
         registeredHostId = null
@@ -2254,6 +2280,24 @@ public class TmuxSessionViewModel @Inject constructor(
      * callers that need the cancel-and-join ordering — most importantly
      * `connect()`, which raced the event loop on real devices (#151) —
      * must use [closeCurrentConnectionAndJoin] instead.
+     *
+     * Issue #215: this path is what runs when the user finishes the
+     * activity (back press, system-driven destroy) and the ViewModel's
+     * `onCleared()` fires on the Main thread. Without an active detach
+     * the tmux `-CC` control client stays registered server-side until
+     * tmux independently notices the SSH socket drop, which on Android
+     * is racy (Activity-finish → SSH transport close → kernel FIN can
+     * take several seconds). Other clients attaching in the gap (e.g.
+     * a laptop running `tmux attach`) see a session with a still-active
+     * orphan client and have their input routed to a dead pipe.
+     *
+     * To keep the AutoCloseable-style `close()` contract while still
+     * notifying tmux server-side, we send `detach-client` via a brief
+     * `runBlocking(Dispatchers.IO)` hop — same pattern
+     * [com.pocketshell.core.ssh.RealSshSession.close] uses for its
+     * `SSH_MSG_DISCONNECT` write. The blocking call is bounded by
+     * [SYNC_DETACH_TIMEOUT_MS] so a wedged socket cannot stall the
+     * activity teardown beyond a fraction of a second.
      */
     private fun closeCurrentConnection() {
         eventsJob?.cancel()
@@ -2289,6 +2333,27 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         paneRows.clear()
         _panes.value = emptyList()
+        // Issue #215: run `detach-client` synchronously over an IO
+        // worker before the local close. The `runBlocking` hop matches
+        // [RealSshSession.close]'s pattern for non-suspending lifecycle
+        // teardown that needs a brief network round-trip. The timeout
+        // ceiling keeps the activity-destroy / onCleared path bounded
+        // — losing the wire mid-detach falls through to the immediate
+        // [TmuxClient.close] below.
+        val toDetach = clientRef
+        if (toDetach != null) {
+            runCatching {
+                runBlocking(Dispatchers.IO) {
+                    withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS) {
+                        toDetach.detachCleanly(timeoutMs = SYNC_DETACH_TIMEOUT_MS)
+                    }
+                }
+            }
+        }
+        // [detachCleanly] already invokes [close]; the call below is a
+        // belt-and-suspenders no-op when detachCleanly ran successfully
+        // and the real teardown path when the runBlocking hop above
+        // failed or was a no-op (clientRef was null).
         runCatching { clientRef?.close() }
         clientRef = null
         registeredHostId?.let { activeTmuxClients.unregister(it) }
@@ -2495,6 +2560,21 @@ private fun List<String>.toTerminalViewportBytes(): ByteArray {
 }
 
 private const val MaxAgentEvents: Int = 500
+
+/**
+ * Issue #215: ceiling on the synchronous `detach-client` round-trip the
+ * non-suspending [TmuxSessionViewModel] teardown path runs during
+ * `onCleared()` and the test-replacement seam. Bound the activity
+ * destroy on Main thread so a wedged transport cannot stall the user's
+ * back-press / app-finish journey.
+ *
+ * 600ms is well above the sub-50ms tmux takes on a healthy localhost /
+ * Docker server (the only target where the detach can actually land
+ * cleanly) and small enough that a SIGKILL on the sshd worker — the
+ * pathological worst case — adds only a perceptible-but-bounded
+ * teardown pause rather than an apparent app freeze.
+ */
+internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
 
 /**
  * Issue #145: logcat tag used by the disconnect observer + connect-attempt

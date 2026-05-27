@@ -20,12 +20,14 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
@@ -133,6 +135,44 @@ public interface TmuxClient : AutoCloseable {
      * pending [sendCommand] calls fail with [TmuxClientException].
      */
     override fun close()
+
+    /**
+     * Issue #215: server-clean teardown of the tmux `-CC` control client.
+     *
+     * Sends `detach-client` to the tmux server before tearing the SSH
+     * shell down so the server-side `tmux list-clients` entry for this
+     * `-CC` connection disappears immediately. Without this step, a hard
+     * close of the SSH transport would leave an orphan control client
+     * registered on the server — reproducibly observed against tmux on
+     * Alpine 3.x — which can block input from other clients (e.g. a
+     * plain `tmux attach` from a laptop) attached to the same session.
+     *
+     * Workflow:
+     *  1. Issue `detach-client` over the live control channel via
+     *     [sendCommand]. Bounded by [timeoutMs] / 2 so a slow / broken
+     *     server cannot wedge the teardown indefinitely.
+     *  2. Wait for the server to close the control channel — observed
+     *     via [disconnected] flipping `true` from the reader-loop EOF
+     *     path. Bounded by the remaining [timeoutMs] budget.
+     *  3. Call [close] unconditionally. Step (3) runs whether the
+     *     command + wait succeeded or not — losing the SSH transport
+     *     mid-detach (network drop, sshd kill, etc.) must still result
+     *     in a fully cleaned-up local state.
+     *
+     * Suspends until the detach round-trip completes or [timeoutMs]
+     * elapses. Safe to call concurrently with [sendCommand] — the
+     * underlying `sendMutex` serialises us with other inflight commands.
+     *
+     * Idempotent: calling on an already-closed or never-connected client
+     * is a no-op (it still invokes [close] to be defensive).
+     *
+     * @param timeoutMs total ceiling on time spent on the detach
+     *   round-trip + reader-loop EOF wait. Defaults to 1000ms, which is
+     *   well above the sub-50ms tmux takes on a healthy localhost /
+     *   Docker server but small enough that a stuck transport does not
+     *   block app shutdown.
+     */
+    public suspend fun detachCleanly(timeoutMs: Long = 1_000L)
 }
 
 /**
@@ -324,6 +364,59 @@ internal class RealTmuxClient(
             .asSharedFlow()
             .filterIsInstance<ControlEvent.Output>()
             .filter { it.paneId == paneId }
+    }
+
+    override suspend fun detachCleanly(timeoutMs: Long) {
+        // Idempotent — once we have already torn down, there is no
+        // server-side state to release. Run [close] anyway so callers
+        // can use this as their single teardown entry point without
+        // tracking lifecycle state themselves.
+        if (closed) return
+        if (!connected) {
+            close()
+            return
+        }
+        val sendBudget = (timeoutMs / 2).coerceAtLeast(100L)
+        // Step 1: ask tmux to detach this control client. tmux replies
+        // with `%begin` / `%end` for the command response AND then
+        // emits `%exit` plus closes the control channel — the reader
+        // loop sees EOF and flips [_disconnected] to `true`. We do not
+        // care whether the response was `isError` (it can be on an
+        // already-detached client); the response existing means tmux
+        // received the request, and the channel-close that follows is
+        // what proves the server-side client entry is gone.
+        //
+        // `withTimeoutOrNull` returns null on timeout
+        // so a wedged server cannot make us block forever. We swallow
+        // [TmuxClientException] for the same reason — losing the
+        // control channel mid-send is exactly the case where there is
+        // nothing for the server to do for us; the unconditional
+        // [close] below handles local-side cleanup.
+        runCatching {
+            withTimeoutOrNull(sendBudget) {
+                sendCommand("detach-client")
+            }
+        }
+        // Step 2: wait for the reader loop to observe EOF on the
+        // control channel. This is the structural confirmation that
+        // the server has dropped this `-CC` client — `%exit` lands on
+        // the events bus, the reader's `readLine()` returns null on
+        // the next iteration, and the `finally` block in
+        // [readerLoop] sets [_disconnected] to `true`. We deliberately
+        // observe [_disconnected] instead of subscribing to the events
+        // SharedFlow because the SharedFlow has no end-of-stream
+        // semantics — the `disconnected` StateFlow is the latched
+        // signal designed for exactly this purpose (see issue #173).
+        val remaining = (timeoutMs - sendBudget).coerceAtLeast(50L)
+        runCatching {
+            withTimeoutOrNull(remaining) {
+                _disconnected.filter { it }.first()
+            }
+        }
+        // Step 3: tear down the local SSH shell + scope. Safe to call
+        // even when the server already closed the channel — [close]
+        // is idempotent.
+        close()
     }
 
     override fun close() {

@@ -98,4 +98,30 @@ internal class FakeTmuxClient : TmuxClient {
         closed = true
         disconnectedSignal.value = true
     }
+
+    /**
+     * Issue #215: record-and-tear-down test double for the production
+     * detach-then-close path. Tests can flip [detachCleanlyEmitsError]
+     * to make the recorded `detach-client` command surface as an error
+     * response without affecting the [close] / [disconnectedSignal]
+     * side-effects — the close-then-disconnected sequence runs whether
+     * the server-side command succeeds or not, mirroring the real
+     * client's "best-effort detach, unconditional local close" shape.
+     */
+    var detachCleanlyCalled: Boolean = false
+        private set
+
+    var detachCleanlyTimeoutMs: Long = -1L
+        private set
+
+    override suspend fun detachCleanly(timeoutMs: Long) {
+        detachCleanlyCalled = true
+        detachCleanlyTimeoutMs = timeoutMs
+        // Mirror the production semantics so view-model tests that drive
+        // close-paths see the same observable effects (sent command +
+        // disconnected signal + closed = true) whether the production
+        // path runs against the real client or the fake.
+        sentCommands += "detach-client"
+        close()
+    }
 }

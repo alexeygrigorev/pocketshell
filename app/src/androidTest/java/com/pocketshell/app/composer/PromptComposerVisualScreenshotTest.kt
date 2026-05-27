@@ -47,6 +47,16 @@ class PromptComposerVisualScreenshotTest {
         )
         renderComposer { state }
 
+        // Issue #153 fix 1: capture the idle "composer-draft" state too
+        // so the dogfood pass has authoritative evidence the idle
+        // waveform's subtle pulse is rendering. The DogfoodVisualScreenshotTest
+        // also produces a `05-composer-draft.png` from inside the real
+        // app journey; this lab-render variant under `05b-` lets the
+        // reviewer compare the two surfaces without standing up the
+        // whole emulator + SSH journey.
+        compose.waitForIdle()
+        DogfoodScreenshotArtifacts.capture("05b-composer-idle-draft")
+
         // Pre-speech sub-state: mic is open, no amplitude has crossed
         // the threshold yet — waveform stays in its idle rest pose.
         compose.runOnIdle {

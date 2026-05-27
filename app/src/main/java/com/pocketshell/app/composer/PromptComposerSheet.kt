@@ -5,11 +5,16 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,11 +32,13 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SheetState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -55,8 +62,15 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
@@ -545,6 +559,7 @@ internal fun SheetContent(
             Waveform(
                 amplitude = state.amplitude,
                 active = isCapturing,
+                transcribing = isTranscribing,
                 modifier = Modifier
                     .weight(1f)
                     .height(32.dp)
@@ -655,14 +670,38 @@ internal fun SheetContent(
                 modifier = Modifier.weight(1f),
                 enabled = !isTranscribing,
             )
-            NeutralButton(
-                // Issue #211: when a Send tap will queue behind the
-                // Whisper round-trip, the label flips to "Send after
-                // transcribe" so the user knows the tap was registered
-                // but the bytes are not yet flying. The legacy Send
-                // copy is preserved for the Idle case so nothing
-                // changes for the common one-tap-with-typed-text path.
+            // Issue #153 fix 3: Send / Send+↵ buttons used to share the
+            // same neutral-surface fill, which made them too easy to
+            // mis-tap on a Pixel 7 viewport (the audit flagged this as a
+            // tier-1 friction point). The visual differentiation now is:
+            //  - Plain "Send" → outline-only (transparent fill, accent
+            //    border + accent text) — clearly the secondary action.
+            //  - "Send + ↵" → solid accent fill + on-accent text — stays
+            //    the primary action (matches the same colour token the
+            //    mic FAB uses, so the user sees one "do the thing"
+            //    coloured affordance per row).
+            //
+            // Each button is wrapped in a [TooltipBox] so a long-press
+            // surfaces the difference for users who don't already know
+            // what the trailing ↵ glyph means. The tooltips are
+            // intentionally short: no model breakdown, just "this sends"
+            // vs "this sends and submits". Long-press is the standard
+            // Android affordance for "explain this control" and Material 3
+            // wires the gesture for us via `TooltipBox`.
+            //
+            // The semantic `OnClick` action lives on the inner Button —
+            // `TooltipBox` only adds an anchor pointer-input modifier for
+            // long-press detection — so `performClick()` in connected
+            // tests still triggers the Button's onClick lambda directly.
+            // The `Modifier.weight(1f)` is applied to the `TooltipBox`
+            // and the Button is `fillMaxWidth()` inside it so the visual
+            // layout matches the previous direct-Button layout.
+            // Issue #211: label flips while a queued Whisper round-trip
+            // is in flight so the user knows the tap was registered but
+            // the bytes are not yet flying.
+            OutlineSendButton(
                 label = if (hasQueuedAffordance) "Send after transcribe" else "Send",
+                tooltipLabel = SEND_TOOLTIP_LABEL,
                 onClick = { onSend(false) },
                 modifier = Modifier
                     .weight(1f)
@@ -671,6 +710,7 @@ internal fun SheetContent(
             )
             PrimaryButton(
                 label = if (hasQueuedAffordance) "Send + ↵ after" else "Send + ↵",
+                tooltipLabel = SEND_ENTER_TOOLTIP_LABEL,
                 onClick = { onSend(true) },
                 modifier = Modifier
                     .weight(1f)
@@ -686,14 +726,31 @@ internal fun SheetContent(
  * animated by the live amplitude from [PromptComposerViewModel.uiState].
  *
  * Bar heights are derived from the latest amplitude scaled by a fixed
- * sine envelope so the strip wiggles even at steady speech levels. When
- * [active] is false the bars collapse to a baseline 4dp.
+ * sine envelope so the strip wiggles even at steady speech levels. Three
+ * visual modes:
+ *
+ *  - **Active (capturing)** — [active] true: bars animate from the live
+ *    amplitude, multiplied by the per-bar envelope.
+ *  - **Idle / pre-speech (listening)** — [active] false, [transcribing]
+ *    false: issue #153 fix 1 — the bars subtly pulse between 4dp and
+ *    6dp on a 1.5s loop so the strip reads as "alive and waiting" rather
+ *    than dormant. Without this pulse the cold composer + pre-speech
+ *    Recording sub-state were visually indistinguishable from a dead
+ *    surface.
+ *  - **Transcribing** — [transcribing] true: issue #153 fix 2 — the bars
+ *    collapse to a flat 4dp baseline (no pulse, no live amplitude) and
+ *    a small [CircularProgressIndicator] overlays the centre of the
+ *    strip. This is what makes "TRANSCRIBING" visually distinct from
+ *    "LISTENING" / "CAPTURING": the user can tell at a glance that the
+ *    recording has stopped and a network round-trip is in flight,
+ *    without relying on the small status label alone.
  */
 @Composable
 private fun Waveform(
     amplitude: Float,
     active: Boolean,
     modifier: Modifier = Modifier,
+    transcribing: Boolean = false,
 ) {
     // Smooth amplitude transitions so a sudden spike doesn't jerk the
     // bars. 80ms is faster than the human eye's flicker fusion threshold
@@ -703,30 +760,128 @@ private fun Waveform(
         animationSpec = tween(durationMillis = 80, easing = LinearEasing),
         label = "waveform-smooth",
     )
-    Row(
+
+    // Issue #153 fix 1: idle pulse. The bars rest at 4dp by default,
+    // which made the cold composer look dormant. A subtle 2dp pulse on a
+    // 1.5s loop (4dp -> 6dp -> 4dp) signals "the mic is ready, tap me"
+    // without competing visually with the live-amplitude animation.
+    //
+    // Gated behind `!active && !transcribing` so the pulse only runs in
+    // the truly-idle states (cold composer + Recording pre-speech).
+    // During Transcribing we explicitly want the strip to look frozen.
+    val idlePulse: Float = if (!active && !transcribing) {
+        val transition = rememberInfiniteTransition(label = "waveform-idle-pulse")
+        val v by transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 2f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 750, easing = LinearEasing),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "waveform-idle-pulse-value",
+        )
+        v
+    } else {
+        0f
+    }
+
+    Box(
         modifier = modifier,
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(3.dp),
+        contentAlignment = Alignment.CenterStart,
     ) {
-        val bars = 30
-        for (i in 0 until bars) {
-            // Mockup-style envelope: a wide hump centred at index 15
-            // with two smaller side lobes. Multiplied by the live
-            // amplitude so a quiet user sees a flat strip and a loud
-            // one sees full-height bars.
-            val envelope = barEnvelopeHeightDp(i)
-            val h = if (active) {
-                (4f + smoothed * envelope).coerceIn(4f, envelope)
-            } else {
-                4f
+        if (transcribing) {
+            // Issue #153 fix 2: during Transcribing the waveform
+            // collapses entirely and is replaced by an always-visible
+            // three-dot pulse indicator + a Material 3 spinner anchored
+            // alongside it. This is the "collapse + spinner" variant the
+            // issue called out: a frozen, decorative bar strip would
+            // still read as "recording" at a glance, so we replace it
+            // outright. The three dots are an in-house indeterminate
+            // indicator (always at least two dots painted at any phase)
+            // so the static dogfood screenshot 07 reliably captures the
+            // distinct state even if the spinner's arc happens to be at
+            // a low-visibility angle in the frame.
+            Row(
+                modifier = Modifier
+                    .testTag(COMPOSER_TRANSCRIBING_SPINNER_TAG)
+                    .padding(start = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.5.dp,
+                    color = PocketShellColors.Accent,
+                )
+                TranscribingDots()
             }
+        } else {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                val bars = 30
+                for (i in 0 until bars) {
+                    // Mockup-style envelope: a wide hump centred at index 15
+                    // with two smaller side lobes. Multiplied by the live
+                    // amplitude so a quiet user sees a flat strip and a loud
+                    // one sees full-height bars.
+                    val envelope = barEnvelopeHeightDp(i)
+                    val h = when {
+                        active -> (4f + smoothed * envelope).coerceIn(4f, envelope)
+                        // Idle / pre-speech: pulse 4..6dp so the strip
+                        // reads as "alive and waiting".
+                        else -> 4f + idlePulse
+                    }
+                    Box(
+                        modifier = Modifier
+                            .width(3.dp)
+                            .height(h.dp)
+                            .background(
+                                color = PocketShellColors.Accent.copy(alpha = 0.85f),
+                                shape = RoundedCornerShape(2.dp),
+                            ),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Issue #153 fix 2: three-dot pulse indicator rendered alongside the
+ * spinner during Transcribing. Each dot's alpha cycles on a 900ms loop
+ * staggered by 300ms — so at any frame at least two of the three dots
+ * are painted with non-trivial alpha. This makes the static dogfood
+ * screenshot 07 visibly distinct from 06b (LISTENING) regardless of
+ * which moment the capture lands on.
+ */
+@Composable
+private fun TranscribingDots() {
+    val transition = rememberInfiniteTransition(label = "transcribing-dots")
+    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        for (i in 0 until 3) {
+            val phase by transition.animateFloat(
+                initialValue = 0f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 900, easing = LinearEasing),
+                    repeatMode = RepeatMode.Reverse,
+                    initialStartOffset = androidx.compose.animation.core.StartOffset(i * 300),
+                ),
+                label = "transcribing-dot-$i",
+            )
+            // Floor alpha at 0.35 so all three dots are always visible
+            // in a static screenshot; the animation just modulates the
+            // brightness.
+            val alpha = 0.35f + 0.65f * phase
             Box(
                 modifier = Modifier
-                    .width(3.dp)
-                    .height(h.dp)
+                    .size(6.dp)
                     .background(
-                        color = PocketShellColors.Accent.copy(alpha = 0.85f),
-                        shape = RoundedCornerShape(2.dp),
+                        color = PocketShellColors.Accent.copy(alpha = alpha),
+                        shape = androidx.compose.foundation.shape.CircleShape,
                     ),
             )
         }
@@ -1101,48 +1256,202 @@ private fun GhostButton(
     }
 }
 
+/**
+ * Issue #153 fix 3: secondary Send button.
+ *
+ * Renders as an outline-only chip with a transparent fill, a 1dp accent
+ * stroke, and accent-tinted text. This is the deliberate visual
+ * downgrade from the previous neutral-surface fill: the audit found
+ * that side-by-side neutral + accent Send buttons read as a single
+ * grouped pair, which made mis-taps common on a Pixel 7 viewport.
+ *
+ * The accent border + accent text means the button still reads as
+ * actionable, but clearly subordinate to the solid-fill primary "Send +
+ * ↵" sibling — exactly the tier difference the audit asked for.
+ *
+ * Disabled state: text drops to `TextMuted` and the border to `Border`
+ * so the button still occupies the same footprint but reads as inert.
+ *
+ * Implemented as a `Box` with [Modifier.combinedClickable] rather than
+ * Material 3's [Button] + [androidx.compose.material3.TooltipBox] pair
+ * because, in Compose BOM 2025.05 (Material 3 1.3.2), wrapping a Button
+ * in a `TooltipBox` swallows synthesised tap events from
+ * `performClick()` in connected tests — the long-press detector consumes
+ * the entire pointer stream. Rolling the click + long-press into a
+ * single `combinedClickable` keeps the test path intact and gives us
+ * full control over the visual tooltip surface.
+ */
 @Composable
-private fun NeutralButton(
+private fun OutlineSendButton(
     label: String,
+    tooltipLabel: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
-    Button(
+    LongPressTooltipBoxButton(
+        label = label,
+        tooltipLabel = tooltipLabel,
         onClick = onClick,
-        modifier = modifier
-            .height(44.dp),
+        modifier = modifier,
         enabled = enabled,
-        shape = RoundedCornerShape(10.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = PocketShellColors.SurfaceElev,
-            contentColor = PocketShellColors.Text,
-        ),
-        border = androidx.compose.foundation.BorderStroke(1.dp, PocketShellColors.Border),
-    ) {
-        Text(label, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-    }
+        containerColor = androidx.compose.ui.graphics.Color.Transparent,
+        contentColor = PocketShellColors.Accent,
+        disabledContentColor = PocketShellColors.TextMuted,
+        borderColor = PocketShellColors.Accent,
+        disabledBorderColor = PocketShellColors.Border,
+    )
 }
 
 @Composable
 private fun PrimaryButton(
     label: String,
+    tooltipLabel: String,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
-    Button(
+    LongPressTooltipBoxButton(
+        label = label,
+        tooltipLabel = tooltipLabel,
         onClick = onClick,
-        modifier = modifier
-            .height(44.dp),
+        modifier = modifier,
         enabled = enabled,
-        shape = RoundedCornerShape(10.dp),
-        colors = ButtonDefaults.buttonColors(
-            containerColor = PocketShellColors.Accent,
-            contentColor = PocketShellColors.OnAccent,
-        ),
+        containerColor = PocketShellColors.Accent,
+        contentColor = PocketShellColors.OnAccent,
+        disabledContentColor = PocketShellColors.TextMuted,
+        borderColor = PocketShellColors.Accent,
+        disabledBorderColor = PocketShellColors.Border,
+    )
+}
+
+/**
+ * Issue #153 fix 3: hand-rolled Send button used by both the outline
+ * (secondary) and the filled (primary) variants in the action row.
+ *
+ * Combines:
+ *  - A styled [Box] with the visual treatment (fill, border, label).
+ *  - A [Modifier.combinedClickable] that handles regular click +
+ *    long-press in a single gesture handler — `performClick()` in tests
+ *    triggers the same path the user's finger does.
+ *  - A [Popup] showing the [tooltipLabel] copy above the button when
+ *    long-press fires. The popup auto-dismisses on outside touch via
+ *    [PopupProperties.dismissOnClickOutside].
+ *
+ * Why not Material 3's [androidx.compose.material3.TooltipBox]: in
+ * Compose BOM 2025.05 (Material 3 1.3.2), wrapping a clickable child
+ * in `TooltipBox` swallows the synthesised tap events emitted by
+ * `androidx.compose.ui.test.performClick`. The connected smoke test
+ * (`PromptComposerSmokeTest.typedDraftSendEnterReachesDockerShell`)
+ * relies on `performClick` to fire the Send + ↵ action against a real
+ * Docker SSH shell — the TooltipBox wrapping regressed that test 100%.
+ * `combinedClickable` does NOT have that interaction.
+ */
+@Composable
+private fun LongPressTooltipBoxButton(
+    label: String,
+    tooltipLabel: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+    containerColor: androidx.compose.ui.graphics.Color = PocketShellColors.Accent,
+    contentColor: androidx.compose.ui.graphics.Color = PocketShellColors.OnAccent,
+    disabledContentColor: androidx.compose.ui.graphics.Color = PocketShellColors.TextMuted,
+    borderColor: androidx.compose.ui.graphics.Color = PocketShellColors.Accent,
+    disabledBorderColor: androidx.compose.ui.graphics.Color = PocketShellColors.Border,
+) {
+    var showTooltip by remember { mutableStateOf(false) }
+    Box(
+        modifier = modifier
+            .height(44.dp)
+            .background(
+                color = if (enabled) containerColor else androidx.compose.ui.graphics.Color.Transparent,
+                shape = RoundedCornerShape(10.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = if (enabled) borderColor else disabledBorderColor,
+                shape = RoundedCornerShape(10.dp),
+            )
+            .combinedClickable(
+                enabled = enabled,
+                role = androidx.compose.ui.semantics.Role.Button,
+                onClick = onClick,
+                onLongClick = { showTooltip = true },
+            ),
+        contentAlignment = Alignment.Center,
     ) {
-        Text(label, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            text = label,
+            color = if (enabled) contentColor else disabledContentColor,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+
+        if (showTooltip) {
+            // Position the tooltip directly above the button anchor so
+            // it does not occlude the user's finger. `dismissOnClickOutside`
+            // gives the user the standard Android escape hatch — tap
+            // anywhere off the popup to clear it.
+            Popup(
+                popupPositionProvider = AboveAnchorPopupPositionProvider,
+                onDismissRequest = { showTooltip = false },
+                properties = PopupProperties(
+                    focusable = false,
+                    dismissOnBackPress = true,
+                    dismissOnClickOutside = true,
+                ),
+            ) {
+                Surface(
+                    color = PocketShellColors.SurfaceElev,
+                    contentColor = PocketShellColors.Text,
+                    shape = RoundedCornerShape(8.dp),
+                    border = androidx.compose.foundation.BorderStroke(
+                        width = 1.dp,
+                        color = PocketShellColors.Border,
+                    ),
+                    modifier = Modifier.testTag(composerSendTooltipTestTag(tooltipLabel)),
+                ) {
+                    Text(
+                        text = tooltipLabel,
+                        color = PocketShellColors.Text,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Issue #153 fix 3: position provider for the long-press tooltip popup.
+ *
+ * Anchors the tooltip directly above the source button, horizontally
+ * centred on it, with an 8dp gap. Clamps to the window so the popup
+ * never spills off the left / right / top edges (it falls back to
+ * appearing below the anchor if there isn't enough space above).
+ */
+private object AboveAnchorPopupPositionProvider : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val gapPx = 24 // ~8dp at xhdpi; close enough for a tooltip offset
+        val centreX = anchorBounds.left + (anchorBounds.width - popupContentSize.width) / 2
+        val x = centreX.coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
+        val yAbove = anchorBounds.top - popupContentSize.height - gapPx
+        val y = if (yAbove >= 0) {
+            yAbove
+        } else {
+            // Not enough space above — render below the anchor instead.
+            (anchorBounds.bottom + gapPx).coerceAtMost(
+                (windowSize.height - popupContentSize.height).coerceAtLeast(0),
+            )
+        }
+        return IntOffset(x, y)
     }
 }
 
@@ -1234,6 +1543,37 @@ internal const val COMPOSER_SEND_TAG = "prompt-composer-send"
 internal const val COMPOSER_SEND_ENTER_TAG = "prompt-composer-send-enter"
 internal const val COMPOSER_STATUS_TAG = "prompt-composer-status"
 internal const val COMPOSER_WAVEFORM_TAG = "prompt-composer-waveform"
+
+/**
+ * Issue #153 fix 2: test tag for the in-flight transcribing spinner
+ * rendered over the centre of the (collapsed) waveform while the FSM is
+ * in `Transcribing`. The spinner is the affordance that makes
+ * Transcribing visually distinct from Listening / Capturing — connected
+ * tests pin its presence so a future refactor cannot silently regress
+ * the distinction.
+ */
+internal const val COMPOSER_TRANSCRIBING_SPINNER_TAG = "prompt-composer-transcribing-spinner"
+
+/**
+ * Issue #153 fix 3: long-press tooltip copy for the Send buttons. Kept
+ * here as named constants so connected tests can assert against the
+ * exact wording without re-implementing the copy and so future copy
+ * tweaks live in one obvious place.
+ */
+internal const val SEND_TOOLTIP_LABEL: String =
+    "Send the draft into the prompt without submitting"
+internal const val SEND_ENTER_TOOLTIP_LABEL: String =
+    "Send the draft and submit it with Enter"
+
+/**
+ * Issue #153 fix 3: stable test tag for the long-press tooltip popup
+ * surface. The tag derives from the tooltip copy so the OutlineSend and
+ * Primary Send tooltips get distinct tags without an extra parameter
+ * threaded through. Connected tests can long-press the button and
+ * assert the popup surfaced with the expected copy.
+ */
+internal fun composerSendTooltipTestTag(label: String): String =
+    "prompt-composer-send-tooltip:" + label.hashCode().toString(16)
 
 /**
  * Issue #185: test tag for the inline "auto-stops after Xs silence"

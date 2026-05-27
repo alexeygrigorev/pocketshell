@@ -141,7 +141,14 @@ class PromptComposerCancelRecordingTest {
         // 4. Cancel chip is now visible and labelled for screen readers.
         compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
         compose.onNodeWithContentDescription("Cancel recording").assertIsDisplayed()
-        compose.onNodeWithText("LISTENING").assertIsDisplayed()
+        // Issue #195: `TestMicCapture.currentAmplitude()` returns 0.5f on
+        // every poll — well above [SILENCE_AMPLITUDE_THRESHOLD] — so the
+        // sampler loop flips `hasDetectedSpeech` to true within one poll
+        // and the status label moves from "LISTENING" to "CAPTURING".
+        // Either reading proves we are in Recording for the cancel
+        // affordance under test; `COMPOSER_STATUS_TAG` is the stable
+        // anchor that survives the sub-state split.
+        compose.onNodeWithTag(COMPOSER_STATUS_TAG).assertIsDisplayed()
 
         // 5. Tap cancel. The chip dispatches into
         //    PromptComposerViewModel.cancelRecording(), which stops the

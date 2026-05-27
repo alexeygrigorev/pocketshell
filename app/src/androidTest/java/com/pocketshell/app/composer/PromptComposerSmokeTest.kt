@@ -48,27 +48,45 @@ class PromptComposerSmokeTest {
 
     @Test
     fun recordingAndTranscribingStatesAreVisible() {
+        // Issue #195: the visual `Recording` state now has two sub-states.
+        // Step through them in order — pre-speech, then capturing, then
+        // transcribing — so the smoke test pins the label distinguishing
+        // "speak when ready" from "actively heard".
         var state by mutableStateOf(
             PromptComposerViewModel.UiState(
                 draft = "check deploy logs",
                 recording = PromptComposerViewModel.RecordingState.Recording,
-                amplitude = 0.8f,
+                amplitude = 0f,
+                hasDetectedSpeech = false,
             ),
         )
         renderComposer { state }
 
         compose.onNodeWithTag(COMPOSER_STATUS_TAG)
             .assertExists()
+        // Pre-speech sub-state: "LISTENING" + idle waveform a11y label.
         compose.onNodeWithText("LISTENING")
             .assertExists()
         compose.onNodeWithTag(COMPOSER_WAVEFORM_TAG)
-            .assert(hasContentDescription("Prompt composer recording waveform"))
+            .assert(hasContentDescription("Prompt composer waiting for speech"))
+
+        compose.runOnIdle {
+            // Active-speech sub-state: the sampler loop has seen at least
+            // one amplitude sample over `SILENCE_AMPLITUDE_THRESHOLD`.
+            state = state.copy(amplitude = 0.8f, hasDetectedSpeech = true)
+        }
+
+        compose.onNodeWithText("CAPTURING")
+            .assertExists()
+        compose.onNodeWithTag(COMPOSER_WAVEFORM_TAG)
+            .assert(hasContentDescription("Prompt composer capturing speech"))
 
         compose.runOnIdle {
             state = PromptComposerViewModel.UiState(
                 draft = "check deploy logs",
                 recording = PromptComposerViewModel.RecordingState.Transcribing,
                 amplitude = 0f,
+                hasDetectedSpeech = false,
             )
         }
 

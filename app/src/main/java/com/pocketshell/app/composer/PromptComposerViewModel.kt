@@ -206,6 +206,12 @@ public class PromptComposerViewModel @Inject constructor(
             it.copy(
                 recording = RecordingState.Recording,
                 amplitude = 0f,
+                // Issue #195: every fresh recording starts in the
+                // "listening, no speech yet" sub-state. The sampling loop
+                // below flips this to true on the first amplitude crossing
+                // so the status label can switch from "LISTENING" (waiting)
+                // to "CAPTURING" (active speech) within one poll cycle.
+                hasDetectedSpeech = false,
                 error = null,
             )
         }
@@ -238,9 +244,25 @@ public class PromptComposerViewModel @Inject constructor(
         val silenceWindowMs = voiceSettings.silenceWindowMs()
         while (kotlinx.coroutines.currentCoroutineContext().isActive) {
             val amp = audioRecorder.currentAmplitude()
-            _uiState.update { it.copy(amplitude = amp) }
+            // Issue #195: flip `hasDetectedSpeech` on the first amplitude
+            // sample that crosses [SILENCE_AMPLITUDE_THRESHOLD] so the
+            // sheet's status label can move from "LISTENING" (waiting) to
+            // "CAPTURING" (active speech). The flag is sticky for the
+            // remainder of this recording — a mid-sentence pause should
+            // not yank the user back to "speak when ready" while their
+            // earlier speech is still in the captured buffer. `SAMPLE_INTERVAL_MS`
+            // is 50ms, so the user-visible transition is well inside the
+            // 200ms responsiveness budget called out in the issue.
+            val crossedThresholdNow = amp >= SILENCE_AMPLITUDE_THRESHOLD
+            _uiState.update {
+                if (crossedThresholdNow && !it.hasDetectedSpeech) {
+                    it.copy(amplitude = amp, hasDetectedSpeech = true)
+                } else {
+                    it.copy(amplitude = amp)
+                }
+            }
 
-            if (amp >= SILENCE_AMPLITUDE_THRESHOLD) {
+            if (crossedThresholdNow) {
                 lastLoudAtMs = clock()
             } else if (clock() - lastLoudAtMs >= silenceWindowMs) {
                 // Drop out of the loop *before* triggering the transcribe;
@@ -486,6 +508,15 @@ public class PromptComposerViewModel @Inject constructor(
      * @param amplitude latest peak amplitude in `[0, 1]`. Drives the
      *   waveform animation while [recording] is [RecordingState.Recording];
      *   `0f` otherwise.
+     * @param hasDetectedSpeech issue #195: `true` once the amplitude sampling
+     *   loop has seen at least one sample at or above
+     *   [SILENCE_AMPLITUDE_THRESHOLD] since the current recording began.
+     *   The composer splits the visual `Recording` state into two sub-states
+     *   keyed on this flag: pre-speech ("LISTENING" + "speak when ready"
+     *   hint) and active speech ("CAPTURING"). The flag is reset to `false`
+     *   on every [startRecording] and is only meaningful while [recording]
+     *   is [RecordingState.Recording] — readers should always pair it with
+     *   the FSM state.
      * @param error transient user-facing error message; `null` clears
      *   the banner. The screen clears this on the next interaction.
      */
@@ -493,6 +524,7 @@ public class PromptComposerViewModel @Inject constructor(
         val draft: String = "",
         val recording: RecordingState = RecordingState.Idle,
         val amplitude: Float = 0f,
+        val hasDetectedSpeech: Boolean = false,
         val error: String? = null,
     )
 

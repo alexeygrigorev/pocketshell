@@ -633,6 +633,181 @@ class PromptComposerViewModelTest {
         assertEquals("ru", captured.get())
     }
 
+    // -- Issue #195: hasDetectedSpeech sub-state transition ---------------
+
+    @Test
+    fun recordingStartsWithHasDetectedSpeechFalseUntilAmplitudeCrossesThreshold() = runTest {
+        // Pattern: a stretch of sub-threshold samples (room noise),
+        // then loud samples. The flag must stay false during the quiet
+        // leading window and flip when the first loud sample arrives —
+        // which proves the sheet's "LISTENING -> CAPTURING" relabel
+        // fires on the first speech amplitude, not on mere mic-open.
+        // With `SAMPLE_INTERVAL_MS = 50ms`, the user sees the relabel
+        // within one poll of starting to speak, well inside the 200ms
+        // responsiveness budget called out in the acceptance criteria.
+        val belowThreshold = PromptComposerViewModel.SILENCE_AMPLITUDE_THRESHOLD - 0.01f
+        val aboveThreshold = PromptComposerViewModel.SILENCE_AMPLITUDE_THRESHOLD + 0.1f
+        // Eight below-threshold samples (~400ms of room noise) then a
+        // long run of loud samples. The leading run is comfortably
+        // shorter than the 5s silence window so auto-stop is not a
+        // factor.
+        val quietSamples = 8
+        val mic = FakeMicCapture(
+            amplitudes = List(quietSamples) { belowThreshold } + List(500) { aboveThreshold },
+        )
+        val vm = newVm(
+            mic = mic,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { testScheduler.currentTime },
+        )
+
+        try {
+            vm.onMicTap()
+            // Initial Recording state: flag is false. The sampler has
+            // not yet had a chance to poll the mic — `startRecording`
+            // updates the FSM synchronously before launching the
+            // amplitude loop.
+            assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+            assertEquals(false, vm.uiState.value.hasDetectedSpeech)
+
+            // Drain a short stretch of sub-threshold polls (50ms each).
+            // The flag must still be false — room noise alone must not
+            // flip the label. We stay well inside the 8-sample quiet
+            // window so no above-threshold sample has been consumed.
+            advanceTimeBy(3L * PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+            runCurrent()
+            assertEquals(false, vm.uiState.value.hasDetectedSpeech)
+
+            // Advance past the quiet leading run so the loud samples
+            // get consumed. Flag flips — this is the moment "LISTENING"
+            // becomes "CAPTURING" in the sheet.
+            advanceTimeBy((quietSamples + 2L) * PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+            runCurrent()
+            assertEquals(true, vm.uiState.value.hasDetectedSpeech)
+        } finally {
+            // Always cancel so `runTest` terminates even when an
+            // assertion above fires — the sampler loop would otherwise
+            // schedule another `delay` on the test scheduler and
+            // `runTest`'s end-of-block `advanceUntilIdle` would hang.
+            vm.cancelRecording()
+            advanceUntilIdle()
+        }
+    }
+
+    @Test
+    fun hasDetectedSpeechRemainsTrueAcrossMidSentencePause() = runTest {
+        // Once the user has spoken, a brief pause must not yank the UI
+        // back to "speak when ready" — the user has already been heard
+        // and the captured buffer still holds their words. This test
+        // proves the flag is sticky for the lifetime of one recording.
+        val below = PromptComposerViewModel.SILENCE_AMPLITUDE_THRESHOLD - 0.01f
+        val above = PromptComposerViewModel.SILENCE_AMPLITUDE_THRESHOLD + 0.1f
+        // First sample loud (flips the flag), then a quiet stretch
+        // shorter than the 5s silence window so auto-stop doesn't fire.
+        val mic = FakeMicCapture(
+            amplitudes = listOf(above) + List(500) { below },
+        )
+        val vm = newVm(
+            mic = mic,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { testScheduler.currentTime },
+        )
+
+        try {
+            vm.onMicTap()
+            // First poll: loud — flag flips to true.
+            advanceTimeBy(PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+            runCurrent()
+            assertEquals(true, vm.uiState.value.hasDetectedSpeech)
+
+            // Drain several quiet polls (a mid-sentence pause, still
+            // well under the 5s silence auto-stop window). The flag
+            // must stay true — the label must keep reading "CAPTURING".
+            advanceTimeBy(10L * PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+            runCurrent()
+            assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+            assertEquals(true, vm.uiState.value.hasDetectedSpeech)
+        } finally {
+            vm.cancelRecording()
+            advanceUntilIdle()
+        }
+    }
+
+    @Test
+    fun hasDetectedSpeechResetsOnNextRecording() = runTest {
+        // A second dictation in the same composer session must start
+        // back at "LISTENING — speak when ready". Without this reset
+        // the previous run's flag would persist and the second
+        // recording would open straight on "CAPTURING", contradicting
+        // the visual sub-state contract.
+        val above = PromptComposerViewModel.SILENCE_AMPLITUDE_THRESHOLD + 0.1f
+        val mic = FakeMicCapture(amplitudes = List(500) { above })
+        val vm = newVm(
+            mic = mic,
+            whisper = fakeWhisperClient { Result.success("first chunk") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { testScheduler.currentTime },
+        )
+
+        try {
+            // First recording: poll once so the flag flips.
+            vm.onMicTap()
+            advanceTimeBy(PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+            runCurrent()
+            assertEquals(true, vm.uiState.value.hasDetectedSpeech)
+
+            // Stop + transcribe back to Idle.
+            vm.onMicTap()
+            advanceUntilIdle()
+            assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+
+            // Second recording: flag must start false again. The check
+            // runs *before* `runCurrent` so the sampler has not yet
+            // polled — `startRecording` resets the flag synchronously.
+            vm.onMicTap()
+            assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+            assertEquals(false, vm.uiState.value.hasDetectedSpeech)
+        } finally {
+            vm.cancelRecording()
+            advanceUntilIdle()
+        }
+    }
+
+    @Test
+    fun firstSpeechAmplitudeRelabelLandsWithinResponsivenessBudget() = runTest {
+        // Acceptance criterion: "Transition is responsive (≤ 200ms after
+        // first speech amplitude)." Pin the bound explicitly so a future
+        // change to `SAMPLE_INTERVAL_MS` cannot silently regress past the
+        // user-perceived budget without this test going red.
+        val above = PromptComposerViewModel.SILENCE_AMPLITUDE_THRESHOLD + 0.1f
+        val mic = FakeMicCapture(amplitudes = List(500) { above })
+        val vm = newVm(
+            mic = mic,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { testScheduler.currentTime },
+        )
+
+        try {
+            vm.onMicTap()
+            val startTime = testScheduler.currentTime
+            assertEquals(false, vm.uiState.value.hasDetectedSpeech)
+
+            // Single sampler poll is enough for an above-threshold
+            // amplitude to flip the flag.
+            advanceTimeBy(PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+            runCurrent()
+            val elapsed = testScheduler.currentTime - startTime
+            assertEquals(true, vm.uiState.value.hasDetectedSpeech)
+            assertTrue(
+                "Sub-state transition took ${elapsed}ms — must be within the 200ms responsiveness budget",
+                elapsed <= 200L,
+            )
+        } finally {
+            vm.cancelRecording()
+            advanceUntilIdle()
+        }
+    }
+
     @Test
     fun voiceSettingsCustomSilenceWindowAutoStopsAtConfiguredThreshold() = runTest {
         // Configure a 1.5s window — well below the historic 5s default —

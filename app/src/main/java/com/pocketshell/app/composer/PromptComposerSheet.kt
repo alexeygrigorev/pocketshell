@@ -425,29 +425,53 @@ internal fun SheetContent(
             if (state.recording == PromptComposerViewModel.RecordingState.Recording) {
                 CancelRecordingChip(onClick = onCancelRecording)
             }
+            // Issue #195: the visual `Recording` state has two sub-states
+            // keyed on `state.hasDetectedSpeech`. Before the first speech
+            // amplitude crosses the threshold the waveform stays in its
+            // idle (collapsed) rest pose so the user understands "the mic
+            // is open but I haven't been heard yet"; once amplitude
+            // crosses, the bars animate from the live amplitude and the
+            // label flips to "CAPTURING". Anything that ties an animation
+            // to `state.amplitude` should also gate on `hasDetectedSpeech`
+            // — otherwise pre-speech sub-threshold mic noise would jiggle
+            // the strip and contradict the "waiting for you" label.
+            val isCapturing = state.recording == PromptComposerViewModel.RecordingState.Recording &&
+                state.hasDetectedSpeech
             Waveform(
                 amplitude = state.amplitude,
-                active = state.recording == PromptComposerViewModel.RecordingState.Recording,
+                active = isCapturing,
                 modifier = Modifier
                     .weight(1f)
                     .height(32.dp)
                     .testTag(COMPOSER_WAVEFORM_TAG)
                     .semantics {
-                        contentDescription = when (state.recording) {
-                            PromptComposerViewModel.RecordingState.Recording ->
-                                "Prompt composer recording waveform"
-                            PromptComposerViewModel.RecordingState.Transcribing ->
+                        contentDescription = when {
+                            state.recording == PromptComposerViewModel.RecordingState.Recording &&
+                                state.hasDetectedSpeech ->
+                                "Prompt composer capturing speech"
+                            state.recording == PromptComposerViewModel.RecordingState.Recording ->
+                                "Prompt composer waiting for speech"
+                            state.recording == PromptComposerViewModel.RecordingState.Transcribing ->
                                 "Prompt composer transcribing"
-                            PromptComposerViewModel.RecordingState.Idle ->
+                            else ->
                                 "Prompt composer idle waveform"
                         }
                     },
             )
             Text(
-                text = when (state.recording) {
-                    PromptComposerViewModel.RecordingState.Recording -> "LISTENING"
-                    PromptComposerViewModel.RecordingState.Transcribing -> "TRANSCRIBING"
-                    PromptComposerViewModel.RecordingState.Idle -> ""
+                // Issue #195: pre-speech vs active-speech sub-states under
+                // the same `Recording` FSM node. "LISTENING" reads as
+                // "system is open but waiting"; "CAPTURING" reads as
+                // "system is hearing you right now". The flip happens
+                // within one 50ms sampler poll of the first amplitude
+                // crossing — well inside the 200ms responsiveness budget
+                // called out in the issue acceptance criteria.
+                text = when {
+                    state.recording == PromptComposerViewModel.RecordingState.Recording &&
+                        state.hasDetectedSpeech -> "CAPTURING"
+                    state.recording == PromptComposerViewModel.RecordingState.Recording -> "LISTENING"
+                    state.recording == PromptComposerViewModel.RecordingState.Transcribing -> "TRANSCRIBING"
+                    else -> ""
                 },
                 color = PocketShellColors.Accent,
                 fontSize = 11.sp,
@@ -750,10 +774,22 @@ internal fun ApiKeyEntryDialog(
  * (it changes per recording state — Idle vs Recording — to subtly
  * affirm the recording is active).
  */
-private fun PromptComposerViewModel.UiState.placeholderHint(): String = when (recording) {
-    PromptComposerViewModel.RecordingState.Idle -> "Tap the mic to dictate, or type a prompt..."
-    PromptComposerViewModel.RecordingState.Recording -> "Listening — speak when ready"
-    PromptComposerViewModel.RecordingState.Transcribing -> "Transcribing..."
+private fun PromptComposerViewModel.UiState.placeholderHint(): String = when {
+    recording == PromptComposerViewModel.RecordingState.Idle ->
+        "Tap the mic to dictate, or type a prompt..."
+    // Issue #195: pre-speech sub-state — mic is open, no amplitude has
+    // crossed the speech threshold yet. The "speak when ready" copy is
+    // load-bearing here: it tells the user the system is open but has
+    // not heard them, which is exactly the user complaint that motivated
+    // the issue (label persisted while user was already speaking).
+    recording == PromptComposerViewModel.RecordingState.Recording && !hasDetectedSpeech ->
+        "Listening — speak when ready"
+    // Issue #195: active-speech sub-state — at least one amplitude sample
+    // crossed [PromptComposerViewModel.SILENCE_AMPLITUDE_THRESHOLD] since
+    // recording started, so the system is actively hearing the user.
+    recording == PromptComposerViewModel.RecordingState.Recording ->
+        "Capturing speech…"
+    else -> "Transcribing..."
 }
 
 internal const val COMPOSER_DRAFT_TAG = "prompt-composer-draft"
@@ -798,13 +834,43 @@ private fun PromptComposerIdlePreview() {
 }
 
 /**
- * Recording state — partial text in the area, mic pulsing,
- * waveform animated by a steady amplitude. Closest match to the
- * mockup's `.composer-text` + `Listening` strip.
+ * Recording state — partial text in the area, mic pulsing, waveform
+ * idle because no speech has been detected yet. Status reads
+ * "LISTENING" and the empty-area placeholder reads "Listening — speak
+ * when ready". Issue #195 sub-state: pre-speech.
  */
-@Preview(name = "Composer · recording", widthDp = 412, heightDp = 360)
+@Preview(name = "Composer · recording (listening, pre-speech)", widthDp = 412, heightDp = 360)
 @Composable
-private fun PromptComposerRecordingPreview() {
+private fun PromptComposerRecordingListeningPreview() {
+    PocketShellTheme {
+        Box(modifier = Modifier.background(PocketShellColors.Surface)) {
+            SheetContent(
+                state = PromptComposerViewModel.UiState(
+                    draft = "",
+                    recording = PromptComposerViewModel.RecordingState.Recording,
+                    amplitude = 0f,
+                    hasDetectedSpeech = false,
+                    error = null,
+                ),
+                onClose = {},
+                onDraftChange = {},
+                onMicTap = {},
+                onSend = {},
+            )
+        }
+    }
+}
+
+/**
+ * Recording state — issue #195 sub-state: active speech. At least one
+ * amplitude sample crossed the speech-detection threshold, so the
+ * label reads "CAPTURING" and the waveform animates by the live
+ * amplitude. This is the screen the user sees while actually
+ * dictating.
+ */
+@Preview(name = "Composer · recording (capturing)", widthDp = 412, heightDp = 360)
+@Composable
+private fun PromptComposerRecordingCapturingPreview() {
     PocketShellTheme {
         Box(modifier = Modifier.background(PocketShellColors.Surface)) {
             SheetContent(
@@ -812,6 +878,7 @@ private fun PromptComposerRecordingPreview() {
                     draft = "check the deploy log and tell me what failed",
                     recording = PromptComposerViewModel.RecordingState.Recording,
                     amplitude = 0.7f,
+                    hasDetectedSpeech = true,
                     error = null,
                 ),
                 onClose = {},

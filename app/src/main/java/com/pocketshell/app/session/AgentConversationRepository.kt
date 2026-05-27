@@ -8,8 +8,109 @@ import com.pocketshell.core.agents.ClaudeCodeParser
 import com.pocketshell.core.agents.CodexParser
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationParser
+import com.pocketshell.core.agents.ConversationRole
+import com.pocketshell.core.agents.OpenCodeReader
 import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.Job
+
+/**
+ * Issue #160 (review round 2): every locally-inserted "optimistic" user
+ * message — added by `sendToAgent` so the conversation pane updates
+ * before the agent's JSONL has been appended and tailed back — uses an
+ * id that starts with this prefix. The dedup pass in
+ * [reconcileAgentEvents] uses that to recognise the placeholder so it
+ * can drop it when the real `Message(role=User)` event eventually
+ * arrives via the tail.
+ *
+ * Strategy B from the issue brief: optimistic events are tagged at
+ * insertion time and removed when the next non-optimistic user message
+ * with the same text arrives. This is robust to:
+ *
+ *  - id-format drift across CLI updates (Claude / Codex / OpenCode all
+ *    mint their own ids; we don't try to predict them),
+ *  - back-to-back duplicate prompts (each optimistic gets its own
+ *    nanoTime-tagged id, so a real arrival only collapses one),
+ *  - parser additions (the dedup contract only inspects the role + text
+ *    + presence of the optimistic prefix).
+ */
+internal const val OPTIMISTIC_USER_MESSAGE_ID_PREFIX: String = "optimistic:"
+
+/**
+ * Issue #160 (review round 2): single source of truth for the
+ * conversation-feed dedup contract used by both
+ * [com.pocketshell.app.session.SessionViewModel] (raw-SSH session) and
+ * [com.pocketshell.app.tmux.TmuxSessionViewModel] (tmux pane).
+ *
+ * Combines three rules in a single pass over [events] (in insertion
+ * order):
+ *
+ *  1. **Optimistic reconciliation.** When a non-optimistic
+ *     `Message(role=User)` arrives and the accumulator already contains
+ *     an optimistic `Message(role=User)` (id starts with
+ *     [OPTIMISTIC_USER_MESSAGE_ID_PREFIX]) with the same text, that
+ *     optimistic entry is dropped — the real event is the authoritative
+ *     record now that the agent's JSONL has it.
+ *  2. **Id dedup.** Subsequent events with the same id replace earlier
+ *     ones (the legacy [LinkedHashMap] semantics — useful for
+ *     streamed `Message`s whose text gets updated incrementally and
+ *     for re-emitted tool-call rows).
+ *  3. **Tail bound.** The result is bounded to the latest [maxEvents]
+ *     events (default [DEFAULT_MAX_AGENT_EVENTS]). This keeps the
+ *     conversation pane from growing without limit on long-lived
+ *     sessions and matches the previous in-VM bound.
+ *
+ * Time-windowing is intentionally NOT used. Optimistic events are
+ * always inserted *before* the real one (the round trip cannot complete
+ * faster than the local synchronous append), so order-based matching is
+ * correct and simpler than chasing wall-clock skew between the Android
+ * device and the remote.
+ */
+internal fun reconcileAgentEvents(
+    events: List<ConversationEvent>,
+    maxEvents: Int = DEFAULT_MAX_AGENT_EVENTS,
+): List<ConversationEvent> {
+    if (events.isEmpty()) return events
+    val byId = LinkedHashMap<String, ConversationEvent>()
+    // Mirror the pre-existing safety net: never inspect more than
+    // 2 * maxEvents historic rows on a single reconcile call (callers
+    // append new events at the tail; older events have already been
+    // bounded on previous passes).
+    val window = events.takeLast(maxEvents * 2)
+    for (event in window) {
+        if (event is ConversationEvent.Message &&
+            event.role == ConversationRole.User &&
+            !event.isOptimistic()
+        ) {
+            // Drop any prior optimistic entry with matching text.
+            val matchingOptimistic = byId.entries.firstOrNull { (_, candidate) ->
+                candidate is ConversationEvent.Message &&
+                    candidate.role == ConversationRole.User &&
+                    candidate.isOptimistic() &&
+                    candidate.text == event.text
+            }
+            if (matchingOptimistic != null) {
+                byId.remove(matchingOptimistic.key)
+            }
+        }
+        byId[event.id] = event
+    }
+    val distinct = byId.values.toList()
+    return if (distinct.size <= maxEvents) {
+        distinct
+    } else {
+        distinct.subList(distinct.size - maxEvents, distinct.size)
+    }
+}
+
+private fun ConversationEvent.Message.isOptimistic(): Boolean =
+    id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX)
+
+/**
+ * Default upper bound on the events kept by the conversation feed.
+ * The constant matches the legacy in-VM `MaxAgentEvents` value so the
+ * bounded-distinct contract stays unchanged for non-optimistic callers.
+ */
+internal const val DEFAULT_MAX_AGENT_EVENTS: Int = 500
 
 internal class AgentConversationRepository(
     private val detector: AgentDetector = AgentDetector(),
@@ -60,9 +161,10 @@ internal class AgentConversationRepository(
         detection: AgentDetection,
         onEvent: (ConversationEvent) -> Unit,
     ): Job? {
-        if (detection.agent == AgentKind.OpenCode) {
-            return null
-        }
+        // Issue #160: OpenCode now tails its JSONL via `session.tail`
+        // identically to Claude and Codex. Polling has been removed —
+        // the row shape is the same per-line JSON envelope used by the
+        // batch [OpenCodeReader.parseRows] path (see [parserFor]).
         val parser = parserFor(detection.agent) ?: return null
         return session.tail(detection.sourcePath) { line ->
             parser.parseLine(line).forEach(onEvent)
@@ -70,14 +172,10 @@ internal class AgentConversationRepository(
     }
 
     suspend fun lineCount(session: SshSession, detection: AgentDetection): Long =
-        if (detection.agent == AgentKind.OpenCode) {
-            0L
-        } else {
-            session.exec("wc -l < ${shellQuote(detection.sourcePath)} 2>/dev/null || printf 0")
-                .stdout
-                .trim()
-                .toLongOrNull() ?: 0L
-        }
+        session.exec("wc -l < ${shellQuote(detection.sourcePath)} 2>/dev/null || printf 0")
+            .stdout
+            .trim()
+            .toLongOrNull() ?: 0L
 
     fun tailEventsFromLine(
         session: SshSession,
@@ -91,6 +189,19 @@ internal class AgentConversationRepository(
         }
     }
 
+    /**
+     * Issue #160 (OpenCode parity): retained as a deprecated no-op
+     * shim while callers in
+     * [com.pocketshell.app.session.SessionViewModel] and
+     * [com.pocketshell.app.tmux.TmuxSessionViewModel] migrate to the
+     * unified [tailEventsFromLine] path. Production code should not
+     * poll OpenCode any more — the `session.tail` route catches up on
+     * appended lines in real time.
+     */
+    @Deprecated(
+        message = "Use tailEventsFromLine — OpenCode now tails like Claude + Codex.",
+        replaceWith = ReplaceWith("tailEventsFromLine(session, detection, 0, onEvent)"),
+    )
     suspend fun pollOpenCodeEvents(
         session: SshSession,
         detection: AgentDetection,
@@ -100,7 +211,7 @@ internal class AgentConversationRepository(
     private fun parserFor(agent: AgentKind): ConversationParser? = when (agent) {
         AgentKind.ClaudeCode -> ClaudeCodeParser()
         AgentKind.Codex -> CodexParser()
-        AgentKind.OpenCode -> null
+        AgentKind.OpenCode -> OpenCodeReader()
     }
 
     internal fun detectionCommand(cwd: String): String {

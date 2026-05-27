@@ -5,14 +5,16 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.di.CommandPlannerClientFactory
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.session.AgentConversationUiState
+import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.session.VoiceCommandReviewUiState
+import com.pocketshell.app.session.reconcileAgentEvents
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.core.agents.AgentDetection
-import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
+import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -607,24 +609,47 @@ public class TmuxSessionViewModel @Inject constructor(
                 hintVisible = true,
             ),
         )
-        val followJob = if (detection.agent == AgentKind.OpenCode) {
-            bridgeScope.launch {
-                while (true) {
-                    kotlinx.coroutines.delay(5_000)
-                    val events = runCatching {
-                        agentRepository.pollOpenCodeEvents(session, detection)
-                    }.getOrDefault(emptyList())
-                    appendAgentEvents(paneId, events)
-                }
-            }
-        } else {
-            agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
-                appendAgentEvents(paneId, listOf(event))
-            }
+        // Issue #160: OpenCode now tails its JSONL via `session.tail`
+        // identically to Claude and Codex. No more polling branch — the
+        // tmux pane gets the same real-time refresh as the raw-SSH route.
+        val followJob = agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
+            appendAgentEvents(paneId, listOf(event))
         }
         if (followJob != null) {
             paneAgentJobs[paneId] = followJob
         }
+    }
+
+    /**
+     * Issue #160: send [text] as a chat message into the agent that's
+     * running in tmux pane [paneId].
+     *
+     * Inserts an optimistic [ConversationEvent.Message] with
+     * [ConversationRole.User] into the conversation feed first so the
+     * UI updates without waiting for the agent's JSONL to be appended
+     * and tailed back. The text is then written into the pane via the
+     * existing `send-keys` path with a trailing carriage return so the
+     * agent reads it as a submitted prompt.
+     *
+     * No-op if [paneId] has no detected agent conversation (the user
+     * shouldn't be able to reach this from the screen, but the
+     * defensive check matches the rest of the public API).
+     */
+    public fun sendToAgentPane(paneId: String, text: String) {
+        val payload = text.trim()
+        if (payload.isEmpty()) return
+        val current = _agentConversations.value[paneId] ?: return
+        val detection = current.detection ?: return
+        val optimistic = ConversationEvent.Message(
+            // Issue #160 round 2: see [OPTIMISTIC_USER_MESSAGE_ID_PREFIX].
+            id = "$OPTIMISTIC_USER_MESSAGE_ID_PREFIX${System.nanoTime()}",
+            agent = detection.agent,
+            atMillis = System.currentTimeMillis(),
+            role = ConversationRole.User,
+            text = payload,
+        )
+        appendAgentEvents(paneId, listOf(optimistic))
+        writeInputToPane(paneId, (payload + "\r").toByteArray(Charsets.UTF_8))
     }
 
     public fun selectSessionTab(paneId: String, tab: SessionTab) {
@@ -1269,18 +1294,8 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 }
 
-private fun boundedDistinctEvents(events: List<ConversationEvent>): List<ConversationEvent> {
-    val byId = LinkedHashMap<String, ConversationEvent>()
-    for (event in events.takeLast(MaxAgentEvents * 2)) {
-        byId[event.id] = event
-    }
-    val distinct = byId.values.toList()
-    return if (distinct.size <= MaxAgentEvents) {
-        distinct
-    } else {
-        distinct.subList(distinct.size - MaxAgentEvents, distinct.size)
-    }
-}
+private fun boundedDistinctEvents(events: List<ConversationEvent>): List<ConversationEvent> =
+    reconcileAgentEvents(events, maxEvents = MaxAgentEvents)
 
 private fun List<String>.toTerminalViewportBytes(): ByteArray {
     val lines = this

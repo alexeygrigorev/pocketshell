@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.app.composer.MarkdownText
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
 import com.pocketshell.app.snippets.SnippetPickerSheet
@@ -55,6 +56,13 @@ import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.VoiceCommandReviewStrip
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
+import com.pocketshell.core.agents.ToolCallSummary
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.text.font.FontFamily
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
 import com.pocketshell.uikit.components.Breadcrumb
@@ -67,6 +75,9 @@ import com.pocketshell.uikit.theme.PocketShellColors
 
 internal const val SESSION_SCREEN_TAG = "session:screen"
 internal const val SESSION_CONVERSATION_PANE_TAG = "session:conversation"
+internal const val SESSION_CONVERSATION_COMPOSER_INPUT_TAG = "session:conversation:composer-input"
+internal const val SESSION_CONVERSATION_COMPOSER_SEND_TAG = "session:conversation:composer-send"
+internal const val SESSION_CONVERSATION_TOOL_ROW_TAG_PREFIX = "session:conversation:tool:"
 internal const val SESSION_AGENT_HINT_TAG = "session:agent-hint"
 /** Issue #116: stable test tag for the in-session blocked / near-limit chip. */
 internal const val SESSION_USAGE_BADGE_TAG = "session:usage-badge"
@@ -250,6 +261,7 @@ public fun SessionScreen(
                 if (agentConversation.selectedTab == SessionTab.Conversation && agentConversation.detection != null) {
                     ConversationPane(
                         events = agentConversation.events,
+                        onSendToAgent = viewModel::sendToAgent,
                         modifier = Modifier
                             .fillMaxSize()
                             .testTag(SESSION_CONVERSATION_PANE_TAG),
@@ -489,16 +501,26 @@ private fun AgentHintChip(
     }
 }
 
+// Issue #160 round 2: `internal` visibility (was `private`) so the
+// connected `ConversationInteractE2eTest` can drive the composer
+// directly without spinning up the whole [SessionScreen] surface —
+// the composer journey is the unit under test and the rest of the
+// session screen is incidental.
 @Composable
-private fun ConversationPane(
+internal fun ConversationPane(
     events: List<ConversationEvent>,
+    onSendToAgent: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var query by remember { mutableStateOf("") }
+    var composerText by remember { mutableStateOf("") }
     val filteredEvents = remember(events, query) {
         val q = query.trim()
         if (q.isBlank()) events else events.filter { it.searchText().contains(q, ignoreCase = true) }
     }
+    val expandedToolCalls = remember { mutableStateOf(setOf<String>()) }
+    val runningToolIds = remember(events) { runningToolCallIds(events) }
+    val eventsById = remember(events) { events.associateBy { it.id } }
     Column(
         modifier = modifier
             .background(color = PocketShellColors.Background)
@@ -528,52 +550,227 @@ private fun ConversationPane(
                 }
             }
             items(filteredEvents, key = { it.id }) { event ->
-                ConversationEventRow(event)
+                ConversationEventRow(
+                    event = event,
+                    runningToolIds = runningToolIds,
+                    eventsById = eventsById,
+                    isExplicitlyExpanded = expandedToolCalls.value.contains(event.id),
+                    onToggleExpand = { id ->
+                        val current = expandedToolCalls.value
+                        expandedToolCalls.value = if (current.contains(id)) current - id else current + id
+                    },
+                )
+            }
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            OutlinedTextField(
+                value = composerText,
+                onValueChange = { composerText = it },
+                modifier = Modifier
+                    .weight(1f)
+                    .testTag(SESSION_CONVERSATION_COMPOSER_INPUT_TAG),
+                placeholder = { Text("Message agent") },
+            )
+            TextButton(
+                onClick = {
+                    val trimmed = composerText.trim()
+                    if (trimmed.isNotEmpty()) {
+                        onSendToAgent(trimmed)
+                        composerText = ""
+                    }
+                },
+                enabled = composerText.isNotBlank(),
+                modifier = Modifier.testTag(SESSION_CONVERSATION_COMPOSER_SEND_TAG),
+            ) {
+                Text("Send")
             }
         }
     }
 }
 
 @Composable
-private fun ConversationEventRow(event: ConversationEvent) {
-    var expanded by remember(event.id) { mutableStateOf(false) }
-    val title = when (event) {
-        is ConversationEvent.Message -> when (event.role) {
-            ConversationRole.User -> "USER"
-            ConversationRole.Assistant -> if (event.streaming) "ASSISTANT - streaming" else "ASSISTANT"
-        }
-        is ConversationEvent.ToolCall -> "Tool: ${event.name}"
-        is ConversationEvent.ToolResult -> if (event.isError) "Tool result - error" else "Tool result"
+private fun ConversationEventRow(
+    event: ConversationEvent,
+    runningToolIds: Set<String>,
+    eventsById: Map<String, ConversationEvent>,
+    isExplicitlyExpanded: Boolean,
+    onToggleExpand: (String) -> Unit,
+) {
+    when (event) {
+        is ConversationEvent.Message -> ConversationMessageRow(event)
+        is ConversationEvent.ToolCall -> ConversationToolCallRow(
+            toolCall = event,
+            result = eventsById.findToolResultFor(event.id),
+            isRunning = event.id in runningToolIds,
+            isExplicitlyExpanded = isExplicitlyExpanded,
+            onToggle = { onToggleExpand(event.id) },
+        )
+        is ConversationEvent.ToolResult -> ConversationToolResultRow(event)
     }
-    val body = when (event) {
-        is ConversationEvent.Message -> event.text
-        is ConversationEvent.ToolCall -> event.input
-        is ConversationEvent.ToolResult -> event.output
+}
+
+@Composable
+private fun ConversationMessageRow(event: ConversationEvent.Message) {
+    val isUser = event.role == ConversationRole.User
+    val title = when (event.role) {
+        ConversationRole.User -> "USER"
+        ConversationRole.Assistant -> if (event.streaming) "ASSISTANT - streaming" else "ASSISTANT"
     }
-    val isTool = event is ConversationEvent.ToolCall || event is ConversationEvent.ToolResult
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .border(width = 1.dp, color = PocketShellColors.Border)
-            .clickable(enabled = isTool) { expanded = !expanded }
+            .background(color = if (isUser) PocketShellColors.SurfaceElev else PocketShellColors.Surface)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Text(
-            text = if (isTool && !expanded) "$title (collapsed)" else title,
-            color = if (isTool) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+            text = title,
+            color = if (isUser) PocketShellColors.Accent else PocketShellColors.TextSecondary,
             fontSize = 11.sp,
             fontWeight = FontWeight.Medium,
         )
-        if (!isTool || expanded) {
+        MarkdownText(text = event.text)
+    }
+}
+
+@Composable
+private fun ConversationToolCallRow(
+    toolCall: ConversationEvent.ToolCall,
+    result: ConversationEvent.ToolResult?,
+    isRunning: Boolean,
+    isExplicitlyExpanded: Boolean,
+    onToggle: () -> Unit,
+) {
+    val expanded = isExplicitlyExpanded || (isRunning && result == null)
+    val summary = remember(toolCall.id, toolCall.input) { ToolCallSummary.forToolCall(toolCall) }
+    val statusGlyph = when {
+        result?.isError == true -> "!"
+        result != null -> "✓"
+        isRunning -> "…"
+        else -> ""
+    }
+    val statusColor = when {
+        result?.isError == true -> PocketShellColors.Red
+        result != null -> PocketShellColors.Green
+        else -> PocketShellColors.TextMuted
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(vertical = 2.dp)
+            .testTag(SESSION_CONVERSATION_TOOL_ROW_TAG_PREFIX + toolCall.id),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = toolCall.name,
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = summary,
+                color = PocketShellColors.TextMuted,
+                fontSize = 12.sp,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+            )
+            if (statusGlyph.isNotEmpty()) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(text = statusGlyph, color = statusColor, fontSize = 12.sp)
+            }
+        }
+        if (expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp, start = 8.dp, end = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                ToolCallSection(label = "input", body = toolCall.input)
+                if (result != null) {
+                    ToolCallSection(
+                        label = if (result.isError) "output (error)" else "output",
+                        body = result.output,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConversationToolResultRow(result: ConversationEvent.ToolResult) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 2.dp),
+    ) {
+        Text(
+            text = if (result.isError) "tool result (error)" else "tool result",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        if (result.output.isNotEmpty()) {
+            ToolCallSection(label = "output", body = result.output)
+        }
+    }
+}
+
+@Composable
+private fun ToolCallSection(label: String, body: String) {
+    if (body.isEmpty()) return
+    val lineCount = body.count { it == '\n' } + 1
+    val tooLong = lineCount > 200 || body.length > 5000
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = label,
+            color = PocketShellColors.TextMuted,
+            fontSize = 10.sp,
+            modifier = Modifier.padding(bottom = 2.dp),
+        )
+        val base = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.TermBg, shape = RoundedCornerShape(4.dp))
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+            .let { if (tooLong) it.heightIn(max = 240.dp) else it }
+        val scrollState = rememberScrollState()
+        val finalModifier = if (tooLong) base.verticalScroll(scrollState) else base
+        Column(modifier = finalModifier) {
             Text(
                 text = body,
-                color = PocketShellColors.Text,
-                fontSize = 13.sp,
+                color = PocketShellColors.TermText,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
             )
         }
     }
+}
+
+private fun Map<String, ConversationEvent>.findToolResultFor(
+    toolCallId: String,
+): ConversationEvent.ToolResult? =
+    values.firstOrNull { it is ConversationEvent.ToolResult && it.toolCallId == toolCallId }
+        as? ConversationEvent.ToolResult
+
+internal fun runningToolCallIds(events: List<ConversationEvent>): Set<String> {
+    val resolved = events
+        .filterIsInstance<ConversationEvent.ToolResult>()
+        .mapNotNullTo(mutableSetOf()) { it.toolCallId }
+    return events
+        .filterIsInstance<ConversationEvent.ToolCall>()
+        .map { it.id }
+        .filter { it !in resolved }
+        .toSet()
 }
 
 private fun ConversationEvent.searchText(): String = when (this) {

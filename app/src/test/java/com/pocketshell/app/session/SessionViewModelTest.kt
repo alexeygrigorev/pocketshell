@@ -639,6 +639,257 @@ class SessionViewModelTest {
         assertEquals("message 510 replacement", (state.events.last() as ConversationEvent.Message).text)
     }
 
+    // ─── Issue #160 (review round 2) — optimistic dedup contract ───
+    //
+    // The conversation pane inserts a placeholder `Message(role=User)`
+    // when the user taps Send so the UI updates immediately, then
+    // waits for the agent's JSONL to emit the real event via the tail.
+    // Without dedup the user sees the same prompt twice (once as
+    // optimistic, once as the real event). [reconcileAgentEvents]
+    // recognises the optimistic prefix on the id and drops the
+    // optimistic entry when the real one arrives with matching text.
+    // See [OPTIMISTIC_USER_MESSAGE_ID_PREFIX].
+
+    @Test
+    fun reconcileAgentEventsCollapsesOptimisticIntoRealUserMessage() {
+        val optimistic = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}1234567",
+            agent = AgentKind.ClaudeCode,
+            atMillis = 1000L,
+            role = ConversationRole.User,
+            text = "hello agent",
+        )
+        val real = ConversationEvent.Message(
+            id = "u1",
+            agent = AgentKind.ClaudeCode,
+            atMillis = 1500L,
+            role = ConversationRole.User,
+            text = "hello agent",
+        )
+
+        val reconciled = reconcileAgentEvents(listOf(optimistic, real))
+
+        assertEquals(
+            "optimistic + real should reduce to one Message keeping the real id",
+            listOf("u1"),
+            reconciled.map { it.id },
+        )
+        assertEquals("hello agent", (reconciled.single() as ConversationEvent.Message).text)
+    }
+
+    @Test
+    fun reconcileAgentEventsKeepsOptimisticUntilRealArrives() {
+        // While the tail has not yet caught up, the optimistic event
+        // must remain visible so the user sees their own prompt.
+        val optimistic = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}999",
+            agent = AgentKind.ClaudeCode,
+            atMillis = 1000L,
+            role = ConversationRole.User,
+            text = "still in flight",
+        )
+
+        val reconciled = reconcileAgentEvents(listOf(optimistic))
+
+        assertEquals(listOf(optimistic.id), reconciled.map { it.id })
+    }
+
+    @Test
+    fun reconcileAgentEventsCollapsesOnlyOneOptimisticPerRealUserMessage() {
+        // Two back-to-back identical user prompts → two optimistic
+        // entries. When the first real event arrives it should
+        // collapse exactly one optimistic, leaving the second
+        // placeholder visible until its own real event arrives.
+        val optimistic1 = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}1",
+            agent = AgentKind.ClaudeCode,
+            atMillis = 1000L,
+            role = ConversationRole.User,
+            text = "ping",
+        )
+        val optimistic2 = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}2",
+            agent = AgentKind.ClaudeCode,
+            atMillis = 1100L,
+            role = ConversationRole.User,
+            text = "ping",
+        )
+        val real1 = ConversationEvent.Message(
+            id = "u1",
+            agent = AgentKind.ClaudeCode,
+            atMillis = 1500L,
+            role = ConversationRole.User,
+            text = "ping",
+        )
+
+        val reconciled = reconcileAgentEvents(listOf(optimistic1, optimistic2, real1))
+
+        // optimistic1 collapses into real1; optimistic2 is still
+        // pending its own real event and must stay visible. Order
+        // follows insertion: optimistic2 was inserted before real1
+        // (which only arrived once optimistic1 had been added then
+        // collapsed), so the visible feed reads optimistic2 → real1.
+        assertEquals(listOf(optimistic2.id, "u1"), reconciled.map { it.id })
+    }
+
+    @Test
+    fun reconcileAgentEventsKeepsOptimisticWhenRealEventHasDifferentText() {
+        // The dedup contract matches on text + role; a real user
+        // message with different content is a different prompt and
+        // must not collapse the unrelated optimistic placeholder.
+        val optimistic = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}1",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.User,
+            text = "first prompt",
+        )
+        val real = ConversationEvent.Message(
+            id = "u1",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.User,
+            text = "completely different prompt",
+        )
+
+        val reconciled = reconcileAgentEvents(listOf(optimistic, real))
+
+        assertEquals(listOf(optimistic.id, "u1"), reconciled.map { it.id })
+    }
+
+    @Test
+    fun reconcileAgentEventsDoesNotCollapseAssistantMessages() {
+        // Only user-role optimistic placeholders are dropped — the
+        // dedup pass is one-directional. An assistant message with
+        // the same text as an existing user message is a different
+        // conversation row and must be preserved.
+        val optimistic = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}1",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.User,
+            text = "hello",
+        )
+        val assistant = ConversationEvent.Message(
+            id = "a1",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.Assistant,
+            text = "hello",
+        )
+
+        val reconciled = reconcileAgentEvents(listOf(optimistic, assistant))
+
+        assertEquals(listOf(optimistic.id, "a1"), reconciled.map { it.id })
+    }
+
+    @Test
+    fun reconcileAgentEventsPreservesIdDedupAndBoundContract() {
+        // The legacy contract is unchanged for non-optimistic
+        // callers: same-id events collapse to the latest version,
+        // and the trailing bound caps the list at `maxEvents`.
+        val events = (0..510).map { index ->
+            ConversationEvent.Message(
+                id = "event-$index",
+                agent = AgentKind.ClaudeCode,
+                role = ConversationRole.Assistant,
+                text = "message $index",
+            )
+        } + ConversationEvent.Message(
+            id = "event-510",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.Assistant,
+            text = "message 510 replacement",
+        )
+
+        val reconciled = reconcileAgentEvents(events)
+
+        assertEquals(500, reconciled.size)
+        assertEquals("event-11", reconciled.first().id)
+        assertEquals(
+            "message 510 replacement",
+            (reconciled.last() as ConversationEvent.Message).text,
+        )
+    }
+
+    @Test
+    fun sendToAgentInsertsOptimisticUserMessageVisibleBeforeTail() = runBlocking {
+        // Pins the round-2 dedup invariant on the production
+        // `sendToAgent` path: the local insert is tagged with the
+        // optimistic prefix (so the tail-side reconcile can collapse
+        // it) and the trimmed payload reaches the terminal-input
+        // bridge with a trailing carriage return.
+        val vm = newVm()
+        vm.startAgentConversationForTest(
+            detection = AgentDetection(
+                agent = AgentKind.ClaudeCode,
+                sourcePath = "/tmp/claude.jsonl",
+                sessionId = "claude",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+            initialEvents = emptyList(),
+        )
+
+        val stdin = ByteArrayOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerJob = vm.terminalState.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = stdin,
+        )
+
+        try {
+            vm.sendToAgent("  please review the diff  ")
+
+            // Optimistic event is visible immediately; id carries the
+            // dedup prefix; trimmed text matches the trimmed payload.
+            val events = vm.agentConversation.value.events
+            assertEquals(1, events.size)
+            val message = events.single() as ConversationEvent.Message
+            assertEquals(ConversationRole.User, message.role)
+            assertEquals("please review the diff", message.text)
+            assertTrue(
+                "expected optimistic id prefix, got id=${message.id}",
+                message.id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX),
+            )
+
+            // Send-keys equivalent: the trimmed text + Enter reaches
+            // the remote PTY's stdin via the terminal bridge.
+            waitForStdin(stdin, "please review the diff\r")
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            vm.terminalState.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun sendToAgentIsNoOpWhenNoDetection() = runBlocking {
+        // Defensive: the conversation pane cannot be reached without
+        // a detection, but the public API still guards against being
+        // called from a test or future entry point that has not
+        // detected an agent yet.
+        val vm = newVm()
+        val stdin = ByteArrayOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerJob = vm.terminalState.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = stdin,
+        )
+        try {
+            vm.sendToAgent("won't fire")
+            assertTrue(
+                "no agent detected — sendToAgent must not append to the feed",
+                vm.agentConversation.value.events.isEmpty(),
+            )
+            // No bytes written to stdin either.
+            assertEquals(0, stdin.size())
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            vm.terminalState.detachExternalProducer()
+        }
+    }
+
     @Test
     fun nonTmuxAgentDetectionDoesNotUseFreshExecCwd() = runTest {
         val session = FakeSshSession()

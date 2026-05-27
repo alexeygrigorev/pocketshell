@@ -20,6 +20,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -92,6 +93,11 @@ import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.VoiceCommandReviewStrip
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
+import com.pocketshell.core.agents.ToolCallSummary
+import com.pocketshell.app.composer.MarkdownText
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
@@ -421,8 +427,12 @@ public fun TmuxSessionScreen(
                     currentAgentConversation?.selectedTab == SessionTab.Conversation &&
                     currentAgentConversation.detection != null
                 ) {
+                    val paneIdForSend = currentPane.paneId
                     TmuxConversationPane(
                         events = currentAgentConversation.events,
+                        onSendToAgent = { text ->
+                            viewModel.sendToAgentPane(paneIdForSend, text)
+                        },
                         modifier = Modifier
                             .fillMaxSize()
                             .testTag(TMUX_CONVERSATION_PANE_TAG),
@@ -955,6 +965,9 @@ private val MotionEasing = CubicBezierEasing(0f, 0f, 0.2f, 1f)
 internal const val TMUX_SESSION_SCREEN_TAG = "tmux:session"
 internal const val TMUX_SESSION_SWITCHER_TAG = "tmux:session-switcher"
 internal const val TMUX_CONVERSATION_PANE_TAG = "tmux:conversation"
+internal const val TMUX_CONVERSATION_COMPOSER_INPUT_TAG = "tmux:conversation:composer-input"
+internal const val TMUX_CONVERSATION_COMPOSER_SEND_TAG = "tmux:conversation:composer-send"
+internal const val TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX = "tmux:conversation:tool:"
 internal const val TMUX_AGENT_HINT_TAG = "tmux:agent-hint"
 /** Issue #116: stable test tag for the in-tmux-session blocked / near-limit chip. */
 internal const val TMUX_SESSION_USAGE_BADGE_TAG = "tmux:usage-badge"
@@ -1200,13 +1213,21 @@ private fun TmuxAgentHintChip(
 @Composable
 private fun TmuxConversationPane(
     events: List<ConversationEvent>,
+    onSendToAgent: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var query by remember { mutableStateOf("") }
+    var composerText by remember { mutableStateOf("") }
     val filteredEvents = remember(events, query) {
         val q = query.trim()
         if (q.isBlank()) events else events.filter { it.searchText().contains(q, ignoreCase = true) }
     }
+    // Tool-call expansion state per event-id. Persisted at the pane
+    // level (not inside the row composable) so a row scrolling out and
+    // back in remembers the user's decision until the session detaches.
+    val expandedToolCalls = remember { mutableStateOf(setOf<String>()) }
+    val runningToolIds = remember(events) { runningToolCallIds(events) }
+    val rowMap = remember(events) { events.associateBy { it.id } }
     Column(
         modifier = modifier
             .background(color = PocketShellColors.Background)
@@ -1236,58 +1257,299 @@ private fun TmuxConversationPane(
                 }
             }
             items(filteredEvents, key = { it.id }) { event ->
-                TmuxConversationEventRow(event)
+                ConversationEventRow(
+                    event = event,
+                    runningToolIds = runningToolIds,
+                    eventsById = rowMap,
+                    isExplicitlyExpanded = expandedToolCalls.value.contains(event.id),
+                    onToggleExpand = { id ->
+                        expandedToolCalls.value = expandedToolCalls.value.toggle(id)
+                    },
+                )
+            }
+        }
+        AgentComposerRow(
+            text = composerText,
+            onTextChange = { composerText = it },
+            onSend = {
+                val trimmed = composerText.trim()
+                if (trimmed.isNotEmpty()) {
+                    onSendToAgent(trimmed)
+                    composerText = ""
+                }
+            },
+        )
+    }
+}
+
+/**
+ * Conversation row dispatcher — picks between the message renderer
+ * (Markdown for `Message`, optimistic + assistant) and the polished
+ * tool-call renderer ([ConversationToolCallRow]).
+ *
+ * `ToolResult` events are folded into their parent `ToolCall` row when
+ * possible (via [toolCallId]) so the user sees one collapsible card per
+ * tool invocation rather than two separate rows.
+ */
+@Composable
+private fun ConversationEventRow(
+    event: ConversationEvent,
+    runningToolIds: Set<String>,
+    eventsById: Map<String, ConversationEvent>,
+    isExplicitlyExpanded: Boolean,
+    onToggleExpand: (String) -> Unit,
+) {
+    when (event) {
+        is ConversationEvent.Message -> ConversationMessageRow(event)
+        is ConversationEvent.ToolCall -> ConversationToolCallRow(
+            toolCall = event,
+            result = eventsById.findToolResultFor(event.id),
+            isRunning = event.id in runningToolIds,
+            isExplicitlyExpanded = isExplicitlyExpanded,
+            onToggle = { onToggleExpand(event.id) },
+        )
+        is ConversationEvent.ToolResult -> {
+            // Orphan tool result with no parent ToolCall — render as a
+            // standalone, very subtle row.
+            ConversationToolResultRow(event)
+        }
+    }
+}
+
+@Composable
+private fun ConversationMessageRow(event: ConversationEvent.Message) {
+    val isUser = event.role == ConversationRole.User
+    val title = when (event.role) {
+        ConversationRole.User -> "USER"
+        ConversationRole.Assistant -> if (event.streaming) "ASSISTANT - streaming" else "ASSISTANT"
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = if (isUser) PocketShellColors.SurfaceElev else PocketShellColors.Surface)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = title,
+            color = if (isUser) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        MarkdownText(text = event.text)
+    }
+}
+
+private fun Map<String, ConversationEvent>.findToolResultFor(
+    toolCallId: String,
+): ConversationEvent.ToolResult? =
+    values.firstOrNull { it is ConversationEvent.ToolResult && it.toolCallId == toolCallId }
+        as? ConversationEvent.ToolResult
+
+/**
+ * Identify every tool call that has no matching tool result yet — the
+ * scope addition asks for these to auto-expand so the user can see
+ * what's currently happening live.
+ */
+internal fun runningToolCallIds(events: List<ConversationEvent>): Set<String> {
+    val resolved = events
+        .filterIsInstance<ConversationEvent.ToolResult>()
+        .mapNotNullTo(mutableSetOf()) { it.toolCallId }
+    return events
+        .filterIsInstance<ConversationEvent.ToolCall>()
+        .map { it.id }
+        .filter { it !in resolved }
+        .toSet()
+}
+
+private fun Set<String>.toggle(id: String): Set<String> =
+    if (contains(id)) this - id else this + id
+
+private fun ConversationEvent.searchText(): String = when (this) {
+    is ConversationEvent.Message -> text
+    is ConversationEvent.ToolCall -> "$name $input"
+    is ConversationEvent.ToolResult -> output
+}
+
+@Composable
+private fun AgentComposerRow(
+    text: String,
+    onTextChange: (String) -> Unit,
+    onSend: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        OutlinedTextField(
+            value = text,
+            onValueChange = onTextChange,
+            modifier = Modifier
+                .weight(1f)
+                .testTag(TMUX_CONVERSATION_COMPOSER_INPUT_TAG),
+            placeholder = { Text("Message agent") },
+        )
+        TextButton(
+            onClick = onSend,
+            enabled = text.isNotBlank(),
+            modifier = Modifier.testTag(TMUX_CONVERSATION_COMPOSER_SEND_TAG),
+        ) {
+            Text("Send")
+        }
+    }
+}
+
+/**
+ * Render a single tool-call invocation as either a one-line collapsed
+ * row (issue #160 scope addition: subtle / minimal) or an expanded
+ * card with input + output bounded by a scroll container for very long
+ * payloads.
+ *
+ * Auto-expand policy: a tool call without a matching tool result is
+ * considered "running" and starts expanded so the user sees what's
+ * happening live. The user's explicit expand/collapse via [onToggle]
+ * overrides the auto-state — that's why we track the explicit flag
+ * separately at the pane level rather than relying purely on the
+ * derived running state.
+ */
+@Composable
+private fun ConversationToolCallRow(
+    toolCall: ConversationEvent.ToolCall,
+    result: ConversationEvent.ToolResult?,
+    isRunning: Boolean,
+    isExplicitlyExpanded: Boolean,
+    onToggle: () -> Unit,
+) {
+    val expanded = isExplicitlyExpanded || (isRunning && result == null)
+    val summary = remember(toolCall.id, toolCall.input) { ToolCallSummary.forToolCall(toolCall) }
+    val statusGlyph = when {
+        result?.isError == true -> "!"
+        result != null -> "✓"
+        isRunning -> "…"
+        else -> ""
+    }
+    val statusColor = when {
+        result?.isError == true -> PocketShellColors.Red
+        result != null -> PocketShellColors.Green
+        else -> PocketShellColors.TextMuted
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(vertical = 2.dp)
+            .testTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + toolCall.id),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = toolCall.name,
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = summary,
+                color = PocketShellColors.TextMuted,
+                fontSize = 12.sp,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+            )
+            if (statusGlyph.isNotEmpty()) {
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(text = statusGlyph, color = statusColor, fontSize = 12.sp)
+            }
+        }
+        if (expanded) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp, start = 8.dp, end = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                ToolCallSection(label = "input", body = toolCall.input)
+                if (result != null) {
+                    ToolCallSection(
+                        label = if (result.isError) "output (error)" else "output",
+                        body = result.output,
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun TmuxConversationEventRow(event: ConversationEvent) {
-    var expanded by remember(event.id) { mutableStateOf(false) }
-    val title = when (event) {
-        is ConversationEvent.Message -> when (event.role) {
-            ConversationRole.User -> "USER"
-            ConversationRole.Assistant -> if (event.streaming) "ASSISTANT - streaming" else "ASSISTANT"
-        }
-        is ConversationEvent.ToolCall -> "Tool: ${event.name}"
-        is ConversationEvent.ToolResult -> if (event.isError) "Tool result - error" else "Tool result"
-    }
-    val body = when (event) {
-        is ConversationEvent.Message -> event.text
-        is ConversationEvent.ToolCall -> event.input
-        is ConversationEvent.ToolResult -> event.output
-    }
-    val isTool = event is ConversationEvent.ToolCall || event is ConversationEvent.ToolResult
+private fun ConversationToolResultRow(result: ConversationEvent.ToolResult) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .background(color = PocketShellColors.Surface)
-            .border(width = 1.dp, color = PocketShellColors.Border)
-            .clickable(enabled = isTool) { expanded = !expanded }
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+            .padding(vertical = 2.dp),
     ) {
-        Text(
-            text = if (isTool && !expanded) "$title (collapsed)" else title,
-            color = if (isTool) PocketShellColors.Accent else PocketShellColors.TextSecondary,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-        )
-        if (!isTool || expanded) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = body,
-                color = PocketShellColors.Text,
-                fontSize = 13.sp,
+                text = if (result.isError) "tool result (error)" else "tool result",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
             )
+        }
+        if (result.output.isNotEmpty()) {
+            ToolCallSection(label = "output", body = result.output)
         }
     }
 }
 
-private fun ConversationEvent.searchText(): String = when (this) {
-    is ConversationEvent.Message -> text
-    is ConversationEvent.ToolCall -> "$name $input"
-    is ConversationEvent.ToolResult -> output
+/**
+ * Inner labelled block of the expanded tool-call card. Very long bodies
+ * (>200 lines OR >5000 chars per the scope addition) collapse into a
+ * bounded-height scrollable container so the conversation pane can't
+ * have a single tool eat the whole viewport.
+ */
+@Composable
+private fun ToolCallSection(label: String, body: String) {
+    if (body.isEmpty()) return
+    val lineCount = body.count { it == '\n' } + 1
+    val tooLong = lineCount > 200 || body.length > 5000
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(
+            text = label,
+            color = PocketShellColors.TextMuted,
+            fontSize = 10.sp,
+            modifier = Modifier.padding(bottom = 2.dp),
+        )
+        val container = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.TermBg, shape = RoundedCornerShape(4.dp))
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+            .let { base ->
+                if (tooLong) base.heightIn(max = 240.dp) else base
+            }
+        // The vertical-scroll container is only needed when the body is
+        // very long — otherwise the natural line height of the Text is
+        // already constrained by the parent LazyColumn.
+        val scrollState = rememberScrollState()
+        val finalModifier = if (tooLong) {
+            container.verticalScroll(scrollState)
+        } else {
+            container
+        }
+        Column(modifier = finalModifier) {
+            Text(
+                text = body,
+                color = PocketShellColors.TermText,
+                fontSize = 12.sp,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            )
+        }
+    }
 }
 
 @Composable

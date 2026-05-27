@@ -274,6 +274,36 @@ public class SessionViewModel @Inject constructor(
         )
     }
 
+    /**
+     * Issue #160 (review round 2) test seam: start the production
+     * `session.tail` follow loop against [session] from
+     * [fromLineExclusive] onward, plumbing every parsed event back
+     * through [appendAgentEvents] (and therefore through the dedup
+     * pass in [boundedDistinctEvents]). Used by
+     * `ConversationInteractE2eTest` to exercise the full composer →
+     * `sendToAgent` → SSH stdin → JSONL append → tail → conversation
+     * pane journey against the Docker agent fixture without having
+     * to spin up the production [startAgentDetection] path (which
+     * scans for live processes the deterministic shim cannot
+     * mimic).
+     *
+     * The returned [Job] is the live tail; tests cancel it (and the
+     * VM's [onCleared] will cancel the stored [agentTailJob] as
+     * usual on teardown).
+     */
+    internal fun startAgentTailForTest(
+        session: SshSession,
+        detection: AgentDetection,
+        fromLineExclusive: Long,
+    ): Job? {
+        agentTailJob?.cancel()
+        val job = agentRepository.tailEventsFromLine(session, detection, fromLineExclusive) { event ->
+            appendAgentEvents(listOf(event))
+        }
+        agentTailJob = job
+        return job
+    }
+
     private suspend fun startAgentConversation(
         session: SshSession,
         detection: AgentDetection,
@@ -289,20 +319,10 @@ public class SessionViewModel @Inject constructor(
                 selectedTab = SessionTab.Terminal,
                 hintVisible = hintKey !in dismissedAgentHints,
             )
-            agentTailJob = if (detection.agent == com.pocketshell.core.agents.AgentKind.OpenCode) {
-                viewModelScope.launch {
-                    while (true) {
-                        kotlinx.coroutines.delay(5_000)
-                        val events = runCatching {
-                            agentRepository.pollOpenCodeEvents(session, detection)
-                        }.getOrDefault(emptyList())
-                        if (events.isNotEmpty()) appendAgentEvents(events)
-                    }
-                }
-            } else {
-                agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
-                    appendAgentEvents(listOf(event))
-                }
+            // Issue #160: OpenCode now uses the same `session.tail` route
+            // Claude + Codex already use — no special polling branch.
+            agentTailJob = agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
+                appendAgentEvents(listOf(event))
             }
     }
 
@@ -312,18 +332,8 @@ public class SessionViewModel @Inject constructor(
         _agentConversation.value = current.copy(events = boundedDistinctEvents(current.events + events))
     }
 
-    private fun boundedDistinctEvents(events: List<ConversationEvent>): List<ConversationEvent> {
-        val byId = LinkedHashMap<String, ConversationEvent>()
-        for (event in events.takeLast(MaxAgentEvents * 2)) {
-            byId[event.id] = event
-        }
-        val distinct = byId.values.toList()
-        return if (distinct.size <= MaxAgentEvents) {
-            distinct
-        } else {
-            distinct.subList(distinct.size - MaxAgentEvents, distinct.size)
-        }
-    }
+    private fun boundedDistinctEvents(events: List<ConversationEvent>): List<ConversationEvent> =
+        reconcileAgentEvents(events, maxEvents = MaxAgentEvents)
 
     public fun selectSessionTab(tab: SessionTab) {
         val current = _agentConversation.value
@@ -521,6 +531,43 @@ public class SessionViewModel @Inject constructor(
     public fun dismissVoiceCommandReview() {
         commandPlannerJob?.cancel()
         _voiceCommandReview.value = VoiceCommandReviewUiState()
+    }
+
+    /**
+     * Issue #160: send [text] as a chat message into the agent running
+     * in the attached SSH shell.
+     *
+     * Adds an optimistic [ConversationEvent.Message] with
+     * [ConversationRole.User] to the conversation feed first so the UI
+     * updates without waiting for the agent's JSONL append. The text is
+     * then written through the same terminal-input path used by chip
+     * taps and snippet picks (`sendText` with a trailing carriage
+     * return), so the agent's CLI sees it as a normal submitted prompt.
+     *
+     * No-op if no agent is currently detected — the conversation pane
+     * isn't reachable in that state, but the defensive check matches
+     * the rest of the public API.
+     */
+    public fun sendToAgent(text: String) {
+        val payload = text.trim()
+        if (payload.isEmpty()) return
+        val current = _agentConversation.value
+        val detection = current.detection ?: return
+        val optimistic = ConversationEvent.Message(
+            // Issue #160 round 2: prefix used by [reconcileAgentEvents]
+            // to recognise the placeholder so it can be replaced by the
+            // real `Message(role=User)` from the agent's JSONL tail.
+            // [System.nanoTime] keeps each optimistic id unique so two
+            // back-to-back identical prompts both stay visible until
+            // their respective tails arrive.
+            id = "$OPTIMISTIC_USER_MESSAGE_ID_PREFIX${System.nanoTime()}",
+            agent = detection.agent,
+            atMillis = System.currentTimeMillis(),
+            role = com.pocketshell.core.agents.ConversationRole.User,
+            text = payload,
+        )
+        appendAgentEvents(listOf(optimistic))
+        sendText(payload, withEnter = true)
     }
 
     /**

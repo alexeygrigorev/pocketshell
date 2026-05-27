@@ -114,3 +114,27 @@ services:
     container_name: pocketshell-test-bootstrap-fish-user-local-path
     ports:
       - "2235:22"
+
+  # Issue #145: deterministic mid-session disconnect fixture. Every
+  # accepted interactive SSH session (TmuxClient shell channel) is
+  # wrapped in a ForceCommand watcher that kills the SSH child after
+  # `FLAKY_DISCONNECT_AFTER_SEC` seconds (default 8 in the Dockerfile,
+  # overridden to 12 here so the PocketShell tmux attach handshake has
+  # room to land before the blip). Non-interactive `session.exec(cmd)`
+  # probes (used by the host picker's `tmuxctl list` / `tmux
+  # list-sessions` calls) skip the timer entirely so the picker probes
+  # stay fast. The container entrypoint seeds a long-lived `flaky-main`
+  # tmux session so the picker's first SSH probe lists it immediately.
+  # Bound on host port 2226 (distinct from `agents`/2222, `tmux`/2224,
+  # bootstrap variants/2230-2235).
+  flaky-agent:
+    build:
+      context: .
+      dockerfile: flaky-agent/Dockerfile
+    image: pocketshell-test:flaky-agent
+    container_name: pocketshell-test-flaky-agent
+    environment:
+      FLAKY_DISCONNECT_AFTER_SEC: "12"
+      FLAKY_SEEDED_SESSION_NAME: "flaky-main"
+    ports:
+      - "2226:22"

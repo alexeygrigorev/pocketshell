@@ -780,6 +780,14 @@ class SessionsDashboardViewModelTest {
     ) : com.pocketshell.core.tmux.TmuxClient {
         private val delegate = FakeTmuxClient()
         override val events = delegate.events
+        // Issue #173 (gap fix to keep unit tests compiling under
+        // #145 round-3): `TmuxClient` gained a `disconnected:
+        // StateFlow<Boolean>` member that this hand-rolled test fake
+        // never started overriding. Delegating to the underlying
+        // [FakeTmuxClient] keeps the throwing semantics intact while
+        // satisfying the interface contract. Tracked separately from
+        // #145 — this fake is unrelated to the disconnect monitor work.
+        override val disconnected = delegate.disconnected
         val sentCommands: MutableList<String> get() = delegate.sentCommands
         override suspend fun connect() = delegate.connect()
         override suspend fun sendCommand(cmd: String): CommandResponse {

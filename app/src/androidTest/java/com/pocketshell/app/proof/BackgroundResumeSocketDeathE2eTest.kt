@@ -74,12 +74,13 @@ import java.io.FileOutputStream
  *    owns `stdout.collect` in [TerminalSurfaceState.attachExternalProducer]
  *    and crashes the app exactly the way the maintainer reported on the
  *    Pixel 7a / Android 16 device.
- *  - The visible Compose tree must show a "connection lost" status line so
- *    the user can see the failure instead of staring at a frozen terminal.
- *    [TmuxSessionScreen] already renders a `StatusLine` for
+ *  - The visible Compose tree must show a "Disconnected from ..." status
+ *    line so the user can see the failure instead of staring at a frozen
+ *    terminal. [TmuxSessionScreen] renders a `FailedConnectionRow` for
  *    `ConnectionStatus.Failed`; we assert the text contains the
- *    "connection lost" marker the TmuxSessionViewModel writes in its
- *    eventsJob-completion handler.
+ *    "Disconnected from" marker the TmuxSessionViewModel writes in its
+ *    `attachClient` `client.disconnected` observer (unified by #145
+ *    round-3 across the previous "connection lost: ..." wording).
  *
  * Artifact contract (see process.md "Terminal Artifact Review"):
  *
@@ -517,12 +518,16 @@ class BackgroundResumeSocketDeathE2eTest {
 
         /**
          * Substring rendered by [TmuxSessionViewModel] in the Failed
-         * connection-status message. Both branches of the
-         * eventsJob.invokeOnCompletion handler ([cause] null or
-         * non-null) write a `"connection lost: ..."` reason so this
-         * marker matches every path the regression test exercises.
+         * connection-status message. Issue #145 unified the disconnect
+         * wording across `client.disconnected` observer paths to read
+         * `"Disconnected from <user>@<host>:<port>. Tap Reconnect to
+         * retry."` so this marker matches that prefix. The old
+         * `"connection lost: tmux control channel closed"` wording was
+         * replaced because the new one is actionable (the user knows
+         * to tap Reconnect) while still being scope-faithful to the
+         * #173 regression: the user sees a Failed status, not a crash.
          */
-        const val CONNECTION_LOST_MARKER: String = "connection lost"
+        const val CONNECTION_LOST_MARKER: String = "Disconnected from"
 
         /**
          * After moveToState(CREATED) we wait this long for the lifecycle

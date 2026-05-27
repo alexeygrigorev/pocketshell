@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.di.CommandPlannerClientFactory
@@ -48,6 +49,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 import javax.inject.Inject
 
 /**
@@ -169,6 +171,15 @@ public class TmuxSessionViewModel @Inject constructor(
     private var connectJob: Job? = null
     private var eventsJob: Job? = null
 
+    // Issue #145: whether [reconnect] would result in a new connect
+    // attempt. The screen surfaces a Reconnect button only when this is
+    // true; without a known target (e.g. the ViewModel was never opened)
+    // the button is hidden so the user doesn't get a silent no-op tap.
+    // The flow is updated whenever [activeTarget] / [connectingTarget]
+    // changes via [refreshReconnectAvailability].
+    private val _canReconnect: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    public val canReconnect: StateFlow<Boolean> = _canReconnect.asStateFlow()
+
     // Issue #102 (reopen): last on-screen terminal grid we propagated to
     // tmux via `resize-window`. Tracked so [resizeRemotePty] is a no-op
     // when Compose re-fires onTerminalSizeChanged with the same numbers
@@ -244,6 +255,18 @@ public class TmuxSessionViewModel @Inject constructor(
         if (connectJob?.isActive == true && connectingTarget == target) return
         if (_connectionStatus.value is ConnectionStatus.Connected && activeTarget == target) return
 
+        // Issue #145: deterministic reconnect-loop signal. Every accepted
+        // connect attempt increments a process-wide counter and emits a
+        // log line that the connected disconnect+reconnect test greps for
+        // from logcat. The two early-return guards above intentionally do
+        // NOT emit — they are no-ops, not reconnect attempts.
+        val attempt = TMUX_CONNECT_ATTEMPTS.incrementAndGet()
+        Log.i(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-connect-attempt count=$attempt host=$host port=$port " +
+                "user=$user session=${target.sessionName}",
+        )
+
         // Issue #151: a tap on "Attach" for a different tmux session
         // re-enters `connect()` while the previous connection's event-loop
         // coroutine is still mid-processing a `ControlEvent`. The old
@@ -259,6 +282,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // transport the only thread interacting with it is us.
         val previousConnectJob = connectJob
         connectingTarget = target
+        refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
         connectJob = viewModelScope.launch {
             // First: drain any in-flight connect() coroutine. `cancelAndJoin`
@@ -276,6 +300,41 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Issue #145: explicit reconnect entry point used by the Compose
+     * "Reconnect" affordance the screen renders when [connectionStatus]
+     * is Failed. Delegates to [connect] with the last known
+     * [activeTarget] (or [connectingTarget] if the failure happened
+     * during the initial connect race). Marked public so tests can
+     * drive the reconnect without going through the screen, and so the
+     * screen's reconnect button has a single named seam to call.
+     *
+     * Returns `false` when there is no known target to reconnect to
+     * (e.g. the ViewModel was never opened). The screen gates the
+     * Reconnect button on [canReconnect] so the user never sees a tap
+     * that silently no-ops; this return value is the secondary defence
+     * for direct programmatic callers.
+     */
+    public fun reconnect(): Boolean {
+        val target = activeTarget ?: connectingTarget ?: return false
+        connect(
+            hostId = target.hostId,
+            hostName = target.hostName,
+            host = target.host,
+            port = target.port,
+            user = target.user,
+            keyPath = target.keyPath,
+            passphrase = target.passphrase,
+            sessionName = target.sessionName,
+            startDirectory = target.startDirectory,
+        )
+        return true
+    }
+
+    private fun refreshReconnectAvailability() {
+        _canReconnect.value = activeTarget != null || connectingTarget != null
+    }
+
     private suspend fun runConnect(target: ConnectionTarget) {
         try {
             val key: SshKey = SshKey.Path(File(target.keyPath))
@@ -288,6 +347,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 knownHosts = KnownHostsPolicy.AcceptAll,
             )
             val session = sessionResult.getOrElse { e ->
+                connectingTarget = null
+                refreshReconnectAvailability()
                 _connectionStatus.value =
                     ConnectionStatus.Failed("connect failed: ${e.message}")
                 return
@@ -300,6 +361,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 startDirectory = target.startDirectory,
             )
             activeTarget = target
+            refreshReconnectAvailability()
             attachClient(client)
             client.connect()
             activeTmuxClients.register(
@@ -322,6 +384,7 @@ public class TmuxSessionViewModel @Inject constructor(
             reconcilePanes()
 
             connectingTarget = null
+            refreshReconnectAvailability()
             _connectionStatus.value = ConnectionStatus.Connected(
                 target.host,
                 target.port,
@@ -330,6 +393,7 @@ public class TmuxSessionViewModel @Inject constructor(
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
             connectingTarget = null
+            refreshReconnectAvailability()
             _connectionStatus.value = ConnectionStatus.Failed(
                 "error: ${t.javaClass.simpleName}: ${t.message}",
             )
@@ -377,20 +441,32 @@ public class TmuxSessionViewModel @Inject constructor(
         bridgeScope.launch {
             client.disconnected.collect { dead ->
                 if (!dead) return@collect
-                if (_connectionStatus.value !is ConnectionStatus.Connected) return@collect
+                val current = _connectionStatus.value
+                if (current !is ConnectionStatus.Connected) return@collect
                 // Only react if this is still THE active client. The
                 // `connect()` race-recovery path attaches a fresh
                 // [TmuxClient] and closes the old one inside the same
                 // VM; the old client's disconnected signal must not
                 // overwrite the new client's Connected status.
                 if (clientRef !== client) return@collect
-                // Reason string shares the "connection lost" prefix
-                // with [SessionViewModel.runConnect]'s analogue handler
-                // so the StatusLine phrasing is consistent across both
-                // routes (raw SSH and tmux-CC) in screenshots /
-                // dogfood reports.
+                // Issue #145: prefer the actionable phrasing — host
+                // coordinates plus "Tap Reconnect to retry." — over the
+                // bare diagnostic so the in-session disconnect band
+                // tells the user both WHERE they were and WHAT to do
+                // next. The screen renders a Reconnect button alongside
+                // this message (see [FailedConnectionRow] in
+                // [TmuxSessionScreen]) gated on [canReconnect]. Logged
+                // under the dedicated tag so the connected
+                // disconnect+reconnect test can correlate with the
+                // connect-attempt counter.
+                Log.w(
+                    ISSUE_145_RECONNECT_TAG,
+                    "tmux-mid-session-disconnect host=${current.host} " +
+                        "port=${current.port} user=${current.user}",
+                )
                 _connectionStatus.value = ConnectionStatus.Failed(
-                    "connection lost: tmux control channel closed",
+                    "Disconnected from ${current.user}@${current.host}:${current.port}. " +
+                        "Tap Reconnect to retry.",
                 )
             }
         }
@@ -1252,6 +1328,10 @@ public class TmuxSessionViewModel @Inject constructor(
         sessionRef = null
         activeTarget = null
         connectingTarget = null
+        // Issue #145: a sync teardown (onCleared / test-replacement seam)
+        // clears the reconnect availability flag so the screen never
+        // re-renders the Reconnect button against a stale target.
+        refreshReconnectAvailability()
         // Issue #102 (reopen): a fresh attach must re-fire `resize-window`
         // against the new tmux session's pane on the next layout pass.
         remoteColumns = 0
@@ -1361,3 +1441,26 @@ private fun List<String>.toTerminalViewportBytes(): ByteArray {
 }
 
 private const val MaxAgentEvents: Int = 500
+
+/**
+ * Issue #145: logcat tag used by the disconnect observer + connect-attempt
+ * counter. Kept short enough to satisfy `Log.isLoggable`'s 23-character
+ * tag limit on older Android versions while still being grep-able from a
+ * dumped logcat. The connected reconnect test searches for this tag and
+ * counts `tmux-connect-attempt` lines to assert no reconnect-loop
+ * thrash.
+ */
+internal const val ISSUE_145_RECONNECT_TAG: String = "PsTmuxReconnect"
+
+/**
+ * Issue #145: process-wide monotonic counter of `connect()` calls that
+ * actually progress to a new attempt (the idempotent early-returns do
+ * not increment). The connected reconnect test snapshots this value
+ * before and after the test body to assert exactly one reconnect attempt
+ * per disconnect, anchored to the test's lifetime rather than to a
+ * shared on-device logcat buffer that can roll over.
+ *
+ * The counter is internal because callers should never key behaviour
+ * off it; it is purely a test signal.
+ */
+internal val TMUX_CONNECT_ATTEMPTS: AtomicInteger = AtomicInteger(0)

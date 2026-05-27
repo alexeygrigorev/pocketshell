@@ -195,6 +195,11 @@ public fun TmuxSessionScreen(
     // Issue #176: collected once at the screen root so the conversation
     // pane recomposes when the toggle flips in Settings.
     val appSettings by settingsViewModel.state.collectAsState()
+    // Issue #145: gate the in-session Reconnect button on whether the
+    // ViewModel has a target to reconnect to. Without this, the button
+    // would render in a tight initial-connect-failure window where
+    // `reconnect()` would silently no-op.
+    val canReconnect by viewModel.canReconnect.collectAsState()
 
     val pagerState = rememberPagerState(pageCount = { panes.size })
 
@@ -371,8 +376,22 @@ public fun TmuxSessionScreen(
             (status as? ConnectionStatus.Connecting)?.let {
                 StatusLine("connecting to ${it.user}@${it.host}:${it.port} (tmux $sessionName)")
             }
-            (status as? ConnectionStatus.Failed)?.let {
-                StatusLine(it.message)
+            // Issue #145: render a user-facing error band (status text +
+            // Reconnect affordance) when the SSH transport drops
+            // mid-session. The view model's `client.disconnected`
+            // observer (added in #173, rephrased in #145) flips status
+            // to Failed when the underlying [TmuxClient.readerLoop]
+            // exits; this band surfaces the failure and gives the user
+            // a single-tap retry that re-runs the same connect() path.
+            // The test tags [TMUX_SESSION_ERROR_TAG] and
+            // [TMUX_SESSION_RECONNECT_TAG] make the elements grep-able
+            // from connected disconnect+reconnect tests.
+            (status as? ConnectionStatus.Failed)?.let { failed ->
+                FailedConnectionRow(
+                    message = failed.message,
+                    onReconnect = { viewModel.reconnect() },
+                    canReconnect = canReconnect,
+                )
             }
             // Issue #116 (usage-panel Fix B): in-session blocked /
             // near-limit chip for the active host. Mirrors the
@@ -1015,6 +1034,15 @@ internal const val TMUX_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX = "tmux:conversa
 internal const val TMUX_AGENT_HINT_TAG = "tmux:agent-hint"
 /** Issue #116: stable test tag for the in-tmux-session blocked / near-limit chip. */
 internal const val TMUX_SESSION_USAGE_BADGE_TAG = "tmux:usage-badge"
+
+/**
+ * Issue #145: stable test tags for the mid-session SSH disconnect band
+ * (root row + the Reconnect button). The connected disconnect+reconnect
+ * test asserts both tags are present once the SSH transport drops, and
+ * taps [TMUX_SESSION_RECONNECT_TAG] to drive the reconnect.
+ */
+internal const val TMUX_SESSION_ERROR_TAG = "tmux:session:error"
+internal const val TMUX_SESSION_RECONNECT_TAG = "tmux:session:reconnect"
 /** Issue #158: the WindowStrip is the per-session window tabs row. Hidden when only one window exists. */
 internal const val TMUX_WINDOW_STRIP_TAG = "tmux:window-strip"
 /**
@@ -1112,6 +1140,63 @@ private fun StatusLine(text: String) {
             .background(color = PocketShellColors.Surface)
             .padding(horizontal = 12.dp, vertical = 6.dp),
     )
+}
+
+/**
+ * Issue #145: in-session SSH-disconnect error band.
+ *
+ * Rendered when [TmuxSessionViewModel.connectionStatus] is
+ * [TmuxSessionViewModel.ConnectionStatus.Failed]. Surfaces the
+ * disconnect message and a single-tap Reconnect button that calls back
+ * into [TmuxSessionViewModel.reconnect].
+ *
+ * The message is rendered in the design-system error token
+ * [PocketShellColors.Red] (see `docs/design-system.md` §1) so the band
+ * reads as a real failure state instead of a muted hint.
+ *
+ * The Reconnect button is gated on [canReconnect] — when no target is
+ * set (the ViewModel never opened) the button is hidden so the user
+ * never sees a tap that silently no-ops.
+ *
+ * The row is tagged with [TMUX_SESSION_ERROR_TAG] (root) and
+ * [TMUX_SESSION_RECONNECT_TAG] (button) so the connected
+ * disconnect+reconnect test can locate both elements without relying
+ * on the message string.
+ */
+@Composable
+private fun FailedConnectionRow(
+    message: String,
+    onReconnect: () -> Unit,
+    canReconnect: Boolean,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .testTag(TMUX_SESSION_ERROR_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = message,
+            // Design-system error token (`docs/design-system.md` §1).
+            // The disconnect band is the canonical "error status"
+            // surface for the tmux route and so reaches for [Red]
+            // rather than the muted `TextSecondary` of the generic
+            // StatusLine.
+            color = PocketShellColors.Red,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f),
+        )
+        if (canReconnect) {
+            TextButton(
+                onClick = onReconnect,
+                modifier = Modifier.testTag(TMUX_SESSION_RECONNECT_TAG),
+            ) {
+                Text("Reconnect")
+            }
+        }
+    }
 }
 
 @Composable

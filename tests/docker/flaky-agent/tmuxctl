@@ -1,0 +1,37 @@
+#!/bin/sh
+# Issue #145: minimal `tmuxctl` shim for the flaky-agent fixture.
+#
+# The host-picker gateway probes `tmuxctl list --by activity` first and
+# falls back to `tmux list-sessions -F '<format>'` only if `tmuxctl` is
+# missing or exits non-zero. The real pip-installed `tmuxctl` in this
+# fixture exits 1 because the metadata file is missing; meanwhile the
+# fallback `tmux list-sessions -F '#{session_name}\t...'` returns output
+# with literal `\t` strings instead of tab characters (tmux's `-F` does
+# not interpret `\t` escapes, only `#{...}` placeholders), so the parser
+# returns an empty list and the picker shows "No tmux sessions found.".
+#
+# This shim shadows the real `tmuxctl` so the picker takes the first
+# branch, returning the seeded `flaky-main` row in the exact format
+# [HostTmuxSessionListParser.parseTmuxctlList] expects.
+#
+# This is fixture-only behaviour. The shim never runs inside the
+# PocketShell app or on a real host — it lives entirely inside the
+# disposable `flaky-agent` Docker image.
+
+set -eu
+
+if [ "${1:-}" = "list" ] || [ "${1:-}" = "ls" ] || [ "${1:-}" = "l" ]; then
+    cat <<'EOF'
+IDX  SESSION               CREATED
+1    flaky-main            2026-05-27 12:00:00
+
+Join a session: tmuxctl <id> or tmuxctl <session>
+Create a new one: tmuxctl :<session>
+Help: tmuxctl --help
+EOF
+    exit 0
+fi
+
+# Any other invocation (the picker only uses `list --by activity`) just
+# exits clean so we don't accidentally drive automated tooling.
+exit 0

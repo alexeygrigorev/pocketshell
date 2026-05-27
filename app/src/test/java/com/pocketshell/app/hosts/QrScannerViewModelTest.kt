@@ -8,9 +8,10 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 /**
- * Issue #129: drive the [QrScannerViewModel] state machine with a
- * fake camera feed of QR strings. Verifies permission handling,
- * single-QR fast path, multi-QR progression, and error / retry.
+ * Issue #129 + #225: drive the [QrScannerViewModel] state machine
+ * with a fake camera feed of QR strings. Verifies permission
+ * handling, single-part envelope fast path, multi-QR progression,
+ * un-wrapped-payload rejection (D22), and error / retry.
  *
  * Robolectric is used so `android.util.Base64` (called by
  * [QrChunkCodec]) is on the classpath.
@@ -43,14 +44,28 @@ class QrScannerViewModelTest {
     }
 
     @Test
-    fun onPayloadDecoded_singleLegacyPayload_completesImmediately() {
+    fun onPayloadDecoded_singlePartEnvelope_completesImmediately() {
         val vm = QrScannerViewModel()
         vm.onPermissionGranted()
-        val payload = """{"type":"pocketshell.ssh-import.v1","version":1}"""
-        vm.onPayloadDecoded(payload)
+        val inner = """{"type":"pocketshell.ssh-import.v1","version":1}"""
+        val envelopes = QrChunkCodec.encode(inner, id = "deadbeef")
+        assertEquals(1, envelopes.size)
+        vm.onPayloadDecoded(envelopes[0])
         val state = vm.state.value
         assertTrue("expected Decoded, got $state", state is QrScannerViewModel.State.Decoded)
-        assertEquals(payload, (state as QrScannerViewModel.State.Decoded).payload)
+        assertEquals(inner, (state as QrScannerViewModel.State.Decoded).payload)
+    }
+
+    @Test
+    fun onPayloadDecoded_unwrappedPayload_transitionsToError() {
+        // D22 / issue #225: legacy un-wrapped QR payloads are no longer
+        // accepted. The scanner must surface an error rather than
+        // silently importing them.
+        val vm = QrScannerViewModel()
+        vm.onPermissionGranted()
+        vm.onPayloadDecoded("""{"type":"pocketshell.ssh-import.v1","version":1}""")
+        val state = vm.state.value
+        assertTrue("expected Error, got $state", state is QrScannerViewModel.State.Error)
     }
 
     @Test
@@ -112,9 +127,12 @@ class QrScannerViewModelTest {
     fun decodedState_ignoresLatePayloads() {
         val vm = QrScannerViewModel()
         vm.onPermissionGranted()
-        vm.onPayloadDecoded("""{"type":"pocketshell.ssh-import.v1"}""")
+        val firstInner = """{"type":"pocketshell.ssh-import.v1"}"""
+        val firstEnvelopes = QrChunkCodec.encode(firstInner, id = "deadbeef")
+        vm.onPayloadDecoded(firstEnvelopes[0])
         val first = vm.state.value as QrScannerViewModel.State.Decoded
-        vm.onPayloadDecoded("""{"type":"different"}""")
+        val secondEnvelopes = QrChunkCodec.encode("""{"type":"different"}""", id = "cafef00d")
+        vm.onPayloadDecoded(secondEnvelopes[0])
         // The terminal state must not be overwritten by stray frames.
         val later = vm.state.value as QrScannerViewModel.State.Decoded
         assertEquals(first.payload, later.payload)

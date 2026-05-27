@@ -102,42 +102,41 @@ class QrScannerViewModel @Inject constructor() : ViewModel() {
         val current = _state.value
         if (current !is State.Scanning) return
         val payload = text.trim()
-        if (QrChunkCodec.isEnvelope(payload)) {
-            val part = QrChunkCodec.decodePart(payload).getOrElse {
-                _state.value = State.Error(
-                    it.message ?: "Could not decode QR envelope",
-                )
-                return
-            }
-            when (val outcome = assembler.accept(part)) {
-                is QrChunkAssembler.Outcome.Complete -> {
-                    _state.value = State.Decoded(payload = outcome.payload)
-                }
-                is QrChunkAssembler.Outcome.Progress -> {
-                    _state.value = State.Scanning(
-                        scanCount = outcome.state.count,
-                        scanTotal = outcome.state.total,
-                    )
-                }
-                is QrChunkAssembler.Outcome.Duplicate -> {
-                    _state.value = State.Scanning(
-                        scanCount = outcome.state.count,
-                        scanTotal = outcome.state.total,
-                    )
-                }
-                is QrChunkAssembler.Outcome.Reset -> {
-                    _state.value = State.Scanning(
-                        scanCount = outcome.state.count,
-                        scanTotal = outcome.state.total,
-                    )
-                }
-            }
+        // D22 hard-cut: only the envelope path is accepted. Non-envelope
+        // QR payloads transition to State.Error (no legacy fallback).
+        if (!QrChunkCodec.isEnvelope(payload)) {
+            _state.value = State.Error("QR payload is not a PocketShell envelope")
             return
         }
-        // Non-envelope path: a raw single-QR import payload
-        // (`pocketshell.ssh-import.v1` JSON). Treat it as complete on
-        // the first decode.
-        _state.value = State.Decoded(payload = payload)
+        val part = QrChunkCodec.decodePart(payload).getOrElse {
+            _state.value = State.Error(
+                it.message ?: "Could not decode QR envelope",
+            )
+            return
+        }
+        when (val outcome = assembler.accept(part)) {
+            is QrChunkAssembler.Outcome.Complete -> {
+                _state.value = State.Decoded(payload = outcome.payload)
+            }
+            is QrChunkAssembler.Outcome.Progress -> {
+                _state.value = State.Scanning(
+                    scanCount = outcome.state.count,
+                    scanTotal = outcome.state.total,
+                )
+            }
+            is QrChunkAssembler.Outcome.Duplicate -> {
+                _state.value = State.Scanning(
+                    scanCount = outcome.state.count,
+                    scanTotal = outcome.state.total,
+                )
+            }
+            is QrChunkAssembler.Outcome.Reset -> {
+                _state.value = State.Scanning(
+                    scanCount = outcome.state.count,
+                    scanTotal = outcome.state.total,
+                )
+            }
+        }
     }
 
     /** User tapped Retry on the error / permission-denied state. */

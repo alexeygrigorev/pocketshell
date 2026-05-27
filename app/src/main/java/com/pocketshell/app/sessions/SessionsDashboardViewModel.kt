@@ -112,6 +112,16 @@ class SessionsDashboardViewModel @Inject constructor(
     val killError: StateFlow<String?> = _killError.asStateFlow()
 
     /**
+     * One-shot user-facing message for a failed [createSession] attempt
+     * (issue #204 — create failures must surface a visible banner so the
+     * user can tell a "duplicate name" rejection apart from a silent
+     * no-op). The screen renders this in a banner slot and clears it via
+     * [clearCreateError] once the user dismisses it.
+     */
+    private val _createError: MutableStateFlow<String?> = MutableStateFlow(null)
+    val createError: StateFlow<String?> = _createError.asStateFlow()
+
+    /**
      * Per-host poller jobs. Keyed by host id so we can cancel the right
      * one when a host unregisters. Per-host snapshot caches let us
      * rebuild the flat list without re-polling every host on every
@@ -277,6 +287,35 @@ class SessionsDashboardViewModel @Inject constructor(
     fun entryFor(hostId: Long): ActiveTmuxClients.Entry? =
         activeClients.clients.value[hostId]
 
+    /**
+     * Create a new tmux session on [entry]'s host and refresh the
+     * dashboard list once tmux acknowledges the creation — issue #204.
+     *
+     * ## Wire shape
+     *
+     * Runs `new-session -d -s <name> -c <startDirectory>`. The `-d` flag
+     * keeps the new session detached so the create flow doesn't
+     * implicitly attach the user's tmux client to the new session — the
+     * dashboard list is the source of truth for "the session exists";
+     * attaching is a separate, explicit affordance (tap the row).
+     *
+     * ## Error surfacing
+     *
+     * Failures (transport drop, tmux `%error` such as duplicate-name
+     * rejection) surface as [createError] so the user can tell a real
+     * failure apart from "the row didn't show up yet because the next
+     * poll is 9.8s away". A successful create runs [refreshEntry]
+     * synchronously so the new row appears well within the 2s
+     * acceptance budget called out in issue #204 — we don't wait for the
+     * 10s poll cycle.
+     *
+     * We do NOT subscribe to `%sessions-changed` here (unlike
+     * [killSession]) because tmux emits the notification BEFORE the new
+     * row is queryable in some edge cases — instead we rely on
+     * sendCommand's response correlator: when `sendCommand` returns
+     * non-error, the session exists on the server, so an immediate
+     * list-sessions is guaranteed to see it.
+     */
     fun createSession(
         entry: ActiveTmuxClients.Entry,
         name: String,
@@ -287,14 +326,37 @@ class SessionsDashboardViewModel @Inject constructor(
             rawStartDirectory = startDirectory,
         )
         viewModelScope.launch {
-            runCatching {
-                entry.client.sendCommand(
+            val client = entry.client
+            val sendResult = runCatching {
+                client.sendCommand(
                     "new-session -d -s '${escapeSingleQuoted(creation.sessionName)}' " +
                         "-c '${escapeSingleQuoted(creation.startDirectory)}'",
                 )
             }
+            val response = sendResult.getOrNull()
+            val transportFailure = sendResult.exceptionOrNull()
+            if (transportFailure != null) {
+                _createError.value = "Couldn't create ${creation.sessionName}: " +
+                    (transportFailure.message ?: "transport error")
+                return@launch
+            }
+            if (response != null && response.isError) {
+                val detail = response.output.joinToString(separator = " ").trim()
+                _createError.value =
+                    "Couldn't create ${creation.sessionName}" +
+                        if (detail.isNotEmpty()) ": $detail" else ""
+                return@launch
+            }
             refreshEntry(entry)
         }
+    }
+
+    /**
+     * Clear the create-error banner. Wired to the screen's banner
+     * dismiss action — issue #204.
+     */
+    fun clearCreateError() {
+        _createError.value = null
     }
 
     fun renameSession(entry: ActiveTmuxClients.Entry, oldName: String, newName: String) {

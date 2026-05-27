@@ -46,6 +46,14 @@ internal const val DASHBOARD_NEW_SESSION_TAG = "dashboard:sessions:new"
 internal const val DASHBOARD_SESSION_ROW_TAG_PREFIX = "dashboard:sessions:row:"
 
 /**
+ * Tag for the create-session-failure banner — issue #204. Rendered
+ * inside [SessionsSection] when [SessionsDashboardViewModel.createError]
+ * is non-null so users see a duplicate-name rejection or transport
+ * failure rather than wondering why the new row never appeared.
+ */
+const val DASHBOARD_CREATE_ERROR_BANNER_TAG: String = "dashboard:sessions:create-error"
+
+/**
  * Tag for the "what do these icons mean?" legend toggle that sits at
  * the top of the dashboard's Sessions section — issue #202. The legend
  * itself is gated behind this toggle so the chrome stays quiet on the
@@ -105,7 +113,15 @@ fun SessionsSection(
     } else {
         allSessions.filter { it.hostId == hostIdFilter }
     }
-    if (sessions.isEmpty()) return
+    // Issue #204: even when [sessions] is empty we still render the
+    // section if the view model is currently surfacing a create-session
+    // error. Without that, dismissing the dialog after a duplicate-name
+    // rejection that ALSO happens to leave the host with zero sessions
+    // would hide the banner before the user could read it. The
+    // [createError] StateFlow is the source of truth and the section
+    // collapses again the moment the user dismisses it.
+    val createError by viewModel.createError.collectAsState()
+    if (sessions.isEmpty() && createError == null) return
 
     val nowSec = System.currentTimeMillis() / 1000L
     var selectedSession by remember { mutableStateOf<SessionSummary?>(null) }
@@ -168,6 +184,19 @@ fun SessionsSection(
         }
         if (legendExpanded) {
             SessionsLegend()
+        }
+        // Issue #204: surface create-session failures (transport errors,
+        // tmux %error such as duplicate-name rejection) inline. The
+        // banner lives inside the section so it sits next to the
+        // affordance that triggered it; HostListScreen owns the kill
+        // banner instead, which is consistent with the original wiring
+        // because the kill flow can fire from anywhere on the dashboard
+        // surface.
+        createError?.let { msg ->
+            CreateErrorBanner(
+                message = msg,
+                onDismiss = { viewModel.clearCreateError() },
+            )
         }
         sessions.forEach { summary ->
             Box(modifier = Modifier.fillMaxWidth()) {
@@ -241,11 +270,24 @@ fun SessionsSection(
                 if (entry != null) {
                     when (currentDialog) {
                         DashboardDialogMode.CreateSession -> {
-                            val creation = resolveTmuxSessionCreation(
-                                rawName = dialogText,
-                                rawStartDirectory = dialogStartDirectory,
+                            // Issue #204: the previous wiring invoked
+                            // `onOpenTmuxSession` here, which attaches an
+                            // interactive client to a NEW tmux session
+                            // (creating it on the way in). That hijacked
+                            // the dashboard's "+ New session" affordance
+                            // into a navigation move that conflated
+                            // "create" and "open". Per the new
+                            // acceptance criteria the button now runs
+                            // `new-session -d` (detached) via the view
+                            // model, refreshes the list, and leaves the
+                            // user on the dashboard so they can decide
+                            // whether to attach. Attach is a separate
+                            // affordance (tap the row).
+                            viewModel.createSession(
+                                entry = entry,
+                                name = dialogText,
+                                startDirectory = dialogStartDirectory,
                             )
-                            onOpenTmuxSession(entry, creation.sessionName, creation.startDirectory)
                         }
                         DashboardDialogMode.RenameSession -> {
                             viewModel.renameSession(
@@ -364,6 +406,39 @@ private fun DashboardLifecycleDialog(
             }
         },
     )
+}
+
+/**
+ * Inline banner used for the create-session failure path — issue #204.
+ *
+ * Visual treatment matches `HostListScreen`'s `ShareMessageBanner` so
+ * the dashboard's banner vocabulary stays consistent across the
+ * kill-error / share / create-error surfaces. The banner is fully
+ * self-contained inside the sessions module so adding a new error
+ * surface here doesn't force a sibling edit on `HostListScreen`
+ * (parallel-issue file ownership concern called out in the issue
+ * brief).
+ */
+@Composable
+private fun CreateErrorBanner(message: String, onDismiss: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .testTag(DASHBOARD_CREATE_ERROR_BANNER_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = message,
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = onDismiss) {
+            Text("Dismiss", color = PocketShellColors.Accent, fontSize = 12.sp)
+        }
+    }
 }
 
 /**

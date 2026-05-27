@@ -900,6 +900,201 @@ class SessionsDashboardViewModelTest {
     }
 
     /**
+     * Issue #204 — happy path for `+ New session`. The view model
+     * issues `new-session -d -s <name> -c <cwd>`, then on success
+     * refreshes the per-host snapshot so the new row appears within the
+     * 2s acceptance budget (much faster than the 10s poll cadence
+     * elsewhere in this file would imply).
+     */
+    @Test
+    fun createSessionSendsDetachedNewSessionAndRefreshes() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            // Response for the new-session command itself.
+            responses.addLast(
+                CommandResponse(number = 0L, output = emptyList(), isError = false),
+            )
+            // Response for the post-create refresh — the new row plus a
+            // stable peer so we can assert the snapshot update.
+            responses.addLast(
+                CommandResponse(
+                    number = 1L,
+                    output = listOf(
+                        row("fresh", activitySec = 200L),
+                        row("existing", activitySec = 100L),
+                    ),
+                    isError = false,
+                ),
+            )
+        }
+        val h = host(20L, "twenty")
+        val entry = ActiveTmuxClients.Entry(
+            hostId = h.id,
+            hostName = h.name,
+            hostname = h.hostname,
+            port = h.port,
+            username = h.username,
+            keyPath = "/k",
+            client = client,
+        )
+        vm.applyHostSnapshotForTest(
+            hostId = h.id,
+            summaries = listOf(
+                SessionSummary(h.id, h.name, "existing", lastActivity = 100L, attached = false),
+            ),
+        )
+
+        vm.createSession(entry, "fresh", startDirectory = "/srv/app")
+        advanceUntilIdle()
+
+        assertTrue(
+            "expected the detached new-session command, got ${client.sentCommands}",
+            client.sentCommands.contains("new-session -d -s 'fresh' -c '/srv/app'"),
+        )
+        // The refresh must have fired: list-sessions came after the
+        // new-session command.
+        assertTrue(
+            "expected list-sessions to follow new-session",
+            client.sentCommands.any { it.startsWith("list-sessions") },
+        )
+        // The post-refresh aggregate now includes the freshly created
+        // row, sorted by activity desc.
+        assertEquals(
+            listOf("fresh", "existing"),
+            vm.sessions.value.map { it.sessionName },
+        )
+        // Happy path stays silent — no banner.
+        assertNull(
+            "successful create should not produce a createError banner",
+            vm.createError.value,
+        )
+    }
+
+    /**
+     * Issue #204 — a duplicate-name (or any other) tmux `%error`
+     * response surfaces a [createError] banner and SKIPS the refresh.
+     * Skipping the refresh matches the kill-error path's rationale: an
+     * unconditional refresh after a failed create would mask the
+     * failure mode (e.g. "the duplicate-name row still exists" would
+     * make it look like the create silently succeeded).
+     */
+    @Test
+    fun createSessionTmuxErrorSurfacesErrorAndSkipsRefresh() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            responses.addLast(
+                CommandResponse(
+                    number = 0L,
+                    output = listOf("duplicate session: fresh"),
+                    isError = true,
+                ),
+            )
+        }
+        val h = host(21L, "twentyone")
+        val entry = ActiveTmuxClients.Entry(
+            hostId = h.id,
+            hostName = h.name,
+            hostname = h.hostname,
+            port = h.port,
+            username = h.username,
+            keyPath = "/k",
+            client = client,
+        )
+
+        vm.createSession(entry, "fresh")
+        advanceUntilIdle()
+
+        assertTrue(
+            "expected the new-session command to be attempted, got ${client.sentCommands}",
+            client.sentCommands.any { it.startsWith("new-session") },
+        )
+        assertFalse(
+            "tmux %error must skip the refresh",
+            client.sentCommands.any { it.startsWith("list-sessions") },
+        )
+        val msg = vm.createError.value
+        assertNotNull("expected createError on tmux %error response", msg)
+        assertTrue(
+            "createError should include the resolved session name; got '$msg'",
+            msg!!.contains("fresh"),
+        )
+        assertTrue(
+            "createError should surface the tmux detail; got '$msg'",
+            msg.contains("duplicate"),
+        )
+    }
+
+    /**
+     * Issue #204 — transport-level failures (SSH channel dropped) also
+     * surface a banner and skip the refresh.
+     */
+    @Test
+    fun createSessionTransportFailureSurfacesErrorAndSkipsRefresh() = runTest {
+        val vm = newVm()
+        val client = ThrowingTmuxClient(
+            throwOnCommand = "new-session",
+            exception = IllegalStateException("ssh channel closed"),
+        )
+        val h = host(22L, "twentytwo")
+        val entry = ActiveTmuxClients.Entry(
+            hostId = h.id,
+            hostName = h.name,
+            hostname = h.hostname,
+            port = h.port,
+            username = h.username,
+            keyPath = "/k",
+            client = client,
+        )
+
+        vm.createSession(entry, "doomed")
+        advanceUntilIdle()
+
+        assertTrue(
+            "expected the new-session command to be attempted",
+            client.sentCommands.any { it.startsWith("new-session") },
+        )
+        assertFalse(
+            "transport failure must skip the refresh",
+            client.sentCommands.any { it.startsWith("list-sessions") },
+        )
+        val msg = vm.createError.value
+        assertNotNull("expected createError after transport failure", msg)
+        assertTrue(
+            "createError should mention the session name; got '$msg'",
+            msg!!.contains("doomed"),
+        )
+    }
+
+    /**
+     * Issue #204 — the banner is one-shot; the user dismisses it and
+     * the StateFlow flips back to null so a subsequent failure can
+     * surface a fresh banner.
+     */
+    @Test
+    fun clearCreateErrorResetsTheStateFlow() = runTest {
+        val vm = newVm()
+        val client = ThrowingTmuxClient(
+            throwOnCommand = "new-session",
+            exception = RuntimeException("boom"),
+        )
+        val h = host(23L, "twentythree")
+        val entry = ActiveTmuxClients.Entry(
+            hostId = h.id,
+            hostName = h.name,
+            hostname = h.hostname,
+            port = h.port,
+            username = h.username,
+            keyPath = "/k",
+            client = client,
+        )
+        vm.createSession(entry, "x")
+        advanceUntilIdle()
+        assertNotNull(vm.createError.value)
+        vm.clearCreateError()
+        assertNull(vm.createError.value)
+    }
+
+    /**
      * Test double that throws on a chosen command — exercises the
      * "sendCommand throws" branch of [SessionsDashboardViewModel.killSession]
      * without touching SSH.

@@ -26,6 +26,24 @@ file is the source of truth; this file is only the quick local checklist.
   and confirmed with `HEAD == origin/main`; tags label stable reviewed `main`
   commits.
 
+## "Hetzner" — the maintainer's dev box
+
+When the maintainer says "Hetzner" (or "data mailer", or "my server"), they
+mean their primary dev server, hostname `RMTHZ`
+(`alexey@135.181.114.209`, SSH alias `hetzner`). The orchestrator agent
+runs ON this box — so `pwd` showing `/home/alexey/git/pocketshell` and
+`hostname` showing `RMTHZ` means we ARE Hetzner, not connected to it.
+
+PocketShell on the maintainer's phone connects TO this same box for
+real-device dogfood (alongside the Docker `agents` fixture used by the
+emulator tests on `10.0.2.2:2222`). Agent JSONL logs live in
+`~/.claude/projects/-home-alexey-git-pocketshell/`. Files the
+maintainer shares from another Android app via the PocketShell
+share-target (#138) land in `~/inbox/pocketshell/`. If asked to
+"process the inbox", read those files directly, act on them, and
+`rm` them — the maintainer wants the inbox empty after processing,
+not archived to a subdirectory.
+
 ## Local Android Tooling
 
 This workspace has Android SDK tools installed even when they are not on

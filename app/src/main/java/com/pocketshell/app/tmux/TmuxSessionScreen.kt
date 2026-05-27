@@ -54,6 +54,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -596,8 +597,21 @@ public fun TmuxSessionScreen(
                 )
             }
 
+            // Issue #165: replace the bare one-line "connecting" status
+            // with a visible progress overlay (linear indeterminate bar
+            // + host string) so a 2-5s SSH handshake doesn't feel like
+            // the app is frozen. After 5s a "Still working, this may
+            // be slow" subline appears; after 15s a Cancel affordance
+            // tears down the in-flight [connectJob] (#151's
+            // join-on-cancel machinery makes the teardown deterministic).
             (status as? ConnectionStatus.Connecting)?.let {
-                StatusLine("connecting to ${it.user}@${it.host}:${it.port} (tmux $sessionName)")
+                ConnectingProgressOverlay(
+                    user = it.user,
+                    host = it.host,
+                    port = it.port,
+                    sessionLabel = "tmux $sessionName",
+                    onCancel = { viewModel.cancelConnect() },
+                )
             }
             // Issue #145: render a user-facing error band (status text +
             // Reconnect affordance) when the SSH transport drops
@@ -1373,6 +1387,38 @@ internal const val TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX = "tmux:chrome:tab-pill
  */
 internal const val TMUX_SESSION_ERROR_TAG = "tmux:session:error"
 internal const val TMUX_SESSION_RECONNECT_TAG = "tmux:session:reconnect"
+/**
+ * Issue #165: stable test tags for the SSH-handshake progress overlay
+ * rendered while [TmuxSessionViewModel.ConnectionStatus] is Connecting.
+ *
+ * - [TMUX_CONNECTING_PROGRESS_TAG] is on the overlay container — the
+ *   connected slow-connect test asserts this is visible from tap-attach
+ *   through to Connected (or to the Cancel tap).
+ * - [TMUX_CONNECTING_PROGRESS_BAR_TAG] is on the linear indeterminate
+ *   progress bar inside the overlay.
+ * - [TMUX_CONNECTING_SLOW_HINT_TAG] is on the 5s "still working" line
+ *   so the overlay can be inspected at different stages without
+ *   relying on translatable text.
+ * - [TMUX_CONNECTING_CANCEL_TAG] is on the 15s Cancel button.
+ */
+internal const val TMUX_CONNECTING_PROGRESS_TAG = "tmux:session:connecting"
+internal const val TMUX_CONNECTING_PROGRESS_BAR_TAG = "tmux:session:connecting:bar"
+internal const val TMUX_CONNECTING_SLOW_HINT_TAG = "tmux:session:connecting:slow-hint"
+internal const val TMUX_CONNECTING_CANCEL_TAG = "tmux:session:connecting:cancel"
+
+/**
+ * Issue #165: timings for the SSH-handshake progress overlay. A
+ * 2-5s handshake is the common case the audit flagged as "feels
+ * frozen"; the 5s subline lets the user know the app is still
+ * working past the typical window, and the 15s Cancel affordance
+ * gives them an exit when something is clearly wrong.
+ *
+ * Internal so unit tests can drive the same constants the production
+ * composable uses (otherwise a 15s wait would dominate the test
+ * runtime).
+ */
+internal const val SLOW_CONNECT_HINT_AFTER_MS: Long = 5_000L
+internal const val CANCEL_AVAILABLE_AFTER_MS: Long = 15_000L
 /** Issue #158: the WindowStrip is the per-session window tabs row. Hidden when only one window exists. */
 internal const val TMUX_WINDOW_STRIP_TAG = "tmux:window-strip"
 /**
@@ -1526,6 +1572,118 @@ private fun StatusLine(text: String) {
             .background(color = PocketShellColors.Surface)
             .padding(horizontal = 12.dp, vertical = 6.dp),
     )
+}
+
+/**
+ * Issue #165: progress overlay rendered above the terminal viewport
+ * while the screen is in [ConnectionStatus.Connecting].
+ *
+ * SSH handshakes take 2-5s on real networks; before this overlay the
+ * screen surfaced a single muted text line which the user-journey
+ * audit (#163, Breakage 5) flagged as "looks frozen". The overlay
+ * stack is:
+ *
+ * 1. A linear indeterminate [LinearProgressIndicator] (Material 3
+ *    default — animates a moving sliver so the user reads
+ *    "something is happening" at-a-glance).
+ * 2. A primary label `Connecting to user@host:port (sessionLabel)…`
+ *    — same information the previous `StatusLine` carried, just
+ *    rendered as the foreground line of a visible affordance instead
+ *    of an easily-missed status strip.
+ * 3. After [SLOW_CONNECT_HINT_AFTER_MS] (5s) a subtle muted
+ *    "Still working, this may be slow…" subline so the user knows
+ *    the app has not silently stalled.
+ * 4. After [CANCEL_AVAILABLE_AFTER_MS] (15s) a "Cancel" affordance
+ *    appears. Tapping it invokes [onCancel] (the screen wires this
+ *    to [TmuxSessionViewModel.cancelConnect] which cancels the
+ *    in-flight [connectJob] cleanly via #151's join-on-cancel
+ *    machinery).
+ *
+ * Auto-dismisses on success (the overlay is gated on
+ * `ConnectionStatus.Connecting`); on failure the screen surfaces the
+ * existing [FailedConnectionRow] error sheet which carries the user
+ * forward without changing the failure UX from #145.
+ *
+ * The 5s / 15s timers run as suspending [LaunchedEffect]s keyed on
+ * the visible host string so a same-screen target swap (e.g. the user
+ * tapped a different host) re-arms both timers from zero — otherwise
+ * a slow first attempt could carry its 15s timer into a fresh attempt
+ * and surface Cancel immediately on the second host.
+ *
+ * Test tags:
+ * - [TMUX_CONNECTING_PROGRESS_TAG] on the overlay root.
+ * - [TMUX_CONNECTING_PROGRESS_BAR_TAG] on the linear progress bar.
+ * - [TMUX_CONNECTING_SLOW_HINT_TAG] on the 5s "still working" line.
+ * - [TMUX_CONNECTING_CANCEL_TAG] on the 15s Cancel button.
+ */
+@Composable
+internal fun ConnectingProgressOverlay(
+    user: String,
+    host: String,
+    port: Int,
+    sessionLabel: String,
+    onCancel: () -> Unit,
+) {
+    val targetKey = "$user@$host:$port|$sessionLabel"
+    var showSlowHint by remember(targetKey) { mutableStateOf(false) }
+    var showCancel by remember(targetKey) { mutableStateOf(false) }
+    LaunchedEffect(targetKey) {
+        // Re-key on the visible target so a swap (different host /
+        // session) restarts both timers from zero. Without the key
+        // change a same-screen retry would inherit the previous
+        // attempt's elapsed time and surface Cancel near-instantly.
+        showSlowHint = false
+        showCancel = false
+        kotlinx.coroutines.delay(SLOW_CONNECT_HINT_AFTER_MS)
+        showSlowHint = true
+        kotlinx.coroutines.delay(CANCEL_AVAILABLE_AFTER_MS - SLOW_CONNECT_HINT_AFTER_MS)
+        showCancel = true
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .testTag(TMUX_CONNECTING_PROGRESS_TAG),
+    ) {
+        LinearProgressIndicator(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .testTag(TMUX_CONNECTING_PROGRESS_BAR_TAG),
+            color = PocketShellColors.Accent,
+            trackColor = PocketShellColors.SurfaceElev,
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Connecting to $user@$host:$port ($sessionLabel)…",
+                color = PocketShellColors.Text,
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f),
+            )
+            if (showCancel) {
+                TextButton(
+                    onClick = onCancel,
+                    modifier = Modifier.testTag(TMUX_CONNECTING_CANCEL_TAG),
+                ) {
+                    Text("Cancel")
+                }
+            }
+        }
+        if (showSlowHint) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Still working, this may be slow…",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 11.sp,
+                modifier = Modifier.testTag(TMUX_CONNECTING_SLOW_HINT_TAG),
+            )
+        }
+    }
 }
 
 /**

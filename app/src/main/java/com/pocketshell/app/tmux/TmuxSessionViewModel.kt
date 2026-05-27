@@ -455,6 +455,44 @@ public class TmuxSessionViewModel @Inject constructor(
         _canReconnect.value = activeTarget != null || connectingTarget != null
     }
 
+    /**
+     * Issue #165: cancel an in-flight SSH/tmux connect attempt. Paired
+     * with the 15s "Cancel" affordance the progress overlay on
+     * [TmuxSessionScreen] surfaces once the handshake has been visibly
+     * stalled. Cancels the [connectJob] coroutine (the in-flight SSH
+     * handshake / tmux client setup throws [CancellationException] and
+     * unwinds — the existing #151 join-on-cancel machinery already
+     * guarantees the transport tear-down does not race the still-live
+     * event loop). Flips [_connectionStatus] to
+     * [ConnectionStatus.Failed] with a "Connect cancelled" message so
+     * the screen renders a deterministic post-cancel state rather than
+     * staying stuck on Connecting.
+     *
+     * Clears [connectingTarget] and refreshes [canReconnect] so the
+     * screen's downstream affordances (Reconnect button, in-flight
+     * lock) read off a consistent snapshot once cancel returns. The
+     * [activeTarget] is left alone — if the user had a working session
+     * before this connect attempt (e.g. a same-host session switch),
+     * reconnect() can still fall back to it.
+     *
+     * No-op when the screen is not currently Connecting. Returns
+     * `true` when a cancel actually fired so callers (the screen and
+     * unit tests) can chain post-cancel behaviour without polling the
+     * state flow.
+     */
+    public fun cancelConnect(): Boolean {
+        val current = _connectionStatus.value
+        if (current !is ConnectionStatus.Connecting) return false
+        connectJob?.cancel()
+        connectJob = null
+        connectingTarget = null
+        refreshReconnectAvailability()
+        _connectionStatus.value = ConnectionStatus.Failed(
+            "Connect cancelled by user.",
+        )
+        return true
+    }
+
     private suspend fun runConnect(target: ConnectionTarget) {
         try {
             // Issue #178: instrument the actual SSH handshake call so a
@@ -811,6 +849,39 @@ public class TmuxSessionViewModel @Inject constructor(
         connectingTarget = null
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+    }
+
+    /**
+     * Issue #165 test seam: stamp the ViewModel into [ConnectionStatus.Connecting]
+     * with [connectJob] pointing at a caller-supplied [job] so unit tests can
+     * exercise [cancelConnect] without running the full SSH handshake path.
+     * Mirrors how the early lines of [connect] would flip the state if the
+     * handshake actually fired.
+     *
+     * Returns the same [job] so the caller can inspect its `isCancelled`
+     * post-cancel without storing the reference twice.
+     */
+    internal fun beginConnectingForTest(
+        host: String,
+        port: Int,
+        user: String,
+        job: Job,
+    ): Job {
+        connectingTarget = ConnectionTarget(
+            hostId = 0L,
+            hostName = "",
+            host = host,
+            port = port,
+            user = user,
+            keyPath = "",
+            passphrase = null,
+            sessionName = "test",
+            startDirectory = null,
+        )
+        refreshReconnectAvailability()
+        _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+        connectJob = job
+        return job
     }
 
     /**

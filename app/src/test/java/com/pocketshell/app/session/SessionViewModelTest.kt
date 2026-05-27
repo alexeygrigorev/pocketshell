@@ -37,6 +37,7 @@ import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayOutputStream
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -1116,6 +1117,46 @@ class SessionViewModelTest {
             "visit-to-dismiss must populate the dismissed-set so a future re-detection stays suppressed",
             vm.dismissedHintKeysForTest().contains("abc"),
         )
+    }
+
+    // Issue #165 — cancelConnect tests. The progress overlay's 15s
+    // Cancel affordance routes through [SessionViewModel.cancelConnect];
+    // these tests assert it cancels the in-flight connect job AND flips
+    // status to Failed so the screen renders a deterministic post-cancel
+    // state instead of staying stuck on Connecting.
+
+    @Test
+    fun cancelConnectFlipsConnectingStatusToFailedAndCancelsJob() = runTest {
+        val vm = newVm()
+        val job = Job()
+        vm.beginConnectingForTest(host = "alpha.example", port = 22, user = "alex", job = job)
+        assertTrue(
+            "precondition: status must be Connecting",
+            vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Connecting,
+        )
+
+        val fired = vm.cancelConnect()
+
+        assertTrue("cancelConnect() must report success when called during Connecting", fired)
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "status must be Failed after cancel, was $status",
+            status is SessionViewModel.ConnectionStatus.Failed,
+        )
+        assertEquals(
+            "Connect cancelled by user.",
+            (status as SessionViewModel.ConnectionStatus.Failed).message,
+        )
+        assertTrue("connectJob must be cancelled by cancelConnect()", job.isCancelled)
+    }
+
+    @Test
+    fun cancelConnectIsNoOpWhenNotConnecting() {
+        val vm = newVm()
+        // Status starts Idle — cancel must be a no-op.
+        val fired = vm.cancelConnect()
+        assertFalse("cancelConnect() must no-op when status is Idle", fired)
+        assertTrue(vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Idle)
     }
 }
 

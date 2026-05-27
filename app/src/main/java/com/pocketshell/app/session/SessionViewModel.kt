@@ -191,6 +191,36 @@ public class SessionViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Issue #165: cancel an in-flight SSH connect attempt that the user
+     * decides to abandon after the 15s "Cancel" affordance appears on the
+     * progress overlay. Cancels the [connectJob] coroutine (any in-flight
+     * SSH handshake will throw [CancellationException] and unwind), and
+     * flips [_connectionStatus] to [ConnectionStatus.Failed] so the screen
+     * surfaces a clear "Connect cancelled" message instead of looking
+     * frozen on Connecting forever.
+     *
+     * No-op when there is no active connect job or the session has
+     * already reached [ConnectionStatus.Connected] — the screen's Cancel
+     * affordance is gated on the Connecting state anyway, but defensive
+     * checks here mean a direct programmatic caller cannot accidentally
+     * tear a live session down.
+     *
+     * Returns `true` when a cancel actually fired so callers can drive
+     * post-cancel behaviour (e.g. pop the screen back to the host list)
+     * without racing the state-flow update.
+     */
+    public fun cancelConnect(): Boolean {
+        val current = _connectionStatus.value
+        if (current !is ConnectionStatus.Connecting) return false
+        connectJob?.cancel()
+        connectJob = null
+        _connectionStatus.value = ConnectionStatus.Failed(
+            "Connect cancelled by user.",
+        )
+        return true
+    }
+
     public fun bindProjectNavigationHost(hostId: Long?) {
         if (_projectNavigation.value.hostId == hostId) return
         projectRootsJob?.cancel()
@@ -292,6 +322,24 @@ public class SessionViewModel @Inject constructor(
             val detection = runCatching { agentRepository.detect(session) }.getOrNull() ?: return@launch
             startAgentConversation(session, detection)
         }
+    }
+
+    /**
+     * Issue #165 test seam: stamp the ViewModel into [ConnectionStatus.Connecting]
+     * with [connectJob] pointing at a caller-supplied [job] so unit tests can
+     * exercise [cancelConnect] without spinning up the real SSH handshake.
+     * Mirrors the early state setup [connect] would do before launching the
+     * production handshake coroutine.
+     */
+    internal fun beginConnectingForTest(
+        host: String,
+        port: Int,
+        user: String,
+        job: Job,
+    ): Job {
+        _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+        connectJob = job
+        return job
     }
 
     internal fun startAgentConversationForTest(

@@ -22,9 +22,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.layout.height
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -98,6 +100,23 @@ internal const val SESSION_CONVERSATION_JUMP_TO_LATEST_TAG =
     "session:conversation:jump-to-latest"
 /** Issue #116: stable test tag for the in-session blocked / near-limit chip. */
 internal const val SESSION_USAGE_BADGE_TAG = "session:usage-badge"
+/**
+ * Issue #165: stable test tags for the SSH-handshake progress overlay
+ * on the raw-SSH session screen. Mirrors the
+ * [com.pocketshell.app.tmux.TmuxSessionScreen] equivalents.
+ */
+internal const val SESSION_CONNECTING_PROGRESS_TAG = "session:connecting"
+internal const val SESSION_CONNECTING_PROGRESS_BAR_TAG = "session:connecting:bar"
+internal const val SESSION_CONNECTING_SLOW_HINT_TAG = "session:connecting:slow-hint"
+internal const val SESSION_CONNECTING_CANCEL_TAG = "session:connecting:cancel"
+
+/**
+ * Issue #165: timings for the SSH-handshake progress overlay. Mirrors
+ * the tmux-route constants; raw-SSH handshakes have the same
+ * 2-5s "feels frozen" window the audit flagged.
+ */
+internal const val SESSION_SLOW_CONNECT_HINT_AFTER_MS: Long = 5_000L
+internal const val SESSION_CANCEL_AVAILABLE_AFTER_MS: Long = 15_000L
 
 /**
  * Phase 1 session screen — the visual target is `docs/mockups/session.html`.
@@ -244,10 +263,19 @@ public fun SessionScreen(
                 },
             )
 
-            // Optional one-line status above the terminal until the
-            // breadcrumb's live dot covers it post-#18.
+            // Issue #165: replace the muted "connecting…" status line
+            // with a visible progress overlay so a 2-5s SSH handshake
+            // doesn't feel frozen. After 5s a "still working" subline
+            // shows up; after 15s a Cancel affordance tears down the
+            // in-flight [connectJob]. Mirrors the equivalent overlay on
+            // [com.pocketshell.app.tmux.TmuxSessionScreen].
             (status as? ConnectionStatus.Connecting)?.let {
-                StatusLine("connecting to ${it.user}@${it.host}:${it.port}")
+                ConnectingProgressOverlay(
+                    user = it.user,
+                    host = it.host,
+                    port = it.port,
+                    onCancel = { viewModel.cancelConnect() },
+                )
             }
             (status as? ConnectionStatus.Failed)?.let {
                 StatusLine(it.message)
@@ -1046,6 +1074,86 @@ private fun StatusLine(text: String) {
             .background(color = PocketShellColors.Surface)
             .padding(horizontal = 12.dp, vertical = 6.dp),
     )
+}
+
+/**
+ * Issue #165: SSH-handshake progress overlay for the raw-SSH session
+ * screen. Mirrors the equivalent overlay on
+ * [com.pocketshell.app.tmux.TmuxSessionScreen]; see that composable for
+ * the full design rationale (linear indeterminate bar + host string at
+ * t=0, "Still working…" subline at 5s, Cancel affordance at 15s).
+ *
+ * The Cancel button is wired to [SessionViewModel.cancelConnect] which
+ * cancels the in-flight [connectJob] and flips status to Failed so the
+ * existing error sheet path renders the post-cancel state. The screen
+ * dismisses the overlay automatically when the status flips to
+ * Connected (the overlay is gated on `ConnectionStatus.Connecting`).
+ */
+@Composable
+internal fun ConnectingProgressOverlay(
+    user: String,
+    host: String,
+    port: Int,
+    onCancel: () -> Unit,
+) {
+    val targetKey = "$user@$host:$port"
+    var showSlowHint by remember(targetKey) { mutableStateOf(false) }
+    var showCancel by remember(targetKey) { mutableStateOf(false) }
+    LaunchedEffect(targetKey) {
+        showSlowHint = false
+        showCancel = false
+        kotlinx.coroutines.delay(SESSION_SLOW_CONNECT_HINT_AFTER_MS)
+        showSlowHint = true
+        kotlinx.coroutines.delay(
+            SESSION_CANCEL_AVAILABLE_AFTER_MS - SESSION_SLOW_CONNECT_HINT_AFTER_MS,
+        )
+        showCancel = true
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .testTag(SESSION_CONNECTING_PROGRESS_TAG),
+    ) {
+        LinearProgressIndicator(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .testTag(SESSION_CONNECTING_PROGRESS_BAR_TAG),
+            color = PocketShellColors.Accent,
+            trackColor = PocketShellColors.SurfaceElev,
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Connecting to $user@$host:$port…",
+                color = PocketShellColors.Text,
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f),
+            )
+            if (showCancel) {
+                TextButton(
+                    onClick = onCancel,
+                    modifier = Modifier.testTag(SESSION_CONNECTING_CANCEL_TAG),
+                ) {
+                    Text("Cancel")
+                }
+            }
+        }
+        if (showSlowHint) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Still working, this may be slow…",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 11.sp,
+                modifier = Modifier.testTag(SESSION_CONNECTING_SLOW_HINT_TAG),
+            )
+        }
+    }
 }
 
 /**

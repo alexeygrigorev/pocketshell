@@ -2335,6 +2335,59 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    // Issue #165 — cancelConnect tests. The progress overlay's 15s
+    // Cancel affordance routes through [TmuxSessionViewModel.cancelConnect];
+    // these tests assert it cancels the in-flight connect job AND flips
+    // status to Failed so the screen renders a deterministic post-cancel
+    // state instead of staying stuck on Connecting.
+
+    @Test
+    fun cancelConnectFlipsConnectingStatusToFailedAndCancelsJob() = runTest {
+        val vm = newVm()
+        // A real Job we can inspect post-cancel, parented to the test
+        // scope. The production [connect] launches into [viewModelScope];
+        // for this seam we just need the cancelable handle.
+        val job = kotlinx.coroutines.Job()
+        vm.beginConnectingForTest(host = "alpha.example", port = 22, user = "alex", job = job)
+        assertTrue(
+            "precondition: status must be Connecting",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connecting,
+        )
+
+        val fired = vm.cancelConnect()
+
+        assertTrue("cancelConnect() must report success when called during Connecting", fired)
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "status must be Failed after cancel, was $status",
+            status is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertEquals(
+            "Connect cancelled by user.",
+            (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+        )
+        assertTrue("connectJob must be cancelled by cancelConnect()", job.isCancelled)
+    }
+
+    @Test
+    fun cancelConnectIsNoOpWhenNotConnecting() = runTest {
+        val vm = newVm()
+        // Status starts Idle — cancel must be a no-op.
+        val firedFromIdle = vm.cancelConnect()
+        assertFalse("cancelConnect() must no-op when status is Idle", firedFromIdle)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Idle)
+
+        // Drive to Connected via the test seam and verify cancel is a
+        // no-op there too — the screen's Cancel button is gated on
+        // Connecting, but the defensive check inside cancelConnect()
+        // is the safety net for direct programmatic callers.
+        vm.attachClientForTest(FakeTmuxClient())
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        val firedFromConnected = vm.cancelConnect()
+        assertFalse("cancelConnect() must no-op when status is Connected", firedFromConnected)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
     /**
      * Issue #178: minimal in-memory [SshSession] double for the
      * fast-switch unit tests. Mirrors the same shape as

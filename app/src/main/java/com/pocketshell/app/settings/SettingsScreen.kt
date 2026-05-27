@@ -83,6 +83,7 @@ fun SettingsScreen(
 ) {
     val settings by viewModel.state.collectAsState()
     val keyStatus by viewModel.keyStatus.collectAsState()
+    val hasUsageInstalledHost by viewModel.hasUsageInstalledHost.collectAsState()
     val context = LocalContext.current
 
     val versionName = remember {
@@ -134,7 +135,10 @@ fun SettingsScreen(
                 )
             }
             item {
-                UsageSection(onOpenUsage = onOpenUsage)
+                UsageSection(
+                    onOpenUsage = onOpenUsage,
+                    hasUsageInstalledHost = hasUsageInstalledHost,
+                )
             }
             item {
                 DiagnosticsSection(onOpenCrashReports = onOpenCrashReports)
@@ -183,16 +187,55 @@ private fun SettingsAppBar(onBack: () -> Unit) {
     }
 }
 
+/**
+ * Section label rendered above each [SectionCard].
+ *
+ * Issue #157 polish item 1: prior to this issue the label used 11 sp
+ * `TextMuted` (the "labelSmall" tier from `docs/design-system.md` §2)
+ * which made consecutive sections read as one continuous stack on a
+ * Pixel 7 viewport — the 2026-05-27 UX audit specifically flagged that
+ * Appearance / Terminal / Voice / Usage / Diagnostics had "no dividers
+ * or section cards" visually separating them. The fix here is twofold:
+ *
+ *  - Bump the label to 12 sp `TextSecondary` so the section name reads
+ *    as a heading rather than a caption (still under the `titleMedium`
+ *    16 sp bar so it doesn't compete with body content inside the
+ *    card).
+ *  - Render a 1 dp `BorderSoft` divider above the label whenever
+ *    [includeTopDivider] is true. The host screen passes `false` for
+ *    the very first section so the divider only ever appears BETWEEN
+ *    sections and never above the top of the list. The divider colour
+ *    matches the card border (`BorderSoft`) so the eye reads
+ *    "card-edge → gap → next card-edge" rather than introducing a new
+ *    visual token.
+ *
+ * Padding mirrors the previous values (22 dp gutter, 8 dp bottom) so
+ * the rest of the screen layout doesn't shift.
+ */
 @Composable
-private fun SectionLabel(text: String) {
-    Text(
-        text = text.uppercase(),
-        color = PocketShellColors.TextMuted,
-        fontSize = 11.sp,
-        fontWeight = FontWeight.SemiBold,
-        letterSpacing = 0.8.sp,
-        modifier = Modifier.padding(start = 22.dp, end = 22.dp, bottom = 8.dp),
-    )
+private fun SectionLabel(text: String, includeTopDivider: Boolean = true) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        if (includeTopDivider) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 22.dp)
+                    .height(1.dp)
+                    .background(PocketShellColors.BorderSoft),
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+        Text(
+            text = text.uppercase(),
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = 0.8.sp,
+            modifier = Modifier
+                .padding(start = 22.dp, end = 22.dp, bottom = 8.dp)
+                .testTag(sectionLabelTestTag(text)),
+        )
+    }
 }
 
 @Composable
@@ -221,7 +264,8 @@ private fun AppearanceSection(
     onSelect: (ThemePreference) -> Unit,
 ) {
     Column {
-        SectionLabel("Appearance")
+        // First section in the list — no divider above the label.
+        SectionLabel("Appearance", includeTopDivider = false)
         SectionCard {
             Text(
                 text = "Theme",
@@ -709,7 +753,11 @@ internal fun formatThresholdLabel(seconds: Float): String {
  * reachable in this issue without scope creep.
  */
 @Composable
-private fun UsageSection(onOpenUsage: () -> Unit) {
+private fun UsageSection(
+    onOpenUsage: () -> Unit,
+    hasUsageInstalledHost: Boolean,
+) {
+    val context = LocalContext.current
     Column {
         SectionLabel("Usage")
         SectionCard {
@@ -741,6 +789,68 @@ private fun UsageSection(onOpenUsage: () -> Unit) {
                     fontSize = 22.sp,
                     fontWeight = FontWeight.Bold,
                 )
+            }
+
+            // Issue #157 polish item 5: when no host has `quse` installed
+            // the cross-host Usage dashboard strip (issue #116) is hidden
+            // — by design, "no empty rail" — but that also leaves the user
+            // with no discoverable way to learn that the panel exists.
+            // Render an inline hint inside the same section card so a
+            // first-time user opening Settings sees both the existing row
+            // (still tappable so they can see the empty state) AND the
+            // nudge to install `quse` on a host.
+            //
+            // The Usage docs link surfaces `docs/usage-panel.md` via the
+            // GitHub web view (no in-app docs browser today). The system
+            // browser handles the rest; we never silently install or
+            // download.
+            if (!hasUsageInstalledHost) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            color = PocketShellColors.SurfaceElev,
+                            shape = RoundedCornerShape(8.dp),
+                        )
+                        .border(
+                            width = 1.dp,
+                            color = PocketShellColors.BorderSoft,
+                            shape = RoundedCornerShape(8.dp),
+                        )
+                        .padding(horizontal = 12.dp, vertical = 10.dp)
+                        .testTag(USAGE_EMPTY_HINT_TAG),
+                ) {
+                    Text(
+                        text = "No quse-installed hosts detected",
+                        color = PocketShellColors.Text,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Install quse on a host to see provider quotas here.",
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 12.sp,
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Learn more about quse",
+                        color = PocketShellColors.Accent,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .clickable(role = Role.Button) {
+                                val intent = android.content.Intent(
+                                    android.content.Intent.ACTION_VIEW,
+                                    android.net.Uri.parse(USAGE_DOCS_URL),
+                                )
+                                runCatching { context.startActivity(intent) }
+                            }
+                            .testTag(USAGE_EMPTY_HINT_DOCS_LINK_TAG)
+                            .padding(vertical = 4.dp),
+                    )
+                }
             }
         }
     }
@@ -823,6 +933,17 @@ internal const val TERMINAL_FONT_SLIDER_TAG = "settings:terminal:font-slider"
 internal const val TMUX_SWITCH_TAG = "settings:terminal:tmux-switch"
 internal const val DIAGNOSTICS_CRASHES_TAG = "settings:diagnostics:crashes"
 internal const val USAGE_OPEN_TAG = "settings:usage:open"
+internal const val USAGE_EMPTY_HINT_TAG = "settings:usage:empty-hint"
+internal const val USAGE_EMPTY_HINT_DOCS_LINK_TAG = "settings:usage:empty-hint:docs-link"
+
+/**
+ * GitHub web URL to the in-repo usage panel docs (the local mirror is
+ * `docs/usage-panel.md`). Hard-coded here because the app does not yet
+ * have an in-app docs browser; tapping the link opens the system
+ * browser via `Intent.ACTION_VIEW`.
+ */
+internal const val USAGE_DOCS_URL: String =
+    "https://github.com/alexeygrigorev/pocketshell/blob/main/docs/usage-panel.md"
 internal const val ABOUT_VERSION_TAG = "settings:about:version"
 internal const val VOICE_API_KEY_ROW_TAG = "settings:voice:api-key-row"
 internal const val VOICE_API_KEY_CLEAR_TAG = "settings:voice:api-key-clear"
@@ -837,3 +958,11 @@ internal fun themeOptionTestTag(theme: ThemePreference): String =
 
 internal fun voiceLanguageOptionTestTag(code: String): String =
     "settings:voice:language:" + code.lowercase()
+
+/**
+ * Stable test tag for the section label above each [SectionCard].
+ * Mirrors the lowercase-without-spaces convention already in use for
+ * tags like `settings:appearance:theme:*`.
+ */
+internal fun sectionLabelTestTag(label: String): String =
+    "settings:section-label:" + label.lowercase().replace(" ", "-")

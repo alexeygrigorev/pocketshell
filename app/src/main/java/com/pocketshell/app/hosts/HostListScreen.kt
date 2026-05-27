@@ -156,6 +156,11 @@ fun HostListScreen(
     val pendingNavigation by viewModel.pendingNavigation.collectAsState()
     val sharePayload by viewModel.sharePayload.collectAsState()
     val shareMessage by viewModel.shareMessage.collectAsState()
+    // Issue #157 polish item 2: import-conflict prompt surfaced when an
+    // inbound host already exists (same hostname:port). The dialog
+    // below renders against this flow; the ViewModel pauses the import
+    // write until the user picks Overwrite / Skip / Add as new.
+    val importConflict by viewModel.importConflict.collectAsState()
     val recheckMessage by viewModel.recheckMessage.collectAsState()
     // Issue #168: surface dashboard kill failures here so the banner sits
     // alongside the share/recheck banners (the dashboard ViewModel owns the
@@ -546,6 +551,22 @@ fun HostListScreen(
             )
         }
 
+        importConflict?.let { conflict ->
+            ImportConflictDialog(
+                conflict = conflict,
+                onOverwrite = {
+                    viewModel.resolveImportConflict(ImportConflictResolution.Overwrite)
+                },
+                onSkip = {
+                    viewModel.resolveImportConflict(ImportConflictResolution.Skip)
+                },
+                onAddAsNew = {
+                    viewModel.resolveImportConflict(ImportConflictResolution.AddAsNew)
+                },
+                onDismiss = viewModel::dismissImportConflict,
+            )
+        }
+
         sharePayload?.let { share ->
             HostShareDialog(
                 share = share,
@@ -646,6 +667,17 @@ internal const val HOST_LIST_EMPTY_STATE_TAG = "host-list:empty-state"
 
 /** Issue #116: stable test tag for the cross-host usage dashboard strip. */
 internal const val USAGE_DASHBOARD_STRIP_TAG = "usage:dashboard-strip"
+
+/**
+ * Issue #157: stable test tags for the import-conflict dialog. The
+ * dialog tag wraps the body Column; the per-button tags ride on the
+ * confirm / dismiss `TextButton`s so a UI test can resolve a specific
+ * resolution without depending on label wording.
+ */
+internal const val IMPORT_CONFLICT_DIALOG_TAG = "host-list:import-conflict"
+internal const val IMPORT_CONFLICT_OVERWRITE_TAG = "host-list:import-conflict:overwrite"
+internal const val IMPORT_CONFLICT_SKIP_TAG = "host-list:import-conflict:skip"
+internal const val IMPORT_CONFLICT_ADD_AS_NEW_TAG = "host-list:import-conflict:add-as-new"
 
 /**
  * Issue #116 / #155: stable test tag for the per-host blocked /
@@ -1091,6 +1123,88 @@ private fun HostShareDialog(
         dismissButton = {
             TextButton(onClick = onDismiss) {
                 Text("Close", color = PocketShellColors.TextSecondary)
+            }
+        },
+        containerColor = PocketShellColors.Surface,
+    )
+}
+
+/**
+ * Issue #157 polish item 2: confirmation dialog shown when an inbound
+ * host import (QR scan, file pick, clipboard paste) matches the
+ * `(hostname, port)` of an existing row. Mirrors the
+ * [HostShareDialog]/[DiscardChangesDialog] visual conventions so the
+ * three confirmation surfaces feel consistent.
+ *
+ * Three resolutions are exposed: Overwrite (update the existing row in
+ * place, preserves its id), Skip (drop the inbound payload), Add as
+ * new (insert anyway). The system-back / scrim tap dismisses without
+ * writing — equivalent to Skip but without the "Skipped X" toast so a
+ * mistaken open of the dialog leaves no audit trail.
+ */
+@Composable
+private fun ImportConflictDialog(
+    conflict: HostListViewModel.ImportConflict,
+    onOverwrite: () -> Unit,
+    onSkip: () -> Unit,
+    onAddAsNew: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val endpoint = "${conflict.incoming.hostname}:${conflict.incoming.port}"
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "Host already exists",
+                color = PocketShellColors.Text,
+            )
+        },
+        text = {
+            Column(modifier = Modifier.testTag(IMPORT_CONFLICT_DIALOG_TAG)) {
+                Text(
+                    text = "A host with endpoint $endpoint is already saved as " +
+                        "“${conflict.existing.name}”.",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 13.sp,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Importing as “${conflict.incoming.name}” " +
+                        "(${conflict.incoming.username}@$endpoint).",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 12.sp,
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = "Overwrite replaces the existing row in place. " +
+                        "Add as new keeps both. Skip discards the import.",
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 12.sp,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = onOverwrite,
+                modifier = Modifier.testTag(IMPORT_CONFLICT_OVERWRITE_TAG),
+            ) {
+                Text("Overwrite", color = PocketShellColors.Accent)
+            }
+        },
+        dismissButton = {
+            Row {
+                TextButton(
+                    onClick = onAddAsNew,
+                    modifier = Modifier.testTag(IMPORT_CONFLICT_ADD_AS_NEW_TAG),
+                ) {
+                    Text("Add as new", color = PocketShellColors.TextSecondary)
+                }
+                TextButton(
+                    onClick = onSkip,
+                    modifier = Modifier.testTag(IMPORT_CONFLICT_SKIP_TAG),
+                ) {
+                    Text("Skip", color = PocketShellColors.TextSecondary)
+                }
             }
         },
         containerColor = PocketShellColors.Surface,

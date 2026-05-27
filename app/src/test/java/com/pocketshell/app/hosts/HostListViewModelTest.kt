@@ -951,6 +951,244 @@ class HostListViewModelTest {
         assertNotNull(viewModel.usageBadges)
     }
 
+    // -- Issue #157 polish item 2: import-conflict prompt -------------------
+
+    /**
+     * Re-importing a host whose `(hostname, port)` already exists must
+     * surface a conflict dialog instead of silently writing. The
+     * ViewModel pauses the write until the user resolves with
+     * [ImportConflictResolution].
+     */
+    @Test
+    fun importSharedHostPayload_pausesAndExposesConflict_whenEndpointAlreadyExists() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "shared-key", privateKeyPath = "/tmp/shared-key"),
+        )
+        db.hostDao().insert(
+            HostEntity(
+                name = "existing",
+                hostname = "shared.example.com",
+                port = 2222,
+                username = "ubuntu",
+                keyId = keyId,
+            ),
+        )
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+        )
+        val payload = """
+            {
+              "type": "pocketshell.host.v1",
+              "name": "shared",
+              "hostname": "shared.example.com",
+              "port": 2222,
+              "username": "ubuntu",
+              "keyName": "shared-key"
+            }
+        """.trimIndent()
+
+        viewModel.importSharedHostPayload(payload).join()
+
+        // The pre-existing row is still the only one.
+        val rowsAfter = db.hostDao().getAll().first()
+        assertEquals(1, rowsAfter.size)
+        assertEquals("existing", rowsAfter[0].name)
+        // The conflict is exposed for the dialog to render.
+        val conflict = viewModel.importConflict.value
+        assertNotNull(conflict)
+        assertEquals("existing", conflict!!.existing.name)
+        assertEquals("shared", conflict.incoming.name)
+        assertEquals("shared.example.com", conflict.incoming.hostname)
+        assertEquals(2222, conflict.incoming.port)
+    }
+
+    @Test
+    fun resolveImportConflict_overwrite_updatesExistingRowInPlace() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "shared-key", privateKeyPath = "/tmp/shared-key"),
+        )
+        val existingId = db.hostDao().insert(
+            HostEntity(
+                name = "existing",
+                hostname = "shared.example.com",
+                port = 2222,
+                username = "old-user",
+                keyId = keyId,
+                tmuxInstalled = true,
+                quseInstalled = true,
+                lastBootstrapAt = 1234L,
+                quseLastDetectedAt = 1234L,
+            ),
+        )
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+        )
+        val payload = """
+            {
+              "type": "pocketshell.host.v1",
+              "name": "shared-new-label",
+              "hostname": "shared.example.com",
+              "port": 2222,
+              "username": "new-user",
+              "keyName": "shared-key"
+            }
+        """.trimIndent()
+        viewModel.importSharedHostPayload(payload).join()
+
+        viewModel.resolveImportConflict(ImportConflictResolution.Overwrite).join()
+
+        val rows = db.hostDao().getAll().first()
+        assertEquals(1, rows.size)
+        assertEquals(existingId, rows[0].id)
+        assertEquals("shared-new-label", rows[0].name)
+        assertEquals("new-user", rows[0].username)
+        // Bootstrap cache is invalidated so the next connect re-probes.
+        assertNull(rows[0].tmuxInstalled)
+        assertNull(rows[0].quseInstalled)
+        assertNull(rows[0].lastBootstrapAt)
+        // Conflict state is cleared.
+        assertNull(viewModel.importConflict.value)
+        assertEquals("Overwrote existing", viewModel.shareMessage.value)
+    }
+
+    @Test
+    fun resolveImportConflict_skip_leavesDatabaseUntouched() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "shared-key", privateKeyPath = "/tmp/shared-key"),
+        )
+        db.hostDao().insert(
+            HostEntity(
+                name = "existing",
+                hostname = "shared.example.com",
+                port = 2222,
+                username = "ubuntu",
+                keyId = keyId,
+            ),
+        )
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+        )
+        val payload = """
+            {
+              "type": "pocketshell.host.v1",
+              "name": "incoming",
+              "hostname": "shared.example.com",
+              "port": 2222,
+              "username": "ubuntu",
+              "keyName": "shared-key"
+            }
+        """.trimIndent()
+        viewModel.importSharedHostPayload(payload).join()
+
+        viewModel.resolveImportConflict(ImportConflictResolution.Skip).join()
+
+        val rows = db.hostDao().getAll().first()
+        assertEquals(1, rows.size)
+        assertEquals("existing", rows[0].name)
+        assertNull(viewModel.importConflict.value)
+        assertEquals("Skipped incoming", viewModel.shareMessage.value)
+    }
+
+    @Test
+    fun resolveImportConflict_addAsNew_appendsSecondRow() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "shared-key", privateKeyPath = "/tmp/shared-key"),
+        )
+        db.hostDao().insert(
+            HostEntity(
+                name = "existing",
+                hostname = "shared.example.com",
+                port = 2222,
+                username = "ubuntu",
+                keyId = keyId,
+            ),
+        )
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+        )
+        val payload = """
+            {
+              "type": "pocketshell.host.v1",
+              "name": "incoming",
+              "hostname": "shared.example.com",
+              "port": 2222,
+              "username": "ubuntu",
+              "keyName": "shared-key"
+            }
+        """.trimIndent()
+        viewModel.importSharedHostPayload(payload).join()
+
+        viewModel.resolveImportConflict(ImportConflictResolution.AddAsNew).join()
+
+        val rows = db.hostDao().getAll().first()
+        assertEquals(2, rows.size)
+        assertTrue(rows.any { it.name == "existing" })
+        assertTrue(rows.any { it.name == "incoming" })
+        assertNull(viewModel.importConflict.value)
+        assertEquals("Imported incoming", viewModel.shareMessage.value)
+    }
+
+    @Test
+    fun importSharedHostPayload_skipsConflictCheck_whenEndpointIsUnique() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "shared-key", privateKeyPath = "/tmp/shared-key"),
+        )
+        db.hostDao().insert(
+            HostEntity(
+                name = "existing",
+                hostname = "first.example.com",
+                port = 22,
+                username = "ubuntu",
+                keyId = keyId,
+            ),
+        )
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+        )
+        val payload = """
+            {
+              "type": "pocketshell.host.v1",
+              "name": "fresh",
+              "hostname": "fresh.example.com",
+              "port": 22,
+              "username": "ubuntu",
+              "keyName": "shared-key"
+            }
+        """.trimIndent()
+        viewModel.importSharedHostPayload(payload).join()
+
+        // No conflict — direct insert, two rows.
+        assertNull(viewModel.importConflict.value)
+        val rows = db.hostDao().getAll().first()
+        assertEquals(2, rows.size)
+        assertEquals("Imported fresh", viewModel.shareMessage.value)
+    }
+
     private companion object {
         val EncryptedOpenSshPrivateKey = """
             -----BEGIN OPENSSH PRIVATE KEY-----

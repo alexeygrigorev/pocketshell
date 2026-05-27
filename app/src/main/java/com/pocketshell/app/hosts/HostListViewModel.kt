@@ -210,6 +210,18 @@ class HostListViewModel @Inject constructor(
     val shareMessage: StateFlow<String?> = _shareMessage.asStateFlow()
 
     /**
+     * Pending import-conflict prompt. Issue #157 polish item 2: when an
+     * incoming import (QR scan, file pick, clipboard paste) resolves to
+     * a `(hostname, port)` that already exists in the local database,
+     * we pause the write and surface this state so the UI can prompt
+     * "Host X:Y already exists — Overwrite, Skip, or Add as new?"
+     * before mutating storage. `null` means there is no pending
+     * conflict to resolve.
+     */
+    private val _importConflict = MutableStateFlow<ImportConflict?>(null)
+    val importConflict: StateFlow<ImportConflict?> = _importConflict.asStateFlow()
+
+    /**
      * The host + key path we'd navigate to once the bootstrap flow
      * resolves. The screen consumes this via [consumePendingNavigation].
      */
@@ -363,6 +375,25 @@ class HostListViewModel @Inject constructor(
             }
         }
 
+        // Issue #157 polish item 2: surface a conflict prompt instead of
+        // silently overwriting / duplicating when the inbound host
+        // matches an existing row's `(hostname, port)`. The user resolves
+        // it via [resolveImportConflict].
+        val existing = findHostByEndpoint(config.host, config.port)
+        if (existing != null) {
+            _importConflict.value = ImportConflict(
+                incoming = PendingHostImport(
+                    name = config.name,
+                    hostname = config.host,
+                    port = config.port,
+                    username = config.username,
+                    keyId = key.id,
+                ),
+                existing = existing,
+            )
+            return
+        }
+
         hostDao.insert(
             HostEntity(
                 name = config.name,
@@ -386,6 +417,20 @@ class HostListViewModel @Inject constructor(
             _shareMessage.value = "Import the SSH key named ${config.keyName} before importing this host"
             return
         }
+        val existing = findHostByEndpoint(config.hostname, config.port)
+        if (existing != null) {
+            _importConflict.value = ImportConflict(
+                incoming = PendingHostImport(
+                    name = config.name,
+                    hostname = config.hostname,
+                    port = config.port,
+                    username = config.username,
+                    keyId = key.id,
+                ),
+                existing = existing,
+            )
+            return
+        }
         hostDao.insert(
             HostEntity(
                 name = config.name,
@@ -397,6 +442,87 @@ class HostListViewModel @Inject constructor(
             ),
         )
         _shareMessage.value = "Imported ${config.name}"
+    }
+
+    /**
+     * Look up an existing host by `(hostname, port)`. Returns the first
+     * match (the DAO orders by name) or `null` if no host matches.
+     *
+     * Implemented as a one-shot `first()` over the existing list flow
+     * rather than a dedicated DAO query to keep this issue from
+     * extending the Room schema / DAO surface — the host list is small
+     * (single-digit rows is the dogfood norm) so the in-memory scan
+     * has no practical cost.
+     */
+    private suspend fun findHostByEndpoint(hostname: String, port: Int): HostEntity? {
+        val rows = hostDao.getAll().first()
+        return rows.firstOrNull { it.hostname == hostname && it.port == port }
+    }
+
+    /**
+     * Resolve the pending [ImportConflict] surfaced by an in-flight
+     * import. The three resolutions mirror the dialog buttons:
+     *
+     *  - [ImportConflictResolution.Overwrite] — update the existing row
+     *    in place, preserving its `id` (so any sessions / bootstrap
+     *    cache rows that reference the id stay valid) but replacing
+     *    `name` / `username` / `keyId` with the incoming values.
+     *    `tmuxInstalled` / `quseInstalled` / `lastBootstrapAt` are
+     *    cleared so the next connect re-probes — the inbound host may
+     *    point at a freshly-rebuilt remote that no longer has the
+     *    cached tooling.
+     *  - [ImportConflictResolution.Skip] — drop the incoming payload
+     *    silently; the existing row is untouched.
+     *  - [ImportConflictResolution.AddAsNew] — insert anyway. The user
+     *    explicitly accepts that two rows now point at the same
+     *    `(hostname, port)`, which is occasionally what they want
+     *    (e.g. two profiles with different usernames or PATH overrides
+     *    for the same VM).
+     */
+    fun resolveImportConflict(resolution: ImportConflictResolution): Job = viewModelScope.launch {
+        val conflict = _importConflict.value ?: return@launch
+        when (resolution) {
+            ImportConflictResolution.Overwrite -> {
+                val updated = conflict.existing.copy(
+                    name = conflict.incoming.name,
+                    hostname = conflict.incoming.hostname,
+                    port = conflict.incoming.port,
+                    username = conflict.incoming.username,
+                    keyId = conflict.incoming.keyId,
+                    // The remote may have changed underneath us; force a
+                    // re-probe on next connect.
+                    tmuxInstalled = null,
+                    quseInstalled = null,
+                    lastBootstrapAt = null,
+                    quseLastDetectedAt = null,
+                )
+                hostDao.update(updated)
+                _shareMessage.value = "Overwrote ${conflict.existing.name}"
+            }
+            ImportConflictResolution.Skip -> {
+                _shareMessage.value = "Skipped ${conflict.incoming.name}"
+            }
+            ImportConflictResolution.AddAsNew -> {
+                hostDao.insert(
+                    HostEntity(
+                        name = conflict.incoming.name,
+                        hostname = conflict.incoming.hostname,
+                        port = conflict.incoming.port,
+                        username = conflict.incoming.username,
+                        keyId = conflict.incoming.keyId,
+                        enabled = false,
+                    ),
+                )
+                _shareMessage.value = "Imported ${conflict.incoming.name}"
+            }
+        }
+        _importConflict.value = null
+    }
+
+    /** Dismiss the import-conflict prompt without writing anything. */
+    fun dismissImportConflict() {
+        _importConflict.value = null
+        _shareMessage.value = null
     }
 
     fun importSharedHostUri(uri: Uri) {
@@ -871,6 +997,31 @@ class HostListViewModel @Inject constructor(
         val payload: String,
     )
 
+    /**
+     * Decoded but not-yet-persisted host import. Captured at the point
+     * the conflict was detected so the resolution flow can act on the
+     * exact same values the codec produced, without re-parsing the
+     * payload.
+     */
+    data class PendingHostImport(
+        val name: String,
+        val hostname: String,
+        val port: Int,
+        val username: String,
+        val keyId: Long,
+    )
+
+    /**
+     * Live import-conflict prompt. [incoming] is the inbound host the
+     * codec just decoded; [existing] is the database row that shares
+     * its `(hostname, port)`. The dialog shows both so the user can
+     * decide what to do with full context.
+     */
+    data class ImportConflict(
+        val incoming: PendingHostImport,
+        val existing: HostEntity,
+    )
+
     private companion object {
         /** 24-hour cache window — re-probe after this. */
         const val BOOTSTRAP_CACHE_MS: Long = 24L * 60L * 60L * 1000L
@@ -886,6 +1037,24 @@ class HostListViewModel @Inject constructor(
         val last = lastBootstrapAt ?: return false
         return now - last < BOOTSTRAP_CACHE_MS
     }
+}
+
+/**
+ * The three user choices for resolving a duplicate-host import
+ * conflict surfaced by [HostListViewModel.importConflict] (issue #157
+ * polish item 2). Lives at the top level so the Compose dialog can
+ * reference the enum without depending on the ViewModel's nested
+ * types.
+ */
+enum class ImportConflictResolution {
+    /** Update the existing row in place, preserving its `id`. */
+    Overwrite,
+
+    /** Drop the incoming payload; leave the database unchanged. */
+    Skip,
+
+    /** Insert anyway, accepting that two rows share the endpoint. */
+    AddAsNew,
 }
 
 /**

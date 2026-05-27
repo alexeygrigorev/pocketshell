@@ -64,6 +64,8 @@ const val ADD_HOST_PATH_OVERRIDE_FIELD_TAG = "add-host-field-path-override"
 const val ADD_HOST_ADVANCED_HEADER_TAG = "add-host-advanced-header"
 const val ADD_HOST_CTA_TAG = "add-host-cta"
 const val ADD_HOST_KEY_DROPDOWN_TAG = "add-host-key-dropdown"
+const val ADD_HOST_KEY_SEARCH_TAG = "add-host-key-search"
+const val ADD_HOST_KEY_SEARCH_EMPTY_TAG = "add-host-key-search-empty"
 
 /**
  * Default placeholder shown in the optional "Usage command" field
@@ -530,6 +532,21 @@ private fun KeySelector(
                 .matchParentSize()
                 .clickable { expanded = true },
         )
+        // Issue #157 polish item 4: long key lists turn the dropdown
+        // into an unwieldy scroll. The search field appears at the top
+        // of the menu whenever the user has KEY_SEARCH_THRESHOLD or
+        // more keys saved; below that, the list is small enough that
+        // a filter would be friction. The query is local to this menu
+        // open — `remember(expanded)` resets it on each open so a
+        // user who closes + reopens the dropdown sees the full list
+        // again.
+        var keyQuery by remember(expanded) { mutableStateOf("") }
+        val filteredKeys = remember(keys, keyQuery) {
+            if (keyQuery.isBlank()) keys
+            else keys.filter { (_, name) ->
+                name.contains(keyQuery, ignoreCase = true)
+            }
+        }
         DropdownMenu(
             expanded = expanded,
             onDismissRequest = { expanded = false },
@@ -551,14 +568,64 @@ private fun KeySelector(
                     },
                 )
             } else {
-                keys.forEach { (id, name) ->
+                if (keys.size >= KEY_SEARCH_THRESHOLD) {
+                    // The search field is a real OutlinedTextField so
+                    // it pops the soft keyboard and respects the form's
+                    // focus chain. It's NOT a DropdownMenuItem because
+                    // those auto-close the menu on tap.
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    ) {
+                        OutlinedTextField(
+                            value = keyQuery,
+                            onValueChange = { keyQuery = it },
+                            singleLine = true,
+                            placeholder = {
+                                Text(
+                                    "Search keys",
+                                    color = PocketShellColors.TextMuted,
+                                    fontSize = 13.sp,
+                                )
+                            },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag(ADD_HOST_KEY_SEARCH_TAG),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = PocketShellColors.Text,
+                                unfocusedTextColor = PocketShellColors.Text,
+                                focusedBorderColor = PocketShellColors.Accent,
+                                unfocusedBorderColor = PocketShellColors.Border,
+                                focusedContainerColor = PocketShellColors.Surface,
+                                unfocusedContainerColor = PocketShellColors.Surface,
+                                cursorColor = PocketShellColors.Accent,
+                            ),
+                        )
+                    }
+                }
+                if (filteredKeys.isEmpty()) {
                     DropdownMenuItem(
-                        text = { Text(name, color = PocketShellColors.Text) },
-                        onClick = {
-                            onSelect(id)
-                            expanded = false
+                        text = {
+                            Text(
+                                text = "No keys match \"$keyQuery\"",
+                                color = PocketShellColors.TextMuted,
+                            )
                         },
+                        onClick = { /* swallow — keeps the menu open */ },
+                        enabled = false,
+                        modifier = Modifier.testTag(ADD_HOST_KEY_SEARCH_EMPTY_TAG),
                     )
+                } else {
+                    filteredKeys.forEach { (id, name) ->
+                        DropdownMenuItem(
+                            text = { Text(name, color = PocketShellColors.Text) },
+                            onClick = {
+                                onSelect(id)
+                                expanded = false
+                            },
+                        )
+                    }
                 }
                 DropdownMenuItem(
                     text = {
@@ -577,6 +644,15 @@ private fun KeySelector(
         }
     }
 }
+
+/**
+ * Issue #157 polish item 4: minimum number of saved keys before the
+ * KeySelector dropdown renders a search field above the list. Below
+ * the threshold every key is visible without scrolling, so the search
+ * field would be friction; at and above it, scanning N keys by eye
+ * stops being practical on a Pixel-7-sized viewport.
+ */
+internal const val KEY_SEARCH_THRESHOLD: Int = 5
 
 /**
  * Collapsible "Advanced" section header + body for the Add/Edit Host

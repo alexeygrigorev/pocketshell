@@ -3,10 +3,14 @@ package com.pocketshell.app.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.core.storage.dao.HostDao
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -32,9 +36,30 @@ import javax.inject.Inject
 class SettingsViewModel @Inject constructor(
     private val repository: SettingsRepository,
     private val apiKeyStorage: PromptComposerViewModel.ApiKeyVault,
+    hostDao: HostDao,
 ) : ViewModel() {
 
     val state: StateFlow<AppSettings> = repository.settings
+
+    /**
+     * Whether at least one persisted host reports `quseInstalled == true`.
+     *
+     * Issue #157 polish item 5: when no quse-installed host exists the
+     * cross-host Usage dashboard strip on the host list never renders
+     * (issue #116 AC: "no empty rail"), so a user has no way to
+     * discover that the in-app quota panel even exists. The Settings →
+     * Usage row drives the only other entry point, but tapping it
+     * lands on a blank `UsageScreen`. Surfacing the boolean here lets
+     * the Settings → Usage section render a "no `quse` hosts detected"
+     * hint with a link to the docs in the empty case, without changing
+     * the routing behaviour for the populated case.
+     *
+     * Derivation mirrors [com.pocketshell.app.hosts.HostListViewModel.hasUsageInstalledHost]
+     * verbatim so both surfaces agree on whether the panel is useful.
+     */
+    val hasUsageInstalledHost: StateFlow<Boolean> = hostDao.getAll()
+        .map { rows -> rows.any { it.quseInstalled == true } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), false)
 
     private val _keyStatus: MutableStateFlow<WhisperKeyStatus> =
         MutableStateFlow(readKeyStatus())

@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux
 
 import android.Manifest
 import android.content.pm.PackageManager
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
@@ -252,6 +253,41 @@ public fun TmuxSessionScreen(
     // dark for voice input).
     var showMicSheet by remember { mutableStateOf(false) }
     var showSnippetPicker by remember { mutableStateOf(false) }
+
+    // Issue #167: intercept system-back so the user returns to the host
+    // list instead of exiting the activity. Without this `BackHandler`
+    // Android's default activity-back finishes the task — the user-visible
+    // symptom on real devices was "tap back from inside a tmux session and
+    // the whole app is gone instead of the host list I came from".
+    //
+    // The actual SSH/tmux teardown happens implicitly: when [onBack] pops
+    // the in-app back stack, this composable leaves composition, the
+    // hosted `TmuxSessionViewModel` is cleared, and its `onCleared()`
+    // runs `closeCurrentConnection()` to cancel coroutines, close the SSH
+    // transport, and unregister from `ActiveTmuxClients` (idempotently —
+    // coordinates with #151's join-on-close lifecycle so we do not race
+    // the event loop here either).
+    //
+    // The dispatch lives in [TmuxSessionBackHandler] so the back-routing
+    // behaviour can be regression-tested without spinning up Hilt + a live
+    // tmux client.
+    TmuxSessionBackHandler(
+        dialogOpen = dialogMode != null,
+        sessionDrawerOpen = showSessionDrawer,
+        windowSwitcherOpen = showWindowSwitcher,
+        micSheetOpen = showMicSheet,
+        snippetPickerOpen = showSnippetPicker,
+        onDismissDialog = { dialogMode = null },
+        onDismissSessionDrawer = {
+            showSessionDrawer = false
+            sessionPickerViewModel.dismiss()
+        },
+        onDismissWindowSwitcher = { showWindowSwitcher = false },
+        onDismissMicSheet = { showMicSheet = false },
+        onDismissSnippetPicker = { showSnippetPicker = false },
+        onBack = onBack,
+    )
+
     val context = LocalContext.current
     // Issue #131: same root-view handle as `SessionScreen`. The pager
     // renders one pane at a time, so the helper's recursive search lands
@@ -2465,6 +2501,59 @@ internal fun TmuxImeAwareTopChrome(
                 onOpenWindowMenu = onOpenWindowMenu,
                 onNewWindow = onNewWindow,
             )
+        }
+    }
+}
+
+/**
+ * Issue #167: a thin wrapper around [BackHandler] that codifies the back
+ * routing on [TmuxSessionScreen].
+ *
+ * Order of precedence:
+ *  1. If a lifecycle dialog is open ([dialogOpen]), back closes the
+ *     dialog (mirroring the Cancel button).
+ *  2. Otherwise, if the session drawer is open ([sessionDrawerOpen]),
+ *     back closes the drawer.
+ *  3. Otherwise, the window switcher / mic sheet / snippet picker
+ *     overlays close in turn.
+ *  4. Otherwise [onBack] runs — which pops the in-app back stack to the
+ *     host list. The hosted `TmuxSessionViewModel` is then cleared by
+ *     Compose's lifecycle owner, and its `onCleared()` tears the SSH +
+ *     tmux client state down (via `closeCurrentConnection`).
+ *
+ * Extracted as its own composable so the routing behaviour can be
+ * regression-tested without a Hilt graph or a live tmux client — the
+ * AVD-side reviewer evidence is the user journey "attach -> system back ->
+ * host list" against the deterministic Docker fixture, which exercises
+ * the implicit teardown via the ViewModel's `onCleared`.
+ *
+ * `DropdownMenu` and `AlertDialog` already intercept system-back
+ * themselves in front of any `BackHandler` registered by the screen, so
+ * the more-menu and window-context-menu dropdowns are not surfaced here;
+ * back on those closes the popup first by the dropdown's own handling.
+ */
+@Composable
+internal fun TmuxSessionBackHandler(
+    dialogOpen: Boolean,
+    sessionDrawerOpen: Boolean,
+    windowSwitcherOpen: Boolean,
+    micSheetOpen: Boolean,
+    snippetPickerOpen: Boolean,
+    onDismissDialog: () -> Unit,
+    onDismissSessionDrawer: () -> Unit,
+    onDismissWindowSwitcher: () -> Unit,
+    onDismissMicSheet: () -> Unit,
+    onDismissSnippetPicker: () -> Unit,
+    onBack: () -> Unit,
+) {
+    BackHandler {
+        when {
+            dialogOpen -> onDismissDialog()
+            sessionDrawerOpen -> onDismissSessionDrawer()
+            windowSwitcherOpen -> onDismissWindowSwitcher()
+            micSheetOpen -> onDismissMicSheet()
+            snippetPickerOpen -> onDismissSnippetPicker()
+            else -> onBack()
         }
     }
 }

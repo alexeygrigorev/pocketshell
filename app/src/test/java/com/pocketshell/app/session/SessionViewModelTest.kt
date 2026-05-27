@@ -900,26 +900,46 @@ class SessionViewModelTest {
     }
 
     @Test
-    fun runtimeDetectionCommandDoesNotProbeOpenCodeGlobalDatabase() {
+    fun runtimeDetectionCommandProbesOpenCodeJsonlDirectory() {
+        // Issue #183: OpenCode runtime detection is re-enabled. The
+        // detection command must walk `~/.local/share/opencode/` for
+        // tailable JSONL rows so the conversation pane lights up when
+        // the user attaches to an existing OpenCode session. The legacy
+        // SQLite store is intentionally not probed via `sqlite3` — only
+        // the tail-friendly JSONL rows that share the same per-line
+        // envelope shape used by Claude and Codex.
         val command = AgentConversationRepository().detectionCommand("/home/alexey/git/pocketshell")
 
-        assertTrue("OpenCode runtime detection must stay disabled", "opencode" !in command)
+        assertTrue("OpenCode runtime detection scans .local/share/opencode/", ".local/share/opencode" in command)
+        assertTrue("OpenCode detection emits an 'opencode|...' candidate row", "opencode|" in command)
         assertTrue("SQLite export path must stay out of runtime detection", "sqlite3" !in command)
     }
 
     @Test
-    fun runtimeDetectionCommandDoesNotProbeCodexSessionLogs() {
+    fun runtimeDetectionCommandProbesCodexSessionLogs() {
+        // Issue #183: Codex runtime detection is re-enabled. The
+        // detection command must walk the `~/.codex/sessions/` rollout
+        // tree for recent JSONL files so attaching to an already-running
+        // Codex session surfaces the Conversation tab. The free-text
+        // cwd grep is still avoided — pane-correlation continues to
+        // come from the `cwd` field emitted alongside each candidate.
         val command = AgentConversationRepository().detectionCommand("/home/alexey/git/pocketshell")
 
-        assertTrue("Codex runtime detection must stay disabled", "codex" !in command)
-        assertTrue("Codex session logs must not be scanned", ".codex/sessions" !in command)
+        assertTrue("Codex session logs are scanned", ".codex/sessions" in command)
+        assertTrue("Codex detection emits a 'codex|...' candidate row", "codex|" in command)
         assertTrue("Codex detection must not use free-text cwd grep", "grep -F" !in command)
     }
 
     @Test
-    fun runtimeDetectionRejectsCodexCandidatesFromRemoteOutput() = runTest {
+    fun runtimeDetectionAcceptsCodexCandidatesFromRemoteOutput() = runTest {
+        // Issue #183: a Codex candidate whose path lives under the
+        // expected `.codex/sessions/` tree must produce a detection.
+        // The previous behaviour returned `null` because the detector
+        // hard-coded Codex to `false`; with the uniform path-hint
+        // filter the row now flows through.
+        val recentMtimeSeconds = System.currentTimeMillis() / 1000
         val session = FakeSshSession(
-            execStdout = "codex|10000|/home/alexey/git/pocketshell|/home/alexey/.codex/sessions/other.jsonl\n",
+            execStdout = "codex|$recentMtimeSeconds|/home/alexey/git/pocketshell|/home/alexey/.codex/sessions/2026/05/22/rollout-123.jsonl\n",
         )
         val detection = AgentConversationRepository().detect(
             session = session,
@@ -927,7 +947,34 @@ class SessionViewModelTest {
             processHints = listOf("123 codex"),
         )
 
-        assertNull(detection)
+        assertEquals(AgentKind.Codex, detection?.agent)
+        assertEquals(
+            "/home/alexey/.codex/sessions/2026/05/22/rollout-123.jsonl",
+            detection?.sourcePath,
+        )
+        assertEquals(AgentDetection.Confidence.ProcessConfirmed, detection?.confidence)
+    }
+
+    @Test
+    fun runtimeDetectionAcceptsOpenCodeCandidatesFromRemoteOutput() = runTest {
+        // Issue #183: same as the Codex case but for OpenCode JSONL
+        // rows under `.local/share/opencode/`.
+        val recentMtimeSeconds = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            execStdout = "opencode|$recentMtimeSeconds|/home/alexey/git/pocketshell|/home/alexey/.local/share/opencode/pocketshell-rows.jsonl\n",
+        )
+        val detection = AgentConversationRepository().detect(
+            session = session,
+            cwd = "/home/alexey/git/pocketshell",
+            processHints = listOf("123 opencode"),
+        )
+
+        assertEquals(AgentKind.OpenCode, detection?.agent)
+        assertEquals(
+            "/home/alexey/.local/share/opencode/pocketshell-rows.jsonl",
+            detection?.sourcePath,
+        )
+        assertEquals(AgentDetection.Confidence.ProcessConfirmed, detection?.confidence)
     }
 
     private class FakeSshSession(

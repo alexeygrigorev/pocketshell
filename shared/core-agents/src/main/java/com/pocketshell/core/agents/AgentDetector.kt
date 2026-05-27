@@ -31,11 +31,7 @@ public class AgentDetector(
         val recent = candidates
             .filter { nowMillis - it.modifiedAtMillis in 0..recentWindowMillis }
             .filter { candidate ->
-                when (candidate.agent) {
-                    AgentKind.Codex -> false
-                    AgentKind.ClaudeCode -> expected[candidate.agent]?.any { candidate.path.contains(it) } ?: false
-                    AgentKind.OpenCode -> false
-                }
+                expected[candidate.agent]?.any { candidate.path.contains(it) } ?: false
             }
             .maxByOrNull { it.modifiedAtMillis }
             ?: return null
@@ -52,8 +48,36 @@ public class AgentDetector(
         )
     }
 
+    /**
+     * Per-engine substrings that a candidate's `path` must contain to be
+     * considered a plausible JSONL log for that engine. The detector's
+     * filter only allows candidates whose path matches one of these hints;
+     * unrelated files (e.g. an OpenCode global SQLite, a sibling project's
+     * Claude project directory) are rejected.
+     *
+     * Engine path conventions:
+     *
+     * - **Claude Code**: `~/.claude/projects/<encoded-cwd>/<session>.jsonl`.
+     *   The cwd-encoding pins the candidate to the active pane's directory.
+     * - **Codex (OpenAI)**: `~/.codex/sessions/.../<rollout>.jsonl`. The
+     *   Codex CLI organises rollouts under a date-keyed tree (e.g.
+     *   `~/.codex/sessions/2026/05/22/rollout-<uuid>.jsonl`) but the
+     *   `.codex/sessions/` prefix is stable across versions. Codex stores
+     *   the originating cwd as part of the rollout payload; the upstream
+     *   candidate-emission step is responsible for filtering to the active
+     *   pane's project before handing rows to the detector.
+     * - **OpenCode**: historically a global SQLite at
+     *   `~/.local/share/opencode/opencode.db`, but the deterministic
+     *   PocketShell fixture and tail-friendly newer releases use
+     *   `~/.local/share/opencode/<name>.jsonl` rows. The
+     *   `.local/share/opencode/` prefix matches both. As with Codex, the
+     *   candidate emitter must verify the row's project/cwd before
+     *   treating it as the active pane's conversation log.
+     */
     public fun expectedPathHints(cwd: String): Map<AgentKind, List<String>> = mapOf(
         AgentKind.ClaudeCode to listOf(".claude/projects/${encodeClaudeCwd(cwd)}"),
+        AgentKind.Codex to listOf(".codex/sessions/"),
+        AgentKind.OpenCode to listOf(".local/share/opencode/"),
     )
 
     public fun encodeClaudeCwd(cwd: String): String =

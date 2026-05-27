@@ -127,8 +127,15 @@ internal class AgentConversationRepository(
             .lineSequence()
             .mapNotNull(::parseCandidate)
             .toList()
+        // Issue #183: extend the process scan to recognise Codex and
+        // OpenCode foreground processes in addition to Claude. The
+        // detector only promotes a candidate to `ProcessConfirmed`
+        // when the engine's command name appears in the scan output;
+        // before this fix the scan was Claude-only, so Codex/OpenCode
+        // detections silently stayed at `RecentFile` even when the
+        // agent was actively running.
         val processLines = processHints + session.exec(
-            "ps -eo pid,ppid,comm,args 2>/dev/null | grep -E 'claude' | grep -v grep || true",
+            "ps -eo pid,ppid,comm,args 2>/dev/null | grep -E 'claude|codex|opencode' | grep -v grep || true",
         )
             .stdout
             .lines()
@@ -217,12 +224,37 @@ internal class AgentConversationRepository(
     internal fun detectionCommand(cwd: String): String {
         val encodedClaudeCwd = detector.encodeClaudeCwd(cwd)
         val quotedCwd = shellQuote(cwd)
+        // Issue #183: enumerate JSONL candidates for every supported
+        // engine. Each engine's discovery walks its conventional log
+        // directory and emits one PSV row per recently-modified file
+        // (`agent|epoch-seconds|cwd|path`). The detector then runs the
+        // engine-specific path-hint filter (see
+        // [AgentDetector.expectedPathHints]) to pick the most recent
+        // matching candidate.
+        //
+        // Codex's `.codex/sessions/` tree is date-keyed (e.g.
+        // `~/.codex/sessions/2026/05/22/rollout-<uuid>.jsonl`), so the
+        // find walks the full subtree. OpenCode rows live one level
+        // deep under `~/.local/share/opencode/`, including the legacy
+        // `opencode.db` SQLite (filtered out — only `*.jsonl` are
+        // tailable). Each branch is best-effort: missing directories
+        // (e.g. user has never run Codex) silently emit nothing.
         return """
             cwd=$quotedCwd
             claude_dir="${'$'}HOME/.claude/projects/$encodedClaudeCwd"
+            codex_dir="${'$'}HOME/.codex/sessions"
+            opencode_dir="${'$'}HOME/.local/share/opencode"
             find "${'$'}claude_dir" -maxdepth 1 -type f -name '*.jsonl' -mmin -5 -print 2>/dev/null | while IFS= read -r f; do
               mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
               printf 'claude|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
+            done
+            find "${'$'}codex_dir" -type f -name '*.jsonl' -mmin -5 -print 2>/dev/null | while IFS= read -r f; do
+              mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
+              printf 'codex|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
+            done
+            find "${'$'}opencode_dir" -maxdepth 1 -type f -name '*.jsonl' -mmin -5 -print 2>/dev/null | while IFS= read -r f; do
+              mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
+              printf 'opencode|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
             done
         """.trimIndent()
     }
@@ -230,10 +262,15 @@ internal class AgentConversationRepository(
     private fun parseCandidate(line: String): AgentLogCandidate? {
         val parts = line.split("|", limit = 4)
         if (parts.size != 4) return null
+        // Issue #183: accept rows for every supported engine. The
+        // engine-specific path-hint filter inside [AgentDetector.detect]
+        // continues to reject rows that don't live under the right
+        // directory tree (e.g. a stray `*.jsonl` outside
+        // `~/.codex/sessions/`).
         val agent = when (parts[0]) {
             "claude" -> AgentKind.ClaudeCode
-            "codex" -> return null
-            "opencode" -> return null
+            "codex" -> AgentKind.Codex
+            "opencode" -> AgentKind.OpenCode
             else -> return null
         }
         val seconds = parts[1].toDoubleOrNull() ?: return null

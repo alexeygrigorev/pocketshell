@@ -135,24 +135,33 @@ internal fun VoiceCommandReviewStrip(
 }
 
 /**
- * Always-visible chip row (only when the IME is hidden, per
- * `docs/input-methods.md` §"Screen real estate"). The first chip is the
- * `dictate` icon chip — tapping it opens the prompt composer; the
- * rest write their literal text + `\n` into the terminal.
+ * Scrollable strip of secondary command chips. Only the chips here are
+ * inside `horizontalScroll`; the primary right-cluster (`keyboard`,
+ * `+ snippet`) is rendered by [PrimaryChipCluster] outside this scroll
+ * region so it stays visible without horizontal-scrolling.
  *
- * The `keyboard` chip (issue #131) sits between `dictate` and `dirs` /
- * `+ snippet` so the IME affordance lives next to the other input-mode
- * chips. It is only rendered when [onShowKeyboardTap] is non-null — the
- * tmux raw-SSH path always wires it; pure presentational previews can
- * leave it `null` to drop the chip from the row.
+ * Left-to-right:
+ * 1. Static command chips passed via [chips] (e.g. `git status`,
+ *    `tmux ls`, `k logs`, `clear`) — quick-runs, low tap frequency.
+ * 2. `dirs` project-navigation chip — secondary navigation, raw-SSH
+ *    route only (rendered when [onProjectNavigationTap] is non-null).
+ *
+ * Per the #208 right-thumb ergonomics audit and design-system §9, the
+ * high-frequency `keyboard` (#131) and `+ snippet` chips are rendered
+ * adjacent to the mic FAB in a non-scrolling sticky cluster (see
+ * [PrimaryChipCluster] and [BottomChipControls]) so they sit inside the
+ * right-thumb arc on a Pixel-class viewport even when there are enough
+ * leading static chips to overflow the scrolling region. Round-1 of #221
+ * left the primary chips inside this scrolling row and the connected
+ * test caught that `keyboard` / `+ snippet` were pushed off-screen by
+ * the four wide static chips that lead the row — round-2 splits them
+ * into the sticky cluster to keep AC2 actually true at the rendered
+ * layout layer.
  */
 @Composable
-private fun ChipRow(
+private fun ScrollableChipStrip(
     chips: List<String>,
     onChipTap: (String) -> Unit,
-    onDictateTap: () -> Unit,
-    onShowKeyboardTap: (() -> Unit)? = null,
-    onAddSnippetTap: (() -> Unit)? = null,
     onProjectNavigationTap: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
@@ -164,17 +173,10 @@ private fun ChipRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        CommandChip(
-            label = "dictate",
-            onClick = onDictateTap,
-            icon = DictateDotIcon,
-        )
-        if (onShowKeyboardTap != null) {
+        chips.forEach { chip ->
             CommandChip(
-                label = "keyboard",
-                onClick = onShowKeyboardTap,
-                icon = KeyboardChipIcon,
-                modifier = Modifier.testTag(SHOW_KEYBOARD_CHIP_TAG),
+                label = chip,
+                onClick = { onChipTap(chip) },
             )
         }
         if (onProjectNavigationTap != null) {
@@ -184,20 +186,59 @@ private fun ChipRow(
                 icon = DictateDotIcon,
             )
         }
+        Spacer(modifier = Modifier.width(4.dp))
+    }
+}
+
+/**
+ * Non-scrolling sticky cluster of primary chips, rendered between the
+ * scrollable [ScrollableChipStrip] and the mic FAB in [BottomChipControls].
+ *
+ * The cluster pins `keyboard` (#131) and `+ snippet` to the right edge of
+ * the bottom toolbar regardless of how many static command chips
+ * [ScrollableChipStrip] is asked to render. The right-thumb ergonomics
+ * goal of design-system §9 only holds if these primary affordances are
+ * actually visible next to the FAB without horizontal-scrolling — see the
+ * KDoc on [ScrollableChipStrip] for the round-1 regression that motivated
+ * splitting them out.
+ *
+ * Order inside the cluster (left → right): `keyboard` → `+ snippet`, so
+ * `+ snippet` is closest to the mic FAB (matches the §9 worked example
+ * `[⌨ keyboard] [+ snippet]    [🎤 mic FAB]`). Both chips are optional;
+ * the cluster collapses to zero width when both callbacks are null
+ * (currently the cluster is always non-empty on the tmux + raw-SSH
+ * routes, but the optional API keeps the helper composable for callers
+ * that wire fewer affordances).
+ */
+@Composable
+private fun PrimaryChipCluster(
+    onShowKeyboardTap: (() -> Unit)?,
+    onAddSnippetTap: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
+    if (onShowKeyboardTap == null && onAddSnippetTap == null) return
+    Row(
+        modifier = modifier
+            .padding(top = 8.dp, bottom = 8.dp, end = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (onShowKeyboardTap != null) {
+            CommandChip(
+                label = "keyboard",
+                onClick = onShowKeyboardTap,
+                icon = KeyboardChipIcon,
+                modifier = Modifier.testTag(SHOW_KEYBOARD_CHIP_TAG),
+            )
+        }
         if (onAddSnippetTap != null) {
             CommandChip(
                 label = "+ snippet",
                 onClick = onAddSnippetTap,
                 icon = DictateDotIcon,
+                modifier = Modifier.testTag(SESSION_ADD_SNIPPET_CHIP_TAG),
             )
         }
-        chips.forEach { chip ->
-            CommandChip(
-                label = chip,
-                onClick = { onChipTap(chip) },
-            )
-        }
-        Spacer(modifier = Modifier.width(4.dp))
     }
 }
 
@@ -205,10 +246,26 @@ private fun ChipRow(
  * Bottom chip + mic FAB strip surfaced when the IME is hidden. Both
  * [SessionScreen][com.pocketshell.app.session.SessionScreen] and
  * [TmuxSessionScreen][com.pocketshell.app.tmux.TmuxSessionScreen] mount
- * this as the bottom band of the per-session input controls. The mic FAB
- * itself routes to the same `onDictateTap` callback as the dictate chip
- * so a user dictating from a tmux pane gets the same prompt composer as
- * the raw-SSH route.
+ * this as the bottom band of the per-session input controls.
+ *
+ * Layout (left → right):
+ *
+ * 1. [ScrollableChipStrip] (`weight(1f)`) — scrollable, holds the
+ *    low-frequency static command chips plus optional `dirs`.
+ * 2. [PrimaryChipCluster] (sticky, non-scrolling) — `keyboard` and
+ *    `+ snippet` pinned to the right side of the chip area so they sit
+ *    inside the right-thumb arc on a Pixel-class viewport regardless of
+ *    how many static chips precede them.
+ * 3. Mic FAB (sticky, non-scrolling) — single dictate affordance, fixed
+ *    width slot on the right edge.
+ *
+ * The redundant `dictate` chip that used to lead the row was removed
+ * per design-system §9 and the right-thumb ergonomics audit
+ * (#208 → #221): with the FAB already anchored to the right-thumb arc,
+ * the chip row need not duplicate it. Splitting the primary cluster out
+ * of the scrolling region fixes the round-1 regression where the four
+ * wide leading static chips pushed `keyboard` / `+ snippet` off-screen
+ * (AC2 of #221).
  *
  * `onProjectNavigationTap` is optional because the tmux route does not
  * surface project navigation yet (the raw-SSH `SessionViewModel` owns the
@@ -231,19 +288,21 @@ internal fun BottomChipControls(
             .border(width = 1.dp, color = PocketShellColors.Border),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ChipRow(
+        ScrollableChipStrip(
             chips = chips,
             onChipTap = onChipTap,
-            onDictateTap = onDictateTap,
-            onShowKeyboardTap = onShowKeyboardTap,
-            onAddSnippetTap = onAddSnippetTap,
             onProjectNavigationTap = onProjectNavigationTap,
             modifier = Modifier.weight(1f),
+        )
+        PrimaryChipCluster(
+            onShowKeyboardTap = onShowKeyboardTap,
+            onAddSnippetTap = onAddSnippetTap,
         )
         Box(
             modifier = Modifier
                 .width(80.dp)
-                .padding(end = 12.dp),
+                .padding(end = 12.dp)
+                .testTag(SESSION_MIC_FAB_TAG),
             contentAlignment = Alignment.CenterEnd,
         ) {
             MicButton(
@@ -351,6 +410,29 @@ private fun ImageVector.Builder.addMicPath(fill: SolidColor): ImageVector.Builde
  * caption is renamed (e.g. to "show keyboard") later.
  */
 internal const val SHOW_KEYBOARD_CHIP_TAG: String = "session:show-keyboard-chip"
+
+/**
+ * Issue #221: stable test tag on the bottom-toolbar mic FAB container.
+ * The mic FAB is now the only dictate entry point (the redundant
+ * `dictate` chip was removed per design-system §9), so connected tests
+ * that previously located the dictate affordance via
+ * `onNodeWithText("dictate")` route through this tag instead.
+ *
+ * Placed on the wrapping [Box] rather than the [MicButton] itself so the
+ * tag stays attached even if the FAB visual is swapped for a different
+ * glyph component later.
+ */
+internal const val SESSION_MIC_FAB_TAG: String = "session:mic-fab"
+
+/**
+ * Issue #221 (round 2): stable test tag on the `+ snippet` chip inside
+ * the sticky `PrimaryChipCluster`. The connected
+ * `bottomChipControlsRendersMicFabAndPrimaryChips` test asserts the chip
+ * is *visible* (not just present in the semantic tree), so it needs a
+ * stable identifier independent of the visible caption — same pattern
+ * as `SHOW_KEYBOARD_CHIP_TAG`.
+ */
+internal const val SESSION_ADD_SNIPPET_CHIP_TAG: String = "session:add-snippet-chip"
 
 /**
  * A 24x24 keyboard glyph used as the leading icon on the "keyboard" chip

@@ -310,23 +310,47 @@ the breadth scan.
 
 ## 9. Worked example: bottom toolbar (re-spec of #152)
 
-**Current issues.** Dictate chip + mic FAB are redundant; chip row is
-overcrowded; modifier strip is taller than it needs to be.
+**Status.** The dictate chip removal and right-edge chip reorder
+landed via #221 (follow-up to the #208 right-thumb ergonomics audit).
+The mic FAB is now the single dictate affordance, and primary chips
+(`keyboard`, `+ snippet`) live in a **sticky right cluster** that sits
+outside the scrolling secondary-chip strip so they are always visible
+next to the FAB without horizontal-scrolling — regardless of how many
+static command chips lead the row.
 
 **Re-spec using design system tokens:**
 
 ```
-┌─────────────────────────────────────────────────┐
-│ [⌨ keyboard] [+ snippet]    [🎤 mic FAB]      │  ← sm (8 dp) gap, lg (16 dp) edge padding
-└─────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│ [git status] [tmux ls] [k logs] ⟷  [⌨ keyboard] [+ snippet] [🎤 FAB] │
+│ ←─── scrollable secondary strip ───→ ←──── sticky right cluster ────→
+└──────────────────────────────────────────────────────────┘
 ```
 
-- **Chip row:**
+- **Bottom strip composition:** a single `Row` with three child slots,
+  left → right: (1) scrollable secondary strip with `weight(1f)`, (2)
+  sticky `PrimaryChipCluster` (non-scrolling), (3) mic FAB (fixed 80 dp
+  slot).
+- **Scrollable secondary strip** (slot 1):
   - Background: `Background` (no elevation).
   - Chips: 8 dp radius (`PocketShellShapes.extraSmall`), `Surface` background, 1 dp `BorderSoft`, `md` (12 dp) internal padding, `sm` (8 dp) gap between.
   - Font: 12 sp monospace, `TextSecondary`.
   - Tap area: ≥ 48 dp.
-  - **Remove the "dictate" chip entirely.** Mic FAB is the single dictate affordance.
+  - **Order (left → right):** low-frequency static command chips
+    (`git status`, `tmux ls`, `k logs`, `clear`) → `dirs` (project
+    navigation, raw-SSH only).
+  - Overflow: horizontally scrollable (`Modifier.horizontalScroll`),
+    so adding more static chips never displaces the sticky cluster.
+- **Sticky primary cluster** (slot 2):
+  - Same chip styling as the scrollable strip; non-scrolling.
+  - **Order (left → right):** `keyboard` → `+ snippet`. `+ snippet`
+    sits closest to the mic FAB so the most-tapped composer entry
+    points line up inside the right-thumb arc.
+  - The cluster pins to the right end of the chip area regardless of
+    static-chip count, fixing the round-1 #221 regression where the
+    primary chips were pushed off-screen by leading static chips.
+  - **The "dictate" chip is removed entirely** (shipped in #221). The
+    mic FAB is the single dictate affordance.
 - **Key bar** (visible only when the keyboard is open):
   - Background: `Surface`.
   - Keys: 38 dp tall, 8 dp radius, `SurfaceElev` background, 1 dp `Border`.

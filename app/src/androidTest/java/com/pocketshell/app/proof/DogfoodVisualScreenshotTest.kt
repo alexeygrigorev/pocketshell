@@ -22,6 +22,7 @@ import com.pocketshell.app.composer.COMPOSER_DRAFT_TAG
 import com.pocketshell.app.composer.COMPOSER_SEND_ENTER_TAG
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -204,7 +205,10 @@ class DogfoodVisualScreenshotTest {
     }
 
     private fun sendCommandViaComposer(command: String) {
-        compose.onNodeWithText("dictate").performClick()
+        // Issue #221: the redundant `dictate` chip was removed; the
+        // right-edge mic FAB is the single dictate entry point. Use its
+        // stable test tag rather than the chip caption.
+        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).performClick()
         compose.onNodeWithText("Prompt Composer").assertExists()
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(command)
         DogfoodScreenshotArtifacts.capture("05-composer-draft")

@@ -4,15 +4,19 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.session.INLINE_DICTATION_MIC_SLOT_TAG
 import com.pocketshell.app.session.INLINE_DICTATION_WAVEFORM_TAG
 import com.pocketshell.app.session.InlineDictationViewModel
@@ -103,7 +107,7 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
-    fun bottomChipControlsRendersMicFabAndDictateChip() {
+    fun bottomChipControlsRendersMicFabAndPrimaryChips() {
         var dictateTaps = 0
         var snippetTaps = 0
         var keyboardTaps = 0
@@ -121,20 +125,52 @@ class TmuxSessionVoiceSurfaceUiTest {
             }
         }
 
-        // Mic FAB is rendered via the ui-kit `MicButton` and exposes a
-        // click action. Tapping it dispatches to onDictateTap (same call
-        // site as the cyan dictate chip).
-        compose.onNodeWithText("dictate").assertIsDisplayed().performClick()
+        // Issue #221 (round 2): capture a viewport PNG of the rendered
+        // bottom strip so reviewer evidence shows the sticky right
+        // cluster (`keyboard`, `+ snippet`) is visible next to the mic
+        // FAB without scrolling. Written under `additional_test_output/`
+        // so `:app:connectedDebugAndroidTest` auto-pulls the artifact to
+        // `app/build/outputs/connected_android_test_additional_output/`.
+        runCatching {
+            val bitmap = compose.onRoot().captureToImage().asAndroidBitmap()
+            val instrumentation = InstrumentationRegistry.getInstrumentation()
+            val mediaRoot = instrumentation.targetContext.externalMediaDirs
+                .firstOrNull { it != null }
+                ?: instrumentation.targetContext.getExternalFilesDir(null)
+            val dir = java.io.File(mediaRoot, "additional_test_output/issue-221-chip-row")
+            if (dir.exists() || dir.mkdirs()) {
+                val outFile = java.io.File(dir, "bottom-chip-controls-viewport.png")
+                outFile.outputStream().use { stream ->
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
+                }
+                println("ISSUE221_VIEWPORT ${outFile.absolutePath}")
+            }
+        }
+
+        // Issue #221: the redundant `dictate` chip was removed (design
+        // system §9). The mic FAB on the right edge is now the single
+        // dictate affordance; tapping it dispatches to onDictateTap.
+        // Routed through the stable test tag on the FAB container so the
+        // assertion does not depend on the MicButton glyph.
+        compose.onNodeWithTag("session:mic-fab").assertIsDisplayed().performClick()
         assertEquals(1, dictateTaps)
 
-        // Issue #131: the show-keyboard chip lives between `dictate` and
-        // `+ snippet` and routes through onShowKeyboardTap. Verified by
-        // its stable test tag so the assertion is robust against a future
-        // caption rename.
+        // Confirm the removed chip is no longer present.
+        compose.onNodeWithText("dictate").assertDoesNotExist()
+
+        // Issue #131 / #221 (round 2): the show-keyboard and `+ snippet`
+        // chips live in a sticky right cluster *outside* the scrolling
+        // chip strip, so they are visible next to the mic FAB without
+        // any horizontal scroll. `assertIsDisplayed()` here is a real
+        // visibility check; the round-1 implementation kept the primary
+        // chips inside the horizontalScroll Row and this assertion
+        // caught them being pushed off-screen by the four wide leading
+        // static chips. Both chips are located by their stable test tag
+        // so the assertion survives a future caption rename.
         compose.onNodeWithTag("session:show-keyboard-chip").assertIsDisplayed().performClick()
         assertEquals(1, keyboardTaps)
 
-        compose.onNodeWithText("+ snippet").assertIsDisplayed().performClick()
+        compose.onNodeWithTag("session:add-snippet-chip").assertIsDisplayed().performClick()
         assertEquals(1, snippetTaps)
 
         compose.onNodeWithText("git status").assertHasClickAction().performClick()

@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -29,13 +30,20 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -81,6 +89,13 @@ internal const val SESSION_CONVERSATION_TOOL_ROW_TAG_PREFIX = "session:conversat
 /** Issue #176: stable test tag prefix for a `SystemNote` row in the SessionScreen conversation pane. */
 internal const val SESSION_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX = "session:conversation:system-note:"
 internal const val SESSION_AGENT_HINT_TAG = "session:agent-hint"
+/**
+ * Issue #154: stable test tags for the conversation navigation polish on
+ * the raw-SSH pane. Mirror the tmux equivalents.
+ */
+internal const val SESSION_CONVERSATION_SEARCH_TAG = "session:conversation:search"
+internal const val SESSION_CONVERSATION_JUMP_TO_LATEST_TAG =
+    "session:conversation:jump-to-latest"
 /** Issue #116: stable test tag for the in-session blocked / near-limit chip. */
 internal const val SESSION_USAGE_BADGE_TAG = "session:usage-badge"
 
@@ -273,6 +288,11 @@ public fun SessionScreen(
                             .fillMaxSize()
                             .testTag(SESSION_CONVERSATION_PANE_TAG),
                         showSystemNotes = appSettings.showSystemNotes,
+                        // Issue #154 (acceptance criterion #5): the
+                        // search query lives on the ViewModel so it
+                        // survives Terminal ↔ Conversation tab flips.
+                        query = agentConversation.searchQuery,
+                        onQueryChange = viewModel::setAgentSearchQuery,
                     )
                 } else {
                     TerminalSurface(
@@ -552,14 +572,20 @@ internal fun ConversationPane(
     // SystemNote events are filtered out entirely; default is true so the
     // existing ConversationInteractE2eTest call site keeps showing them.
     showSystemNotes: Boolean = true,
+    // Issue #154 (acceptance criterion #5): hoist the search query so it
+    // survives Terminal ↔ Conversation tab flips. Defaults keep the old
+    // local-`remember` behaviour for direct callers that haven't migrated
+    // (notably the `ConversationInteractE2eTest`).
+    query: String = "",
+    onQueryChange: (String) -> Unit = NoOpStringChange,
 ) {
-    var query by remember { mutableStateOf("") }
+    val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     var composerText by remember { mutableStateOf("") }
     val visibleEvents = remember(events, showSystemNotes) {
         if (showSystemNotes) events else events.filterNot { it is ConversationEvent.SystemNote }
     }
-    val filteredEvents = remember(visibleEvents, query) {
-        val q = query.trim()
+    val filteredEvents = remember(visibleEvents, effectiveQuery) {
+        val q = effectiveQuery.trim()
         if (q.isBlank()) visibleEvents else visibleEvents.filter { it.searchText().contains(q, ignoreCase = true) }
     }
     val expandedToolCalls = remember { mutableStateOf(setOf<String>()) }
@@ -567,51 +593,86 @@ internal fun ConversationPane(
     val expandedSystemNotes = remember { mutableStateOf(setOf<String>()) }
     val runningToolIds = remember(events) { runningToolCallIds(events) }
     val eventsById = remember(events) { events.associateBy { it.id } }
+
+    // Issue #154 (acceptance criteria #1 & #3): tail-follow + jump-to-latest.
+    // Same model as the tmux pane: hold the list state at this level,
+    // auto-scroll on new events when the user is at the bottom, and
+    // surface a "↓ Latest" pill when they have scrolled away.
+    val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
+    val atBottom by remember(filteredEvents) {
+        derivedStateOf { listState.isScrolledToBottom(filteredEvents.size) }
+    }
+    LaunchedEffect(filteredEvents.size) {
+        if (filteredEvents.isEmpty()) return@LaunchedEffect
+        if (atBottom) {
+            listState.scrollToItem(filteredEvents.size - 1)
+        }
+    }
+
     Column(
         modifier = modifier
             .background(color = PocketShellColors.Background)
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
+            value = effectiveQuery,
+            onValueChange = onEffectiveQueryChange,
             placeholder = { Text("Search in conversation") },
             singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(SESSION_CONVERSATION_SEARCH_TAG),
         )
-        LazyColumn(
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
-            contentPadding = PaddingValues(vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            if (filteredEvents.isEmpty()) {
-                item {
-                    Text(
-                        text = if (events.isEmpty()) "No conversation events yet." else "No matching events.",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 13.sp,
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (filteredEvents.isEmpty()) {
+                    item {
+                        Text(
+                            text = if (events.isEmpty()) "No conversation events yet." else "No matching events.",
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 13.sp,
+                        )
+                    }
+                }
+                items(filteredEvents, key = { it.id }) { event ->
+                    ConversationEventRow(
+                        event = event,
+                        runningToolIds = runningToolIds,
+                        eventsById = eventsById,
+                        isExplicitlyExpanded = expandedToolCalls.value.contains(event.id),
+                        onToggleExpand = { id ->
+                            val current = expandedToolCalls.value
+                            expandedToolCalls.value = if (current.contains(id)) current - id else current + id
+                        },
+                        isSystemNoteExpanded = expandedSystemNotes.value.contains(event.id),
+                        onToggleSystemNoteExpand = { id ->
+                            val current = expandedSystemNotes.value
+                            expandedSystemNotes.value = if (current.contains(id)) current - id else current + id
+                        },
                     )
                 }
             }
-            items(filteredEvents, key = { it.id }) { event ->
-                ConversationEventRow(
-                    event = event,
-                    runningToolIds = runningToolIds,
-                    eventsById = eventsById,
-                    isExplicitlyExpanded = expandedToolCalls.value.contains(event.id),
-                    onToggleExpand = { id ->
-                        val current = expandedToolCalls.value
-                        expandedToolCalls.value = if (current.contains(id)) current - id else current + id
-                    },
-                    isSystemNoteExpanded = expandedSystemNotes.value.contains(event.id),
-                    onToggleSystemNoteExpand = { id ->
-                        val current = expandedSystemNotes.value
-                        expandedSystemNotes.value = if (current.contains(id)) current - id else current + id
-                    },
-                )
-            }
+            JumpToLatestOverlay(
+                visible = !atBottom && filteredEvents.isNotEmpty(),
+                onClick = {
+                    coroutineScope.launch {
+                        listState.animateScrollToItem(filteredEvents.size - 1)
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 12.dp, bottom = 12.dp),
+            )
         }
         Row(
             modifier = Modifier
@@ -643,6 +704,85 @@ internal fun ConversationPane(
             }
         }
     }
+}
+
+/**
+ * Issue #154: shared helper that decides whether the conversation pane
+ * uses the caller's hoisted `(query, onQueryChange)` pair or falls back
+ * to a local `remember`. See the tmux equivalent for full rationale.
+ * Lives in this file (not the tmux file) so the raw-SSH and tmux
+ * conversation panes can each import it without a cyclic dependency.
+ */
+@Composable
+private fun rememberHoistedQuery(
+    hoistedQuery: String,
+    onHoistedChange: (String) -> Unit,
+): Pair<String, (String) -> Unit> {
+    if (onHoistedChange !== NoOpStringChange) {
+        return hoistedQuery to onHoistedChange
+    }
+    var local by remember { mutableStateOf("") }
+    return local to { next: String -> local = next }
+}
+
+private val NoOpStringChange: (String) -> Unit = {}
+
+/**
+ * Issue #154: raw-SSH mirror of the tmux jump-to-latest pill.
+ */
+@Composable
+private fun JumpToLatestOverlay(
+    visible: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(animationSpec = tween(durationMillis = 200)),
+        exit = fadeOut(animationSpec = tween(durationMillis = 200)),
+        modifier = modifier,
+    ) {
+        JumpToLatestButton(onClick = onClick)
+    }
+}
+
+@Composable
+private fun JumpToLatestButton(
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(20.dp)
+    Row(
+        modifier = Modifier
+            .background(color = PocketShellColors.Accent, shape = shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .testTag(SESSION_CONVERSATION_JUMP_TO_LATEST_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = "↓ Latest",
+            color = PocketShellColors.Background,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+/**
+ * Issue #154 (acceptance criterion #3): true when the LazyColumn is at
+ * the bottom of its content. Empty lists are treated as bottom-ed so
+ * the FAB never flashes during the first-event transition.
+ */
+internal fun androidx.compose.foundation.lazy.LazyListState.isScrolledToBottom(
+    itemCount: Int,
+): Boolean {
+    if (itemCount == 0) return true
+    val info = layoutInfo
+    val lastVisible = info.visibleItemsInfo.lastOrNull() ?: return true
+    if (lastVisible.index < itemCount - 1) return false
+    val viewportEnd = info.viewportEndOffset - info.afterContentPadding
+    return lastVisible.offset + lastVisible.size <= viewportEnd + 1
 }
 
 @Composable

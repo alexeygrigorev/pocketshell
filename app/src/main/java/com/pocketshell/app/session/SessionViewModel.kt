@@ -390,6 +390,18 @@ public class SessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #154 (acceptance criterion #5): hoist the conversation
+     * search query into the ViewModel so it survives Terminal ↔
+     * Conversation tab switches. Bound to the search field's
+     * `onValueChange` inside [ConversationPane].
+     */
+    public fun setAgentSearchQuery(query: String) {
+        val current = _agentConversation.value
+        if (current.searchQuery == query) return
+        _agentConversation.value = current.copy(searchQuery = query)
+    }
+
+    /**
      * Issue #179: snapshot of the dismissed-hint keys for unit tests.
      * The set is private — tests need a read-only seam to prove the
      * explicit-dismiss and visit-to-dismiss paths both populate it.
@@ -918,6 +930,16 @@ public data class AgentConversationUiState(
     val events: List<ConversationEvent> = emptyList(),
     val selectedTab: SessionTab = SessionTab.Terminal,
     val hintVisible: Boolean = false,
+    /**
+     * Issue #154: persisted search query for the conversation pane. The
+     * value lives on the ViewModel state (not as a local `remember` in
+     * the pane composable) so the query survives Terminal ↔ Conversation
+     * tab switches. Acceptance criterion (#5): the pane is the only
+     * consumer of [searchQuery], and the ViewModel exposes a setter
+     * (`setAgentSearchQuery` on `SessionViewModel` / `TmuxSessionViewModel`)
+     * that the composer wires `onValueChange` into.
+     */
+    val searchQuery: String = "",
 )
 
 public data class VoiceCommandReviewUiState(

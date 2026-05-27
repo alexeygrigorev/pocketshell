@@ -1347,6 +1347,58 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    // ─── Issue #154: conversation search query persistence ─────────────
+
+    @Test
+    fun setAgentSearchQueryUpdatesPaneState() = runTest {
+        // Acceptance criterion #5: the search query is hoisted into the
+        // pane's `AgentConversationUiState` so a Terminal ↔ Conversation
+        // tab round-trip cannot clear it. The screen wires the search
+        // field's `onValueChange` into `setAgentSearchQuery`; this test
+        // pins that contract at the view-model level.
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        assertEquals(
+            "fresh pane state must start with an empty search query",
+            "",
+            vm.agentConversations.value["%0"]!!.searchQuery,
+        )
+
+        vm.setAgentSearchQuery("%0", "kubectl")
+
+        assertEquals(
+            "the query must reach the pane's state for tab-flip survival",
+            "kubectl",
+            vm.agentConversations.value["%0"]!!.searchQuery,
+        )
+
+        // A tab flip is just a copy() that preserves the searchQuery
+        // field; we can also exercise the explicit flow by selecting
+        // Terminal and asserting nothing changed.
+        vm.selectSessionTab("%0", SessionTab.Terminal)
+        assertEquals(
+            "query must survive a Conversation ↔ Terminal flip",
+            "kubectl",
+            vm.agentConversations.value["%0"]!!.searchQuery,
+        )
+    }
+
+    @Test
+    fun setAgentSearchQueryIsNoOpForUnknownPane() = runTest {
+        // Calling the setter against a pane the VM has never seen must
+        // not crash and must not populate a phantom row in the map.
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+
+        vm.setAgentSearchQuery("%nope", "anything")
+
+        assertTrue(
+            "unknown pane must not be silently created",
+            vm.agentConversations.value.isEmpty(),
+        )
+    }
+
     // ─── Issue #186: per-window agent detection state ──────────────────
     //
     // Detection is per-pane (and therefore per-window for the simple

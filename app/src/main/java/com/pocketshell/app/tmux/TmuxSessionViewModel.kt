@@ -1279,6 +1279,19 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
+     * Issue #154 (acceptance criterion #5): hoist the per-pane
+     * conversation search query into the ViewModel so it survives
+     * Terminal ↔ Conversation tab switches (the previous local
+     * `remember` lost the query on every tab flip). Bound to the
+     * search field's `onValueChange` inside [TmuxConversationPane].
+     */
+    public fun setAgentSearchQuery(paneId: String, query: String) {
+        val current = _agentConversations.value[paneId] ?: return
+        if (current.searchQuery == query) return
+        setAgentConversation(paneId, current.copy(searchQuery = query))
+    }
+
+    /**
      * Issue #197: unlock the conversation send-target without requiring
      * the caller to know which pane is currently locked. Used by the
      * screen's Terminal-tab tap path: if the user has navigated to a

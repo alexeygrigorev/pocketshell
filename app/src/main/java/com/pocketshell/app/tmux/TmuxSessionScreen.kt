@@ -43,6 +43,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.pager.HorizontalPager
@@ -58,6 +59,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -584,44 +586,57 @@ public fun TmuxSessionScreen(
                 // conversation pane is locked on the agent pane.
                 val conversationTabSelected = lockedConversationPaneId != null ||
                     currentAgentConversation?.selectedTab == SessionTab.Conversation
-                Tabs(
-                    labels = tabs,
-                    selectedIndex = if (conversationTabSelected) 1 else 0,
-                    onSelected = { index ->
-                        if (index == 1) {
-                            // Prefer the currently-viewed pane if it has a
-                            // detection; otherwise fall back to the agent
-                            // pane already known to the session (so the
-                            // user can re-enter the conversation from a
-                            // sibling window without having to navigate
-                            // back to the agent's window first).
-                            val target = currentPane
-                                ?.takeIf { agentConversations[it.paneId]?.detection != null }
-                                ?: panes.firstOrNull { agentConversations[it.paneId]?.detection != null }
-                            target?.let { pane ->
-                                viewModel.selectSessionTab(pane.paneId, SessionTab.Conversation)
-                            }
-                        } else {
-                            // Terminal tab: unlock the conversation and
-                            // flip the locked pane's tab back so the
-                            // pager re-takes the viewport. We go
-                            // through [returnToTerminalFromConversation]
-                            // (rather than per-pane selectSessionTab)
-                            // because the currently-visible pane may
-                            // not be the locked pane — and if it is
-                            // not, it has no AgentConversationUiState
-                            // for selectSessionTab to mutate.
-                            if (lockedConversationPaneId != null) {
-                                viewModel.returnToTerminalFromConversation()
+                // Issue #154 (acceptance criterion #2): fire a 2-second
+                // pulse overlay above the Tabs strip when the
+                // Conversation tab newly appears so the user notices
+                // the new affordance instead of missing it entirely.
+                // The pulse is keyed on a transition false → true on
+                // [showConversationTab]; once it has rendered (and
+                // automatically expired) it does not re-fire until the
+                // user disconnects and a fresh detection lights up the
+                // tab again.
+                TabsRowWithPulse(
+                    pulseVisible = showConversationTab,
+                ) {
+                    Tabs(
+                        labels = tabs,
+                        selectedIndex = if (conversationTabSelected) 1 else 0,
+                        onSelected = { index ->
+                            if (index == 1) {
+                                // Prefer the currently-viewed pane if it has a
+                                // detection; otherwise fall back to the agent
+                                // pane already known to the session (so the
+                                // user can re-enter the conversation from a
+                                // sibling window without having to navigate
+                                // back to the agent's window first).
+                                val target = currentPane
+                                    ?.takeIf { agentConversations[it.paneId]?.detection != null }
+                                    ?: panes.firstOrNull { agentConversations[it.paneId]?.detection != null }
+                                target?.let { pane ->
+                                    viewModel.selectSessionTab(pane.paneId, SessionTab.Conversation)
+                                }
                             } else {
-                                currentPane?.let { pane ->
-                                    viewModel.selectSessionTab(pane.paneId, SessionTab.Terminal)
+                                // Terminal tab: unlock the conversation and
+                                // flip the locked pane's tab back so the
+                                // pager re-takes the viewport. We go
+                                // through [returnToTerminalFromConversation]
+                                // (rather than per-pane selectSessionTab)
+                                // because the currently-visible pane may
+                                // not be the locked pane — and if it is
+                                // not, it has no AgentConversationUiState
+                                // for selectSessionTab to mutate.
+                                if (lockedConversationPaneId != null) {
+                                    viewModel.returnToTerminalFromConversation()
+                                } else {
+                                    currentPane?.let { pane ->
+                                        viewModel.selectSessionTab(pane.paneId, SessionTab.Terminal)
+                                    }
                                 }
                             }
-                        }
-                    },
-                    modifier = Modifier.testTag(TMUX_TABS_TAG),
-                )
+                        },
+                        modifier = Modifier.testTag(TMUX_TABS_TAG),
+                    )
+                }
             }
 
             // Per #158: only surface the WindowStrip when there are
@@ -710,6 +725,14 @@ public fun TmuxSessionScreen(
                         currentWindowMatchesAgent = currentWindowMatchesAgent,
                         firstSendConfirmed = firstSendConfirmed,
                         onConfirmFirstSend = { viewModel.confirmFirstSendForPane(paneIdForSend) },
+                        // Issue #154 (acceptance criterion #5): hoist
+                        // the search query into the ViewModel state so
+                        // toggling to the Terminal tab and back does
+                        // not clear the user's filter.
+                        query = lockedConversation.searchQuery,
+                        onQueryChange = { next ->
+                            viewModel.setAgentSearchQuery(paneIdForSend, next)
+                        },
                     )
                 } else if (panes.isEmpty()) {
                     EmptyPanesPlaceholder()
@@ -1297,6 +1320,38 @@ internal const val TMUX_CONVERSATION_FIRST_SEND_CONFIRM_TAG =
     "tmux:conversation:first-send-confirm"
 internal const val TMUX_CONVERSATION_WINDOW_MISMATCH_BANNER_TAG =
     "tmux:conversation:window-mismatch-banner"
+/**
+ * Issue #154: stable test tags for the conversation navigation polish:
+ * - [TMUX_CONVERSATION_SEARCH_TAG] is on the search field inside
+ *   [TmuxConversationPane]. The connected `TmuxConversationPaneNavigationUiTest`
+ *   uses it to type a query, then asserts the value survives a tab
+ *   round-trip.
+ * - [TMUX_CONVERSATION_JUMP_TO_LATEST_TAG] is on the "↓ Latest"
+ *   affordance pinned to the bottom-end of the conversation list when
+ *   the user has scrolled away from the tail. The button hides itself
+ *   when the user is already at the bottom.
+ */
+internal const val TMUX_CONVERSATION_SEARCH_TAG =
+    "tmux:conversation:search"
+internal const val TMUX_CONVERSATION_JUMP_TO_LATEST_TAG =
+    "tmux:conversation:jump-to-latest"
+/**
+ * Issue #154: test tag on the conversation feed's LazyColumn so the
+ * navigation E2E test can drive scroll position directly via
+ * `performScrollToIndex` (the indirection through a child text-row is
+ * fragile because LazyColumn lazily disposes off-screen rows).
+ */
+internal const val TMUX_CONVERSATION_LIST_TAG =
+    "tmux:conversation:list"
+/**
+ * Issue #154: stable test tag for the brief pulse highlight that fades
+ * over the Tabs row when the Conversation tab newly appears. The pulse
+ * is a sibling overlay sitting on top of [TMUX_TABS_TAG]; tests can
+ * `assertExists()` on this tag while the pulse animation runs and
+ * `assertDoesNotExist()` after it completes.
+ */
+internal const val TMUX_CONVERSATION_TAB_PULSE_TAG =
+    "tmux:tabs:conversation-pulse"
 /** Issue #116: stable test tag for the in-tmux-session blocked / near-limit chip. */
 internal const val TMUX_SESSION_USAGE_BADGE_TAG = "tmux:usage-badge"
 
@@ -1767,6 +1822,76 @@ private fun TmuxAgentHintChip(
  */
 internal const val AGENT_HINT_AUTO_DISMISS_MS: Long = 8_000L
 
+/**
+ * Issue #154 (acceptance criterion #2): how long the Conversation-tab
+ * pulse overlay stays visible after the tab newly appears. Long enough
+ * for the user to register the new affordance, short enough that it
+ * does not feel like sticky chrome.
+ */
+internal const val TAB_PULSE_DURATION_MS: Long = 2_000L
+
+/**
+ * Wraps the [Tabs] strip and overlays a brief accent ring + fade-in
+ * highlight the first time the Conversation tab joins the row. The
+ * overlay is a sibling Box pinned to the Tabs container; it does not
+ * intercept taps because the underlying [Tabs] sits in the same Box
+ * and gets pointer input first. The pulse is keyed on the false → true
+ * transition of [pulseVisible] (which the call site drives off
+ * `showConversationTab`); once the timer fires it does not re-trigger
+ * until the tab disappears and reappears (e.g. after a fresh agent
+ * detection on a new session).
+ */
+@Composable
+private fun TabsRowWithPulse(
+    pulseVisible: Boolean,
+    content: @Composable () -> Unit,
+) {
+    var showPulse by remember { mutableStateOf(false) }
+    // Track whether we have *seen* the conversation tab at least once
+    // since the screen mounted — without this, the initial composition
+    // would fire the pulse for every session that boots with a live
+    // agent (i.e. a reconnect to an already-running Claude pane).
+    // Initial-load animation belongs to the entry transition; the pulse
+    // is reserved for the "new agent detected mid-session" transition.
+    var hasSeenConversationTab by remember { mutableStateOf(pulseVisible) }
+    LaunchedEffect(pulseVisible) {
+        if (pulseVisible && !hasSeenConversationTab) {
+            hasSeenConversationTab = true
+            showPulse = true
+            kotlinx.coroutines.delay(TAB_PULSE_DURATION_MS)
+            showPulse = false
+        } else if (!pulseVisible) {
+            // Tab disappeared (agent process died, etc.) — reset so a
+            // future re-appearance fires the pulse again.
+            hasSeenConversationTab = false
+            showPulse = false
+        }
+    }
+    Box(modifier = Modifier.fillMaxWidth()) {
+        content()
+        androidx.compose.animation.AnimatedVisibility(
+            visible = showPulse,
+            enter = fadeIn(
+                animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+            ),
+            exit = fadeOut(
+                animationSpec = tween(durationMillis = TAB_PULSE_DURATION_MS.toInt(), easing = MotionEasing),
+            ),
+            modifier = Modifier.matchParentSize(),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .border(
+                        width = 2.dp,
+                        color = PocketShellColors.Accent,
+                    )
+                    .testTag(TMUX_CONVERSATION_TAB_PULSE_TAG),
+            )
+        }
+    }
+}
+
 @Composable
 internal fun TmuxConversationPane(
     events: List<ConversationEvent>,
@@ -1791,14 +1916,24 @@ internal fun TmuxConversationPane(
     currentWindowMatchesAgent: Boolean = true,
     firstSendConfirmed: Boolean = true,
     onConfirmFirstSend: () -> Unit = {},
+    // Issue #154 (acceptance criterion #5): hoist the search query so
+    // it survives Terminal ↔ Conversation tab switches. The screen
+    // wires these to the per-pane `AgentConversationUiState.searchQuery`
+    // / `TmuxSessionViewModel.setAgentSearchQuery`. The defaults keep
+    // direct callers (unit tests, the connected E2E test) running with
+    // the previous "local remember" behaviour: when [onQueryChange] is
+    // the no-op default we fall back to an internal `remember` so the
+    // search field still types. See [rememberHoistedQuery] below.
+    query: String = "",
+    onQueryChange: (String) -> Unit = NoOpStringChange,
 ) {
-    var query by remember { mutableStateOf("") }
+    val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     var composerText by remember { mutableStateOf("") }
     val visibleEvents = remember(events, showSystemNotes) {
         if (showSystemNotes) events else events.filterNot { it is ConversationEvent.SystemNote }
     }
-    val filteredEvents = remember(visibleEvents, query) {
-        val q = query.trim()
+    val filteredEvents = remember(visibleEvents, effectiveQuery) {
+        val q = effectiveQuery.trim()
         if (q.isBlank()) visibleEvents else visibleEvents.filter { it.searchText().contains(q, ignoreCase = true) }
     }
     // Tool-call expansion state per event-id. Persisted at the pane
@@ -1811,49 +1946,95 @@ internal fun TmuxConversationPane(
     val expandedSystemNotes = remember { mutableStateOf(setOf<String>()) }
     val runningToolIds = remember(events) { runningToolCallIds(events) }
     val rowMap = remember(events) { events.associateBy { it.id } }
+
+    // Issue #154 (acceptance criteria #1 & #3): tail-follow + jump-to-latest.
+    // The list state owns scroll position; we read it via snapshots so
+    // recomposition tracks both the user's manual scroll and the
+    // auto-scroll fired by new events. `atBottom` is derived once per
+    // change rather than recomputed inside the LazyColumn item lambda.
+    val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
+    val atBottom by remember(filteredEvents) {
+        derivedStateOf { listState.isScrolledToBottom(filteredEvents.size) }
+    }
+    // Auto-scroll on new events when the user is at the bottom. The
+    // effect is keyed on `filteredEvents.size`, not the full list, so a
+    // tail-follow scroll fires once per new event rather than on every
+    // recomposition. If the user has scrolled up, we leave their
+    // position alone and surface the jump-to-latest FAB instead.
+    LaunchedEffect(filteredEvents.size) {
+        if (filteredEvents.isEmpty()) return@LaunchedEffect
+        if (atBottom) {
+            listState.scrollToItem(filteredEvents.size - 1)
+        }
+    }
+
     Column(
         modifier = modifier
             .background(color = PocketShellColors.Background)
             .padding(horizontal = 12.dp, vertical = 8.dp),
     ) {
         OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
+            value = effectiveQuery,
+            onValueChange = onEffectiveQueryChange,
             placeholder = { Text("Search in conversation") },
             singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(TMUX_CONVERSATION_SEARCH_TAG),
         )
-        LazyColumn(
+        // Wrap the LazyColumn in a Box so the jump-to-latest FAB can
+        // overlay the bottom-end of the scrollable area. The Box claims
+        // the flex weight; the FAB is a sibling pinned to BottomEnd.
+        Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f),
-            contentPadding = PaddingValues(vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            if (filteredEvents.isEmpty()) {
-                item {
-                    Text(
-                        text = if (events.isEmpty()) "No conversation events yet." else "No matching events.",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 13.sp,
+            LazyColumn(
+                state = listState,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .testTag(TMUX_CONVERSATION_LIST_TAG),
+                contentPadding = PaddingValues(vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (filteredEvents.isEmpty()) {
+                    item {
+                        Text(
+                            text = if (events.isEmpty()) "No conversation events yet." else "No matching events.",
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 13.sp,
+                        )
+                    }
+                }
+                items(filteredEvents, key = { it.id }) { event ->
+                    ConversationEventRow(
+                        event = event,
+                        runningToolIds = runningToolIds,
+                        eventsById = rowMap,
+                        isExplicitlyExpanded = expandedToolCalls.value.contains(event.id),
+                        onToggleExpand = { id ->
+                            expandedToolCalls.value = expandedToolCalls.value.toggle(id)
+                        },
+                        isSystemNoteExpanded = expandedSystemNotes.value.contains(event.id),
+                        onToggleSystemNoteExpand = { id ->
+                            expandedSystemNotes.value = expandedSystemNotes.value.toggle(id)
+                        },
                     )
                 }
             }
-            items(filteredEvents, key = { it.id }) { event ->
-                ConversationEventRow(
-                    event = event,
-                    runningToolIds = runningToolIds,
-                    eventsById = rowMap,
-                    isExplicitlyExpanded = expandedToolCalls.value.contains(event.id),
-                    onToggleExpand = { id ->
-                        expandedToolCalls.value = expandedToolCalls.value.toggle(id)
-                    },
-                    isSystemNoteExpanded = expandedSystemNotes.value.contains(event.id),
-                    onToggleSystemNoteExpand = { id ->
-                        expandedSystemNotes.value = expandedSystemNotes.value.toggle(id)
-                    },
-                )
-            }
+            JumpToLatestOverlay(
+                visible = !atBottom && filteredEvents.isNotEmpty(),
+                onClick = {
+                    coroutineScope.launch {
+                        listState.animateScrollToItem(filteredEvents.size - 1)
+                    }
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 12.dp, bottom = 12.dp),
+            )
         }
         // Issue #197: stack the three send-target surfaces directly
         // above the composer so the user can read "where am I sending?"
@@ -1893,6 +2074,105 @@ internal fun TmuxConversationPane(
             },
         )
     }
+}
+
+/**
+ * Issue #154 (acceptance criterion #5): when callers wire the conversation
+ * pane to a real hoisted `(query, onQueryChange)` pair the pane uses those
+ * values directly. When callers leave the defaults in place — which is the
+ * case for the connected `ConversationInteractE2eTest` and the
+ * `TmuxConversationSendTargetUiTest` that exist before this change — we
+ * keep the previous local-`remember` behaviour so the search field still
+ * types into something. The sentinel [NoOpStringChange] is identity-checked
+ * (not value-checked) so a caller that wires a real lambda is always
+ * treated as hoisted, even if their lambda happens to be empty for a frame.
+ */
+@Composable
+private fun rememberHoistedQuery(
+    hoistedQuery: String,
+    onHoistedChange: (String) -> Unit,
+): Pair<String, (String) -> Unit> {
+    if (onHoistedChange !== NoOpStringChange) {
+        return hoistedQuery to onHoistedChange
+    }
+    var local by remember { mutableStateOf("") }
+    return local to { next: String -> local = next }
+}
+
+private val NoOpStringChange: (String) -> Unit = {}
+
+/**
+ * Issue #154: jump-to-latest affordance. A small accent-tinted pill that
+ * sits in the bottom-right of the conversation pane while the user has
+ * scrolled the feed away from its tail. Tapping the pill smooth-scrolls
+ * to the last event and resumes tail-follow on the next message. The
+ * styling mirrors the muted-accent pattern used by the agent hint banner
+ * (#179) and the first-send banner (#197) so the pane stays visually
+ * cohesive. Extracted as a top-level composable (not nested inside the
+ * pane's `Box`) so the [AnimatedVisibility] call resolves against the
+ * package-level variant rather than the outer `ColumnScope.AnimatedVisibility`
+ * extension.
+ */
+@Composable
+private fun JumpToLatestOverlay(
+    visible: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(
+            animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+        ),
+        exit = fadeOut(
+            animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+        ),
+        modifier = modifier,
+    ) {
+        JumpToLatestButton(onClick = onClick)
+    }
+}
+
+@Composable
+private fun JumpToLatestButton(
+    onClick: () -> Unit,
+) {
+    val shape = RoundedCornerShape(20.dp)
+    Row(
+        modifier = Modifier
+            .background(color = PocketShellColors.Accent, shape = shape)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp)
+            .testTag(TMUX_CONVERSATION_JUMP_TO_LATEST_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = "↓ Latest",
+            color = PocketShellColors.Background,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+/**
+ * Issue #154 (acceptance criterion #3): a LazyList is "at the bottom"
+ * when the last item index is visible and its bottom edge sits inside
+ * the viewport. We treat an empty list and a list whose only item is
+ * fully visible as bottom-ed so the FAB never flashes during the
+ * "first event arrives" transition. The function lives at file scope
+ * so unit tests can hit it directly.
+ */
+internal fun androidx.compose.foundation.lazy.LazyListState.isScrolledToBottom(
+    itemCount: Int,
+): Boolean {
+    if (itemCount == 0) return true
+    val info = layoutInfo
+    val lastVisible = info.visibleItemsInfo.lastOrNull() ?: return true
+    if (lastVisible.index < itemCount - 1) return false
+    val viewportEnd = info.viewportEndOffset - info.afterContentPadding
+    return lastVisible.offset + lastVisible.size <= viewportEnd + 1
 }
 
 /**

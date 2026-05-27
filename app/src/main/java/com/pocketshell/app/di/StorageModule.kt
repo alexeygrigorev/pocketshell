@@ -5,6 +5,8 @@ import androidx.room.Room
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.AiApiCallLogDao
 import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.dao.PortRemappingDao
+import com.pocketshell.core.storage.dao.PortUsageDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SnippetDao
 import com.pocketshell.core.storage.dao.SshKeyDao
@@ -15,6 +17,7 @@ import com.pocketshell.core.storage.migrations.MIGRATION_4_5
 import com.pocketshell.core.storage.migrations.MIGRATION_5_6
 import com.pocketshell.core.storage.migrations.MIGRATION_6_7
 import com.pocketshell.core.storage.migrations.MIGRATION_7_8
+import com.pocketshell.core.storage.migrations.MIGRATION_8_9
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -64,6 +67,7 @@ object StorageModule {
                 MIGRATION_5_6,
                 MIGRATION_6_7,
                 MIGRATION_7_8,
+                MIGRATION_8_9,
             )
             .fallbackToDestructiveMigration(dropAllTables = false)
             .build()
@@ -85,4 +89,16 @@ object StorageModule {
     // Whisper instrumentation in VoiceModule.
     @Provides
     fun provideAiApiCallLogDao(db: AppDatabase): AiApiCallLogDao = db.aiApiCallLogDao()
+
+    // Issue #203 expanded scope: ported from `ssh-auto-forward-android`.
+    // `provideAppDatabase` already wires the migration that creates the
+    // `port_remappings` (v1) and `port_usage` (v9) tables; here we just
+    // surface the DAOs so the port-forward panel + AutoForwarder can read
+    // and write them via the new bridge interfaces in
+    // `com.pocketshell.core.portfwd`.
+    @Provides
+    fun providePortRemappingDao(db: AppDatabase): PortRemappingDao = db.portRemappingDao()
+
+    @Provides
+    fun providePortUsageDao(db: AppDatabase): PortUsageDao = db.portUsageDao()
 }

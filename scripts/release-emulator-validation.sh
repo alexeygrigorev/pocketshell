@@ -19,6 +19,13 @@ VALIDATED_APK="$RUN_DIR/app-debug.apk"
 TERMINAL_RELEASE_GATE="${TERMINAL_RELEASE_GATE:-0}"
 TERMINAL_RELEASE_RUN_ID="$RUN_ID-terminal-release"
 TERMINAL_WORKBENCH_LOG_ROOT="$ROOT_DIR/build/terminal-workbench"
+REAL_AGENT_RELEASE_GATE_RUN_ID="$RUN_ID-real-agent-release-gate"
+REAL_AGENT_RELEASE_GATE_LOG_ROOT="$ROOT_DIR/build/real-agent-release-gate"
+REAL_AGENT_RELEASE_GATE_RUN_DIR="$REAL_AGENT_RELEASE_GATE_LOG_ROOT/$REAL_AGENT_RELEASE_GATE_RUN_ID"
+REAL_AGENT_COMPOSE_FILE="${REAL_AGENT_COMPOSE_FILE:-tests/docker/real-agent/compose.yml}"
+REAL_AGENT_RELEASE_GATE_TEST_CLASS="com.pocketshell.app.proof.RealAgentReleaseGateTest"
+ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
+ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 
 usage() {
   cat <<'USAGE'
@@ -39,13 +46,17 @@ Environment overrides:
   TERMINAL_RELEASE_GATE=1
       Also run the optional high-confidence terminal release gate. This starts
       the real-agent Docker target, SSHes into it from the emulator, drives real
-      interactive agent CLI screens, and validates terminal artifacts.
+      interactive agent CLI screens, validates terminal artifacts, and runs the
+      additional RealAgentReleaseGateTest against the same real-agent fixture to
+      assert on visible CLI output and on the JSONL conversation logs the CLIs
+      write back to disk.
 
 Artifacts:
   build/release-emulator-validation/<run-id>/summary.md
   build/release-emulator-validation/<run-id>/app-debug.apk
   build/pre-release-confidence-gate/<run-id>-pre-release/
   build/terminal-workbench/<run-id>-terminal-release/ (optional)
+  build/real-agent-release-gate/<run-id>-real-agent-release-gate/ (optional)
   build/phone-dogfood/<run-id>-terminal-lab/
   build/phone-dogfood/<run-id>-tmux-existing-session/
   build/phone-dogfood/<run-id>-setup-detection/
@@ -128,6 +139,91 @@ publish_validated_apk() {
   record_artifact "tested debug APK" "build/release-emulator-validation/$RUN_ID/app-debug.apk"
 }
 
+# Run RealAgentReleaseGateTest against the same real-agent Docker fixture the
+# terminal-workbench step exercises. The workbench step covers
+# viewport/visible-text capture; this additional step asserts on real-agent CLI
+# output (deterministic visible substring) AND on the JSONL conversation log
+# the CLIs write back to disk. The two checks are intentionally complementary:
+# either one failing should block a release tag.
+run_real_agent_release_gate_instrumentation() {
+  local run_dir="$REAL_AGENT_RELEASE_GATE_RUN_DIR"
+  local instrumentation_log="$run_dir/instrumentation.log"
+  local docker_log="$run_dir/docker-real-agents.log"
+  local ssh_log="$run_dir/docker-ssh-readiness.log"
+  local logcat="$run_dir/logcat.txt"
+  mkdir -p "$run_dir"
+
+  printf '\n[real-agent release gate instrumentation]\n'
+  printf 'Test class: %s\n' "$REAL_AGENT_RELEASE_GATE_TEST_CLASS"
+  printf 'Artifact root: %s\n' "$run_dir"
+
+  # Bring up (or verify) the real-agent compose service.
+  docker compose -f "$REAL_AGENT_COMPOSE_FILE" up -d --build real-agents \
+    2>&1 | tee "$run_dir/docker-up.log"
+
+  # Probe SSH readiness from the host so a slow image build / restart does not
+  # surface as an opaque instrumentation timeout later.
+  : > "$ssh_log"
+  local ssh_key="$ROOT_DIR/tests/docker/test_key"
+  chmod 600 "$ssh_key" 2>/dev/null || true
+  local ssh_ready=0
+  for attempt in $(seq 1 60); do
+    if {
+      printf '[%s] attempt=%s\n' "$(date -Is)" "$attempt"
+      ssh \
+        -i "$ssh_key" \
+        -p 2240 \
+        -o BatchMode=yes \
+        -o ConnectTimeout=3 \
+        -o ConnectionAttempts=1 \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        testuser@127.0.0.1 \
+        'claude --version && codex --version'
+    } >> "$ssh_log" 2>&1; then
+      ssh_ready=1
+      break
+    fi
+    sleep 1
+  done
+  [[ "$ssh_ready" -eq 1 ]] || {
+    printf 'FAIL: real-agent SSH fixture did not become ready (port 2240)\n' >&2
+    tail -n 80 "$ssh_log" >&2 || true
+    return 1
+  }
+
+  # Clear logcat so the captured slice belongs to this instrumentation only.
+  "$ADB" logcat -c >/dev/null 2>&1 || true
+
+  set +e
+  "$ADB" shell am instrument -w -r \
+    -e class "$REAL_AGENT_RELEASE_GATE_TEST_CLASS" \
+    -e pocketshellRealAgentReleaseGate 1 \
+    com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner \
+    2>&1 | tee "$instrumentation_log"
+  local instrumentation_status="${PIPESTATUS[0]}"
+  set -e
+
+  # Capture diagnostics regardless of outcome so reviewers can audit.
+  docker compose -f "$REAL_AGENT_COMPOSE_FILE" logs --no-color --timestamps real-agents \
+    > "$docker_log" 2>&1 || true
+  "$ADB" logcat -d -v threadtime -t 6000 > "$logcat" 2>&1 || true
+
+  if [[ "$instrumentation_status" -ne 0 ]]; then
+    printf 'FAIL: RealAgentReleaseGateTest instrumentation exited %s\n' "$instrumentation_status" >&2
+    return "$instrumentation_status"
+  fi
+  if ! grep -q 'INSTRUMENTATION_CODE: -1' "$instrumentation_log"; then
+    printf 'FAIL: RealAgentReleaseGateTest did not report INSTRUMENTATION_CODE: -1\n' >&2
+    return 1
+  fi
+  if ! grep -q 'OK (' "$instrumentation_log"; then
+    printf 'FAIL: RealAgentReleaseGateTest did not report an OK summary\n' >&2
+    return 1
+  fi
+  return 0
+}
+
 require_clean_pushed_main
 write_summary_header
 
@@ -141,6 +237,15 @@ if [[ "$TERMINAL_RELEASE_GATE" == "1" ]]; then
     "optional terminal release gate" \
     "build/terminal-workbench/$TERMINAL_RELEASE_RUN_ID/" \
     env LOG_ROOT="$TERMINAL_WORKBENCH_LOG_ROOT" RUN_ID="$TERMINAL_RELEASE_RUN_ID" REAL_AGENTS=1 scripts/terminal-workbench.sh
+
+  # Additive real-agent CLI + JSONL release gate (#146). The workbench step
+  # above captures viewport/visible-text from the real-agent fixture; this
+  # extra step exercises the same fixture's installed Claude / Codex CLIs
+  # end-to-end and asserts on the on-disk JSONL conversation log.
+  run_required \
+    "real-agent CLI release gate" \
+    "build/real-agent-release-gate/$REAL_AGENT_RELEASE_GATE_RUN_ID/" \
+    run_real_agent_release_gate_instrumentation
 fi
 
 run_required \
@@ -170,6 +275,7 @@ publish_validated_apk
   printf -- '- [ ] Attach or link every artifact directory listed above in the issue and tag notes.\n'
   if [[ "$TERMINAL_RELEASE_GATE" == "1" ]]; then
     printf -- '- [ ] Inspect `build/terminal-workbench/%s/artifact-summary.txt` and the authoritative `*-viewport.png` renders before treating terminal usability as release-ready.\n' "$TERMINAL_RELEASE_RUN_ID"
+    printf -- '- [ ] Inspect `build/real-agent-release-gate/%s/instrumentation.log` plus the Docker/logcat artifacts in the same directory to confirm the real Claude/Codex CLI run was healthy.\n' "$REAL_AGENT_RELEASE_GATE_RUN_ID"
   else
     printf -- '- [ ] Optional terminal release gate was skipped. Run `TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh` when terminal usability is in release scope.\n'
   fi

@@ -322,6 +322,61 @@ artifacts, and writes
 is manual/optional unless explicitly enabled through the environment or the
 GitHub Actions workflow input.
 
+#### Real-agent CLI interaction test (issue #146)
+
+When `TERMINAL_RELEASE_GATE=1` is set, the release validation also runs
+`RealAgentReleaseGateTest`
+(`app/src/androidTest/java/com/pocketshell/app/proof/RealAgentReleaseGateTest.kt`)
+against the same `tests/docker/real-agent/compose.yml` fixture. The test:
+
+- Connects through the real PocketShell app UI to `testuser@10.0.2.2:2240`,
+  attaches a tmux pane, and types commands through the same `TerminalView`
+  input connection the phone user hits.
+- Invokes the actual installed `claude --print '<prompt>'` and
+  `codex exec --skip-git-repo-check '<prompt>'` binaries inside the tmux pane
+  (Claude Code 2.x and Codex CLI 0.x via the fixture's `Dockerfile`). The
+  real-agent image deliberately ships without API credentials, so the
+  deterministic visible substrings the test matches against are the CLI-emitted
+  startup texts — `Not logged in` for Claude and `OpenAI Codex v` for Codex —
+  using `TerminalTextMatcher.containsWrapTolerant` so the soft-wrap at the
+  Compose grid boundary does not flake the assertion.
+- Reads the JSONL conversation log back over SSH from
+  `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` and
+  `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<session>.jsonl`, then
+  asserts on a minimal schema (`sessionId` field for Claude; `session_meta`
+  payload with `id`/`cwd` for Codex). This is the load-bearing JSONL contract
+  PocketShell's
+  [com.pocketshell.app.session.AgentConversationRepository](../app/src/main/java/com/pocketshell/app/session/AgentConversationRepository.kt)
+  parses, so a CLI version bump that broke the schema would surface here.
+
+The test is opt-in via the instrumentation runner argument
+`pocketshellRealAgentReleaseGate=1`, set automatically by
+`scripts/release-emulator-validation.sh` when `TERMINAL_RELEASE_GATE=1`. Without
+the argument the test class is skipped by `Assume.assumeTrue`, so normal
+`connectedDebugAndroidTest` runs and the default release gate are unaffected.
+Artifacts (instrumentation log, Docker compose log, SSH readiness probe,
+emulator logcat) are written under
+`build/real-agent-release-gate/<run-id>-real-agent-release-gate/`.
+
+To run it locally (a booted emulator and the real-agent Docker image are both
+required):
+
+```bash
+REAL_AGENTS=1 TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh
+```
+
+`REAL_AGENTS=1` is consumed by the underlying `scripts/terminal-workbench.sh`
+step; `TERMINAL_RELEASE_GATE=1` opts both the workbench step and the new
+`RealAgentReleaseGateTest` step in. To exercise the test in isolation against a
+running emulator + real-agent fixture without the rest of the release gate:
+
+```bash
+docker compose -f tests/docker/real-agent/compose.yml up -d --build real-agents
+./gradlew :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.RealAgentReleaseGateTest \
+  -Pandroid.testInstrumentationRunnerArguments.pocketshellRealAgentReleaseGate=1
+```
+
 The same validation can be run manually from GitHub Actions when local emulator
 capacity is unavailable: Actions -> Release Emulator Validation -> Run
 workflow. Choose the release branch or `main`; optionally provide a `run_id`.

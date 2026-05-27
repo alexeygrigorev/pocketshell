@@ -517,8 +517,14 @@ internal fun SheetContent(
             Spacer(modifier = Modifier.height(8.dp))
         }
 
-        // Mic row: button on the left, waveform in the middle, label on
-        // the right. Matches `.composer-mic-row` in the mockup.
+        // Mic row: waveform takes the slack on the left, status label
+        // sits centre-right, and the mic FAB anchors the right edge so
+        // the primary dictation control lives inside the right-thumb
+        // reach arc (issue #208 right-hand ergonomics; design-system §9
+        // already pins the tmux mic FAB bottom-right, the composer now
+        // matches). The cancel chip from #174 travels with the mic and
+        // renders immediately to its left during Recording, keeping the
+        // abort affordance inside the same thumb arc.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -526,25 +532,6 @@ internal fun SheetContent(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            MicButton(
-                state = when (state.recording) {
-                    PromptComposerViewModel.RecordingState.Idle -> MicButtonState.Idle
-                    PromptComposerViewModel.RecordingState.Recording -> MicButtonState.Recording
-                    PromptComposerViewModel.RecordingState.Transcribing -> MicButtonState.Disabled
-                },
-                onClick = { if (!isTranscribing) onMicTap() },
-            )
-            // Issue #174: small `X` discard chip rendered only while the
-            // FSM is in Recording so the user can abort a dictation
-            // without paying the Whisper round-trip. Hidden outside
-            // Recording (no buffer to discard during Idle; the audio is
-            // already in flight during Transcribing). The chip uses
-            // `TextSecondary` (the design-system muted-secondary token
-            // from #162) so it never competes for attention with the
-            // accent-tinted mic FAB / waveform.
-            if (state.recording == PromptComposerViewModel.RecordingState.Recording) {
-                CancelRecordingChip(onClick = onCancelRecording)
-            }
             // Issue #195: the visual `Recording` state has two sub-states
             // keyed on `state.hasDetectedSpeech`. Before the first speech
             // amplitude crosses the threshold the waveform stays in its
@@ -597,6 +584,31 @@ internal fun SheetContent(
                 fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.testTag(COMPOSER_STATUS_TAG),
+            )
+            // Issue #174: small `X` discard chip rendered only while the
+            // FSM is in Recording so the user can abort a dictation
+            // without paying the Whisper round-trip. Hidden outside
+            // Recording (no buffer to discard during Idle; the audio is
+            // already in flight during Transcribing). The chip uses
+            // `TextSecondary` (the design-system muted-secondary token
+            // from #162) so it never competes for attention with the
+            // accent-tinted mic FAB / waveform.
+            //
+            // Issue #208: the chip travels with the mic. The mic FAB now
+            // anchors the right edge for right-thumb reach, so the
+            // cancel chip renders immediately to its left — still inside
+            // the same thumb arc, still adjacent to the affordance it
+            // aborts.
+            if (state.recording == PromptComposerViewModel.RecordingState.Recording) {
+                CancelRecordingChip(onClick = onCancelRecording)
+            }
+            MicButton(
+                state = when (state.recording) {
+                    PromptComposerViewModel.RecordingState.Idle -> MicButtonState.Idle
+                    PromptComposerViewModel.RecordingState.Recording -> MicButtonState.Recording
+                    PromptComposerViewModel.RecordingState.Transcribing -> MicButtonState.Disabled
+                },
+                onClick = { if (!isTranscribing) onMicTap() },
             )
         }
 

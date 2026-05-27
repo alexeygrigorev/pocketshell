@@ -32,6 +32,18 @@ import androidx.room.PrimaryKey
  * on every poll. [usageCommandOverride] is an optional per-host override
  * for the usage command (e.g. a corporate wrapper that emits the same
  * JSON shape) — `null` falls back to `quse --json`.
+ *
+ * Issue #41 added [pathOverride]: an optional colon-separated list of
+ * extra PATH directories that the bootstrap probe prepends ahead of the
+ * standard `$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin` augmentation
+ * before running `command -v <tool>`. Maintainers who install
+ * `quse` / `tmuxctl` from cloned repos with venvs (e.g.
+ * `~/git/quse/.venv/bin`) keep those paths in `~/.bashrc`, which is
+ * NOT sourced by the `/bin/sh -lc` wrapper used by the probe (only
+ * `~/.profile` is). Surfacing the PATH override here lets the user
+ * type the venv directories once on the Add/Edit Host screen and have
+ * every probe see them. `null` and the empty string both mean
+ * "no override, use the default augmentation only".
  */
 @Entity(
     tableName = "hosts",
@@ -63,4 +75,5 @@ data class HostEntity(
     val quseInstalled: Boolean? = null,
     val quseLastDetectedAt: Long? = null,
     val usageCommandOverride: String? = null,
+    val pathOverride: String? = null,
 )

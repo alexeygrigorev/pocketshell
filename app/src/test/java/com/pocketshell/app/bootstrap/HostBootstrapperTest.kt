@@ -537,6 +537,101 @@ class HostBootstrapperTest {
     }
 
     @Test
+    fun pathAwareCommand_omitsOverride_whenNullOrBlank() {
+        // Backwards compatibility: a null / empty / whitespace override
+        // must produce the same wrapper string as the v0 codepath, so
+        // existing fixtures and emulator artifacts keep matching.
+        val expected = pathAware("command -v 'quse'")
+        assertEquals(expected, bootstrapper.pathAwareCommand("command -v 'quse'", pathOverride = null))
+        assertEquals(expected, bootstrapper.pathAwareCommand("command -v 'quse'", pathOverride = ""))
+        assertEquals(expected, bootstrapper.pathAwareCommand("command -v 'quse'", pathOverride = "   "))
+    }
+
+    @Test
+    fun pathAwareCommand_prependsOverride_aheadOfBuiltInPath() {
+        // Issue #41: the override has to land BEFORE the
+        // $HOME/.local/bin segment so a venv install (which would
+        // otherwise be invisible to the probe) wins PATH search order.
+        val override = "/home/u/git/quse/.venv/bin:/home/u/git/tmuxcli/.venv/bin"
+        val expected = pathAwareWithOverride("command -v 'quse'", override)
+        assertEquals(expected, bootstrapper.pathAwareCommand("command -v 'quse'", pathOverride = override))
+        // The override is trimmed of surrounding whitespace before being
+        // prepended (a stray newline from a paste shouldn't break the
+        // wrapper).
+        assertEquals(
+            expected,
+            bootstrapper.pathAwareCommand("command -v 'quse'", pathOverride = "  $override  "),
+        )
+    }
+
+    @Test
+    fun checkTool_returnsInstalled_whenOverrideResolvesTheBinary() = runTest {
+        // The probe without the override returns Missing; with the
+        // override pointing at the venv directory, the same probe must
+        // observe `command -v` succeed and return `Installed`.
+        val override = "/home/u/git/quse/.venv/bin"
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'quse'") to ExecResult("", "", 1),
+                pathAwareWithOverride("command -v 'quse'", override) to
+                    ExecResult("/home/u/git/quse/.venv/bin/quse\n", "", 0),
+            ),
+        )
+
+        val missing = bootstrapper.checkTool(session, "quse", pathOverride = null)
+        assertEquals(ToolStatus.Missing, missing)
+
+        val installed = bootstrapper.checkTool(session, "quse", pathOverride = override)
+        assertTrue(installed is ToolStatus.Installed)
+        assertEquals("/home/u/git/quse/.venv/bin/quse", (installed as ToolStatus.Installed).path)
+    }
+
+    @Test
+    fun checkServerSetup_forwardsOverride_toEveryToolProbe() = runTest {
+        // End-to-end: a full checkServerSetup pass with a non-null
+        // override should route every command -v / systemctl probe
+        // through the override-prepended wrapper. The Hetzner repro
+        // case the issue describes: quse + tmuxctl live in venvs the
+        // .bashrc PATH knows about, but /bin/sh -lc does not. With the
+        // override the report flips from "Missing" to "Installed" and
+        // the host becomes "ready" without changing anything else.
+        val override = "/home/u/git/quse/.venv/bin:/home/u/git/tmuxcli/.venv/bin"
+        val session = FakeSshSession(
+            mapOf(
+                pathAwareWithOverride("command -v 'tmuxctl'", override) to
+                    ExecResult("/home/u/git/tmuxcli/.venv/bin/tmuxctl\n", "", 0),
+                pathAwareWithOverride("command -v 'quse'", override) to
+                    ExecResult("/home/u/git/quse/.venv/bin/quse\n", "", 0),
+                pathAwareWithOverride("command -v 'uv'", override) to
+                    ExecResult("/home/u/.local/bin/uv\n", "", 0),
+                pathAwareWithOverride("command -v 'systemctl'", override) to
+                    ExecResult("/usr/bin/systemctl\n", "", 0),
+                systemdAware("systemctl --user is-active tmuxctl-jobs.service") to
+                    ExecResult("active\n", "", 0),
+                systemdAware("systemctl --user is-enabled tmuxctl-jobs.service") to
+                    ExecResult("enabled\n", "", 0),
+            ),
+        )
+
+        val report = bootstrapper.checkServerSetup(session, pathOverride = override)
+
+        assertTrue(report.isReady)
+        assertEquals(
+            ToolStatus.Installed("/home/u/git/quse/.venv/bin/quse"),
+            report.tools[BootstrapTool.Quse],
+        )
+        assertEquals(
+            ToolStatus.Installed("/home/u/git/tmuxcli/.venv/bin/tmuxctl"),
+            report.tools[BootstrapTool.Tmuxctl],
+        )
+        // Every command -v invocation actually saw the override segment.
+        assertTrue(
+            "expected every command -v wrapper to carry the override",
+            session.recorded.filter { it.contains("command -v '") }.all { it.contains(override) },
+        )
+    }
+
+    @Test
     fun installServerSetup_reprobesBeforeInstallingStaleMissingTools() = runTest {
         val session = FakeSshSession(
             dynamic = { command ->
@@ -611,6 +706,9 @@ class HostBootstrapperTest {
 
     private fun pathAware(command: String): String =
         shell("PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; export PATH; $command")
+
+    private fun pathAwareWithOverride(command: String, override: String): String =
+        shell("PATH=\"$override:\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; export PATH; $command")
 
     private fun systemdAware(command: String): String =
         shell(

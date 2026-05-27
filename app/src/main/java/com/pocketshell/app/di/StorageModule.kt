@@ -11,6 +11,7 @@ import com.pocketshell.core.storage.migrations.MIGRATION_1_2
 import com.pocketshell.core.storage.migrations.MIGRATION_2_3
 import com.pocketshell.core.storage.migrations.MIGRATION_3_4
 import com.pocketshell.core.storage.migrations.MIGRATION_4_5
+import com.pocketshell.core.storage.migrations.MIGRATION_5_6
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -52,7 +53,7 @@ object StorageModule {
             // app. `dropAllTables = false` keeps user data on the safer
             // path; once we ship to real users this fallback should be
             // removed and missing migrations should hard-fail.
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
             .fallbackToDestructiveMigration(dropAllTables = false)
             .build()
 

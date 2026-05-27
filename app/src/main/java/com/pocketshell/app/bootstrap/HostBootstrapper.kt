@@ -149,9 +149,19 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
      * exit 1 with empty stdout when absent. Empty stdout is treated as a
      * defensive backstop in case some shell surfaces a non-fatal warning
      * but still exits 0.
+     *
+     * Issue #41: [pathOverride] is an optional colon-separated PATH
+     * fragment (e.g. `/home/u/git/quse/.venv/bin`). When non-null and
+     * non-blank it is prepended ahead of the standard built-in
+     * augmentation, so binaries installed in venv-style locations the
+     * user keeps in `~/.bashrc` (which is not sourced by `/bin/sh -lc`)
+     * become visible to the probe.
      */
-    public suspend fun checkTmux(session: SshSession): TmuxStatus = try {
-        val result = session.exec(pathAwareCommand("command -v tmux"))
+    public suspend fun checkTmux(
+        session: SshSession,
+        pathOverride: String? = null,
+    ): TmuxStatus = try {
+        val result = session.exec(pathAwareCommand("command -v tmux", pathOverride))
         when {
             result.exitCode == 0 && result.stdout.isNotBlank() -> TmuxStatus.Installed
             // Non-zero exit is the POSIX "command not found" signal.
@@ -167,13 +177,16 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         TmuxStatus.Unknown("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
     }
 
-    public suspend fun checkServerSetup(session: SshSession): HostBootstrapReport {
+    public suspend fun checkServerSetup(
+        session: SshSession,
+        pathOverride: String? = null,
+    ): HostBootstrapReport {
         val tools = BootstrapTool.entries.associateWith { tool ->
-            checkTool(session, tool.binaryName)
+            checkTool(session, tool.binaryName, pathOverride)
         }
-        val installer = detectPythonToolInstaller(session)
+        val installer = detectPythonToolInstaller(session, pathOverride)
         val daemon = if (tools[BootstrapTool.Tmuxctl] is ToolStatus.Installed) {
-            checkTmuxctlDaemon(session)
+            checkTmuxctlDaemon(session, pathOverride)
         } else {
             TmuxctlDaemonStatus.Missing
         }
@@ -188,8 +201,9 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     public suspend fun installServerSetup(
         session: SshSession,
         report: HostBootstrapReport? = null,
+        pathOverride: String? = null,
     ): InstallResult {
-        val currentReport = freshenReport(session, report)
+        val currentReport = freshenReport(session, report, pathOverride)
         if (currentReport.unknownTools.isNotEmpty()) {
             val unknown = currentReport.unknownTools.joinToString { it.binaryName }
             return InstallResult.Error("Could not detect required host tools: $unknown. Reconnect and try again.")
@@ -200,12 +214,12 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
                 "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install tmuxctl and quse.",
             )
             for (tool in missingTools) {
-                val result = installServerTool(session, installer, tool)
+                val result = installServerTool(session, installer, tool, pathOverride)
                 if (result !is InstallResult.Success) return result
             }
         }
 
-        val afterTools = checkServerSetup(session)
+        val afterTools = checkServerSetup(session, pathOverride)
         val daemon = afterTools.daemon
         if (daemon is TmuxctlDaemonStatus.Unavailable) {
             return InstallResult.Error(daemon.reason)
@@ -214,7 +228,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             return InstallResult.Error(daemon.reason)
         }
         if (daemon !is TmuxctlDaemonStatus.Running || !daemon.enabled) {
-            return installTmuxctlUserDaemon(session)
+            return installTmuxctlUserDaemon(session, pathOverride)
         }
         return InstallResult.Success
     }
@@ -222,15 +236,20 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     private suspend fun freshenReport(
         session: SshSession,
         report: HostBootstrapReport?,
+        pathOverride: String?,
     ): HostBootstrapReport {
         if (report == null || report.missingTools.isNotEmpty() || report.unknownTools.isNotEmpty()) {
-            return checkServerSetup(session)
+            return checkServerSetup(session, pathOverride)
         }
         return report
     }
 
-    internal suspend fun checkTool(session: SshSession, binaryName: String): ToolStatus = try {
-        val result = session.exec(pathAwareCommand("command -v ${shellQuote(binaryName)}"))
+    internal suspend fun checkTool(
+        session: SshSession,
+        binaryName: String,
+        pathOverride: String? = null,
+    ): ToolStatus = try {
+        val result = session.exec(pathAwareCommand("command -v ${shellQuote(binaryName)}", pathOverride))
         when {
             result.exitCode == 0 && result.stdout.isNotBlank() -> ToolStatus.Installed(result.stdout.trim())
             result.exitCode != 0 -> ToolStatus.Missing
@@ -242,17 +261,23 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         ToolStatus.Unknown("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
     }
 
-    internal suspend fun detectPythonToolInstaller(session: SshSession): PythonToolInstaller? {
+    internal suspend fun detectPythonToolInstaller(
+        session: SshSession,
+        pathOverride: String? = null,
+    ): PythonToolInstaller? {
         PythonToolInstaller.entries.forEach { installer ->
-            if (checkTool(session, installer.binaryName) is ToolStatus.Installed) {
+            if (checkTool(session, installer.binaryName, pathOverride) is ToolStatus.Installed) {
                 return installer
             }
         }
         return null
     }
 
-    internal suspend fun checkTmuxctlDaemon(session: SshSession): TmuxctlDaemonStatus {
-        when (val systemctl = checkTool(session, "systemctl")) {
+    internal suspend fun checkTmuxctlDaemon(
+        session: SshSession,
+        pathOverride: String? = null,
+    ): TmuxctlDaemonStatus {
+        when (val systemctl = checkTool(session, "systemctl", pathOverride)) {
             is ToolStatus.Installed -> Unit
             ToolStatus.Missing -> return TmuxctlDaemonStatus.Unavailable("systemctl is not installed on this host")
             is ToolStatus.Unknown -> return TmuxctlDaemonStatus.Unknown("could not locate systemctl: ${systemctl.reason}")
@@ -290,9 +315,13 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         session: SshSession,
         installer: PythonToolInstaller,
         tool: BootstrapTool,
-    ): InstallResult = runPythonToolInstall(session, installer, tool)
+        pathOverride: String? = null,
+    ): InstallResult = runPythonToolInstall(session, installer, tool, pathOverride)
 
-    public suspend fun installTmuxctlDaemon(session: SshSession): InstallResult = installTmuxctlUserDaemon(session)
+    public suspend fun installTmuxctlDaemon(
+        session: SshSession,
+        pathOverride: String? = null,
+    ): InstallResult = installTmuxctlUserDaemon(session, pathOverride)
 
     /**
      * Detect the host's OS family and run the matching package-manager
@@ -407,21 +436,25 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         session: SshSession,
         installer: PythonToolInstaller,
         tool: BootstrapTool,
+        pathOverride: String?,
     ): InstallResult {
         val command = when (installer) {
             PythonToolInstaller.Uv -> "uv tool install ${tool.packageName}"
             PythonToolInstaller.Pipx -> "pipx install ${tool.packageName}"
         }
-        return runInstall(session, pathAwareCommand(command), needsRoot = false)
+        return runInstall(session, pathAwareCommand(command, pathOverride), needsRoot = false)
     }
 
-    private suspend fun installTmuxctlUserDaemon(session: SshSession): InstallResult {
-        val tmuxctl = when (val status = checkTool(session, "tmuxctl")) {
+    private suspend fun installTmuxctlUserDaemon(
+        session: SshSession,
+        pathOverride: String?,
+    ): InstallResult {
+        val tmuxctl = when (val status = checkTool(session, "tmuxctl", pathOverride)) {
             is ToolStatus.Installed -> status.path
             ToolStatus.Missing -> return InstallResult.Error("tmuxctl is not installed; install it before enabling the jobs daemon.")
             is ToolStatus.Unknown -> return InstallResult.Error("could not locate tmuxctl: ${status.reason}")
         }
-        if (checkTool(session, "systemctl") !is ToolStatus.Installed) {
+        if (checkTool(session, "systemctl", pathOverride) !is ToolStatus.Installed) {
             return InstallResult.Error("systemctl is not installed on this host; enable tmuxctl jobs daemon manually.")
         }
         val command = buildString {
@@ -462,8 +495,43 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         val needsRoot: Boolean,
     )
 
-    private fun pathAwareCommand(command: String): String =
-        posixShellCommand("PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; export PATH; $command")
+    /**
+     * Build the `/bin/sh -lc '…'` wrapper that augments PATH before
+     * running [command].
+     *
+     * The base augmentation is the historical
+     * `$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin` prefix, which covers
+     * the canonical tool-install locations the probe needs to see. Issue
+     * #41 adds an optional per-host override that is prepended *ahead*
+     * of that base so it wins in PATH search order:
+     *
+     * ```
+     * PATH="<override>:$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:$PATH"
+     * ```
+     *
+     * The override is taken verbatim from the user's Add/Edit Host
+     * "Extra PATH directories" field. A `null` or all-whitespace value
+     * disables the prepend (and produces a probe command that is
+     * byte-identical to the v0 wrapper for backwards compatibility with
+     * the existing HostBootstrapperTest fixtures).
+     *
+     * The override is not shell-escaped: the user is intentionally
+     * choosing PATH entries that already contain forward slashes and
+     * possibly `~`, and we want it to behave exactly the way the user
+     * would type it into a shell — i.e. tilde expansion and `$VAR`
+     * substitution happen if the user wrote them. The whole wrapper is
+     * single-quoted as one big argument to `sh -lc`, so the override is
+     * subject to the same expansion rules as the inline literals around
+     * it. We re-quote the wrapper itself via [shellQuote] which escapes
+     * any single-quote the user might paste in.
+     */
+    internal fun pathAwareCommand(command: String, pathOverride: String? = null): String {
+        val trimmed = pathOverride?.trim().orEmpty()
+        val prefix = if (trimmed.isNotEmpty()) "$trimmed:" else ""
+        return posixShellCommand(
+            "PATH=\"${prefix}\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; export PATH; $command",
+        )
+    }
 
     private fun systemdUserCommand(command: String): String =
         posixShellCommand(

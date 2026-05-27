@@ -52,6 +52,15 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
  * the legacy `heru` CLI. The SQL lives in
  * [com.pocketshell.core.storage.migrations.MIGRATION_4_5].
  *
+ * Version 6 (issue #41) added a `pathOverride` column to [HostEntity]
+ * for the bootstrap-probe PATH override. The probe wraps every
+ * `command -v <tool>` in `/bin/sh -lc`, which sources `~/.profile` but
+ * not `~/.bashrc`, so PATH entries declared only in `.bashrc` (a
+ * common pattern for venv-style tool installs) are invisible to it.
+ * The new column carries the user-supplied colon-separated PATH that
+ * the probe prepends ahead of its built-in augmentation. The SQL lives
+ * in [com.pocketshell.core.storage.migrations.MIGRATION_5_6].
+ *
  * `exportSchema = false` matches the reference module. When the schema
  * starts evolving in real users' hands, flip this on and check generated
  * schemas into `schemas/` so migrations are reviewable.
@@ -66,7 +75,7 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
         SnippetEntity::class,
         AgentSessionEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {

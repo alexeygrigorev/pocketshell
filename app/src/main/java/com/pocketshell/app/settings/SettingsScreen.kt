@@ -132,6 +132,12 @@ fun SettingsScreen(
                 )
             }
             item {
+                ConversationSection(
+                    showSystemNotes = settings.showSystemNotes,
+                    onShowSystemNotesChange = viewModel::setShowSystemNotes,
+                )
+            }
+            item {
                 UsageSection(onOpenUsage = onOpenUsage)
             }
             item {
@@ -666,6 +672,67 @@ internal fun formatThresholdLabel(seconds: Float): String {
  * surfaces — both are tracked as follow-up issues so the panel becomes
  * reachable in this issue without scope creep.
  */
+/**
+ * Conversation section — issue #176. Single toggle that controls
+ * whether XML-tagged system blocks (Claude Code's `<system-reminder>`,
+ * `<command-name>`, `<local-command-stdout>`, …) appear in the
+ * conversation pane.
+ *
+ *  - When ON (default): the parser still emits
+ *    [com.pocketshell.core.agents.ConversationEvent.SystemNote] events
+ *    and the renderer draws them as muted, collapsible rows so they do
+ *    not visually compete with user/assistant prose.
+ *  - When OFF: the renderer filters those events out entirely. The
+ *    user can still inspect them via the JSONL log on the remote host.
+ *
+ *  Lives between Voice and Usage so the cluster of "pane behaviour"
+ *  knobs stays together; Diagnostics and About continue to anchor the
+ *  bottom of the screen.
+ */
+@Composable
+private fun ConversationSection(
+    showSystemNotes: Boolean,
+    onShowSystemNotesChange: (Boolean) -> Unit,
+) {
+    Column {
+        SectionLabel("Conversation")
+        SectionCard {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Show system notes",
+                        color = PocketShellColors.Text,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Show agent-emitted XML blocks (system-reminder, command-name, …) " +
+                            "as muted collapsible rows. Turn off to hide them entirely.",
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 12.sp,
+                    )
+                }
+                Switch(
+                    checked = showSystemNotes,
+                    onCheckedChange = onShowSystemNotesChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = PocketShellColors.OnAccent,
+                        checkedTrackColor = PocketShellColors.Accent,
+                        uncheckedThumbColor = PocketShellColors.TextSecondary,
+                        uncheckedTrackColor = PocketShellColors.Surface,
+                        uncheckedBorderColor = PocketShellColors.Border,
+                    ),
+                    modifier = Modifier.testTag(SHOW_SYSTEM_NOTES_SWITCH_TAG),
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun UsageSection(onOpenUsage: () -> Unit) {
     Column {
@@ -788,6 +855,7 @@ internal const val VOICE_API_KEY_FIELD_TAG = "settings:voice:api-key-field"
 internal const val VOICE_API_KEY_SAVE_TAG = "settings:voice:api-key-save"
 internal const val VOICE_SILENCE_SLIDER_TAG = "settings:voice:silence-slider"
 internal const val VOICE_SILENCE_VALUE_TAG = "settings:voice:silence-value"
+internal const val SHOW_SYSTEM_NOTES_SWITCH_TAG = "settings:conversation:show-system-notes-switch"
 
 internal fun themeOptionTestTag(theme: ThemePreference): String =
     "settings:appearance:theme:" + theme.name.lowercase()

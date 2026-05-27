@@ -72,6 +72,13 @@ class SettingsViewModel @Inject constructor(
         repository.setVoiceSilenceThresholdSeconds(seconds)
 
     /**
+     * Toggle [AppSettings.showSystemNotes] — issue #176. When off, the
+     * conversation pane filters XML-tagged system blocks entirely; when
+     * on (default), they render as muted collapsible rows.
+     */
+    fun setShowSystemNotes(enabled: Boolean) = repository.setShowSystemNotes(enabled)
+
+    /**
      * Persist [key] through the keystore-backed vault. The caller still
      * owns the [CharArray] and is responsible for zeroing it after this
      * call returns (matches the contract in

@@ -60,6 +60,7 @@ data class AppSettings(
     val tmuxOnAttachByDefault: Boolean = true,
     val voiceLanguage: String = VOICE_LANGUAGE_AUTO,
     val voiceSilenceThresholdSeconds: Float = DEFAULT_VOICE_SILENCE_SECONDS,
+    val showSystemNotes: Boolean = DEFAULT_SHOW_SYSTEM_NOTES,
 ) {
     companion object {
         const val MIN_TERMINAL_FONT_SP: Float = 10f
@@ -98,6 +99,17 @@ data class AppSettings(
         const val MAX_VOICE_SILENCE_SECONDS: Float = 10f
         const val DEFAULT_VOICE_SILENCE_SECONDS: Float = 5f
         const val VOICE_SILENCE_STEP_SECONDS: Float = 0.5f
+
+        /**
+         * Default for [AppSettings.showSystemNotes] — issue #176. When
+         * true, XML-tagged system blocks emitted by Claude Code (and any
+         * future engine that adopts the same convention) render as muted
+         * collapsible rows in the conversation pane. When false they are
+         * filtered out entirely. Default is true so a fresh install sees
+         * the same notes the previous (pre-#176) builds did, just visually
+         * de-emphasized.
+         */
+        const val DEFAULT_SHOW_SYSTEM_NOTES: Boolean = true
     }
 }
 

@@ -78,6 +78,8 @@ internal const val SESSION_CONVERSATION_PANE_TAG = "session:conversation"
 internal const val SESSION_CONVERSATION_COMPOSER_INPUT_TAG = "session:conversation:composer-input"
 internal const val SESSION_CONVERSATION_COMPOSER_SEND_TAG = "session:conversation:composer-send"
 internal const val SESSION_CONVERSATION_TOOL_ROW_TAG_PREFIX = "session:conversation:tool:"
+/** Issue #176: stable test tag prefix for a `SystemNote` row in the SessionScreen conversation pane. */
+internal const val SESSION_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX = "session:conversation:system-note:"
 internal const val SESSION_AGENT_HINT_TAG = "session:agent-hint"
 /** Issue #116: stable test tag for the in-session blocked / near-limit chip. */
 internal const val SESSION_USAGE_BADGE_TAG = "session:usage-badge"
@@ -125,6 +127,10 @@ public fun SessionScreen(
      */
     usageBadgeProvider: com.pocketshell.core.usage.UsageProviderRecord? = null,
     inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
+    // Issue #176: pulled in via Hilt so the Settings → Conversation →
+    // "Show system notes" toggle reaches the in-session conversation pane
+    // without restarting.
+    settingsViewModel: com.pocketshell.app.settings.SettingsViewModel = hiltViewModel(),
 ) {
     LaunchedEffect(host, port, user, keyPath, passphrase) {
         viewModel.connect(host, port, user, keyPath, passphrase)
@@ -139,6 +145,7 @@ public fun SessionScreen(
     val voiceCommandReview by viewModel.voiceCommandReview.collectAsState()
     val projectNavigation by viewModel.projectNavigation.collectAsState()
     val dictationState by inlineDictationViewModel.uiState.collectAsState()
+    val appSettings by settingsViewModel.state.collectAsState()
     val keyBarModifierStates = remember(modifierStates) {
         modifierStates.mapKeys { (modifier, _) -> modifier.keyBarLabel }
     }
@@ -265,6 +272,7 @@ public fun SessionScreen(
                         modifier = Modifier
                             .fillMaxSize()
                             .testTag(SESSION_CONVERSATION_PANE_TAG),
+                        showSystemNotes = appSettings.showSystemNotes,
                     )
                 } else {
                     TerminalSurface(
@@ -511,14 +519,23 @@ internal fun ConversationPane(
     events: List<ConversationEvent>,
     onSendToAgent: (String) -> Unit,
     modifier: Modifier = Modifier,
+    // Issue #176: same opt-in as the tmux pane — when false, XML-tagged
+    // SystemNote events are filtered out entirely; default is true so the
+    // existing ConversationInteractE2eTest call site keeps showing them.
+    showSystemNotes: Boolean = true,
 ) {
     var query by remember { mutableStateOf("") }
     var composerText by remember { mutableStateOf("") }
-    val filteredEvents = remember(events, query) {
+    val visibleEvents = remember(events, showSystemNotes) {
+        if (showSystemNotes) events else events.filterNot { it is ConversationEvent.SystemNote }
+    }
+    val filteredEvents = remember(visibleEvents, query) {
         val q = query.trim()
-        if (q.isBlank()) events else events.filter { it.searchText().contains(q, ignoreCase = true) }
+        if (q.isBlank()) visibleEvents else visibleEvents.filter { it.searchText().contains(q, ignoreCase = true) }
     }
     val expandedToolCalls = remember { mutableStateOf(setOf<String>()) }
+    // Issue #176: SystemNote expand state — sticky for the pane lifetime.
+    val expandedSystemNotes = remember { mutableStateOf(setOf<String>()) }
     val runningToolIds = remember(events) { runningToolCallIds(events) }
     val eventsById = remember(events) { events.associateBy { it.id } }
     Column(
@@ -558,6 +575,11 @@ internal fun ConversationPane(
                     onToggleExpand = { id ->
                         val current = expandedToolCalls.value
                         expandedToolCalls.value = if (current.contains(id)) current - id else current + id
+                    },
+                    isSystemNoteExpanded = expandedSystemNotes.value.contains(event.id),
+                    onToggleSystemNoteExpand = { id ->
+                        val current = expandedSystemNotes.value
+                        expandedSystemNotes.value = if (current.contains(id)) current - id else current + id
                     },
                 )
             }
@@ -601,6 +623,8 @@ private fun ConversationEventRow(
     eventsById: Map<String, ConversationEvent>,
     isExplicitlyExpanded: Boolean,
     onToggleExpand: (String) -> Unit,
+    isSystemNoteExpanded: Boolean,
+    onToggleSystemNoteExpand: (String) -> Unit,
 ) {
     when (event) {
         is ConversationEvent.Message -> ConversationMessageRow(event)
@@ -612,6 +636,11 @@ private fun ConversationEventRow(
             onToggle = { onToggleExpand(event.id) },
         )
         is ConversationEvent.ToolResult -> ConversationToolResultRow(event)
+        is ConversationEvent.SystemNote -> ConversationSystemNoteRow(
+            note = event,
+            isExpanded = isSystemNoteExpanded,
+            onToggle = { onToggleSystemNoteExpand(event.id) },
+        )
     }
 }
 
@@ -707,6 +736,63 @@ private fun ConversationToolCallRow(
     }
 }
 
+/**
+ * Issue #176: SessionScreen mirror of the tmux variant. Renders an
+ * XML-tagged [ConversationEvent.SystemNote] as a muted collapsible row
+ * so Claude Code's `<system-reminder>`, `<command-name>`,
+ * `<local-command-stdout>`, … blocks no longer compete for attention
+ * with user/assistant prose. See [ConversationSystemNoteRow] in
+ * `TmuxSessionScreen.kt` for the full design rationale.
+ */
+@Composable
+private fun ConversationSystemNoteRow(
+    note: ConversationEvent.SystemNote,
+    isExpanded: Boolean,
+    onToggle: () -> Unit,
+) {
+    val preview = remember(note.content) { note.content.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty() }
+    val chevron = if (isExpanded) "v" else "›"
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(vertical = 2.dp)
+            .testTag(SESSION_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX + note.id),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = note.tag,
+                color = PocketShellColors.TextSecondary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = preview,
+                color = PocketShellColors.TextMuted,
+                fontSize = 11.sp,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = chevron,
+                color = PocketShellColors.TextMuted,
+                fontSize = 12.sp,
+            )
+        }
+        if (isExpanded && note.content.isNotEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp, start = 8.dp, end = 4.dp),
+            ) {
+                ToolCallSection(label = "content", body = note.content)
+            }
+        }
+    }
+}
+
 @Composable
 private fun ConversationToolResultRow(result: ConversationEvent.ToolResult) {
     Column(
@@ -777,6 +863,7 @@ private fun ConversationEvent.searchText(): String = when (this) {
     is ConversationEvent.Message -> text
     is ConversationEvent.ToolCall -> "$name $input"
     is ConversationEvent.ToolResult -> output
+    is ConversationEvent.SystemNote -> "$tag $content"
 }
 
 @Composable

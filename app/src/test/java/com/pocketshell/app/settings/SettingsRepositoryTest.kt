@@ -49,6 +49,11 @@ class SettingsRepositoryTest {
             snap.voiceSilenceThresholdSeconds,
             0f,
         )
+        // Issue #176: system notes are visible-but-muted by default so
+        // fresh installs see the same conversation events the pre-#176
+        // build did, just visually de-emphasized.
+        assertEquals(AppSettings.DEFAULT_SHOW_SYSTEM_NOTES, snap.showSystemNotes)
+        assertTrue("expected default to be ON", snap.showSystemNotes)
     }
 
     @Test
@@ -162,5 +167,21 @@ class SettingsRepositoryTest {
             SettingsRepository(context).settings.value.voiceSilenceThresholdSeconds,
             0.01f,
         )
+    }
+
+    // -- Issue #176: conversation system-notes toggle ----------------------
+
+    @Test
+    fun `setShowSystemNotes toggles off and on, persisting across instances`() {
+        val repo = SettingsRepository(context)
+        repo.setShowSystemNotes(false)
+        assertEquals(false, repo.settings.value.showSystemNotes)
+        // Re-read from a fresh instance to confirm the write went to
+        // disk and survives a process death.
+        assertEquals(false, SettingsRepository(context).settings.value.showSystemNotes)
+
+        repo.setShowSystemNotes(true)
+        assertEquals(true, repo.settings.value.showSystemNotes)
+        assertEquals(true, SettingsRepository(context).settings.value.showSystemNotes)
     }
 }

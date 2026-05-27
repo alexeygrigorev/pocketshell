@@ -77,6 +77,7 @@ import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.session.InlineDictationViewModel
+import com.pocketshell.app.settings.SettingsViewModel
 import com.pocketshell.app.session.KeyBarWithMic
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
@@ -153,6 +154,10 @@ public fun TmuxSessionScreen(
     modifier: Modifier = Modifier,
     sessionPickerViewModel: HostTmuxSessionPickerViewModel = hiltViewModel(),
     inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
+    // Issue #176: needed for the Settings → Conversation → "Show system
+    // notes" toggle to take effect inside the conversation pane without
+    // restarting the session.
+    settingsViewModel: SettingsViewModel = hiltViewModel(),
     onBack: () -> Unit = {},
     onOpenTmuxSession: (sessionName: String, startDirectory: String?) -> Unit = { _, _ -> },
     onReplaceTmuxSession: (sessionName: String) -> Unit = {},
@@ -187,6 +192,9 @@ public fun TmuxSessionScreen(
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
     val voiceCommandReview by viewModel.voiceCommandReview.collectAsState()
     val dictationState by inlineDictationViewModel.uiState.collectAsState()
+    // Issue #176: collected once at the screen root so the conversation
+    // pane recomposes when the toggle flips in Settings.
+    val appSettings by settingsViewModel.state.collectAsState()
 
     val pagerState = rememberPagerState(pageCount = { panes.size })
 
@@ -443,6 +451,7 @@ public fun TmuxSessionScreen(
                         modifier = Modifier
                             .fillMaxSize()
                             .testTag(TMUX_CONVERSATION_PANE_TAG),
+                        showSystemNotes = appSettings.showSystemNotes,
                     )
                 } else if (panes.isEmpty()) {
                     EmptyPanesPlaceholder()
@@ -1001,6 +1010,8 @@ internal const val TMUX_CONVERSATION_PANE_TAG = "tmux:conversation"
 internal const val TMUX_CONVERSATION_COMPOSER_INPUT_TAG = "tmux:conversation:composer-input"
 internal const val TMUX_CONVERSATION_COMPOSER_SEND_TAG = "tmux:conversation:composer-send"
 internal const val TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX = "tmux:conversation:tool:"
+/** Issue #176: stable test tag prefix for a `SystemNote` row in the tmux conversation pane. */
+internal const val TMUX_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX = "tmux:conversation:system-note:"
 internal const val TMUX_AGENT_HINT_TAG = "tmux:agent-hint"
 /** Issue #116: stable test tag for the in-tmux-session blocked / near-limit chip. */
 internal const val TMUX_SESSION_USAGE_BADGE_TAG = "tmux:usage-badge"
@@ -1276,21 +1287,33 @@ private fun TmuxAgentHintChip(
 }
 
 @Composable
-private fun TmuxConversationPane(
+internal fun TmuxConversationPane(
     events: List<ConversationEvent>,
     onSendToAgent: (String) -> Unit,
     modifier: Modifier = Modifier,
+    // Issue #176: when false, XML-tagged SystemNote events are filtered
+    // from the visible feed entirely. The default keeps the existing
+    // behaviour (notes visible but muted) so direct callers that did
+    // not opt into the setting wire-up still see system notes.
+    showSystemNotes: Boolean = true,
 ) {
     var query by remember { mutableStateOf("") }
     var composerText by remember { mutableStateOf("") }
-    val filteredEvents = remember(events, query) {
+    val visibleEvents = remember(events, showSystemNotes) {
+        if (showSystemNotes) events else events.filterNot { it is ConversationEvent.SystemNote }
+    }
+    val filteredEvents = remember(visibleEvents, query) {
         val q = query.trim()
-        if (q.isBlank()) events else events.filter { it.searchText().contains(q, ignoreCase = true) }
+        if (q.isBlank()) visibleEvents else visibleEvents.filter { it.searchText().contains(q, ignoreCase = true) }
     }
     // Tool-call expansion state per event-id. Persisted at the pane
     // level (not inside the row composable) so a row scrolling out and
     // back in remembers the user's decision until the session detaches.
     val expandedToolCalls = remember { mutableStateOf(setOf<String>()) }
+    // Issue #176: SystemNote expand state — same idea as tool-call expand,
+    // collapsed by default, the user's choice is sticky for the lifetime
+    // of the conversation pane.
+    val expandedSystemNotes = remember { mutableStateOf(setOf<String>()) }
     val runningToolIds = remember(events) { runningToolCallIds(events) }
     val rowMap = remember(events) { events.associateBy { it.id } }
     Column(
@@ -1330,6 +1353,10 @@ private fun TmuxConversationPane(
                     onToggleExpand = { id ->
                         expandedToolCalls.value = expandedToolCalls.value.toggle(id)
                     },
+                    isSystemNoteExpanded = expandedSystemNotes.value.contains(event.id),
+                    onToggleSystemNoteExpand = { id ->
+                        expandedSystemNotes.value = expandedSystemNotes.value.toggle(id)
+                    },
                 )
             }
         }
@@ -1363,6 +1390,8 @@ private fun ConversationEventRow(
     eventsById: Map<String, ConversationEvent>,
     isExplicitlyExpanded: Boolean,
     onToggleExpand: (String) -> Unit,
+    isSystemNoteExpanded: Boolean,
+    onToggleSystemNoteExpand: (String) -> Unit,
 ) {
     when (event) {
         is ConversationEvent.Message -> ConversationMessageRow(event)
@@ -1378,6 +1407,11 @@ private fun ConversationEventRow(
             // standalone, very subtle row.
             ConversationToolResultRow(event)
         }
+        is ConversationEvent.SystemNote -> ConversationSystemNoteRow(
+            note = event,
+            isExpanded = isSystemNoteExpanded,
+            onToggle = { onToggleSystemNoteExpand(event.id) },
+        )
     }
 }
 
@@ -1435,6 +1469,7 @@ private fun ConversationEvent.searchText(): String = when (this) {
     is ConversationEvent.Message -> text
     is ConversationEvent.ToolCall -> "$name $input"
     is ConversationEvent.ToolResult -> output
+    is ConversationEvent.SystemNote -> "$tag $content"
 }
 
 @Composable
@@ -1546,6 +1581,74 @@ private fun ConversationToolCallRow(
                         body = result.output,
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * Issue #176: muted, collapsible renderer for
+ * [ConversationEvent.SystemNote] — the XML-tagged metadata blocks
+ * Claude Code emits inside Message text (`<system-reminder>`,
+ * `<command-name>`, `<local-command-stdout>`, …).
+ *
+ * Collapsed (default): a single muted row showing the tag label and a
+ * one-line preview of the content so the user can scan past it quickly.
+ * Tapping the row toggles to the expanded state which shows the full
+ * raw content in monospace — no markdown processing because the body
+ * is structured / code-like.
+ *
+ * Styling uses [PocketShellColors.TextMuted] / [PocketShellColors.TextSecondary]
+ * so the row reads as "background metadata" rather than a peer message.
+ */
+@Composable
+private fun ConversationSystemNoteRow(
+    note: ConversationEvent.SystemNote,
+    isExpanded: Boolean,
+    onToggle: () -> Unit,
+) {
+    val preview = remember(note.content) { note.content.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty() }
+    val chevron = if (isExpanded) "v" else "›"
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(vertical = 2.dp)
+            .testTag(TMUX_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX + note.id),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = note.tag,
+                color = PocketShellColors.TextSecondary,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = preview,
+                color = PocketShellColors.TextMuted,
+                fontSize = 11.sp,
+                modifier = Modifier.weight(1f),
+                maxLines = 1,
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = chevron,
+                color = PocketShellColors.TextMuted,
+                fontSize = 12.sp,
+            )
+        }
+        if (isExpanded && note.content.isNotEmpty()) {
+            // Raw monospace body so the XML-like structure stays readable.
+            // Reuses ToolCallSection so very long blocks fall into the
+            // bounded scrollable container rather than swallowing the
+            // viewport.
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp, start = 8.dp, end = 4.dp),
+            ) {
+                ToolCallSection(label = "content", body = note.content)
             }
         }
     }

@@ -102,6 +102,18 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(voiceSilenceThresholdSeconds = clamped)
     }
 
+    /**
+     * Persist the conversation-pane system-notes toggle. Issue #176. When
+     * false, the renderer drops XML-tagged blocks (`<system-reminder>`,
+     * `<command-name>`, `<local-command-stdout>`, …) from the visible
+     * feed. When true, they remain visible as muted collapsible rows.
+     */
+    fun setShowSystemNotes(enabled: Boolean) {
+        if (_settings.value.showSystemNotes == enabled) return
+        prefs.edit().putBoolean(KEY_SHOW_SYSTEM_NOTES, enabled).apply()
+        _settings.value = _settings.value.copy(showSystemNotes = enabled)
+    }
+
     private fun readSnapshot(): AppSettings {
         val themeName = prefs.getString(KEY_THEME, ThemePreference.System.name)
             ?: ThemePreference.System.name
@@ -122,12 +134,17 @@ class SettingsRepository @Inject constructor(
             AppSettings.MIN_VOICE_SILENCE_SECONDS,
             AppSettings.MAX_VOICE_SILENCE_SECONDS,
         )
+        val showSystemNotes = prefs.getBoolean(
+            KEY_SHOW_SYSTEM_NOTES,
+            AppSettings.DEFAULT_SHOW_SYSTEM_NOTES,
+        )
         return AppSettings(
             theme = theme,
             terminalFontSizeSp = font,
             tmuxOnAttachByDefault = tmux,
             voiceLanguage = language,
             voiceSilenceThresholdSeconds = silence,
+            showSystemNotes = showSystemNotes,
         )
     }
 
@@ -138,5 +155,6 @@ class SettingsRepository @Inject constructor(
         const val KEY_TMUX_ON_ATTACH = "tmux_on_attach_default"
         const val KEY_VOICE_LANGUAGE = "voice_language"
         const val KEY_VOICE_SILENCE_SECONDS = "voice_silence_seconds"
+        const val KEY_SHOW_SYSTEM_NOTES = "show_system_notes"
     }
 }

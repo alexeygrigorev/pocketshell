@@ -11,8 +11,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import net.schmizz.sshj.SSHClient
+import net.schmizz.sshj.common.DisconnectReason
 import net.schmizz.sshj.connection.channel.direct.Session.Command
+import net.schmizz.sshj.transport.TransportException
 import java.io.BufferedReader
+import java.io.IOException
 import java.io.InputStreamReader
 
 /**
@@ -176,7 +179,63 @@ internal class RealSshSession(
 
     override fun close() {
         scope.cancel()
-        runCatching { client.disconnect() }
+        // Issue #151: a teardown-before-reattach race could leave the
+        // transport already half-disconnected (cancelled mid-flight from the
+        // tmux event-loop coroutine in `TmuxSessionViewModel`) when this
+        // `close()` runs. sshj's `SSHClient.disconnect()` then throws
+        // `TransportException` with `DisconnectReason.BY_APPLICATION`
+        // ("Disconnected") because it tries to send a disconnect packet over
+        // a transport that has already gone down. That exception was
+        // surfaced to the user as a crash on the v0.2.7 dogfood device.
+        //
+        // The orthogonal `TmuxSessionViewModel` fix joins the event-loop
+        // job before calling `close()`, which closes the race in the normal
+        // path. The `BY_APPLICATION` catch below is the belt-and-suspenders
+        // side of that fix: if any other code path ever calls close on an
+        // already-disconnected transport (including a double-close), we
+        // swallow the already-disconnected signal silently because that is
+        // exactly the no-op outcome `close()` already wanted. Other
+        // `TransportException` reasons (KEX failure, MAC error, unexpected
+        // protocol errors) propagate so genuine transport faults still
+        // surface.
+        //
+        // The outer best-effort catch keeps the previous `runCatching`
+        // semantics for non-TransportException failures during teardown
+        // (e.g. socket-level IO faults). `close()` is supposed to be a
+        // best-effort cleanup — propagating a stray IO error during shutdown
+        // does not give the caller anything actionable and breaks the
+        // idempotency guarantee. We re-throw the configured "real
+        // transport fault" path explicitly so the BY_APPLICATION skip is
+        // the only path that silently no-ops, and everything else either
+        // succeeds or is logged as best-effort.
+        try {
+            client.disconnect()
+        } catch (e: TransportException) {
+            if (e.disconnectReason != DisconnectReason.BY_APPLICATION) {
+                throw e
+            }
+            // BY_APPLICATION = already-disconnected; close() is idempotent
+            // here by design — silently no-op.
+        } catch (e: IOException) {
+            // sshj declares `disconnect()` as `throws IOException`. A
+            // non-TransportException IO failure during shutdown is
+            // best-effort: nothing the caller can do, propagating it would
+            // defeat the idempotency contract. Swallowed deliberately to
+            // preserve the pre-#151 `runCatching` semantics for this path.
+        } catch (e: RuntimeException) {
+            // Belt-and-suspenders: the pre-#151 implementation wrapped the
+            // whole disconnect in `runCatching`, which silently swallowed
+            // every Throwable. We narrow that to the failure modes that
+            // are actually known to surface from sshj's disconnect path,
+            // but we keep RuntimeException swallowed so we don't regress
+            // call sites that historically tolerated a sloppy teardown
+            // (e.g. close() invoked from a callback whose dispatcher
+            // contract turns a stray socket write into a runtime fault
+            // like `NetworkOnMainThreadException`). Fixing those call
+            // sites is out of scope for #151; this catch preserves the
+            // status quo for them so the BY_APPLICATION-specific fix
+            // does not silently widen the failure surface.
+        }
     }
 
     private fun ensureConnected() {

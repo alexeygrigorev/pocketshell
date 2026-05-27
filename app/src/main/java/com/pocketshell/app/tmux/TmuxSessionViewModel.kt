@@ -32,7 +32,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -40,6 +42,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
@@ -239,11 +242,34 @@ public class TmuxSessionViewModel @Inject constructor(
         if (connectJob?.isActive == true && connectingTarget == target) return
         if (_connectionStatus.value is ConnectionStatus.Connected && activeTarget == target) return
 
-        connectJob?.cancel()
-        closeCurrentConnection()
+        // Issue #151: a tap on "Attach" for a different tmux session
+        // re-enters `connect()` while the previous connection's event-loop
+        // coroutine is still mid-processing a `ControlEvent`. The old
+        // implementation fired `connectJob?.cancel()` and immediately ran
+        // `closeCurrentConnection()` synchronously — the cancel signal had
+        // not yet propagated, so `sessionRef?.close()` raced the still-live
+        // event-loop coroutine and `SSHClient.disconnect()` threw
+        // `TransportException [BY_APPLICATION] Disconnected` because the
+        // transport was already half-down from the cancellation. That
+        // crash was reproduced on the v0.2.7 dogfood device. The new shape
+        // cancels-and-joins the prior connect job AND the event-loop job
+        // inside a launched coroutine, so by the time we touch the SSH
+        // transport the only thread interacting with it is us.
+        val previousConnectJob = connectJob
         connectingTarget = target
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
         connectJob = viewModelScope.launch {
+            // First: drain any in-flight connect() coroutine. `cancelAndJoin`
+            // sends cancel and suspends until the prior job actually exits.
+            // We do this in `NonCancellable` so a fresh cancel on the new
+            // job (e.g. another rapid connect()) does not interrupt the
+            // join itself — that would leave us in the original race window.
+            withContext(NonCancellable) {
+                previousConnectJob?.cancelAndJoin()
+                // Then tear the previous connection down properly — joining
+                // the event-loop coroutine before touching the transport.
+                closeCurrentConnectionAndJoin()
+            }
             runConnect(target)
         }
     }
@@ -1046,6 +1072,74 @@ public class TmuxSessionViewModel @Inject constructor(
         super.onCleared()
     }
 
+    /**
+     * Suspending teardown of the current SSH/tmux connection.
+     *
+     * Issue #151: the previous synchronous `closeCurrentConnection()` was
+     * called from `connect()` while the event-loop coroutine subscribed to
+     * `TmuxClient.events` was still alive (and frequently mid-processing a
+     * `ControlEvent`). Tearing down the SSH transport from one thread while
+     * another was mid-write produced `TransportException [BY_APPLICATION]`
+     * crashes on real devices. This entry point `cancelAndJoin`s the
+     * event-loop job FIRST, so by the time we touch `clientRef.close()` /
+     * `sessionRef.close()` no other coroutine is talking to the transport.
+     *
+     * Must be called from a coroutine that owns whatever
+     * exception-propagation policy the caller needs (the production caller
+     * wraps this in `NonCancellable`; tests may not need to).
+     */
+    private suspend fun closeCurrentConnectionAndJoin() {
+        eventsJob?.cancelAndJoin()
+        eventsJob = null
+        projectRootsJob?.cancelAndJoin()
+        projectRootsJob = null
+        _projectRoots.value = emptyList()
+        val producerJobsToJoin = paneProducerJobs.values.toList()
+        val agentJobsToJoin = paneAgentJobs.values.toList()
+        val inputJobsToJoin = paneInputJobs.values.toList()
+        for (job in producerJobsToJoin) job.cancelAndJoin()
+        for (job in agentJobsToJoin) job.cancelAndJoin()
+        for (job in inputJobsToJoin) job.cancelAndJoin()
+        for ((_, channel) in paneInputChannels) {
+            channel.close()
+        }
+        paneAgentJobs.clear()
+        paneAgentInputs.clear()
+        paneInputJobs.clear()
+        paneInputChannels.clear()
+        _agentConversations.value = emptyMap()
+        paneProducerJobs.clear()
+        for ((_, row) in paneRows) {
+            runCatching { row.terminalState.detachExternalProducer() }
+        }
+        paneRows.clear()
+        _panes.value = emptyList()
+        runCatching { clientRef?.close() }
+        clientRef = null
+        registeredHostId?.let { activeTmuxClients.unregister(it) }
+        registeredHostId = null
+        // `RealSshSession.close()` now swallows the already-disconnected
+        // `BY_APPLICATION` TransportException (#151), but we keep the
+        // `runCatching` here too because the session may be a non-real
+        // implementation in tests.
+        runCatching { sessionRef?.close() }
+        sessionRef = null
+        activeTarget = null
+        connectingTarget = null
+        // Issue #102 (reopen): a fresh attach must re-fire `resize-window`
+        // against the new tmux session's pane on the next layout pass.
+        remoteColumns = 0
+        remoteRows = 0
+    }
+
+    /**
+     * Non-suspending teardown used by `onCleared()` and the synchronous
+     * test-replacement seam. Cancels the event-loop coroutine (fire and
+     * forget) and then tears the rest of the state down sync. Production
+     * callers that need the cancel-and-join ordering — most importantly
+     * `connect()`, which raced the event loop on real devices (#151) —
+     * must use [closeCurrentConnectionAndJoin] instead.
+     */
     private fun closeCurrentConnection() {
         eventsJob?.cancel()
         eventsJob = null

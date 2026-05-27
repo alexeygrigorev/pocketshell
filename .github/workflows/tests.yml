@@ -134,25 +134,30 @@ jobs:
       - name: Start Docker agent target
         run: docker compose -f tests/docker/docker-compose.yml up -d --build agents
 
-      - name: Verify agent SSH target
+      - name: Wait for agent container to report healthy
+        # Issue #150: consume the compose `healthcheck:` block via
+        # `docker inspect` instead of retry-sleep polling SSH from the
+        # host. The compose service runs `ssh ... testuser@localhost
+        # true` inside the container; reaching `healthy` means SSH +
+        # authentication are working.
+        run: |
+          source tests/docker/lib/wait-for-healthy.sh
+          wait_for_container_healthy tests/docker/docker-compose.yml agents /tmp/agent-health.log 60
+          cat /tmp/agent-health.log
+
+      - name: Verify agent SSH target tool surface
+        # Health-status already proves SSH is up; this single SSH probe
+        # only verifies the agent-image-specific tool surface remained
+        # intact for the connected suite.
         run: |
           chmod 600 tests/docker/test_key
-          for attempt in {1..30}; do
-            if ssh -i tests/docker/test_key -p 2222 \
-              -o BatchMode=yes \
-              -o ConnectTimeout=2 \
-              -o StrictHostKeyChecking=no \
-              -o UserKnownHostsFile=/dev/null \
-              testuser@127.0.0.1 \
-              'for tool in heru agent-log-explorer tmuxctl; do command -v "$tool"; done' > /tmp/agent-smoke.log 2>&1; then
-              cat /tmp/agent-smoke.log
-              exit 0
-            fi
-            cat /tmp/agent-smoke.log
-            echo "Agent SSH target not ready; retrying (${attempt}/30)"
-            sleep 2
-          done
-          exit 1
+          ssh -i tests/docker/test_key -p 2222 \
+            -o BatchMode=yes \
+            -o ConnectTimeout=2 \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            testuser@127.0.0.1 \
+            'for tool in heru agent-log-explorer tmuxctl; do command -v "$tool"; done'
 
       - name: Run connected Android tests
         # `-Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true`

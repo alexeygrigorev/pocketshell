@@ -42,6 +42,10 @@ REAL_AGENT_RELEASE_GATE_LOG_ROOT="$ROOT_DIR/build/real-agent-release-gate"
 REAL_AGENT_RELEASE_GATE_RUN_DIR="$REAL_AGENT_RELEASE_GATE_LOG_ROOT/$REAL_AGENT_RELEASE_GATE_RUN_ID"
 REAL_AGENT_COMPOSE_FILE="${REAL_AGENT_COMPOSE_FILE:-tests/docker/real-agent/compose.yml}"
 REAL_AGENT_RELEASE_GATE_TEST_CLASS="com.pocketshell.app.proof.RealAgentReleaseGateTest"
+
+# Issue #150: shared health-status polling helper. Provides
+# `wait_for_container_healthy` used by the real-agent gate below.
+source "$ROOT_DIR/tests/docker/lib/wait-for-healthy.sh"
 LONG_RUNNING_TEST="${LONG_RUNNING_TEST:-0}"
 LONG_RUNNING_TEST_RUN_ID="$RUN_ID-long-running"
 LONG_RUNNING_TEST_LOG_ROOT="$ROOT_DIR/build/long-running-session"
@@ -203,33 +207,31 @@ run_real_agent_release_gate_instrumentation() {
   docker compose -f "$REAL_AGENT_COMPOSE_FILE" up -d --build real-agents \
     2>&1 | tee "$run_dir/docker-up.log"
 
-  # Probe SSH readiness from the host so a slow image build / restart does not
-  # surface as an opaque instrumentation timeout later.
-  : > "$ssh_log"
+  # Issue #150: wait on the compose `healthcheck:` block via
+  # `docker inspect`, not a host-side SSH retry loop. Keep one follow-up
+  # SSH probe so the readiness log still records the real-agent CLI
+  # sanity check (`claude --version && codex --version`).
   local ssh_key="$ROOT_DIR/tests/docker/test_key"
   chmod 600 "$ssh_key" 2>/dev/null || true
-  local ssh_ready=0
-  for attempt in $(seq 1 60); do
-    if {
-      printf '[%s] attempt=%s\n' "$(date -Is)" "$attempt"
-      ssh \
-        -i "$ssh_key" \
-        -p 2240 \
-        -o BatchMode=yes \
-        -o ConnectTimeout=3 \
-        -o ConnectionAttempts=1 \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        testuser@127.0.0.1 \
-        'claude --version && codex --version'
-    } >> "$ssh_log" 2>&1; then
-      ssh_ready=1
-      break
-    fi
-    sleep 1
-  done
-  [[ "$ssh_ready" -eq 1 ]] || {
-    printf 'FAIL: real-agent SSH fixture did not become ready (port 2240)\n' >&2
+  if ! wait_for_container_healthy "$REAL_AGENT_COMPOSE_FILE" real-agents "$ssh_log" 60; then
+    printf 'FAIL: real-agent SSH fixture did not become healthy (port 2240)\n' >&2
+    tail -n 80 "$ssh_log" >&2 || true
+    return 1
+  fi
+  {
+    printf '[%s] health=healthy; running follow-up SSH sanity probe\n' "$(date -Is)"
+    ssh \
+      -i "$ssh_key" \
+      -p 2240 \
+      -o BatchMode=yes \
+      -o ConnectTimeout=3 \
+      -o ConnectionAttempts=1 \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      testuser@127.0.0.1 \
+      'claude --version && codex --version'
+  } >> "$ssh_log" 2>&1 || {
+    printf 'FAIL: real-agent SSH fixture reported healthy but follow-up SSH probe failed (port 2240)\n' >&2
     tail -n 80 "$ssh_log" >&2 || true
     return 1
   }

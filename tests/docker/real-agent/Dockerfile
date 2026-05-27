@@ -14,6 +14,7 @@ RUN apt-get update \
         less \
         make \
         g++ \
+        openssh-client \
         openssh-server \
         procps \
         python3 \
@@ -34,10 +35,13 @@ RUN ssh-keygen -A \
     && chown -R testuser:testuser /home/testuser /workspace
 
 COPY test_key.pub /home/testuser/.ssh/authorized_keys
+# Issue #150: see Dockerfile.ssh — same rationale for the in-container
+# compose healthcheck. The private key is a committed test fixture.
+COPY test_key /root/test_key
 COPY real-agent/entrypoint.sh /usr/local/bin/pocketshell-real-agent-entrypoint
 COPY real-agent/start-agent-sessions.sh /usr/local/bin/pocketshell-start-agent-sessions
 
-RUN chmod 600 /home/testuser/.ssh/authorized_keys \
+RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
     && chmod +x \
         /usr/local/bin/pocketshell-real-agent-entrypoint \
         /usr/local/bin/pocketshell-start-agent-sessions \

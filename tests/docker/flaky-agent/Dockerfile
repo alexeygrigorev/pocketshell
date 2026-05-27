@@ -27,7 +27,7 @@
 # disconnect watcher.
 FROM alpine:latest
 
-RUN apk add --no-cache openssh-server tmux procps bash coreutils \
+RUN apk add --no-cache openssh-server openssh-client tmux procps bash coreutils \
     && ssh-keygen -A \
     && adduser -D -s /bin/sh testuser \
     && passwd -u testuser \
@@ -36,11 +36,14 @@ RUN apk add --no-cache openssh-server tmux procps bash coreutils \
 
 COPY sshd_config /etc/ssh/sshd_config
 COPY test_key.pub /home/testuser/.ssh/authorized_keys
+# Issue #150: see Dockerfile.ssh — same rationale for the in-container
+# compose healthcheck. The private key is a committed test fixture.
+COPY test_key /root/test_key
 COPY flaky-agent/entrypoint.sh /usr/local/bin/pocketshell-flaky-agent-entrypoint
 COPY flaky-agent/flaky-disconnect-watcher.sh /usr/local/bin/pocketshell-flaky-disconnect-watcher
 COPY flaky-agent/tmuxctl /usr/local/bin/tmuxctl
 
-RUN chmod 600 /home/testuser/.ssh/authorized_keys \
+RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
     && chmod +x /usr/local/bin/pocketshell-flaky-agent-entrypoint \
                 /usr/local/bin/pocketshell-flaky-disconnect-watcher \
                 /usr/local/bin/tmuxctl \

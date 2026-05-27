@@ -170,7 +170,51 @@ Start the Docker agent target used by normal connected Android smoke:
 docker compose -f tests/docker/docker-compose.yml up -d --build agents
 ```
 
-Host-side SSH sanity check:
+### Container readiness via compose health checks (issue #150)
+
+Every service in `tests/docker/docker-compose.yml` and
+`tests/docker/real-agent/compose.yml` declares a `healthcheck:` block
+that runs `ssh -o ConnectTimeout=2 -i /root/test_key testuser@localhost
+true` inside the container. Reaching `healthy` proves SSH and key
+authentication are working end-to-end, so callers should wait on
+`docker inspect --format='{{.State.Health.Status}}'` instead of
+polling SSH from the host with a retry-sleep loop.
+
+Inline check:
+
+```bash
+docker inspect --format='{{.Name}}: {{.State.Health.Status}}' \
+  $(docker compose -f tests/docker/docker-compose.yml ps -q)
+```
+
+Reusable shell helper (used by every harness script under `scripts/`):
+
+```bash
+source tests/docker/lib/wait-for-healthy.sh
+wait_for_container_healthy tests/docker/docker-compose.yml agents \
+  /tmp/agent-health.log 60
+```
+
+Healthcheck shape (identical for every service):
+
+```yaml
+healthcheck:
+  test: ["CMD-SHELL", "ssh -o BatchMode=yes -o ConnectTimeout=2 ..."]
+  interval: 2s
+  timeout: 5s
+  retries: 10
+  start_period: 5s
+```
+
+A warm image usually settles to `healthy` within 1–6 s of `compose up`.
+Existing host-side SSH retry loops in `scripts/*.sh` and the CI
+workflow have been migrated to consume health status first and then
+run a single follow-up SSH probe only to record the same
+tool-availability evidence reviewers look for (`tmux -V`,
+`command -v tmuxctl heru …`).
+
+Host-side SSH sanity check (now optional — health status already
+proves SSH + auth work):
 
 ```bash
 chmod 600 tests/docker/test_key

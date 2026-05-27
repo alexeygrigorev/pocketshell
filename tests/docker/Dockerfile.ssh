@@ -9,7 +9,7 @@
 # extend this one in later issues.
 FROM alpine:latest
 
-RUN apk add --no-cache openssh-server \
+RUN apk add --no-cache openssh-server openssh-client \
     && ssh-keygen -A \
     && adduser -D -s /bin/sh testuser \
     && passwd -u testuser \
@@ -18,8 +18,13 @@ RUN apk add --no-cache openssh-server \
 
 COPY sshd_config /etc/ssh/sshd_config
 COPY test_key.pub /home/testuser/.ssh/authorized_keys
+# Issue #150: copy the matching private key so the compose healthcheck can run
+# an end-to-end SSH probe (`ssh ... testuser@localhost true`) from inside the
+# container. The key is a committed test fixture (see tests/docker/test_key);
+# it never authenticates against anything outside this disposable test image.
+COPY test_key /root/test_key
 
-RUN chmod 600 /home/testuser/.ssh/authorized_keys \
+RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
     && chown -R testuser:testuser /home/testuser/.ssh
 
 EXPOSE 22

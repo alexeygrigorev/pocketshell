@@ -5,7 +5,7 @@
 # credentials. Use it for local emulator + Docker smoke tests only.
 FROM alpine:latest
 
-RUN apk add --no-cache openssh-server tmux procps bash \
+RUN apk add --no-cache openssh-server openssh-client tmux procps bash \
     && ssh-keygen -A \
     && adduser -D -s /bin/sh testuser \
     && passwd -u testuser \
@@ -14,11 +14,14 @@ RUN apk add --no-cache openssh-server tmux procps bash \
 
 COPY sshd_config /etc/ssh/sshd_config
 COPY test_key.pub /home/testuser/.ssh/authorized_keys
+# Issue #150: see Dockerfile.ssh — same rationale for the in-container
+# compose healthcheck. The private key is a committed test fixture.
+COPY test_key /root/test_key
 COPY agent-bin/ /usr/local/bin/
 COPY agent-fixtures/ /opt/pocketshell-agent-fixtures/
 COPY agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
 
-RUN chmod 600 /home/testuser/.ssh/authorized_keys \
+RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
     && chmod +x /usr/local/bin/claude \
         /usr/local/bin/codex \
         /usr/local/bin/opencode \

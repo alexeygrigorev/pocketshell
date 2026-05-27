@@ -109,31 +109,36 @@ prepare_verify_root() {
   fi
 }
 
+# Issue #150: wait on the compose `healthcheck:` block via
+# `docker inspect`, not a host-side SSH retry loop. Keep a single
+# follow-up SSH probe so the readiness log still records the
+# tool-availability sanity check reviewers look for.
+source "$ROOT_DIR/tests/docker/lib/wait-for-healthy.sh"
+
 wait_for_docker_ssh() {
   local log_file="$RUN_DIR/02-docker-ssh-readiness.log"
-  : > "$log_file"
   chmod 600 "$ROOT_DIR/$SSH_KEY"
-  for attempt in $(seq 1 60); do
-    {
-      printf '[%s] attempt=%s\n' "$(date -Is)" "$attempt"
-      ssh -i "$ROOT_DIR/$SSH_KEY" \
-        -p "$SSH_PORT" \
-        -o BatchMode=yes \
-        -o ConnectTimeout=3 \
-        -o ConnectionAttempts=1 \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        "$SSH_USER@$SSH_HOST" \
-        'for tool in claude codex opencode heru agent-log-explorer tmuxctl uv tmux; do command -v "$tool"; done && tmuxctl list --by activity'
-    } >> "$log_file" 2>&1 && {
-      printf '\n[02-docker-ssh-readiness]\nLog: %s\n' "$log_file"
-      tail -n 30 "$log_file"
-      return 0
-    }
-    sleep 1
-  done
-  tail -n 120 "$log_file" || true
-  fail "Docker SSH fixture did not become ready at $SSH_USER@$SSH_HOST:$SSH_PORT"
+  if ! wait_for_container_healthy "$ROOT_DIR/$COMPOSE_FILE" agents "$log_file" 60; then
+    tail -n 120 "$log_file" || true
+    fail "Docker SSH fixture did not become healthy at $SSH_USER@$SSH_HOST:$SSH_PORT"
+  fi
+  {
+    printf '[%s] health=healthy; running follow-up SSH sanity probe\n' "$(date -Is)"
+    ssh -i "$ROOT_DIR/$SSH_KEY" \
+      -p "$SSH_PORT" \
+      -o BatchMode=yes \
+      -o ConnectTimeout=3 \
+      -o ConnectionAttempts=1 \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      "$SSH_USER@$SSH_HOST" \
+      'for tool in claude codex opencode heru agent-log-explorer tmuxctl uv tmux; do command -v "$tool"; done && tmuxctl list --by activity'
+  } >> "$log_file" 2>&1 || {
+    tail -n 120 "$log_file" || true
+    fail "Docker SSH fixture reported healthy but follow-up SSH probe failed at $SSH_USER@$SSH_HOST:$SSH_PORT"
+  }
+  printf '\n[02-docker-ssh-readiness]\nLog: %s\n' "$log_file"
+  tail -n 30 "$log_file"
 }
 
 wait_for_emulator() {

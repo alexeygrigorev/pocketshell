@@ -81,31 +81,35 @@ wait_for_emulator() {
   fail "emulator did not boot"
 }
 
+# Issue #150: wait on the compose `healthcheck:` block via
+# `docker inspect`, not a host-side SSH retry loop. Keep one follow-up
+# SSH probe so the readiness log still records the same "tmux ready"
+# evidence reviewers look for.
+source "$ROOT_DIR/tests/docker/lib/wait-for-healthy.sh"
+
 wait_for_ssh_fixture() {
   local log_file="$RUN_DIR/docker-ssh-readiness.log"
-  : > "$log_file"
-  local attempt
-  for attempt in $(seq 1 60); do
-    {
-      printf '[%s] attempt=%s\n' "$(date -Is)" "$attempt"
-      ssh \
-        -i "$SSH_KEY" \
-        -p "$SSH_PORT" \
-        -o BatchMode=yes \
-        -o ConnectTimeout=3 \
-        -o ConnectionAttempts=1 \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        "$SSH_USER@$SSH_HOST" \
-        "printf 'keyboard stress ssh ready '; tmux -V"
-    } >> "$log_file" 2>&1 && {
-      tail -n 20 "$log_file"
-      return 0
-    }
-    sleep 1
-  done
-  tail -n 80 "$log_file" || true
-  fail "Docker SSH fixture did not become ready"
+  if ! wait_for_container_healthy "$COMPOSE_FILE" agents "$log_file" 60; then
+    tail -n 80 "$log_file" || true
+    fail "Docker SSH fixture did not become healthy"
+  fi
+  {
+    printf '[%s] health=healthy; running follow-up SSH sanity probe\n' "$(date -Is)"
+    ssh \
+      -i "$SSH_KEY" \
+      -p "$SSH_PORT" \
+      -o BatchMode=yes \
+      -o ConnectTimeout=3 \
+      -o ConnectionAttempts=1 \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      "$SSH_USER@$SSH_HOST" \
+      "printf 'keyboard stress ssh ready '; tmux -V"
+  } >> "$log_file" 2>&1 || {
+    tail -n 80 "$log_file" || true
+    fail "Docker SSH fixture reported healthy but follow-up SSH probe failed"
+  }
+  tail -n 20 "$log_file"
 }
 
 collect_diagnostics() {

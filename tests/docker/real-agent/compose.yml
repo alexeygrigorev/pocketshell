@@ -11,3 +11,21 @@ services:
     container_name: pocketshell-test-real-agents
     ports:
       - "2240:22"
+    # Issue #150: same SSH-shaped healthcheck as the deterministic fleet
+    # in ../docker-compose.yml. Callers wait on
+    # `docker inspect --format='{{.State.Health.Status}}' <container>`
+    # instead of polling SSH with a retry loop.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          ssh -o BatchMode=yes
+          -o ConnectTimeout=2
+          -o StrictHostKeyChecking=no
+          -o UserKnownHostsFile=/dev/null
+          -i /root/test_key
+          testuser@localhost true
+      interval: 2s
+      timeout: 5s
+      retries: 10
+      start_period: 5s

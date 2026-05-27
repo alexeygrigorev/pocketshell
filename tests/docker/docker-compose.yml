@@ -11,6 +11,29 @@
 # The Testcontainers-based integration tests in `shared/core-ssh` /
 # `shared/core-tmux` build their own images and pick ephemeral ports — they
 # don't use this compose file.
+#
+# Issue #150: every service ships an SSH-shaped healthcheck so callers can
+# wait on `docker inspect --format='{{.State.Health.Status}}' <container>`
+# instead of polling SSH with retry loops. The check runs from inside the
+# container against `testuser@localhost` using `/root/test_key` (copied in
+# by the Dockerfile), so it exercises the same auth path as a real client
+# without depending on the host network.
+x-ssh-healthcheck:
+  &ssh-healthcheck
+  test:
+    - CMD-SHELL
+    - >-
+      ssh -o BatchMode=yes
+      -o ConnectTimeout=2
+      -o StrictHostKeyChecking=no
+      -o UserKnownHostsFile=/dev/null
+      -i /root/test_key
+      testuser@localhost true
+  interval: 2s
+  timeout: 5s
+  retries: 10
+  start_period: 5s
+
 services:
   sshd:
     build:
@@ -20,6 +43,7 @@ services:
     container_name: pocketshell-test-ssh
     ports:
       - "2222:22"
+    healthcheck: *ssh-healthcheck
 
   # `pocketshell-test:tmux` extends the base SSH image with tmux +
   # tmuxctl. Host port 2224 keeps it distinct from `sshd`'s 2222 so
@@ -34,6 +58,7 @@ services:
       - sshd
     ports:
       - "2224:22"
+    healthcheck: *ssh-healthcheck
 
   # Deterministic local target for emulator smoke tests. It exposes the
   # same SSH port as `sshd`; run one or the other, not both:
@@ -46,6 +71,7 @@ services:
     container_name: pocketshell-test-agents
     ports:
       - "2222:22"
+    healthcheck: *ssh-healthcheck
 
   bootstrap-ready:
     build:
@@ -57,6 +83,7 @@ services:
     container_name: pocketshell-test-bootstrap-ready
     ports:
       - "2230:22"
+    healthcheck: *ssh-healthcheck
 
   bootstrap-uv-install:
     build:
@@ -68,6 +95,7 @@ services:
     container_name: pocketshell-test-bootstrap-uv-install
     ports:
       - "2231:22"
+    healthcheck: *ssh-healthcheck
 
   bootstrap-unsupported:
     build:
@@ -79,6 +107,7 @@ services:
     container_name: pocketshell-test-bootstrap-unsupported
     ports:
       - "2232:22"
+    healthcheck: *ssh-healthcheck
 
   bootstrap-daemon-disabled:
     build:
@@ -90,6 +119,7 @@ services:
     container_name: pocketshell-test-bootstrap-daemon-disabled
     ports:
       - "2233:22"
+    healthcheck: *ssh-healthcheck
 
   bootstrap-user-local-path:
     build:
@@ -101,6 +131,7 @@ services:
     container_name: pocketshell-test-bootstrap-user-local-path
     ports:
       - "2234:22"
+    healthcheck: *ssh-healthcheck
 
   bootstrap-fish-user-local-path:
     build:
@@ -114,6 +145,7 @@ services:
     container_name: pocketshell-test-bootstrap-fish-user-local-path
     ports:
       - "2235:22"
+    healthcheck: *ssh-healthcheck
 
   # Issue #145: deterministic mid-session disconnect fixture. Every
   # accepted interactive SSH session (TmuxClient shell channel) is
@@ -138,3 +170,8 @@ services:
       FLAKY_SEEDED_SESSION_NAME: "flaky-main"
     ports:
       - "2226:22"
+    # The flaky-agent watcher kills *interactive* sessions after
+    # FLAKY_DISCONNECT_AFTER_SEC seconds; non-interactive `exec` probes
+    # (like the `true` healthcheck) skip the watcher entirely, so the
+    # standard SSH healthcheck still settles to `healthy` reliably.
+    healthcheck: *ssh-healthcheck

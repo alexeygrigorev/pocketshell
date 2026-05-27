@@ -117,6 +117,12 @@ if [[ -n "${ADB_SERIAL:-}" && -z "${ANDROID_SERIAL:-}" ]]; then
   export ANDROID_SERIAL="$ADB_SERIAL"
 fi
 
+# Issue #150: shared health-status polling helper. Provides
+# `wait_for_container_healthy` so verify_docker_* below can wait on the
+# compose `healthcheck:` block via `docker inspect` instead of SSH
+# retry loops.
+source "$ROOT_DIR/tests/docker/lib/wait-for-healthy.sh"
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/phone-dogfood.sh [scenario...]
@@ -337,33 +343,35 @@ verify_emulator_booted() {
   fi
 }
 
+# Issue #150: wait on the compose `healthcheck:` block via
+# `docker inspect`, not a host-side SSH retry loop. We keep a single
+# follow-up SSH probe so the readiness log still records the same
+# tool-availability sanity-check evidence reviewers look for.
 verify_docker_agents() {
   run_logged "05-docker-agents-up" docker compose -f "$COMPOSE_FILE" up -d --build agents
   local log_file="$LOG_DIR/06-docker-ssh-readiness.log"
-  : > "$log_file"
-  local attempt
-  for attempt in $(seq 1 60); do
-    {
-      printf '[%s] attempt=%s\n' "$(date -Is)" "$attempt"
-      ssh \
-        -i "$SSH_KEY" \
-        -p "$SSH_PORT" \
-        -o BatchMode=yes \
-        -o ConnectTimeout=3 \
-        -o ConnectionAttempts=1 \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        "$SSH_USER@$SSH_HOST" \
-        'printf "docker ssh ready "; for tool in tmux tmuxctl heru agent-log-explorer uv; do command -v "$tool"; done; tmux -V'
-    } >> "$log_file" 2>&1 && {
-      printf '\n[06-docker-ssh-readiness]\nLog: %s\n' "$(relpath "$log_file")"
-      tail -n 20 "$log_file"
-      return 0
-    }
-    sleep 1
-  done
-  tail -n 100 "$log_file" || true
-  fail "Docker SSH fixture did not become ready at $SSH_USER@$SSH_HOST:$SSH_PORT"
+  if ! wait_for_container_healthy "$COMPOSE_FILE" agents "$log_file" 60; then
+    tail -n 100 "$log_file" || true
+    fail "Docker SSH fixture did not become healthy at $SSH_USER@$SSH_HOST:$SSH_PORT"
+  fi
+  {
+    printf '[%s] health=healthy; running follow-up SSH sanity probe\n' "$(date -Is)"
+    ssh \
+      -i "$SSH_KEY" \
+      -p "$SSH_PORT" \
+      -o BatchMode=yes \
+      -o ConnectTimeout=3 \
+      -o ConnectionAttempts=1 \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      "$SSH_USER@$SSH_HOST" \
+      'printf "docker ssh ready "; for tool in tmux tmuxctl heru agent-log-explorer uv; do command -v "$tool"; done; tmux -V'
+  } >> "$log_file" 2>&1 || {
+    tail -n 100 "$log_file" || true
+    fail "Docker SSH fixture reported healthy but follow-up probe failed at $SSH_USER@$SSH_HOST:$SSH_PORT"
+  }
+  printf '\n[06-docker-ssh-readiness]\nLog: %s\n' "$(relpath "$log_file")"
+  tail -n 20 "$log_file"
 }
 
 verify_docker_bootstrap_profiles() {
@@ -378,33 +386,30 @@ verify_docker_bootstrap_profiles() {
 
   for profile in "${profiles[@]}"; do
     local port="${SETUP_DETECTION_PORTS[$profile]}"
+    local service="${SETUP_DETECTION_SERVICES[$profile]}"
     local log_file="$LOG_DIR/06-docker-bootstrap-readiness-$profile.log"
-    : > "$log_file"
-    local attempt
-    for attempt in $(seq 1 60); do
-      {
-        printf '[%s] profile=%s attempt=%s\n' "$(date -Is)" "$profile" "$attempt"
-        ssh \
-          -i "$SSH_KEY" \
-          -p "$port" \
-          -o BatchMode=yes \
-          -o ConnectTimeout=3 \
-          -o ConnectionAttempts=1 \
-          -o StrictHostKeyChecking=no \
-          -o UserKnownHostsFile=/dev/null \
-          "$SSH_USER@$SSH_HOST" \
-          'printf "bootstrap ssh ready "; uname -a'
-      } >> "$log_file" 2>&1 && {
-        printf '\n[06-docker-bootstrap-readiness-%s]\nLog: %s\n' "$profile" "$(relpath "$log_file")"
-        tail -n 10 "$log_file"
-        break
-      }
-      sleep 1
-    done
-    if ! grep -q "bootstrap ssh ready" "$log_file"; then
+    if ! wait_for_container_healthy "$COMPOSE_FILE" "$service" "$log_file" 60; then
       tail -n 100 "$log_file" || true
-      fail "Docker bootstrap fixture '$profile' did not become ready at $SSH_USER@$SSH_HOST:$port"
+      fail "Docker bootstrap fixture '$profile' did not become healthy at $SSH_USER@$SSH_HOST:$port"
     fi
+    {
+      printf '[%s] profile=%s health=healthy; running follow-up SSH sanity probe\n' "$(date -Is)" "$profile"
+      ssh \
+        -i "$SSH_KEY" \
+        -p "$port" \
+        -o BatchMode=yes \
+        -o ConnectTimeout=3 \
+        -o ConnectionAttempts=1 \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        "$SSH_USER@$SSH_HOST" \
+        'printf "bootstrap ssh ready "; uname -a'
+    } >> "$log_file" 2>&1 || {
+      tail -n 100 "$log_file" || true
+      fail "Docker bootstrap fixture '$profile' reported healthy but follow-up SSH probe failed at $SSH_USER@$SSH_HOST:$port"
+    }
+    printf '\n[06-docker-bootstrap-readiness-%s]\nLog: %s\n' "$profile" "$(relpath "$log_file")"
+    tail -n 10 "$log_file"
   done
 }
 

@@ -80,6 +80,11 @@ SKIP_REAL_AGENT="${SKIP_REAL_AGENT:-0}"
 DETERMINISTIC_COMPOSE_FILE="${DETERMINISTIC_COMPOSE_FILE:-tests/docker/docker-compose.yml}"
 REAL_AGENT_COMPOSE_FILE="${REAL_AGENT_COMPOSE_FILE:-tests/docker/real-agent/compose.yml}"
 
+# Issue #150: shared health-status polling helper. Provides
+# `wait_for_container_healthy` so the embedded SSH-smoke step below can
+# consume the compose `healthcheck:` block via `docker inspect`.
+source "$ROOT_DIR/tests/docker/lib/wait-for-healthy.sh"
+
 usage() {
   cat <<'USAGE'
 Usage: scripts/release-terminal-gate.sh
@@ -449,34 +454,34 @@ run_ssh_smoke_step() {
     docker compose -f "$DETERMINISTIC_COMPOSE_FILE" up -d --build agents
     printf '\n# Docker compose ps\n'
     docker compose -f "$DETERMINISTIC_COMPOSE_FILE" ps
-    printf '\n# probing SSH readiness\n'
-    : > "$ssh_readiness"
+    # Issue #150: wait on the compose `healthcheck:` block via
+    # `docker inspect` (sourced wait_for_container_healthy) instead of
+    # polling SSH with a retry loop. Follow up with a single SSH probe
+    # so the readiness log still records the same "tmux ready" evidence.
+    printf '\n# probing SSH readiness via docker inspect health status\n'
     local ssh_key="$ROOT_DIR/tests/docker/test_key"
-    local ssh_ok=0
-    for attempt in $(seq 1 60); do
-      if {
-        printf '[%s] attempt=%s\n' "$(date -Is)" "$attempt"
-        ssh \
-          -i "$ssh_key" \
-          -p 2222 \
-          -o BatchMode=yes \
-          -o ConnectTimeout=3 \
-          -o ConnectionAttempts=1 \
-          -o StrictHostKeyChecking=no \
-          -o UserKnownHostsFile=/dev/null \
-          testuser@127.0.0.1 \
-          "printf 'release terminal gate ssh ready '; tmux -V"
-      } >> "$ssh_readiness" 2>&1; then
-        ssh_ok=1
-        break
-      fi
-      sleep 1
-    done
-    if [[ "$ssh_ok" -ne 1 ]]; then
-      printf '\nFAIL: Docker SSH fixture did not become ready (host port 2222)\n' >&2
+    if ! wait_for_container_healthy "$DETERMINISTIC_COMPOSE_FILE" agents "$ssh_readiness" 60; then
+      printf '\nFAIL: Docker SSH fixture did not become healthy (host port 2222)\n' >&2
       tail -n 80 "$ssh_readiness" >&2 || true
       exit 1
     fi
+    {
+      printf '[%s] health=healthy; running follow-up SSH sanity probe\n' "$(date -Is)"
+      ssh \
+        -i "$ssh_key" \
+        -p 2222 \
+        -o BatchMode=yes \
+        -o ConnectTimeout=3 \
+        -o ConnectionAttempts=1 \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        testuser@127.0.0.1 \
+        "printf 'release terminal gate ssh ready '; tmux -V"
+    } >> "$ssh_readiness" 2>&1 || {
+      printf '\nFAIL: Docker SSH fixture reported healthy but follow-up SSH probe failed (host port 2222)\n' >&2
+      tail -n 80 "$ssh_readiness" >&2 || true
+      exit 1
+    }
     tail -n 20 "$ssh_readiness"
 
     printf '\n# clearing emulator logcat\n'

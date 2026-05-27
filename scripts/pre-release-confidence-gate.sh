@@ -624,8 +624,14 @@ run_bash_step "gradle-compile-unit" \
   "./gradlew $GRADLE_FLAGS :app:kspDebugKotlin :app:kspReleaseKotlin :app:kspDebugAndroidTestKotlin :app:kspDebugUnitTestKotlin :app:kspReleaseUnitTestKotlin :app:hiltJavaCompileDebug :app:hiltJavaCompileRelease :app:hiltJavaCompileDebugAndroidTest --stacktrace && ./gradlew $GRADLE_FLAGS assembleDebug check -x lint -x lintDebug --stacktrace"
 
 run_step "docker-agents-up" docker compose -f "$COMPOSE_FILE" up -d --build agents
+# Issue #150: wait on the compose `healthcheck:` block via
+# `docker inspect`. The follow-up SSH sanity check still verifies the
+# fixture's tool surface (`claude codex opencode quse tmuxctl uv`), but
+# the readiness poll itself is event-based, not retry-sleep.
+run_bash_step "docker-agents-health" \
+  "source '$ROOT_DIR/tests/docker/lib/wait-for-healthy.sh' && wait_for_container_healthy '$COMPOSE_FILE' agents '$RUN_DIR/docker-agents-health.log' 60"
 run_bash_step "docker-agents-ssh-sanity" \
-  "chmod 600 '$SSH_KEY' && for i in {1..30}; do ssh -i '$SSH_KEY' -p 2222 -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null testuser@127.0.0.1 'for tool in claude codex opencode quse tmuxctl uv; do command -v \"\$tool\"; done && quse --json >/dev/null && tmuxctl jobs list --session codex >/dev/null' && exit 0; sleep 2; done; exit 1"
+  "chmod 600 '$SSH_KEY' && ssh -i '$SSH_KEY' -p 2222 -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null testuser@127.0.0.1 'for tool in claude codex opencode quse tmuxctl uv; do command -v \"\$tool\"; done && quse --json >/dev/null && tmuxctl jobs list --session codex >/dev/null'"
 
 run_bash_step "emulator-readiness" \
   "'$ADB' devices && for i in {1..90}; do state=\$('$ADB' shell getprop sys.boot_completed 2>/dev/null | tr -d '\r'); if [ \"\$state\" = 1 ]; then exit 0; fi; sleep 2; done; '$ADB' devices; exit 1"

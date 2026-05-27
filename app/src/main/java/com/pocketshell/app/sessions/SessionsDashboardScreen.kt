@@ -31,6 +31,14 @@ internal const val DASHBOARD_NEW_SESSION_TAG = "dashboard:sessions:new"
 internal const val DASHBOARD_SESSION_ROW_TAG_PREFIX = "dashboard:sessions:row:"
 
 /**
+ * Tag for the one-shot kill-failure banner — issue #168. The banner is
+ * rendered inside `HostListScreen` (which owns the Scaffold-shaped
+ * column) but the tag lives next to the dashboard's other tags so test
+ * code referring to it has one obvious import path.
+ */
+const val DASHBOARD_KILL_ERROR_BANNER_TAG: String = "dashboard:sessions:kill-error"
+
+/**
  * Sessions section of the dashboard — issue #46.
  *
  * Inlined into [com.pocketshell.app.hosts.HostListScreen] above the

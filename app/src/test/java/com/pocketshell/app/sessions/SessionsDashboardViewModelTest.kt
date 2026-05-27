@@ -4,13 +4,17 @@ import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.tmux.FakeTmuxClient
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.core.tmux.protocol.ControlEvent
 import com.pocketshell.uikit.model.TagKind
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.runCurrent
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
@@ -481,7 +485,7 @@ class SessionsDashboardViewModelTest {
     fun lifecycleActionsIssueTmuxCommandsAndRefresh() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
-            repeat(3) {
+            repeat(4) {
                 responses.addLast(
                     CommandResponse(
                         number = it.toLong(),
@@ -505,10 +509,285 @@ class SessionsDashboardViewModelTest {
         vm.createSession(entry, "next")
         vm.renameSession(entry, "next", "renamed")
         vm.killSession(entry, "renamed")
+        // Issue #168: killSession now waits up to 2s for tmux's
+        // %sessions-changed event before refreshing. Emit it
+        // synchronously so the kill flow completes without burning the
+        // full 2s fallback timeout.
         runCurrent()
+        client.emittedEvents.emit(ControlEvent.SessionsChanged)
+        advanceUntilIdle()
 
         assertTrue(client.sentCommands.contains("new-session -d -s 'next' -c '~'"))
         assertTrue(client.sentCommands.contains("rename-session -t 'next' 'renamed'"))
         assertTrue(client.sentCommands.contains("kill-session -t 'renamed'"))
+        assertNull(
+            "successful kill should not produce a killError banner",
+            vm.killError.value,
+        )
+    }
+
+    /**
+     * Issue #168 — silent kill failures (failure mode 1 from the issue
+     * body) must now surface as a [killError] banner AND must not run
+     * the refresh, because a refresh after a failed kill would show the
+     * still-alive row and reproduce the exact symptom the issue
+     * reports.
+     */
+    @Test
+    fun killSessionTransportFailureSurfacesErrorAndSkipsRefresh() = runTest {
+        val vm = newVm()
+        val client = ThrowingTmuxClient(
+            throwOnCommand = "kill-session",
+            exception = IllegalStateException("ssh channel closed"),
+        )
+        val h = host(11L, "elem")
+        val entry = ActiveTmuxClients.Entry(
+            hostId = h.id,
+            hostName = h.name,
+            hostname = h.hostname,
+            port = h.port,
+            username = h.username,
+            keyPath = "/k",
+            client = client,
+        )
+
+        vm.killSession(entry, "doomed")
+        advanceUntilIdle()
+
+        assertTrue(
+            "expected the kill command to be attempted, got ${client.sentCommands}",
+            client.sentCommands.any { it.startsWith("kill-session") },
+        )
+        // The refresh would issue a list-sessions if we hadn't skipped
+        // it; we deliberately did NOT queue a list-sessions response
+        // because the kill failure path must not call it.
+        assertFalse(
+            "transport failure must skip the refresh — refresh would issue list-sessions",
+            client.sentCommands.any { it.startsWith("list-sessions") },
+        )
+        val msg = vm.killError.value
+        assertNotNull("expected user-facing killError after transport failure", msg)
+        assertTrue(
+            "killError should mention the session name; got '$msg'",
+            msg!!.contains("doomed"),
+        )
+    }
+
+    /**
+     * Issue #168 — a tmux `%error` response (e.g. `can't find session`)
+     * is also surfaced rather than silently swallowed. Mirrors the
+     * transport-failure path: error visible, refresh skipped.
+     */
+    @Test
+    fun killSessionTmuxErrorResponseSurfacesErrorAndSkipsRefresh() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            responses.addLast(
+                CommandResponse(
+                    number = 0L,
+                    output = listOf("can't find session: ghost"),
+                    isError = true,
+                ),
+            )
+        }
+        val h = host(12L, "twelve")
+        val entry = ActiveTmuxClients.Entry(
+            hostId = h.id,
+            hostName = h.name,
+            hostname = h.hostname,
+            port = h.port,
+            username = h.username,
+            keyPath = "/k",
+            client = client,
+        )
+
+        vm.killSession(entry, "ghost")
+        advanceUntilIdle()
+
+        assertFalse(
+            "tmux %error must skip the refresh",
+            client.sentCommands.any { it.startsWith("list-sessions") },
+        )
+        val msg = vm.killError.value
+        assertNotNull("expected killError on tmux %error response", msg)
+        assertTrue(
+            "killError should include the tmux error detail; got '$msg'",
+            msg!!.contains("ghost"),
+        )
+    }
+
+    /**
+     * Issue #168 — happy path: after the kill is acknowledged on the
+     * wire, the dashboard must wait for tmux's `%sessions-changed`
+     * notification (not blindly issue list-sessions before tmux has
+     * finished tearing the session down) and then refresh.
+     */
+    @Test
+    fun killSessionSuccessWaitsForSessionsChangedEventBeforeRefresh() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            // Response for the kill itself.
+            responses.addLast(
+                CommandResponse(
+                    number = 0L,
+                    output = emptyList(),
+                    isError = false,
+                ),
+            )
+            // Response for the post-kill refresh — empty list (the
+            // session is gone, no rows left).
+            responses.addLast(
+                CommandResponse(
+                    number = 1L,
+                    output = emptyList(),
+                    isError = false,
+                ),
+            )
+        }
+        val h = host(13L, "thirteen")
+        val entry = ActiveTmuxClients.Entry(
+            hostId = h.id,
+            hostName = h.name,
+            hostname = h.hostname,
+            port = h.port,
+            username = h.username,
+            keyPath = "/k",
+            client = client,
+        )
+        // Seed a snapshot so we can prove it's wiped on refresh.
+        vm.applyHostSnapshotForTest(
+            hostId = h.id,
+            summaries = listOf(
+                SessionSummary(h.id, h.name, "stale", lastActivity = 100L, attached = false),
+            ),
+        )
+        assertEquals(1, vm.sessions.value.size)
+
+        vm.killSession(entry, "stale")
+        runCurrent()
+        // Before the event arrives the refresh has NOT happened yet:
+        // only the kill command should be on the wire.
+        assertEquals(
+            "only the kill command should be in flight before %sessions-changed",
+            listOf("kill-session -t 'stale'"),
+            client.sentCommands,
+        )
+        // tmux finishes the teardown and emits the deterministic event.
+        client.emittedEvents.emit(ControlEvent.SessionsChanged)
+        advanceUntilIdle()
+
+        // Now the refresh has fired and the empty list-sessions reply
+        // has wiped the per-host snapshot.
+        assertTrue(
+            "refresh should have issued list-sessions after %sessions-changed",
+            client.sentCommands.any { it.startsWith("list-sessions") },
+        )
+        assertTrue(
+            "expected the killed session to disappear from the aggregate list",
+            vm.sessions.value.isEmpty(),
+        )
+        assertNull("happy path should not surface a killError", vm.killError.value)
+    }
+
+    /**
+     * Issue #168 — if tmux never emits `%sessions-changed` (degenerate
+     * server, dropped event after reconnect, etc.) the dashboard must
+     * still refresh after the 2s fallback so the row eventually
+     * disappears. Keeps the worst-case latency bounded.
+     */
+    @Test
+    fun killSessionFallsBackToRefreshAfterTimeoutWithoutEvent() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            responses.addLast(
+                CommandResponse(
+                    number = 0L,
+                    output = emptyList(),
+                    isError = false,
+                ),
+            )
+            responses.addLast(
+                CommandResponse(
+                    number = 1L,
+                    output = emptyList(),
+                    isError = false,
+                ),
+            )
+        }
+        val h = host(14L, "fourteen")
+        val entry = ActiveTmuxClients.Entry(
+            hostId = h.id,
+            hostName = h.name,
+            hostname = h.hostname,
+            port = h.port,
+            username = h.username,
+            keyPath = "/k",
+            client = client,
+        )
+
+        vm.killSession(entry, "lonely")
+        runCurrent()
+        // Half-way through the timeout: refresh must still be pending,
+        // we deliberately never emit %sessions-changed.
+        advanceTimeBy(1_500)
+        runCurrent()
+        assertFalse(
+            "refresh must not fire while the event timeout is still pending",
+            client.sentCommands.any { it.startsWith("list-sessions") },
+        )
+        // Past the 2s fallback the refresh kicks regardless, so the
+        // dashboard stays consistent in the pathological case.
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertTrue(
+            "refresh must fire after the event-wait fallback expires",
+            client.sentCommands.any { it.startsWith("list-sessions") },
+        )
+    }
+
+    @Test
+    fun clearKillErrorResetsTheStateFlow() = runTest {
+        val vm = newVm()
+        val client = ThrowingTmuxClient(
+            throwOnCommand = "kill-session",
+            exception = RuntimeException("boom"),
+        )
+        val h = host(15L, "fifteen")
+        val entry = ActiveTmuxClients.Entry(
+            hostId = h.id,
+            hostName = h.name,
+            hostname = h.hostname,
+            port = h.port,
+            username = h.username,
+            keyPath = "/k",
+            client = client,
+        )
+        vm.killSession(entry, "x")
+        advanceUntilIdle()
+        assertNotNull(vm.killError.value)
+        vm.clearKillError()
+        assertNull(vm.killError.value)
+    }
+
+    /**
+     * Test double that throws on a chosen command — exercises the
+     * "sendCommand throws" branch of [SessionsDashboardViewModel.killSession]
+     * without touching SSH.
+     */
+    private class ThrowingTmuxClient(
+        private val throwOnCommand: String,
+        private val exception: Throwable,
+    ) : com.pocketshell.core.tmux.TmuxClient {
+        private val delegate = FakeTmuxClient()
+        override val events = delegate.events
+        val sentCommands: MutableList<String> get() = delegate.sentCommands
+        override suspend fun connect() = delegate.connect()
+        override suspend fun sendCommand(cmd: String): CommandResponse {
+            delegate.sentCommands += cmd
+            if (cmd.startsWith(throwOnCommand)) throw exception
+            return CommandResponse(0L, emptyList(), false)
+        }
+        override fun outputFor(paneId: String) = delegate.outputFor(paneId)
+        override fun close() = delegate.close()
     }
 }

@@ -63,6 +63,7 @@ import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.bootstrap.HostBootstrapSheet
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.sessions.DASHBOARD_KILL_ERROR_BANNER_TAG
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerSheet
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
@@ -156,6 +157,10 @@ fun HostListScreen(
     val sharePayload by viewModel.sharePayload.collectAsState()
     val shareMessage by viewModel.shareMessage.collectAsState()
     val recheckMessage by viewModel.recheckMessage.collectAsState()
+    // Issue #168: surface dashboard kill failures here so the banner sits
+    // alongside the share/recheck banners (the dashboard ViewModel owns the
+    // kill but HostListScreen owns the only Scaffold-shaped column).
+    val killError by sessionsViewModel.killError.collectAsState()
     val setupStates by viewModel.setupStates.collectAsState()
     // Issue #116 (usage-panel Fix B): per-card chip + cross-host strip.
     val usageBadges by viewModel.usageBadges.collectAsState()
@@ -340,6 +345,16 @@ fun HostListScreen(
             // versa.
             recheckMessage?.let { msg ->
                 ShareMessageBanner(message = msg, onDismiss = viewModel::clearRecheckMessage)
+            }
+
+            // Issue #168: surface dashboard kill failures inline so the
+            // user can tell a silent failure apart from "kill worked but
+            // the row didn't refresh yet". Reuses [ShareMessageBanner]
+            // for visual consistency with the other one-shot banners.
+            killError?.let { msg ->
+                Box(modifier = Modifier.testTag(DASHBOARD_KILL_ERROR_BANNER_TAG)) {
+                    ShareMessageBanner(message = msg, onDismiss = sessionsViewModel::clearKillError)
+                }
             }
 
             // Issue #46: cross-host session dashboard. Render the

@@ -1,21 +1,26 @@
 package com.pocketshell.app.sessions
 
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.systemsurfaces.ActiveSessionsWidgetProvider
 import com.pocketshell.app.systemsurfaces.SystemSurfaceStateStore
 import com.pocketshell.core.tmux.TmuxClient
+import com.pocketshell.core.tmux.protocol.ControlEvent
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 /**
@@ -96,6 +101,15 @@ class SessionsDashboardViewModel @Inject constructor(
      * [com.pocketshell.app.hosts.HostListScreen] for the gate.
      */
     val sessions: StateFlow<List<SessionSummary>> = _sessions.asStateFlow()
+
+    /**
+     * One-shot user-facing message for a failed lifecycle operation
+     * (issue #168 — kill failures must not be silently swallowed). The
+     * screen renders this in a banner slot and clears it via
+     * [clearKillError] once the user dismisses it.
+     */
+    private val _killError: MutableStateFlow<String?> = MutableStateFlow(null)
+    val killError: StateFlow<String?> = _killError.asStateFlow()
 
     /**
      * Per-host poller jobs. Keyed by host id so we can cancel the right
@@ -298,15 +312,132 @@ class SessionsDashboardViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Kill the tmux session named [name] on [entry]'s client and refresh
+     * the dashboard list once tmux acknowledges the death.
+     *
+     * ## Why this looks different from [createSession] / [renameSession]
+     *
+     * Per issue #168, the original implementation wrapped `sendCommand`
+     * in a plain [runCatching] and unconditionally refreshed afterwards.
+     * That had two visible failure modes for the user:
+     *
+     *  1. **Silent failures.** A transport error (closed client, dropped
+     *     channel) was swallowed by [runCatching] — `refreshEntry` then
+     *     issued a list-sessions against the still-alive server, the row
+     *     re-appeared, and the user concluded "kill is broken".
+     *  2. **Refresh race.** Even on a successful kill, the immediate
+     *     `refreshEntry` could land on the wire BEFORE tmux finished the
+     *     session cleanup. The list-sessions response then still
+     *     included the row that was about to disappear.
+     *
+     * The fix is twofold:
+     *
+     *  - If the kill command throws, OR tmux responds with `%error`,
+     *    surface a user-visible [killError] and SKIP the refresh: a
+     *    refresh after a failed kill would just re-render the still-alive
+     *    row and look like the bug from #168.
+     *  - On a successful kill, wait for tmux's deterministic
+     *    [ControlEvent.SessionsChanged] notification (`%sessions-changed`
+     *    on the wire) before refreshing. tmux emits it once the server
+     *    has finished tearing the session down, so the subsequent
+     *    list-sessions is guaranteed to see the post-death state.
+     *  - As a last-resort fallback (e.g. tmux client lost the event
+     *    while reconnecting), the refresh still runs after a 2s
+     *    timeout. This preserves the old "best effort" behaviour for
+     *    pathological cases without making it the default.
+     *
+     * Debug logging (`hostId` + `client.hashCode()`) covers the third
+     * suspected failure mode from #168 — "wrong client" — so a future
+     * reviewer can grep logcat and confirm the same client instance
+     * issued the kill and the subsequent refresh.
+     */
     fun killSession(entry: ActiveTmuxClients.Entry, name: String) {
         val trimmed = name.trim()
         if (trimmed.isEmpty()) return
         viewModelScope.launch {
-            runCatching {
-                entry.client.sendCommand("kill-session -t '${escapeSingleQuoted(trimmed)}'")
+            val client = entry.client
+            val clientHash = System.identityHashCode(client)
+            Log.i(
+                ISSUE_168_DIAG_TAG,
+                "kill-session-start host=${entry.hostId} name=$trimmed clientHash=$clientHash",
+            )
+            // Subscribe to the deterministic post-kill notification BEFORE
+            // sending the command so we don't miss the event in the race
+            // window between sendCommand returning and our collector
+            // installing. `events` is a hot SharedFlow — late subscription
+            // would drop the notification we care about.
+            //
+            // We use `withTimeoutOrNull` rather than blocking forever to
+            // keep a degenerate tmux (e.g. server stuck before emitting
+            // the event) from leaving the dashboard out of sync
+            // indefinitely. 2s is generous compared to tmux's typical
+            // sub-100ms session-cleanup latency on Docker / localhost.
+            // `start = UNDISPATCHED` guarantees the inner coroutine runs
+            // up to its first suspension point (the `events.first { … }`
+            // collector install) before this launch call returns. Without
+            // it the listener would only attach after the parent yields,
+            // which on a fast tmux can be AFTER the `%sessions-changed`
+            // notification has already flown past on the hot SharedFlow.
+            val eventDeferred = viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                withTimeoutOrNull(KILL_EVENT_WAIT_MS) {
+                    client.events.first { event ->
+                        event is ControlEvent.SessionsChanged ||
+                            (event is ControlEvent.SessionChanged && event.name == trimmed)
+                    }
+                }
+                Unit
             }
+
+            val sendResult = runCatching {
+                client.sendCommand("kill-session -t '${escapeSingleQuoted(trimmed)}'")
+            }
+            val response = sendResult.getOrNull()
+            val transportFailure = sendResult.exceptionOrNull()
+            if (transportFailure != null) {
+                eventDeferred.cancel()
+                Log.w(
+                    ISSUE_168_DIAG_TAG,
+                    "kill-session-transport-failed host=${entry.hostId} name=$trimmed " +
+                        "clientHash=$clientHash err=${transportFailure.javaClass.simpleName}: " +
+                        transportFailure.message,
+                )
+                _killError.value = "Failed to kill $trimmed: ${transportFailure.message ?: "transport error"}"
+                return@launch
+            }
+            if (response != null && response.isError) {
+                eventDeferred.cancel()
+                val detail = response.output.joinToString(separator = " ").trim()
+                Log.w(
+                    ISSUE_168_DIAG_TAG,
+                    "kill-session-tmux-error host=${entry.hostId} name=$trimmed " +
+                        "clientHash=$clientHash detail=$detail",
+                )
+                _killError.value = "Couldn't kill $trimmed${if (detail.isNotEmpty()) ": $detail" else ""}"
+                return@launch
+            }
+
+            // Wait up to KILL_EVENT_WAIT_MS for the SessionsChanged /
+            // matching SessionChanged event the tmux server emits on
+            // session teardown. join() the launcher coroutine since
+            // withTimeoutOrNull returns null on a timeout but the event
+            // is what we actually care about; join() also propagates if
+            // the scope is cancelled by onCleared.
+            eventDeferred.join()
+            Log.i(
+                ISSUE_168_DIAG_TAG,
+                "kill-session-refresh host=${entry.hostId} name=$trimmed clientHash=$clientHash",
+            )
             refreshEntry(entry)
         }
+    }
+
+    /**
+     * Clear the kill-error banner. Wired to the screen's banner dismiss
+     * action.
+     */
+    fun clearKillError() {
+        _killError.value = null
     }
 
     /**
@@ -396,6 +527,18 @@ class SessionsDashboardViewModel @Inject constructor(
          */
         const val LIST_SESSIONS_COMMAND: String =
             "list-sessions -F '#{session_name}::#{session_activity}::#{session_attached}'"
+
+        /**
+         * Max time we wait for tmux to emit the post-kill
+         * `%sessions-changed` notification before falling back to an
+         * unconditional refresh. 2s is the cap called out in issue
+         * #168's acceptance criteria — tmux's actual cleanup latency on
+         * a healthy localhost/Docker server is sub-100ms.
+         */
+        const val KILL_EVENT_WAIT_MS: Long = 2_000L
+
+        /** Logcat tag for issue #168 kill diagnostics. */
+        private const val ISSUE_168_DIAG_TAG: String = "issue168-kill"
     }
 }
 

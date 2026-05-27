@@ -12,7 +12,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.yield
 import net.schmizz.sshj.SSHClient
-import net.schmizz.sshj.common.DisconnectReason
+import net.schmizz.sshj.common.SSHException
 import net.schmizz.sshj.connection.channel.direct.Session.Command
 import net.schmizz.sshj.transport.TransportException
 import java.io.BufferedReader
@@ -20,6 +20,8 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.io.InputStreamReader
+import java.util.logging.Level
+import java.util.logging.Logger
 
 /**
  * sshj-backed implementation of [SshSession].
@@ -72,8 +74,55 @@ internal class RealSshSession(
         // tail to exit.
         return scope.launch {
             val coroutineJob = currentCoroutineContext()[Job]
+            // Issue #239 — agent-log tail must NOT propagate transport
+            // failures to the coroutine root.
+            //
+            // The v0.2.8 maintainer device captured a crash where the
+            // remote SSH socket aborted mid-tail (`Software caused
+            // connection abort`). `client.startSession()` returned with
+            // a `ConnectionException` (which extends `SSHException` /
+            // `IOException`), the existing wrap turned it into an
+            // `SshException`, and that propagated to the coroutine root
+            // on the supervisor-scoped `launch`. The default uncaught
+            // exception handler then routed it to `CrashReporter` —
+            // turning an ordinary network-loss event into a crash
+            // report.
+            //
+            // Per D21 (no background work) and the orthogonal reconnect
+            // state machine in `TmuxSessionViewModel` (#145 + #173):
+            // when the transport drops, the tmux event-loop coroutine
+            // observes the same drop through its producer job and
+            // routes through `_disconnected` -> reconnect; on
+            // reconnect, `reconcilePanes` calls
+            // `startAgentConversationForPane` again and a fresh
+            // `tail()` is launched on the new session. The tail's own
+            // job just needs to end cleanly so it doesn't cascade into
+            // the crash reporter.
+            //
+            // Catch shape:
+            //  - `SshException`: anything we wrapped ourselves
+            //    (`Failed to start tail session ...` and friends).
+            //  - `IOException`: covers `SocketException`,
+            //    sshj's `SSHException` family (`TransportException`,
+            //    `ConnectionException`, all extend `SSHException` which
+            //    extends `IOException`), and any other I/O failure
+            //    reading from the channel stream.
+            //  - `CancellationException` is deliberately NOT caught:
+            //    coroutine cancellation must always propagate so the
+            //    structured-concurrency contract is preserved (Job
+            //    cancellation by the caller still tears down the
+            //    channel via the `invokeOnCompletion` handler below).
+            //  - Genuine programming errors (NPE, IAE, ...) still
+            //    propagate to the supervisor scope so they aren't
+            //    silently swallowed.
             val sessionChannel = try {
                 client.startSession()
+            } catch (e: SshException) {
+                logTailRecoverableFailure(path, e)
+                return@launch
+            } catch (e: IOException) {
+                logTailRecoverableFailure(path, e)
+                return@launch
             } catch (t: Throwable) {
                 throw SshException("Failed to start tail session for `$path`: ${t.message}", t)
             }
@@ -91,10 +140,27 @@ internal class RealSshSession(
                 } else {
                     "-n 0"
                 }
-                cmd = sessionChannel.exec("tail -F $lineArg '$quoted'")
+                cmd = try {
+                    sessionChannel.exec("tail -F $lineArg '$quoted'")
+                } catch (e: IOException) {
+                    // Channel-open / exec race against transport drop —
+                    // same recoverable-disconnect story as the
+                    // startSession() catch above.
+                    logTailRecoverableFailure(path, e)
+                    return@launch
+                }
                 BufferedReader(InputStreamReader(cmd!!.inputStream, Charsets.UTF_8)).use { reader ->
                     while (isActive) {
-                        val line = reader.readLine() ?: break
+                        val line = try {
+                            reader.readLine() ?: break
+                        } catch (e: IOException) {
+                            // Mid-stream socket abort. The
+                            // `invokeOnCompletion` handler below will
+                            // close the channel for us. Surface as a
+                            // clean job exit, not a crash.
+                            logTailRecoverableFailure(path, e)
+                            return@launch
+                        }
                         onLine(line)
                         // Suspend per-line so a cancelled tail job exits
                         // promptly even when the remote is gushing output.
@@ -107,6 +173,20 @@ internal class RealSshSession(
                 runCatching { sessionChannel.close() }
             }
         }
+    }
+
+    /**
+     * Diagnostic log when [tail] swallows a recoverable transport failure
+     * (issue #239). Logged through `java.util.logging` (same channel as
+     * [SshjTransportThreadGuard]) so the same swallowed-disconnect event
+     * is visible in logcat under a stable, grep-able tag without pulling
+     * `android.util.Log` into the shared module.
+     */
+    private fun logTailRecoverableFailure(path: String, cause: Throwable) {
+        TAIL_LOGGER.log(
+            Level.INFO,
+            "[$TAIL_LOG_TAG] tail($path) ended on transport drop; reconnect path will resume on next attach: ${cause.javaClass.simpleName}: ${cause.message}",
+        )
     }
 
     override fun openLocalPortForward(
@@ -287,35 +367,45 @@ internal class RealSshSession(
 
     override fun close() {
         scope.cancel()
-        // Issue #151: a teardown-before-reattach race could leave the
-        // transport already half-disconnected (cancelled mid-flight from the
-        // tmux event-loop coroutine in `TmuxSessionViewModel`) when this
-        // `close()` runs. sshj's `SSHClient.disconnect()` then throws
-        // `TransportException` with `DisconnectReason.BY_APPLICATION`
-        // ("Disconnected") because it tries to send a disconnect packet over
-        // a transport that has already gone down. That exception was
-        // surfaced to the user as a crash on the v0.2.7 maintainer device.
+        // Issue #151 + #239: `close()` is idempotent and silent by
+        // contract. The v0.2.7 crash report showed the original
+        // narrow-catch race: a teardown-before-reattach left the
+        // transport already half-disconnected (cancelled mid-flight from
+        // the tmux event-loop coroutine in `TmuxSessionViewModel`), and
+        // sshj's `SSHClient.disconnect()` threw `TransportException` with
+        // `DisconnectReason.BY_APPLICATION` ("Disconnected") because it
+        // tried to send a disconnect packet over a transport that had
+        // already gone down. That was swallowed for the
+        // `BY_APPLICATION` case only — leaving every other
+        // `TransportException` reason able to crash on the
+        // `ViewModel.onCleared` -> `closeCurrentConnection` ->
+        // `RealSshSession.close()` cascade.
         //
-        // The orthogonal `TmuxSessionViewModel` fix joins the event-loop
-        // job before calling `close()`, which closes the race in the normal
-        // path. The `BY_APPLICATION` catch below is the belt-and-suspenders
-        // side of that fix: if any other code path ever calls close on an
-        // already-disconnected transport (including a double-close), we
-        // swallow the already-disconnected signal silently because that is
-        // exactly the no-op outcome `close()` already wanted. Other
-        // `TransportException` reasons (KEX failure, MAC error, unexpected
-        // protocol errors) propagate so genuine transport faults still
-        // surface.
+        // v0.2.8 confirmed the narrow catch is still wrong shape: the
+        // maintainer device hit twin crashes (A + B in issue #239)
+        // during `onCleared`, again with `BY_APPLICATION`, again from
+        // the supervisor-scoped IO coroutine root. The Android lifecycle
+        // (activity destroy -> ViewModelStore.clear ->
+        // `onCleared` on every ViewModel) is the canonical close path
+        // under D21 (no background work), and any `TransportException`
+        // surfacing from that path has nowhere useful to go — the
+        // session is being torn down anyway and the caller has no
+        // actionable recovery.
         //
-        // The outer best-effort catch keeps the previous `runCatching`
-        // semantics for non-TransportException failures during teardown
-        // (e.g. socket-level IO faults). `close()` is supposed to be a
-        // best-effort cleanup — propagating a stray IO error during shutdown
-        // does not give the caller anything actionable and breaks the
-        // idempotency guarantee. We re-throw the configured "real
-        // transport fault" path explicitly so the BY_APPLICATION skip is
-        // the only path that silently no-ops, and everything else either
-        // succeeds or is logged as best-effort.
+        // Per the issue: "swallows `TransportException` with reason
+        // `BY_APPLICATION` (and likely any TransportException — close
+        // is idempotent)." We widen to the full `TransportException`
+        // family so every teardown-time transport fault (KEX failure,
+        // MAC error, unexpected protocol errors, half-closed transport)
+        // is treated the same way: log and no-op, never propagate.
+        // Genuine "transport blew up while connected" diagnostics still
+        // surface through the regular read/write path (sshj raises the
+        // same exception on the producer-coroutine boundary), so
+        // swallowing here does not hide a live-connection fault.
+        //
+        // The outer best-effort catches preserve the idempotency
+        // guarantee for non-TransportException teardown failures
+        // (`IOException`, exotic `RuntimeException`).
         //
         // Issue #166: `SSHClient.disconnect()` sends an
         // `SSH_MSG_DISCONNECT` packet over the live transport — a real
@@ -348,17 +438,34 @@ internal class RealSshSession(
                 client.disconnect()
             }
         } catch (e: TransportException) {
-            if (e.disconnectReason != DisconnectReason.BY_APPLICATION) {
-                throw e
-            }
-            // BY_APPLICATION = already-disconnected; close() is idempotent
-            // here by design — silently no-op.
+            // Issue #239: close() is idempotent and silent by contract.
+            // Every TransportException here is teardown-time and not
+            // actionable — swallow and log.
+            CLOSE_LOGGER.log(
+                Level.INFO,
+                "[$CLOSE_LOG_TAG] swallowed TransportException during close() " +
+                    "(reason=${e.disconnectReason}): ${e.message}",
+            )
+        } catch (e: SSHException) {
+            // sshj's `SSHException` is the parent of `TransportException`
+            // (already handled) and `ConnectionException`. A
+            // `ConnectionException` surfacing here is the same shape of
+            // already-down-transport teardown noise — silently no-op so
+            // the idempotency contract holds.
+            CLOSE_LOGGER.log(
+                Level.INFO,
+                "[$CLOSE_LOG_TAG] swallowed SSHException during close(): ${e.message}",
+            )
         } catch (e: IOException) {
             // sshj declares `disconnect()` as `throws IOException`. A
-            // non-TransportException IO failure during shutdown is
-            // best-effort: nothing the caller can do, propagating it would
-            // defeat the idempotency contract. Swallowed deliberately to
-            // preserve the pre-#151 `runCatching` semantics for this path.
+            // non-SSHException IO failure during shutdown is best-effort:
+            // nothing the caller can do, propagating it would defeat the
+            // idempotency contract. Swallowed deliberately to preserve the
+            // pre-#151 `runCatching` semantics for this path.
+            CLOSE_LOGGER.log(
+                Level.INFO,
+                "[$CLOSE_LOG_TAG] swallowed IOException during close(): ${e.message}",
+            )
         } catch (e: RuntimeException) {
             // Belt-and-suspenders: the pre-#151 implementation wrapped the
             // whole disconnect in `runCatching`, which silently swallowed
@@ -368,6 +475,10 @@ internal class RealSshSession(
             // any other RuntimeException sshj may surface during teardown
             // (e.g. an exotic state-machine error) so close() stays
             // idempotent in the face of unknown teardown failure modes.
+            CLOSE_LOGGER.log(
+                Level.INFO,
+                "[$CLOSE_LOG_TAG] swallowed RuntimeException during close(): ${e.message}",
+            )
         }
     }
 
@@ -412,3 +523,24 @@ internal const val INTERACTIVE_PTY_INITIAL_COLUMNS: Int = 80
  * first layout.
  */
 internal const val INTERACTIVE_PTY_INITIAL_ROWS: Int = 24
+
+/**
+ * Logcat-grep tag for `RealSshSession.close()` swallowing a teardown-time
+ * transport fault (issue #239). Routed through `java.util.logging` for
+ * the same reason [SshjTransportThreadGuard] uses that channel — no
+ * Android-only dependency from this shared module.
+ */
+internal const val CLOSE_LOG_TAG: String = "issue239-close-teardown"
+
+private val CLOSE_LOGGER: Logger = Logger.getLogger(RealSshSession::class.java.name + ".close")
+
+/**
+ * Logcat-grep tag for `RealSshSession.tail()` swallowing a recoverable
+ * transport drop (issue #239). The reconnect state machine in
+ * `TmuxSessionViewModel` (#145 + #173) will resume the tail on the next
+ * attach; this log line is the diagnostic breadcrumb that says the tail
+ * coroutine ended cleanly instead of crashing the worker.
+ */
+internal const val TAIL_LOG_TAG: String = "issue239-tail-recover"
+
+private val TAIL_LOGGER: Logger = Logger.getLogger(RealSshSession::class.java.name + ".tail")

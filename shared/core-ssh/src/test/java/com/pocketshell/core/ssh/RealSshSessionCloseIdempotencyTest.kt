@@ -2,16 +2,19 @@ package com.pocketshell.core.ssh
 
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.DisconnectReason
+import net.schmizz.sshj.connection.ConnectionException
 import net.schmizz.sshj.transport.TransportException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
-import org.junit.Assert.fail
 import org.junit.Test
+import java.io.IOException
+import java.net.SocketException
 
 /**
- * Issue #151 — `RealSshSession.close()` must be idempotent.
+ * Issue #151 + #239 — `RealSshSession.close()` must be idempotent and
+ * silent.
  *
  * The v0.2.7 crash report showed:
  *
@@ -23,23 +26,29 @@ import org.junit.Test
  *   at com.pocketshell.app.tmux.TmuxSessionViewModel.connect(TmuxSessionViewModel.kt:243)
  * ```
  *
- * Root cause: when the user taps "Attach" on a different tmux session, the
- * tmux ViewModel's event-loop coroutine is still mid-processing a
- * `ControlEvent` when the SSH transport teardown begins. sshj's
- * `SSHClient.disconnect()` then throws `TransportException` with
- * `DisconnectReason.BY_APPLICATION` because the transport has already gone
- * down via the cancellation.
+ * v0.2.8 then captured twin crashes on the same `onCleared` cascade
+ * (issue #239 crashes A + B). The original narrow catch only handled
+ * `BY_APPLICATION`; the wider contract now is that **any**
+ * `TransportException` raised during teardown is non-actionable and
+ * must not propagate. The Android lifecycle (activity destroy ->
+ * `ViewModelStore.clear` -> `onCleared` on every ViewModel) is the
+ * canonical close path under D21; teardown-time transport faults give
+ * the caller nothing useful to recover from.
  *
- * The orthogonal `TmuxSessionViewModel` fix cancels-and-joins the event-loop
- * job before touching the transport. This test pins the belt-and-suspenders
- * side of the fix: even if some other code path (or a future regression in
- * the ViewModel) ever calls `close()` against an already-disconnected
- * transport, `RealSshSession.close()` must NOT propagate the
- * already-disconnected signal — `close()` is idempotent by design.
+ * Genuine "transport blew up while connected" diagnostics still surface
+ * through the regular read/write path (sshj raises the same exception
+ * on the producer-coroutine boundary), so widening this catch does not
+ * hide a live-connection fault.
  *
- * Negative case: any other `TransportException` reason (KEX failure, MAC
- * error, protocol error) MUST still propagate. The catch is scoped to
- * `BY_APPLICATION` precisely so a genuine transport fault still surfaces.
+ * This test pins:
+ *   1. The `BY_APPLICATION` case is silently swallowed (idempotency).
+ *   2. Other `TransportException` reasons are also swallowed (close is
+ *      idempotent for every teardown-time transport fault).
+ *   3. Repeated `close()` is a no-op.
+ *   4. `IOException` / `ConnectionException` / `SocketException` from
+ *      sshj's `disconnect()` chain are also swallowed.
+ *   5. Close-while-disconnected (sshj already cancelled, then close
+ *      arrives) propagates no exception.
  */
 class RealSshSessionCloseIdempotencyTest {
 
@@ -89,23 +98,24 @@ class RealSshSessionCloseIdempotencyTest {
     }
 
     @Test
-    fun `close propagates TransportException with a non-BY_APPLICATION reason`() {
-        // Negative case: a genuine transport fault (e.g. KEY_EXCHANGE_FAILED)
-        // must still surface so callers can tell the difference between
-        // "transport was already down" (no-op) and "transport blew up while
-        // we were trying to shut it down" (alarming).
+    fun `close swallows TransportException with a non-BY_APPLICATION reason`() {
+        // Issue #239: widened from the v0.2.7 narrow `BY_APPLICATION`
+        // catch. Every `TransportException` raised during teardown is
+        // non-actionable — the Android lifecycle cascade
+        // (activity destroy -> ViewModel.onCleared ->
+        // `RealSshSession.close()`) has no recovery path, and propagating
+        // would trip the crash reporter exactly like the maintainer
+        // device's v0.2.8 reports showed.
         val badReason = DisconnectReason.KEY_EXCHANGE_FAILED
         val client = ThrowingDisconnectClient(
             toThrow = TransportException(badReason, "kex blew up"),
         )
         val session = RealSshSession(client)
 
-        try {
-            session.close()
-            fail("expected TransportException with reason=$badReason to propagate from close()")
-        } catch (e: TransportException) {
-            assertEquals(badReason, e.disconnectReason)
-        }
+        // Must NOT throw — widened contract per issue #239.
+        session.close()
+
+        assertEquals(1, client.disconnectCallCount)
     }
 
     @Test
@@ -130,6 +140,72 @@ class RealSshSessionCloseIdempotencyTest {
             client,
         )
         assertNotNull(applicationDisconnect.disconnectReason)
+    }
+
+    @Test
+    fun `close swallows ConnectionException raised during disconnect`() {
+        // Issue #239: `ConnectionException` extends sshj's `SSHException`,
+        // which in turn extends `IOException`. A connection-layer
+        // teardown fault (e.g. a channel close hiccup) is just as
+        // non-actionable as a transport-layer fault — silent no-op.
+        val client = ThrowingDisconnectClient(
+            toThrow = ConnectionException("Software caused connection abort"),
+        )
+        val session = RealSshSession(client)
+
+        session.close() // must not throw
+
+        assertEquals(1, client.disconnectCallCount)
+    }
+
+    @Test
+    fun `close swallows raw IOException raised during disconnect`() {
+        // Issue #239: sshj declares `disconnect()` as `throws IOException`.
+        // A non-SSH IOException (e.g. half-closed socket on flush) during
+        // teardown is also non-actionable — preserve the idempotent
+        // close contract.
+        val client = ThrowingDisconnectClient(
+            toThrow = IOException("socket already closed"),
+        )
+        val session = RealSshSession(client)
+
+        session.close() // must not throw
+
+        assertEquals(1, client.disconnectCallCount)
+    }
+
+    @Test
+    fun `close while transport already disconnected propagates no exception`() {
+        // Issue #239 acceptance criterion: explicit close-while-disconnected
+        // path. Simulates the v0.2.8 maintainer reports: the SSH transport
+        // had already been torn down (e.g. by sshj's internal Reader
+        // thread observing socket abort) before `ViewModel.onCleared` ran;
+        // when `close()` then invoked `SSHClient.disconnect()`, sshj
+        // surfaced a chained `IOException` cause (`SocketException`).
+        //
+        // Concretely we simulate the second-close shape that the crash
+        // report showed: the disconnect attempt finds the transport
+        // already gone and raises `BY_APPLICATION` again, then a raw
+        // `SocketException`. Neither must propagate.
+        val firstClient = ThrowingDisconnectClient(
+            toThrow = TransportException(
+                DisconnectReason.BY_APPLICATION,
+                "Disconnected",
+            ),
+        )
+        val firstSession = RealSshSession(firstClient)
+        firstSession.close()
+        // Second close on an already-disconnected client: raises a
+        // raw SocketException (the underlying socket is gone).
+        val secondClient = ThrowingDisconnectClient(
+            toThrow = SocketException("Software caused connection abort"),
+        )
+        val secondSession = RealSshSession(secondClient)
+
+        secondSession.close() // must not throw
+
+        assertEquals(1, firstClient.disconnectCallCount)
+        assertEquals(1, secondClient.disconnectCallCount)
     }
 
     /**

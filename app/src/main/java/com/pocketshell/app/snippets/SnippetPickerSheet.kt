@@ -331,12 +331,14 @@ private fun SnippetPickerRow(
 ) {
     val kind = SnippetKind.fromStorage(snippet.kind)
     val displayLabel = snippet.displayLabel()
-    // Issue #190: only render the one-line body preview when the label
-    // was explicitly overridden AND the body carries content beyond what
-    // the label already shows. When the label IS the derived first line
-    // the preview would be a duplicate.
-    val showBodyPreview = remember(snippet) {
-        shouldShowBodyPreview(snippet, displayLabel)
+    // Issue #198: render a one-line body preview under the label so the
+    // user can tell snippets apart without expanding the row. The dedup
+    // rule from #190 still applies — when the body collapses to exactly
+    // the label (single-line derived labels, or explicit labels that
+    // happen to quote the body verbatim) the preview would just repeat
+    // the primary text, so it stays hidden in that case.
+    val bodyPreview = remember(snippet, displayLabel) {
+        snippetBodyPreview(snippet, displayLabel)
     }
     Column(
         modifier = Modifier
@@ -375,15 +377,20 @@ private fun SnippetPickerRow(
                     Spacer(modifier = Modifier.width(8.dp))
                     KindTag(kind)
                 }
-                if (showBodyPreview) {
+                if (bodyPreview != null) {
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = snippet.body,
-                        color = PocketShellColors.TextSecondary,
+                        // Issue #198: 12 sp monospace `TextMuted` mirrors
+                        // the host-card subtitle pattern in
+                        // `docs/design-system.md` so the picker reads
+                        // consistently with the rest of the surface.
+                        text = bodyPreview,
+                        color = PocketShellColors.TextMuted,
                         fontFamily = JetBrainsMonoFamily,
-                        fontSize = 11.sp,
+                        fontSize = 12.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag(snippetBodyPreviewTag(snippet.id)),
                     )
                 }
             }
@@ -490,22 +497,46 @@ internal fun snippetSendChipTag(snippetId: Long, withEnter: Boolean): String =
     if (withEnter) "snippet-send-with-enter-$snippetId" else "snippet-send-$snippetId"
 
 /**
- * Returns `true` when the picker row should render the secondary body
- * preview under the label (issue #190).
+ * Returns the one-line body preview string for [snippet] to render
+ * under [displayLabel] in the picker row, or `null` when the row
+ * should suppress the preview entirely (issue #198).
  *
  * Rule:
- *  - Hide when the label is derived — the body's first line IS the
- *    label, repeating it adds nothing.
- *  - Hide when the explicit label happens to match the body exactly —
- *    same dedup reasoning.
- *  - Otherwise, show — the user picked a label that does not directly
- *    quote the body and a one-line preview clarifies what will be sent.
+ *  - Empty bodies render no preview row (no blank padding). This is
+ *    defensive: the editor blocks blank-body inserts but legacy rows
+ *    might still surface here.
+ *  - When the body collapses to exactly the displayed label — the
+ *    common case for single-line snippets with a derived label, or
+ *    an explicit label that quotes the body verbatim — the preview
+ *    would just duplicate the primary text, so it stays hidden.
+ *  - Otherwise the preview is the body with newlines collapsed to a
+ *    single space so multi-line snippets surface their hidden lines
+ *    in the one-line preview (with Compose-driven ellipsis on
+ *    overflow). Internal runs of whitespace are not normalised: shell
+ *    bodies frequently rely on doubled spaces (here-doc indentation,
+ *    awk field separators) that we should preserve verbatim.
  */
-internal fun shouldShowBodyPreview(snippet: SnippetEntity, displayLabel: String): Boolean {
-    if (!snippet.hasExplicitLabel()) return false
-    val firstBodyLine = snippet.body.lineSequence().firstOrNull()?.trim().orEmpty()
-    return firstBodyLine.isNotEmpty() && firstBodyLine != displayLabel.trim()
+internal fun snippetBodyPreview(snippet: SnippetEntity, displayLabel: String): String? {
+    val body = snippet.body
+    if (body.isBlank()) return null
+    // Collapse \r\n then \n to a single space so a multi-line body
+    // reads as one line in the picker preview. `\r` on its own is
+    // treated the same (defensive: legacy Mac-style line endings).
+    val singleLine = body
+        .replace("\r\n", " ")
+        .replace('\n', ' ')
+        .replace('\r', ' ')
+        .trim()
+    if (singleLine.isEmpty()) return null
+    if (singleLine == displayLabel.trim()) return null
+    return singleLine
 }
+
+/**
+ * Test tag for a row's one-line body preview Text (issue #198).
+ */
+internal fun snippetBodyPreviewTag(snippetId: Long): String =
+    "snippet-body-preview-$snippetId"
 
 /**
  * Small accent pill used in the row trailing position to discriminate
@@ -599,10 +630,20 @@ private fun SnippetPickerPopulatedPreview() {
         Box(modifier = Modifier.background(PocketShellColors.Surface)) {
             SnippetPickerContent(
                 snippets = listOf(
-                    // Derived label: label is null, picker shows the body
-                    // first line and no secondary preview (issue #190).
+                    // Derived label, single-line body: the body collapses
+                    // to the label so the preview row stays hidden
+                    // (issue #198 dedup).
                     SnippetEntity(id = 1, hostId = 1, label = null, body = "kubectl get pods -A", kind = "command"),
-                    SnippetEntity(id = 2, hostId = 1, label = null, body = "kubectl logs -f deploy/api", kind = "command"),
+                    // Derived label, multi-line body: the second line is
+                    // hidden by the derived label, so the preview shows
+                    // the full body with newlines collapsed to spaces.
+                    SnippetEntity(
+                        id = 2,
+                        hostId = 1,
+                        label = null,
+                        body = "kubectl logs -f deploy/api\n  --since=10m --tail=200",
+                        kind = "command",
+                    ),
                     // Overridden label: secondary preview shows the body
                     // because it differs from the chosen label.
                     SnippetEntity(

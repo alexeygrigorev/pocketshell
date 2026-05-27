@@ -414,9 +414,17 @@ fun HostListScreen(
                             // map (race-free fallback while the DAO emission
                             // catches up).
                             val setupState = setupStates[host.id] ?: HostSetupState.Unknown
-                            // Issue #116: per-host usage chip. `null`
-                            // when the scheduler has no record warranting
-                            // a chip — the slot collapses cleanly.
+                            // Issue #155: the per-host usage record is
+                            // no longer rendered as an inline chip in the
+                            // primary status row — it would compete with
+                            // the setup-state badge for attention while
+                            // the cross-host Usage dashboard strip ABOVE
+                            // this list already surfaces blocked state.
+                            // Instead the record (when present) is
+                            // surfaced inside the kebab overflow menu so
+                            // a user who long-presses / taps the kebab
+                            // sees the per-host quota status alongside
+                            // Ports / Share / Re-check setup.
                             val usageRecord = usageBadges[host.id]
                             HostCard(
                                 name = host.name,
@@ -446,27 +454,13 @@ fun HostListScreen(
                                     // probe re-runs.
                                     { tapRequests.tryEmit(host.id) }
                                 } else null,
-                                // Issue #116: render the blocked /
-                                // near-limit chip when the scheduler has
-                                // a record for this host. The closure is
-                                // hoisted into the `usageBadge` slot so
-                                // the HostCard layout can place the chip
-                                // next to the setup-state badge without
-                                // re-shaping that component.
-                                usageBadge = usageRecord?.let { record ->
-                                    {
-                                        Box(modifier = Modifier.testTag(HOST_USAGE_BADGE_TAG_PREFIX + host.id)) {
-                                            com.pocketshell.app.usage.UsageSessionBlockedBadge(
-                                                provider = record,
-                                            )
-                                        }
-                                    }
-                                },
                                 trailingContent = {
                                     HostOverflowMenuAnchor(
                                         expanded = menuOpen,
                                         onExpand = { menuOpen = true },
                                         onDismiss = { menuOpen = false },
+                                        usageRecord = usageRecord,
+                                        usageBadgeTestTag = HOST_USAGE_BADGE_TAG_PREFIX + host.id,
                                         onOpenPorts = {
                                             menuOpen = false
                                             portPanelRequests.tryEmit(host.id)
@@ -639,11 +633,14 @@ internal const val HOST_LIST_EMPTY_STATE_TAG = "host-list:empty-state"
 internal const val USAGE_DASHBOARD_STRIP_TAG = "usage:dashboard-strip"
 
 /**
- * Issue #116: stable test tag for the per-host blocked / near-limit
- * chip rendered next to the setup-state badge on [HostCard]. Carried
- * via the `usageBadge` slot from the host list call site. The setup-
- * state badge from #120 uses [com.pocketshell.uikit.components.HOST_SETUP_BADGE_TAG]
- * so the two chips can be targeted independently.
+ * Issue #116 / #155: stable test tag for the per-host blocked /
+ * near-limit chip. Originally rendered next to the setup-state badge
+ * on [HostCard] via the card's `usageBadge` slot. Issue #155 demoted
+ * the chip OFF the primary status row to reduce scanning friction
+ * (the cross-host Usage dashboard strip already surfaces blocked
+ * state). The chip now lives inside the kebab overflow menu — see
+ * [HostOverflowMenuAnchor] — and keeps the same test tag so existing
+ * instrumentation that targets it stays valid.
  */
 internal const val HOST_USAGE_BADGE_TAG_PREFIX = "host:usage-badge:"
 
@@ -907,20 +904,40 @@ private const val HOSTS_TAB_INDEX = 0
  * `material-icons-extended` for a single glyph (`Icons.Filled.MoreVert`
  * is not part of `material-icons-core`, the only ramp on our
  * classpath).
+ *
+ * Issue #155: the 40 dp tap target now carries a permanent visible
+ * affordance — a circular [PocketShellColors.SurfaceElev] background
+ * with a 1 dp [PocketShellColors.BorderSoft] hairline border —
+ * matching the design-system §8 requirement that the kebab read as
+ * "always visible affordance". Previously the icon was drawn directly
+ * on the card surface, which made it easy to miss against the host's
+ * setup-state badge and avatar colour. The same issue also moves the
+ * usage record into this menu so it no longer competes with the
+ * setup-state badge in the row.
  */
 @Composable
 private fun HostOverflowMenuAnchor(
     expanded: Boolean,
     onExpand: () -> Unit,
     onDismiss: () -> Unit,
+    usageRecord: com.pocketshell.core.usage.UsageProviderRecord?,
+    usageBadgeTestTag: String,
     onOpenPorts: () -> Unit,
     onShare: () -> Unit,
     onRecheckSetup: () -> Unit,
 ) {
     Box {
+        // Issue #155: render the kebab inside a 40 dp circular
+        // SurfaceElev container with a 1 dp BorderSoft hairline border
+        // so the affordance is visually obvious. The design-system §8
+        // re-spec explicitly calls for a "circular (20 dp radius)"
+        // kebab; the hairline border keeps it on the same chrome
+        // language as the host card (Δ3 — borders, not shadows).
         Box(
             modifier = Modifier
                 .size(40.dp)
+                .background(color = PocketShellColors.SurfaceElev, shape = CircleShape)
+                .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = CircleShape)
                 .clickable(role = Role.Button, onClick = onExpand)
                 .testTag(HOST_OVERFLOW_BUTTON_TAG),
             contentAlignment = Alignment.Center,
@@ -931,6 +948,28 @@ private fun HostOverflowMenuAnchor(
             expanded = expanded,
             onDismissRequest = onDismiss,
         ) {
+            // Issue #155: per-host usage status surfaced as the first
+            // menu entry when the scheduler has a blocked / near-limit
+            // record for the host. Rendered as a non-clickable header
+            // row (no `onClick`) so it reads as state rather than an
+            // action — the user can already drill into the cross-host
+            // Usage dashboard from the strip above the host list. The
+            // pill is wrapped in a Box carrying the existing
+            // `host:usage-badge:<id>` test tag so instrumentation that
+            // previously located the inline chip keeps working.
+            if (usageRecord != null) {
+                DropdownMenuItem(
+                    enabled = false,
+                    text = {
+                        Box(modifier = Modifier.testTag(usageBadgeTestTag)) {
+                            com.pocketshell.app.usage.UsageSessionBlockedBadge(
+                                provider = usageRecord,
+                            )
+                        }
+                    },
+                    onClick = {},
+                )
+            }
             DropdownMenuItem(
                 text = { Text("Ports") },
                 onClick = onOpenPorts,

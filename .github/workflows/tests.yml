@@ -131,19 +131,41 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Start Docker agent target
-        run: docker compose -f tests/docker/docker-compose.yml up -d --build agents
+      - name: Build SSH base image
+        # `tmux`'s Dockerfile does `FROM pocketshell-test:ssh`, so the
+        # base image must exist in the local cache before we start the
+        # `tmux` service with `--no-deps`. We build it without starting
+        # the `sshd` container, which would otherwise collide with
+        # `agents` on host port 2222 via tmux's `depends_on: sshd`.
+        run: docker compose -f tests/docker/docker-compose.yml build sshd
 
-      - name: Wait for agent container to report healthy
+      - name: Start Docker fixtures (agents, flaky-agent, tmux)
+        # Issue #207: previously only `agents` started, which made
+        # `SshReconnectE2eTest` (needs `flaky-agent` on host port 2226,
+        # fixture from #145) fail every run with `ECONNREFUSED port
+        # 2226`. The `tmux` fixture (host port 2224) is brought up in
+        # the same step for parity with the locally-runnable set; no
+        # connected test currently binds 2224 but it is in scope per
+        # the issue acceptance criteria. `--no-deps` keeps tmux's
+        # `depends_on: sshd` from spinning up `sshd` (which would
+        # conflict with `agents` on host port 2222); the SSH base image
+        # was already built in the previous step.
+        run: docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents flaky-agent tmux
+
+      - name: Wait for fixture containers to report healthy
         # Issue #150: consume the compose `healthcheck:` block via
         # `docker inspect` instead of retry-sleep polling SSH from the
-        # host. The compose service runs `ssh ... testuser@localhost
-        # true` inside the container; reaching `healthy` means SSH +
+        # host. Each service runs `ssh ... testuser@localhost true`
+        # inside its container; reaching `healthy` means SSH +
         # authentication are working.
         run: |
           source tests/docker/lib/wait-for-healthy.sh
-          wait_for_container_healthy tests/docker/docker-compose.yml agents /tmp/agent-health.log 60
-          cat /tmp/agent-health.log
+          wait_for_container_healthy tests/docker/docker-compose.yml agents /tmp/agents-health.log 60
+          cat /tmp/agents-health.log
+          wait_for_container_healthy tests/docker/docker-compose.yml flaky-agent /tmp/flaky-agent-health.log 60
+          cat /tmp/flaky-agent-health.log
+          wait_for_container_healthy tests/docker/docker-compose.yml tmux /tmp/tmux-health.log 60
+          cat /tmp/tmux-health.log
 
       - name: Verify agent SSH target tool surface
         # Health-status already proves SSH is up; this single SSH probe
@@ -183,7 +205,11 @@ jobs:
           mkdir -p artifacts/docker
           docker compose -f tests/docker/docker-compose.yml ps > artifacts/docker/compose-ps.txt
           docker compose -f tests/docker/docker-compose.yml logs --no-color agents > artifacts/docker/agents.log
+          docker compose -f tests/docker/docker-compose.yml logs --no-color flaky-agent > artifacts/docker/flaky-agent.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color tmux > artifacts/docker/tmux.log 2>/dev/null || true
           docker inspect pocketshell-test-agents > artifacts/docker/agents-inspect.json 2>/dev/null || true
+          docker inspect pocketshell-test-flaky-agent > artifacts/docker/flaky-agent-inspect.json 2>/dev/null || true
+          docker inspect pocketshell-test-tmux > artifacts/docker/tmux-inspect.json 2>/dev/null || true
 
       - name: Upload Android test reports
         if: always()
@@ -204,6 +230,6 @@ jobs:
           path: artifacts/docker/
           if-no-files-found: ignore
 
-      - name: Stop Docker agent target
+      - name: Stop Docker fixtures
         if: always()
         run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans

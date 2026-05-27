@@ -38,7 +38,6 @@ import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
-import org.junit.Assume
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -76,6 +75,25 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
     private var launchedActivity: ActivityScenario<MainActivity>? = null
     private val timings = mutableListOf<String>()
 
+    /**
+     * Budget for the tmux-session picker bottom sheet to transition from
+     * `Loading` to `Ready`. The transition covers SSH connect, remote
+     * `tmux list-sessions`, and the picker's recomposition into row
+     * widgets bearing each session name.
+     *
+     * On a local Linux dev emulator the full Loading → Ready cycle lands
+     * in well under 5s, so 20s is comfortable. On the GitHub Actions
+     * swiftshader CI emulator running with a parallel Docker `agents`
+     * container, the same cycle has been observed to exceed 20s under
+     * load (see #207 sub-failure bisect: this test was added by #178 and
+     * failed on its very first CI run with a clean 20s
+     * `ComposeTimeoutException` at the picker `waitForText`). Scaling to
+     * 60s on CI gives generous headroom while keeping the local budget
+     * tight so a real regression on a dev box still surfaces.
+     */
+    private val pickerWaitMs: Long =
+        if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 20_000L
+
     @After
     fun closeLaunchedActivity() {
         launchedActivity?.close()
@@ -89,18 +107,6 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
 
     @Test
     fun sameHostSessionSwitchReusesSshTransport() = runBlocking {
-        // STOPGAP — tracked in #207. The CI emulator has been failing this
-        // same-host session-switch journey on every push since recent
-        // merges (this test entered CI under #178 and is among the symptom
-        // set). Symptom is an assertion failure ("expected visible
-        // terminal text ...") rather than a crash, and the test still
-        // passes locally. Gate the test on CI so the main branch CI signal
-        // returns to green while the real root cause is investigated in
-        // parallel under #207. Same skip pattern as #132 (a4ccbff).
-        Assume.assumeFalse(
-            "STOPGAP for #207 — passes locally, fails intermittently on CI; root cause under investigation.",
-            TerminalTestTimeouts.isRunningOnCi(),
-        )
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
 
@@ -116,7 +122,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
                 .isNotEmpty()
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        waitForText(SESSION_A, timeoutMs = 20_000)
+        waitForText(SESSION_A, timeoutMs = pickerWaitMs)
         compose.onNodeWithText(SESSION_A).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
@@ -136,7 +142,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         val switchAt = SystemClock.elapsedRealtime()
         compose.onNodeWithText("⋮").performClick()
         compose.onNodeWithText("Switch session").performClick()
-        waitForText(SESSION_B, timeoutMs = 20_000)
+        waitForText(SESSION_B, timeoutMs = pickerWaitMs)
         compose.onAllNodesWithText("Attach")
             .fetchSemanticsNodes()
             .also {

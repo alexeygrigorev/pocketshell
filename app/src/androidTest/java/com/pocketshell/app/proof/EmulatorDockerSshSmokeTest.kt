@@ -20,6 +20,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
@@ -263,7 +264,19 @@ class EmulatorDockerSshSmokeTest {
             }
             val attachTapAt = SystemClock.elapsedRealtime()
             compose.onNodeWithText(existingTmuxSessionName).performClick()
-            compose.onNodeWithText("Terminal").assertExists()
+            // Issue #216: the visible "Terminal" tab label is only
+            // rendered when the consolidated tab pill (#189) has 2+
+            // entries — i.e. an agent has been detected. For a
+            // shell-only / single-tab dogfood session no "Terminal"
+            // text node exists. Use [TMUX_SESSION_SCREEN_TAG] (root of
+            // [TmuxSessionScreen]) as the universal "route swapped to
+            // the tmux session screen" sentinel.
+            compose.waitUntil(timeoutMillis = 10_000) {
+                compose.onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
             waitForSessionConnectUiToSettle()
             waitForTerminalSessionAttached()
             val terminalReadyMs = waitForTerminalUsableByMarker(
@@ -373,7 +386,25 @@ class EmulatorDockerSshSmokeTest {
     }
 
     private fun sendCommandViaTerminalInput(command: String) {
-        val text = if (command.endsWith("\n")) command else "$command\n"
+        // Issue #216: tmux attach can emit a CPR (cursor position report)
+        // query `\x1b[6n` that the termux emulator answers via
+        // `mSession.write(...)` — which puts the response (e.g.
+        // `\x1b[27;17R`) on the PTY's input side as bytes the shell will
+        // read on its next command-line read. If the test types
+        // `sh /tmp/.../run.sh\n` while that response is still queued in
+        // readline's input buffer, bash sees the concatenation
+        // `[27;17Rsh /tmp/.../run.sh` and reports `-sh: [27: not found`.
+        //
+        // To make the input deterministic, prepend `\x15` (Ctrl-U, the
+        // readline "kill-line" binding) so the shell discards anything
+        // already queued in the current input line before our command
+        // arrives. The Ctrl-U is a no-op on an empty line so it's safe
+        // when no CPR response is pending.
+        val text = buildString {
+            append('')
+            append(command)
+            if (!command.endsWith("\n")) append('\n')
+        }
         var committed = false
         launchedActivity?.onActivity { activity ->
             val terminalView = activity.window.decorView.findTerminalView() ?: return@onActivity

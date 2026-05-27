@@ -1357,6 +1357,16 @@ internal const val TMUX_SESSION_USAGE_BADGE_TAG = "tmux:usage-badge"
  *   them without relying on translatable text.
  * - [TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX] is the prefix for per-tab
  *   pill segments (index 0 = Terminal, index 1 = Conversation).
+ * - [TMUX_TERMINAL_TAB_TAG] is a named, stable hook for the Terminal
+ *   segment inside the consolidated pill (equivalent to
+ *   `TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX + "0"`). Added for issue #216
+ *   so connected E2E tests that previously asserted on the visible
+ *   "Terminal" text can address the Terminal segment without depending
+ *   on translatable strings. Note: the segment is only present when the
+ *   pill itself is rendered (multi-tab case — i.e. an agent has been
+ *   detected). For the universal "I am on the tmux session screen"
+ *   sentinel, use [TMUX_SESSION_SCREEN_TAG] instead, since the pill is
+ *   intentionally suppressed for shell-only / single-tab panes per #189.
  */
 internal const val TMUX_FULL_BREADCRUMB_TAG = "tmux:breadcrumb:full"
 internal const val TMUX_COMPACT_BREADCRUMB_TAG = "tmux:breadcrumb:compact"
@@ -1364,6 +1374,7 @@ internal const val TMUX_TABS_TAG = "tmux:tabs"
 internal const val TMUX_CONSOLIDATED_SESSION_LABEL_TAG = "tmux:chrome:session-label"
 internal const val TMUX_CONSOLIDATED_WINDOW_CRUMB_TAG = "tmux:chrome:window-crumb"
 internal const val TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX = "tmux:chrome:tab-pill:"
+internal const val TMUX_TERMINAL_TAB_TAG = "tmux:chrome:tab-pill:terminal"
 
 /**
  * Issue #145: stable test tags for the mid-session SSH disconnect band
@@ -1824,6 +1835,20 @@ private fun WindowSwitcherOverlay(
 
                 HorizontalPager(
                     state = pagerState,
+                    // Issue #216: compose every page so the semantic
+                    // tree always contains all per-page tags. Without
+                    // this, [HorizontalPager]'s default
+                    // `beyondViewportPageCount = 0` only composes the
+                    // currently-visible page; tests that drive the
+                    // overlay by tapping `${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}N`
+                    // would race the swipe-and-settle path. Each page
+                    // is a single Column with two short Text labels
+                    // (<200 bytes), so composing all pages eagerly is
+                    // a negligible memory cost even for tmux sessions
+                    // with many windows (typical 2–10). It also makes
+                    // the overlay swipe feel instant since no adjacent
+                    // page has to compose mid-gesture.
+                    beyondViewportPageCount = Int.MAX_VALUE,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(104.dp)
@@ -3151,6 +3176,16 @@ private fun ConsolidatedTabPill(
     ) {
         labels.forEachIndexed { index, label ->
             val selected = index == selectedIndex
+            // Issue #216: index 0 is conventionally the Terminal segment.
+            // Apply [TMUX_TERMINAL_TAB_TAG] as a named alias for tests that
+            // previously asserted on the visible "Terminal" text (now
+            // suppressed in single-tab shell-only sessions); the per-index
+            // prefix tag stays as the generic per-segment hook.
+            val segmentTag = if (index == 0) {
+                TMUX_TERMINAL_TAB_TAG
+            } else {
+                TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX + index
+            }
             Box(
                 modifier = Modifier
                     .background(
@@ -3162,7 +3197,7 @@ private fun ConsolidatedTabPill(
                         onClick = { onSelected(index) },
                     )
                     .padding(horizontal = 10.dp, vertical = 4.dp)
-                    .testTag(TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX + index),
+                    .testTag(segmentTag),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(

@@ -159,8 +159,19 @@ class TmuxAttachPrefillDockerTest {
             val attachTapAt = SystemClock.elapsedRealtime()
             recordStamp("picker_tap")
             compose.onNodeWithText(sessionName).performClick()
-            // The compose route swap to the terminal screen.
-            compose.onNodeWithText("Terminal").assertExists()
+            // The compose route swap to the terminal screen. Issue #216:
+            // the visible "Terminal" tab label is only rendered when the
+            // consolidated tab pill (#189) has 2+ entries — i.e. an
+            // agent has been detected. The seeded session here is a
+            // shell-only pane, so we assert on the screen-root tag
+            // instead. The waitUntil envelope absorbs the brief gap
+            // between picker tap and the tmux route taking over.
+            compose.waitUntil(timeoutMillis = 10_000) {
+                compose.onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
             recordStamp("terminal_route_attached")
             recordTiming("attach_tap_to_terminal_route_ms", SystemClock.elapsedRealtime() - attachTapAt)
 

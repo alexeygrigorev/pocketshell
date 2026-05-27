@@ -4,14 +4,12 @@ import android.graphics.Bitmap
 import android.os.SystemClock
 import android.util.Log
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
-import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTouchInput
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -48,8 +46,8 @@ import java.io.FileOutputStream
  * "Kill window doesn't actually close the window".
  *
  * The user reproduced the symptom on a real phone: three tmux windows
- * open, tap "Kill window" on Window 2 / 3, observe the windows still
- * present in the WindowStrip with no error feedback.
+ * open, tap "Kill window", observe the windows still present with no
+ * error feedback.
  *
  * Root cause (paralleling issue #168 for kill-session):
  *
@@ -67,25 +65,49 @@ import java.io.FileOutputStream
  *  - Surface transport / tmux `%error` failures on [TmuxSessionViewModel.windowKillError]
  *    so the screen can render a banner — no silent swallow.
  *  - Force an explicit reconcile after the event lands (or the 2s
- *    fallback timeout fires) so the WindowStrip drops the killed pill
- *    deterministically.
+ *    fallback timeout fires) so the surviving window list drops the
+ *    killed pill deterministically.
  *
- * This test exercises that path end-to-end against the deterministic
- * Docker `agents` fixture (host port 2222). The session-picker on that
- * fixture goes through a `tmuxctl list` stub that only knows about three
- * canned session names (`claude-main`, `codex`, `opencode-lab`) — we
- * cannot pick a session that name isn't on that list. So we seed REAL
- * windows into the `opencode-lab` session (cleaning any prior tmux
- * state first), let the picker surface `opencode-lab`, then drive the
- * tmux session attach against the live tmux server inside the
- * container. The app attaches, the WindowStrip surfaces three pills,
- * the user long-presses on `Window 2`, taps `Kill Window 2`, confirms
- * the dialog, and within 2s the WindowStrip drops to two pills.
+ * ## Post-#189 UX
+ *
+ * After #189 the inline `WindowStrip` was retired in favour of the
+ * kebab `Switch window` entry and the [WindowSwitcherOverlay]. There is
+ * no per-window long-press kill any more — `Kill window` in the kebab
+ * always targets the CURRENT window. The dogfood-reported bug was "any
+ * window kill silently fails"; killing the currently-active window is
+ * sufficient to exercise the fixed code path.
+ *
+ * The app's pane reconcile sorts panes by `pane_index`, and the main
+ * pager (driven by `currentPane = panes[pagerState.currentPage]`)
+ * starts at page 0 immediately after attach. So `currentWindowId` ==
+ * Window 1 by default. The test:
+ *
+ *  1. Seeds three windows in the `opencode-lab` session.
+ *  2. Attaches the app — the in-app current window is Window 1.
+ *  3. Opens the kebab and confirms `Switch window` + `Kill window`
+ *     entries appear (proving `multipleWindows = true`, i.e. the view
+ *     model reconciled to a 3-window state).
+ *  4. Captures the pre-kill viewport for the artifact bundle.
+ *  5. Taps `Kill window` and asserts the dialog targets the in-app
+ *     current window's `@<id>` (positive proof that the kill is wired
+ *     to the right window).
+ *  6. Polls remote `tmux list-windows` until the count drops to 2 and
+ *     verifies the surviving windows are `win2`+`win3` (i.e. the kill
+ *     deleted the right window).
+ *  7. Re-opens the WindowSwitcher overlay and confirms `Switch window`
+ *     is still present and the overlay shows exactly 2 surviving
+ *     pages. Issue #216 set [WindowSwitcherOverlay]'s pager
+ *     `beyondViewportPageCount = Int.MAX_VALUE` so all pages are
+ *     simultaneously composed in the semantic tree; the per-page
+ *     testTags are reliable probes for the surviving window count
+ *     regardless of which page is currently in the viewport.
  *
  * Artifacts written under
  * `<media>/additional_test_output/issue188-kill-window/`:
- *  - `01-before-kill-window2-viewport.png`
- *  - `02-after-kill-window2-viewport.png`
+ *  - `01-before-kill-window1-viewport.png` (kebab open over Window 1
+ *    terminal pane, just before tapping `Kill window`)
+ *  - `02-after-kill-window1-viewport.png` (overlay open showing the 2
+ *    surviving pages)
  *  - `timings.txt`
  *  - `summary.txt`
  */
@@ -118,7 +140,7 @@ class KillWindowE2eTest {
 
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
 
-        // --- (1) Tap host card → picker → attach to kill-window-lab.
+        // --- (1) Tap host card → picker → attach to opencode-lab.
         compose.waitUntil(timeoutMillis = 10_000) {
             compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
                 .fetchSemanticsNodes()
@@ -132,7 +154,7 @@ class KillWindowE2eTest {
         }
         compose.onNodeWithText(SESSION_LAB).performClick()
 
-        // --- (2) Wait for the tmux session screen + all three pills.
+        // --- (2) Wait for the tmux session screen.
         compose.waitUntil(timeoutMillis = 30_000) {
             compose.onAllNodesWithTag(
                 TMUX_SESSION_SCREEN_TAG,
@@ -141,44 +163,63 @@ class KillWindowE2eTest {
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
+        // Cross-check that the seed actually populated 3 windows on the
+        // remote before driving the app. This separates "fixture seed
+        // broken" from "app failed to reconcile".
+        val seededWindows = listRemoteWindows(key)
+        assertEquals(
+            "expected three seeded windows on the remote before driving the app; got $seededWindows",
+            3,
+            seededWindows.size,
+        )
+        // Capture each window's @id so we can (a) verify the kill
+        // dialog targets the right id and (b) verify the surviving set
+        // by name after the kill.
+        val win1Entry = seededWindows.firstOrNull { it.name == "win1" }
+        val win2Entry = seededWindows.firstOrNull { it.name == "win2" }
+        val win3Entry = seededWindows.firstOrNull { it.name == "win3" }
+        assertTrue(
+            "expected seeded windows 'win1','win2','win3' on the remote; " +
+                "got ${seededWindows.map { it.name }}",
+            win1Entry != null && win2Entry != null && win3Entry != null,
+        )
+        val win1WindowId = win1Entry!!.windowId
+        Log.i(LOG_TAG, "seeded windows: $seededWindows; win1=$win1WindowId")
+
+        // --- (3) Wait for the kebab to mount. Confirm both `Switch
+        // window` AND `Kill window` entries are present — the former
+        // proves `multipleWindows = true` (i.e. the view model
+        // reconciled to a multi-window state), the latter is what we
+        // tap next.
         compose.waitUntil(timeoutMillis = 30_000) {
-            compose.onAllNodesWithTag(TMUX_WINDOW_STRIP_TAG, useUnmergedTree = true)
+            compose.onAllNodesWithText("⋮", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("⋮").performClick()
+        compose.waitUntil(timeoutMillis = 30_000) {
+            compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty() &&
-                compose.onAllNodesWithTag(
-                    "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}1",
-                    useUnmergedTree = true,
-                ).fetchSemanticsNodes().isNotEmpty() &&
-                compose.onAllNodesWithTag(
-                    "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}2",
-                    useUnmergedTree = true,
-                ).fetchSemanticsNodes().isNotEmpty() &&
-                compose.onAllNodesWithTag(
-                    "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}3",
-                    useUnmergedTree = true,
-                ).fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodesWithText("Kill window", useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
         }
-        captureFullDevice("01-before-kill-window2")
+        captureFullDevice("01-before-kill-window1")
 
-        // --- (3) Long-press the Window 2 pill, tap "Kill Window 2" in the
-        // dropdown, confirm in the dialog.
-        val killWindow2TapAt = SystemClock.elapsedRealtime()
-        compose.onNodeWithTag(
-            "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}2",
-            useUnmergedTree = true,
-        ).performTouchInput { longClick(durationMillis = 800L) }
+        // --- (4) Tap `Kill window`. The current window is Window 1
+        // (per pane_index sort), so the dialog targets `@<win1_id>`. We
+        // assert the dialog text names that id before tapping Kill —
+        // that closes the loop between "app's current window is win1"
+        // and "kill targeted win1".
+        val killWindowTapAt = SystemClock.elapsedRealtime()
+        compose.onNodeWithText("Kill window").performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithText("Kill Window 2", useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
-        compose.onNodeWithText("Kill Window 2").performClick()
-        // The dialog renders "Kill" on the confirm button. Wait for the
-        // dialog body so we tap the dialog's "Kill", not anything stray.
-        compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithText("This will close ", substring = true, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+            compose.onAllNodesWithText(
+                "This will close $win1WindowId",
+                substring = true,
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isNotEmpty()
         }
         // The kill button reads "Kill" — single text node inside the
         // dialog at this point. onLast() guards against any incidental
@@ -187,60 +228,108 @@ class KillWindowE2eTest {
             .onLast()
             .performClick()
 
-        // --- (4) Within 2s the strip must drop to two pills — i.e. the
-        // third pill's tag must disappear. We assert via the pill-3 tag
-        // because that is the canonical "WindowStrip went from 3 → 2".
-        //
-        // The Compose waitUntil envelope is `STRIP_REFRESH_TIMEOUT_MS`,
-        // which is the issue #188 acceptance criterion's 2s ceiling
-        // padded by `KILL_WINDOW_EVENT_WAIT_MS` (the view model's
-        // internal 2s fallback for a `%window-close` notification that
-        // tmux sometimes withholds when our control client is not the
-        // window's active client). The latency we record is measured
-        // from the user's "Kill" tap; the test still asserts a sub-2s
-        // wall clock when tmux emits `%window-close` promptly, but no
-        // longer flakes if tmux silently waits the full timeout. tmux
-        // 3.6 on the Docker `agents` fixture has been observed dropping
-        // the notification when killing a non-active window.
-        compose.waitUntil(timeoutMillis = STRIP_REFRESH_TIMEOUT_MS) {
-            compose.onAllNodesWithTag(
-                "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}3",
-                useUnmergedTree = true,
-            )
-                .fetchSemanticsNodes()
-                .isEmpty()
+        // --- (5) Within ~2-5s the remote tmux session must drop from 3
+        // windows to 2, and the surviving windows must be win2 + win3
+        // (proving the kill targeted Window 1 specifically). We poll
+        // the SSH side directly (separate from the UI tree) so the
+        // assertion does not race the kebab + overlay re-open against
+        // the in-flight reconcile.
+        var remoteWindowsAfterKill: List<RemoteWindow> = listRemoteWindows(key)
+        val pollDeadline = SystemClock.elapsedRealtime() + STRIP_REFRESH_TIMEOUT_MS
+        while (
+            remoteWindowsAfterKill.size > 2 &&
+            SystemClock.elapsedRealtime() < pollDeadline
+        ) {
+            kotlinx.coroutines.delay(200)
+            remoteWindowsAfterKill = listRemoteWindows(key)
         }
-        val killLatencyMs = SystemClock.elapsedRealtime() - killWindow2TapAt
-        recordTiming("kill_window2_ms", killLatencyMs)
-        Log.i(LOG_TAG, "kill Window 2 dropped strip to two pills in ${killLatencyMs}ms")
-        captureFullDevice("02-after-kill-window2")
-
-        // --- (5) The remaining two pills (Window 1 and Window 2) must
-        // still be present. Note: after killing the 2nd window in the
-        // 3-window session, the surviving windows are renumbered to
-        // "Window 1" and "Window 2" because [toWindowSummaries] is
-        // 1-based on the live panes list. We assert pill count, not
-        // labels.
-        compose.onNodeWithTag(
-            "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}1",
-            useUnmergedTree = true,
-        ).assertExists()
-        compose.onNodeWithTag(
-            "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}2",
-            useUnmergedTree = true,
-        ).assertExists()
-
-        // --- (6) Cross-check the real tmux server. `list-windows` for the
-        // seeded session must report exactly two windows.
-        val remoteWindows = listRemoteWindows(key)
+        val killLatencyMs = SystemClock.elapsedRealtime() - killWindowTapAt
         assertEquals(
-            "tmux list-windows on the remote should agree with the strip; got $remoteWindows",
+            "tmux list-windows should report 2 surviving windows within " +
+                "${STRIP_REFRESH_TIMEOUT_MS}ms; got $remoteWindowsAfterKill " +
+                "after ${killLatencyMs}ms",
             2,
-            remoteWindows.size,
+            remoteWindowsAfterKill.size,
         )
+        val survivingNames = remoteWindowsAfterKill.map { it.name }.toSet()
+        assertEquals(
+            "kill must have targeted win1 specifically; surviving windows " +
+                "should be win2+win3, got $survivingNames",
+            setOf("win2", "win3"),
+            survivingNames,
+        )
+        recordTiming("kill_window1_ms", killLatencyMs)
+        Log.i(LOG_TAG, "kill Window 1 dropped remote windows to 2 in ${killLatencyMs}ms")
 
+        // --- (6) The kebab + view model must agree with the post-kill
+        // remote state. Open the kebab and assert `Switch window` is
+        // still present (proving `multipleWindows` is still true, i.e.
+        // we did not collapse to a single window). Then drill into the
+        // WindowSwitcher and observe exactly 2 surviving pages.
+        compose.waitForIdle()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("⋮").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("⋮").performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("Switch window").performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(TMUX_WINDOW_SWITCHER_OVERLAY_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        // Pages 1 and 2 must BOTH be present AND page 3 must be gone
+        // (`beyondViewportPageCount = Int.MAX_VALUE` composes every
+        // page in the semantic tree, so addressability does not depend
+        // on which page is currently in the viewport). The waitUntil
+        // here covers the in-app reconcile latency: tmux acks the kill
+        // (verified above via the remote-side poll), then
+        // `%window-close` fires, then [TmuxSessionViewModel] reconciles
+        // `_panes`, then the WindowSwitcher overlay rebuilds its pager
+        // with the new page count. Polling all three conditions
+        // together waits for the visible state to converge.
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(
+                "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}1",
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isNotEmpty() &&
+                compose.onAllNodesWithTag(
+                    "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}2",
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().isNotEmpty() &&
+                compose.onAllNodesWithTag(
+                    "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}3",
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().isEmpty()
+        }
+        compose.onNodeWithTag(
+            "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}1",
+            useUnmergedTree = true,
+        ).assertExists()
+        compose.onNodeWithTag(
+            "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}2",
+            useUnmergedTree = true,
+        ).assertExists()
+        // Page 3 must be gone — confirms the UI tree agrees with the
+        // already-checked remote tmux server state.
+        compose.onAllNodesWithTag(
+            "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}3",
+            useUnmergedTree = true,
+        ).fetchSemanticsNodes().also { nodes ->
+            assertTrue(
+                "WindowSwitcher should not have a 3rd page after kill; got ${nodes.size} nodes",
+                nodes.isEmpty(),
+            )
+        }
+        captureFullDevice("02-after-kill-window1")
+
+        // --- (7) Write artifacts.
         writeTimings()
-        writeSummary(killLatencyMs, remoteWindows)
+        writeSummary(killLatencyMs, remoteWindowsAfterKill)
         Unit
     }
 
@@ -329,7 +418,21 @@ class KillWindowE2eTest {
         Log.i(LOG_TAG, "seeded session windows: ${exec?.stdout?.trim()}")
     }
 
-    private suspend fun listRemoteWindows(key: String): List<String> {
+    private data class RemoteWindow(val windowId: String, val name: String)
+
+    /**
+     * List remote tmux windows as `(@id, name)` pairs so the test can
+     * (a) verify the kill targeted the right window by id (the dialog
+     * renders `This will close @<id>`) and (b) verify the surviving
+     * window set by name (`win2`+`win3`) after the kill.
+     *
+     * Implementation note: tmux 3.6 converts literal tab characters in
+     * `-F` format output to `_` (verified against this test's docker
+     * fixture). We use `|` as the field separator instead — tmux
+     * doesn't mangle it and the seeded window names (`win1`, `win2`,
+     * `win3`) never contain it.
+     */
+    private suspend fun listRemoteWindows(key: String): List<RemoteWindow> {
         val result = SshConnection.connect(
             host = DEFAULT_HOST,
             port = DEFAULT_PORT,
@@ -341,7 +444,7 @@ class KillWindowE2eTest {
             session.use {
                 it.exec(
                     "tmux list-windows -t ${shellQuote(SESSION_LAB)} " +
-                        "-F '#{window_id}' 2>/dev/null || true",
+                        "-F '#{window_id}|#{window_name}' 2>/dev/null || true",
                 )
             }
         }
@@ -350,6 +453,11 @@ class KillWindowE2eTest {
             .split('\n')
             .map { it.trim() }
             .filter { it.isNotEmpty() }
+            .mapNotNull { line ->
+                val parts = line.split('|')
+                if (parts.size != 2) return@mapNotNull null
+                RemoteWindow(windowId = parts[0], name = parts[1])
+            }
     }
 
     private suspend fun cleanupSeededSessions(key: String) {
@@ -415,7 +523,7 @@ class KillWindowE2eTest {
         println("ISSUE188_TIMINGS ${file.absolutePath}")
     }
 
-    private fun writeSummary(killMs: Long, remainingWindows: List<String>) {
+    private fun writeSummary(killMs: Long, remainingWindows: List<RemoteWindow>) {
         val file = artifactFile("summary.txt")
         file.writeText(
             buildString {
@@ -423,12 +531,16 @@ class KillWindowE2eTest {
                 appendLine("host=$DEFAULT_HOST port=$DEFAULT_PORT user=$DEFAULT_USER")
                 appendLine("seeded_session=$SESSION_LAB")
                 appendLine("seeded_windows=win1,win2,win3")
-                appendLine("kill_window2_ms=$killMs")
+                appendLine("killed_window=win1  # the in-app currentWindow after attach")
+                appendLine("kill_window1_ms=$killMs")
                 appendLine("threshold_ms=2000  # per issue #188 acceptance criterion")
-                appendLine("remote_remaining_windows=${remainingWindows.joinToString(",")}")
+                appendLine(
+                    "remote_remaining_windows=" +
+                        remainingWindows.joinToString(",") { "${it.windowId}:${it.name}" },
+                )
                 appendLine("artifacts:")
-                appendLine("  01-before-kill-window2-viewport.png")
-                appendLine("  02-after-kill-window2-viewport.png")
+                appendLine("  01-before-kill-window1-viewport.png")
+                appendLine("  02-after-kill-window1-viewport.png")
                 appendLine("  timings.txt")
             },
         )
@@ -454,7 +566,7 @@ class KillWindowE2eTest {
         const val SESSION_LAB: String = "opencode-lab"
 
         /**
-         * Compose wait envelope for the WindowStrip refresh after kill.
+         * Compose wait envelope for the post-kill window-list refresh.
          *
          * Issue #188 acceptance criteria target sub-2s, which is what
          * happens when tmux emits `%window-close` immediately. On the

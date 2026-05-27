@@ -22,6 +22,7 @@ import com.pocketshell.app.composer.COMPOSER_DRAFT_TAG
 import com.pocketshell.app.composer.COMPOSER_SEND_ENTER_TAG
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -104,7 +105,17 @@ class DogfoodVisualScreenshotTest {
             )
 
             compose.onNodeWithText("Continue with SSH").performClick()
-            compose.onNodeWithText("Terminal").assertExists()
+            // Issue #216: the visible "Terminal" tab label is only
+            // rendered when the consolidated tab pill (#189) has 2+
+            // entries — i.e. an agent has been detected. The dogfood
+            // shell session has no agent, so we assert on the
+            // screen-root tag instead.
+            compose.waitUntil(timeoutMillis = 10_000) {
+                compose.onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
             compose.onNodeWithText("tmux ls").assertExists()
             waitForSessionConnectUiToSettle()
 

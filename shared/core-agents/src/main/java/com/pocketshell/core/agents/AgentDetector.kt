@@ -20,11 +20,30 @@ public data class AgentDetection(
 public class AgentDetector(
     private val recentWindowMillis: Long = 5 * 60 * 1000L,
 ) {
+    /**
+     * Returns the most-recent matching JSONL candidate as an
+     * [AgentDetection], or `null` if no candidate satisfies the recency +
+     * path-hint filter.
+     *
+     * Confidence is `ProcessConfirmed` when [processLines] contains a row
+     * naming the same agent; otherwise `RecentFile`.
+     *
+     * Issue #186: when [requireProcessMatch] is `true`, the detector
+     * additionally requires that the agent's command name appear in
+     * [processLines] before returning a non-null detection. Per-pane
+     * callers ([com.pocketshell.app.session.AgentConversationRepository.detectForPane])
+     * pass a TTY-scoped process list and set this flag so a JSONL file
+     * created by a sibling window (which shares the cwd) does not light
+     * up the Conversation tab on a window where no agent is actually
+     * running. Session-scoped callers pass `false` (default) and accept
+     * the looser `RecentFile` confidence when the process scan misses.
+     */
     public fun detect(
         cwd: String,
         nowMillis: Long,
         candidates: List<AgentLogCandidate>,
         processLines: List<String>,
+        requireProcessMatch: Boolean = false,
     ): AgentDetection? {
         val normalizedCwd = normalizeCwd(cwd)
         val expected = expectedPathHints(normalizedCwd)
@@ -36,6 +55,7 @@ public class AgentDetector(
             .maxByOrNull { it.modifiedAtMillis }
             ?: return null
         val confirmed = processLines.any { line -> line.namesAgent(recent.agent) }
+        if (requireProcessMatch && !confirmed) return null
         return AgentDetection(
             agent = recent.agent,
             sourcePath = recent.path,

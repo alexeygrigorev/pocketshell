@@ -214,6 +214,90 @@ class AgentDetectorTest {
     }
 
     @Test
+    fun requireProcessMatchReturnsNullWhenProcessScanMisses() {
+        // Issue #186 (per-window detection): when the caller is a tmux
+        // pane that scopes the process scan to its own TTY, a sibling
+        // window's agent JSONL must NOT bleed through. The pane-scoped
+        // `processLines` will be empty (no agent on this TTY), so the
+        // detection must return null — otherwise the Conversation tab
+        // lights up on non-agent windows just because they share a cwd
+        // with the agent window.
+        val detection = detector.detect(
+            cwd = "/home/alexey/git/pocketshell",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.ClaudeCode,
+                    path = "/home/alexey/.claude/projects/-home-alexey-git-pocketshell/new.jsonl",
+                    modifiedAtMillis = 9_500,
+                    sessionId = "claude-1",
+                ),
+            ),
+            processLines = listOf("1234 pts/2 00:00:01 bash"),
+            requireProcessMatch = true,
+        )
+
+        assertNull(
+            "requireProcessMatch=true must suppress detection when no row in " +
+                "processLines names the agent; sibling-window JSONLs must not light up.",
+            detection,
+        )
+    }
+
+    @Test
+    fun requireProcessMatchReturnsDetectionWhenProcessScanHits() {
+        // Sanity: the same call with a matching process row returns the
+        // detection — the gate fires only on a miss, not on every call.
+        val detection = detector.detect(
+            cwd = "/home/alexey/git/pocketshell",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.ClaudeCode,
+                    path = "/home/alexey/.claude/projects/-home-alexey-git-pocketshell/new.jsonl",
+                    modifiedAtMillis = 9_500,
+                    sessionId = "claude-1",
+                ),
+            ),
+            processLines = listOf("1234 pts/0 00:00:01 claude"),
+            requireProcessMatch = true,
+        )
+
+        assertEquals(AgentKind.ClaudeCode, detection?.agent)
+        assertEquals(AgentDetection.Confidence.ProcessConfirmed, detection?.confidence)
+    }
+
+    @Test
+    fun requireProcessMatchDefaultsToFalseAndPreservesPreviousBehaviour() {
+        // The session-scoped call path
+        // ([AgentConversationRepository.detect]) still wants
+        // RecentFile-without-process-confirm to register, so the new
+        // requireProcessMatch parameter MUST default to `false`. This
+        // test pins that default against a regression that would force
+        // the strict gate everywhere.
+        val detection = detector.detect(
+            cwd = "/home/alexey/git/pocketshell",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.ClaudeCode,
+                    path = "/home/alexey/.claude/projects/-home-alexey-git-pocketshell/new.jsonl",
+                    modifiedAtMillis = 9_500,
+                    sessionId = "claude-1",
+                ),
+            ),
+            processLines = emptyList(),
+        )
+
+        assertNotNull(
+            "default call (no requireProcessMatch) must still return RecentFile " +
+                "when the process scan misses; this preserves the pre-#186 contract.",
+            detection,
+        )
+        assertEquals(AgentDetection.Confidence.RecentFile, detection?.confidence)
+    }
+
+    @Test
     fun picksMostRecentAcrossMultipleEnginesWhenAllPathsMatch() {
         // When more than one engine has a recent matching candidate
         // (e.g. user briefly switched agents in the same pane), the

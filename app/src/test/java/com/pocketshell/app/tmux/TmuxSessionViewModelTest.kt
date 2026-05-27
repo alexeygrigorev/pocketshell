@@ -1346,6 +1346,219 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    // ─── Issue #186: per-window agent detection state ──────────────────
+    //
+    // Detection is per-pane (and therefore per-window for the simple
+    // case of one pane per window). The view-model surface that the
+    // screen drives off is [agentForWindow] — it must return the
+    // current window's agent kind regardless of which window's pane the
+    // user is currently viewing, so the Conversation tab + hint banner
+    // can hide on plain-shell windows even when a sibling window has a
+    // live agent.
+
+    @Test
+    fun agentForWindowReturnsNullForUnknownWindowId() = runTest {
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+
+        assertNull(vm.agentForWindow(null))
+        assertNull(vm.agentForWindow(""))
+        assertNull(vm.agentForWindow("@nonexistent"))
+    }
+
+    @Test
+    fun agentForWindowReturnsKindOfDetectedAgentInThatWindow() = runTest {
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "agent",
+                    paneIndex = 0,
+                ),
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%1",
+                    windowId = "@1",
+                    sessionId = "$0",
+                    title = "shell",
+                    paneIndex = 0,
+                ),
+            ),
+        )
+        // Only window @0's pane has a detection — window @1 is a plain
+        // shell with no agent.
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+
+        assertEquals(
+            "the agent-running window must report its agent kind",
+            AgentKind.ClaudeCode,
+            vm.agentForWindow("@0"),
+        )
+        assertNull(
+            "a plain-shell window must NOT inherit a sibling window's agent kind " +
+                "even when they share a cwd",
+            vm.agentForWindow("@1"),
+        )
+    }
+
+    @Test
+    fun agentForWindowPicksLowestPaneIndexWhenMultipleAgentsInOneWindow() = runTest {
+        // Edge case: two panes in the same window with detections.
+        // Stable behaviour: the pane that appears first in the panes
+        // list wins (which is paneIndex ascending per the reconcile
+        // sort).
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "a",
+                    paneIndex = 0,
+                ),
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%1",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "b",
+                    paneIndex = 1,
+                ),
+            ),
+        )
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.startAgentConversationForTest(
+            "%1",
+            AgentDetection(
+                agent = AgentKind.Codex,
+                sourcePath = "/home/u/.codex/sessions/x.jsonl",
+                sessionId = "x",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+        )
+
+        assertEquals(AgentKind.ClaudeCode, vm.agentForWindow("@0"))
+    }
+
+    @Test
+    fun listPanesFormatRequestsPaneTty() = runTest {
+        // Issue #186: the list-panes format must include
+        // `#{pane_tty}` so per-pane detection can scope its process
+        // scan to a TTY. Without this, the per-window fix has no
+        // signal to act on.
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tshell\t0\t/workspace\tbash\t/dev/pts/3"),
+                isError = false,
+            ),
+        )
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        client.emittedEvents.emit(
+            ControlEvent.WindowAdd(sessionId = "\$0", windowId = "@0", name = ""),
+        )
+        advanceUntilIdle()
+
+        val listPanesCmd = client.sentCommands.single { it.startsWith("list-panes") }
+        assertTrue(
+            "list-panes format must include #{pane_tty}; got `$listPanesCmd`",
+            listPanesCmd.contains("#{pane_tty}"),
+        )
+
+        val pane = vm.panes.value.single()
+        assertEquals("/dev/pts/3", pane.paneTty)
+    }
+
+    @Test
+    fun agentForWindowClearsAfterPaneLosesDetection() = runTest {
+        // The screen drives Conversation-tab visibility off
+        // [agentForWindow]. When a pane that previously had a
+        // detection no longer reports one (the user exited Claude),
+        // `agentForWindow` for that window must return null so the tab
+        // disappears.
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "a", paneIndex = 0),
+            ),
+        )
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        assertEquals(AgentKind.ClaudeCode, vm.agentForWindow("@0"))
+
+        // Simulate the production clear path: drop the conversation
+        // entry directly (mirrors what `clearAgentDetectionForPane`
+        // does when [detectForPane] returns null on a subsequent
+        // probe).
+        vm.clearAgentDetectionForPaneForTest("%0")
+
+        assertNull(
+            "agentForWindow must return null once the pane's detection is cleared",
+            vm.agentForWindow("@0"),
+        )
+    }
+
+    @Test
+    fun lockClearsWhenLockedPaneLosesDetection() = runTest {
+        // Issue #186 / #197 interaction: if the user has opened the
+        // Conversation tab on the agent pane (locking the composer to
+        // that pane), and then exits the agent in that pane, the lock
+        // must clear so the composer doesn't keep sending into a
+        // shell that no longer hosts an agent.
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "agent", paneIndex = 0),
+            ),
+        )
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        assertEquals("%0", vm.lockedConversationPaneId.value)
+
+        vm.clearAgentDetectionForPaneForTest("%0")
+
+        assertNull(
+            "lock must clear when the locked pane loses its detection",
+            vm.lockedConversationPaneId.value,
+        )
+        assertNull(
+            "agentForWindow must report null once the pane lost its detection",
+            vm.agentForWindow("@0"),
+        )
+    }
+
+    @Test
+    fun parsedPanePaneTtyDefaultsToEmptyWhenOmitted() = runTest {
+        // Defensive: an older tmux that doesn't emit the new field, or
+        // a unit test passing the legacy shape, must still produce a
+        // valid TmuxPaneState (with an empty paneTty so per-pane
+        // detection short-circuits to null).
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "a", paneIndex = 0)),
+        )
+        advanceUntilIdle()
+
+        assertEquals("", vm.panes.value.single().paneTty)
+    }
+
     @Test
     fun closedPaneDropsFirstSendAcknowledgementAndClearsLock() = runTest {
         // A pane that tmux removes between reconciles takes its first-send

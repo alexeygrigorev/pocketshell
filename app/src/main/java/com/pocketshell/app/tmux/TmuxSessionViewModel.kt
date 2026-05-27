@@ -14,6 +14,7 @@ import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.core.agents.AgentDetection
+import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.ssh.KnownHostsPolicy
@@ -221,7 +222,12 @@ public class TmuxSessionViewModel @Inject constructor(
     private var remoteRows: Int = 0
     private val agentRepository: AgentConversationRepository = AgentConversationRepository()
     private val paneAgentJobs: MutableMap<String, Job> = ConcurrentHashMap()
-    private val paneAgentInputs: MutableMap<String, Pair<String, String>> = ConcurrentHashMap()
+    // Issue #186: dedup key is (cwd, foreground-command, tty). Adding
+    // tty here means a tmux re-attach that rotates a pane onto a new
+    // `/dev/pts/N` is a fresh detection trigger — the previous shape
+    // (cwd, command) would treat that as already-seen and skip the
+    // round-trip, leaving the cached "no agent" verdict in place.
+    private val paneAgentInputs: MutableMap<String, Triple<String, String, String>> = ConcurrentHashMap()
     private val paneInputChannels: MutableMap<String, Channel<ByteArray>> = ConcurrentHashMap()
     private val paneInputJobs: MutableMap<String, Job> = ConcurrentHashMap()
 
@@ -644,7 +650,14 @@ public class TmuxSessionViewModel @Inject constructor(
                         append("-s -t '${escapeSingleQuoted(target.sessionName)}' ")
                     }
                     append("-F ")
-                    append("'#{pane_id}\t#{window_id}\t#{session_id}\t#{session_name}\t#{pane_title}\t#{pane_index}\t#{pane_current_path}\t#{pane_current_command}'")
+                    // Issue #186: append `#{pane_tty}` so per-pane agent
+                    // detection can scope its process scan to the pane's
+                    // TTY (e.g. `/dev/pts/3`). Without this, the
+                    // per-window detection fix has no way to ask
+                    // "is the agent process actually running ON this
+                    // pane?" and falls back to host-wide grep — which is
+                    // exactly the bug #186 is fixing.
+                    append("'#{pane_id}\t#{window_id}\t#{session_id}\t#{session_name}\t#{pane_title}\t#{pane_index}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_tty}'")
                 },
             )
         }.getOrNull() ?: return
@@ -686,6 +699,11 @@ public class TmuxSessionViewModel @Inject constructor(
                     title = p.title,
                     cwd = p.cwd,
                     currentCommand = p.currentCommand,
+                    // Issue #186: refresh `paneTty` so per-pane agent
+                    // detection always uses the current TTY (tmux can
+                    // rotate panes between ptys on detach/reattach in
+                    // rare cases).
+                    paneTty = p.paneTty,
                 )
             } else {
                 val state = TerminalSurfaceState()
@@ -710,6 +728,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     title = p.title,
                     cwd = p.cwd,
                     currentCommand = p.currentCommand,
+                    paneTty = p.paneTty,
                     terminalState = state,
                 ).also { newRows += it }
             }
@@ -758,19 +777,110 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    /**
+     * Issue #186: resolve the agent kind for [windowId] from the
+     * per-pane detection state, or null when no pane in that window has
+     * an agent. The screen consumes this to gate the Conversation tab
+     * + hint banner on the **currently-visible** window's detection
+     * state instead of the session-wide one — which is what made
+     * v0.2.8 light up "Claude detected" on plain-shell windows that
+     * just shared a cwd with the agent window.
+     *
+     * Returns null for a blank windowId so callers that read
+     * `currentPane?.windowId` (potentially null between attach and the
+     * first pane reconcile) get a deterministic null instead of a stale
+     * sibling-window kind.
+     *
+     * Picks the kind from the **first** pane in the window with a
+     * non-null detection, ordered by pane index per [_panes] (which
+     * already sorts panes within a window by `pane_index`). Multiple
+     * agents in a single window is rare in practice (tmux users almost
+     * always one-agent-per-window); when it does happen, the lower
+     * pane index wins so the tab shows a stable kind across reconciles.
+     */
+    public fun agentForWindow(windowId: String?): AgentKind? {
+        if (windowId.isNullOrBlank()) return null
+        val conversations = _agentConversations.value
+        return _panes.value
+            .asSequence()
+            .filter { it.windowId == windowId }
+            .mapNotNull { conversations[it.paneId]?.detection?.agent }
+            .firstOrNull()
+    }
+
     private fun startAgentDetectionForPane(pane: TmuxPaneState) {
         val session = sessionRef ?: return
         val cwd = pane.cwd.takeIf { it.isNotBlank() } ?: return
         val command = pane.currentCommand
-        val input = cwd to command
+        val tty = pane.paneTty
+        // Issue #186: include the pane TTY in the dedup key so a tmux
+        // re-attach that re-assigns the pane to a different `/dev/pts/N`
+        // re-runs detection. Without the tty in the key, a pane that
+        // moved between ttys would keep its stale "no agent" verdict
+        // even after the agent CLI was started on the new tty.
+        val input = Triple(cwd, command, tty)
         if (paneAgentInputs[pane.paneId] == input && paneAgentJobs[pane.paneId]?.isActive == true) return
         paneAgentJobs.remove(pane.paneId)?.cancel()
         paneAgentInputs[pane.paneId] = input
-        paneAgentJobs[pane.paneId] = bridgeScope.launch {
+        val paneId = pane.paneId
+        paneAgentJobs[paneId] = bridgeScope.launch {
+            // Issue #186: run the per-pane detection path so a sibling
+            // window's JSONL log cannot light up the Conversation tab
+            // on a non-agent window that just shares a cwd. The legacy
+            // session-scoped [detect] is intentionally NOT called here
+            // — its host-wide process scan was the root cause of the
+            // "Claude detected" misattribution reported in the v0.2.8
+            // dogfood.
+            //
+            // When `tty` is blank (older tmux that does not emit
+            // `#{pane_tty}`, or a freshly-discovered pane between
+            // bootstrap and the first list-panes round-trip), the
+            // repository returns null — preserving the old behaviour
+            // that "no signal = no detection" for this pane.
             val detection = runCatching {
-                agentRepository.detect(session, cwd, processHints = listOf(command))
-            }.getOrNull() ?: return@launch
-            startAgentConversationForPane(session, pane.paneId, detection)
+                agentRepository.detectForPane(
+                    session = session,
+                    cwd = cwd,
+                    paneTty = tty,
+                    paneCommand = command,
+                )
+            }.getOrNull()
+            if (detection == null) {
+                // Issue #186: when a pane that previously had a
+                // detection no longer does (the user exited Claude /
+                // Codex / OpenCode, or the agent process died), clear
+                // the per-pane conversation state so the Conversation
+                // tab + hint chip disappear for this window. Also
+                // release the conversation lock if it was pointing at
+                // this pane — otherwise the composer would keep
+                // sending to a pane that no longer has an agent.
+                clearAgentDetectionForPane(paneId)
+                return@launch
+            }
+            startAgentConversationForPane(session, paneId, detection)
+        }
+    }
+
+    /**
+     * Issue #186: drop the per-pane agent conversation state when
+     * detection comes back null. Mirrors the cleanup done in
+     * [applyParsedPanes] for a pane that tmux removed, but applies to a
+     * still-live pane whose agent just left.
+     *
+     * Cancels any active tail job, removes the conversation row from
+     * [_agentConversations], and clears the conversation lock if it was
+     * pointing here. The first-send confirmation acknowledgement is
+     * INTENTIONALLY preserved: if the user later starts the agent again
+     * on the same pane, they have already seen the banner once and the
+     * UX-spec calls for it to stay dismissed for the lifetime of the
+     * tmux session.
+     */
+    private fun clearAgentDetectionForPane(paneId: String) {
+        val current = _agentConversations.value[paneId] ?: return
+        if (current.detection == null) return
+        _agentConversations.value = _agentConversations.value - paneId
+        if (_lockedConversationPaneId.value == paneId) {
+            _lockedConversationPaneId.value = null
         }
     }
 
@@ -979,6 +1089,17 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     internal fun appendAgentEventsForTest(paneId: String, events: List<ConversationEvent>) {
         appendAgentEvents(paneId, events)
+    }
+
+    /**
+     * Issue #186 test seam: replay the "agent left this pane" path
+     * that production calls when a subsequent [detectForPane] returns
+     * null. Drives the same internal [clearAgentDetectionForPane] so
+     * tests can assert the lock + conversation row clearing without
+     * standing up a real SSH session.
+     */
+    internal fun clearAgentDetectionForPaneForTest(paneId: String) {
+        clearAgentDetectionForPane(paneId)
     }
 
     /**
@@ -1554,6 +1675,13 @@ public class TmuxSessionViewModel @Inject constructor(
             paneIndex = paneIndex,
             cwd = parts.getOrNull(if (hasSessionName) 6 else 5).orEmpty(),
             currentCommand = parts.getOrNull(if (hasSessionName) 7 else 6).orEmpty(),
+            // Issue #186: `#{pane_tty}` is the 9th (or 8th, without
+            // session_name) field in the format string above. Older
+            // tmux versions that omit the field simply return empty,
+            // in which case per-pane agent detection skips this pane
+            // (see [detectForPane]) rather than fall back to a
+            // host-wide scan.
+            paneTty = parts.getOrNull(if (hasSessionName) 8 else 7).orEmpty(),
             sessionName = sessionName,
         )
     }
@@ -1571,6 +1699,10 @@ public class TmuxSessionViewModel @Inject constructor(
         val paneIndex: Int,
         val cwd: String = "",
         val currentCommand: String = "",
+        // Issue #186: per-pane TTY captured from `#{pane_tty}` so
+        // detection can scope its process scan to a specific pane.
+        // Default is empty (older tmux / unit tests that don't care).
+        val paneTty: String = "",
         val sessionName: String = "",
     )
 

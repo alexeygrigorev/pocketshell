@@ -153,6 +153,93 @@ internal class AgentConversationRepository(
         return null
     }
 
+    /**
+     * Issue #186: per-window agent detection. Scopes the process scan to
+     * **this pane's TTY** (instead of doing a host-wide
+     * `ps -eo pid,ppid,comm,args | grep -E 'claude|codex|opencode'`) so a
+     * JSONL log written by an agent running in a sibling window does NOT
+     * register as a detection on a plain-shell pane that just happens to
+     * share the same cwd.
+     *
+     * Concretely: the maintainer's v0.2.8 dogfood report had a 3-window
+     * tmux session where only Window 1 ran Claude. Pre-#186, Windows 2
+     * and 3 also saw the Conversation tab + "Claude Code session
+     * detected" hint because [detect] runs a host-wide process scan and
+     * the JSONL file is shared across the same cwd. This entry point
+     * fixes that by:
+     *
+     *  1. Restricting the process scan to processes whose controlling
+     *     terminal is [paneTty] (e.g. `/dev/pts/3`). `ps -t <tty>` is
+     *     the standard POSIX selector for "processes on this TTY".
+     *  2. Including the pane's foreground process name ([paneCommand],
+     *     i.e. `#{pane_current_command}` from `list-panes`) so callers
+     *     that have already paid for a `list-panes` query don't need a
+     *     second round-trip for that signal.
+     *  3. Passing `requireProcessMatch = true` to [AgentDetector.detect]
+     *     so a recent JSONL alone is not enough — the agent process
+     *     must actually be live on THIS pane's TTY.
+     *
+     * Callers that want session-scoped (looser) detection should keep
+     * using [detect]; this method is intended for the tmux per-pane path
+     * in [com.pocketshell.app.tmux.TmuxSessionViewModel.startAgentDetectionForPane].
+     *
+     * @param paneTty value of `#{pane_tty}` from tmux's `list-panes`,
+     *   e.g. `/dev/pts/3`. When blank, the detection is suppressed
+     *   entirely — without a TTY there is no way to scope the process
+     *   scan, and a per-pane caller without a TTY signal is by
+     *   construction not a candidate for agent attribution.
+     * @param paneCommand value of `#{pane_current_command}` from tmux,
+     *   forwarded as an additional process-name hint. Most Node-based
+     *   CLIs report as `node` here, so the TTY-scoped `ps` is the
+     *   primary signal; the pane command is best-effort.
+     */
+    suspend fun detectForPane(
+        session: SshSession,
+        cwd: String,
+        paneTty: String,
+        paneCommand: String,
+    ): AgentDetection? {
+        val normalizedCwd = cwd.trim().ifBlank { return null }
+        val normalizedTty = paneTty.trim().ifBlank { return null }
+        val nowMillis = System.currentTimeMillis()
+        val candidates = session.exec(detectionCommand(normalizedCwd))
+            .stdout
+            .lineSequence()
+            .mapNotNull(::parseCandidate)
+            .toList()
+        // Per-pane process list. We strip any leading `/dev/` from the
+        // tty because `ps -t` accepts both `pts/3` and `/dev/pts/3` on
+        // GNU/BSD `ps`, but the unprefixed form is portable across
+        // every `ps` variant. Tmux usually reports the full path; we
+        // normalise here to keep the contract loose for callers.
+        val ttyArg = normalizedTty.removePrefix("/dev/")
+        val paneProcesses = session.exec(
+            "ps -t ${shellQuote(ttyArg)} -o pid,comm,args 2>/dev/null || true",
+        )
+            .stdout
+            .lines()
+            // Drop blank trailing rows and the ps header row.
+            .filter { it.isNotBlank() && !it.trimStart().startsWith("PID") }
+        // The pane's foreground process name is a cheap signal we
+        // already have from `list-panes` — merge it in so callers that
+        // wrap a JS-based agent in a shell wrapper still register
+        // (the `comm` column on `ps -t` reports `node` for Claude /
+        // Codex / OpenCode in their Node form, but `args` carries the
+        // wrapper command name, which `namesAgent` already greps for).
+        val processLines = if (paneCommand.isBlank()) {
+            paneProcesses
+        } else {
+            paneProcesses + paneCommand
+        }
+        return detector.detect(
+            cwd = normalizedCwd,
+            nowMillis = nowMillis,
+            candidates = candidates,
+            processLines = processLines,
+            requireProcessMatch = true,
+        )
+    }
+
     suspend fun readInitialEvents(
         session: SshSession,
         detection: AgentDetection,

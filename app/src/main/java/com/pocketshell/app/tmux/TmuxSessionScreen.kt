@@ -497,16 +497,28 @@ public fun TmuxSessionScreen(
                 }
             }
 
-            // Issue #197: the Conversation tab stays visible as long as
-            // ANY pane in the session has a detected agent (not just the
-            // currently-viewed pane). Without this, a user viewing a
-            // non-agent window after opening Conversation on the agent
-            // window would lose access to the tab pill entirely — the
-            // ask in the issue body is to keep the conversation locked
-            // on the agent pane and let the user switch back via the
-            // Tabs surface even from a sibling window.
-            val sessionHasAgentConversation = agentConversations.values.any { it.detection != null }
-            val tabs = if (sessionHasAgentConversation) {
+            // Issue #186: the Conversation tab keys off the
+            // CURRENTLY-VISIBLE window's detection state — not the
+            // session-wide one. v0.2.8 dogfood reported "Claude
+            // detected" lighting up on plain-shell windows that shared
+            // a cwd with the agent window; per-window detection
+            // ([TmuxSessionViewModel.agentForWindow]) fixes the data
+            // layer, and this gating change keeps the tab in sync with
+            // the per-window verdict.
+            //
+            // Issue #197 co-existence: when the user has explicitly
+            // opened the conversation pane ([lockedConversationPaneId]
+            // is non-null), the tab stays visible from any window so
+            // the locked composer remains reachable. The cross-window
+            // mismatch banner inside [TmuxConversationPane] already
+            // tells the user they are away from the agent window.
+            val currentWindowAgent: com.pocketshell.core.agents.AgentKind? =
+                remember(panes, agentConversations, currentWindowId) {
+                    viewModel.agentForWindow(currentWindowId)
+                }
+            val showConversationTab = currentWindowAgent != null ||
+                lockedConversationPaneId != null
+            val tabs = if (showConversationTab) {
                 listOf("Terminal", "Conversation")
             } else {
                 listOf("Terminal")

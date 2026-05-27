@@ -47,5 +47,12 @@ public data class TmuxPaneState(
     val title: String,
     val cwd: String = "",
     val currentCommand: String = "",
+    // Issue #186: per-window agent detection scopes its process scan to
+    // the pane's TTY so a sibling window's JSONL log does not bleed
+    // through and light up the Conversation tab on a non-agent window.
+    // Carried via `#{pane_tty}` from `list-panes`; e.g. `/dev/pts/3`.
+    // Empty when tmux has not yet been queried (initial bootstrap)
+    // or when an older tmux fails to emit the field.
+    val paneTty: String = "",
     val terminalState: TerminalSurfaceState,
 )

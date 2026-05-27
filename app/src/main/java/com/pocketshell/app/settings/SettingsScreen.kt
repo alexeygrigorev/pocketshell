@@ -127,10 +127,13 @@ fun SettingsScreen(
                     keyStatus = keyStatus,
                     language = settings.voiceLanguage,
                     silenceThresholdSeconds = settings.voiceSilenceThresholdSeconds,
+                    persistFailedTranscriptions = settings.persistFailedTranscriptions,
                     onSaveApiKey = viewModel::saveApiKey,
                     onClearApiKey = viewModel::clearApiKey,
                     onLanguageSelected = viewModel::setVoiceLanguage,
                     onSilenceThresholdChange = viewModel::setVoiceSilenceThresholdSeconds,
+                    onPersistFailedTranscriptionsChange =
+                        viewModel::setPersistFailedTranscriptions,
                     onOpenAiCosts = onOpenAiCosts,
                 )
             }
@@ -456,10 +459,12 @@ private fun VoiceSection(
     keyStatus: WhisperKeyStatus,
     language: String,
     silenceThresholdSeconds: Float,
+    persistFailedTranscriptions: Boolean,
     onSaveApiKey: (CharArray) -> Unit,
     onClearApiKey: () -> Unit,
     onLanguageSelected: (String) -> Unit,
     onSilenceThresholdChange: (Float) -> Unit,
+    onPersistFailedTranscriptionsChange: (Boolean) -> Unit,
     onOpenAiCosts: () -> Unit = {},
 ) {
     var showKeyDialog by remember { mutableStateOf(false) }
@@ -589,6 +594,49 @@ private fun VoiceSection(
                     .fillMaxWidth()
                     .testTag(VOICE_SILENCE_SLIDER_TAG),
             )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // -- Persist-failed-transcriptions toggle (issue #180) ------
+            //
+            // Default ON: the maintainer's v0.2.7 dogfood complaint was
+            // that a tunnel-induced Whisper failure dropped a 1-minute
+            // voice prompt. With the toggle on, the audio is persisted
+            // before the Whisper call and a retry banner appears on
+            // failure. Off restores the pre-#180 fail-fast behaviour
+            // for users who would rather lose audio than have it on
+            // disk.
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Save audio when transcription fails",
+                        color = PocketShellColors.Text,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "On a network failure, keep the audio on the device so it can be retried.",
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 12.sp,
+                    )
+                }
+                Switch(
+                    checked = persistFailedTranscriptions,
+                    onCheckedChange = onPersistFailedTranscriptionsChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = PocketShellColors.OnAccent,
+                        checkedTrackColor = PocketShellColors.Accent,
+                        uncheckedThumbColor = PocketShellColors.TextSecondary,
+                        uncheckedTrackColor = PocketShellColors.Surface,
+                        uncheckedBorderColor = PocketShellColors.Border,
+                    ),
+                    modifier = Modifier.testTag(VOICE_PERSIST_FAILED_SWITCH_TAG),
+                )
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -952,6 +1000,7 @@ internal const val VOICE_API_KEY_SAVE_TAG = "settings:voice:api-key-save"
 internal const val VOICE_SILENCE_SLIDER_TAG = "settings:voice:silence-slider"
 internal const val VOICE_SILENCE_VALUE_TAG = "settings:voice:silence-value"
 internal const val VOICE_AI_COSTS_ROW_TAG = "settings:voice:ai-costs-row"
+internal const val VOICE_PERSIST_FAILED_SWITCH_TAG = "settings:voice:persist-failed-switch"
 
 internal fun themeOptionTestTag(theme: ThemePreference): String =
     "settings:appearance:theme:" + theme.name.lowercase()

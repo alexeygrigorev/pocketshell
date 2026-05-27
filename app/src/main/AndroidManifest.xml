@@ -13,6 +13,18 @@
     <uses-permission android:name="android.permission.INTERNET" />
 
     <!--
+        Issue #180: the prompt composer needs to know whether the device is
+        online so it can skip the Whisper round-trip when there's no
+        network and queue the audio for retry-on-foreground-resume
+        instead of burning a 60s OkHttp call timeout. `ACCESS_NETWORK_STATE`
+        is the lowest-privilege way to query `ConnectivityManager` —
+        consistent with the project's no-background-work principle (D21),
+        we do NOT take `CHANGE_NETWORK_STATE` or any background-execution
+        permission, just the passive read.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!--
         Issue #15: the prompt composer captures microphone audio for the
         Whisper transcription round-trip. `RECORD_AUDIO` is declared at
         manifest level (system-level gating) and additionally requested at

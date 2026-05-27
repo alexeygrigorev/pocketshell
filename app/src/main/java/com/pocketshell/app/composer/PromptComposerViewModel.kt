@@ -8,8 +8,13 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
+import com.pocketshell.app.voice.ConnectivityObserver
+import com.pocketshell.app.voice.PendingTranscriptionItem
+import com.pocketshell.app.voice.PendingTranscriptionStore
+import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.core.voice.AndroidKeystoreApiKeyStorage
 import com.pocketshell.core.voice.AudioRecorderException
+import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
@@ -17,8 +22,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -74,6 +81,15 @@ public class PromptComposerViewModel @Inject constructor(
     internal val whisperClientFactory: WhisperClientFactory,
     internal val apiKeyStorage: ApiKeyVault,
     internal val voiceSettings: VoiceSettingsSnapshot,
+    // Issue #180: optional dependencies for the failed-transcription
+    // retry queue. Both default to no-op stubs so the rich library of
+    // existing unit + connected tests that construct the ViewModel
+    // directly (without Hilt) keep compiling without touching every
+    // call site. Production wiring in `VoiceModule` always provides the
+    // real implementations.
+    internal val pendingTranscriptionStore: PendingTranscriptionQueue =
+        DisabledPendingTranscriptionQueue,
+    internal val connectivity: ConnectivityProbe = AlwaysOnlineConnectivityProbe,
     private val savedStateHandle: SavedStateHandle = SavedStateHandle(),
 ) : ViewModel() {
 
@@ -121,6 +137,34 @@ public class PromptComposerViewModel @Inject constructor(
 
     private var recordingJob: Job? = null
     private var transcribeJob: Job? = null
+
+    /**
+     * Issue #180: live snapshot of the failed / offline-queued
+     * transcriptions. The composer sheet collects this to render the
+     * "Transcription failed — retry" banner + expandable list. Always
+     * an empty list when the underlying [PendingTranscriptionQueue] is
+     * the no-op stub (e.g. in unit tests that construct the ViewModel
+     * directly).
+     *
+     * The flow is exposed as a [StateFlow] so the UI can `collectAsState`
+     * without needing a default initial value at every call site. Cold
+     * sources upstream would force a recomposition wobble while the
+     * first emission lands; pinning to `WhileSubscribed(5_000L)` matches
+     * the rest of the codebase's reactive surfaces.
+     */
+    public val pendingItems: StateFlow<List<PendingTranscriptionItem>> =
+        pendingTranscriptionStore.items
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
+
+    init {
+        // Sweep orphans on construction so a crash between "audio file
+        // written" and "row inserted" never accumulates dead files in
+        // the voice-pending dir. Best-effort: a reconcile failure is
+        // logged at the store level and does not block the composer.
+        viewModelScope.launch {
+            runCatching { pendingTranscriptionStore.reconcile() }
+        }
+    }
 
     // Test seam: defaults to wall-clock System.currentTimeMillis at
     // production, but tests substitute a virtual clock so the 5s silence
@@ -331,6 +375,53 @@ public class PromptComposerViewModel @Inject constructor(
                 }
                 return@launch
             }
+
+            val queueEnabled = voiceSettings.persistFailedTranscriptions()
+
+            // Issue #180: persist the audio BEFORE the Whisper call so a
+            // mid-flight network drop / process kill cannot lose the
+            // recording. The store handles its own size cap + IO failure
+            // — returning null means we fall back to the legacy "fail
+            // fast, drop bytes" behaviour. The pending row carries a
+            // sentinel "Waiting for network" message when we know we are
+            // offline so the UI never has to guess.
+            val offline = !connectivity.refresh()
+            val pendingId: String? = if (queueEnabled) {
+                val initialError = if (offline) {
+                    PendingTranscriptionItem.NETWORK_WAITING_MESSAGE
+                } else {
+                    null
+                }
+                pendingTranscriptionStore.enqueueAudio(
+                    audio = audio,
+                    destinationContext = PendingTranscriptionEntity.DESTINATION_COMPOSER,
+                    initialError = initialError,
+                )?.id
+            } else {
+                null
+            }
+
+            // Recording + transcribe round-trip is complete: clear the
+            // saved "was recording" flag whichever way it lands so we do
+            // not falsely surface "recording interrupted" on the next
+            // recreate. Done before the actual network call so the
+            // saved blob is already coherent even if Whisper is slow.
+            savedStateHandle[KEY_WAS_RECORDING] = false
+
+            if (offline && pendingId != null) {
+                // Skip the Whisper call entirely — there is no network.
+                // The pending entry is already on disk; the user sees
+                // the banner and the FSM returns to Idle so they can
+                // keep typing while waiting for connectivity.
+                _uiState.update {
+                    it.copy(
+                        recording = RecordingState.Idle,
+                        error = PendingTranscriptionItem.NETWORK_WAITING_MESSAGE,
+                    )
+                }
+                return@launch
+            }
+
             // WhisperClient implementations are responsible for jumping
             // off the caller's dispatcher (OkHttpWhisperClient already
             // wraps the call in `withContext(Dispatchers.IO)`), so we
@@ -338,14 +429,15 @@ public class PromptComposerViewModel @Inject constructor(
             // virtual scheduler in charge — wrapping with a real
             // dispatcher would make `runTest`'s `advanceUntilIdle` hang.
             val result = client.transcribe(audio, voiceSettings.whisperLanguageHint())
-            // Recording + transcribe round-trip is complete: clear the
-            // saved "was recording" flag whichever way it lands so we do
-            // not falsely surface "recording interrupted" on the next
-            // recreate. Done before the state update so the saved blob is
-            // already coherent if the process is killed mid-update.
-            savedStateHandle[KEY_WAS_RECORDING] = false
             result.fold(
                 onSuccess = { text ->
+                    if (pendingId != null) {
+                        // Clean up the persisted audio + row now that
+                        // the transcript is in hand. Best-effort: a
+                        // delete failure here leaves an orphan file
+                        // that the next reconcile() will sweep up.
+                        runCatching { pendingTranscriptionStore.markSucceeded(pendingId) }
+                    }
                     _uiState.update {
                         val sep = if (it.draft.isEmpty() || it.draft.endsWith(" ")) "" else " "
                         val newDraft = it.draft + sep + text
@@ -361,19 +453,171 @@ public class PromptComposerViewModel @Inject constructor(
                     }
                 },
                 onFailure = { t ->
-                    val msg = when (t) {
-                        is WhisperException.Auth -> "API key was rejected. Check your OpenAI key in settings."
-                        is WhisperException.RateLimited -> "Rate limited by OpenAI. Try again in a moment."
-                        is WhisperException.Server -> "OpenAI server error. Try again."
-                        is WhisperException.Transport -> "Network error: ${t.message}"
-                        is WhisperException.Parse -> "Unexpected response from Whisper."
-                        else -> t.message ?: "Transcription failed"
+                    val msg = userFacingWhisperError(t)
+                    if (pendingId != null) {
+                        runCatching { pendingTranscriptionStore.markFailure(pendingId, msg) }
                     }
                     _uiState.update {
                         it.copy(recording = RecordingState.Idle, error = msg)
                     }
                 },
             )
+        }
+    }
+
+    /**
+     * Map a Whisper exception onto a user-facing string. Extracted out
+     * of [stopAndTranscribe] so the retry path can render the same
+     * messages without duplicating the `when` block.
+     */
+    private fun userFacingWhisperError(t: Throwable): String = when (t) {
+        is WhisperException.Auth -> "API key was rejected. Check your OpenAI key in settings."
+        is WhisperException.RateLimited -> "Rate limited by OpenAI. Try again in a moment."
+        is WhisperException.Server -> "OpenAI server error. Try again."
+        is WhisperException.Transport -> "Network error: ${t.message}"
+        is WhisperException.Parse -> "Unexpected response from Whisper."
+        else -> t.message ?: "Transcription failed"
+    }
+
+    /**
+     * Issue #180: re-send the persisted audio for [id] to Whisper.
+     *
+     * On success the transcript is appended to the current draft and
+     * the queue entry + audio file are deleted. On failure the entry's
+     * retry counter bumps and the latest error stamps onto the row;
+     * once the counter hits
+     * [PendingTranscriptionEntity.MAX_RETRY_ATTEMPTS] the UI hides the
+     * Retry button and surfaces Delete / Save-as-audio instead (the
+     * cap is enforced both here and in the UI gate).
+     *
+     * No-op when:
+     *  - The row is already gone (race against a parallel discard).
+     *  - The audio file is missing (orphaned row; reconcile sweeps it).
+     *  - The user has not stored a Whisper API key (the UI normally
+     *    prevents this state but the gate is defensive).
+     *  - The row has already hit the retry cap (defensive gate; the
+     *    UI hides the Retry button at the cap).
+     */
+    public fun retryPending(id: String) {
+        viewModelScope.launch {
+            val row = pendingTranscriptionStore.snapshot().firstOrNull { it.id == id }
+                ?: return@launch
+            if (row.atRetryCap) return@launch
+
+            val client = whisperClientFactory.create() ?: run {
+                _uiState.update {
+                    it.copy(error = "No OpenAI API key saved. Open settings to add one.")
+                }
+                return@launch
+            }
+            val audio = pendingTranscriptionStore.loadAudio(id) ?: run {
+                // Orphan row — clean it up and clear any stale banner.
+                runCatching { pendingTranscriptionStore.markSucceeded(id) }
+                return@launch
+            }
+
+            // Refuse to fire while offline — the user would just waste
+            // another retry slot on a guaranteed-to-fail upload. Surface
+            // the "waiting for network" hint as a no-op banner.
+            if (!connectivity.refresh()) {
+                _uiState.update {
+                    it.copy(error = PendingTranscriptionItem.NETWORK_WAITING_MESSAGE)
+                }
+                return@launch
+            }
+
+            _uiState.update { it.copy(error = null) }
+            val result = client.transcribe(audio, voiceSettings.whisperLanguageHint())
+            result.fold(
+                onSuccess = { text ->
+                    runCatching { pendingTranscriptionStore.markSucceeded(id) }
+                    _uiState.update {
+                        val sep = if (it.draft.isEmpty() || it.draft.endsWith(" ")) "" else " "
+                        val newDraft = it.draft + sep + text
+                        savedStateHandle[KEY_DRAFT] = newDraft
+                        it.copy(draft = newDraft, error = null)
+                    }
+                },
+                onFailure = { t ->
+                    val msg = userFacingWhisperError(t)
+                    runCatching { pendingTranscriptionStore.markFailure(id, msg) }
+                    _uiState.update { it.copy(error = msg) }
+                },
+            )
+        }
+    }
+
+    /**
+     * Issue #180: drop a queued transcription. Deletes the row + audio
+     * file. Idempotent.
+     */
+    public fun discardPending(id: String) {
+        viewModelScope.launch {
+            runCatching { pendingTranscriptionStore.discard(id) }
+        }
+    }
+
+    /**
+     * Issue #180: copy the persisted audio into the app's
+     * `voice-exports/` directory so the user can hand it to another
+     * transcription tool. Surfaced after the 3-retry cap is hit — at
+     * that point Whisper has consistently failed and saving the audio
+     * is the user's escape hatch.
+     *
+     * On success the queue entry is removed (the source file moves into
+     * exports) and the result path is exposed via [UiState.savedAudioPath]
+     * so the sheet can show a confirmation. On failure (missing row,
+     * IO error) the state is untouched.
+     */
+    public fun savePendingAsAudioFile(id: String) {
+        viewModelScope.launch {
+            val path = runCatching { pendingTranscriptionStore.saveAsAudioFile(id) }
+                .getOrNull()
+            if (path != null) {
+                _uiState.update { it.copy(savedAudioPath = path) }
+            }
+        }
+    }
+
+    /**
+     * Acknowledge the "saved to <path>" confirmation toast so it doesn't
+     * keep redrawing on every recomposition. The sheet calls this after
+     * surfacing the path to the user.
+     */
+    public fun clearSavedAudioConfirmation() {
+        _uiState.update { it.copy(savedAudioPath = null) }
+    }
+
+    /**
+     * Issue #180: foreground-resume auto-retry hook.
+     *
+     * Called by the composer sheet on a `Lifecycle.Event.ON_RESUME` (or
+     * sheet-open / connectivity-returns transition). When the device
+     * has network, every queued row that is BELOW the retry cap and was
+     * "waiting for network" (retryCount = 0, sentinel message) is
+     * re-attempted. Rows that already failed a Whisper round-trip
+     * (retryCount > 0) are NOT auto-retried — only manual retry; the
+     * user implicitly opted into the retry by tapping the button.
+     *
+     * D21 compliance: this method only runs while the composer is
+     * foreground (the sheet's `LifecycleEventObserver` is what calls
+     * it). There is no scheduler, no WorkManager, no Timer. If the
+     * user backgrounds the app, queued rows stay put and auto-retry
+     * runs the next time the sheet opens.
+     */
+    public fun onForegroundResume() {
+        viewModelScope.launch {
+            if (!connectivity.refresh()) return@launch
+            val snapshot = runCatching { pendingTranscriptionStore.snapshot() }
+                .getOrElse { return@launch }
+            // Only the "queued offline, never tried Whisper" rows are
+            // auto-retried. Rows with a prior Whisper failure require an
+            // explicit user tap so a permanently-failing audio buffer
+            // doesn't burn quota on every foreground.
+            val toRetry = snapshot.filter { it.isWaitingForNetwork }
+            for (item in toRetry) {
+                retryPending(item.id)
+            }
         }
     }
 
@@ -519,6 +763,12 @@ public class PromptComposerViewModel @Inject constructor(
      *   the FSM state.
      * @param error transient user-facing error message; `null` clears
      *   the banner. The screen clears this on the next interaction.
+     * @param savedAudioPath issue #180: when non-null, the absolute path
+     *   to a `voice-exports/` file the user just saved via the
+     *   Save-as-audio affordance. The sheet renders a one-shot
+     *   confirmation surfacing the path; tapping it (or any other
+     *   interaction) calls [clearSavedAudioConfirmation] to clear the
+     *   field.
      */
     public data class UiState(
         val draft: String = "",
@@ -526,6 +776,7 @@ public class PromptComposerViewModel @Inject constructor(
         val amplitude: Float = 0f,
         val hasDetectedSpeech: Boolean = false,
         val error: String? = null,
+        val savedAudioPath: String? = null,
     )
 
     /**
@@ -574,6 +825,75 @@ public class PromptComposerViewModel @Inject constructor(
          * [AppSettings.VOICE_LANGUAGE_AUTO] sentinel.
          */
         public fun whisperLanguageHint(): String?
+
+        /**
+         * Issue #180: whether failed Whisper transcriptions should be
+         * persisted to disk so the user can retry them. Default
+         * implementation returns `true` (the post-#180 behaviour) so
+         * older test fakes that don't override the method still see the
+         * documented default-on behaviour. Production wiring reads the
+         * [AppSettings.persistFailedTranscriptions] flag from the
+         * settings repository.
+         */
+        public fun persistFailedTranscriptions(): Boolean = true
+    }
+
+    /**
+     * Issue #180: thin seam around [PendingTranscriptionStore] so the
+     * ViewModel can be unit-tested without filesystem / DB plumbing.
+     * Production wiring binds onto the real store; tests substitute the
+     * [DisabledPendingTranscriptionQueue] no-op (which makes the queue
+     * invisible — the FSM behaves as it did pre-#180) or an in-memory
+     * fake that scripts items.
+     */
+    public interface PendingTranscriptionQueue {
+        /** Hot stream of queued items, newest first. Empty list when off. */
+        public val items: kotlinx.coroutines.flow.Flow<List<PendingTranscriptionItem>>
+
+        /** Persist audio + insert a row. Returns the new item, or null on cap / IO failure. */
+        public suspend fun enqueueAudio(
+            audio: ByteArray,
+            destinationContext: String,
+            initialError: String? = null,
+        ): PendingTranscriptionItem?
+
+        /** One-shot snapshot of the current rows. */
+        public suspend fun snapshot(): List<PendingTranscriptionItem>
+
+        /** Load the audio bytes for [id], or null if missing. */
+        public suspend fun loadAudio(id: String): ByteArray?
+
+        /** Delete row + audio file (success path). Idempotent. */
+        public suspend fun markSucceeded(id: String)
+
+        /** Bump retry count + stamp error message. Returns updated item, or null. */
+        public suspend fun markFailure(id: String, errorMessage: String): PendingTranscriptionItem?
+
+        /** Delete row + audio file (user-driven discard). Idempotent. */
+        public suspend fun discard(id: String)
+
+        /**
+         * Copy the audio out to the exports dir + delete the queue
+         * entry. Returns the exported file path on success.
+         */
+        public suspend fun saveAsAudioFile(id: String): String?
+
+        /** Sweep orphan files / rows. Best-effort. */
+        public suspend fun reconcile()
+    }
+
+    /**
+     * Issue #180: thin seam around [ConnectivityObserver] so the
+     * ViewModel can be unit-tested without
+     * [android.net.ConnectivityManager]. Production wiring binds onto
+     * the real observer; tests substitute the
+     * [AlwaysOnlineConnectivityProbe] (legacy behaviour: every
+     * recording fires Whisper) or a scriptable fake that flips between
+     * online and offline.
+     */
+    public interface ConnectivityProbe {
+        /** True if the device is online right now. Re-evaluates platform state. */
+        public fun refresh(): Boolean
     }
 
     /**
@@ -658,4 +978,42 @@ public class PromptComposerViewModel @Inject constructor(
         public const val RECORDING_INTERRUPTED_MESSAGE: String =
             "Recording was interrupted. Tap the mic to record again."
     }
+}
+
+/**
+ * Issue #180: no-op [PromptComposerViewModel.PendingTranscriptionQueue]
+ * implementation used when the ViewModel is constructed without the
+ * real store — exclusively by host-JVM unit tests and connected tests
+ * that pre-date the queue. The flow stays empty so the composer banner
+ * never appears; every suspend method short-circuits. Production wiring
+ * via Hilt never sees this object.
+ */
+public object DisabledPendingTranscriptionQueue : PromptComposerViewModel.PendingTranscriptionQueue {
+    override val items: kotlinx.coroutines.flow.Flow<List<PendingTranscriptionItem>> =
+        kotlinx.coroutines.flow.flowOf(emptyList())
+
+    override suspend fun enqueueAudio(
+        audio: ByteArray,
+        destinationContext: String,
+        initialError: String?,
+    ): PendingTranscriptionItem? = null
+
+    override suspend fun snapshot(): List<PendingTranscriptionItem> = emptyList()
+    override suspend fun loadAudio(id: String): ByteArray? = null
+    override suspend fun markSucceeded(id: String) = Unit
+    override suspend fun markFailure(id: String, errorMessage: String): PendingTranscriptionItem? = null
+    override suspend fun discard(id: String) = Unit
+    override suspend fun saveAsAudioFile(id: String): String? = null
+    override suspend fun reconcile() = Unit
+}
+
+/**
+ * Issue #180: always-online stub for
+ * [PromptComposerViewModel.ConnectivityProbe]. Used by older tests that
+ * predate #180 — every recording is treated as "device has network",
+ * which matches the pre-#180 codepath (always try Whisper). Production
+ * wiring always provides the real [ConnectivityObserver].
+ */
+public object AlwaysOnlineConnectivityProbe : PromptComposerViewModel.ConnectivityProbe {
+    override fun refresh(): Boolean = true
 }

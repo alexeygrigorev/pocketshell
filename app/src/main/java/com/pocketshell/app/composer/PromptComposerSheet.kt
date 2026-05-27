@@ -57,7 +57,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.pocketshell.app.snippets.SnippetPickerSheet
+import com.pocketshell.app.voice.PendingTranscriptionItem
+import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -116,6 +121,7 @@ public fun PromptComposerSheet(
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
 ) {
     val state by viewModel.uiState.collectAsState()
+    val pendingItems by viewModel.pendingItems.collectAsState()
     val context = LocalContext.current
 
     var showApiKeyDialog by remember { mutableStateOf(false) }
@@ -124,6 +130,35 @@ public fun PromptComposerSheet(
     // host (Phase 0 / proof-of-life entry point) — in that case the
     // Snippets button stays inert.
     var showSnippetPicker by remember { mutableStateOf(false) }
+    // Issue #180: whether the user has tapped the queue summary to
+    // expand the per-item list. Default collapsed so the banner stays
+    // compact when multiple items are queued.
+    var pendingListExpanded by remember { mutableStateOf(false) }
+
+    // Issue #180: foreground-resume auto-retry. The composer is the
+    // only surface that owns this queue today; observing the sheet's
+    // lifecycle (rather than the activity's) means a sheet that is
+    // currently visible re-attempts queued items on every `ON_RESUME`
+    // and on first display. D21 compliance: there is no background
+    // work — the observer is registered while the sheet is in
+    // composition and removed when it leaves.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.onForegroundResume()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        // Fire once on enter so a sheet that opens with the lifecycle
+        // already in RESUMED gets the same auto-retry.
+        if (lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)) {
+            viewModel.onForegroundResume()
+        }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
@@ -189,6 +224,13 @@ public fun PromptComposerSheet(
             onSnippets = if (hostId != null) {
                 { showSnippetPicker = true }
             } else null,
+            pendingItems = pendingItems,
+            pendingListExpanded = pendingListExpanded,
+            onTogglePendingList = { pendingListExpanded = !pendingListExpanded },
+            onRetryPending = viewModel::retryPending,
+            onDiscardPending = viewModel::discardPending,
+            onSavePendingAsAudio = viewModel::savePendingAsAudioFile,
+            onAcknowledgeSavedAudio = viewModel::clearSavedAudioConfirmation,
         )
     }
 
@@ -268,6 +310,16 @@ internal fun SheetContent(
     // no-op so existing previews and the legacy connected tests that
     // bypass the ViewModel keep compiling.
     onCancelRecording: () -> Unit = {},
+    // Issue #180: queued failed / offline transcriptions. Defaults to
+    // an empty list so older previews + tests that pre-date the queue
+    // render the same composer shape they always did.
+    pendingItems: List<PendingTranscriptionItem> = emptyList(),
+    pendingListExpanded: Boolean = false,
+    onTogglePendingList: () -> Unit = {},
+    onRetryPending: (String) -> Unit = {},
+    onDiscardPending: (String) -> Unit = {},
+    onSavePendingAsAudio: (String) -> Unit = {},
+    onAcknowledgeSavedAudio: () -> Unit = {},
 ) {
     val isTranscribing = state.recording == PromptComposerViewModel.RecordingState.Transcribing
 
@@ -394,6 +446,52 @@ internal fun SheetContent(
             ) {
                 Text(text = msg, color = PocketShellColors.Accent, fontSize = 12.sp)
             }
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        // Issue #180: "saved to <path>" confirmation. One-shot — the
+        // user taps it (or anything else) and the ViewModel clears the
+        // field. Lives between the error banner and the queue banner
+        // so the user sees the confirmation right next to the "save
+        // as audio" affordance that produced it.
+        state.savedAudioPath?.let { path ->
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onAcknowledgeSavedAudio)
+                    .background(
+                        color = PocketShellColors.SurfaceElev,
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = PocketShellColors.BorderSoft,
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .testTag(COMPOSER_PENDING_SAVED_BANNER_TAG),
+            ) {
+                Text(
+                    text = "Audio saved to $path",
+                    color = PocketShellColors.Text,
+                    fontSize = 12.sp,
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        // Issue #180: pending-transcription banner + expandable list.
+        // Renders only when at least one row is queued; sits above the
+        // mic row so the user notices it before re-recording.
+        if (pendingItems.isNotEmpty()) {
+            PendingTranscriptionsBanner(
+                items = pendingItems,
+                expanded = pendingListExpanded,
+                onToggle = onTogglePendingList,
+                onRetry = onRetryPending,
+                onDiscard = onDiscardPending,
+                onSaveAsAudio = onSavePendingAsAudio,
+            )
             Spacer(modifier = Modifier.height(8.dp))
         }
 
@@ -587,6 +685,267 @@ internal fun barEnvelopeHeightDp(index: Int): Float {
     // 1 - centred^2 -> 1 at centre, 0 at edges.
     val envelope = 1f - centred * centred
     return 6f + envelope * 22f // [6dp .. 28dp]
+}
+
+/**
+ * Issue #180: banner + expandable list rendered above the mic row when
+ * the failed/offline-queued transcription list is non-empty.
+ *
+ * Two visual states:
+ *  - **Collapsed (default):** a single row showing "N pending
+ *    transcription(s)" with a chevron. Tapping anywhere on the row
+ *    toggles to the expanded state. The row also surfaces the first
+ *    queued row's status ("Waiting for network" vs the Whisper error
+ *    text) so the user can decide whether to expand before tapping.
+ *  - **Expanded:** the collapsed row plus a vertical list of per-item
+ *    rows. Each per-item row has:
+ *      - The relative timestamp ("X minutes ago")
+ *      - The status / error message
+ *      - Retry / Discard buttons when below the retry cap
+ *      - Save-as-audio / Discard buttons when at the cap
+ *
+ * The whole banner is wrapped in a single tap target for the
+ * collapsed/expand toggle, and individual buttons stop propagation by
+ * using `clickable(...)` directly on themselves.
+ */
+@Composable
+private fun PendingTranscriptionsBanner(
+    items: List<PendingTranscriptionItem>,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onRetry: (String) -> Unit,
+    onDiscard: (String) -> Unit,
+    onSaveAsAudio: (String) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                color = PocketShellColors.AccentSoft,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.Accent.copy(alpha = 0.4f),
+                shape = RoundedCornerShape(8.dp),
+            )
+            .testTag(COMPOSER_PENDING_BANNER_TAG),
+    ) {
+        // Summary row — always rendered, always tappable.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onToggle)
+                .padding(horizontal = 12.dp, vertical = 10.dp)
+                .testTag(COMPOSER_PENDING_TOGGLE_TAG),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = pendingSummaryHeadline(items),
+                    color = PocketShellColors.Accent,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                val subline = pendingSummarySubline(items)
+                if (subline.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = subline,
+                        color = PocketShellColors.Accent.copy(alpha = 0.85f),
+                        fontSize = 11.sp,
+                    )
+                }
+            }
+            Text(
+                text = if (expanded) "v" else ">",
+                color = PocketShellColors.Accent,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+
+        if (expanded) {
+            // 1dp top divider so the per-item list reads as a sub-section
+            // rather than running into the summary row.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+                    .height(1.dp)
+                    .background(PocketShellColors.Accent.copy(alpha = 0.25f)),
+            )
+            items.forEach { item ->
+                PendingTranscriptionRow(
+                    item = item,
+                    onRetry = { onRetry(item.id) },
+                    onDiscard = { onDiscard(item.id) },
+                    onSaveAsAudio = { onSaveAsAudio(item.id) },
+                )
+            }
+        }
+    }
+}
+
+/**
+ * Issue #180: per-item row inside the expanded queue banner.
+ */
+@Composable
+private fun PendingTranscriptionRow(
+    item: PendingTranscriptionItem,
+    onRetry: () -> Unit,
+    onDiscard: () -> Unit,
+    onSaveAsAudio: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .testTag(composerPendingItemRowTestTag(item.id)),
+    ) {
+        Text(
+            text = formatRelativeTimestamp(item.recordingTimestampMs, System.currentTimeMillis()),
+            color = PocketShellColors.Accent,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        val statusText = when {
+            item.isWaitingForNetwork -> PendingTranscriptionItem.NETWORK_WAITING_MESSAGE
+            item.lastErrorMessage != null -> item.lastErrorMessage
+            else -> "Queued — tap retry to send"
+        }
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = statusText,
+            color = PocketShellColors.Accent.copy(alpha = 0.85f),
+            fontSize = 11.sp,
+        )
+        if (item.retryCount > 0 && !item.atRetryCap) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Attempt ${item.retryCount + 1} of " +
+                    "${PendingTranscriptionEntity.MAX_RETRY_ATTEMPTS}",
+                color = PocketShellColors.Accent.copy(alpha = 0.7f),
+                fontSize = 11.sp,
+            )
+        }
+        Spacer(modifier = Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (!item.atRetryCap) {
+                PendingActionButton(
+                    label = "Retry",
+                    primary = true,
+                    onClick = onRetry,
+                    modifier = Modifier.testTag(composerPendingRetryTestTag(item.id)),
+                )
+                PendingActionButton(
+                    label = "Discard",
+                    primary = false,
+                    onClick = onDiscard,
+                    modifier = Modifier.testTag(composerPendingDiscardTestTag(item.id)),
+                )
+            } else {
+                // 3-retry cap hit — Whisper has repeatedly failed for
+                // this audio. Offer Save (so the user can hand it to a
+                // different transcription tool) or Discard.
+                PendingActionButton(
+                    label = "Save audio",
+                    primary = true,
+                    onClick = onSaveAsAudio,
+                    modifier = Modifier.testTag(composerPendingSaveTestTag(item.id)),
+                )
+                PendingActionButton(
+                    label = "Discard",
+                    primary = false,
+                    onClick = onDiscard,
+                    modifier = Modifier.testTag(composerPendingDiscardTestTag(item.id)),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PendingActionButton(
+    label: String,
+    primary: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
+            .background(
+                color = if (primary) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(6.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = if (primary) PocketShellColors.Accent else PocketShellColors.Border,
+                shape = RoundedCornerShape(6.dp),
+            )
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+    ) {
+        Text(
+            text = label,
+            color = if (primary) PocketShellColors.OnAccent else PocketShellColors.Text,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+/**
+ * Issue #180 helper: headline string for the collapsed queue banner.
+ * Singular vs plural reads naturally; exposed `internal` so the unit
+ * tests can assert against the exact copy without re-implementing the
+ * pluralisation logic.
+ */
+internal fun pendingSummaryHeadline(items: List<PendingTranscriptionItem>): String = when (items.size) {
+    0 -> ""
+    1 -> "1 pending transcription"
+    else -> "${items.size} pending transcriptions"
+}
+
+/**
+ * Issue #180 helper: secondary line summarising the most recent item's
+ * status. Avoids cramming a multi-line description into the collapsed
+ * row.
+ */
+internal fun pendingSummarySubline(items: List<PendingTranscriptionItem>): String {
+    val first = items.firstOrNull() ?: return ""
+    return when {
+        first.isWaitingForNetwork -> "Waiting for network — tap to view"
+        first.atRetryCap -> "Tap to save or discard"
+        first.lastErrorMessage != null -> "Tap to retry"
+        else -> "Tap to retry"
+    }
+}
+
+/**
+ * Issue #180 helper: humanise an epoch-millis timestamp into "Just now"
+ * / "X seconds/minutes/hours ago" relative to [nowMs]. Exposed `internal`
+ * so unit tests can verify the breakpoints without standing up the
+ * whole banner.
+ */
+internal fun formatRelativeTimestamp(timestampMs: Long, nowMs: Long): String {
+    val delta = (nowMs - timestampMs).coerceAtLeast(0L)
+    return when {
+        delta < 30_000L -> "Just now"
+        delta < 60_000L -> "${delta / 1_000L} seconds ago"
+        delta < 60L * 60_000L -> {
+            val minutes = delta / 60_000L
+            if (minutes == 1L) "1 minute ago" else "$minutes minutes ago"
+        }
+        delta < 24L * 60L * 60_000L -> {
+            val hours = delta / (60L * 60_000L)
+            if (hours == 1L) "1 hour ago" else "$hours hours ago"
+        }
+        else -> {
+            val days = delta / (24L * 60L * 60_000L)
+            if (days == 1L) "1 day ago" else "$days days ago"
+        }
+    }
 }
 
 /**
@@ -805,6 +1164,28 @@ internal const val COMPOSER_WAVEFORM_TAG = "prompt-composer-waveform"
  * FSM transitions back to `Idle` without a Whisper call.
  */
 internal const val COMPOSER_CANCEL_RECORDING_TAG = "prompt-composer-cancel-recording"
+
+/**
+ * Issue #180: test tags for the failed-transcription queue surface.
+ * Connected tests assert that the banner appears when the queue is
+ * non-empty and that the retry / discard / save affordances dispatch
+ * into the ViewModel.
+ */
+internal const val COMPOSER_PENDING_BANNER_TAG = "prompt-composer-pending-banner"
+internal const val COMPOSER_PENDING_TOGGLE_TAG = "prompt-composer-pending-toggle"
+internal const val COMPOSER_PENDING_SAVED_BANNER_TAG = "prompt-composer-pending-saved"
+
+internal fun composerPendingItemRowTestTag(id: String): String =
+    "prompt-composer-pending-row:$id"
+
+internal fun composerPendingRetryTestTag(id: String): String =
+    "prompt-composer-pending-retry:$id"
+
+internal fun composerPendingDiscardTestTag(id: String): String =
+    "prompt-composer-pending-discard:$id"
+
+internal fun composerPendingSaveTestTag(id: String): String =
+    "prompt-composer-pending-save:$id"
 
 // -- Previews -----------------------------------------------------------------
 

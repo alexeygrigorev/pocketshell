@@ -16,6 +16,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -806,6 +807,393 @@ class PromptComposerViewModelTest {
             vm.cancelRecording()
             advanceUntilIdle()
         }
+    }
+
+    // -- Issue #180: failed-transcription retry queue -----------------------
+
+    /**
+     * Hand-rolled in-memory [PromptComposerViewModel.PendingTranscriptionQueue].
+     * Counts every method call so the FSM tests can assert that the
+     * persist-before-Whisper invariant holds and that the success /
+     * failure paths route through the store as documented.
+     */
+    private class FakePendingQueue(
+        private val initialAudioMap: MutableMap<String, ByteArray> = mutableMapOf(),
+    ) : PromptComposerViewModel.PendingTranscriptionQueue {
+        private val flow = kotlinx.coroutines.flow.MutableStateFlow<List<com.pocketshell.app.voice.PendingTranscriptionItem>>(emptyList())
+        override val items: kotlinx.coroutines.flow.Flow<List<com.pocketshell.app.voice.PendingTranscriptionItem>> = flow
+
+        var enqueueCount = 0
+            private set
+        var succeededIds: MutableList<String> = mutableListOf()
+        var failureIds: MutableList<Pair<String, String>> = mutableListOf()
+        var discardedIds: MutableList<String> = mutableListOf()
+        var savedIds: MutableList<String> = mutableListOf()
+        var reconcileCount = 0
+            private set
+        var nextId: String = "pending-1"
+
+        override suspend fun enqueueAudio(
+            audio: ByteArray,
+            destinationContext: String,
+            initialError: String?,
+        ): com.pocketshell.app.voice.PendingTranscriptionItem? {
+            enqueueCount++
+            val id = nextId
+            initialAudioMap[id] = audio
+            val item = com.pocketshell.app.voice.PendingTranscriptionItem(
+                id = id,
+                recordingTimestampMs = 0,
+                destinationContext = destinationContext,
+                retryCount = 0,
+                lastErrorMessage = initialError,
+                audioByteSize = audio.size.toLong(),
+            )
+            flow.value = listOf(item) + flow.value
+            return item
+        }
+
+        override suspend fun snapshot(): List<com.pocketshell.app.voice.PendingTranscriptionItem> =
+            flow.value
+
+        override suspend fun loadAudio(id: String): ByteArray? = initialAudioMap[id]
+
+        override suspend fun markSucceeded(id: String) {
+            succeededIds += id
+            initialAudioMap.remove(id)
+            flow.value = flow.value.filterNot { it.id == id }
+        }
+
+        override suspend fun markFailure(
+            id: String,
+            errorMessage: String,
+        ): com.pocketshell.app.voice.PendingTranscriptionItem? {
+            failureIds += id to errorMessage
+            val existing = flow.value.firstOrNull { it.id == id } ?: return null
+            val updated = existing.copy(
+                retryCount = existing.retryCount + 1,
+                lastErrorMessage = errorMessage,
+            )
+            flow.value = flow.value.map { if (it.id == id) updated else it }
+            return updated
+        }
+
+        override suspend fun discard(id: String) {
+            discardedIds += id
+            initialAudioMap.remove(id)
+            flow.value = flow.value.filterNot { it.id == id }
+        }
+
+        override suspend fun saveAsAudioFile(id: String): String? {
+            savedIds += id
+            initialAudioMap.remove(id)
+            flow.value = flow.value.filterNot { it.id == id }
+            return "/data/files/voice-exports/$id.wav"
+        }
+
+        override suspend fun reconcile() {
+            reconcileCount++
+        }
+    }
+
+    /**
+     * Scriptable [PromptComposerViewModel.ConnectivityProbe]. The default
+     * mirrors the legacy "always online" behaviour; tests flip the value
+     * to exercise the offline-queue path.
+     */
+    private class FakeConnectivity(initial: Boolean = true) : PromptComposerViewModel.ConnectivityProbe {
+        var online: Boolean = initial
+        override fun refresh(): Boolean = online
+    }
+
+    private fun newVmWithQueue(
+        mic: PromptComposerViewModel.MicCapture = FakeMicCapture(),
+        whisper: WhisperClient? = fakeWhisperClient { Result.success("hello world") },
+        storage: ApiKeyVault = newStorage().also { it.save("sk-test".toCharArray()) },
+        samplerDispatcher: TestDispatcher? = null,
+        clock: () -> Long = { System.currentTimeMillis() },
+        voiceSettings: PromptComposerViewModel.VoiceSettingsSnapshot = FakeVoiceSettings(),
+        queue: FakePendingQueue = FakePendingQueue(),
+        connectivity: FakeConnectivity = FakeConnectivity(initial = true),
+    ): Pair<PromptComposerViewModel, FakePendingQueue> {
+        val factory = WhisperClientFactory { whisper }
+        val vm = PromptComposerViewModel(
+            audioRecorder = mic,
+            whisperClientFactory = factory,
+            apiKeyStorage = storage,
+            voiceSettings = voiceSettings,
+            pendingTranscriptionStore = queue,
+            connectivity = connectivity,
+        )
+        if (samplerDispatcher != null) vm.samplerDispatcher = samplerDispatcher
+        vm.clock = clock
+        return vm to queue
+    }
+
+    @Test
+    fun audioIsPersistedBeforeWhisperCall() = runTest {
+        val (vm, queue) = newVmWithQueue(
+            whisper = fakeWhisperClient { Result.success("hello") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        // Persisted exactly once before the Whisper round-trip.
+        assertEquals(1, queue.enqueueCount)
+        // Whisper success deleted the row.
+        assertEquals(listOf("pending-1"), queue.succeededIds)
+        // Draft has the transcript.
+        assertEquals("hello", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun whisperFailureKeepsAudioOnDiskAndBumpsRetryCount() = runTest {
+        val (vm, queue) = newVmWithQueue(
+            whisper = fakeWhisperClient {
+                Result.failure(WhisperException.Transport("offline"))
+            },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(1, queue.enqueueCount)
+        assertEquals(0, queue.succeededIds.size)
+        assertEquals(1, queue.failureIds.size)
+        assertEquals("pending-1", queue.failureIds[0].first)
+        // Error banner mirrors the failure reason.
+        assertNotNull(vm.uiState.value.error)
+    }
+
+    @Test
+    fun offlineSkipsWhisperAndQueuesDirectly() = runTest {
+        var whisperCalls = 0
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                whisperCalls++
+                return Result.success("never")
+            }
+        }
+        val (vm, queue) = newVmWithQueue(
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            connectivity = FakeConnectivity(initial = false),
+        )
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(1, queue.enqueueCount)
+        assertEquals(0, whisperCalls)
+        // Banner reads "waiting for network".
+        assertEquals(
+            com.pocketshell.app.voice.PendingTranscriptionItem.NETWORK_WAITING_MESSAGE,
+            vm.uiState.value.error,
+        )
+    }
+
+    @Test
+    fun queueDisabledByVoiceSettingsSkipsPersistence() = runTest {
+        val settings = object : PromptComposerViewModel.VoiceSettingsSnapshot {
+            override fun silenceWindowMs(): Long = PromptComposerViewModel.SILENCE_WINDOW_MS
+            override fun whisperLanguageHint(): String? = null
+            override fun persistFailedTranscriptions(): Boolean = false
+        }
+        val (vm, queue) = newVmWithQueue(
+            whisper = fakeWhisperClient { Result.failure(WhisperException.Transport("offline")) },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            voiceSettings = settings,
+        )
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals("queue must not be used when the toggle is off", 0, queue.enqueueCount)
+    }
+
+    @Test
+    fun retryPendingSuccessAppendsToDraftAndClearsQueue() = runTest {
+        // Seed a queued item without going through the recording path.
+        val queue = FakePendingQueue()
+        queue.nextId = "retryable"
+        queue.enqueueAudio(ByteArray(8) { 1 }, "composer")
+        // Bump it once to simulate a prior failure (so the retry path is
+        // hit, not the initial-attempt path).
+        queue.markFailure("retryable", "Whisper auth failed")
+
+        val (vm, _) = newVmWithQueue(
+            whisper = fakeWhisperClient { Result.success("retry transcript") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            queue = queue,
+        )
+        vm.retryPending("retryable")
+        advanceUntilIdle()
+
+        assertEquals("retry transcript", vm.uiState.value.draft)
+        assertTrue(queue.succeededIds.contains("retryable"))
+    }
+
+    @Test
+    fun retryPendingFailureBumpsRetryCountAndSurfacesError() = runTest {
+        val queue = FakePendingQueue()
+        queue.nextId = "retryable"
+        queue.enqueueAudio(ByteArray(8) { 1 }, "composer")
+
+        val (vm, _) = newVmWithQueue(
+            whisper = fakeWhisperClient { Result.failure(WhisperException.Server("oops", 500)) },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            queue = queue,
+        )
+        vm.retryPending("retryable")
+        advanceUntilIdle()
+
+        assertEquals(1, queue.failureIds.size)
+        assertEquals("retryable", queue.failureIds[0].first)
+        assertNotNull(vm.uiState.value.error)
+    }
+
+    @Test
+    fun retryPendingAtCapShortCircuits() = runTest {
+        val queue = FakePendingQueue()
+        queue.nextId = "capped"
+        queue.enqueueAudio(ByteArray(8) { 1 }, "composer")
+        // Bump to the cap.
+        queue.markFailure("capped", "1")
+        queue.markFailure("capped", "2")
+        queue.markFailure("capped", "3")
+
+        val (vm, _) = newVmWithQueue(
+            whisper = fakeWhisperClient { Result.success("never") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            queue = queue,
+        )
+        val priorFailures = queue.failureIds.size
+        val priorSuccesses = queue.succeededIds.size
+        vm.retryPending("capped")
+        advanceUntilIdle()
+        // Should not have called Whisper, so neither counter moved.
+        assertEquals(priorFailures, queue.failureIds.size)
+        assertEquals(priorSuccesses, queue.succeededIds.size)
+    }
+
+    @Test
+    fun retryPendingWhileOfflineSkipsWhisperAndNudgesUser() = runTest {
+        val queue = FakePendingQueue()
+        queue.nextId = "offline-retry"
+        queue.enqueueAudio(ByteArray(8) { 1 }, "composer")
+
+        var whisperCalls = 0
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                whisperCalls++
+                return Result.success("never")
+            }
+        }
+        val (vm, _) = newVmWithQueue(
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            queue = queue,
+            connectivity = FakeConnectivity(initial = false),
+        )
+        vm.retryPending("offline-retry")
+        advanceUntilIdle()
+
+        assertEquals(0, whisperCalls)
+        assertEquals(
+            com.pocketshell.app.voice.PendingTranscriptionItem.NETWORK_WAITING_MESSAGE,
+            vm.uiState.value.error,
+        )
+    }
+
+    @Test
+    fun discardPendingClearsQueueEntry() = runTest {
+        val queue = FakePendingQueue()
+        queue.nextId = "to-discard"
+        queue.enqueueAudio(ByteArray(8) { 1 }, "composer")
+        val (vm, _) = newVmWithQueue(queue = queue)
+        vm.discardPending("to-discard")
+        advanceUntilIdle()
+        assertTrue(queue.discardedIds.contains("to-discard"))
+    }
+
+    @Test
+    fun savePendingAsAudioFileExportsAndSurfacesPath() = runTest {
+        val queue = FakePendingQueue()
+        queue.nextId = "to-save"
+        queue.enqueueAudio(ByteArray(8) { 1 }, "composer")
+        val (vm, _) = newVmWithQueue(queue = queue)
+        vm.savePendingAsAudioFile("to-save")
+        advanceUntilIdle()
+        assertTrue(queue.savedIds.contains("to-save"))
+        assertEquals(
+            "/data/files/voice-exports/to-save.wav",
+            vm.uiState.value.savedAudioPath,
+        )
+        vm.clearSavedAudioConfirmation()
+        assertNull(vm.uiState.value.savedAudioPath)
+    }
+
+    @Test
+    fun foregroundResumeAutoRetriesOnlyWaitingForNetworkItems() = runTest {
+        val queue = FakePendingQueue()
+        // Two queued rows: one waiting for network (auto-retry candidate),
+        // one already failed (manual-only).
+        queue.nextId = "offline-one"
+        queue.enqueueAudio(
+            ByteArray(8),
+            "composer",
+            initialError = com.pocketshell.app.voice.PendingTranscriptionItem.NETWORK_WAITING_MESSAGE,
+        )
+        queue.nextId = "failed-one"
+        queue.enqueueAudio(ByteArray(8), "composer")
+        queue.markFailure("failed-one", "Whisper auth failed")
+
+        val (vm, _) = newVmWithQueue(
+            whisper = fakeWhisperClient { Result.success("auto-retry success") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            queue = queue,
+        )
+        vm.onForegroundResume()
+        advanceUntilIdle()
+
+        // Only the offline row was retried successfully.
+        assertTrue(queue.succeededIds.contains("offline-one"))
+        assertFalse(queue.succeededIds.contains("failed-one"))
+    }
+
+    @Test
+    fun foregroundResumeNoOpWhenOffline() = runTest {
+        val queue = FakePendingQueue()
+        queue.nextId = "offline-row"
+        queue.enqueueAudio(
+            ByteArray(8),
+            "composer",
+            initialError = com.pocketshell.app.voice.PendingTranscriptionItem.NETWORK_WAITING_MESSAGE,
+        )
+
+        var whisperCalls = 0
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                whisperCalls++
+                return Result.success("never")
+            }
+        }
+        val (vm, _) = newVmWithQueue(
+            whisper = whisper,
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            queue = queue,
+            connectivity = FakeConnectivity(initial = false),
+        )
+        vm.onForegroundResume()
+        advanceUntilIdle()
+        assertEquals("must not burn quota while offline", 0, whisperCalls)
     }
 
     @Test

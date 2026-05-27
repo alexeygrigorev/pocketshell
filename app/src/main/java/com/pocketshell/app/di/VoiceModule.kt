@@ -6,6 +6,9 @@ import androidx.annotation.RequiresPermission
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
+import com.pocketshell.app.voice.ConnectivityObserver
+import com.pocketshell.app.voice.PendingTranscriptionItem
+import com.pocketshell.app.voice.PendingTranscriptionStore
 import com.pocketshell.core.storage.dao.AiApiCallLogDao
 import com.pocketshell.core.storage.entity.AiApiCallEntry
 import com.pocketshell.core.voice.AiCostRecord
@@ -139,6 +142,34 @@ object VoiceModule {
         reloadWhisperClient(storage, priceCatalogue, costRecorder)
     }
 
+    /**
+     * Issue #180: bind the [PromptComposerViewModel.PendingTranscriptionQueue]
+     * seam onto the real [PendingTranscriptionStore]. Same delegation
+     * shape as [provideMicCapture] / [provideApiKeyVault] — a thin
+     * adapter so the ViewModel stays free of `PendingTranscriptionStore`'s
+     * Room + filesystem dependencies at unit-test time.
+     */
+    @Provides
+    @Singleton
+    fun providePendingTranscriptionQueue(
+        store: PendingTranscriptionStore,
+    ): PromptComposerViewModel.PendingTranscriptionQueue =
+        PendingTranscriptionStoreAdapter(store)
+
+    /**
+     * Issue #180: bind [PromptComposerViewModel.ConnectivityProbe] onto
+     * the real [ConnectivityObserver]. The observer registers a long-
+     * lived `ConnectivityManager.NetworkCallback` at construction time
+     * (D21-compliant: the callback fires while the process is alive,
+     * nothing keeps the JVM pinned), so we keep the binding as a
+     * singleton.
+     */
+    @Provides
+    @Singleton
+    fun provideConnectivityProbe(
+        observer: ConnectivityObserver,
+    ): PromptComposerViewModel.ConnectivityProbe = ConnectivityObserverProbe(observer)
+
     @Provides
     fun provideCommandPlannerClientFactory(
         storage: AndroidKeystoreApiKeyStorage,
@@ -197,6 +228,9 @@ internal class SettingsRepositoryVoiceSnapshot(
         val code = repository.settings.value.voiceLanguage
         return if (code == AppSettings.VOICE_LANGUAGE_AUTO || code.isBlank()) null else code
     }
+
+    override fun persistFailedTranscriptions(): Boolean =
+        repository.settings.value.persistFailedTranscriptions
 }
 
 /**
@@ -257,6 +291,49 @@ internal class AiApiCallLogCostRecorder(
             )
         }
     }
+}
+
+/**
+ * Issue #180: bridge [PendingTranscriptionStore] (the real DB + filesystem
+ * store) onto the [PromptComposerViewModel.PendingTranscriptionQueue]
+ * seam. Production wiring always uses this adapter; unit tests stay on
+ * the [com.pocketshell.app.composer.DisabledPendingTranscriptionQueue]
+ * no-op or a hand-built in-memory fake.
+ */
+internal class PendingTranscriptionStoreAdapter(
+    private val store: PendingTranscriptionStore,
+) : PromptComposerViewModel.PendingTranscriptionQueue {
+    override val items = store.items
+    override suspend fun enqueueAudio(
+        audio: ByteArray,
+        destinationContext: String,
+        initialError: String?,
+    ): PendingTranscriptionItem? = store.enqueueAudio(
+        audio = audio,
+        destinationContext = destinationContext,
+        initialError = initialError,
+    )
+
+    override suspend fun snapshot(): List<PendingTranscriptionItem> = store.snapshot()
+    override suspend fun loadAudio(id: String): ByteArray? = store.loadAudio(id)
+    override suspend fun markSucceeded(id: String) = store.markSucceeded(id)
+    override suspend fun markFailure(id: String, errorMessage: String): PendingTranscriptionItem? =
+        store.markFailure(id, errorMessage)
+    override suspend fun discard(id: String) = store.discard(id)
+    override suspend fun saveAsAudioFile(id: String): String? = store.saveAsAudioFile(id)
+    override suspend fun reconcile() = store.reconcile()
+}
+
+/**
+ * Issue #180: bridge [ConnectivityObserver] onto the
+ * [PromptComposerViewModel.ConnectivityProbe] seam. The observer keeps
+ * its own callback registration alive for the singleton lifetime; this
+ * adapter is purely a method-shape transform.
+ */
+internal class ConnectivityObserverProbe(
+    private val observer: ConnectivityObserver,
+) : PromptComposerViewModel.ConnectivityProbe {
+    override fun refresh(): Boolean = observer.refresh()
 }
 
 private fun reloadCommandPlannerClient(storage: AndroidKeystoreApiKeyStorage): CommandPlannerClient? {

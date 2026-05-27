@@ -104,6 +104,15 @@ class SettingsViewModel @Inject constructor(
     fun setShowSystemNotes(enabled: Boolean) = repository.setShowSystemNotes(enabled)
 
     /**
+     * Toggle [AppSettings.persistFailedTranscriptions] — issue #180.
+     * When off, a Whisper failure drops the audio buffer (the
+     * pre-#180 behaviour). When on (default), the audio is persisted
+     * so the user can retry.
+     */
+    fun setPersistFailedTranscriptions(enabled: Boolean) =
+        repository.setPersistFailedTranscriptions(enabled)
+
+    /**
      * Persist [key] through the keystore-backed vault. The caller still
      * owns the [CharArray] and is responsible for zeroing it after this
      * call returns (matches the contract in

@@ -61,6 +61,14 @@ data class AppSettings(
     val voiceLanguage: String = VOICE_LANGUAGE_AUTO,
     val voiceSilenceThresholdSeconds: Float = DEFAULT_VOICE_SILENCE_SECONDS,
     val showSystemNotes: Boolean = DEFAULT_SHOW_SYSTEM_NOTES,
+    /**
+     * Whether failed Whisper transcriptions are persisted to disk so the
+     * audio can be retried. Issue #180. Default `true` so users get the
+     * data-loss protection by default; the privacy-conscious can opt out
+     * via Settings → Voice. When `false`, a Whisper failure clears the
+     * audio buffer the same way pre-#180 builds did.
+     */
+    val persistFailedTranscriptions: Boolean = DEFAULT_PERSIST_FAILED_TRANSCRIPTIONS,
 ) {
     companion object {
         const val MIN_TERMINAL_FONT_SP: Float = 10f
@@ -110,6 +118,15 @@ data class AppSettings(
          * de-emphasized.
          */
         const val DEFAULT_SHOW_SYSTEM_NOTES: Boolean = true
+
+        /**
+         * Default for [AppSettings.persistFailedTranscriptions] — issue
+         * #180. Default is `true` so the maintainer's data-loss complaint
+         * from v0.2.7 dogfood is solved out of the box; users who prefer
+         * the older "fail fast, no on-disk audio buffer" behaviour can
+         * opt out via the Voice section toggle.
+         */
+        const val DEFAULT_PERSIST_FAILED_TRANSCRIPTIONS: Boolean = true
     }
 }
 

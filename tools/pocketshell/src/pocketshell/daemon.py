@@ -75,6 +75,11 @@ DEFAULT_IDLE_TIMEOUT_SECS = 120.0
 # in one place.
 METHOD_TTLS: Mapping[str, float] = {
     "usage.fetch": 30.0,
+    # `repos.list_local` is cheap-to-recompute but the Android picker may
+    # poll it repeatedly while the user types; a short cache keeps the
+    # filesystem walk off the hot path without showing stale state for
+    # more than a couple of seconds.
+    "repos.list_local": 10.0,
 }
 
 # Length-prefix is a 4-byte unsigned big-endian integer. ``struct``
@@ -374,11 +379,32 @@ def _usage_fetch_handler(params: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Method: repos.list_local
+# ---------------------------------------------------------------------------
+
+
+def _repos_list_local_handler(params: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Scan configured roots for cloned git repos and return them as JSON.
+
+    Thin shim around :func:`pocketshell.repos.daemon_handler`. The shim
+    exists so the daemon module does not need to import
+    :mod:`pocketshell.repos` at module load time (which would create a
+    circular dependency: ``repos`` imports ``daemon`` lazily for the
+    client-side probe). Lazy import keeps the daemon's cold-start cost
+    paid only when this method is actually invoked.
+    """
+    from pocketshell import repos as _repos
+
+    return _repos.daemon_handler(dict(params))
+
+
 # Single shared registry; tests can register additional methods via
 # :meth:`Daemon.register_method` on a fresh instance without touching
 # this dict.
 DEFAULT_METHODS: Mapping[str, RpcHandler] = {
     "usage.fetch": _usage_fetch_handler,
+    "repos.list_local": _repos_list_local_handler,
 }
 
 

@@ -3,7 +3,7 @@
 Skeleton landed in the first PR of issue
 [#170](https://github.com/alexeygrigorev/pocketshell/issues/170). Follow-up
 PRs add subgroups: `jobs` (#170 second PR), `sessions` (#218),
-`agent-log` (#217), and `daemon` (#219). Later PRs will add `repos`.
+`agent-log` (#217), `daemon` (#219), and `repos` (#220).
 
 Per the D22 locked principle (no backwards compatibility, hard cuts only)
 the eventual goal is for the PocketShell Android app to probe for this
@@ -24,6 +24,7 @@ import click
 from pocketshell import __version__
 from pocketshell.agent_log import agent_log_command
 from pocketshell.jobs import jobs_group
+from pocketshell.repos import repos_group
 from pocketshell.sessions import sessions_group
 from pocketshell.usage import usage_command
 
@@ -33,8 +34,9 @@ from pocketshell.usage import usage_command
     help=(
         "Unified server-side helper for the PocketShell Android client.\n\n"
         "Subcommands replace the separately-installed `quse` and `tmuxctl` "
-        "CLIs. Today `usage`, `jobs`, `sessions`, `agent-log`, and `daemon` "
-        "are wired up; more subcommands will land in follow-up rounds."
+        "CLIs. Today `usage`, `jobs`, `sessions`, `agent-log`, `repos`, "
+        "and `daemon` are wired up; more subcommands will land in "
+        "follow-up rounds."
     ),
 )
 @click.version_option(__version__, "-V", "--version", prog_name="pocketshell")
@@ -46,6 +48,7 @@ cli.add_command(usage_command, name="usage")
 cli.add_command(jobs_group, name="jobs")
 cli.add_command(sessions_group, name="sessions")
 cli.add_command(agent_log_command, name="agent-log")
+cli.add_command(repos_group, name="repos")
 
 
 # ---------------------------------------------------------------------------

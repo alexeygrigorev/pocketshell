@@ -135,8 +135,17 @@ Parallelism is issue-scoped, not role-skipping:
 - Do not mix fixes for multiple reviewed issues into one unreviewed coordinator patch.
 - Launch agents asynchronously. The orchestrator must not start agents in a blocking mode when there is useful coordinator work available, such as refining issues, reading surrounding code, preparing reviewer briefs, or checking unrelated backlog status.
 - Waiting on an agent is only appropriate when the next required process step depends on that specific agent result and there is no other useful non-overlapping work to do.
-- Concurrent-agent cap: **up to ~10 background agents** can run in parallel under normal load (research spikes + implementers + reviewers combined). When the cap is reached and more work is queued, prefer firing read-only Explore spikes (no filesystem contention) over additional implementers. Drop below the cap only when an agent completes; do not pause running agents to make room.
+- Concurrent-agent cap: **up to ~10 background agents** can run in parallel under normal load (research spikes + implementers + reviewers combined). When the cap is reached and more work is queued, prefer firing read-only research/Explore spikes (no filesystem contention) over additional implementers. Drop below the cap only when an agent completes; do not pause running agents to make room.
+- Push for parallelism actively: when an agent completes, the orchestrator's next step is normally "what else can dispatch right now?" not "wait for the next user message." Independent research (audits, spikes, library feasibility) is especially good for filling capacity because it doesn't compete for the AVD.
 - Emulator-touching work is the contention bottleneck, not the agent count itself. Reviewers and implementers that need `connectedAndroidTest` queue politely on the AVD (retry once on SIGKILL) per the workflow set in `emulator_contention.md`. The release-emulator-validation gate scripts hold an exclusive `flock` (#182) and will block sibling worktrees during a release run.
+
+### Choosing the right agent type
+
+- **`implementer`** (custom, in `.claude/agents/implementer.md`): writes code + tests for a single GitHub issue. Used per the implementer/reviewer loop.
+- **`reviewer`** (custom, in `.claude/agents/reviewer.md`): inspects diffs + runs builds/tests; posts APPROVED or CHANGES REQUESTED.
+- **`researcher`** (custom, in `.claude/agents/researcher.md`): read-only research spikes — design audits, UX journeys, library feasibility, JTBD inventories. Returns one structured comment on the issue. Prefer over `Explore` for any deliverable that needs sustained citations, a GO/NO-GO recommendation, or section-structured output.
+- **`Explore`**: ad-hoc code search ("where is function X defined?", "list files matching pattern Y"). Single-shot under 200 words.
+- **`general-purpose`**: catch-all for multi-step tasks that don't fit the above.
 
 Parallel work is safe when issues touch different modules or paths and
 neither depends on another's unmerged work. Worktree isolation (see next

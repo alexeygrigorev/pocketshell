@@ -14,6 +14,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 import java.util.concurrent.atomic.AtomicInteger
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -105,7 +106,7 @@ class PromptComposerCancelRecordingTest {
         )
 
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 val state by vm.uiState.collectAsState()
                 SheetContent(
                     state = state,
@@ -188,7 +189,7 @@ class PromptComposerCancelRecordingTest {
         // the visual gate without standing up a suspended coroutine,
         // which would risk wedging the instrumentation runner.
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 SheetContent(
                     state = PromptComposerViewModel.UiState(
                         draft = "in-flight prompt",
@@ -228,7 +229,7 @@ class PromptComposerCancelRecordingTest {
         )
 
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 val state by vm.uiState.collectAsState()
                 SheetContent(
                     state = state,

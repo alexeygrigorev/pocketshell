@@ -43,6 +43,7 @@ import com.pocketshell.uikit.model.Tag
 import com.pocketshell.uikit.model.TagKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 
 /**
  * Visual `@Preview` for every ui-kit component, rendered together in a
@@ -67,7 +68,7 @@ import com.pocketshell.uikit.theme.PocketShellTheme
 @Preview(name = "All components", showBackground = false, heightDp = 1800, widthDp = 412)
 @Composable
 fun ComponentsPreview() {
-    PocketShellTheme {
+    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
         Surface(
             color = PocketShellColors.Background,
             modifier = Modifier.fillMaxWidth(),
@@ -293,7 +294,7 @@ fun ComponentsPreview() {
 @Preview(name = "HostCard")
 @Composable
 fun HostCardPreview() {
-    PocketShellTheme {
+    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
         PreviewSurface {
             HostCard(
                 name = "hetzner",
@@ -308,7 +309,7 @@ fun HostCardPreview() {
 @Preview(name = "SessionRow")
 @Composable
 fun SessionRowPreview() {
-    PocketShellTheme {
+    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
         PreviewSurface {
             SessionRow(
                 badge = "A",
@@ -329,7 +330,7 @@ fun SessionRowPreview() {
 @Preview(name = "Breadcrumb")
 @Composable
 fun BreadcrumbPreview() {
-    PocketShellTheme {
+    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
         PreviewSurface(padding = 0.dp) {
             Breadcrumb(
                 crumbs = listOf(
@@ -347,7 +348,7 @@ fun BreadcrumbPreview() {
 @Preview(name = "KeyBar")
 @Composable
 fun KeyBarPreview() {
-    PocketShellTheme {
+    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
         PreviewSurface(padding = 0.dp) {
             KeyBar(
                 keys = listOf(
@@ -369,7 +370,7 @@ fun KeyBarPreview() {
 @Preview(name = "MicButton")
 @Composable
 fun MicButtonPreview() {
-    PocketShellTheme {
+    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
         PreviewSurface {
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 MicButton(state = MicButtonState.Idle, onClick = {})
@@ -383,7 +384,7 @@ fun MicButtonPreview() {
 @Preview(name = "StatusDot")
 @Composable
 fun StatusDotPreview() {
-    PocketShellTheme {
+    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
         PreviewSurface {
             Row(horizontalArrangement = Arrangement.spacedBy(20.dp)) {
                 StatusDot(status = ConnectionStatus.Idle)
@@ -398,7 +399,7 @@ fun StatusDotPreview() {
 @Preview(name = "Pill")
 @Composable
 fun PillPreview() {
-    PocketShellTheme {
+    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
         PreviewSurface {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Pill(label = "OK", kind = PillKind.Ok)
@@ -413,7 +414,7 @@ fun PillPreview() {
 @Preview(name = "ProgressBar")
 @Composable
 fun ProgressBarPreview() {
-    PocketShellTheme {
+    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
         PreviewSurface {
             Column(
                 modifier = Modifier.fillMaxWidth(),
@@ -430,7 +431,7 @@ fun ProgressBarPreview() {
 @Preview(name = "CommandChip")
 @Composable
 fun CommandChipPreview() {
-    PocketShellTheme {
+    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
         PreviewSurface {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 CommandChip(label = "git status", onClick = {})
@@ -451,7 +452,7 @@ fun CommandChipPreview() {
 @Preview(name = "CommandChip (icon variant)")
 @Composable
 fun CommandChipIconPreview() {
-    PocketShellTheme {
+    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
         PreviewSurface {
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 CommandChip(

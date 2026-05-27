@@ -27,6 +27,7 @@ import com.pocketshell.core.voice.PlannedCommand
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -55,7 +56,7 @@ class TmuxSessionVoiceSurfaceUiTest {
     @Test
     fun keyBarWithMicShowsRecordingWaveformInTmuxSurface() {
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 KeyBarWithMic(
                     keys = TmuxKeyBarLayout,
                     onKey = {},
@@ -81,7 +82,7 @@ class TmuxSessionVoiceSurfaceUiTest {
             var modeState by remember {
                 mutableStateOf(InlineDictationViewModel.DictationMode.Prompt)
             }
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 KeyBarWithMic(
                     keys = TmuxKeyBarLayout,
                     onKey = {},
@@ -108,7 +109,7 @@ class TmuxSessionVoiceSurfaceUiTest {
         var keyboardTaps = 0
         val chipTaps = mutableListOf<String>()
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 BottomChipControls(
                     chips = DefaultSessionChips,
                     onChipTap = { chipTaps += it },
@@ -144,7 +145,7 @@ class TmuxSessionVoiceSurfaceUiTest {
     fun voiceCommandReviewStripRoutesInsertAndRunThroughCallbacks() {
         val events = mutableListOf<String>()
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 VoiceCommandReviewStrip(
                     state = VoiceCommandReviewUiState(
                         transcript = "show git status",
@@ -171,7 +172,7 @@ class TmuxSessionVoiceSurfaceUiTest {
     fun inlineDictationErrorStripDismissesOnTap() {
         var dismissed = false
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 InlineDictationErrorStrip(
                     message = "Microphone permission denied.",
                     onDismiss = { dismissed = true },

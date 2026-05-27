@@ -20,6 +20,7 @@ import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -102,7 +103,7 @@ class TmuxAgentHintDismissUiTest {
 
         compose.setContent {
             val conversations by vm.agentConversations.collectAsState()
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 Box(modifier = Modifier.fillMaxSize()) {
                     TmuxAgentHintBanner(
                         pane = pane0,
@@ -178,7 +179,7 @@ class TmuxAgentHintDismissUiTest {
 
         compose.setContent {
             val conversations by vm.agentConversations.collectAsState()
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 Box(modifier = Modifier.fillMaxSize()) {
                     TmuxAgentHintBanner(
                         pane = pane0,

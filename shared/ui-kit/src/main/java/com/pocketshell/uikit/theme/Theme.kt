@@ -101,16 +101,15 @@ enum class PocketShellThemeMode {
  * }
  * ```
  *
- * The default mode stays [PocketShellThemeMode.Dark] for source
- * backwards-compatibility — call sites that do not opt in to the new
- * preference (most existing tests and previews) keep the dark scheme
- * they were built against. Issue #112's settings surface explicitly
- * threads a [mode] derived from the persisted [com.pocketshell.app.settings.AppSettings]
- * snapshot.
+ * [mode] is required at every call site (no default) per D22: hard-cut
+ * semantics, no source-compatibility defaults. Production code threads
+ * the persisted [com.pocketshell.app.settings.AppSettings] theme; tests
+ * and previews pass an explicit [PocketShellThemeMode] (typically
+ * [PocketShellThemeMode.Dark] for fixture stability).
  */
 @Composable
 fun PocketShellTheme(
-    mode: PocketShellThemeMode = PocketShellThemeMode.Dark,
+    mode: PocketShellThemeMode,
     content: @Composable () -> Unit,
 ) {
     val scheme: ColorScheme = when (mode) {

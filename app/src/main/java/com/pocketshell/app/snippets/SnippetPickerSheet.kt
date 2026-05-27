@@ -52,6 +52,7 @@ import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 
 /**
  * Modal bottom sheet listing the saved snippets for [hostId], with a
@@ -626,7 +627,7 @@ private fun EmptyPickerState(onManageTap: () -> Unit) {
 @Preview(name = "Snippet picker - populated", widthDp = 412, heightDp = 600)
 @Composable
 private fun SnippetPickerPopulatedPreview() {
-    PocketShellTheme {
+    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
         Box(modifier = Modifier.background(PocketShellColors.Surface)) {
             SnippetPickerContent(
                 snippets = listOf(
@@ -668,7 +669,7 @@ private fun SnippetPickerPopulatedPreview() {
 @Preview(name = "Snippet picker - empty", widthDp = 412, heightDp = 600)
 @Composable
 private fun SnippetPickerEmptyPreview() {
-    PocketShellTheme {
+    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
         Box(modifier = Modifier.background(PocketShellColors.Surface)) {
             SnippetPickerContent(
                 snippets = emptyList(),

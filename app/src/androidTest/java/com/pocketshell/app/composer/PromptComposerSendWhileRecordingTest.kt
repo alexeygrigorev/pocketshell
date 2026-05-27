@@ -13,6 +13,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -100,7 +101,7 @@ class PromptComposerSendWhileRecordingTest {
             mutableListOf<PromptComposerViewModel.SendRequest>(),
         )
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 val state by vm.uiState.collectAsState()
                 SheetContent(
                     state = state,

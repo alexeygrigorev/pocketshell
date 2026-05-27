@@ -22,6 +22,7 @@ import com.pocketshell.uikit.model.Tag
 import com.pocketshell.uikit.model.TagKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 import java.io.File
 import java.io.FileOutputStream
 import org.junit.Rule
@@ -64,7 +65,7 @@ class SessionRowIndicatorScreenshotTest {
     @Test
     fun captureIndicatorCombinations() {
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -164,7 +165,7 @@ class SessionRowIndicatorScreenshotTest {
     @Test
     fun captureLegendPanel() {
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()

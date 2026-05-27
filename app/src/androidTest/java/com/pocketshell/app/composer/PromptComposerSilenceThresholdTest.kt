@@ -12,6 +12,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -113,7 +114,7 @@ class PromptComposerSilenceThresholdTest {
         )
 
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 val state by vm.uiState.collectAsState()
                 SheetContent(
                     state = state,
@@ -181,7 +182,7 @@ class PromptComposerSilenceThresholdTest {
         )
 
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 val state by vm.uiState.collectAsState()
                 SheetContent(
                     state = state,
@@ -260,7 +261,7 @@ class PromptComposerSilenceThresholdTest {
         )
 
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 val state by vm.uiState.collectAsState()
                 SheetContent(
                     state = state,

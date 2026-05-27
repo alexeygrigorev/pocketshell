@@ -7,6 +7,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -45,7 +46,7 @@ class SnippetPickerBodyPreviewTest {
         // body. The preview must surface it.
         val s = snippet(id = 1, label = "list pods", body = "kubectl get pods -A")
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 SnippetPickerContent(
                     snippets = listOf(s),
                     totalCount = 1,
@@ -69,7 +70,7 @@ class SnippetPickerBodyPreviewTest {
         // showing it twice would only add visual clutter.
         val s = snippet(id = 2, label = null, body = "kubectl get pods -A")
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 SnippetPickerContent(
                     snippets = listOf(s),
                     totalCount = 1,
@@ -97,7 +98,7 @@ class SnippetPickerBodyPreviewTest {
             body = "kubectl logs -f deploy/api\n  --since=10m --tail=200",
         )
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 SnippetPickerContent(
                     snippets = listOf(s),
                     totalCount = 1,
@@ -123,7 +124,7 @@ class SnippetPickerBodyPreviewTest {
         // appear at all.
         val s = snippet(id = 4, label = "labelled", body = "")
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 SnippetPickerContent(
                     snippets = listOf(s),
                     totalCount = 1,
@@ -153,7 +154,7 @@ class SnippetPickerBodyPreviewTest {
             body = "echo first\necho second",
         )
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 SnippetPickerContent(
                     snippets = listOf(deduped, explicit, multiline),
                     totalCount = 3,

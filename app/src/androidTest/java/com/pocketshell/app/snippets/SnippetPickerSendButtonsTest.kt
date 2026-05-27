@@ -8,6 +8,7 @@ import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -47,7 +48,7 @@ class SnippetPickerSendButtonsTest {
         )
 
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 SnippetPickerContent(
                     snippets = listOf(commandSnippet, promptSnippet),
                     totalCount = 2,
@@ -86,7 +87,7 @@ class SnippetPickerSendButtonsTest {
         var rowTaps = 0
 
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 SnippetPickerContent(
                     snippets = listOf(snippet),
                     totalCount = 1,
@@ -122,7 +123,7 @@ class SnippetPickerSendButtonsTest {
         val sends = mutableListOf<Pair<Long, Boolean>>()
 
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 SnippetPickerContent(
                     snippets = listOf(snippet),
                     totalCount = 1,
@@ -157,7 +158,7 @@ class SnippetPickerSendButtonsTest {
         var lastPicked: SnippetEntity? = null
 
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 SnippetPickerContent(
                     snippets = listOf(snippet),
                     totalCount = 1,
@@ -198,7 +199,7 @@ class SnippetPickerSendButtonsTest {
         val tapped = mutableListOf<Long>()
 
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 SnippetPickerContent(
                     snippets = listOf(snippet),
                     totalCount = 1,
@@ -232,7 +233,7 @@ class SnippetPickerSendButtonsTest {
         )
 
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 SnippetPickerContent(
                     snippets = listOf(snippet),
                     totalCount = 1,

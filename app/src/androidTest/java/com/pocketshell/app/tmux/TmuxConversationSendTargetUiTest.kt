@@ -7,6 +7,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -38,7 +39,7 @@ class TmuxConversationSendTargetUiTest {
     @Test
     fun targetIndicatorAlwaysShowsAgentWindowAndPane() {
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = {},
@@ -61,7 +62,7 @@ class TmuxConversationSendTargetUiTest {
     fun firstSendBannerShowsUntilUserConfirms() {
         var confirmCount = 0
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = {},
@@ -94,7 +95,7 @@ class TmuxConversationSendTargetUiTest {
     @Test
     fun firstSendBannerHiddenWhenAlreadyConfirmed() {
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = {},
@@ -114,7 +115,7 @@ class TmuxConversationSendTargetUiTest {
     @Test
     fun mismatchBannerShowsWhenCurrentWindowDiffersFromAgentWindow() {
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = {},
@@ -137,7 +138,7 @@ class TmuxConversationSendTargetUiTest {
     @Test
     fun mismatchBannerHiddenWhenWindowsAgree() {
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = {},
@@ -160,7 +161,7 @@ class TmuxConversationSendTargetUiTest {
         // AND hasn't yet acknowledged the first-send banner. Both
         // banners + the target indicator must all be visible.
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = {},
@@ -188,7 +189,7 @@ class TmuxConversationSendTargetUiTest {
         // the new surfaces should render in that case so the
         // pre-#197 composition is preserved bit-for-bit.
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = {},

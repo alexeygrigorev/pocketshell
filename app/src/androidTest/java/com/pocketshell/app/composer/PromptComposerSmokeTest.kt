@@ -20,6 +20,7 @@ import com.pocketshell.app.proof.openShell
 import com.pocketshell.app.session.SessionViewModel
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -137,7 +138,7 @@ class PromptComposerSmokeTest {
         try {
             var state by mutableStateOf(PromptComposerViewModel.UiState())
             compose.setContent {
-                PocketShellTheme {
+                PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                     SheetContent(
                         state = state,
                         onClose = {},
@@ -171,7 +172,7 @@ class PromptComposerSmokeTest {
 
     private fun renderComposer(state: () -> PromptComposerViewModel.UiState) {
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 SheetContent(
                     state = state(),
                     onClose = {},

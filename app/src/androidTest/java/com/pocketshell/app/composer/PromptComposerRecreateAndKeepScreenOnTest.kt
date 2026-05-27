@@ -13,6 +13,7 @@ import com.pocketshell.app.composer.PromptComposerViewModel.RecordingState
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -63,7 +64,7 @@ class PromptComposerRecreateAndKeepScreenOnTest {
         // DisposableEffect mutates so the test can read the live flag.
         val capturedView = arrayOfNulls<android.view.View>(1)
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 capturedView[0] = LocalView.current
                 SheetContent(
                     state = state,
@@ -138,7 +139,7 @@ class PromptComposerRecreateAndKeepScreenOnTest {
         )
         val capturedView = arrayOfNulls<android.view.View>(1)
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 capturedView[0] = LocalView.current
                 SheetContent(
                     state = state,

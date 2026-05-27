@@ -18,6 +18,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
+import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -64,7 +65,7 @@ class TmuxSessionScreenImeChromeTest {
     @Test
     fun chromeIsFullWhenImeHidden() {
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxImeAwareTopChrome(
                     chromeCompressed = false,
                     crumbs = sampleCrumbs(),
@@ -93,7 +94,7 @@ class TmuxSessionScreenImeChromeTest {
     @Test
     fun chromeIsCompressedWhenImeVisible() {
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxImeAwareTopChrome(
                     chromeCompressed = true,
                     crumbs = sampleCrumbs(),
@@ -120,7 +121,7 @@ class TmuxSessionScreenImeChromeTest {
     fun chromeFlipsLiveBetweenStates() {
         val compressedState = mutableStateOf(false)
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 Column {
                     TmuxImeAwareTopChrome(
                         chromeCompressed = compressedState.value,
@@ -163,7 +164,7 @@ class TmuxSessionScreenImeChromeTest {
         // (Terminal + Conversation tab pill, multi-window crumb)
         // because anything narrower will trivially be smaller.
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 Column {
                     TmuxImeAwareTopChrome(
                         chromeCompressed = false,
@@ -210,7 +211,7 @@ class TmuxSessionScreenImeChromeTest {
         // cursor row — the vendored TerminalView paints the cursor row
         // at its bottom-most row when `mTopRow == 0`.
         compose.setContent {
-            PocketShellTheme {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 Column(modifier = Modifier.fillMaxSize()) {
                     TmuxImeAwareTopChrome(
                         chromeCompressed = true,

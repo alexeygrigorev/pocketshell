@@ -73,7 +73,6 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.model.HostSetupState
-import com.pocketshell.uikit.model.HostStatus
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlinx.coroutines.flow.MutableSharedFlow
 
@@ -149,6 +148,12 @@ fun HostListScreen(
 ) {
     val hosts by viewModel.hosts.collectAsState()
     val sessions by sessionsViewModel.sessions.collectAsState()
+    // Issue #201: the trailing host-card status chip needs the set of
+    // hosts the app is currently attached to (i.e. has a live tmux -CC
+    // client registered for). The ViewModel projects the singleton
+    // [ActiveTmuxClients] registry onto a flat id-set so the derived
+    // status reacts the moment a register / unregister happens.
+    val attachedHostIds by viewModel.attachedHostIds.collectAsState()
     val hostTmuxPickerState by hostTmuxSessionPickerViewModel.state.collectAsState()
     val updateInfo by viewModel.updateAvailable.collectAsState()
     val bootstrapState by viewModel.bootstrapState.collectAsState()
@@ -446,14 +451,23 @@ fun HostListScreen(
                             // sees the per-host quota status alongside
                             // Ports / Share / Re-check setup.
                             val usageRecord = usageBadges[host.id]
+                            // Issue #201: resolve the per-host status from
+                            // the setup-probe state, the cross-host
+                            // session aggregate, and the registered tmux
+                            // client set. The derivation is intentionally
+                            // a pure function (see [resolveHostStatus] in
+                            // HostListViewModel.kt) so unit tests can
+                            // exercise every label without a UI.
+                            val hostStatus = resolveHostStatus(
+                                hostId = host.id,
+                                setupState = setupState,
+                                sessions = sessions,
+                                attachedHostIds = attachedHostIds,
+                            )
                             HostCard(
                                 name = host.name,
                                 subtitle = "${host.username}@${host.hostname}:${host.port}",
-                                // Phase 1 does not track live connection state
-                                // here — the host list is a static snapshot.
-                                // Live "connected" chips return when
-                                // session-state plumbing lands (#22).
-                                status = HostStatus.Disconnected,
+                                status = hostStatus,
                                 onClick = { tapRequests.tryEmit(host.id) },
                                 // Issue #113: long-press now opens the same
                                 // overflow menu the kebab exposes — gives

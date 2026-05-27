@@ -13,6 +13,8 @@ import com.pocketshell.app.bootstrap.TmuxStatus
 import com.pocketshell.app.bootstrap.ToolStatus
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
+import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.sessions.SessionSummary
 import com.pocketshell.app.usage.UsageDashboardRow
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
@@ -27,6 +29,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.uikit.model.HostSetupState
+import com.pocketshell.uikit.model.HostStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Job
@@ -96,6 +99,13 @@ class HostListViewModel @Inject constructor(
     // `@Singleton @Inject`; the Robolectric tests construct one with the
     // same in-memory DAOs they already use.
     private val usageScheduler: UsageScheduler,
+    // Issue #201: the per-host status chip needs to know which hosts
+    // the app is currently attached to. The same singleton registry
+    // already drives the cross-host session dashboard
+    // ([SessionsDashboardViewModel]); we inject it here read-only so
+    // the derived [HostStatus] can flip to `Attached` the moment a
+    // `tmux -CC` client registers.
+    private val activeClients: ActiveTmuxClients,
 ) : ViewModel() {
 
     /** Live list of saved hosts, sorted by name (DAO query). */
@@ -155,6 +165,19 @@ class HostListViewModel @Inject constructor(
             buildDashboardRows(records)
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
+
+    /**
+     * Read-only projection of [ActiveTmuxClients.clients] used by the
+     * host-card status chip (issue #201) to flip a row to the
+     * `Attached` state when the app holds a live `tmux -CC` client
+     * against the host. Keyed by [HostEntity.id]; emits the empty set
+     * when no clients are registered. Exposed as a `Set` rather than
+     * the full registry map so the screen layer only re-renders on
+     * register / unregister, not on internal entry-value changes.
+     */
+    val attachedHostIds: StateFlow<Set<Long>> = activeClients.clients
+        .map { it.keys.toSet() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptySet())
 
     /**
      * Per-host worst-case provider record — populated only for hosts
@@ -1082,6 +1105,110 @@ internal fun deriveSetupState(host: HostEntity): HostSetupState {
         quse == false -> HostSetupState.NeedsSetup
         else -> HostSetupState.Ready
     }
+}
+
+/**
+ * Pure derivation of the host-card trailing status chip (issue #201) —
+ * the at-a-glance answer to "what's happening on this host right now?".
+ * Each return value maps to exactly one trigger condition; the AC for
+ * #201 explicitly forbids overlap between labels and bans the previous
+ * ambiguous "idle" wording.
+ *
+ * Precedence (top-down — first match wins):
+ *
+ *  1. [HostStatus.NeedsSetup]      — `setupState == NeedsSetup`. Setup-
+ *     required wins over everything else; the inline `HostSetupBadge`
+ *     surfaces the actionable affordance and the trailing chip is
+ *     hidden by the caller. We still emit `NeedsSetup` here (rather
+ *     than collapsing to Unknown) so the caller can branch on it
+ *     without re-computing the precedence rule.
+ *  2. [HostStatus.ConnectionError] — `lastConnectError != null`. A
+ *     known-failed connect means session counts are stale; surface the
+ *     error instead.
+ *  3. [HostStatus.Attached]        — `appAttached == true`. The app
+ *     itself holds a live `tmux -CC` client against this host.
+ *  4. [HostStatus.ActiveSessions]  — `setupState == Ready` AND
+ *     `sessionCount >= 1`. The host has live tmux sessions and we know
+ *     it does because the bootstrap probe verified the tooling.
+ *  5. [HostStatus.NoActiveSessions] — `setupState == Ready` AND
+ *     `sessionCount == 0`. We've verified the tooling AND we have a
+ *     positive answer that there are no sessions; safe to say "no
+ *     active sessions" rather than "unknown".
+ *  6. [HostStatus.Unknown]         — anything else. Most often:
+ *     `setupState == Unknown` (cold launch, probe in flight) — we have
+ *     not verified the tooling so we cannot claim a session count of
+ *     zero. The renderer surfaces a quiet spinner in this case so the
+ *     user never sees a stale indicator.
+ *
+ * @param setupState bootstrap-probe readiness, derived elsewhere via
+ *   [deriveSetupState]. Drives precedence + the Ready gate on
+ *   session-count claims.
+ * @param sessionCount number of tmux sessions reported by
+ *   [com.pocketshell.app.sessions.SessionsDashboardViewModel] for this
+ *   host. Pass `null` if no recent `list-sessions` data is available
+ *   (e.g. the dashboard has not polled this host yet).
+ * @param appAttached `true` when [com.pocketshell.app.sessions.ActiveTmuxClients]
+ *   reports a live client registered for this host id.
+ * @param lastConnectError opaque marker for "the most recent SSH
+ *   attempt failed". The signal is currently best-expressed as
+ *   `tmuxInstalled == false && quseInstalled == false && there was a
+ *   probe attempt`; for now we keep the parameter explicit so a future
+ *   issue (when a richer connect-failure persistence lands) can hook
+ *   in without re-shaping the derivation. Defaults to `false`.
+ */
+internal fun deriveHostStatus(
+    setupState: HostSetupState,
+    sessionCount: Int?,
+    appAttached: Boolean,
+    lastConnectError: Boolean = false,
+): HostStatus = when {
+    setupState == HostSetupState.NeedsSetup -> HostStatus.NeedsSetup
+    lastConnectError -> HostStatus.ConnectionError
+    appAttached -> HostStatus.Attached
+    setupState == HostSetupState.Ready && sessionCount != null && sessionCount >= 1 ->
+        HostStatus.ActiveSessions(count = sessionCount)
+    setupState == HostSetupState.Ready && sessionCount == 0 -> HostStatus.NoActiveSessions
+    else -> HostStatus.Unknown
+}
+
+/**
+ * Convenience wrapper around [deriveHostStatus] that takes the raw
+ * cross-host session list ([SessionSummary] from the dashboard) +
+ * registered-client host-id set, looks up the per-host slice, and
+ * returns the resolved [HostStatus]. Lives next to the pure derivation
+ * so the screen layer doesn't repeat the grouping logic inline.
+ *
+ * `sessions` is expected to be the aggregate from
+ * [com.pocketshell.app.sessions.SessionsDashboardViewModel.sessions];
+ * `attachedHostIds` is the key-set of
+ * [com.pocketshell.app.sessions.ActiveTmuxClients.clients].
+ *
+ * `sessionCount` is intentionally derived as
+ * `sessions.count { it.hostId == hostId }` rather than counting unique
+ * names — tmux session names are already unique on a server (tmux
+ * enforces it), so the count agrees either way and the simpler
+ * expression is easier to verify by inspection.
+ */
+internal fun resolveHostStatus(
+    hostId: Long,
+    setupState: HostSetupState,
+    sessions: List<SessionSummary>,
+    attachedHostIds: Set<Long>,
+): HostStatus {
+    val perHost = sessions.filter { it.hostId == hostId }
+    // We treat "no session data for this host" (i.e. the dashboard
+    // hasn't polled it yet) as `null`. Only when the host's tmux
+    // client has been seen and reported a zero-row list do we surface
+    // "no active sessions". The presence of any session row OR a
+    // registered tmux client both imply the dashboard has data.
+    val haveData = perHost.isNotEmpty() || hostId in attachedHostIds
+    val sessionCount = if (haveData) perHost.size else null
+    val appAttached = hostId in attachedHostIds
+    return deriveHostStatus(
+        setupState = setupState,
+        sessionCount = sessionCount,
+        appAttached = appAttached,
+    )
 }
 
 /**

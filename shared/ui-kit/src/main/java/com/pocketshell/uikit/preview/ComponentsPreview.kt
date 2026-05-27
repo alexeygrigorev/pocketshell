@@ -80,28 +80,36 @@ fun ComponentsPreview() {
                 verticalArrangement = Arrangement.spacedBy(20.dp),
             ) {
                 Section("HostCard") {
+                    // Issue #201: cycle through the new status vocabulary
+                    // so reviewers see the full mapping in one place.
                     HostCard(
                         name = "hetzner",
                         subtitle = "alex@65.108.42.11",
-                        status = HostStatus.Connected,
+                        status = HostStatus.Attached,
                         onClick = {},
                     )
                     HostCard(
                         name = "gpu-box",
                         subtitle = "alex@10.0.0.42",
-                        status = HostStatus.Connecting,
+                        status = HostStatus.ActiveSessions(count = 3),
                         onClick = {},
                     )
                     HostCard(
                         name = "prod",
                         subtitle = "deploy@prod.acme.io",
-                        status = HostStatus.Disconnected,
+                        status = HostStatus.NoActiveSessions,
                         onClick = {},
                     )
                     HostCard(
                         name = "edge",
                         subtitle = "ci@edge.acme.io",
-                        status = HostStatus.Error,
+                        status = HostStatus.ConnectionError,
+                        onClick = {},
+                    )
+                    HostCard(
+                        name = "fresh",
+                        subtitle = "alex@new.acme.io",
+                        status = HostStatus.Unknown,
                         onClick = {},
                     )
                 }
@@ -281,7 +289,7 @@ fun HostCardPreview() {
             HostCard(
                 name = "hetzner",
                 subtitle = "alex@65.108.42.11",
-                status = HostStatus.Connected,
+                status = HostStatus.Attached,
                 onClick = {},
             )
         }

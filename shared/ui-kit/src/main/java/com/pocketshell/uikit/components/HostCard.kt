@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -187,9 +188,19 @@ fun HostCard(
             )
         }
 
-        Spacer(modifier = Modifier.width(12.dp))
-
-        HostStatusChip(status = status)
+        // Issue #201: the trailing chip is the host's at-a-glance
+        // status indicator (session count, attachment, connection
+        // error, or a quiet spinner while the state is unverified).
+        // It is suppressed entirely when the inline `HostSetupBadge`
+        // already calls out NeedsSetup — the AC requires
+        // setup-required to take precedence over session-count
+        // display, and showing both pills would re-create the
+        // ambiguous "needs setup AND idle" combination the issue
+        // exists to fix.
+        if (setupState != HostSetupState.NeedsSetup) {
+            Spacer(modifier = Modifier.width(12.dp))
+            HostStatusChip(status = status)
+        }
 
         if (trailingContent != null) {
             Spacer(modifier = Modifier.width(8.dp))
@@ -199,35 +210,79 @@ fun HostCard(
 }
 
 /**
- * Small colour + text chip rendering the connection state. Replaces the
- * 8dp [StatusDot] previously used at the trailing edge — the dot relied
- * on learned colour conventions ("amber = connecting") and read as
- * decoration to non-technical users. The chip says the same thing in
- * words.
+ * Small colour + text chip rendering the host's at-a-glance status.
  *
- * Mapping (issue #113):
+ * Issue #201 replaces the previous flat-enum mapping (which surfaced the
+ * ambiguous label "idle" for any not-connected host). Each label now
+ * maps to exactly one trigger condition; see the KDoc on [HostStatus]
+ * for the contract.
  *
- * - [HostStatus.Connected]  -> green, "connected"
- * - [HostStatus.Connecting] -> amber, "connecting"
- * - [HostStatus.Disconnected] -> muted grey, "idle"
- * - [HostStatus.Error] -> red, "error"
+ * Mapping:
  *
- * The chip uses an `Accent`-style accent-soft fill at low alpha derived
- * from the same status colour so the colour reads on the dark surface
- * without painting a solid block that competes with the rest of the
- * row. Border, text colour, and an inner dot use the full-strength
- * colour for legibility.
+ * - [HostStatus.Unknown]         -> quiet spinner (no text)
+ * - [HostStatus.NoActiveSessions] -> muted grey, "No active sessions"
+ * - [HostStatus.ActiveSessions]  -> accent cyan, "N session(s)"
+ * - [HostStatus.Attached]        -> green, "Attached"
+ * - [HostStatus.NeedsSetup]      -> not rendered here; the inline
+ *   `HostSetupBadge` already calls it out, and the caller hides the
+ *   trailing chip in that case.
+ * - [HostStatus.ConnectionError] -> red, "Connection error"
+ *
+ * Visually, the chip uses an accent-soft fill at low alpha derived from
+ * the same colour so it reads on the dark surface without painting a
+ * solid block. Border, text colour, and an inner dot use the
+ * full-strength colour for legibility. The [Unknown] case substitutes a
+ * 14dp [CircularProgressIndicator] so first-load / probe-in-flight
+ * surfaces never carry a stale label — the AC explicitly bans showing
+ * an indicator when the underlying state has not been verified yet.
+ *
+ * The chip carries a stable [HOST_STATUS_CHIP_TAG] test tag so
+ * instrumentation can find it regardless of which state is rendered.
+ * Spinner-state ([Unknown]) carries the additional
+ * [HOST_STATUS_SPINNER_TAG] so a test can distinguish "still loading"
+ * from "verified-but-empty" without depending on label wording.
  */
 @Composable
 private fun HostStatusChip(status: HostStatus) {
+    // Unknown: render a quiet spinner so the row doesn't carry a stale
+    // label while the underlying probe is still resolving. Sized so the
+    // visual footprint matches the chip we'd render in any other state.
+    if (status is HostStatus.Unknown) {
+        Box(
+            modifier = Modifier
+                .testTag(HOST_STATUS_CHIP_TAG)
+                .size(20.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier
+                    .size(14.dp)
+                    .testTag(HOST_STATUS_SPINNER_TAG),
+                color = PocketShellColors.TextMuted,
+                strokeWidth = 1.5.dp,
+            )
+        }
+        return
+    }
+    // NeedsSetup is suppressed by the caller (see the precedence comment
+    // in HostCard above) — guarding here too so a misuse from a future
+    // call site doesn't paint a duplicate "needs setup" pill next to
+    // the inline `HostSetupBadge`.
+    if (status is HostStatus.NeedsSetup) return
+
     val (color, label) = when (status) {
-        HostStatus.Connected -> PocketShellColors.Green to "connected"
-        HostStatus.Connecting -> PocketShellColors.Amber to "connecting"
-        HostStatus.Disconnected -> PocketShellColors.TextMuted to "idle"
-        HostStatus.Error -> PocketShellColors.Red to "error"
+        HostStatus.NoActiveSessions -> PocketShellColors.TextMuted to "No active sessions"
+        is HostStatus.ActiveSessions -> PocketShellColors.Accent to
+            if (status.count == 1) "1 session" else "${status.count} sessions"
+        HostStatus.Attached -> PocketShellColors.Green to "Attached"
+        HostStatus.ConnectionError -> PocketShellColors.Red to "Connection error"
+        // Handled above; included so the `when` is exhaustive against the
+        // sealed hierarchy without resorting to an `else` branch.
+        HostStatus.Unknown, HostStatus.NeedsSetup -> return
     }
     Row(
         modifier = Modifier
+            .testTag(HOST_STATUS_CHIP_TAG)
             .background(
                 color = color.copy(alpha = 0.16f),
                 shape = RoundedCornerShape(999.dp),
@@ -254,6 +309,15 @@ private fun HostStatusChip(status: HostStatus) {
         )
     }
 }
+
+/**
+ * Stable test tags for the trailing status chip / spinner. Used by
+ * instrumentation and Compose UI tests to find the chip regardless of
+ * which [HostStatus] variant is being rendered (and therefore which
+ * label).
+ */
+const val HOST_STATUS_CHIP_TAG: String = "host-status-chip"
+const val HOST_STATUS_SPINNER_TAG: String = "host-status-chip:spinner"
 
 /**
  * Small colour + text chip rendering the per-host bootstrap state.

@@ -10,6 +10,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.bootstrap.HostBootstrapper
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
+import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.usage.UsageRemoteSource
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
@@ -150,6 +151,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         // Read from the underlying DAO flow directly — the ViewModel's
         // own StateFlow uses `WhileSubscribed(5s)`, which interacts with
@@ -176,6 +178,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         val key = viewModel.keyFor(keyId)
         assertNotNull(key)
@@ -192,6 +195,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         assertNull(viewModel.keyFor(9_999L))
     }
@@ -215,6 +219,7 @@ class HostListViewModelTest {
             releaseChecker = fake,
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
 
         // `init {}` kicks off the check; UnconfinedTestDispatcher drains
@@ -233,6 +238,7 @@ class HostListViewModelTest {
             releaseChecker = fake,
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
 
         assertEquals(1, fake.callCount)
@@ -249,6 +255,7 @@ class HostListViewModelTest {
             releaseChecker = fake,
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         // `init {}` already fired one call.
         assertEquals(1, fake.callCount)
@@ -277,6 +284,7 @@ class HostListViewModelTest {
             releaseChecker = fake,
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
 
         assertEquals(0, fake.callCount)
@@ -321,6 +329,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
 
         viewModel.bootstrapHost(host, keyPath = "/tmp/k")
@@ -363,6 +372,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
 
         // Synchronous cache-check sets pending immediately at ready=false
@@ -482,6 +492,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
 
         // Read the upstream projection — same `stateIn(WhileSubscribed)`
@@ -533,6 +544,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
 
         // Pre-condition: no acknowledgement banner yet.
@@ -579,6 +591,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         val payload = """
             {
@@ -612,6 +625,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         val payload = """
             {
@@ -642,6 +656,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         val payload = SshImportPayloadCodec.encode(
             SshImportConfig(
@@ -688,6 +703,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         val payload = SshImportPayloadCodec.encode(
             SshImportConfig(
@@ -724,6 +740,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         val payload = SshImportPayloadCodec.encode(
             SshImportConfig(
@@ -759,6 +776,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         val inner = SshImportPayloadCodec.encode(
             SshImportConfig(
@@ -793,6 +811,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         val payload = "X".repeat(QrChunkCodec.ChunkSize * 2 + 1)
         val envelopes = QrChunkCodec.encode(payload, id = "deadbeef")
@@ -826,6 +845,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         assertEquals(
             false,
@@ -924,6 +944,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = scheduler,
+            activeClients = ActiveTmuxClients(),
         )
 
         // The snapshots flow on the scheduler is the upstream — that's
@@ -980,6 +1001,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         val payload = """
             {
@@ -1032,6 +1054,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         val payload = """
             {
@@ -1082,6 +1105,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         val payload = """
             {
@@ -1125,6 +1149,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         val payload = """
             {
@@ -1169,6 +1194,7 @@ class HostListViewModelTest {
             releaseChecker = FakeReleaseChecker(result = null),
             bootstrapper = HostBootstrapper(),
             usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
         )
         val payload = """
             {

@@ -234,19 +234,17 @@ private fun SetupActions(
                 )
             }
         }
-        when (val mosh = report.mosh) {
-            is MoshStatus.Unsupported -> SetupInfoRow(
-                title = "Mosh",
-                detail = mosh.reason,
-            )
-        }
+        // Mosh row intentionally not rendered. Spike #159 returned NO-GO
+        // for Mosh + tmux -CC, so surfacing a permanent "unsupported" row
+        // would only draw attention to a feature we do not ship. The
+        // `MoshStatus` data model is kept in `HostBootstrapper.kt` so
+        // re-adding the row later is a one-file UI change.
     }
 }
 
 internal fun HostBootstrapReport.hasBootstrapSheetRows(): Boolean =
     missingTools.isNotEmpty() ||
-        needsTmuxctlDaemonSetup() ||
-        mosh is MoshStatus.Unsupported
+        needsTmuxctlDaemonSetup()
 
 internal fun HostBootstrapSheetState.Prompt.hasActionableSetup(): Boolean =
     needsTmux ||

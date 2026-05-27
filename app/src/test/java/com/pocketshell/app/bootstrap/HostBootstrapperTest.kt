@@ -311,7 +311,12 @@ class HostBootstrapperTest {
     }
 
     @Test
-    fun bootstrapSheetRows_includeMoshInfo_whenServerSetupIsReady() {
+    fun bootstrapSheetRows_areEmpty_whenServerSetupIsReady() {
+        // Issue #164: the Mosh row no longer renders (spike #159 returned
+        // NO-GO), so a fully-ready host no longer has any sheet rows. The
+        // MoshStatus model itself is preserved on the report for forward
+        // compatibility — see assertions in
+        // checkServerSetup_reportsReady_whenToolsAndDaemonArePresent.
         val report = HostBootstrapReport(
             tools = BootstrapTool.entries.associateWith {
                 ToolStatus.Installed("/home/u/.local/bin/${it.binaryName}")
@@ -321,7 +326,7 @@ class HostBootstrapperTest {
         )
 
         assertTrue(report.isReady)
-        assertTrue(report.hasBootstrapSheetRows())
+        assertTrue(!report.hasBootstrapSheetRows())
         assertTrue(!HostBootstrapSheetState.Prompt(needsTmux = false, report = report).hasActionableSetup())
     }
 

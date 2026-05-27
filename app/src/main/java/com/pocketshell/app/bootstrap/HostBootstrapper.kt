@@ -72,6 +72,20 @@ public sealed interface TmuxctlDaemonStatus {
     public data class Unknown(val reason: String) : TmuxctlDaemonStatus
 }
 
+/**
+ * Bootstrap-report slot for Mosh status on a remote host.
+ *
+ * Kept on the data model even though the bootstrap sheet does not render a
+ * Mosh row anymore. The research spike for issue
+ * [#159](https://github.com/alexeygrigorev/pocketshell/issues/159) returned
+ * NO-GO because Mosh's display-replication protocol is incompatible with the
+ * `tmux -CC` control mode PocketShell relies on for per-pane rendering, so we
+ * are not shipping Mosh support. Issue #164 then removed the dead UI row but
+ * intentionally left this type, the always-`Unsupported` default, and
+ * [MOSH_UNSUPPORTED_REASON] in place so re-adding the row later (if the
+ * upstream Mosh story ever changes) stays a one-file UI change instead of a
+ * model + UI change.
+ */
 public sealed interface MoshStatus {
     public data class Unsupported(val reason: String) : MoshStatus
 }

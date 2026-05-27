@@ -24,6 +24,12 @@ REAL_AGENT_RELEASE_GATE_LOG_ROOT="$ROOT_DIR/build/real-agent-release-gate"
 REAL_AGENT_RELEASE_GATE_RUN_DIR="$REAL_AGENT_RELEASE_GATE_LOG_ROOT/$REAL_AGENT_RELEASE_GATE_RUN_ID"
 REAL_AGENT_COMPOSE_FILE="${REAL_AGENT_COMPOSE_FILE:-tests/docker/real-agent/compose.yml}"
 REAL_AGENT_RELEASE_GATE_TEST_CLASS="com.pocketshell.app.proof.RealAgentReleaseGateTest"
+LONG_RUNNING_TEST="${LONG_RUNNING_TEST:-0}"
+LONG_RUNNING_TEST_RUN_ID="$RUN_ID-long-running"
+LONG_RUNNING_TEST_LOG_ROOT="$ROOT_DIR/build/long-running-session"
+LONG_RUNNING_TEST_RUN_DIR="$LONG_RUNNING_TEST_LOG_ROOT/$LONG_RUNNING_TEST_RUN_ID"
+LONG_RUNNING_TEST_CLASS="com.pocketshell.app.proof.LongRunningSessionStabilityTest"
+LONG_RUNNING_COMPOSE_FILE="${LONG_RUNNING_COMPOSE_FILE:-tests/docker/docker-compose.yml}"
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 
@@ -50,6 +56,14 @@ Environment overrides:
       additional RealAgentReleaseGateTest against the same real-agent fixture to
       assert on visible CLI output and on the JSONL conversation logs the CLIs
       write back to disk.
+  LONG_RUNNING_TEST=1
+      Also run the opt-in 10-minute foreground hold regression
+      (LongRunningSessionStabilityTest). Brings up the deterministic Docker
+      `agents` service on host port 2222, attaches a tmux session through the
+      emulator, sends a tick every 2 minutes for the full 10 minutes, and
+      asserts on zero SSH transport teardown events plus < 50 MB memory growth
+      via dumpsys meminfo. The test alone adds ~11 minutes of wall time, hence
+      the opt-in.
 
 Artifacts:
   build/release-emulator-validation/<run-id>/summary.md
@@ -57,6 +71,7 @@ Artifacts:
   build/pre-release-confidence-gate/<run-id>-pre-release/
   build/terminal-workbench/<run-id>-terminal-release/ (optional)
   build/real-agent-release-gate/<run-id>-real-agent-release-gate/ (optional)
+  build/long-running-session/<run-id>-long-running/ (optional)
   build/phone-dogfood/<run-id>-terminal-lab/
   build/phone-dogfood/<run-id>-tmux-existing-session/
   build/phone-dogfood/<run-id>-setup-detection/
@@ -107,6 +122,7 @@ write_summary_header() {
     printf 'Automated status: RUNNING\n'
     printf 'Visual audit inspected: no\n'
     printf 'Optional terminal release gate: %s\n' "$([[ "$TERMINAL_RELEASE_GATE" == "1" ]] && printf enabled || printf skipped)"
+    printf 'Optional long-running session hold: %s\n' "$([[ "$LONG_RUNNING_TEST" == "1" ]] && printf enabled || printf skipped)"
     printf '\n## Required Artifacts\n\n'
   } > "$SUMMARY_PATH"
 }
@@ -224,6 +240,84 @@ run_real_agent_release_gate_instrumentation() {
   return 0
 }
 
+# Run LongRunningSessionStabilityTest against the deterministic Docker `agents`
+# fixture (#148). Holds the activity in RESUMED for ~10 minutes, sends a tick
+# every 2 minutes, and asserts on zero SSH transport teardown events and
+# < 50 MB memory growth via dumpsys meminfo. The on-device test gates itself
+# behind the instrumentation arg `pocketshellLongRunningTest=1`, so passing the
+# arg is what opts the run in; without it the test class is silently skipped.
+#
+# Artifact bundle includes the captured logcat slice, the meminfo summary, and
+# the run docker logs so the reviewer can audit reconnect counters and
+# memory growth without needing to rerun the 10-minute hold.
+run_long_running_session_instrumentation() {
+  local run_dir="$LONG_RUNNING_TEST_RUN_DIR"
+  local instrumentation_log="$run_dir/instrumentation.log"
+  local docker_log="$run_dir/docker-agents.log"
+  local logcat="$run_dir/logcat.txt"
+  local artifacts_dir="$run_dir/artifacts/long-running-session"
+  mkdir -p "$run_dir" "$artifacts_dir"
+
+  printf '\n[long-running session stability instrumentation]\n'
+  printf 'Test class: %s\n' "$LONG_RUNNING_TEST_CLASS"
+  printf 'Artifact root: %s\n' "$run_dir"
+
+  # Bring up (or verify) the deterministic agents compose service on port 2222.
+  docker compose -f "$LONG_RUNNING_COMPOSE_FILE" up -d agents \
+    2>&1 | tee "$run_dir/docker-up.log"
+
+  # Clear logcat on the device before the test starts so the captured slice is
+  # exclusively the run window. The instrumentation also clears logcat
+  # internally for the reconnect-counter parse, but pre-clearing here keeps the
+  # post-run pull short.
+  "$ADB" logcat -c >/dev/null 2>&1 || true
+
+  set +e
+  # The on-device test gates picker round-trips on
+  # TerminalTestTimeouts.terminalVisibilityTimeoutMs(), which is 60 s
+  # locally and 180 s when `pocketshellCi=true` is set. The long-running
+  # gate runs unattended for ~11 minutes, so we always opt into the
+  # generous deadline — under heavy worktree contention the host picker
+  # probe alone has been observed to exceed 30 s, and the 10-minute hold
+  # alone is far more expensive than the extra slack on the picker.
+  "$ADB" shell am instrument -w -r \
+    -e class "$LONG_RUNNING_TEST_CLASS" \
+    -e pocketshellLongRunningTest 1 \
+    -e pocketshellCi true \
+    com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner \
+    2>&1 | tee "$instrumentation_log"
+  local instrumentation_status="${PIPESTATUS[0]}"
+  set -e
+
+  # Capture diagnostics regardless of outcome so reviewers can audit.
+  docker compose -f "$LONG_RUNNING_COMPOSE_FILE" logs --no-color --timestamps agents \
+    > "$docker_log" 2>&1 || true
+  "$ADB" logcat -d -v threadtime -t 60000 > "$logcat" 2>&1 || true
+
+  # Pull the device artifact bundle written by the instrumentation
+  # (long-running-summary.txt, captured logcat tail, final visible
+  # transcript) into the run dir so summary.md can link directly to it
+  # and the reviewer does not need to rerun the 10-minute hold to audit.
+  "$ADB" pull \
+    "/sdcard/Android/media/com.pocketshell.app/additional_test_output/long-running-session" \
+    "$artifacts_dir" \
+    >/dev/null 2>&1 || true
+
+  if [[ "$instrumentation_status" -ne 0 ]]; then
+    printf 'FAIL: LongRunningSessionStabilityTest instrumentation exited %s\n' "$instrumentation_status" >&2
+    return "$instrumentation_status"
+  fi
+  if ! grep -q 'INSTRUMENTATION_CODE: -1' "$instrumentation_log"; then
+    printf 'FAIL: LongRunningSessionStabilityTest did not report INSTRUMENTATION_CODE: -1\n' >&2
+    return 1
+  fi
+  if ! grep -q 'OK (' "$instrumentation_log"; then
+    printf 'FAIL: LongRunningSessionStabilityTest did not report an OK summary\n' >&2
+    return 1
+  fi
+  return 0
+}
+
 require_clean_pushed_main
 write_summary_header
 
@@ -246,6 +340,18 @@ if [[ "$TERMINAL_RELEASE_GATE" == "1" ]]; then
     "real-agent CLI release gate" \
     "build/real-agent-release-gate/$REAL_AGENT_RELEASE_GATE_RUN_ID/" \
     run_real_agent_release_gate_instrumentation
+fi
+
+# Additive 10-minute foreground hold (#148). Mirrors the TERMINAL_RELEASE_GATE
+# pattern above: a separate, independently opt-in branch that adds a single
+# heavy regression suite without changing the default release-gate behaviour.
+# When LONG_RUNNING_TEST is unset or 0 the entire block is skipped — the
+# default release validation flow is unchanged.
+if [[ "$LONG_RUNNING_TEST" == "1" ]]; then
+  run_required \
+    "optional long-running session hold" \
+    "build/long-running-session/$LONG_RUNNING_TEST_RUN_ID/" \
+    run_long_running_session_instrumentation
 fi
 
 run_required \
@@ -278,6 +384,11 @@ publish_validated_apk
     printf -- '- [ ] Inspect `build/real-agent-release-gate/%s/instrumentation.log` plus the Docker/logcat artifacts in the same directory to confirm the real Claude/Codex CLI run was healthy.\n' "$REAL_AGENT_RELEASE_GATE_RUN_ID"
   else
     printf -- '- [ ] Optional terminal release gate was skipped. Run `TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh` when terminal usability is in release scope.\n'
+  fi
+  if [[ "$LONG_RUNNING_TEST" == "1" ]]; then
+    printf -- '- [ ] Inspect `build/long-running-session/%s/artifacts/long-running-session/long-running-summary.txt` for reconnect counters, memory growth, and per-tick latencies before treating extended-foreground stability as release-ready.\n' "$LONG_RUNNING_TEST_RUN_ID"
+  else
+    printf -- '- [ ] Optional long-running session hold was skipped. Run `LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh` when extended-foreground stability is in release scope.\n'
   fi
   printf -- '- [ ] Download the tested debug APK from `release-emulator-validation/%s/app-debug.apk` inside the validation artifact, or `build/release-emulator-validation/%s/app-debug.apk` locally.\n' "$RUN_ID" "$RUN_ID"
   printf -- '- [ ] Inspect `build/dogfood-visual-pass/%s-visual-audit/screenshots/dogfood-visual-pass/` for release blockers.\n' "$RUN_ID"

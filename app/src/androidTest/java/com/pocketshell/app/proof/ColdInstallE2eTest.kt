@@ -236,12 +236,14 @@ class ColdInstallE2eTest {
         dismissBootstrapSheetIfPresent()
 
         // ---------------------------------------------------------------
-        // Phase 5 — wait for the session picker to mount with the pre-
-        // seeded session row, then tap it to attach. The picker title is
-        // "Tmux sessions" on the success path.
+        // Phase 5 — wait for the folder list (issue #171) to mount with
+        // the pre-seeded session row visible inline under its folder
+        // header, then tap the session to attach. The screen title is
+        // "Folders" — the post-tap surface flipped from the picker
+        // sheet to FolderListScreen.
         // ---------------------------------------------------------------
         compose.waitUntil(timeoutMillis = 30_000) {
-            compose.onAllNodesWithText("Tmux sessions", useUnmergedTree = true)
+            compose.onAllNodesWithText("Folders", useUnmergedTree = true)
                 .fetchSemanticsNodes().isNotEmpty()
         }
         compose.waitUntil(timeoutMillis = 20_000) {

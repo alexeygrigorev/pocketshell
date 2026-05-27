@@ -174,6 +174,30 @@ sealed interface AppDestination {
         val startDirectory: String? = null,
     ) : AppDestination
 
+    /**
+     * Per-host folder list — issue #171.
+     *
+     * The landing destination after a user taps a host card. Replaces
+     * the inline `HostTmuxSessionPickerSheet` route as the default
+     * post-tap surface (per the spike's locked decisions). Sessions
+     * remain reachable from the flat "Show all sessions on this host"
+     * link that the folder screen renders at the bottom.
+     *
+     * SSH connection parameters are required because the screen
+     * issues `tmux list-sessions` and a sibling `list-panes` exec via
+     * `SshConnection` to read each session's `pane_current_path` /
+     * `session_path` for folder grouping.
+     */
+    data class FolderList(
+        val hostId: Long,
+        val hostName: String,
+        val hostname: String,
+        val port: Int,
+        val username: String,
+        val keyPath: String,
+        val passphrase: CharArray?,
+    ) : AppDestination
+
     /** Per-session recurring jobs backed by the host's `tmuxctl jobs` CLI. */
     data class RecurringJobs(
         val hostName: String,

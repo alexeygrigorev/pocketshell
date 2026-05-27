@@ -308,11 +308,14 @@ class HostBootstrapScenarioSuiteTest {
     }
 
     private fun waitForReadyNavigation() {
+        // Issue #171: post-bootstrap navigation now lands on the
+        // FolderListScreen ("Folders" title) instead of the inline
+        // HostTmuxSessionPickerSheet ("Tmux sessions" title).
         compose.waitUntil(timeoutMillis = 20_000) {
-            compose.onAllNodesWithText("Tmux sessions").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithText("Folders").fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag(HOST_BOOTSTRAP_SHEET_TAG).assertDoesNotExist()
-        compose.onNodeWithText("Tmux sessions").assertExists()
+        compose.onNodeWithText("Folders").assertExists()
     }
 
     private fun assertSetupRows(vararg rows: String) {

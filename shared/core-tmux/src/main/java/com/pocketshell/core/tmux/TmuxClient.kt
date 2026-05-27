@@ -137,6 +137,21 @@ public interface TmuxClient : AutoCloseable {
     override fun close()
 
     /**
+     * Issue #238: resize the tmux window for [sessionId] to [cols] columns ×
+     * [rows] rows by issuing `resize-window -t '<sessionId>' -x <cols> -y <rows>`.
+     *
+     * Convenience wrapper over [sendCommand] so callers do not have to build
+     * the literal command string (and worry about escaping the session
+     * id) themselves. Returns the [CommandResponse] from tmux so the caller
+     * can branch on [CommandResponse.isError] for user feedback.
+     *
+     * No-op for non-positive [cols] / [rows]. The session id is wrapped in
+     * single quotes with POSIX `'\''` escaping so session names containing
+     * apostrophes (e.g. `alex's-lab`) still parse correctly.
+     */
+    public suspend fun resizeWindow(sessionId: String, cols: Int, rows: Int): CommandResponse
+
+    /**
      * Issue #215: server-clean teardown of the tmux `-CC` control client.
      *
      * Sends `detach-client` to the tmux server before tearing the SSH
@@ -364,6 +379,24 @@ internal class RealTmuxClient(
             .asSharedFlow()
             .filterIsInstance<ControlEvent.Output>()
             .filter { it.paneId == paneId }
+    }
+
+    override suspend fun resizeWindow(sessionId: String, cols: Int, rows: Int): CommandResponse {
+        // Issue #238: refuse non-positive dimensions outright — a tmux
+        // `resize-window -x 0 -y 0` is an error response that would wipe
+        // out the legitimate prior size. Surface the no-op as a synthetic
+        // error so callers can branch the same way they would on a real
+        // tmux refusal.
+        if (cols <= 0 || rows <= 0) {
+            return CommandResponse(
+                number = -1L,
+                output = listOf("resize-window: non-positive dimensions ${cols}x${rows}"),
+                isError = true,
+            )
+        }
+        return sendCommand(
+            "resize-window -t '${escapeSingleQuoted(sessionId)}' -x $cols -y $rows",
+        )
     }
 
     override suspend fun detachCleanly(timeoutMs: Long) {

@@ -402,8 +402,12 @@ class LongRunningSessionStabilityTest {
         }
         compose.onNodeWithText(hostName, useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        // Issue #171: the post-tap surface is now FolderListScreen,
+        // which renders sessions inline as visible SessionRow nodes
+        // grouped under their folder header. The session name is the
+        // tappable affordance directly.
         compose.waitUntil(timeoutMillis = pickerTimeoutMs) {
-            compose.onAllNodesWithText("Tmux sessions", useUnmergedTree = true)
+            compose.onAllNodesWithText("Folders", useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }

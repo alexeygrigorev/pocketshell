@@ -94,6 +94,28 @@ internal class FakeTmuxClient : TmuxClient {
             .filterIsInstance<ControlEvent.Output>()
             .filter { it.paneId == paneId }
 
+    /**
+     * Issue #238: response to the next [resizeWindow] call. Defaults to a
+     * successful empty response; tests that need to exercise the tmux-error
+     * path overwrite this before invoking the production handler.
+     */
+    var resizeWindowResponse: CommandResponse = CommandResponse(
+        number = 0L,
+        output = emptyList(),
+        isError = false,
+    )
+
+    override suspend fun resizeWindow(sessionId: String, cols: Int, rows: Int): CommandResponse {
+        // Record the equivalent tmux command so existing tests that grep
+        // [sentCommands] for "resize-window" keep working without knowing
+        // the call went through the typed helper. We apply the same
+        // POSIX single-quote escaping the real client uses so a session
+        // name containing `'` round-trips identically through both paths.
+        val escaped = sessionId.replace("'", "'\\''")
+        sentCommands += "resize-window -t '$escaped' -x $cols -y $rows"
+        return resizeWindowResponse
+    }
+
     override fun close() {
         closed = true
         disconnectedSignal.value = true

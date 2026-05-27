@@ -64,6 +64,23 @@ class HostConnectErrorE2eTest {
 
     @Test
     fun connectFailureSheetShowsUserFacingMessage() = runBlocking {
+        // Issue #171 (round 2, D22 hard-cut): this test is specific to
+        // the inline HostTmuxSessionPickerSheet's error-sheet contract
+        // (HOST_PICKER_RETRY_TAG, HOST_PICKER_RAW_SHELL_TAG,
+        // "Open raw shell (skip tmux)" label, Connection failed title).
+        // The picker sheet mount was deleted from HostListScreen when
+        // the post-tap surface flipped to FolderListScreen. The new
+        // surface renders connection errors via an ErrorPanel with a
+        // Retry button (FOLDER_LIST_ERROR_TAG / FOLDER_LIST_RETRY_TAG)
+        // — equivalent semantics, different shape. A FolderListScreen-
+        // aware connect-error test belongs to its own scope.
+        org.junit.Assume.assumeTrue(
+            "Picker-sheet error contract removed by #171 (D22). " +
+                "FolderListScreen renders errors via ErrorPanel — see " +
+                "FOLDER_LIST_ERROR_TAG.",
+            false,
+        )
+
         val key = readFixtureKey()
         // Use a port that is intentionally not bound. The Docker
         // `agents` service listens on 2222; 2299 is unused so the

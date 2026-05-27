@@ -87,6 +87,18 @@ class ShowKeyboardChipE2eTest {
 
     @Test
     fun showKeyboardChipBringsUpSoftInput() = runBlocking {
+        // Issue #171 (round 2, D22 hard-cut): the "Continue with SSH"
+        // raw-shell escape hatch was deleted when the host-tap surface
+        // flipped to FolderListScreen. The chip behaviour this test
+        // exercises is identical on the tmux-attach path that
+        // `ShowKeyboardChipDockerTest` already covers, so skipping this
+        // raw-SSH-only variant is acceptable per D22 (no compatibility
+        // shim for a deleted surface).
+        org.junit.Assume.assumeTrue(
+            "Raw-SSH escape hatch removed by #171 (D22). Tmux-attach chip behaviour is covered by ShowKeyboardChipDockerTest.",
+            false,
+        )
+
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key), port = DEFAULT_PORT)
         val hostName = "ShowKeyboard ${System.currentTimeMillis()}"
@@ -105,10 +117,7 @@ class ShowKeyboardChipE2eTest {
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
 
-        // The Docker fixture publishes tmux sessions, so the host picker
-        // shows the "Continue with SSH" raw-shell escape hatch. The
-        // raw-SSH branch lands on `SessionScreen` which is the screen the
-        // issue targets first.
+        // (Unreachable — Assume.assumeTrue(false) above skips the test.)
         compose.waitUntil(timeoutMillis = 30_000) {
             compose.onAllNodesWithText("Continue with SSH", useUnmergedTree = true)
                 .fetchSemanticsNodes()

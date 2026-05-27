@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -311,6 +312,21 @@ public fun TmuxSessionScreen(
         }
     }
 
+    // Issue #238: collect the view model's one-shot user-facing messages
+    // (currently just the manual "Resize session" success / error string)
+    // and render them as a short Toast. Keying on the viewmodel reference
+    // means the collector lives for as long as the screen is composed
+    // against the same VM instance — every emission is delivered exactly
+    // once. We use Toast (not a Snackbar) because the issue body
+    // explicitly asks for one ("Visible toast on success") and because
+    // Toast survives the screen being torn down mid-deliver, which a
+    // Snackbar inside the disposed Compose tree wouldn't.
+    LaunchedEffect(viewModel) {
+        viewModel.userMessages.collect { message ->
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        }
+    }
+
     // Route inline-dictation transcripts into the currently focused pane.
     // The collector re-binds whenever the focused pane or dictation mode
     // changes so we always write into the pane the user is looking at, not
@@ -592,6 +608,16 @@ public fun TmuxSessionScreen(
                     onSwitchWindow = {
                         moreExpanded = false
                         showWindowSwitcher = true
+                    },
+                    // Issue #238: maintainer-asked "Resize session" — snap
+                    // tmux session window dims to phone cols × rows. The
+                    // viewmodel reads the dimensions Compose has already
+                    // propagated via [TmuxSessionViewModel.resizeRemotePty]
+                    // and posts a [TmuxSessionViewModel.userMessages]
+                    // string the LaunchedEffect below surfaces as a Toast.
+                    onResizeSession = {
+                        moreExpanded = false
+                        viewModel.requestManualResize()
                     },
                 )
             }
@@ -1416,6 +1442,15 @@ internal const val TMUX_CONNECTING_CANCEL_TAG = "tmux:session:connecting:cancel"
  */
 internal const val SLOW_CONNECT_HINT_AFTER_MS: Long = 5_000L
 internal const val CANCEL_AVAILABLE_AFTER_MS: Long = 15_000L
+/**
+ * Issue #238: stable test tag for the kebab "Resize session" menu item.
+ * The maintainer's dogfood report asks for a manual button that snaps the
+ * remote tmux session window to the phone's current Compose grid dims via
+ * `tmux resize-window`. Connected E2E test
+ * [TmuxResizeSessionE2eTest] asserts the item is present and that tapping
+ * it drops the remote `#{window_width}×#{window_height}` to phone dims.
+ */
+internal const val TMUX_RESIZE_BUTTON_TAG = "tmux:resize-button"
 /** Issue #158: the WindowStrip is the per-session window tabs row. Hidden when only one window exists. */
 internal const val TMUX_WINDOW_STRIP_TAG = "tmux:window-strip"
 /**
@@ -2826,6 +2861,12 @@ private fun TmuxMoreMenu(
     // switch to.
     multipleWindows: Boolean = false,
     onSwitchWindow: () -> Unit = {},
+    // Issue #238: maintainer-asked manual "Resize session" affordance.
+    // Snaps the tmux session window to the phone's current Compose grid
+    // via `tmux resize-window`. Lives under "On this host" rather than
+    // "In this session" because the resize targets the session window
+    // as a whole — same scope as Rename/Kill session.
+    onResizeSession: () -> Unit = {},
 ) {
     Box(
         modifier = Modifier.fillMaxWidth(),
@@ -2866,6 +2907,16 @@ private fun TmuxMoreMenu(
             DropdownMenuItem(text = { Text("+ New session") }, onClick = onCreateSession)
             DropdownMenuItem(text = { Text("Switch session") }, onClick = onSwitchSession)
             DropdownMenuItem(text = { Text("Rename session") }, onClick = onRenameSession)
+            // Issue #238: manual "Resize session" — issues `tmux resize-window`
+            // against the active session with the phone's current Compose
+            // grid (cols × rows) so a session previously sized by a desktop
+            // terminal snaps to the phone's viewport. Explicitly NOT
+            // automatic on attach per maintainer ask.
+            DropdownMenuItem(
+                text = { Text("Resize session") },
+                onClick = onResizeSession,
+                modifier = Modifier.testTag(TMUX_RESIZE_BUTTON_TAG),
+            )
             DropdownMenuItem(text = { Text("Kill session") }, onClick = onKillSession)
             HorizontalDivider()
             DropdownMenuItem(text = { Text("Recurring jobs") }, onClick = onOpenJobs)

@@ -40,9 +40,14 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
@@ -184,6 +189,25 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     private val _windowKillError: MutableStateFlow<String?> = MutableStateFlow(null)
     public val windowKillError: StateFlow<String?> = _windowKillError.asStateFlow()
+
+    /**
+     * Issue #238: one-shot user-facing strings the screen renders as a
+     * Toast. Used by the manual "Resize session" kebab item to surface
+     * `"Resized to <cols>×<rows>"` on success and an error string when
+     * tmux returns `%error` (or the transport throws).
+     *
+     * Modeled as a [SharedFlow] with `extraBufferCapacity` and
+     * [BufferOverflow.DROP_OLDEST] so a rapid double-tap that fires two
+     * messages before the screen has consumed the first one drops the
+     * stale one instead of suspending the producer. The screen consumes
+     * via a `LaunchedEffect` keyed on the flow.
+     */
+    private val _userMessages: MutableSharedFlow<String> = MutableSharedFlow(
+        replay = 0,
+        extraBufferCapacity = 4,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    public val userMessages: SharedFlow<String> = _userMessages.asSharedFlow()
 
     // Voice Command-mode planner state — mirrors
     // [com.pocketshell.app.session.SessionViewModel]'s voice planner so the
@@ -1837,11 +1861,89 @@ public class TmuxSessionViewModel @Inject constructor(
         remoteRows = rows
         bridgeScope.launch {
             runCatching {
-                client.sendCommand(
-                    "resize-window -t '${escapeSingleQuoted(target.sessionName)}' " +
-                        "-x $columns -y $rows",
-                )
+                // Issue #238: route through the typed [TmuxClient.resizeWindow]
+                // helper so the manual "Resize session" path and this
+                // automatic layout-driven path share one escaping +
+                // wire-format implementation. The recorded `sentCommands`
+                // shape ("resize-window -t '<name>' -x <cols> -y <rows>")
+                // is unchanged — see [FakeTmuxClient.resizeWindow].
+                client.resizeWindow(target.sessionName, columns, rows)
             }
+        }
+    }
+
+    /**
+     * Issue #238: snap the remote tmux session window to the phone's
+     * current Compose terminal grid dimensions on demand.
+     *
+     * The maintainer's dogfood pain point: when PocketShell attaches to a
+     * tmux session previously sized by a desktop terminal, the input area
+     * can be off-screen because the session window is still at the
+     * desktop's 200×50 (or similar) layout. This handler runs `tmux
+     * resize-window -t '<session>' -x <cols> -y <rows>` against the
+     * latest known phone dimensions ([remoteColumns] / [remoteRows] —
+     * already propagated to the remote in the automatic path by
+     * [resizeRemotePty] on every layout pass since commit `39cddd8`) so
+     * tmux re-flows the inner panes for the phone.
+     *
+     * Per the issue's explicit scope: NO automatic on-attach behaviour.
+     * This handler is only invoked by the user tapping "Resize session"
+     * in the kebab.
+     *
+     * Posts a one-shot [userMessages] string on completion — `"Resized
+     * to <cols>×<rows>"` on success, a short error string when tmux
+     * responds with `%error` or the transport throws. The screen
+     * renders the message via `Toast.makeText(...).show()`. Failure
+     * cases (no live client, no active target, zero dimensions) post
+     * a descriptive message rather than silently no-op so the user
+     * never sees a tap with no feedback.
+     */
+    public fun requestManualResize() {
+        val client = clientRef
+        val target = activeTarget
+        val cols = remoteColumns
+        val rows = remoteRows
+        if (client == null || target == null) {
+            _userMessages.tryEmit("Not connected — can't resize yet.")
+            return
+        }
+        if (cols <= 0 || rows <= 0) {
+            // Compose layout has not laid the terminal out yet. The user
+            // tapping Resize before the first pane finishes laying out
+            // (extremely rare — the kebab is reachable only after the
+            // session screen has rendered) gets explicit feedback
+            // instead of a silent no-op.
+            _userMessages.tryEmit("Phone size unknown yet — try again in a moment.")
+            return
+        }
+        bridgeScope.launch {
+            val result = runCatching {
+                client.resizeWindow(target.sessionName, cols, rows)
+            }
+            val message = result.fold(
+                onSuccess = { response ->
+                    if (response.isError) {
+                        val detail = response.output.joinToString(separator = " ").trim()
+                        if (detail.isNotEmpty()) "Resize failed: $detail" else "Resize failed."
+                    } else {
+                        // The locked-in dimensions are now what the remote
+                        // tmux session is on. Mirror them into
+                        // [remoteColumns] / [remoteRows] so the next layout
+                        // pass's idempotency check in [resizeRemotePty]
+                        // sees them as already-applied — without this, a
+                        // user tap immediately followed by a layout
+                        // recomputation would dispatch a duplicate
+                        // resize-window for the same dimensions.
+                        remoteColumns = cols
+                        remoteRows = rows
+                        "Resized to ${cols}×${rows}"
+                    }
+                },
+                onFailure = { error ->
+                    "Resize failed: ${error.message ?: error.javaClass.simpleName}"
+                },
+            )
+            _userMessages.tryEmit(message)
         }
     }
 
@@ -2069,6 +2171,14 @@ public class TmuxSessionViewModel @Inject constructor(
             sendNamedKey(paneId, named)
         }
     }
+
+    /**
+     * Issue #238 test seam: snapshot the cached remote dimensions
+     * ([remoteColumns], [remoteRows]) so unit tests can assert the
+     * [requestManualResize] path mirrors them into the local cache
+     * after a successful resize-window dispatch.
+     */
+    internal fun remoteDimensionsForTest(): Pair<Int, Int> = remoteColumns to remoteRows
 
     /**
      * Quote a string for inclusion inside single quotes in a tmux command

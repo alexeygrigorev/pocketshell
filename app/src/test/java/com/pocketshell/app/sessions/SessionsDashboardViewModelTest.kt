@@ -1129,5 +1129,7 @@ class SessionsDashboardViewModelTest {
         // configured command name.
         override suspend fun detachCleanly(timeoutMs: Long) =
             delegate.detachCleanly(timeoutMs)
+        override suspend fun resizeWindow(sessionId: String, cols: Int, rows: Int) =
+            delegate.resizeWindow(sessionId, cols, rows)
     }
 }

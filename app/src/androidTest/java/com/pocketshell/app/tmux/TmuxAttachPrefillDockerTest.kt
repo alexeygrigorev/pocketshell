@@ -158,15 +158,24 @@ class TmuxAttachPrefillDockerTest {
 
             val attachTapAt = SystemClock.elapsedRealtime()
             recordStamp("picker_tap")
+            // Issue #171: click via the session-name text in the merged
+            // tree so the click bubbles up to the SessionRow's
+            // combinedClickable parent. With Compose's semantics merging
+            // the row's onClick fires when the text inside it is tapped.
             compose.onNodeWithText(sessionName).performClick()
             // The compose route swap to the terminal screen. Issue #216:
             // the visible "Terminal" tab label is only rendered when the
             // consolidated tab pill (#189) has 2+ entries — i.e. an
             // agent has been detected. The seeded session here is a
             // shell-only pane, so we assert on the screen-root tag
-            // instead. The waitUntil envelope absorbs the brief gap
-            // between picker tap and the tmux route taking over.
-            compose.waitUntil(timeoutMillis = 10_000) {
+            // instead. With the FolderListScreen-driven flow (issue
+            // #171) the TmuxSessionScreen also renders its compact
+            // chrome instead of the full Terminal/Conversation tab row
+            // depending on WindowInsets.ime state on the AVD, so the
+            // screen-tag selector is robust against both modes. The
+            // waitUntil envelope absorbs the brief gap between picker
+            // tap and the tmux route taking over.
+            compose.waitUntil(timeoutMillis = 20_000) {
                 compose.onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
                     .fetchSemanticsNodes()
                     .isNotEmpty()

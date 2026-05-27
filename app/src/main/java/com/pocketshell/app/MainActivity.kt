@@ -33,6 +33,7 @@ import com.pocketshell.app.jobs.RecurringJobsScreen
 import com.pocketshell.app.jobs.RecurringJobsViewModel
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.portfwd.PortForwardPanelScreen
+import com.pocketshell.app.projects.FolderListScreen
 import com.pocketshell.app.projects.WatchedFoldersScreen
 import com.pocketshell.app.projects.WatchedFoldersViewModel
 import com.pocketshell.app.session.SessionScreen
@@ -260,9 +261,16 @@ private fun AppNavigator(
             // existing wiring (the strip uses the same callback so the
             // two routes always agree).
             onOpenUsage = { navigate(AppDestination.Usage) },
-            onOpenSession = { host, keyPath, passphrase ->
+            // Issue #171: host-tap now routes to the new folder list
+            // (the default destination after a host tap). The folder
+            // list owns its own probe + grouping; it surfaces the
+            // existing flat session list via the "Show all sessions on
+            // this host" link. The previous `onOpenSession` /
+            // `onOpenTmuxHostSession` callbacks (picker-sheet routes)
+            // were removed from `HostListScreen` per D22 hard-cut.
+            onOpenFolderList = { host, keyPath, passphrase ->
                 navigate(
-                    AppDestination.Session(
+                    AppDestination.FolderList(
                         hostId = host.id,
                         hostName = host.name,
                         hostname = host.hostname,
@@ -270,21 +278,6 @@ private fun AppNavigator(
                         username = host.username,
                         keyPath = keyPath,
                         passphrase = passphrase,
-                    ),
-                )
-            },
-            onOpenTmuxHostSession = { host, keyPath, passphrase, sessionName, startDirectory ->
-                navigate(
-                    AppDestination.TmuxSession(
-                        hostId = host.id,
-                        hostName = host.name,
-                        hostname = host.hostname,
-                        port = host.port,
-                        username = host.username,
-                        keyPath = keyPath,
-                        passphrase = passphrase,
-                        sessionName = sessionName,
-                        startDirectory = startDirectory,
                     ),
                 )
             },
@@ -489,6 +482,58 @@ private fun AppNavigator(
                 onBack = ::back,
             )
         }
+
+        // Issue #171: per-host folder list — the default destination
+        // after a host tap. Replaces the inline picker sheet for the
+        // post-tap surface; routes onward to `TmuxSession` (via tap)
+        // and the existing `HostTmuxSessionPickerSheet` (via the
+        // "Show all sessions on this host" fallback link).
+        is AppDestination.FolderList -> FolderListScreen(
+            hostId = dest.hostId,
+            hostName = dest.hostName,
+            hostname = dest.hostname,
+            port = dest.port,
+            username = dest.username,
+            keyPath = dest.keyPath,
+            passphrase = dest.passphrase,
+            onBack = ::back,
+            onOpenSession = { sessionName, startDirectory ->
+                navigate(
+                    AppDestination.TmuxSession(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        sessionName = sessionName,
+                        startDirectory = startDirectory,
+                    ),
+                )
+            },
+            onSessionCreated = { sessionName, cwd ->
+                // Issue #171 round 2: the SessionTypePickerSheet has
+                // already created the tmux session on the remote (and
+                // optionally `send-keys`'d the agent CLI), so the only
+                // remaining step is to attach. We route to TmuxSession
+                // with `-A` semantics — if the create path collided on
+                // an existing session name, the attach falls through.
+                navigate(
+                    AppDestination.TmuxSession(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        sessionName = sessionName,
+                        startDirectory = cwd,
+                    ),
+                )
+            },
+        )
 
         is AppDestination.RecurringJobs -> {
             val jobsViewModel = hiltViewModel<RecurringJobsViewModel>()

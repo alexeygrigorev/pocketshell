@@ -93,18 +93,26 @@ class WalkthroughVisualScreenshotTest {
             )
 
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+            // Issue #171: post-tap surface is the FolderListScreen
+            // ("Folders" title) with sessions visible inline as
+            // SessionRow nodes under their folder header. The seeded
+            // session lives in its session_path so it surfaces under a
+            // folder row; tapping its name routes to TmuxSession.
             compose.waitUntil(timeoutMillis = 20_000) {
-                compose.onAllNodesWithText("Tmux sessions").fetchSemanticsNodes().isNotEmpty() &&
-                    compose.onAllNodesWithText("Continue with SSH").fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodesWithText("Folders").fetchSemanticsNodes().isNotEmpty() &&
+                    compose.onAllNodesWithText(tmuxSessionName).fetchSemanticsNodes().isNotEmpty()
             }
-            val sessionPickerScreenshot = WalkthroughScreenshotArtifacts.capture("02-host-setup-session-picker")
+            val sessionPickerScreenshot = WalkthroughScreenshotArtifacts.capture("02-host-setup-folder-list")
             assertTextsClearOfNavigationBar(
-                texts = listOf("Tmux sessions", "+ New session", "Continue with SSH"),
-                screenshotName = "02-host-setup-session-picker.png",
+                texts = listOf("Folders", tmuxSessionName),
+                screenshotName = "02-host-setup-folder-list.png",
                 artifact = sessionPickerScreenshot,
             )
 
-            compose.onNodeWithText("Continue with SSH").performClick()
+            // Issue #171: folders-first nav — tapping the session row
+            // under its folder routes directly to TmuxSession (no
+            // "Continue with SSH" intermediary screen).
+            compose.onNodeWithText(tmuxSessionName).performClick()
             // Issue #216: the visible "Terminal" tab label is only
             // rendered when the consolidated tab pill (#189) has 2+
             // entries — i.e. an agent has been detected. The walkthrough
@@ -116,7 +124,6 @@ class WalkthroughVisualScreenshotTest {
                     .isNotEmpty()
             }
             compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
-            compose.onNodeWithText("tmux ls").assertExists()
             waitForSessionConnectUiToSettle()
 
             sendCommandViaComposer("printf '%s\\n' '$marker'")
@@ -219,7 +226,23 @@ class WalkthroughVisualScreenshotTest {
         // Issue #221: the redundant `dictate` chip was removed; the
         // right-edge mic FAB is the single dictate entry point. Use its
         // stable test tag rather than the chip caption.
-        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).performClick()
+        //
+        // Issue #171 (round 3 rebase): with the folders-first flow
+        // arriving on TmuxSessionScreen the AVD intermittently reports
+        // `WindowInsets.ime` as visible right after route arrival,
+        // which routes the bottom band to `KeyBarWithMic` rather than
+        // `BottomChipControls` (the only host of SESSION_MIC_FAB_TAG).
+        // Force the IME closed and wait for the mic FAB to enter the
+        // semantics tree before tapping — same robustness pattern
+        // round 2 applied to `TmuxAttachPrefillDockerTest`'s
+        // route-arrival assertion.
+        hideSoftKeyboard()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(SESSION_MIC_FAB_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(SESSION_MIC_FAB_TAG, useUnmergedTree = true).performClick()
         compose.onNodeWithText("Prompt Composer").assertExists()
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(command)
         WalkthroughScreenshotArtifacts.capture("05-composer-draft")

@@ -27,6 +27,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.Tag
 import com.pocketshell.uikit.model.TagKind
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
@@ -80,6 +81,17 @@ fun SessionRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     onLongClick: (() -> Unit)? = null,
+    /**
+     * Issue #171: agent classifier that tints the leading badge. The
+     * mockup-faithful default (`null`) preserves the original
+     * `AccentSoft` / `Accent` cyan rendering used by the dashboard
+     * (#202) so existing call sites don't shift visually. New
+     * folder-list call sites map their `AgentKind` -> [SessionAgentKind]
+     * so plain-shell sessions read as neutral, Claude reads as cyan,
+     * Codex / OpenCode read as purple, and edge states (probing /
+     * exited) read as amber / muted per the spike's locked tokens.
+     */
+    agentKind: SessionAgentKind? = null,
 ) {
     Row(
         modifier = modifier
@@ -107,11 +119,19 @@ fun SessionRow(
         // issue #202, the legend at the top of the dashboard spells
         // this out so a first-time user does not assume the cyan badge
         // means "Claude" — agent-kind has its own labelled chip.
+        //
+        // Issue #171: when [agentKind] is supplied (folder-list call
+        // path), the badge tint switches to the kind's semantic colour
+        // so a glance at the folder detail screen surfaces
+        // shell-vs-agent at the row's most prominent visual anchor.
+        // The fallback (`null`) preserves the original cyan rendering
+        // so existing dashboard call sites are unchanged.
+        val badgeTint = agentBadgeColors(agentKind)
         Box(
             modifier = Modifier
                 .size(38.dp)
                 .background(
-                    color = PocketShellColors.AccentSoft,
+                    color = badgeTint.background,
                     shape = RoundedCornerShape(10.dp),
                 )
                 .semantics { contentDescription = "Session initial $badge" },
@@ -119,7 +139,7 @@ fun SessionRow(
         ) {
             Text(
                 text = badge.take(1).uppercase(),
-                color = PocketShellColors.Accent,
+                color = badgeTint.foreground,
                 fontFamily = JetBrainsMonoFamily,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -202,6 +222,57 @@ fun SessionRow(
  * If a downstream caller needs standalone tag rendering later, promote
  * this.
  */
+/**
+ * Two-tone palette for the leading badge — issue #171.
+ *
+ * Returned for the resolved [SessionAgentKind]: the [background] is the
+ * 38dp tile fill; [foreground] is the mono initial drawn on top. The
+ * mapping mirrors the spike's locked tokens (`Accent` for Claude,
+ * `Purple` for Codex/OpenCode, `TextSecondary` for plain shell,
+ * `Amber` for probing, `TextMuted` for exited) and uses the existing
+ * `AccentSoft` translucent-cyan default when [kind] is null so existing
+ * dashboard rows are unchanged.
+ */
+internal data class SessionBadgeColors(
+    val background: androidx.compose.ui.graphics.Color,
+    val foreground: androidx.compose.ui.graphics.Color,
+)
+
+internal fun agentBadgeColors(kind: SessionAgentKind?): SessionBadgeColors =
+    when (kind) {
+        null -> SessionBadgeColors(
+            background = PocketShellColors.AccentSoft,
+            foreground = PocketShellColors.Accent,
+        )
+        SessionAgentKind.Claude -> SessionBadgeColors(
+            background = PocketShellColors.AccentSoft,
+            foreground = PocketShellColors.Accent,
+        )
+        SessionAgentKind.Codex,
+        SessionAgentKind.OpenCode,
+        -> SessionBadgeColors(
+            // 12% purple — same alpha as AccentSoft's 0.12 cyan so the
+            // visual weight matches across agent kinds.
+            background = PocketShellColors.Purple.copy(alpha = 0.12f),
+            foreground = PocketShellColors.Purple,
+        )
+        SessionAgentKind.Shell -> SessionBadgeColors(
+            // Neutral surface-elev background with a secondary-text
+            // initial — plain tmux pane reads as "not an agent" without
+            // shouting for attention.
+            background = PocketShellColors.SurfaceElev,
+            foreground = PocketShellColors.TextSecondary,
+        )
+        SessionAgentKind.Probing -> SessionBadgeColors(
+            background = PocketShellColors.Amber.copy(alpha = 0.12f),
+            foreground = PocketShellColors.Amber,
+        )
+        SessionAgentKind.Exited -> SessionBadgeColors(
+            background = PocketShellColors.SurfaceElev,
+            foreground = PocketShellColors.TextMuted,
+        )
+    }
+
 @Composable
 private fun TagChip(tag: Tag) {
     val (textColor: Color, bgColor: Color) = when (tag.kind) {

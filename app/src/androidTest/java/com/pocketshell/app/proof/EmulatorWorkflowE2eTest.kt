@@ -74,16 +74,21 @@ class EmulatorWorkflowE2eTest {
 
     @Test
     fun realAppRawSshJourneyRunsShellCommandsAndInteractiveTui() = runBlocking {
-        // STOPGAP — tracked in #207. The CI emulator has been failing the
-        // workflow E2E journeys on every push since recent merges.
-        // Symptom is an assertion failure ("expected visible terminal
-        // text ...") rather than a crash, and the test still passes
-        // locally. Gate the test on CI so the main branch CI signal
-        // returns to green while the real root cause is investigated in
-        // parallel under #207. Same skip pattern as #132 (a4ccbff).
-        Assume.assumeFalse(
-            "STOPGAP for #207 — passes locally, fails intermittently on CI; root cause under investigation.",
-            TerminalTestTimeouts.isRunningOnCi(),
+        // Issue #171 (round 2, D22 hard-cut): the "Continue with SSH"
+        // raw-shell escape hatch lived on the inline
+        // HostTmuxSessionPickerSheet that we deleted when the post-tap
+        // surface flipped to FolderListScreen. The folder UI is
+        // tmux-first; raw-SSH attach paths are no longer reachable
+        // from the dashboard nav graph. The journey covered by this
+        // test (open raw SSH → interactive TUI) is now an
+        // architecturally dead path on the host-list flow. Skip the
+        // test rather than carry a back-compat shim — per D22 the
+        // older surface is deleted in the same PR that introduces the
+        // replacement.
+        Assume.assumeTrue(
+            "Raw-SSH escape hatch removed by #171 (D22 hard-cut). " +
+                "Tmux-attach + folder grouping is the only post-host-tap path.",
+            false,
         )
         // Issue #143: the Alpine MOTD ("Welcome to Alpine!" … "/etc/motd")
         // renders before the remote shell finishes attaching the PTY and
@@ -281,8 +286,12 @@ class EmulatorWorkflowE2eTest {
         }
         compose.onNodeWithText(hostName, useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        // Issue #171: the post-tap surface is now the FolderListScreen,
+        // titled "Folders". Sessions render inline as visible
+        // SessionRow nodes under their folder header so callers can
+        // tap a session by its name directly.
         compose.waitUntil(timeoutMillis = 20_000) {
-            compose.onAllNodesWithText("Tmux sessions", useUnmergedTree = true)
+            compose.onAllNodesWithText("Folders", useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }

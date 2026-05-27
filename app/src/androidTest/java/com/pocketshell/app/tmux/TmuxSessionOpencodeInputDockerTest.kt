@@ -81,11 +81,12 @@ import java.security.MessageDigest
  *   1. Persist a host row pointing at the `pocketshell-test:agents`
  *      container (port 2222, tmux 3.6 + tmuxctl) with
  *      `tmuxInstalled = true` so the host tap takes the bootstrap
- *      fast-path and opens the picker sheet immediately.
- *   2. Launch [MainActivity], tap the host row, click "+ New session"
- *      and Create — same user flow as the host-list-to-tmux-attach
- *      path, just without depending on a particular pre-seeded session
- *      name. This routes through `onOpenTmuxHostSession` ->
+ *      fast-path and opens the FolderListScreen (issue #171) immediately.
+ *   2. Pre-seed a detached tmux session named `SESSION_NAME`, launch
+ *      [MainActivity], tap the host row, then tap the seeded session
+ *      by its name inside the folder list — the post-tap surface is
+ *      FolderListScreen (issue #171) which renders sessions inline as
+ *      tappable rows. The tap routes to
  *      [com.pocketshell.app.tmux.TmuxSessionScreen] (the screen at the
  *      heart of the reopened-#102 bug).
  *   3. Wait for the per-pane [TerminalSurface] to mount and the tmux
@@ -177,9 +178,16 @@ class TmuxSessionOpencodeInputDockerTest {
         // run).
         killStaleTmuxSession(sshKey, sshPort)
 
+        // Issue #171: pre-seed the tmux session directly via SSH so the
+        // FolderListScreen renders it under a known folder row. The
+        // old picker-driven "+ New session" path is replaced by the
+        // SessionTypePickerSheet; pre-seeding avoids depending on the
+        // generated session-name suffix the sheet emits.
+        seedTmuxSession(sshKey, sshPort, SESSION_NAME)
+
         val hostRowTag: String = persistHost(appContext, key, sshPort)
         try {
-            // ----- Launch app and navigate host -> picker -> "+ New session".
+            // ----- Launch app and navigate host -> FolderListScreen.
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
             compose.waitUntil(timeoutMillis = 10_000) {
                 compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
@@ -189,21 +197,16 @@ class TmuxSessionOpencodeInputDockerTest {
             recordStamp("host_row_visible")
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
 
-            // The host tap opens the picker sheet. Wait for "+ New
-            // session" to be visible (present on Ready / Fallback /
-            // "no sessions found" branches).
+            // Wait for the FolderListScreen to mount, then tap the
+            // pre-seeded session by its name.
             compose.waitUntil(timeoutMillis = ATTACH_TIMEOUT_MS) {
-                compose.onAllNodesWithText("+ New session").fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodesWithText(SESSION_NAME, useUnmergedTree = true)
+                    .fetchSemanticsNodes().isNotEmpty()
             }
             recordStamp("picker_visible")
 
             val attachTapAt = SystemClock.elapsedRealtime()
-            compose.onNodeWithText("+ New session").performClick()
-            compose.waitUntil(timeoutMillis = 5_000) {
-                compose.onAllNodesWithText("Session name").fetchSemanticsNodes().isNotEmpty()
-            }
-            compose.onNodeWithText("Session name").performTextInput(SESSION_NAME)
-            compose.onNodeWithText("Create").performClick()
+            compose.onNodeWithText(SESSION_NAME, useUnmergedTree = true).performClick()
 
             compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertIsDisplayed()
             recordStamp("tmux_session_screen_mounted")
@@ -355,6 +358,30 @@ class TmuxSessionOpencodeInputDockerTest {
             timeoutMs = 15_000,
         ).mapCatching { session ->
             session.use { it.exec("tmux kill-session -t '$SESSION_NAME' 2>/dev/null || true") }
+        }
+    }
+
+    /**
+     * Issue #171: pre-seed a detached tmux session with [sessionName]
+     * so the FolderListScreen renders it under a folder row. Used in
+     * place of the old picker-sheet "+ New session" path.
+     */
+    private suspend fun seedTmuxSession(
+        sshKey: SshKey.Pem,
+        sshPort: Int,
+        sessionName: String,
+    ) {
+        SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = sshPort,
+            user = DEFAULT_USER,
+            key = sshKey,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use {
+                it.exec("tmux new-session -d -s '$sessionName' -c /tmp")
+            }
         }
     }
 

@@ -64,9 +64,6 @@ import com.pocketshell.app.bootstrap.HostBootstrapSheet
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.DASHBOARD_KILL_ERROR_BANNER_TAG
-import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
-import com.pocketshell.app.sessions.HostTmuxSessionPickerSheet
-import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.sessions.SessionsDashboardViewModel
 import com.pocketshell.app.sessions.SessionsSection
 import com.pocketshell.core.storage.entity.HostEntity
@@ -121,14 +118,18 @@ fun HostListScreen(
     // that haven't wired the destination yet keep compiling, but the
     // production nav graph in `MainActivity` always supplies it.
     onOpenScan: () -> Unit = {},
-    onOpenSession: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit,
-    onOpenTmuxHostSession: (
-        HostEntity,
-        keyPath: String,
-        passphrase: CharArray?,
-        sessionName: String,
-        startDirectory: String?,
-    ) -> Unit = { _, _, _, _, _ -> },
+    /**
+     * Issue #171: navigate to the per-host folder list — the new default
+     * destination after a host tap. Replaces the inline
+     * `HostTmuxSessionPickerSheet` route as the post-tap surface.
+     *
+     * The previous `onOpenSession` / `onOpenTmuxHostSession` callbacks
+     * were removed when the picker sheet mount was dropped from this
+     * screen — those routes lived only on the picker's "Continue with
+     * SSH" / row-attach branches and are now owned by [FolderListScreen]
+     * and its onward navigation in MainActivity (per D22 hard-cut).
+     */
+    onOpenFolderList: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit = { _, _, _ -> },
     onOpenPortForwardPanel: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit = { _, _, _ -> },
     /**
      * Issue #206: per-host watched-folders config screen. The kebab path
@@ -150,7 +151,6 @@ fun HostListScreen(
     modifier: Modifier = Modifier,
     viewModel: HostListViewModel = hiltViewModel(),
     sessionsViewModel: SessionsDashboardViewModel = hiltViewModel(),
-    hostTmuxSessionPickerViewModel: HostTmuxSessionPickerViewModel = hiltViewModel(),
     onOpenTmuxSession: (ActiveTmuxClients.Entry, sessionName: String, startDirectory: String?) -> Unit =
         { _, _, _ -> },
 ) {
@@ -162,7 +162,6 @@ fun HostListScreen(
     // [ActiveTmuxClients] registry onto a flat id-set so the derived
     // status reacts the moment a register / unregister happens.
     val attachedHostIds by viewModel.attachedHostIds.collectAsState()
-    val hostTmuxPickerState by hostTmuxSessionPickerViewModel.state.collectAsState()
     val updateInfo by viewModel.updateAvailable.collectAsState()
     val bootstrapState by viewModel.bootstrapState.collectAsState()
     val bootstrapHostName by viewModel.bootstrapHostName.collectAsState()
@@ -231,8 +230,7 @@ fun HostListScreen(
     // unlock the user already cleared for a session start.
     val watchedFoldersRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
     val currentHosts by rememberUpdatedState(hosts)
-    val currentOpenSession by rememberUpdatedState(onOpenSession)
-    val currentOpenTmuxHostSession by rememberUpdatedState(onOpenTmuxHostSession)
+    val currentOpenFolderList by rememberUpdatedState(onOpenFolderList)
     val currentOpenPortForwardPanel by rememberUpdatedState(onOpenPortForwardPanel)
     val currentOpenWatchedFolders by rememberUpdatedState(onOpenWatchedFolders)
     var pendingPassphrase by remember { mutableStateOf<PendingPassphraseRequest?>(null) }
@@ -331,20 +329,22 @@ fun HostListScreen(
         viewModel.reprobeUnknownHostsOnce()
     }
 
-    // Fire `onOpenSession` once the ViewModel marks the pending
-    // navigation ready. The ViewModel handles the cache-hit fast path
-    // (immediate ready) as well as the sheet-driven slow path
-    // (ready after Skip / Continue / Close).
+    // Fire navigation once the ViewModel marks the pending route ready.
+    // The ViewModel handles the cache-hit fast path (immediate ready)
+    // as well as the sheet-driven slow path (ready after Skip /
+    // Continue / Close).
+    //
+    // Issue #171: the post-tap surface flipped from the inline
+    // `HostTmuxSessionPickerSheet` to the new `FolderListScreen`. The
+    // picker sheet stays mounted below for the legacy paths that still
+    // need the cwd-blind session list (no current call sites in v1, but
+    // the wiring is preserved so the "Show all sessions on this host"
+    // fallback inside the folder list can route back through it if a
+    // future iteration wants the bottom-sheet UX).
     LaunchedEffect(pendingNavigation) {
         val pending = pendingNavigation
         if (pending != null && pending.ready) {
-            hostTmuxSessionPickerViewModel.load(
-                HostTmuxSessionPickerRequest(
-                    host = pending.host,
-                    keyPath = pending.keyPath,
-                    passphrase = pending.passphrase,
-                ),
-            )
+            currentOpenFolderList(pending.host, pending.keyPath, pending.passphrase)
             viewModel.consumePendingNavigation()
         }
     }
@@ -686,29 +686,12 @@ fun HostListScreen(
             )
         }
 
-        HostTmuxSessionPickerSheet(
-            state = hostTmuxPickerState,
-            onAttach = { request, sessionName, startDirectory ->
-                hostTmuxSessionPickerViewModel.dismiss()
-                currentOpenTmuxHostSession(
-                    request.host,
-                    request.keyPath,
-                    request.passphrase,
-                    sessionName,
-                    startDirectory,
-                )
-            },
-            onRawSsh = { request ->
-                hostTmuxSessionPickerViewModel.dismiss()
-                currentOpenSession(request.host, request.keyPath, request.passphrase)
-            },
-            onDismiss = hostTmuxSessionPickerViewModel::dismiss,
-            // Issue #109: Retry rebuilds the same SSH connect attempt
-            // from the saved request; Cancel aborts the in-flight
-            // connect coroutine and returns the sheet to Idle.
-            onRetry = hostTmuxSessionPickerViewModel::retry,
-            onCancel = hostTmuxSessionPickerViewModel::cancelLoading,
-        )
+        // Issue #171: the inline `HostTmuxSessionPickerSheet` mount was
+        // removed when the post-tap surface flipped to
+        // [FolderListScreen]. The picker sheet itself stays alive for
+        // the in-session "switch session" drawer hosted by
+        // `TmuxSessionScreen`; the dashboard screen no longer owns a
+        // picker instance.
     }
 }
 

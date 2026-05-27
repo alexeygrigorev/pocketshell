@@ -278,12 +278,14 @@ class RealAgentReleaseGateTest {
         }
         compose.onNodeWithText(hostName, useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        // Wait for the picker page to actually render the "Tmux sessions"
+        // Wait for the folder list (issue #171) to render its "Folders"
         // header before looking for our session name — the SSH probe and
         // initial list query can take 5-15s on the heavier real-agent
-        // image even when the bootstrap check is cached.
+        // image even when the bootstrap check is cached. The session
+        // is rendered inline under its folder so the next assertion can
+        // grab it directly by text.
         compose.waitUntil(timeoutMillis = 30_000) {
-            compose.onAllNodesWithText("Tmux sessions", useUnmergedTree = true)
+            compose.onAllNodesWithText("Folders", useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }

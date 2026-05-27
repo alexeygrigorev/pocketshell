@@ -982,6 +982,203 @@ class TmuxSessionViewModelTest {
         assertEquals("resize-window -t 'it'\\''s work' -x 60 -y 24", command)
     }
 
+    // ----- Issue #238: manual "Resize session" kebab handler.
+
+    @Test
+    fun requestManualResizeFiresResizeWindowAgainstActiveSessionDims() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        // First, the Compose layout pass populates the cached phone
+        // dimensions (this is what production does on every layout pass
+        // via [resizeRemotePty]).
+        vm.resizeRemotePty(columns = 85, rows = 30)
+        advanceUntilIdle()
+        // Drop the layout-pass dispatch so the manual tap's dispatch is
+        // visible in isolation.
+        val priorResizeCount = client.sentCommands.count { it.startsWith("resize-window") }
+        assertEquals(1, priorResizeCount)
+
+        vm.requestManualResize()
+        advanceUntilIdle()
+
+        // Manual tap re-issues resize-window with the cached dimensions
+        // even though the dimensions have not changed since the last
+        // layout pass — the maintainer's pain point was attaching to a
+        // session that tmux had at a different size, so the manual button
+        // must trigger an actual round-trip.
+        val resizeCommands = client.sentCommands.filter { it.startsWith("resize-window") }
+        assertEquals(2, resizeCommands.size)
+        assertEquals("resize-window -t 'work' -x 85 -y 30", resizeCommands.last())
+    }
+
+    @Test
+    fun requestManualResizeSurfacesSuccessToastMessage() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        vm.resizeRemotePty(columns = 85, rows = 30)
+        advanceUntilIdle()
+
+        val collected = async(start = CoroutineStart.UNDISPATCHED) {
+            vm.userMessages.first()
+        }
+
+        vm.requestManualResize()
+        advanceUntilIdle()
+
+        assertEquals("Resized to 85×30", collected.await())
+    }
+
+    @Test
+    fun requestManualResizeSurfacesErrorToastWhenTmuxReturnsError() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        // Pre-arm the canned error response BEFORE we wire the client
+        // so the resize-window helper consumes the failure path.
+        client.resizeWindowResponse = CommandResponse(
+            number = 7L,
+            output = listOf("can't resize window: detached"),
+            isError = true,
+        )
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        vm.resizeRemotePty(columns = 85, rows = 30)
+        advanceUntilIdle()
+
+        val collected = async(start = CoroutineStart.UNDISPATCHED) {
+            vm.userMessages.first()
+        }
+
+        vm.requestManualResize()
+        advanceUntilIdle()
+
+        val message = collected.await()
+        assertTrue(
+            "expected error message to surface tmux detail, got '$message'",
+            message.startsWith("Resize failed") && message.contains("detached"),
+        )
+    }
+
+    @Test
+    fun requestManualResizeBeforeConnectSurfacesNotConnectedMessage() = runTest {
+        val vm = newVm()
+        // No client wired — manual tap must not crash; it must surface a
+        // clear "not connected" message instead of silently no-opping
+        // (the user needs to know why their tap had no effect).
+        val collected = async(start = CoroutineStart.UNDISPATCHED) {
+            vm.userMessages.first()
+        }
+
+        vm.requestManualResize()
+        advanceUntilIdle()
+
+        assertEquals("Not connected — can't resize yet.", collected.await())
+    }
+
+    @Test
+    fun requestManualResizeBeforeLayoutSurfacesUnknownSizeMessage() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        // Note: NO resizeRemotePty call — the cached dimensions are 0x0,
+        // mirroring the very-early-attach state before the first layout
+        // pass. The manual tap must surface a clear "size unknown" hint.
+        val collected = async(start = CoroutineStart.UNDISPATCHED) {
+            vm.userMessages.first()
+        }
+
+        vm.requestManualResize()
+        advanceUntilIdle()
+
+        assertEquals(
+            "Phone size unknown yet — try again in a moment.",
+            collected.await(),
+        )
+        // And no resize-window command went out — the guard short-circuits
+        // before any wire activity.
+        assertTrue(
+            "resize-window must not dispatch when phone dims are 0×0; got " +
+                client.sentCommands,
+            client.sentCommands.none { it.startsWith("resize-window") },
+        )
+    }
+
+    @Test
+    fun requestManualResizeMirrorsAppliedDimsIntoCacheToSkipDuplicateLayoutResize() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        vm.resizeRemotePty(columns = 85, rows = 30)
+        advanceUntilIdle()
+
+        vm.requestManualResize()
+        advanceUntilIdle()
+
+        // After a successful manual resize the cached remote dims must
+        // match what we just told tmux. Otherwise a subsequent layout
+        // pass with the same dims would re-fire `resize-window` because
+        // the idempotency check in [resizeRemotePty] would see a stale
+        // cache. (Production exercise: user taps Resize, no layout
+        // change follows, automatic resize must NOT bombard tmux.)
+        val (cachedCols, cachedRows) = vm.remoteDimensionsForTest()
+        assertEquals(85, cachedCols)
+        assertEquals(30, cachedRows)
+        vm.resizeRemotePty(columns = 85, rows = 30)
+        advanceUntilIdle()
+        // Exactly one resize from the initial layout pass + one from the
+        // manual tap = 2. No third dispatch from the redundant layout pass.
+        assertEquals(
+            2,
+            client.sentCommands.count { it.startsWith("resize-window") },
+        )
+    }
+
     @Test
     fun outputForReceivesEventsRoutedThroughEventsFlow() = runTest {
         val vm = newVm()
@@ -2135,6 +2332,11 @@ class TmuxSessionViewModelTest {
         // configured command name.
         override suspend fun detachCleanly(timeoutMs: Long) =
             delegate.detachCleanly(timeoutMs)
+        // Issue #238: resizeWindow added to the interface. Delegate
+        // straight to FakeTmuxClient so kill-window tests don't have
+        // to reason about manual-resize behaviour.
+        override suspend fun resizeWindow(sessionId: String, cols: Int, rows: Int) =
+            delegate.resizeWindow(sessionId, cols, rows)
     }
 
     // ─── Issue #178: same-host fast-switch reuses the SSH transport ───

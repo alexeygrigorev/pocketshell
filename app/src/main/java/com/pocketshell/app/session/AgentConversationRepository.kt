@@ -283,25 +283,6 @@ internal class AgentConversationRepository(
         }
     }
 
-    /**
-     * Issue #160 (OpenCode parity): retained as a deprecated no-op
-     * shim while callers in
-     * [com.pocketshell.app.session.SessionViewModel] and
-     * [com.pocketshell.app.tmux.TmuxSessionViewModel] migrate to the
-     * unified [tailEventsFromLine] path. Production code should not
-     * poll OpenCode any more — the `session.tail` route catches up on
-     * appended lines in real time.
-     */
-    @Deprecated(
-        message = "Use tailEventsFromLine — OpenCode now tails like Claude + Codex.",
-        replaceWith = ReplaceWith("tailEventsFromLine(session, detection, 0, onEvent)"),
-    )
-    suspend fun pollOpenCodeEvents(
-        session: SshSession,
-        detection: AgentDetection,
-        maxLines: Int = 200,
-    ): List<ConversationEvent> = emptyList()
-
     private fun parserFor(agent: AgentKind): ConversationParser? = when (agent) {
         AgentKind.ClaudeCode -> ClaudeCodeParser()
         AgentKind.Codex -> CodexParser()

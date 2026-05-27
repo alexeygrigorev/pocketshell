@@ -195,6 +195,17 @@ public fun TmuxSessionScreen(
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
     val voiceCommandReview by viewModel.voiceCommandReview.collectAsState()
     val dictationState by inlineDictationViewModel.uiState.collectAsState()
+    // Issue #197: when the user explicitly opens the Conversation tab on
+    // an agent pane, the ViewModel records that pane id here. While
+    // non-null we keep the conversation surface mounted against that
+    // pane (and surface a banner if the user navigates to a different
+    // window). Cleared when the user explicitly returns to the Terminal
+    // tab.
+    val lockedConversationPaneId by viewModel.lockedConversationPaneId.collectAsState()
+    // Issue #197: per-pane record of "user already acknowledged the
+    // first-send confirmation banner". Drives whether the conversation
+    // composer renders the one-time banner above the input field.
+    val firstSendConfirmedPanes by viewModel.firstSendConfirmedPanes.collectAsState()
     // Issue #176: collected once at the screen root so the conversation
     // pane recomposes when the toggle flips in Settings.
     val appSettings by settingsViewModel.state.collectAsState()
@@ -486,7 +497,16 @@ public fun TmuxSessionScreen(
                 }
             }
 
-            val tabs = if (currentAgentConversation?.detection != null) {
+            // Issue #197: the Conversation tab stays visible as long as
+            // ANY pane in the session has a detected agent (not just the
+            // currently-viewed pane). Without this, a user viewing a
+            // non-agent window after opening Conversation on the agent
+            // window would lose access to the tab pill entirely — the
+            // ask in the issue body is to keep the conversation locked
+            // on the agent pane and let the user switch back via the
+            // Tabs surface even from a sibling window.
+            val sessionHasAgentConversation = agentConversations.values.any { it.detection != null }
+            val tabs = if (sessionHasAgentConversation) {
                 listOf("Terminal", "Conversation")
             } else {
                 listOf("Terminal")
@@ -510,15 +530,46 @@ public fun TmuxSessionScreen(
                     animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
                 ),
             ) {
+                // Issue #197: Conversation tab reads as "selected" whenever
+                // the lock is active — that includes the case where the
+                // user has navigated to a non-agent window while the
+                // conversation pane is locked on the agent pane.
+                val conversationTabSelected = lockedConversationPaneId != null ||
+                    currentAgentConversation?.selectedTab == SessionTab.Conversation
                 Tabs(
                     labels = tabs,
-                    selectedIndex = if (currentAgentConversation?.selectedTab == SessionTab.Conversation) 1 else 0,
+                    selectedIndex = if (conversationTabSelected) 1 else 0,
                     onSelected = { index ->
-                        currentPane?.let { pane ->
-                            viewModel.selectSessionTab(
-                                pane.paneId,
-                                if (index == 1) SessionTab.Conversation else SessionTab.Terminal,
-                            )
+                        if (index == 1) {
+                            // Prefer the currently-viewed pane if it has a
+                            // detection; otherwise fall back to the agent
+                            // pane already known to the session (so the
+                            // user can re-enter the conversation from a
+                            // sibling window without having to navigate
+                            // back to the agent's window first).
+                            val target = currentPane
+                                ?.takeIf { agentConversations[it.paneId]?.detection != null }
+                                ?: panes.firstOrNull { agentConversations[it.paneId]?.detection != null }
+                            target?.let { pane ->
+                                viewModel.selectSessionTab(pane.paneId, SessionTab.Conversation)
+                            }
+                        } else {
+                            // Terminal tab: unlock the conversation and
+                            // flip the locked pane's tab back so the
+                            // pager re-takes the viewport. We go
+                            // through [returnToTerminalFromConversation]
+                            // (rather than per-pane selectSessionTab)
+                            // because the currently-visible pane may
+                            // not be the locked pane — and if it is
+                            // not, it has no AgentConversationUiState
+                            // for selectSessionTab to mutate.
+                            if (lockedConversationPaneId != null) {
+                                viewModel.returnToTerminalFromConversation()
+                            } else {
+                                currentPane?.let { pane ->
+                                    viewModel.selectSessionTab(pane.paneId, SessionTab.Terminal)
+                                }
+                            }
                         }
                     },
                     modifier = Modifier.testTag(TMUX_TABS_TAG),
@@ -563,18 +614,41 @@ public fun TmuxSessionScreen(
             // default; sibling panes are pre-loaded into the off-screen
             // pages but kept lightweight because each TerminalSurface
             // owns its own (already-attached) TerminalSurfaceState.
+            //
+            // Issue #197: when the user has opened the Conversation tab,
+            // [lockedConversationPaneId] holds the agent pane the
+            // composer must send to — even if the user has since
+            // navigated to a sibling window via the WindowStrip. We
+            // resolve the agent pane via the lock first so the
+            // conversation surface stays mounted across window
+            // navigations; the cross-window mismatch is surfaced inside
+            // [TmuxConversationPane] as a banner above the composer.
+            val lockedPane = lockedConversationPaneId?.let { lockedId ->
+                panes.firstOrNull { it.paneId == lockedId }
+            }
+            val lockedConversation = lockedPane?.paneId?.let { agentConversations[it] }
+            val showConversation = lockedPane != null &&
+                lockedConversation?.detection != null &&
+                lockedConversation.selectedTab == SessionTab.Conversation
             Box(
                 modifier = Modifier
                     .weight(1f),
             ) {
-                if (
-                    currentPane != null &&
-                    currentAgentConversation?.selectedTab == SessionTab.Conversation &&
-                    currentAgentConversation.detection != null
-                ) {
-                    val paneIdForSend = currentPane.paneId
+                if (showConversation) {
+                    val paneIdForSend = lockedPane!!.paneId
+                    val agentWindows = remember(panes) { panes.toWindowSummaries() }
+                    val agentWindowLabel = remember(lockedPane, panes, agentWindows) {
+                        agentWindowLabelFor(lockedPane, panes, agentWindows)
+                    }
+                    val agentPaneLabel = remember(lockedPane, panes) {
+                        agentPaneLabelFor(lockedPane, panes)
+                    }
+                    val agentDisplayName = lockedConversation!!.detection?.agent?.displayName.orEmpty()
+                    val currentWindowMatchesAgent =
+                        currentPane?.windowId == lockedPane.windowId
+                    val firstSendConfirmed = paneIdForSend in firstSendConfirmedPanes
                     TmuxConversationPane(
-                        events = currentAgentConversation.events,
+                        events = lockedConversation.events,
                         onSendToAgent = { text ->
                             viewModel.sendToAgentPane(paneIdForSend, text)
                         },
@@ -582,6 +656,12 @@ public fun TmuxSessionScreen(
                             .fillMaxSize()
                             .testTag(TMUX_CONVERSATION_PANE_TAG),
                         showSystemNotes = appSettings.showSystemNotes,
+                        agentWindowLabel = agentWindowLabel,
+                        agentPaneLabel = agentPaneLabel,
+                        agentDisplayName = agentDisplayName,
+                        currentWindowMatchesAgent = currentWindowMatchesAgent,
+                        firstSendConfirmed = firstSendConfirmed,
+                        onConfirmFirstSend = { viewModel.confirmFirstSendForPane(paneIdForSend) },
                     )
                 } else if (panes.isEmpty()) {
                     EmptyPanesPlaceholder()
@@ -1132,6 +1212,29 @@ internal const val TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX = "tmux:conversation:to
 /** Issue #176: stable test tag prefix for a `SystemNote` row in the tmux conversation pane. */
 internal const val TMUX_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX = "tmux:conversation:system-note:"
 internal const val TMUX_AGENT_HINT_TAG = "tmux:agent-hint"
+/**
+ * Issue #197: stable test tags for the conversation pane's send-target
+ * indicator and the two banners that disambiguate "where does this
+ * message go?" when the user has multiple tmux windows.
+ *
+ * - [TMUX_CONVERSATION_TARGET_INDICATOR_TAG] is on the always-visible
+ *   "Sending to: Window N · Pane N" strip above the composer.
+ * - [TMUX_CONVERSATION_FIRST_SEND_BANNER_TAG] is on the one-time
+ *   confirmation banner shown until the user acknowledges with "Got
+ *   it" (the button tag is [TMUX_CONVERSATION_FIRST_SEND_CONFIRM_TAG]).
+ * - [TMUX_CONVERSATION_WINDOW_MISMATCH_BANNER_TAG] is on the subtle
+ *   "Agent is on Window N, not the current window." banner shown only
+ *   when the user has navigated to a sibling window while the
+ *   conversation pane is locked to the agent pane.
+ */
+internal const val TMUX_CONVERSATION_TARGET_INDICATOR_TAG =
+    "tmux:conversation:target-indicator"
+internal const val TMUX_CONVERSATION_FIRST_SEND_BANNER_TAG =
+    "tmux:conversation:first-send-banner"
+internal const val TMUX_CONVERSATION_FIRST_SEND_CONFIRM_TAG =
+    "tmux:conversation:first-send-confirm"
+internal const val TMUX_CONVERSATION_WINDOW_MISMATCH_BANNER_TAG =
+    "tmux:conversation:window-mismatch-banner"
 /** Issue #116: stable test tag for the in-tmux-session blocked / near-limit chip. */
 internal const val TMUX_SESSION_USAGE_BADGE_TAG = "tmux:usage-badge"
 
@@ -1248,6 +1351,52 @@ private fun breadcrumbCrumbs(
         Crumb(label = windowLabel, isCurrent = false, onClick = { /* window switcher — #47 */ }),
         Crumb(label = paneLabel, isCurrent = true, onClick = { /* current pane — no-op */ }),
     )
+}
+
+/**
+ * Issue #197: derive the human-readable window label for [pane] using the
+ * same indexing rule the WindowStrip and breadcrumb use. Returns the
+ * matching [WindowSummary.title] (e.g. "Window 1") so the conversation
+ * pane's target indicator reads consistently with the session chrome
+ * around it. Falls back to "Window ?" only if the lookup misses, which
+ * should never happen for a pane that exists in [panes].
+ *
+ * Exposed as `internal` so the unit test in
+ * `TmuxSessionScreenTest` can pin the labelling rule without standing
+ * up the full Compose surface.
+ */
+internal fun agentWindowLabelFor(
+    pane: TmuxPaneState,
+    panes: List<TmuxPaneState>,
+    windows: List<WindowSummary>,
+): String {
+    val match = windows.firstOrNull { it.windowId == pane.windowId }
+    if (match != null) return match.title
+    // Synthesize from the pane list as a defensive fallback so the
+    // banner still has a useful label if `windows` was built off a
+    // stale snapshot.
+    return panes.toWindowSummaries()
+        .firstOrNull { it.windowId == pane.windowId }
+        ?.title
+        ?: "Window ?"
+}
+
+/**
+ * Issue #197: derive a human-readable pane label for [pane] using the
+ * same rule as [breadcrumbCrumbs] — pane's non-blank title wins,
+ * otherwise the 1-based pane index within its window. So a Claude pane
+ * that tmux reports as the first pane of Window 1 reads as "Pane 1"
+ * inside the target indicator.
+ */
+internal fun agentPaneLabelFor(
+    pane: TmuxPaneState,
+    panes: List<TmuxPaneState>,
+): String {
+    if (pane.title.isNotBlank()) return pane.title
+    val paneIndexInWindow = panes
+        .filter { it.windowId == pane.windowId }
+        .indexOfFirst { it.paneId == pane.paneId }
+    return if (paneIndexInWindow >= 0) "Pane ${paneIndexInWindow + 1}" else "Pane ?"
 }
 
 @Composable
@@ -1566,6 +1715,20 @@ internal fun TmuxConversationPane(
     // behaviour (notes visible but muted) so direct callers that did
     // not opt into the setting wire-up still see system notes.
     showSystemNotes: Boolean = true,
+    // Issue #197: the conversation composer now exposes "which window /
+    // pane will my message land in?" above the input field. Each of
+    // these surfaces is keyed off the agent pane the composer is bound
+    // to — not the currently-visible pane in the pager. Direct callers
+    // (unit tests, the connected ConversationInteractE2eTest) that
+    // don't yet care about the new surface can pass empty strings /
+    // `true` to opt out — those defaults render the pane in the
+    // pre-#197 shape.
+    agentWindowLabel: String = "",
+    agentPaneLabel: String = "",
+    agentDisplayName: String = "",
+    currentWindowMatchesAgent: Boolean = true,
+    firstSendConfirmed: Boolean = true,
+    onConfirmFirstSend: () -> Unit = {},
 ) {
     var query by remember { mutableStateOf("") }
     var composerText by remember { mutableStateOf("") }
@@ -1630,6 +1793,32 @@ internal fun TmuxConversationPane(
                 )
             }
         }
+        // Issue #197: stack the three send-target surfaces directly
+        // above the composer so the user can read "where am I sending?"
+        // without taking their eyes off the input field. Order from top:
+        // 1. Window-mismatch banner (only when the user has navigated
+        //    away from the agent window while the composer is still
+        //    locked to the agent pane).
+        // 2. First-send confirmation banner (one-time per pane).
+        // 3. Always-visible target indicator strip.
+        if (!currentWindowMatchesAgent && agentWindowLabel.isNotEmpty()) {
+            TmuxConversationWindowMismatchBanner(
+                agentWindowLabel = agentWindowLabel,
+            )
+        }
+        if (!firstSendConfirmed && agentWindowLabel.isNotEmpty()) {
+            TmuxConversationFirstSendBanner(
+                agentWindowLabel = agentWindowLabel,
+                agentDisplayName = agentDisplayName,
+                onConfirm = onConfirmFirstSend,
+            )
+        }
+        if (agentWindowLabel.isNotEmpty() && agentPaneLabel.isNotEmpty()) {
+            TmuxConversationTargetIndicator(
+                agentWindowLabel = agentWindowLabel,
+                agentPaneLabel = agentPaneLabel,
+            )
+        }
         AgentComposerRow(
             text = composerText,
             onTextChange = { composerText = it },
@@ -1640,6 +1829,110 @@ internal fun TmuxConversationPane(
                     composerText = ""
                 }
             },
+        )
+    }
+}
+
+/**
+ * Issue #197: always-visible strip directly above the composer that
+ * answers "Sending to which window / pane?" The text uses the muted
+ * secondary token (`docs/design-system.md` §3, §6) so it reads as
+ * contextual metadata rather than a primary surface. Strip layout
+ * mirrors the in-session usage badge row — left-aligned, single line,
+ * no background fill — so it cohabits cleanly with the conversation
+ * feed.
+ */
+@Composable
+private fun TmuxConversationTargetIndicator(
+    agentWindowLabel: String,
+    agentPaneLabel: String,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp, bottom = 2.dp)
+            .testTag(TMUX_CONVERSATION_TARGET_INDICATOR_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "Sending to: $agentWindowLabel · $agentPaneLabel",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 11.sp,
+        )
+    }
+}
+
+/**
+ * Issue #197: one-time confirmation banner shown above the composer
+ * until the user taps "Got it." Uses the `AccentSoft` fill + 1 dp
+ * `AccentDim` border + 10 dp radius pattern (`docs/design-system.md`
+ * §6.3) so it reads as an actionable hint rather than an error. The
+ * dismissal is recorded in [TmuxSessionViewModel.firstSendConfirmedPanes]
+ * so reopening the conversation pane later in the same session does
+ * not re-show it.
+ */
+@Composable
+private fun TmuxConversationFirstSendBanner(
+    agentWindowLabel: String,
+    agentDisplayName: String,
+    onConfirm: () -> Unit,
+) {
+    val shape = RoundedCornerShape(10.dp)
+    val agentSubject = agentDisplayName
+        .takeIf { it.isNotBlank() }
+        ?.let { "$it pane" }
+        ?: "agent pane"
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp)
+            .background(color = PocketShellColors.AccentSoft, shape = shape)
+            .border(width = 1.dp, color = PocketShellColors.AccentDim, shape = shape)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .testTag(TMUX_CONVERSATION_FIRST_SEND_BANNER_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = "Sending to $agentWindowLabel's $agentSubject — got it?",
+            color = PocketShellColors.Text,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(
+            onClick = onConfirm,
+            modifier = Modifier.testTag(TMUX_CONVERSATION_FIRST_SEND_CONFIRM_TAG),
+        ) {
+            Text("Got it")
+        }
+    }
+}
+
+/**
+ * Issue #197: subtle banner shown above the composer when the user has
+ * navigated to a window that does NOT contain the agent pane the
+ * composer is bound to. Reuses the muted secondary text token; the row
+ * has no background fill so it does not compete with the first-send
+ * banner above it. The banner is informational only — there is no
+ * dismiss action, because the mismatch resolves itself as soon as the
+ * user navigates back to the agent's window (which clears
+ * `!currentWindowMatchesAgent`).
+ */
+@Composable
+private fun TmuxConversationWindowMismatchBanner(
+    agentWindowLabel: String,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp, bottom = 2.dp)
+            .testTag(TMUX_CONVERSATION_WINDOW_MISMATCH_BANNER_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "Agent is on $agentWindowLabel, not the current window.",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 11.sp,
         )
     }
 }

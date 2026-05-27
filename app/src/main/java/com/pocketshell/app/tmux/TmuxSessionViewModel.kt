@@ -131,6 +131,36 @@ public class TmuxSessionViewModel @Inject constructor(
     public val agentConversations: StateFlow<Map<String, AgentConversationUiState>> =
         _agentConversations.asStateFlow()
 
+    // Issue #197: the pane the conversation composer currently sends to.
+    // Set when the user explicitly selects the Conversation tab for a pane
+    // with a detected agent; cleared when they switch back to the Terminal
+    // tab. While non-null, the screen renders the conversation pane for
+    // this pane regardless of the pager's current page, so navigating to a
+    // sibling window via the WindowStrip does NOT silently move the send
+    // target to a pane that has no agent. The mismatch between this
+    // locked pane and the currently-visible pane (when they differ) is
+    // surfaced as the "Agent is on Window N, not the current window."
+    // banner in [TmuxSessionScreen]. Cleared on connection teardown via
+    // [closeCurrentConnection*].
+    private val _lockedConversationPaneId: MutableStateFlow<String?> =
+        MutableStateFlow(null)
+
+    public val lockedConversationPaneId: StateFlow<String?> =
+        _lockedConversationPaneId.asStateFlow()
+
+    // Issue #197: set of (paneId) keys for which the user has already
+    // acknowledged the first-send confirmation banner. We track at
+    // pane granularity rather than session-name granularity so a second
+    // Claude pane in the same tmux session also gets its own one-time
+    // confirmation — different panes are different conceptual targets.
+    // Survives the ViewModel lifetime (process lifetime of the
+    // foreground tmux session); cleared on connection teardown.
+    private val _firstSendConfirmedPanes: MutableStateFlow<Set<String>> =
+        MutableStateFlow(emptySet())
+
+    public val firstSendConfirmedPanes: StateFlow<Set<String>> =
+        _firstSendConfirmedPanes.asStateFlow()
+
     private val _connectionStatus: MutableStateFlow<ConnectionStatus> =
         MutableStateFlow(ConnectionStatus.Idle)
 
@@ -701,6 +731,17 @@ public class TmuxSessionViewModel @Inject constructor(
             paneRows.remove(paneId)
         }
         _agentConversations.value = _agentConversations.value.filterKeys { it in nextById.keys }
+        // Issue #197: drop any first-send acknowledgement for panes that
+        // tmux just removed — a fresh pane reusing the same `%N` id later
+        // (rare but possible after a kill+re-create cycle within the same
+        // session) should get its own confirmation banner. Also clear
+        // the conversation lock if it was pointing at a gone pane.
+        _firstSendConfirmedPanes.value = _firstSendConfirmedPanes.value.intersect(nextById.keys)
+        _lockedConversationPaneId.value?.let { locked ->
+            if (locked !in nextById.keys) {
+                _lockedConversationPaneId.value = null
+            }
+        }
         paneRows.putAll(nextById)
         _panes.value = nextById.values.toList()
         return newRows
@@ -811,6 +852,18 @@ public class TmuxSessionViewModel @Inject constructor(
             current.detection?.let { detection ->
                 dismissedAgentHints += hintKeyFor(paneId, detection)
             }
+            // Issue #197: lock the conversation send-target to this pane
+            // so a subsequent WindowStrip tap to a non-agent window does
+            // not silently swap the composer onto a pane with no agent.
+            _lockedConversationPaneId.value = paneId
+        } else {
+            // Issue #197: explicit Terminal-tab selection unlocks the
+            // conversation pane. Clearing only when the user owns the
+            // intent keeps the lock alive when JSONL appends or pane
+            // reconciles call selectSessionTab(Conversation) again.
+            if (_lockedConversationPaneId.value == paneId) {
+                _lockedConversationPaneId.value = null
+            }
         }
         setAgentConversation(paneId, current.copy(selectedTab = tab, hintVisible = false))
     }
@@ -826,6 +879,38 @@ public class TmuxSessionViewModel @Inject constructor(
             dismissedAgentHints += hintKeyFor(paneId, detection)
         }
         setAgentConversation(paneId, current.copy(hintVisible = false))
+    }
+
+    /**
+     * Issue #197: acknowledge the first-send confirmation banner for the
+     * conversation pane bound to [paneId]. Once acknowledged the
+     * "Sending to window N's <agent> pane — got it?" banner stays
+     * dismissed for the lifetime of the ViewModel (i.e. the live tmux
+     * session). Public so the screen's "Got it" button has a single
+     * named seam to call.
+     */
+    public fun confirmFirstSendForPane(paneId: String) {
+        if (paneId.isBlank()) return
+        if (paneId in _firstSendConfirmedPanes.value) return
+        _firstSendConfirmedPanes.value = _firstSendConfirmedPanes.value + paneId
+    }
+
+    /**
+     * Issue #197: unlock the conversation send-target without requiring
+     * the caller to know which pane is currently locked. Used by the
+     * screen's Terminal-tab tap path: if the user has navigated to a
+     * sibling window while the conversation pane is locked on the
+     * agent pane, the currently-visible pane has no `AgentConversationUiState`
+     * and [selectSessionTab] would silently no-op. This entry point
+     * unlocks the conversation, while [selectSessionTab] still owns
+     * flipping the locked pane's `selectedTab` if there is a pane
+     * still alive at that id.
+     */
+    public fun returnToTerminalFromConversation() {
+        val locked = _lockedConversationPaneId.value ?: return
+        _lockedConversationPaneId.value = null
+        val current = _agentConversations.value[locked] ?: return
+        setAgentConversation(locked, current.copy(selectedTab = SessionTab.Terminal))
     }
 
     /**
@@ -1356,6 +1441,11 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputJobs.clear()
         paneInputChannels.clear()
         _agentConversations.value = emptyMap()
+        // Issue #197: clear conversation-target state so a fresh connect
+        // does not start with a stale lock or a stale "already
+        // acknowledged first send" record from the previous session.
+        _lockedConversationPaneId.value = null
+        _firstSendConfirmedPanes.value = emptySet()
         paneProducerJobs.clear()
         for ((_, row) in paneRows) {
             runCatching { row.terminalState.detachExternalProducer() }
@@ -1411,6 +1501,11 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputJobs.clear()
         paneInputChannels.clear()
         _agentConversations.value = emptyMap()
+        // Issue #197: clear conversation-target state so a fresh connect
+        // does not start with a stale lock or a stale "already
+        // acknowledged first send" record from the previous session.
+        _lockedConversationPaneId.value = null
+        _firstSendConfirmedPanes.value = emptySet()
         paneProducerJobs.clear()
         for ((_, row) in paneRows) {
             runCatching { row.terminalState.detachExternalProducer() }

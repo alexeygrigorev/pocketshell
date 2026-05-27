@@ -1163,4 +1163,216 @@ class TmuxSessionViewModelTest {
             vm.agentConversations.value["%0"]!!.hintVisible,
         )
     }
+
+    // ─── Issue #197: conversation send-target lock + first-send confirmation ───
+    //
+    // The lock keeps the conversation composer bound to the agent pane
+    // even after the user navigates to a sibling window via the
+    // WindowStrip — so a `send-keys` from the composer cannot silently
+    // land on a non-agent pane in another window. The first-send
+    // confirmation banner is per-pane and persists for the lifetime of
+    // the VM.
+
+    @Test
+    fun selectingConversationTabLocksTargetToThatPane() = runTest {
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        assertNull(
+            "lock must start unset before the user opens the Conversation tab",
+            vm.lockedConversationPaneId.value,
+        )
+
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+
+        assertEquals(
+            "lock must point at the pane the user opened conversation on",
+            "%0",
+            vm.lockedConversationPaneId.value,
+        )
+    }
+
+    @Test
+    fun returningToTerminalTabClearsTheLock() = runTest {
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        assertEquals("%0", vm.lockedConversationPaneId.value)
+
+        vm.selectSessionTab("%0", SessionTab.Terminal)
+
+        assertNull(
+            "switching back to Terminal must unlock the conversation target",
+            vm.lockedConversationPaneId.value,
+        )
+    }
+
+    @Test
+    fun terminalTabOnNonLockedPaneDoesNotClearTheLock() = runTest {
+        // If the user is viewing a sibling pane (%1) while the lock is
+        // pointing at %0, calling selectSessionTab on the sibling
+        // (which can happen when the screen re-fires the tab callback
+        // against `currentPane`) must NOT clear the lock — clearing
+        // would defeat the whole purpose of #197's "don't auto-switch"
+        // behaviour. Only an explicit Terminal-tab tap on the locked
+        // pane unlocks.
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        // Synthesize a sibling pane (no detection) so a Terminal-tab
+        // selectSessionTab call against it is well-formed.
+        vm.startAgentConversationForTest("%1", newClaudeDetection())
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        assertEquals("%0", vm.lockedConversationPaneId.value)
+
+        vm.selectSessionTab("%1", SessionTab.Terminal)
+
+        assertEquals(
+            "lock must remain on the agent pane after a non-locked-pane tab tap",
+            "%0",
+            vm.lockedConversationPaneId.value,
+        )
+    }
+
+    @Test
+    fun returnToTerminalFromConversationClearsLockEvenFromSiblingPane() = runTest {
+        // The screen's Terminal-tab tap can fire from a pane that has
+        // no AgentConversationUiState (the user navigated to a sibling
+        // window while the conversation was locked). The standalone
+        // unlock entry point must still clear the lock and flip the
+        // locked pane's selectedTab back to Terminal.
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        assertEquals("%0", vm.lockedConversationPaneId.value)
+        assertEquals(
+            SessionTab.Conversation,
+            vm.agentConversations.value["%0"]!!.selectedTab,
+        )
+
+        vm.returnToTerminalFromConversation()
+
+        assertNull(
+            "explicit return-to-Terminal must unlock the conversation",
+            vm.lockedConversationPaneId.value,
+        )
+        assertEquals(
+            "locked pane's selected tab must flip back to Terminal",
+            SessionTab.Terminal,
+            vm.agentConversations.value["%0"]!!.selectedTab,
+        )
+    }
+
+    @Test
+    fun returnToTerminalFromConversationIsNoOpWhenNotLocked() = runTest {
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        assertNull(vm.lockedConversationPaneId.value)
+        val before = vm.agentConversations.value["%0"]
+
+        vm.returnToTerminalFromConversation()
+
+        assertNull(vm.lockedConversationPaneId.value)
+        assertEquals(before, vm.agentConversations.value["%0"])
+    }
+
+    @Test
+    fun confirmFirstSendForPaneTracksAcknowledgement() = runTest {
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "shell", paneIndex = 0)),
+        )
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        assertFalse(
+            "first-send acknowledgement must start unset",
+            "%0" in vm.firstSendConfirmedPanes.value,
+        )
+
+        vm.confirmFirstSendForPane("%0")
+
+        assertTrue(
+            "first-send acknowledgement must record the pane",
+            "%0" in vm.firstSendConfirmedPanes.value,
+        )
+
+        // Idempotent — calling again must not blow up or duplicate.
+        vm.confirmFirstSendForPane("%0")
+        assertEquals(
+            "first-send acknowledgement must be idempotent",
+            1,
+            vm.firstSendConfirmedPanes.value.size,
+        )
+    }
+
+    @Test
+    fun confirmFirstSendIgnoresBlankPaneId() = runTest {
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+
+        vm.confirmFirstSendForPane("")
+
+        assertTrue(
+            "blank pane id must not pollute the confirmed set",
+            vm.firstSendConfirmedPanes.value.isEmpty(),
+        )
+    }
+
+    @Test
+    fun firstSendConfirmationSurvivesAcrossPanes() = runTest {
+        // Two agent panes get their own one-time banner; confirming
+        // one must not silently confirm the other.
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "a", paneIndex = 0),
+                TmuxSessionViewModel.ParsedPane("%1", "@1", "$0", "b", paneIndex = 0),
+            ),
+        )
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.startAgentConversationForTest("%1", newClaudeDetection())
+
+        vm.confirmFirstSendForPane("%0")
+
+        assertTrue("%0 in vm.firstSendConfirmedPanes.value", "%0" in vm.firstSendConfirmedPanes.value)
+        assertFalse(
+            "second pane must NOT inherit the first pane's first-send acknowledgement",
+            "%1" in vm.firstSendConfirmedPanes.value,
+        )
+    }
+
+    @Test
+    fun closedPaneDropsFirstSendAcknowledgementAndClearsLock() = runTest {
+        // A pane that tmux removes between reconciles takes its first-send
+        // acknowledgement with it — a later `%N` reuse must get a fresh
+        // banner. Same for the conversation lock: a gone pane cannot be
+        // the lock target.
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "a", paneIndex = 0)),
+        )
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.confirmFirstSendForPane("%0")
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        assertTrue("%0" in vm.firstSendConfirmedPanes.value)
+        assertEquals("%0", vm.lockedConversationPaneId.value)
+
+        // Reconcile with the pane gone.
+        vm.applyParsedPanesForTest(emptyList())
+
+        assertFalse(
+            "first-send acknowledgement must be dropped when the pane closes",
+            "%0" in vm.firstSendConfirmedPanes.value,
+        )
+        assertNull(
+            "lock must be cleared when the locked pane disappears",
+            vm.lockedConversationPaneId.value,
+        )
+    }
 }

@@ -1,6 +1,7 @@
 package com.pocketshell.app.proof
 
 import android.content.Context
+import android.util.Log
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -33,8 +34,10 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import net.schmizz.sshj.SSHClient
+import net.schmizz.sshj.common.SSHException
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
+import java.io.IOException
 import java.io.OutputStream
 
 /**
@@ -289,13 +292,55 @@ internal const val INTERACTIVE_PTY_INITIAL_ROWS: Int = 24
  * Reads happen on [Dispatchers.IO] and use normal Flow backpressure. Terminal
  * bytes must not be dropped: split escape sequences corrupt full-screen CLI
  * rendering.
+ *
+ * Issue #173: catch [IOException] / [SSHException] from `input.read` and end
+ * the flow instead of propagating. When the user backgrounds the app (e.g. by
+ * taking a screenshot or briefly switching apps) Android may tear the TCP
+ * socket down underneath sshj's [SocketInputStream.read] blocking call. The
+ * read then throws `SocketException` ("Software caused connection abort",
+ * ECONNABORTED) which sshj wraps as [SSHException]. Before this catch the
+ * exception escaped the [flow] block, propagated through the producer-scope
+ * coroutine that owns the [Flow.collect] in
+ * [com.pocketshell.core.terminal.ui.TerminalSurfaceState.attachExternalProducer],
+ * and reached the default uncaught-exception handler — crashing the app on
+ * the user's first resume after backgrounding (reproduced on Pixel 7a /
+ * Android 16, v0.2.7).
+ *
+ * Ending the flow cleanly lets [SessionViewModel] observe the producer job's
+ * completion via `invokeOnCompletion` and transition the connection state to
+ * [com.pocketshell.app.session.SessionViewModel.ConnectionStatus.Failed], which
+ * is the no-background-work behaviour the app already wants on resume (the
+ * user re-establishes via the reconnect path rather than us keeping the
+ * socket alive in the background).
  */
 internal fun createStdoutFlow(shell: Session.Shell): Flow<ByteArray> {
     return flow {
         val input = shell.inputStream
         val buffer = ByteArray(4096)
         while (true) {
-            val n = input.read(buffer)
+            val n = try {
+                input.read(buffer)
+            } catch (e: SSHException) {
+                // Most common production trigger: sshj's Reader thread maps
+                // the underlying SocketException to SSHException on transport
+                // tear-down. Log once and end the flow cleanly so the
+                // producer scope's invokeOnCompletion can flip the
+                // ConnectionStatus.
+                Log.i(
+                    PRODUCT_FLOW_TAG,
+                    "ssh-read-aborted ssh-exception cause=${e.javaClass.simpleName}: ${e.message}",
+                )
+                break
+            } catch (e: IOException) {
+                // Bare IOException (SocketException, EOFException,
+                // ChannelClosedException, etc.) without an sshj wrap. Same
+                // outcome: end the flow.
+                Log.i(
+                    PRODUCT_FLOW_TAG,
+                    "ssh-read-aborted io-exception cause=${e.javaClass.simpleName}: ${e.message}",
+                )
+                break
+            }
             if (n == -1) break
             if (n > 0) {
                 emit(buffer.copyOf(n))
@@ -303,6 +348,14 @@ internal fun createStdoutFlow(shell: Session.Shell): Flow<ByteArray> {
         }
     }.flowOn(Dispatchers.IO)
 }
+
+/**
+ * Logcat tag used by [createStdoutFlow] when the SSH read fails with an
+ * exception we have to swallow rather than rethrow (issue #173). Kept short
+ * enough to satisfy `Log.isLoggable`'s 23-char limit on older Android
+ * versions while remaining greppable from crash-report investigation.
+ */
+internal const val PRODUCT_FLOW_TAG: String = "issue173-stdout-flow"
 
 /**
  * Convenience wrapper used by `ProofPipelineTest`: feed a [Flow] of bytes

@@ -28,6 +28,7 @@ import com.pocketshell.core.voice.CommandPlannerSessionMetadata
 import com.pocketshell.uikit.model.KeyModifierState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -239,6 +240,37 @@ public class SessionViewModel @Inject constructor(
                 stdout = outputFlow,
                 remoteStdin = handle.shell.outputStream,
             )
+
+            // Issue #173: when the SSH stdout flow ends — e.g. because
+            // Android tore down the socket while the app was backgrounded for
+            // a screenshot, and [createStdoutFlow] swallowed the resulting
+            // SSHException — flip the connection state to Failed so the UI
+            // surfaces a clear "connection lost" line instead of looking
+            // still-Connected with a dead transport. Bare-completion (e.g.
+            // remote `exit`) gets the same treatment; the user reconnects
+            // explicitly via the host picker. We only flip from Connected so
+            // an already-Failed state (from the catch below or a teardown)
+            // is not overwritten.
+            producerJob?.invokeOnCompletion { cause ->
+                if (_connectionStatus.value is ConnectionStatus.Connected) {
+                    // Reason strings all share the "connection lost"
+                    // prefix so the screen's status line phrasing is
+                    // consistent regardless of whether the SSH stdout
+                    // flow terminated cleanly (EOF / null cause) or
+                    // because [createStdoutFlow] swallowed an SSHException
+                    // / IOException from the OS tearing the socket down
+                    // (Issue #173). The phrasing also matches the
+                    // tmux-CC [TmuxSessionViewModel.attachClient]
+                    // path's invokeOnCompletion so both UI surfaces
+                    // align in dogfood reports.
+                    val reason = when (cause) {
+                        null -> "connection lost: remote shell closed"
+                        is CancellationException -> return@invokeOnCompletion
+                        else -> "connection lost: ${cause.javaClass.simpleName}: ${cause.message}"
+                    }
+                    _connectionStatus.value = ConnectionStatus.Failed(reason)
+                }
+            }
 
             // Kick the shell through the terminal bridge so sshj network I/O
             // stays on the bridge's background input-drainer thread.

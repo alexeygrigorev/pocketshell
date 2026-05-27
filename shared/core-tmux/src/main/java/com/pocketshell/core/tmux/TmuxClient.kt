@@ -14,7 +14,10 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.flow
@@ -111,6 +114,20 @@ public interface TmuxClient : AutoCloseable {
     public fun outputFor(paneId: String): Flow<ControlEvent.Output>
 
     /**
+     * Issue #173: observable signal that the control channel has
+     * disconnected — either because [close] was called or because the
+     * underlying SSH transport's reader loop exited (clean EOF or
+     * exception). Latches to `true` and never flips back; a fresh
+     * [TmuxClient] is required to reconnect.
+     *
+     * Callers use this to react to the OS tearing down the TCP socket
+     * underneath us while the app was backgrounded — the [events]
+     * `SharedFlow` is hot and cannot signal end-of-stream, so observing
+     * `disconnected` is the only way to learn that the reader is gone.
+     */
+    public val disconnected: StateFlow<Boolean>
+
+    /**
      * Tear down the tmux control channel and the underlying SSH shell.
      * Idempotent. After [close] the [events] flow completes and any
      * pending [sendCommand] calls fail with [TmuxClientException].
@@ -178,6 +195,15 @@ internal class RealTmuxClient(
     )
 
     override val events: Flow<ControlEvent> = eventBus.asSharedFlow()
+
+    // Issue #173: latched signal that the reader loop has exited (or
+    // [close] was called). The reader sets this from its `finally` block
+    // so subscribers (notably [TmuxSessionViewModel.attachClient]) can
+    // observe a socket tear-down even though the hot [eventBus]
+    // SharedFlow never completes on its own.
+    private val _disconnected: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    override val disconnected: StateFlow<Boolean> = _disconnected.asStateFlow()
 
     // Outstanding sendCommand waiters, FIFO. tmux's control mode is
     // strict one-at-a-time, and we serialise on the Kotlin side via
@@ -304,6 +330,10 @@ internal class RealTmuxClient(
         if (closed) return
         closed = true
         connected = false
+        // Issue #173: signal disconnection BEFORE we tear the rest down
+        // so observers like [TmuxSessionViewModel] can flip their
+        // connection-status state without racing the scope cancel.
+        _disconnected.value = true
         readerJob?.cancel()
         readerJob = null
         runCatching { shell?.close() }
@@ -448,6 +478,17 @@ internal class RealTmuxClient(
                 }
             }
         } finally {
+            // Issue #173: the reader has exited — either because [close]
+            // already flipped `closed` (in which case `_disconnected` is
+            // already true), or because the underlying SSH socket died
+            // (e.g. Android tore the TCP connection down during a
+            // backgrounded screenshot pause, the remote sshd was killed,
+            // or the user's network dropped). In the latter case
+            // `_disconnected.value` is still false; flip it here so
+            // observers see the connection drop. The hot [eventBus]
+            // SharedFlow cannot signal end-of-stream on its own, so this
+            // is the only path to surface the drop without polling.
+            _disconnected.value = true
             // Drain any in-flight pending command — the channel is gone.
             inflight?.deferred?.completeExceptionally(
                 TmuxClientException("control channel closed mid-command"),

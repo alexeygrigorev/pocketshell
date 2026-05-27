@@ -5,6 +5,9 @@ import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterIsInstance
 
@@ -38,6 +41,17 @@ internal class FakeTmuxClient : TmuxClient {
     )
 
     override val events: Flow<ControlEvent> = emittedEvents
+
+    /**
+     * Issue #173: test-controllable disconnection signal so tests can
+     * simulate the production [TmuxClient.readerLoop] exit (e.g. socket
+     * tear-down during background) by flipping [disconnectedSignal] to
+     * `true`. Defaults to `false` — connected — like a freshly-built
+     * real client.
+     */
+    val disconnectedSignal: MutableStateFlow<Boolean> = MutableStateFlow(false)
+
+    override val disconnected: StateFlow<Boolean> = disconnectedSignal.asStateFlow()
 
     val sentCommands: MutableList<String> = mutableListOf()
 
@@ -82,5 +96,6 @@ internal class FakeTmuxClient : TmuxClient {
 
     override fun close() {
         closed = true
+        disconnectedSignal.value = true
     }
 }

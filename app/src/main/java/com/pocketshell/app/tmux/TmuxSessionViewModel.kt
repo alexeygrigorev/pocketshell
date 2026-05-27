@@ -352,9 +352,46 @@ public class TmuxSessionViewModel @Inject constructor(
         // Cancel any previous subscription before re-binding (idempotency
         // for tests that swap clients on the same ViewModel instance).
         eventsJob?.cancel()
-        eventsJob = bridgeScope.launch(start = CoroutineStart.UNDISPATCHED) {
+        val job = bridgeScope.launch(start = CoroutineStart.UNDISPATCHED) {
             client.events.collect { event ->
                 onControlEvent(event)
+            }
+        }
+        eventsJob = job
+        // Issue #173: observe the client's latched `disconnected`
+        // StateFlow so we flip [_connectionStatus] to Failed when the
+        // underlying [TmuxClient.readerLoop] exits (clean EOF, sshj
+        // exception, or [TmuxClient.close]). The hot [TmuxClient.events]
+        // SharedFlow does NOT signal end-of-stream when the reader dies,
+        // so this is the only path that catches an OS-driven socket
+        // tear-down (e.g. Android severing the TCP socket while the
+        // app was backgrounded for a screenshot). The observer is
+        // launched in the same `bridgeScope` so it is torn down by
+        // `closeCurrentConnection*` along with the rest of the
+        // per-connection coroutines.
+        //
+        // We capture [client] in the launched lambda so a later swap
+        // (TmuxSessionViewModel.connect against a different host /
+        // session) does not race: only the disconnected-signal of the
+        // client we attached just now is acted on.
+        bridgeScope.launch {
+            client.disconnected.collect { dead ->
+                if (!dead) return@collect
+                if (_connectionStatus.value !is ConnectionStatus.Connected) return@collect
+                // Only react if this is still THE active client. The
+                // `connect()` race-recovery path attaches a fresh
+                // [TmuxClient] and closes the old one inside the same
+                // VM; the old client's disconnected signal must not
+                // overwrite the new client's Connected status.
+                if (clientRef !== client) return@collect
+                // Reason string shares the "connection lost" prefix
+                // with [SessionViewModel.runConnect]'s analogue handler
+                // so the StatusLine phrasing is consistent across both
+                // routes (raw SSH and tmux-CC) in screenshots /
+                // dogfood reports.
+                _connectionStatus.value = ConnectionStatus.Failed(
+                    "connection lost: tmux control channel closed",
+                )
             }
         }
     }

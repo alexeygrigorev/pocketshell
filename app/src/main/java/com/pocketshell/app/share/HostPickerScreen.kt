@@ -329,14 +329,12 @@ private fun TextDispatchDialog(
             )
         },
         confirmButton = {
-            TextButton(
-                onClick = onSave,
-                modifier = Modifier.testTag(SHARE_TEXT_SAVE_TAG),
-            ) {
-                Text(text = "Save as file")
-            }
-        },
-        dismissButton = {
+            // Issue #222 (#208 follow-up): "Paste into session" is the
+            // more-frequent action when a session is attached, so it
+            // belongs in the right-hand `confirmButton` slot (the
+            // thumb-friendly primary position). "Save as file" moves to
+            // the left `dismissButton` slot.
+            //
             // Issue #193: the paste option is now wired end-to-end.
             // Enable iff at least one host in the user's list has a
             // registered live `tmux -CC` client in
@@ -347,6 +345,14 @@ private fun TextDispatchDialog(
                 modifier = Modifier.testTag(SHARE_TEXT_PASTE_TAG),
             ) {
                 Text(text = "Paste into session")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onSave,
+                modifier = Modifier.testTag(SHARE_TEXT_SAVE_TAG),
+            ) {
+                Text(text = "Save as file")
             }
         },
     )

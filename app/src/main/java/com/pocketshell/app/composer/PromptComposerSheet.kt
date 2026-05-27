@@ -896,35 +896,49 @@ private fun PendingTranscriptionRow(
             )
         }
         Spacer(modifier = Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // #208 follow-up move #2: right-align the action row so the
+        // primary button (Retry or Save audio) lands closest to the
+        // right thumb. Discard (secondary) renders to its left.
+        // Maintainer dogfood 2026-05-27 + audit comment-4554970633
+        // call this out — Retry was previously leftmost under the
+        // default Arrangement.Start.
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+        ) {
             if (!item.atRetryCap) {
+                // Order matters: with Arrangement.End the row fills
+                // right-to-left visually but children still render in
+                // declaration order. Discard first → ends up left of
+                // Retry; Retry last → anchors the right edge.
+                PendingActionButton(
+                    label = "Discard",
+                    primary = false,
+                    onClick = onDiscard,
+                    modifier = Modifier.testTag(composerPendingDiscardTestTag(item.id)),
+                )
                 PendingActionButton(
                     label = "Retry",
                     primary = true,
                     onClick = onRetry,
                     modifier = Modifier.testTag(composerPendingRetryTestTag(item.id)),
                 )
+            } else {
+                // 3-retry cap hit — Whisper has repeatedly failed for
+                // this audio. Offer Save (so the user can hand it to a
+                // different transcription tool) or Discard. Save is the
+                // primary action here and travels to the right edge.
                 PendingActionButton(
                     label = "Discard",
                     primary = false,
                     onClick = onDiscard,
                     modifier = Modifier.testTag(composerPendingDiscardTestTag(item.id)),
                 )
-            } else {
-                // 3-retry cap hit — Whisper has repeatedly failed for
-                // this audio. Offer Save (so the user can hand it to a
-                // different transcription tool) or Discard.
                 PendingActionButton(
                     label = "Save audio",
                     primary = true,
                     onClick = onSaveAsAudio,
                     modifier = Modifier.testTag(composerPendingSaveTestTag(item.id)),
-                )
-                PendingActionButton(
-                    label = "Discard",
-                    primary = false,
-                    onClick = onDiscard,
-                    modifier = Modifier.testTag(composerPendingDiscardTestTag(item.id)),
                 )
             }
         }

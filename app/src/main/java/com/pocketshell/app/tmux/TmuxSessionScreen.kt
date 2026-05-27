@@ -48,6 +48,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -197,8 +198,8 @@ public fun TmuxSessionScreen(
     val currentAgentConversation = currentPane?.paneId?.let { agentConversations[it] }
     val currentWindowId = currentPane?.windowId
     val windows = remember(panes) { panes.toWindowSummaries() }
-    val crumbs = remember(host, sessionName, currentPane) {
-        breadcrumbCrumbs(host, sessionName, currentPane)
+    val crumbs = remember(host, sessionName, currentPane, panes, windows) {
+        breadcrumbCrumbs(host, sessionName, currentPane, panes, windows)
     }
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
@@ -403,7 +404,13 @@ public fun TmuxSessionScreen(
                 },
             )
 
-            if (windows.isNotEmpty()) {
+            // Per #158: only surface the WindowStrip when there are
+            // multiple windows in this session. In the (very common)
+            // single-window case the strip was pure chrome and confused
+            // users about what the trailing "+" creates (window vs
+            // session). For the single-window case the "+ New window"
+            // affordance remains reachable from the kebab dropdown.
+            if (windows.size > 1) {
                 WindowStrip(
                     windows = windows,
                     currentWindowId = currentWindowId,
@@ -822,11 +829,19 @@ internal fun TmuxSessionDrawer(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     item {
+                        // Per #158: disambiguate "session" vs "window"
+                        // controls. The drawer is host-scoped (every
+                        // session is a separate workspace owned by the
+                        // tmux server on the remote host); the trailing
+                        // strip's "+ window" is session-scoped. The
+                        // wording here calls that out explicitly so the
+                        // user doesn't accidentally fork a workspace
+                        // when they meant to add a window.
                         TextButton(
                             modifier = Modifier.fillMaxWidth(),
                             onClick = onCreate,
                         ) {
-                            Text("+ New session")
+                            Text("+ New tmux session (separate workspace)")
                         }
                     }
                     when (state) {
@@ -945,9 +960,27 @@ internal data class WindowSummary(
     val title: String,
 )
 
+/**
+ * Build [WindowSummary] rows for the WindowStrip / WindowSwitcher.
+ *
+ * Per #158: the previous implementation surfaced the raw tmux `@N`
+ * window IDs as the visible label, which the user reported as cryptic.
+ * We now number windows by their position in the pane order so the user
+ * sees "Window 1", "Window 2", … — stable for the duration of a session
+ * because [TmuxSessionViewModel] preserves pane row identity across
+ * `%layout-change` notifications (the underlying tmux pane ID is the
+ * key). Window renaming via the `%window-renamed` control-mode payload
+ * is tracked in #47; once that lands the renamed title can be threaded
+ * here without changing the index-based fallback.
+ */
 internal fun List<TmuxPaneState>.toWindowSummaries(): List<WindowSummary> =
     distinctBy { it.windowId }
-        .map { pane -> WindowSummary(windowId = pane.windowId, title = pane.windowId) }
+        .mapIndexed { index, pane ->
+            WindowSummary(
+                windowId = pane.windowId,
+                title = "Window ${index + 1}",
+            )
+        }
 
 private sealed interface TmuxDialogMode {
     data object CreateSession : TmuxDialogMode
@@ -971,6 +1004,18 @@ internal const val TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX = "tmux:conversation:to
 internal const val TMUX_AGENT_HINT_TAG = "tmux:agent-hint"
 /** Issue #116: stable test tag for the in-tmux-session blocked / near-limit chip. */
 internal const val TMUX_SESSION_USAGE_BADGE_TAG = "tmux:usage-badge"
+/** Issue #158: the WindowStrip is the per-session window tabs row. Hidden when only one window exists. */
+internal const val TMUX_WINDOW_STRIP_TAG = "tmux:window-strip"
+/**
+ * Issue #158: prefix for the per-pill test tag inside the WindowStrip.
+ * The pill index is 1-based, so the first window's pill carries
+ * "tmux:window-strip-pill:1", the second "tmux:window-strip-pill:2",
+ * etc. Used by [TmuxSessionWindowNavigationE2eTest] so the click
+ * does not collide with the same "Window N" string in the breadcrumb.
+ */
+internal const val TMUX_WINDOW_STRIP_PILL_TAG_PREFIX = "tmux:window-strip-pill:"
+/** Issue #158: trailing "+ window" button inside the WindowStrip. */
+internal const val TMUX_NEW_WINDOW_BUTTON_TAG = "tmux:new-window-button"
 
 private fun Modifier.verticalSwipeInput(
     thresholdPx: Float,
@@ -1003,19 +1048,39 @@ private fun Modifier.verticalSwipeInput(
 
 /**
  * Build the breadcrumb segments. With tmux we have a real four-level
- * chain (host → session → window → pane), so we surface all four — the
- * window crumb is keyed off [TmuxPaneState.windowId] for now (e.g.
- * "@0"); a follow-up issue (#47) replaces the bare ID with the
- * window name once we cache the `%window-renamed` payload.
+ * chain (host → session → window → pane), so we surface all four.
+ *
+ * Per #158: the window + pane labels used to surface the raw tmux
+ * `@N` / `%N` IDs, which the user reported as cryptic ("can't find my
+ * way back"). We now derive a 1-based ordinal from the
+ * [panes] / [windows] lists so the crumb reads
+ * `host › session › Window 2 › Pane 3`. The non-blank pane title from
+ * `display-message -p '#{pane_title}'` still wins when present.
+ * Window renaming via the `%window-renamed` control-mode payload is
+ * tracked in #47; until then the ordinal is what we show.
  */
 private fun breadcrumbCrumbs(
     host: String,
     sessionName: String,
     currentPane: TmuxPaneState?,
+    panes: List<TmuxPaneState>,
+    windows: List<WindowSummary>,
 ): List<Crumb> {
-    val windowLabel = currentPane?.windowId ?: "—"
+    val windowLabel = currentPane?.let { pane ->
+        val match = windows.firstOrNull { it.windowId == pane.windowId }
+        match?.title ?: "Window ?"
+    } ?: "—"
     val paneLabel = currentPane?.let { pane ->
-        if (pane.title.isBlank()) pane.paneId else pane.title
+        if (pane.title.isNotBlank()) {
+            pane.title
+        } else {
+            // 1-based index within the current window; "Pane 1" is the
+            // first pane of the window the user is looking at.
+            val paneIndexInWindow = panes
+                .filter { it.windowId == pane.windowId }
+                .indexOfFirst { it.paneId == pane.paneId }
+            if (paneIndexInWindow >= 0) "Pane ${paneIndexInWindow + 1}" else "Pane ?"
+        }
     } ?: "—"
     return listOf(
         Crumb(label = host, isCurrent = false, onClick = { /* host root — #18 */ }),
@@ -1575,15 +1640,13 @@ private fun TmuxMoreMenu(
             expanded = expanded,
             onDismissRequest = onDismiss,
         ) {
-            DropdownMenuItem(text = { Text("New session") }, onClick = onCreateSession)
-            DropdownMenuItem(text = { Text("Switch session") }, onClick = onSwitchSession)
-            DropdownMenuItem(text = { Text("Rename session") }, onClick = onRenameSession)
-            DropdownMenuItem(text = { Text("Kill session") }, onClick = onKillSession)
-            DropdownMenuItem(text = { Text("Recurring jobs") }, onClick = onOpenJobs)
-            // Issue #114 Fix A: jump to the cross-host Usage / quota
-            // panel from inside a live tmux session.
-            DropdownMenuItem(text = { Text("Usage") }, onClick = onOpenUsage)
-            DropdownMenuItem(text = { Text("New window") }, onClick = onNewWindow)
+            // Per #158: visually group the destructive / scope-confusing
+            // affordances so "session" and "window" aren't a flat
+            // alphabet soup. Header rows are not clickable; the dividers
+            // separate the three families: in-this-session window ops,
+            // on-this-host session ops, and cross-host shortcuts.
+            DropdownMenuSectionHeader(text = "In this session")
+            DropdownMenuItem(text = { Text("+ New window") }, onClick = onNewWindow)
             DropdownMenuItem(
                 text = { Text("Rename window") },
                 onClick = onRenameWindow,
@@ -1594,8 +1657,30 @@ private fun TmuxMoreMenu(
                 onClick = onKillWindow,
                 enabled = currentWindowId != null,
             )
+            HorizontalDivider()
+            DropdownMenuSectionHeader(text = "On this host")
+            DropdownMenuItem(text = { Text("+ New session") }, onClick = onCreateSession)
+            DropdownMenuItem(text = { Text("Switch session") }, onClick = onSwitchSession)
+            DropdownMenuItem(text = { Text("Rename session") }, onClick = onRenameSession)
+            DropdownMenuItem(text = { Text("Kill session") }, onClick = onKillSession)
+            HorizontalDivider()
+            DropdownMenuItem(text = { Text("Recurring jobs") }, onClick = onOpenJobs)
+            // Issue #114 Fix A: jump to the cross-host Usage / quota
+            // panel from inside a live tmux session.
+            DropdownMenuItem(text = { Text("Usage") }, onClick = onOpenUsage)
         }
     }
+}
+
+@Composable
+private fun DropdownMenuSectionHeader(text: String) {
+    Text(
+        text = text,
+        color = PocketShellColors.TextSecondary,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Medium,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+    )
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -1612,11 +1697,12 @@ private fun WindowStrip(
             .fillMaxWidth()
             .background(color = PocketShellColors.Surface)
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 8.dp, vertical = 6.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+            .testTag(TMUX_WINDOW_STRIP_TAG),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        windows.forEach { window ->
+        windows.forEachIndexed { index, window ->
             val selected = window.windowId == currentWindowId
             Text(
                 text = window.title,
@@ -1635,11 +1721,23 @@ private fun WindowStrip(
                         onClick = { onSelectWindow(window) },
                         onLongClick = { onOpenWindowMenu(window) },
                     )
-                    .padding(horizontal = 12.dp, vertical = 7.dp),
+                    .padding(horizontal = 12.dp, vertical = 7.dp)
+                    // Per #158: each pill carries a stable, unique
+                    // test tag so the E2E test can address it without
+                    // colliding with the breadcrumb crumb that also
+                    // reads "Window N".
+                    .testTag("${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}${index + 1}"),
             )
         }
-        TextButton(onClick = onNewWindow) {
-            Text("+")
+        // Per #158: the trailing "+" used to be ambiguous (window vs
+        // session). The visible label is now "+ window" so the user can
+        // tell at a glance this affordance adds a window to the current
+        // session — host-level "+ New session" lives in the drawer.
+        TextButton(
+            onClick = onNewWindow,
+            modifier = Modifier.testTag(TMUX_NEW_WINDOW_BUTTON_TAG),
+        ) {
+            Text("+ window")
         }
     }
 }
@@ -1659,8 +1757,12 @@ private fun WindowContextMenu(
             expanded = true,
             onDismissRequest = onDismiss,
         ) {
-            DropdownMenuItem(text = { Text("Rename ${window.windowId}") }, onClick = onRename)
-            DropdownMenuItem(text = { Text("Kill ${window.windowId}") }, onClick = onKill)
+            // Per #158: use the readable window title ("Window 2") instead
+            // of the cryptic `@N` tmux ID. The user reached this menu by
+            // long-pressing the strip's "Window N" pill, so the label
+            // here must match what they tapped.
+            DropdownMenuItem(text = { Text("Rename ${window.title}") }, onClick = onRename)
+            DropdownMenuItem(text = { Text("Kill ${window.title}") }, onClick = onKill)
         }
     }
 }

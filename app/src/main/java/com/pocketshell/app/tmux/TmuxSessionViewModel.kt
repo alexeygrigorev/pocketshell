@@ -466,10 +466,23 @@ public class TmuxSessionViewModel @Inject constructor(
                 // pane_index is appended last so we can sort within a
                 // window. tmux can change index order on layout-rotate
                 // commands, so we re-read it on every reconcile.
+                //
+                // Per #158: include `-s` so we list panes across every
+                // window in the session, not only the current window.
+                // Without `-s`, `list-panes -t <session>` returns only
+                // the panes of the session's current window — meaning
+                // `new-window` reconciles wipe the prior window's pane
+                // rows from the UI, the WindowStrip never sees more
+                // than one entry, and tap-to-switch has nothing to
+                // switch between. The existing unit test
+                // `reconcileScopesPanesAndWindowSummariesToActiveSession`
+                // already expects a multi-window response shape — that
+                // was a latent inconsistency between the unit fake and
+                // the real tmux command, surfaced by the #158 E2E.
                 buildString {
                     append("list-panes ")
                     if (target != null) {
-                        append("-t '${escapeSingleQuoted(target.sessionName)}' ")
+                        append("-s -t '${escapeSingleQuoted(target.sessionName)}' ")
                     }
                     append("-F ")
                     append("'#{pane_id}\t#{window_id}\t#{session_id}\t#{session_name}\t#{pane_title}\t#{pane_index}\t#{pane_current_path}\t#{pane_current_command}'")

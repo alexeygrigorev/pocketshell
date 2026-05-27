@@ -313,16 +313,23 @@ class TmuxSessionViewModelTest {
         advanceUntilIdle()
 
         val command = client.sentCommands.single { it.startsWith("list-panes") }
-        assertTrue(command.startsWith("list-panes -t 'work' -F "))
+        // Per #158: reconcilePanes now uses `-s` so the response covers
+        // every window in the target session, not only the current
+        // window. Without `-s`, a `new-window` reconcile would replace
+        // the prior window's panes with just the new pane and the
+        // WindowStrip would never see two entries.
+        assertTrue(command.startsWith("list-panes -s -t 'work' -F "))
         assertFalse(command.contains(" -a "))
 
         val panes = vm.panes.value
         assertEquals(listOf("%0", "%1"), panes.map { it.paneId })
         assertEquals(listOf("@0", "@1"), panes.map { it.windowId })
+        // Per #158: window summaries now carry a readable 1-based
+        // ordinal as their title instead of the bare `@N` tmux ID.
         assertEquals(
             listOf(
-                WindowSummary(windowId = "@0", title = "@0"),
-                WindowSummary(windowId = "@1", title = "@1"),
+                WindowSummary(windowId = "@0", title = "Window 1"),
+                WindowSummary(windowId = "@1", title = "Window 2"),
             ),
             panes.toWindowSummaries(),
         )

@@ -16,11 +16,14 @@ class TmuxSessionScreenTest {
 
         val windows = panes.toWindowSummaries()
 
+        // Per #158: title is now a 1-based ordinal derived from
+        // pane-order arrival, not the bare `@N` tmux ID. The
+        // deduplication semantics are unchanged.
         assertEquals(
             listOf(
-                WindowSummary(windowId = "@1", title = "@1"),
-                WindowSummary(windowId = "@0", title = "@0"),
-                WindowSummary(windowId = "@2", title = "@2"),
+                WindowSummary(windowId = "@1", title = "Window 1"),
+                WindowSummary(windowId = "@0", title = "Window 2"),
+                WindowSummary(windowId = "@2", title = "Window 3"),
             ),
             windows,
         )

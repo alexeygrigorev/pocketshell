@@ -58,7 +58,7 @@ class TmuxSessionDrawerUiTest {
         compose.onNodeWithText("available").assertExists()
 
         compose.onNodeWithText("fresh-work").performClick()
-        compose.onNodeWithText("+ New session").performClick()
+        compose.onNodeWithText("+ New tmux session (separate workspace)").performClick()
         compose.onNodeWithText("Refresh").performClick()
         compose.onNodeWithText("Close").performClick()
 
@@ -90,7 +90,7 @@ class TmuxSessionDrawerUiTest {
 
         compose.onNodeWithTag(TMUX_SESSION_SWITCHER_TAG).assertExists()
         compose.onNodeWithText("No tmux sessions found.").assertExists()
-        compose.onNodeWithText("+ New session").performClick()
+        compose.onNodeWithText("+ New tmux session (separate workspace)").performClick()
 
         assertTrue(createClicked)
     }

@@ -15,6 +15,16 @@ import com.termux.terminal.WcWidth;
  * Renderer of a {@link TerminalEmulator} into a {@link Canvas}.
  * <p/>
  * Saves font metrics, so needs to be recreated each time the typeface or font size changes.
+ * <p/>
+ * <b>Cell-width pinning (PocketShell #172, Option A):</b> the renderer pins every
+ * column to {@link #mFontWidth} — the advance width of a regular-weight {@code 'X'}
+ * — and draws every glyph (regular or bold) into that fixed cell. Bold glyphs that
+ * would otherwise be wider are horizontally compressed via {@link Canvas#scale} so
+ * cell boundaries land on consistent x-pixels regardless of weight. This avoids the
+ * gap/overlap regression that appears when agent CLIs (e.g. Claude Code's animated
+ * spinner) toggle bold per-letter on a font whose bold metrics differ from
+ * regular. The trade-off is documented in {@link #drawTextRun}: bold loses a
+ * sliver of horizontal weight; neighbors do not displace.
  */
 public final class TerminalRenderer {
 
@@ -191,6 +201,56 @@ public final class TerminalRenderer {
         float left = startColumn * mFontWidth;
         float right = left + runWidthColumns * mFontWidth;
 
+        // PocketShell #172 — Option A: pin every glyph (regular OR bold) into
+        // the regular-advance cell width.
+        //
+        // Background: the caller computed `mes` by summing per-codepoint widths
+        // from the `asciiMeasures` cache, which was populated at construction
+        // time with `setFakeBoldText(false)`. When the current run is bold:
+        //
+        //   - Some monospace fonts on Android (notably the default
+        //     `Typeface.MONOSPACE` bold variant) advertise *narrower* bold
+        //     advances than regular, so the cached regular widths overestimate
+        //     `mes` for bold runs and the existing horizontal-scale branch
+        //     never triggers — the run is drawn too narrow inside its cell
+        //     allocation, leaving visible gaps between cells.
+        //   - Fake-bold stroke thickening also bleeds horizontally past each
+        //     glyph's advance, pushing painted pixels into the next cell.
+        //
+        // Per-letter bold/regular toggles (Claude Code's animated "Working..."
+        // spinner) compound both effects and produce the visible gap/overlap
+        // pattern reported in #172.
+        //
+        // The fix has two complementary parts:
+        //
+        //   1. Re-measure bold runs with `setFakeBoldText(true)` so the
+        //      horizontal-scale branch below sees the true bold advance.
+        //      The branch then stretches (or compresses) the bold run to fill
+        //      exactly the regular-advance cell allocation, so bold and
+        //      regular runs occupy the same column footprint.
+        //   2. Clip every glyph draw to its column-aligned cell rectangle in
+        //      pre-scale (physical) coordinates. Stroke bleed (fake bold,
+        //      italic skew, ligature overhang) is pinned inside the cell so
+        //      neighbors are never visually displaced. The y axis is left
+        //      unclipped so glyphs on adjacent rows still render.
+        //
+        // Trade-off the issue calls for: bold loses a sliver of stroke weight
+        // at the cell edges, but cell columns stay on the regular-advance
+        // grid for every glyph, every weight, every run.
+        if (bold) {
+            final boolean previousBold = mTextPaint.isFakeBoldText();
+            mTextPaint.setFakeBoldText(true);
+            mes = mTextPaint.measureText(text, startCharIndex, runWidthChars);
+            mTextPaint.setFakeBoldText(previousBold);
+        }
+
+        // Physical (pre-scale) cell bounds — fixed multiples of `mFontWidth`,
+        // independent of the rendered glyph's actual advance width. Used both
+        // for the foreground glyph clip and as the source for the post-scale
+        // `left`/`right` rectangles used by the background / cursor draws.
+        final float cellLeftPx = startColumn * mFontWidth;
+        final float cellRightPx = cellLeftPx + runWidthColumns * mFontWidth;
+
         mes = mes / mFontWidth;
         boolean savedMatrix = false;
         if (Math.abs(mes - runWidthColumns) > 0.01) {
@@ -234,8 +294,35 @@ public final class TerminalRenderer {
             mTextPaint.setStrikeThruText(strikeThrough);
             mTextPaint.setColor(foreColor);
 
+            // PocketShell #172 (Option A clip) — restrict the foreground glyph
+            // draw to this run's cell-aligned physical column footprint so
+            // fake-bold stroke thickening (and italic skew, ligature overhang)
+            // cannot bleed sideways into neighboring columns. The clip is
+            // computed in pre-scale physical pixels and applied OUTSIDE the
+            // existing scale matrix; that way the clip survives the scale
+            // and bounds physical ink at the cell boundary regardless of
+            // how aggressively the bold paint draws over its advance.
+            //
+            // We must temporarily pop the scale matrix (if active) so the
+            // `clipRect` is intersected in physical coordinates, then push
+            // a new state that re-applies the scale on top of the physical
+            // clip. The y range is left at full canvas height so descenders
+            // / ascenders that overlap the next row's pixel band still
+            // render unclipped.
+            if (savedMatrix) {
+                canvas.restore();
+                savedMatrix = false;
+            }
+            canvas.save();
+            canvas.clipRect(cellLeftPx, 0f, cellRightPx, (float) canvas.getHeight());
+            if (Math.abs(mes - runWidthColumns) > 0.01) {
+                canvas.scale(runWidthColumns / mes, 1.f);
+            }
+
             // The text alignment is the default Paint.Align.LEFT.
             canvas.drawTextRun(text, startCharIndex, runWidthChars, startCharIndex, runWidthChars, left, y - mFontLineSpacingAndAscent, false, mTextPaint);
+
+            canvas.restore();
         }
 
         if (savedMatrix) canvas.restore();

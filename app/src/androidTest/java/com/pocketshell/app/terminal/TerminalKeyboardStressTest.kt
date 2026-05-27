@@ -12,12 +12,16 @@ import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
+import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
+import com.pocketshell.app.proof.TerminalTestTimeouts
+import com.pocketshell.app.proof.signals.waitForComposeLayoutStable
+import com.pocketshell.app.proof.signals.waitForInputMethodVisible
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.core.ssh.SshKey
 import com.termux.view.TerminalView
@@ -25,7 +29,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Assume
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.BufferedReader
@@ -33,6 +37,7 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStreamReader
 import java.security.MessageDigest
+import kotlin.system.measureTimeMillis
 
 /**
  * Issue #104 stress harness — drives the keyboard/typing path under live
@@ -81,6 +86,16 @@ import java.security.MessageDigest
 @RunWith(AndroidJUnit4::class)
 class TerminalKeyboardStressTest {
 
+    // Compose test rule used by `waitForComposeLayoutStable`. The hide-cycle
+    // layout-settle measurement (#142) reads the bounding rect of the
+    // `TERMINAL_LAB_SCREEN_TAG` column through Compose's semantics tree, so a
+    // `ComposeTestRule` must be installed even though the test launches
+    // [TerminalLabActivity] manually with a custom intent. Empty rule (no
+    // setContent) lets the existing manual `ActivityScenario.launch(intent)`
+    // path stay unchanged.
+    @get:Rule
+    val compose = createEmptyComposeRule()
+
     private var launchedActivity: ActivityScenario<TerminalLabActivity>? = null
     private val keystrokeTimings = mutableListOf<KeystrokeSample>()
     private val hideTimings = mutableListOf<HideSample>()
@@ -95,15 +110,16 @@ class TerminalKeyboardStressTest {
 
     @Test
     fun typingAndKeyboardToggleStayResponsiveUnderLiveOutput() = runBlocking {
-        // Tracked in #132: the keyboard-hide → stable-layout responsiveness
-        // assertion (3000 ms ceiling) misses on CI under load even after the
-        // stress-miss tolerance bumps. CI run 26376321647 observed max=5912 ms
-        // across 5 cycles. Same family of CI emulator latency flakes; same
-        // skip pattern. Local runs land in <1 s.
-        Assume.assumeFalse(
-            "Tracked in #132: keyboard-hide settle exceeds 3 s on CI; investigate separately.",
-            com.pocketshell.app.proof.TerminalTestTimeouts.isRunningOnCi(),
-        )
+        // Issue #142 re-enabled this test on CI by decoupling the IME-ack
+        // measurement from the layout-stable measurement. The old
+        // `totalHideMs < 3000` ceiling conflated a slow `dumpsys input_method`
+        // ack (system-framework lag on swiftshader emulators) with the
+        // app's layout-settle responsiveness. We now consume #140's
+        // `waitForInputMethodVisible` (WindowInsets-based, no dumpsys
+        // lag) and `waitForComposeLayoutStable` (Compose semantics
+        // bounds polling), with separate CI-aware ceilings — see
+        // `TerminalTestTimeouts.keyboardHideImeAckCeilingMs()` and
+        // `keyboardHideLayoutStableCeilingMs()`.
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val appContext = instrumentation.targetContext
         val key = instrumentation.context.assets
@@ -261,7 +277,7 @@ class TerminalKeyboardStressTest {
                 // pathological hang. Local runs hit this branch in ~20
                 // ms median, so a larger CI ceiling does not slow them.
                 val deadline = perCharStart +
-                    com.pocketshell.app.proof.TerminalTestTimeouts.perCharacterStallCeilingMs()
+                    TerminalTestTimeouts.perCharacterStallCeilingMs()
                 var visibleByDeadline = false
                 while (SystemClock.elapsedRealtime() < deadline) {
                     val text = visibleTerminalText()
@@ -294,25 +310,58 @@ class TerminalKeyboardStressTest {
 
             captureViewport("cycle$cycle-after-type")
 
-            // Phase 3 — hide the soft keyboard and time how long until the
-            // terminal layout (height/width) settles again. The decorView
-            // height changes when the IME insets are removed; we capture
-            // when the TerminalView's height stops changing for at least
-            // 250 ms.
-            val hideStart = SystemClock.elapsedRealtime()
+            // Phase 3 — hide the soft keyboard, then independently measure
+            // (a) the IME visibility ack via WindowInsets, and (b) how long
+            // the terminal-lab Compose surface takes to reach layout-stable
+            // after the ack. Both measurements start from the same
+            // `hideSoftKeyboard` call, but `imeHideMs` and `layoutStableMs`
+            // are reported separately so the responsiveness gate can hold
+            // the app-layout side to a tight ceiling without contamination
+            // from the framework-bound IME-ack delay (issue #142).
+            //
+            // The `TERMINAL_LAB_SCREEN_TAG` Column has `imePadding()` (see
+            // `TerminalLabActivity.kt`), so its bounding rect changes as
+            // the IME inset is removed and settles within a frame or two
+            // of the ack landing — exactly the property the original
+            // raw-View width/height poll was approximating.
             hideSoftKeyboard(instr)
-            val keyboardHidden = waitForImeVisibility(instr, expected = false, timeoutMs = 4_000)
-            val hideAckMs = SystemClock.elapsedRealtime() - hideStart
-
-            val stableMs = waitForTerminalLayoutStable(stableWindowMs = 250, timeoutMs = 4_000)
-            val totalHideMs = SystemClock.elapsedRealtime() - hideStart
+            val scenarioForIme = checkNotNull(launchedActivity) {
+                "ActivityScenario must be live for the IME-visibility wait"
+            }
+            // `waitForInputMethodVisible` returns the final observed
+            // visibility (`true` == visible, `false` == hidden). When
+            // we ask `expected = false`, success returns `false`. We
+            // record `hidden = !finalVisible` to keep the HideSample
+            // artifact schema readable.
+            var imeFinalVisible = true
+            val imeHideMs = measureTimeMillis {
+                imeFinalVisible = waitForInputMethodVisible(
+                    scenario = scenarioForIme,
+                    expected = false,
+                    timeoutMs = 4_000,
+                )
+            }
+            val keyboardHidden = !imeFinalVisible
+            var layoutStable = false
+            val layoutStableMs = measureTimeMillis {
+                layoutStable = waitForComposeLayoutStable(
+                    rule = compose,
+                    tag = TERMINAL_LAB_SCREEN_TAG,
+                    stableWindowMs = 250,
+                    timeoutMs = 4_000,
+                )
+            }
+            recordNote(
+                "cycle=$cycle ime_hide_ms=$imeHideMs layout_stable_ms=$layoutStableMs " +
+                    "hidden=$keyboardHidden layout_settled=$layoutStable",
+            )
 
             hideTimings += HideSample(
                 cycle = cycle,
-                imeAckMs = hideAckMs,
-                stableMs = stableMs,
-                totalMs = totalHideMs,
+                imeHideMs = imeHideMs,
+                layoutStableMs = layoutStableMs,
                 hidden = keyboardHidden,
+                layoutSettled = layoutStable,
             )
 
             // Phase 4 — assert app is still responsive: viewport hash must
@@ -383,7 +432,7 @@ class TerminalKeyboardStressTest {
         // would still show up because the median assertion above
         // would be wildly exceeded AND the `still_painting_after_hide`
         // freeze assertion below would also flip.
-        val maxAllowedMisses = if (com.pocketshell.app.proof.TerminalTestTimeouts.isRunningOnCi()) {
+        val maxAllowedMisses = if (TerminalTestTimeouts.isRunningOnCi()) {
             25
         } else {
             0
@@ -392,14 +441,29 @@ class TerminalKeyboardStressTest {
             "expected typed characters to become visible within the deadline; " +
                 "missed=$missed samples=${elapsedSamples.size} " +
                 "maxAllowedMisses=$maxAllowedMisses (CI tolerance applied=" +
-                "${com.pocketshell.app.proof.TerminalTestTimeouts.isRunningOnCi()})",
+                "${TerminalTestTimeouts.isRunningOnCi()})",
             missed <= maxAllowedMisses,
         )
-        val maxHide = hideTimings.maxOfOrNull { it.totalMs } ?: 0L
+
+        // Decoupled hide-cycle ceilings (issue #142). The IME-ack ceiling
+        // is loose because the IME process is system-framework code on
+        // the emulator side; the layout-stable ceiling is tight because
+        // it measures our own Compose recomposition + AndroidView interop.
+        // Both ceilings come from `TerminalTestTimeouts` so the CI vs.
+        // local split is owned in one place.
+        val imeHideCeilingMs = TerminalTestTimeouts.keyboardHideImeAckCeilingMs()
+        val layoutStableCeilingMs = TerminalTestTimeouts.keyboardHideLayoutStableCeilingMs()
+        val maxImeHide = hideTimings.maxOfOrNull { it.imeHideMs } ?: 0L
+        val maxLayoutStable = hideTimings.maxOfOrNull { it.layoutStableMs } ?: 0L
         assertTrue(
-            "expected keyboard-hide → stable-layout to settle within 3000 ms; " +
-                "max=$maxHide ms cycles=${hideTimings.size}",
-            maxHide < 3_000,
+            "expected IME-hide ack to land within $imeHideCeilingMs ms; " +
+                "max=$maxImeHide ms cycles=${hideTimings.size} (CI=${TerminalTestTimeouts.isRunningOnCi()})",
+            maxImeHide < imeHideCeilingMs,
+        )
+        assertTrue(
+            "expected terminal-lab layout to settle within $layoutStableCeilingMs ms after IME-hide ack; " +
+                "max=$maxLayoutStable ms cycles=${hideTimings.size} (CI=${TerminalTestTimeouts.isRunningOnCi()})",
+            maxLayoutStable < layoutStableCeilingMs,
         )
         assertTrue(
             "expected viewport hashes to vary across phases (the test should not " +
@@ -460,42 +524,17 @@ class TerminalKeyboardStressTest {
     }
 
     // --- Layout / paint helpers --------------------------------------------
-
-    /**
-     * Wait until the TerminalView's bounds (width x height) have stopped
-     * changing for [stableWindowMs] ms or [timeoutMs] elapses. Returns the
-     * time from start to "first sample where the bounds were stable for the
-     * window" — what the issue's "hide → stable layout" metric expects.
-     */
-    private fun waitForTerminalLayoutStable(stableWindowMs: Long, timeoutMs: Long): Long {
-        val start = SystemClock.elapsedRealtime()
-        val deadline = start + timeoutMs
-        var lastSize = currentTerminalSize()
-        var lastChangedAt = SystemClock.elapsedRealtime()
-        while (SystemClock.elapsedRealtime() < deadline) {
-            val now = SystemClock.elapsedRealtime()
-            val size = currentTerminalSize()
-            if (size != lastSize) {
-                lastSize = size
-                lastChangedAt = now
-            } else if (now - lastChangedAt >= stableWindowMs) {
-                return now - start
-            }
-            SystemClock.sleep(15)
-        }
-        return timeoutMs
-    }
-
-    private fun currentTerminalSize(): TerminalDimensions {
-        var dim = TerminalDimensions(0, 0)
-        launchedActivity?.onActivity { activity ->
-            val view = findTerminalView(activity.window.decorView)
-            if (view != null) {
-                dim = TerminalDimensions(view.width, view.height)
-            }
-        }
-        return dim
-    }
+    //
+    // The previous `waitForTerminalLayoutStable` (raw `TerminalView.width` /
+    // `TerminalView.height` polling) was removed in issue #142 once its only
+    // call site migrated to `waitForComposeLayoutStable` from the
+    // signal-helpers package (#140). The Compose helper samples the
+    // `TERMINAL_LAB_SCREEN_TAG` column's `boundsInRoot`, which is the
+    // semantics tree's view of the same dimensions plus any `imePadding()`
+    // contribution — exactly the property the hide-cycle measurement cares
+    // about. The supporting `currentTerminalSize` helper and the
+    // `TerminalDimensions` data class went with it, since nothing else
+    // referenced them.
 
     // --- Viewport capture --------------------------------------------------
 
@@ -626,7 +665,7 @@ class TerminalKeyboardStressTest {
         // Local: 60 s. CI: 180 s. Predicate polls every 75 ms and exits
         // as soon as it matches, so local runs are unaffected.
         val deadline = SystemClock.elapsedRealtime() +
-            com.pocketshell.app.proof.TerminalTestTimeouts.terminalVisibilityTimeoutMs()
+            TerminalTestTimeouts.terminalVisibilityTimeoutMs()
         var last = ""
         while (SystemClock.elapsedRealtime() < deadline) {
             last = visibleTerminalText()
@@ -705,9 +744,21 @@ class TerminalKeyboardStressTest {
 
     private fun writeHideTimings() {
         val text = buildString {
-            appendLine("# cycle,ime_ack_ms,stable_ms,total_ms,hidden")
+            // Schema updated in #142: the historical `ime_ack_ms` /
+            // `stable_ms` / `total_ms` columns were sequentially-stacked
+            // measurements that conflated framework IME-ack lag with the
+            // app's Compose layout-settle. We now record the two phases
+            // independently so reviewers can localise regressions to the
+            // right stage.
+            appendLine("# cycle,ime_hide_ms,layout_stable_ms,hidden,layout_settled")
             hideTimings.forEach { sample ->
-                appendLine("${sample.cycle},${sample.imeAckMs},${sample.stableMs},${sample.totalMs},${sample.hidden}")
+                appendLine(
+                    "${sample.cycle}," +
+                        "${sample.imeHideMs}," +
+                        "${sample.layoutStableMs}," +
+                        "${sample.hidden}," +
+                        "${sample.layoutSettled}",
+                )
             }
         }
         writeText("keyboard-stress-hide-timings.txt", text)
@@ -720,8 +771,12 @@ class TerminalKeyboardStressTest {
         val max = elapsed.maxOrNull() ?: -1
         val missed = keystrokeTimings.count { !it.visible }
 
-        val hideMax = hideTimings.maxOfOrNull { it.totalMs } ?: -1
-        val hideMedian = hideTimings.map { it.totalMs }.sorted().let {
+        val imeHideMax = hideTimings.maxOfOrNull { it.imeHideMs } ?: -1L
+        val imeHideMedian = hideTimings.map { it.imeHideMs }.sorted().let {
+            if (it.isEmpty()) -1L else it[it.size / 2]
+        }
+        val layoutStableMax = hideTimings.maxOfOrNull { it.layoutStableMs } ?: -1L
+        val layoutStableMedian = hideTimings.map { it.layoutStableMs }.sorted().let {
             if (it.isEmpty()) -1L else it[it.size / 2]
         }
         val text = buildString {
@@ -732,8 +787,13 @@ class TerminalKeyboardStressTest {
             appendLine("keystroke_max_ms=$max")
             appendLine("keystroke_missed_deadline=$missed")
             appendLine("hide_cycles=${hideTimings.size}")
-            appendLine("hide_total_median_ms=$hideMedian")
-            appendLine("hide_total_max_ms=$hideMax")
+            appendLine("ime_hide_median_ms=$imeHideMedian")
+            appendLine("ime_hide_max_ms=$imeHideMax")
+            appendLine("layout_stable_median_ms=$layoutStableMedian")
+            appendLine("layout_stable_max_ms=$layoutStableMax")
+            appendLine("ime_hide_ceiling_ms=${TerminalTestTimeouts.keyboardHideImeAckCeilingMs()}")
+            appendLine("layout_stable_ceiling_ms=${TerminalTestTimeouts.keyboardHideLayoutStableCeilingMs()}")
+            appendLine("ci=${TerminalTestTimeouts.isRunningOnCi()}")
             appendLine("viewport_hashes_total=${viewportHashes.size}")
             appendLine("viewport_hashes_distinct=${viewportHashes.toSet().size}")
             appendLine("notes:")
@@ -779,14 +839,22 @@ class TerminalKeyboardStressTest {
 
     private data class HideSample(
         val cycle: Int,
-        val imeAckMs: Long,
-        val stableMs: Long,
-        val totalMs: Long,
+        // Time spent waiting on the system IME visibility ack to flip
+        // from visible to hidden (via WindowInsets, NOT dumpsys). See
+        // `TerminalTestTimeouts.keyboardHideImeAckCeilingMs` for the
+        // ceiling rationale.
+        val imeHideMs: Long,
+        // Time spent waiting on the terminal-lab Compose surface
+        // (`TERMINAL_LAB_SCREEN_TAG`) to reach layout-stable after the
+        // IME-hide call. See
+        // `TerminalTestTimeouts.keyboardHideLayoutStableCeilingMs` for
+        // the ceiling rationale.
+        val layoutStableMs: Long,
+        // `true` when the IME visibility ack landed within the helper's
+        // internal timeout (i.e. `expected = false` was observed).
         val hidden: Boolean,
-    )
-
-    private data class TerminalDimensions(
-        val width: Int,
-        val height: Int,
+        // `true` when the layout-stable helper observed a stability
+        // window inside its timeout, `false` on timeout.
+        val layoutSettled: Boolean,
     )
 }

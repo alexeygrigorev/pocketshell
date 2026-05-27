@@ -49,6 +49,36 @@ internal object TerminalTestTimeouts {
     private const val LOCAL_PER_CHARACTER_STALL_CEILING_MS: Long = 10_000L
     private const val CI_PER_CHARACTER_STALL_CEILING_MS: Long = 30_000L
 
+    // --- Keyboard-hide ceilings (decoupled IME ack vs. layout settle) ----
+    //
+    // Issue #142 split the keyboard-hide responsiveness assertion into two
+    // independent measurements so the system-framework delay (IME ack
+    // propagating through WindowInsets) does not contaminate the
+    // app-layout-responsiveness ceiling. Both numbers come from the
+    // signal-helpers package (#140):
+    //
+    //  - IME visibility ack uses `waitForInputMethodVisible`, which polls
+    //    WindowInsets directly and bypasses the historic `dumpsys
+    //    input_method` lag observed on swiftshader CI emulators. The local
+    //    surface routinely lands under ~500 ms; CI swiftshader has been
+    //    observed to spike past 4 s when a busy emulator is also serving
+    //    sibling instrumentation, hence the loose 5 s ceiling. The local
+    //    ceiling stays tight at 2.5 s so a regression on a dev box still
+    //    surfaces.
+    //
+    //  - Compose layout-stable uses `waitForComposeLayoutStable`, which
+    //    samples the `TERMINAL_LAB_SCREEN_TAG` column's bounding rect.
+    //    The column has `imePadding()`, so its rect changes as the IME
+    //    inset is removed and settles within a frame or two of the IME
+    //    ack landing. This is "our code's responsibility" — Compose
+    //    recomposition and AndroidView interop — and is held to a tight
+    //    2 s on CI / 1 s local ceiling.
+    private const val LOCAL_KEYBOARD_HIDE_IME_ACK_CEILING_MS: Long = 2_500L
+    private const val CI_KEYBOARD_HIDE_IME_ACK_CEILING_MS: Long = 5_000L
+
+    private const val LOCAL_KEYBOARD_HIDE_LAYOUT_STABLE_CEILING_MS: Long = 1_000L
+    private const val CI_KEYBOARD_HIDE_LAYOUT_STABLE_CEILING_MS: Long = 2_000L
+
     /**
      * Timeout for a single `waitForVisibleTerminalText` poll loop. The
      * loop early-exits as soon as its predicate matches, so a generous
@@ -73,6 +103,40 @@ internal object TerminalTestTimeouts {
             CI_PER_CHARACTER_STALL_CEILING_MS
         } else {
             LOCAL_PER_CHARACTER_STALL_CEILING_MS
+        }
+
+    /**
+     * Per-cycle ceiling for the IME visibility ack to flip from
+     * "visible" to "hidden" after `hideSoftInputFromWindow`. The
+     * measurement uses `waitForInputMethodVisible` from the signal-
+     * helpers package, which polls `WindowInsetsCompat.Type.ime()` and
+     * does NOT suffer from the historical `dumpsys input_method`
+     * propagation lag on swiftshader emulators. Even so, the IME
+     * process is system-framework code outside our control, hence
+     * the looser CI ceiling than the layout-settle ceiling below.
+     */
+    fun keyboardHideImeAckCeilingMs(): Long =
+        if (isRunningOnCi()) {
+            CI_KEYBOARD_HIDE_IME_ACK_CEILING_MS
+        } else {
+            LOCAL_KEYBOARD_HIDE_IME_ACK_CEILING_MS
+        }
+
+    /**
+     * Per-cycle ceiling for the terminal-lab Compose surface to reach
+     * layout-stable after the IME ack has landed. The measurement uses
+     * `waitForComposeLayoutStable` from the signal-helpers package,
+     * sampling the bounding rect of the `TERMINAL_LAB_SCREEN_TAG`
+     * column (which has `imePadding()` so its rect changes as the IME
+     * inset is removed). This is our app's responsibility — Compose
+     * recomposition + AndroidView interop — so the ceiling stays tight
+     * to catch real regressions.
+     */
+    fun keyboardHideLayoutStableCeilingMs(): Long =
+        if (isRunningOnCi()) {
+            CI_KEYBOARD_HIDE_LAYOUT_STABLE_CEILING_MS
+        } else {
+            LOCAL_KEYBOARD_HIDE_LAYOUT_STABLE_CEILING_MS
         }
 
     /**

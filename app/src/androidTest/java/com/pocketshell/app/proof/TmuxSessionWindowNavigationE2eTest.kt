@@ -8,12 +8,19 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTextInput
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
@@ -22,6 +29,10 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_MORE_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_FULL_CHROME_MORE_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_OVERLAY_TAG
+import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_PAGE_TAG_PREFIX
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_WINDOW_STRIP_TAG
 import com.pocketshell.app.tmux.TMUX_WINDOW_SWITCHER_OVERLAY_TAG
@@ -50,7 +61,7 @@ import java.io.FileOutputStream
  * "new" inside a tmux session, the user landed on a cryptically-labeled
  * window (`@137`) with no obvious way back. #158 unifies four fixes:
  *
- *  1. **Disambiguated labels** — drawer "+ New tmux session ..." vs
+ *  1. **Disambiguated labels** — session-pager "New" vs
  *     in-strip "+ window", kebab grouped by scope.
  *  2. **WindowStrip hidden when there is only one window** — single-pane
  *     sessions no longer carry extra chrome.
@@ -74,9 +85,9 @@ import java.io.FileOutputStream
  *  - The new-window flow uses the in-strip `+ window` button (the test
  *    explicitly verifies that affordance; covering the kebab path too
  *    would duplicate ground without adding signal).
- *  - The session-create flow goes through the drawer → "+ New tmux
- *    session ..." → dialog → "Save", matching the user's discovery
- *    path. The dialog's confirm button is labelled "Save" (see
+ *  - The session-create flow goes through the session pager → "New" →
+ *    dialog → "Save", matching the user's discovery path. The dialog's
+ *    confirm button is labelled "Save" (see
  *    [com.pocketshell.app.tmux.TmuxLifecycleDialog]).
  */
 @RunWith(AndroidJUnit4::class)
@@ -151,7 +162,7 @@ class TmuxSessionWindowNavigationE2eTest {
         // ===== Step 3 — Add a window from the kebab + window menu =====
         // Single source of truth for the "+ New window" affordance — the
         // strip is gone (#189), so the kebab is the discoverable path.
-        compose.onNodeWithText("⋮").performClick()
+        openMoreMenu()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithText("+ New window", useUnmergedTree = true)
                 .fetchSemanticsNodes()
@@ -171,12 +182,11 @@ class TmuxSessionWindowNavigationE2eTest {
         compose.waitUntil(timeoutMillis = 20_000) {
             // Open the kebab; close it after the first probe so we
             // can re-open it freshly for the switcher launch below.
-            // We use onAllNodesWithText so we can probe without
-            // throwing while the dropdown is animating in.
-            compose.onAllNodesWithText("⋮").fetchSemanticsNodes().isNotEmpty()
+            // Probe without throwing while the dropdown is animating in.
+            moreButtonVisible()
         }
         recordTiming("add_window_ms", SystemClock.elapsedRealtime() - newWindowAt)
-        compose.onNodeWithText("⋮").performClick()
+        openMoreMenu()
         compose.waitUntil(timeoutMillis = 10_000) {
             compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
                 .fetchSemanticsNodes()
@@ -199,11 +209,19 @@ class TmuxSessionWindowNavigationE2eTest {
         captureViewport("issue158-03-window-switcher-two-entries")
 
         // Tap window 2's page in the overlay to swap the visible pane.
-        compose.onNodeWithTag(
-            "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}2",
-            useUnmergedTree = true,
-        ).performClick()
-        waitForTerminalReady()
+        performWindowSwitcherPageClick(2)
+        // The WindowSwitcher click starts a local pager scroll. Waiting
+        // only for "terminal is non-empty" races because Window 1 is
+        // already non-empty (`CLAUDE-READY`). Wait until the visible
+        // transcript is no longer Window 1 before sending input, or the
+        // marker can be written into the wrong pane.
+        waitForVisibleTerminal("switched to window 2 before typing") { transcript ->
+            !TerminalTextMatcher.containsWrapTolerant(
+                transcript,
+                INITIAL_WINDOW_MARKER,
+                terminalCols = terminalGridSize().columns,
+            )
+        }
         SystemClock.sleep(SETTLE_MS)
 
         // ===== Step 5 — Send marker into window 2 =====
@@ -223,7 +241,7 @@ class TmuxSessionWindowNavigationE2eTest {
 
         // ===== Step 6 — Switch to window 1 via the kebab, marker MUST NOT be visible =====
         val switchToWinOneAt = SystemClock.elapsedRealtime()
-        compose.onNodeWithText("⋮").performClick()
+        openMoreMenu()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
                 .fetchSemanticsNodes()
@@ -236,21 +254,24 @@ class TmuxSessionWindowNavigationE2eTest {
                 useUnmergedTree = true,
             ).fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithTag(
-            "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}1",
-            useUnmergedTree = true,
-        ).performClick()
+        performWindowSwitcherPageClick(1)
         // The pager animates to the first pane of window 1. Wait for the
         // visible transcript to flip away from the win-2 marker — the
         // terminalState attached to the visible pane is window 1's, which
         // has not seen the printf. Allowing up to the CI-aware visibility
         // timeout absorbs slow GPU repaint on swiftshader emulators.
         waitForVisibleTerminal("switched to window 1 (marker gone)") { transcript ->
-            !TerminalTextMatcher.containsWrapTolerant(
+            val columns = terminalGridSize().columns
+            TerminalTextMatcher.containsWrapTolerant(
                 transcript,
-                winTwoMarker,
-                terminalCols = terminalGridSize().columns,
-            )
+                INITIAL_WINDOW_MARKER,
+                terminalCols = columns,
+            ) &&
+                !TerminalTextMatcher.containsWrapTolerant(
+                    transcript,
+                    winTwoMarker,
+                    terminalCols = columns,
+                )
         }
         recordTiming(
             "switch_to_window_1_ms",
@@ -260,7 +281,7 @@ class TmuxSessionWindowNavigationE2eTest {
 
         // ===== Step 7 — Switch back to window 2 via the kebab, marker MUST reappear =====
         val switchBackAt = SystemClock.elapsedRealtime()
-        compose.onNodeWithText("⋮").performClick()
+        openMoreMenu()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
                 .fetchSemanticsNodes()
@@ -273,16 +294,19 @@ class TmuxSessionWindowNavigationE2eTest {
                 useUnmergedTree = true,
             ).fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithTag(
-            "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}2",
-            useUnmergedTree = true,
-        ).performClick()
+        performWindowSwitcherPageClick(2)
         waitForVisibleTerminal("switched back to window 2 (marker present)") { transcript ->
+            val columns = terminalGridSize().columns
             TerminalTextMatcher.containsWrapTolerant(
                 transcript,
                 winTwoMarker,
-                terminalCols = terminalGridSize().columns,
-            )
+                terminalCols = columns,
+            ) &&
+                !TerminalTextMatcher.containsWrapTolerant(
+                    transcript,
+                    INITIAL_WINDOW_MARKER,
+                    terminalCols = columns,
+                )
         }
         recordTiming(
             "switch_back_to_window_2_ms",
@@ -290,24 +314,23 @@ class TmuxSessionWindowNavigationE2eTest {
         )
         captureViewport("issue158-06-switched-back-to-window-2")
 
-        // ===== Step 8 — Open drawer and create a new session =====
+        // ===== Step 8 — Open the session pager and create a new session =====
         // The strip's "+ window" affordance is *not* the same as the
-        // drawer's "+ New tmux session ..." — that is exactly the UX
-        // disambiguation #158 demands. We tap the drawer entry, fill in
-        // the name field, and tap "Save" (the dialog's confirm button).
-        compose.onNodeWithText("⋮").performClick()
+        // pager's session-level "New" action. We tap the pager entry,
+        // fill in the name field, and tap "Save" (the dialog's confirm
+        // button).
+        openMoreMenu()
         compose.onNodeWithText("Switch session").performClick()
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText(NEW_SESSION_DRAWER_LABEL, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
+        compose.onNodeWithTag(TMUX_SESSION_PAGER_OVERLAY_TAG, useUnmergedTree = true)
+            .assertExists()
         val createSessionAt = SystemClock.elapsedRealtime()
-        compose.onNodeWithText(NEW_SESSION_DRAWER_LABEL).performClick()
+        compose.onNodeWithText("New").performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithText("Session name").fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithText("Session name").performTextInput(SESSION_SCRATCH)
+        compose.onAllNodes(hasSetTextAction(), useUnmergedTree = true)
+            .onFirst()
+            .performTextInput(SESSION_SCRATCH)
         compose.onNodeWithText("Save").performClick()
 
         // The Save tap calls onOpenTmuxSession which re-launches the
@@ -319,31 +342,35 @@ class TmuxSessionWindowNavigationE2eTest {
         captureViewport("issue158-07-new-session-scratch")
 
         // Confirm the new session exists on the remote and is active.
-        // The drawer reports the active session under the title row;
-        // opening it surfaces the seed list including the new session.
-        compose.onNodeWithText("⋮").performClick()
+        // Opening the pager surfaces the seed list including the new
+        // session.
+        openMoreMenu()
         compose.onNodeWithText("Switch session").performClick()
+        compose.onNodeWithTag(TMUX_SESSION_PAGER_OVERLAY_TAG, useUnmergedTree = true)
+            .assertExists()
         compose.waitUntil(timeoutMillis = 10_000) {
             compose.onAllNodesWithText(SESSION_SCRATCH, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        // Dismiss the drawer without changing anything for the next step.
+        // Dismiss the pager without changing anything for the next step.
         compose.onNodeWithText("Close").performClick()
 
-        // ===== Step 9 — Attach back to claude-main from the drawer =====
+        // ===== Step 9 — Attach back to claude-main from the session pager =====
         // This is the #151 reattach path. The marker we sent into win-2
         // earlier MUST still be present because the original session is
         // alive on the remote.
-        compose.onNodeWithText("⋮").performClick()
+        openMoreMenu()
         compose.onNodeWithText("Switch session").performClick()
+        compose.onNodeWithTag(TMUX_SESSION_PAGER_OVERLAY_TAG, useUnmergedTree = true)
+            .assertExists()
         compose.waitUntil(timeoutMillis = 10_000) {
             compose.onAllNodesWithText(SESSION_CLAUDE, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
         val reattachAt = SystemClock.elapsedRealtime()
-        compose.onNodeWithText(SESSION_CLAUDE).performClick()
+        performSessionPagerPageClick(SESSION_CLAUDE)
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
         recordTiming("reattach_claude_main_ms", SystemClock.elapsedRealtime() - reattachAt)
@@ -354,11 +381,9 @@ class TmuxSessionWindowNavigationE2eTest {
         // "Switch window" entry, which the kebab only renders when
         // there are siblings to switch to.
         compose.waitUntil(timeoutMillis = 20_000) {
-            compose.onAllNodesWithText("⋮", useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+            moreButtonVisible()
         }
-        compose.onNodeWithText("⋮").performClick()
+        openMoreMenu()
         compose.waitUntil(timeoutMillis = 10_000) {
             compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
                 .fetchSemanticsNodes()
@@ -374,10 +399,7 @@ class TmuxSessionWindowNavigationE2eTest {
         // After reattach, the user could land on either window — what
         // matters is that the win-2 marker is reachable. Tap window 2's
         // overlay page explicitly to land on it deterministically.
-        compose.onNodeWithTag(
-            "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}2",
-            useUnmergedTree = true,
-        ).performClick()
+        performWindowSwitcherPageClick(2)
         waitForVisibleTerminal("marker preserved across reattach") { transcript ->
             TerminalTextMatcher.containsWrapTolerant(
                 transcript,
@@ -450,7 +472,7 @@ class TmuxSessionWindowNavigationE2eTest {
             appendLine("tmux kill-session -t ${shellQuote(SESSION_SCRATCH)} 2>/dev/null || true")
             appendLine(
                 "tmux new-session -d -s ${shellQuote(SESSION_CLAUDE)} " +
-                    shellQuote("printf 'CLAUDE-READY\\n'; exec sh"),
+                    shellQuote("printf '$INITIAL_WINDOW_MARKER\\n'; exec sh"),
             )
             appendLine("tmux list-sessions")
         }
@@ -501,6 +523,54 @@ class TmuxSessionWindowNavigationE2eTest {
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
+    }
+
+    private fun openMoreMenu() {
+        val tags = listOf(
+            TMUX_COMPACT_CHROME_MORE_BUTTON_TAG,
+            TMUX_FULL_CHROME_MORE_BUTTON_TAG,
+        ).filter { tag ->
+            compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        tags.forEach { tag ->
+            compose.onNodeWithTag(tag, useUnmergedTree = true).performClick()
+            val opened = runCatching {
+                compose.waitUntil(timeoutMillis = 1_000) {
+                    compose.onAllNodesWithText("+ New window", useUnmergedTree = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+            }.isSuccess
+            if (opened) return
+        }
+        compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
+            .performClick()
+    }
+
+    private fun moreButtonVisible(): Boolean =
+        compose.onAllNodesWithTag(TMUX_COMPACT_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty() ||
+            compose.onAllNodesWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+
+    private fun performWindowSwitcherPageClick(page: Int) {
+        compose.onNodeWithTag(
+            "$TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX$page",
+            useUnmergedTree = true,
+        ).performSemanticsAction(SemanticsActions.OnClick)
+    }
+
+    private fun performSessionPagerPageClick(sessionName: String) {
+        val taggedSessionPage = hasAnyDescendant(hasText(sessionName)) and
+            (1..8)
+                .map { page -> hasTestTag("$TMUX_SESSION_PAGER_PAGE_TAG_PREFIX$page") }
+                .reduce { left, right -> left or right }
+        compose.onNode(taggedSessionPage, useUnmergedTree = true)
+            .performSemanticsAction(SemanticsActions.OnClick)
     }
 
     private fun waitForTerminalViewAttached() {
@@ -687,8 +757,7 @@ class TmuxSessionWindowNavigationE2eTest {
         const val DEVICE_DIR_NAME: String = "issue158-window-navigation"
         const val SESSION_CLAUDE: String = "claude-main"
         const val SESSION_SCRATCH: String = "scratch"
-        const val NEW_SESSION_DRAWER_LABEL: String =
-            "+ New tmux session (separate workspace)"
+        const val INITIAL_WINDOW_MARKER: String = "CLAUDE-READY"
         /**
          * Settle delay after layout changes. The strip-hidden assertion
          * runs right after attach; the create-window assertion runs

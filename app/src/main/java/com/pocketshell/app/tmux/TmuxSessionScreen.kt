@@ -1669,6 +1669,10 @@ internal const val TMUX_CONSOLIDATED_SESSION_LABEL_TAG = "tmux:chrome:session-la
 internal const val TMUX_CONSOLIDATED_WINDOW_CRUMB_TAG = "tmux:chrome:window-crumb"
 internal const val TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX = "tmux:chrome:tab-pill:"
 internal const val TMUX_TERMINAL_TAB_TAG = "tmux:chrome:tab-pill:terminal"
+internal const val TMUX_FULL_CHROME_BACK_BUTTON_TAG = "tmux:chrome:full:back"
+internal const val TMUX_FULL_CHROME_MORE_BUTTON_TAG = "tmux:chrome:full:more"
+internal const val TMUX_COMPACT_CHROME_BACK_BUTTON_TAG = "tmux:chrome:compact:back"
+internal const val TMUX_COMPACT_CHROME_MORE_BUTTON_TAG = "tmux:chrome:compact:more"
 
 /**
  * Issue #145: stable test tags for the mid-session SSH disconnect band
@@ -3438,7 +3442,8 @@ internal fun ConsolidatedTopChrome(
         Box(
             modifier = Modifier
                 .size(36.dp)
-                .clickable(onClick = onBack),
+                .clickable(onClick = onBack)
+                .testTag(TMUX_FULL_CHROME_BACK_BUTTON_TAG),
             contentAlignment = Alignment.Center,
         ) {
             Text(
@@ -3521,7 +3526,8 @@ internal fun ConsolidatedTopChrome(
         Box(
             modifier = Modifier
                 .size(36.dp)
-                .clickable(onClick = onMore),
+                .clickable(onClick = onMore)
+                .testTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG),
             contentAlignment = Alignment.Center,
         ) {
             Text(
@@ -3711,7 +3717,8 @@ private fun CompactBreadcrumb(
         Box(
             modifier = Modifier
                 .size(36.dp)
-                .clickable(onClick = onBack),
+                .clickable(onClick = onBack)
+                .testTag(TMUX_COMPACT_CHROME_BACK_BUTTON_TAG),
             contentAlignment = Alignment.Center,
         ) {
             Text(
@@ -3733,7 +3740,8 @@ private fun CompactBreadcrumb(
         Box(
             modifier = Modifier
                 .size(36.dp)
-                .clickable(onClick = onMore),
+                .clickable(onClick = onMore)
+                .testTag(TMUX_COMPACT_CHROME_MORE_BUTTON_TAG),
             contentAlignment = Alignment.Center,
         ) {
             Text(

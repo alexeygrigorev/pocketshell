@@ -45,6 +45,8 @@ import kotlin.math.max
 internal const val DASHBOARD_SESSIONS_SECTION_TAG = "dashboard:sessions"
 internal const val DASHBOARD_NEW_SESSION_TAG = "dashboard:sessions:new"
 internal const val DASHBOARD_SESSION_ROW_TAG_PREFIX = "dashboard:sessions:row:"
+internal const val DASHBOARD_SESSION_NAME_FIELD_TAG = "dashboard:sessions:session-name"
+internal const val DASHBOARD_START_FOLDER_FIELD_TAG = "dashboard:sessions:start-folder"
 
 /**
  * Tag for the create-session-failure banner — issue #204. Rendered
@@ -417,6 +419,7 @@ private fun DashboardLifecycleDialog(
                         onValueChange = onTextChange,
                         singleLine = true,
                         label = { Text("Session name") },
+                        modifier = Modifier.testTag(DASHBOARD_SESSION_NAME_FIELD_TAG),
                     )
                     // Issue #206 + #204: watched-folders chip row.
                     // Lives above the start-folder field so tapping a
@@ -431,6 +434,7 @@ private fun DashboardLifecycleDialog(
                         onValueChange = onStartDirectoryChange,
                         singleLine = true,
                         label = { Text("Start folder") },
+                        modifier = Modifier.testTag(DASHBOARD_START_FOLDER_FIELD_TAG),
                     )
                 }
             } else if (isTextMode) {
@@ -439,6 +443,7 @@ private fun DashboardLifecycleDialog(
                     onValueChange = onTextChange,
                     singleLine = true,
                     label = { Text("Session name") },
+                    modifier = Modifier.testTag(DASHBOARD_SESSION_NAME_FIELD_TAG),
                 )
             } else {
                 Text("This will close $sessionName.")

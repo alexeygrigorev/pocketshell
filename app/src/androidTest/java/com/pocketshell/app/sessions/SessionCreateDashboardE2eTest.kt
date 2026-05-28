@@ -171,15 +171,14 @@ class SessionCreateDashboardE2eTest {
             .performClick()
 
         // The "New session" dialog renders with two fields: name and
-        // start folder. Find the name field (it carries the
-        // "Session name" label inside Compose's outlined-text
-        // affordance) and type the chosen name.
+        // start folder. Target the editable text field by tag; the label
+        // text itself is not focusable on every Compose version.
         compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithText("Session name", useUnmergedTree = true)
+            compose.onAllNodesWithTag(DASHBOARD_SESSION_NAME_FIELD_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        compose.onNodeWithText("Session name", useUnmergedTree = true)
+        compose.onNodeWithTag(DASHBOARD_SESSION_NAME_FIELD_TAG, useUnmergedTree = true)
             .performTextInput(SESSION_CREATED)
         // Confirm via the dialog's "Save" button. The dialog uses
         // "Save" for create/rename (kill is "Kill"), so onLast()
@@ -232,11 +231,11 @@ class SessionCreateDashboardE2eTest {
         compose.onNodeWithTag(DASHBOARD_NEW_SESSION_TAG, useUnmergedTree = true)
             .performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithText("Session name", useUnmergedTree = true)
+            compose.onAllNodesWithTag(DASHBOARD_SESSION_NAME_FIELD_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        compose.onNodeWithText("Session name", useUnmergedTree = true)
+        compose.onNodeWithTag(DASHBOARD_SESSION_NAME_FIELD_TAG, useUnmergedTree = true)
             .performTextInput(SESSION_CREATED)
         compose.onAllNodesWithText("Save", useUnmergedTree = true)
             .onLast()

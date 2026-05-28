@@ -28,6 +28,23 @@ Not byte-identical to upstream. PocketShell terminal-rendering polish lives here
   layout is unchanged (verified by `allRegularCellsRemainAligned` + the #172
   tests); this removes the visual cell-merging a face's shaper could apply.
 
-The grid/emulator itself (`com.termux.terminal.**`, `com.termux.view.TerminalView`)
-handles in-place CR / cursor / erase rewrites correctly and is unchanged by
-#259 — see `StatusSpinnerRewriteGridTest` and `TerminalRendererSpinnerRewriteInstrumentedTest`.
+## `src/main/java/com/termux/terminal/TerminalEmulator.java`
+
+Not byte-identical to upstream.
+
+- **#259** — carriage-return overwrite tracking. When the agent rewrites its
+  status/spinner line in place with a bare `\r` followed by a *shorter* string,
+  upstream leaves the tail of the previous (longer) frame stranded on the row,
+  so two spinner frames coexist (the "rows run together / `gthinkingwithout`"
+  garble). The patch tracks a pending CR-overwrite region
+  (`mCarriageReturnOverwrite*` fields + `recordCarriageReturnOverwrite` /
+  `markCarriageReturnOverwriteOutput` / `finishCarriageReturnOverwrite`): on a
+  bare `\r` it remembers the original line-end column, and when the rewrite
+  finishes shorter it clears the stale tail cells. Intentional, tested
+  deviation from strict xterm semantics, tuned for agent spinners — see the
+  `#259` cases in `TerminalTest.java`, `StatusSpinnerRewriteGridTest`, and
+  `CapturePaneSeedReplayGridTest`.
+
+`com.termux.view.TerminalView` and the rest of `com.termux.terminal.**` remain
+byte-identical to upstream — see `TerminalRendererSpinnerRewriteInstrumentedTest`
+for the render-side coverage.

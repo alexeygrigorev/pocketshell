@@ -42,12 +42,12 @@ modifications).
 
 | Path | Source | Notes |
 |---|---|---|
-| `src/main/java/com/termux/terminal/**` | upstream `terminal-emulator/src/main/java/com/termux/terminal/**` | byte-identical |
-| `src/main/java/com/termux/view/**` | upstream `terminal-view/src/main/java/com/termux/view/**` | byte-identical |
+| `src/main/java/com/termux/terminal/**` | upstream `terminal-emulator/src/main/java/com/termux/terminal/**` | **patched** — `TerminalEmulator.java` carries the #259 CR-overwrite fix; see `PATCHES.md`. Rest byte-identical. |
+| `src/main/java/com/termux/view/**` | upstream `terminal-view/src/main/java/com/termux/view/**` | **patched** — `TerminalRenderer.java` carries #172/#241/#259 changes; see `PATCHES.md`. Rest byte-identical. |
 | `src/main/res/drawable/text_select_handle_*.xml` | upstream `terminal-view/src/main/res/drawable/` | byte-identical |
 | `src/main/res/values/strings.xml` | upstream `terminal-view/src/main/res/values/strings.xml` | byte-identical |
 | `src/main/jni/termux.c`, `src/main/jni/Android.mk` | upstream `terminal-emulator/src/main/jni/` | **not compiled** — see "JNI handling" |
-| `src/test/java/com/termux/terminal/**` | upstream `terminal-emulator/src/test/java/com/termux/terminal/**` | byte-identical; all 145 tests pass |
+| `src/test/java/com/termux/terminal/**` | upstream `terminal-emulator/src/test/java/com/termux/terminal/**` | patched — adds #259 CR-overwrite cases to `TerminalTest.java`; rest byte-identical |
 
 If we ever deviate from upstream — even a one-character patch — record it in
 `PATCHES.md` alongside this file.

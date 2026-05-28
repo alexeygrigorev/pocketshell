@@ -189,7 +189,9 @@ class HostBootstrapScenarioSuiteTest {
 
         fun seedAppDatabase() {
             val appContext = InstrumentationRegistry.getInstrumentation().targetContext
-            val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME).build()
+            val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
+                .fallbackToDestructiveMigration(dropAllTables = true)
+                .build()
             try {
                 runBlocking {
                     val storedKey = SshKeyStorage.persistKey(
@@ -216,7 +218,9 @@ class HostBootstrapScenarioSuiteTest {
 
         fun cleanupAppDatabase() {
             val appContext = InstrumentationRegistry.getInstrumentation().targetContext
-            val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME).build()
+            val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
+                .fallbackToDestructiveMigration(dropAllTables = true)
+                .build()
             try {
                 runBlocking {
                     hostId?.let { db.hostDao().deleteById(it) }

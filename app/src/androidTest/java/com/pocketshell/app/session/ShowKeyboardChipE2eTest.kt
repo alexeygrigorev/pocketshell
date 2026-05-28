@@ -24,11 +24,6 @@ import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
-import com.pocketshell.core.storage.migrations.MIGRATION_1_2
-import com.pocketshell.core.storage.migrations.MIGRATION_2_3
-import com.pocketshell.core.storage.migrations.MIGRATION_3_4
-import com.pocketshell.core.storage.migrations.MIGRATION_4_5
-import com.pocketshell.core.storage.migrations.MIGRATION_5_6
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertTrue
@@ -211,8 +206,7 @@ class ShowKeyboardChipE2eTest {
     private suspend fun seedHost(key: String, hostName: String): String {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
-            .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
-            .fallbackToDestructiveMigration(dropAllTables = false)
+            .fallbackToDestructiveMigration(dropAllTables = true)
             .build()
         return try {
             db.clearAllTables()

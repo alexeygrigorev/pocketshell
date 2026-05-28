@@ -11,16 +11,6 @@ import com.pocketshell.core.storage.dao.PortUsageDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SnippetDao
 import com.pocketshell.core.storage.dao.SshKeyDao
-import com.pocketshell.core.storage.migrations.MIGRATION_1_2
-import com.pocketshell.core.storage.migrations.MIGRATION_2_3
-import com.pocketshell.core.storage.migrations.MIGRATION_3_4
-import com.pocketshell.core.storage.migrations.MIGRATION_4_5
-import com.pocketshell.core.storage.migrations.MIGRATION_5_6
-import com.pocketshell.core.storage.migrations.MIGRATION_6_7
-import com.pocketshell.core.storage.migrations.MIGRATION_7_8
-import com.pocketshell.core.storage.migrations.MIGRATION_8_9
-import com.pocketshell.core.storage.migrations.MIGRATION_9_10
-import com.pocketshell.core.storage.migrations.MIGRATION_10_11
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -53,28 +43,11 @@ object StorageModule {
             AppDatabase::class.java,
             DATABASE_NAME,
         )
-            // Issue #49 introduced schema v2 (host-bootstrap cache columns).
-            // The migration is hand-rolled in `core-storage/migrations` so the
-            // SQL is explicit and unit-testable. We still keep
-            // `fallbackToDestructiveMigration` as a backstop for the
-            // pre-release era — if a schema mismatch surfaces from a route
-            // we haven't covered, Room would otherwise throw and brick the
-            // app. `dropAllTables = false` keeps user data on the safer
-            // path; once we ship to real users this fallback should be
-            // removed and missing migrations should hard-fail.
-            .addMigrations(
-                MIGRATION_1_2,
-                MIGRATION_2_3,
-                MIGRATION_3_4,
-                MIGRATION_4_5,
-                MIGRATION_5_6,
-                MIGRATION_6_7,
-                MIGRATION_7_8,
-                MIGRATION_8_9,
-                MIGRATION_9_10,
-                MIGRATION_10_11,
-            )
-            .fallbackToDestructiveMigration(dropAllTables = false)
+            // D22/#229: PocketShell is still pre-release and has no
+            // external install base. If a stale local schema is present, wipe
+            // every table and recreate the fresh v1 baseline; SSH host setup
+            // can be restored quickly through the QR import path.
+            .fallbackToDestructiveMigration(dropAllTables = true)
             .build()
 
     @Provides

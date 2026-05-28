@@ -15,14 +15,15 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.layout.height
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -109,6 +110,7 @@ internal const val SESSION_CONNECTING_PROGRESS_TAG = "session:connecting"
 internal const val SESSION_CONNECTING_PROGRESS_BAR_TAG = "session:connecting:bar"
 internal const val SESSION_CONNECTING_SLOW_HINT_TAG = "session:connecting:slow-hint"
 internal const val SESSION_CONNECTING_CANCEL_TAG = "session:connecting:cancel"
+internal const val SESSION_ARMED_MODIFIER_STRIP_TAG = "session:armed-modifiers"
 
 /**
  * Issue #165: timings for the SSH-handshake progress overlay. Mirrors
@@ -1153,27 +1155,85 @@ internal fun ConnectingProgressOverlay(
     }
 }
 
-/**
- * Small accent strip surfaced while one or more sticky modifiers are
- * active. It gives a textual hint alongside the key bar's active-key
- * treatment, especially for the locked state.
- */
+internal data class ArmedModifierPillUi(
+    val label: String,
+    val state: KeyModifierState,
+)
+
+internal fun armedModifierPills(
+    states: Map<SessionViewModel.Modifier, KeyModifierState>,
+): List<ArmedModifierPillUi> =
+    states
+        .filterValues { it != KeyModifierState.Off }
+        .map { (modifier, state) ->
+            ArmedModifierPillUi(
+                label = modifier.name.uppercase(),
+                state = state,
+            )
+        }
+
 @Composable
 private fun ArmedModifierStrip(states: Map<SessionViewModel.Modifier, KeyModifierState>) {
-    val label = states.entries.joinToString(" + ") { (modifier, state) ->
-        if (state == KeyModifierState.Locked) "${modifier.name} locked" else "${modifier.name} armed"
-    }
+    val pills = armedModifierPills(states)
+    if (pills.isEmpty()) return
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .background(color = PocketShellColors.AccentSoft)
-            .padding(horizontal = 12.dp, vertical = 4.dp),
+            .testTag(SESSION_ARMED_MODIFIER_STRIP_TAG)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            pills.forEach { pill ->
+                ArmedModifierPill(pill)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ArmedModifierPill(pill: ArmedModifierPillUi) {
+    Row(
+        modifier = Modifier
+            .background(
+                color = PocketShellColors.Surface,
+                shape = RoundedCornerShape(999.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.AccentDim,
+                shape = RoundedCornerShape(999.dp),
+            )
+            .padding(horizontal = 7.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(12.dp)
+                .background(
+                    color = PocketShellColors.AccentSoft,
+                    shape = RoundedCornerShape(999.dp),
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = if (pill.state == KeyModifierState.Locked) "L" else "1",
+                color = PocketShellColors.Accent,
+                fontSize = 8.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
         Text(
-            text = "$label - tap a bar key to send it wrapped",
+            text = pill.label,
             color = PocketShellColors.Accent,
-            fontSize = 11.sp,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Medium,
         )
     }
 }

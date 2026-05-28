@@ -136,7 +136,7 @@ internal fun VoiceCommandReviewStrip(
 
 /**
  * Scrollable strip of secondary command chips. Only the chips here are
- * inside `horizontalScroll`; the primary right-cluster (`keyboard`,
+ * inside `horizontalScroll`; the primary right-cluster (`show keyboard`,
  * `+ snippet`) is rendered by [PrimaryChipCluster] outside this scroll
  * region so it stays visible without horizontal-scrolling.
  *
@@ -147,13 +147,13 @@ internal fun VoiceCommandReviewStrip(
  *    route only (rendered when [onProjectNavigationTap] is non-null).
  *
  * Per the #208 right-thumb ergonomics audit and design-system §9, the
- * high-frequency `keyboard` (#131) and `+ snippet` chips are rendered
+ * high-frequency `show keyboard` (#131) and `+ snippet` chips are rendered
  * adjacent to the mic FAB in a non-scrolling sticky cluster (see
  * [PrimaryChipCluster] and [BottomChipControls]) so they sit inside the
  * right-thumb arc on a Pixel-class viewport even when there are enough
  * leading static chips to overflow the scrolling region. Round-1 of #221
  * left the primary chips inside this scrolling row and the connected
- * test caught that `keyboard` / `+ snippet` were pushed off-screen by
+ * test caught that `show keyboard` / `+ snippet` were pushed off-screen by
  * the four wide static chips that lead the row — round-2 splits them
  * into the sticky cluster to keep AC2 actually true at the rendered
  * layout layer.
@@ -194,7 +194,7 @@ private fun ScrollableChipStrip(
  * Non-scrolling sticky cluster of primary chips, rendered between the
  * scrollable [ScrollableChipStrip] and the mic FAB in [BottomChipControls].
  *
- * The cluster pins `keyboard` (#131) and `+ snippet` to the right edge of
+ * The cluster pins `show keyboard` (#131) and `+ snippet` to the right edge of
  * the bottom toolbar regardless of how many static command chips
  * [ScrollableChipStrip] is asked to render. The right-thumb ergonomics
  * goal of design-system §9 only holds if these primary affordances are
@@ -202,9 +202,9 @@ private fun ScrollableChipStrip(
  * KDoc on [ScrollableChipStrip] for the round-1 regression that motivated
  * splitting them out.
  *
- * Order inside the cluster (left → right): `keyboard` → `+ snippet`, so
+ * Order inside the cluster (left → right): `show keyboard` → `+ snippet`, so
  * `+ snippet` is closest to the mic FAB (matches the §9 worked example
- * `[⌨ keyboard] [+ snippet]    [🎤 mic FAB]`). Both chips are optional;
+ * `[⌨ show keyboard] [+ snippet]    [🎤 mic FAB]`). Both chips are optional;
  * the cluster collapses to zero width when both callbacks are null
  * (currently the cluster is always non-empty on the tmux + raw-SSH
  * routes, but the optional API keeps the helper composable for callers
@@ -225,7 +225,7 @@ private fun PrimaryChipCluster(
     ) {
         if (onShowKeyboardTap != null) {
             CommandChip(
-                label = "keyboard",
+                label = SHOW_KEYBOARD_CHIP_LABEL,
                 onClick = onShowKeyboardTap,
                 icon = KeyboardChipIcon,
                 modifier = Modifier.testTag(SHOW_KEYBOARD_CHIP_TAG),
@@ -252,7 +252,7 @@ private fun PrimaryChipCluster(
  *
  * 1. [ScrollableChipStrip] (`weight(1f)`) — scrollable, holds the
  *    low-frequency static command chips plus optional `dirs`.
- * 2. [PrimaryChipCluster] (sticky, non-scrolling) — `keyboard` and
+ * 2. [PrimaryChipCluster] (sticky, non-scrolling) — `show keyboard` and
  *    `+ snippet` pinned to the right side of the chip area so they sit
  *    inside the right-thumb arc on a Pixel-class viewport regardless of
  *    how many static chips precede them.
@@ -264,7 +264,7 @@ private fun PrimaryChipCluster(
  * (#208 → #221): with the FAB already anchored to the right-thumb arc,
  * the chip row need not duplicate it. Splitting the primary cluster out
  * of the scrolling region fixes the round-1 regression where the four
- * wide leading static chips pushed `keyboard` / `+ snippet` off-screen
+ * wide leading static chips pushed `show keyboard` / `+ snippet` off-screen
  * (AC2 of #221).
  *
  * `onProjectNavigationTap` is optional because the tmux route does not
@@ -316,7 +316,7 @@ internal fun BottomChipControls(
 /**
  * v1 chip set — matches `docs/mockups/session.html`'s `.chip-row`
  * (without the dictate entry, which the screen renders separately as the
- * icon chip).
+ * mic FAB).
  */
 internal val DefaultSessionChips: List<String> = listOf(
     "git status",
@@ -325,9 +325,11 @@ internal val DefaultSessionChips: List<String> = listOf(
     "clear",
 )
 
+internal const val SHOW_KEYBOARD_CHIP_LABEL: String = "show keyboard"
+
 /**
- * A 24x24 microphone glyph used as the dictate chip's leading icon and as
- * the inline-dictation mic slot's idle/transcribing fallback. We build
+ * A 24x24 microphone glyph used by accent chips and as the
+ * inline-dictation mic slot's idle/transcribing fallback. We build
  * the [ImageVector] inline rather than pull in `material-icons-extended`
  * for one glyph — the icon set already in the classpath
  * (`material-icons-core`, transitively from material3) does not ship a
@@ -406,8 +408,7 @@ private fun ImageVector.Builder.addMicPath(fill: SolidColor): ImageVector.Builde
 /**
  * Issue #131: stable test tag for the show-keyboard chip. Lives next to
  * `INLINE_DICTATION_*` tags so connected tests can reach the chip without
- * relying on its visible label ("keyboard"), which could shift if the
- * caption is renamed (e.g. to "show keyboard") later.
+ * relying on its visible label.
  */
 internal const val SHOW_KEYBOARD_CHIP_TAG: String = "session:show-keyboard-chip"
 
@@ -435,7 +436,7 @@ internal const val SESSION_MIC_FAB_TAG: String = "session:mic-fab"
 internal const val SESSION_ADD_SNIPPET_CHIP_TAG: String = "session:add-snippet-chip"
 
 /**
- * A 24x24 keyboard glyph used as the leading icon on the "keyboard" chip
+ * A 24x24 keyboard glyph used as the leading icon on the "show keyboard" chip
  * (issue #131). We hand-trace rather than pull in `material-icons-extended`
  * for one glyph — same rationale as the [DictateDotIcon] mic above; the
  * `material-icons-core` set transitively present via material3 does not

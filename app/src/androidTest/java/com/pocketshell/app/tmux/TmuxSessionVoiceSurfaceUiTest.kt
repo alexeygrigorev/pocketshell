@@ -127,7 +127,7 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         // Issue #221 (round 2): capture a viewport PNG of the rendered
         // bottom strip so reviewer evidence shows the sticky right
-        // cluster (`keyboard`, `+ snippet`) is visible next to the mic
+        // cluster (`show keyboard`, `+ snippet`) is visible next to the mic
         // FAB without scrolling. Written under `additional_test_output/`
         // so `:app:connectedDebugAndroidTest` auto-pulls the artifact to
         // `app/build/outputs/connected_android_test_additional_output/`.
@@ -169,6 +169,8 @@ class TmuxSessionVoiceSurfaceUiTest {
         // so the assertion survives a future caption rename.
         compose.onNodeWithTag("session:show-keyboard-chip").assertIsDisplayed().performClick()
         assertEquals(1, keyboardTaps)
+        compose.onNodeWithText("show keyboard").assertIsDisplayed()
+        compose.onNodeWithText("keyboard").assertDoesNotExist()
 
         compose.onNodeWithTag("session:add-snippet-chip").assertIsDisplayed().performClick()
         assertEquals(1, snippetTaps)

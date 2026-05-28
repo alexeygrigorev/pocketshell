@@ -648,8 +648,8 @@ private fun InlineMicSlot(
         } else if (state == InlineDictationViewModel.RecordingState.Recording) {
             InlineMicWaveform(amplitude = amplitude)
         } else {
-            // Microphone glyph — shared with the chip row's dictate
-            // icon (`DictateDotIcon` in `voice/VoiceSessionSurface.kt`).
+            // Microphone glyph shared with the session voice surface
+            // (`DictateDotIcon` in `voice/VoiceSessionSurface.kt`).
             // Replaces an earlier filled-dot `Text("●")` fallback that the
             // UI/UX audit (#108, re-flagged in #123) found ambiguous: the
             // dot did not read as "microphone" without the adjacent

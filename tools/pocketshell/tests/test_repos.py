@@ -58,9 +58,13 @@ from pocketshell.repos import (
     daemon_handler_local,
     daemon_handler_remote,
     fetch_remote_repos,
+    find_local_repo,
+    github_clone_url,
+    normalize_full_name,
     parse_github_remote,
     repos_group,
     resolve_scan_roots,
+    safe_clone_target,
     scan_roots,
 )
 
@@ -496,6 +500,135 @@ def test_name_derives_from_directory_not_remote(tmp_path: Path) -> None:
     # owner/full_name reflect the canonical GitHub identity.
     assert only.owner == "upstream-org"
     assert only.full_name == "upstream-org/upstream-name"
+
+
+# ---------------------------------------------------------------------------
+# Clone/open helpers
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_full_name_accepts_owner_repo() -> None:
+    assert normalize_full_name(" alexeygrigorev/pocketshell.git ") == (
+        "alexeygrigorev",
+        "pocketshell",
+    )
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["pocketshell", "../owner/repo", "owner/repo/extra", "https://github.com/o/r"],
+)
+def test_normalize_full_name_rejects_non_slugs(value: str) -> None:
+    with pytest.raises(ValueError):
+        normalize_full_name(value)
+
+
+def test_github_clone_url_supports_ssh_and_https() -> None:
+    assert (
+        github_clone_url("alexeygrigorev/pocketshell")
+        == "git@github.com:alexeygrigorev/pocketshell.git"
+    )
+    assert (
+        github_clone_url("alexeygrigorev/pocketshell", protocol="https")
+        == "https://github.com/alexeygrigorev/pocketshell.git"
+    )
+
+
+def test_safe_clone_target_stays_under_root(tmp_path: Path) -> None:
+    assert safe_clone_target(tmp_path, "owner/project") == tmp_path / "project"
+    assert safe_clone_target(tmp_path, "owner/project", "custom") == tmp_path / "custom"
+    with pytest.raises(ValueError):
+        safe_clone_target(tmp_path, "owner/project", "../escape")
+    with pytest.raises(ValueError):
+        safe_clone_target(tmp_path, "owner/project", "/tmp/escape")
+
+
+def test_find_local_repo_prefers_full_name_over_directory_name(tmp_path: Path) -> None:
+    _make_real_repo(
+        tmp_path,
+        "renamed",
+        remote_url="git@github.com:alexeygrigorev/pocketshell.git",
+    )
+    repo = find_local_repo("alexeygrigorev/pocketshell", roots=[tmp_path])
+    assert repo is not None
+    assert repo.name == "renamed"
+    assert repo.local is not None
+    assert repo.local.path == str(tmp_path / "renamed")
+
+
+def test_cli_repos_open_prints_local_clone_path(tmp_path: Path) -> None:
+    repo_path = _make_real_repo(
+        tmp_path,
+        "pocketshell",
+        remote_url="https://github.com/alexeygrigorev/pocketshell.git",
+    )
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["repos", "open", "alexeygrigorev/pocketshell", "--root", str(tmp_path)],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == str(repo_path)
+
+
+def test_cli_repos_open_reports_missing_clone(tmp_path: Path) -> None:
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["repos", "open", "alexeygrigorev/pocketshell", "--root", str(tmp_path)],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1, result.output
+    assert "not cloned" in result.output
+
+
+def test_cli_repos_clone_invokes_git_clone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args=args, returncode=0)
+
+    monkeypatch.setattr(repos_mod.subprocess, "run", fake_run)
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "repos",
+            "clone",
+            "alexeygrigorev/pocketshell",
+            "--root",
+            str(tmp_path),
+            "--protocol",
+            "https",
+        ],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == str(tmp_path / "pocketshell")
+    assert calls == [
+        [
+            "git",
+            "clone",
+            "https://github.com/alexeygrigorev/pocketshell.git",
+            str(tmp_path / "pocketshell"),
+        ]
+    ]
+
+
+def test_cli_repos_clone_rejects_existing_target(tmp_path: Path) -> None:
+    (tmp_path / "pocketshell").mkdir()
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        ["repos", "clone", "alexeygrigorev/pocketshell", "--root", str(tmp_path)],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 1, result.output
+    assert "already exists" in result.output
 
 
 # ---------------------------------------------------------------------------

@@ -22,6 +22,10 @@ Subcommands
   filesystem + one network) implicitly under one command is surprising
   for scripts that pipe the output. Keeping the existing default
   preserves muscle memory; ``--remote`` is opt-in.
+- ``pocketshell repos open <owner/repo>`` — print the local clone path
+  for a known GitHub repository.
+- ``pocketshell repos clone <owner/repo>`` — clone a GitHub repository
+  into a configured root and print the resulting path.
 
 Unified output schema (D22 hard cut)
 ------------------------------------
@@ -123,6 +127,8 @@ DAEMON_REMOTE_CACHE_TTL_SECS = 300.0
 # takes to walk the full account.
 GH_API_PER_PAGE = 100
 
+_FULL_NAME_RE = re.compile(r"^(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)$")
+
 
 # ---------------------------------------------------------------------------
 # Unified data classes
@@ -219,6 +225,87 @@ def parse_github_remote(url: Optional[str]) -> Optional[tuple[str, str]]:
         if match:
             return match.group("owner"), match.group("repo")
     return None
+
+
+def normalize_full_name(value: str) -> tuple[str, str]:
+    """Return ``(owner, repo)`` for an ``owner/repo`` GitHub slug.
+
+    The app will eventually pass this value from the GitHub project
+    picker. Keep the accepted grammar intentionally small so the
+    helper never interprets arbitrary shell input as a clone URL.
+    """
+    clean = value.strip().removesuffix(".git")
+    match = _FULL_NAME_RE.match(clean)
+    if match is None:
+        raise ValueError("expected GitHub repository as owner/repo")
+    return match.group("owner"), match.group("repo")
+
+
+def github_clone_url(full_name: str, *, protocol: str = "ssh") -> str:
+    """Build a clone URL for ``full_name`` using the requested protocol."""
+    owner, repo = normalize_full_name(full_name)
+    if protocol == "ssh":
+        return f"git@github.com:{owner}/{repo}.git"
+    if protocol == "https":
+        return f"https://github.com/{owner}/{repo}.git"
+    raise ValueError("protocol must be ssh or https")
+
+
+def safe_clone_target(root: Path, full_name: str, folder_name: Optional[str] = None) -> Path:
+    """Return the clone target path under ``root``.
+
+    ``folder_name`` is optional and restricted to a single path segment.
+    This prevents a malformed app payload from cloning outside the
+    configured root via ``../`` or an absolute path.
+    """
+    _owner, repo = normalize_full_name(full_name)
+    raw_name = folder_name.strip() if folder_name is not None else repo
+    if not raw_name or raw_name in {".", ".."}:
+        raise ValueError("folder name must not be empty")
+    candidate = Path(raw_name)
+    if candidate.is_absolute() or len(candidate.parts) != 1:
+        raise ValueError("folder name must be a single path segment")
+    return root.expanduser() / raw_name
+
+
+def find_local_repo(
+    full_name: str,
+    *,
+    roots: Sequence[Path],
+    max_depth: int = DEFAULT_MAX_DEPTH,
+) -> Optional[Repo]:
+    """Find a local clone by canonical GitHub ``owner/repo`` identity."""
+    owner, repo_name = normalize_full_name(full_name)
+    canonical = f"{owner}/{repo_name}".lower()
+    fallback_name = repo_name.lower()
+    fallback: Optional[Repo] = None
+    for repo in scan_roots(roots, max_depth=max_depth):
+        if repo.full_name and repo.full_name.lower() == canonical:
+            return repo
+        if fallback is None and repo.name.lower() == fallback_name:
+            fallback = repo
+    return fallback
+
+
+def clone_repo(
+    full_name: str,
+    *,
+    root: Path,
+    folder_name: Optional[str] = None,
+    protocol: str = "ssh",
+    git_binary: str = "git",
+) -> Path:
+    """Clone ``full_name`` into ``root`` and return the target path."""
+    target = safe_clone_target(root, full_name, folder_name)
+    if target.exists():
+        raise FileExistsError(f"clone target already exists: {target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    url = github_clone_url(full_name, protocol=protocol)
+    subprocess.run(
+        [git_binary, "clone", url, str(target)],
+        check=True,
+    )
+    return target
 
 
 # ---------------------------------------------------------------------------
@@ -978,6 +1065,106 @@ def repos_list(
     rendered = _format_human_local([_repo_from_jsonable(entry) for entry in payload])
     if rendered:
         sys.stdout.write(rendered)
+
+
+@repos_group.command(
+    "open",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@click.argument("repository")
+@click.option(
+    "--root",
+    "roots",
+    multiple=True,
+    type=str,
+    help=(
+        "Scan root directory (may be repeated). When passed, replaces "
+        "the default ``~/git`` and ``POCKETSHELL_REPOS_ROOTS``."
+    ),
+)
+@click.option(
+    "--max-depth",
+    type=int,
+    default=DEFAULT_MAX_DEPTH,
+    show_default=True,
+    help="Maximum directory depth to scan while locating the clone.",
+)
+def repos_open(repository: str, roots: tuple[str, ...], max_depth: int) -> None:
+    """Print the local path for a cloned GitHub ``owner/repo``."""
+    if max_depth < 0:
+        click.echo(
+            f"pocketshell repos open: --max-depth must be >= 0 (got {max_depth})",
+            err=True,
+        )
+        raise click.exceptions.Exit(2)
+    try:
+        normalize_full_name(repository)
+    except ValueError as exc:
+        click.echo(f"pocketshell repos open: {exc}", err=True)
+        raise click.exceptions.Exit(2)
+    repo = find_local_repo(
+        repository,
+        roots=resolve_scan_roots(roots),
+        max_depth=max_depth,
+    )
+    if repo is None or repo.local is None:
+        click.echo(f"pocketshell repos open: repository is not cloned: {repository}", err=True)
+        raise click.exceptions.Exit(1)
+    click.echo(repo.local.path)
+
+
+@repos_group.command(
+    "clone",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@click.argument("repository")
+@click.option(
+    "--root",
+    type=str,
+    default=DEFAULT_ROOT_PATHS[0],
+    show_default=True,
+    help="Clone root directory.",
+)
+@click.option(
+    "--folder",
+    "folder_name",
+    type=str,
+    default=None,
+    help="Optional target folder name under the clone root.",
+)
+@click.option(
+    "--protocol",
+    type=click.Choice(["ssh", "https"]),
+    default="ssh",
+    show_default=True,
+    help="GitHub clone URL protocol.",
+)
+def repos_clone(
+    repository: str,
+    root: str,
+    folder_name: Optional[str],
+    protocol: str,
+) -> None:
+    """Clone a GitHub ``owner/repo`` and print the target path."""
+    try:
+        target = clone_repo(
+            repository,
+            root=Path(os.path.expanduser(root)),
+            folder_name=folder_name,
+            protocol=protocol,
+        )
+    except ValueError as exc:
+        click.echo(f"pocketshell repos clone: {exc}", err=True)
+        raise click.exceptions.Exit(2)
+    except FileExistsError as exc:
+        click.echo(f"pocketshell repos clone: {exc}", err=True)
+        raise click.exceptions.Exit(1)
+    except FileNotFoundError:
+        click.echo("pocketshell repos clone: `git` is not installed on this host.", err=True)
+        raise click.exceptions.Exit(127)
+    except subprocess.CalledProcessError as exc:
+        raise click.exceptions.Exit(exc.returncode)
+    click.echo(str(target))
 
 
 def _run_remote(

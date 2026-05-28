@@ -51,33 +51,6 @@ class TmuxSessionScreenTest {
     }
 
     @Test
-    fun agentPaneLabelForUsesTitleWhenPresent() {
-        val titled = TmuxPaneState(
-            paneId = "%0",
-            windowId = "@0",
-            sessionId = "\$0",
-            title = "claude",
-            terminalState = TerminalSurfaceState(),
-        )
-        assertEquals("claude", agentPaneLabelFor(titled, listOf(titled)))
-    }
-
-    @Test
-    fun agentPaneLabelForFallsBackToOneBasedIndexWhenTitleBlank() {
-        val panes = listOf(
-            pane(paneId = "%0", windowId = "@0", title = ""),
-            pane(paneId = "%1", windowId = "@0", title = ""),
-            pane(paneId = "%2", windowId = "@1", title = ""),
-        )
-        // %0 is the first pane of @0.
-        assertEquals("Pane 1", agentPaneLabelFor(panes[0], panes))
-        // %1 is the second pane of @0.
-        assertEquals("Pane 2", agentPaneLabelFor(panes[1], panes))
-        // %2 is the first pane of @1.
-        assertEquals("Pane 1", agentPaneLabelFor(panes[2], panes))
-    }
-
-    @Test
     fun sessionSwitcherPagesMirrorReadySessionRowsAndMarkCurrent() {
         val pages = sessionSwitcherPages(
             state = HostTmuxSessionPickerState.Ready(

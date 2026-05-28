@@ -20,15 +20,14 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
@@ -143,26 +142,36 @@ public class PromptComposerViewModel @Inject constructor(
     private var transcribeJob: Job? = null
 
     /**
-     * Issue #211: one-shot Send dispatch surface. The composer sheet
-     * collects this and invokes the host's `onSend` callback whenever
-     * a send is ready to fire — either immediately (the FSM was Idle
-     * when the user tapped Send) or after the in-flight Whisper round-
-     * trip lands (the FSM was Recording or Transcribing when the user
-     * tapped Send and the queued send fires on transcription success).
+     * Issue #211 / #254: one-shot Send dispatch surface. The composer
+     * sheet collects this and invokes the host's `onSend` callback
+     * whenever a send is ready to fire — either immediately (the FSM was
+     * Idle when the user tapped Send) or after the in-flight Whisper
+     * round-trip lands (the FSM was Recording or Transcribing when the
+     * user tapped Send and the queued send fires on transcription
+     * success).
      *
-     * The flow is `MutableSharedFlow` with `extraBufferCapacity = 1` so
-     * a send dispatched while no collector is briefly attached (e.g.
-     * mid-recomposition) survives instead of getting silently dropped.
-     * `BufferOverflow.DROP_OLDEST` means a second pending send (which
-     * should never happen in practice — the FSM gates this) replaces
-     * an unconsumed earlier one rather than blocking the producer.
+     * Backed by a [Channel] (consumed via [receiveAsFlow]) rather than a
+     * `MutableSharedFlow`. The composer is a one-collector surface whose
+     * collector is torn down and re-created every time the sheet is
+     * dismissed and re-opened (the `LaunchedEffect` lives in the sheet's
+     * composition). A `replay = 0` SharedFlow only delivers an emission
+     * to subscribers present at emit time, so a send dispatched into the
+     * SharedFlow's buffer while the previous sheet's collector had just
+     * been cancelled — and the next sheet's collector had not yet
+     * subscribed — was silently dropped. That is the exact #254
+     * "Send + ↵ works once after dictation, then not on subsequent
+     * sends" bug: the dictated transcript fired `dispatchSendNow` from
+     * the `viewModelScope` transcribe coroutine in that subscriber gap.
+     *
+     * A `Channel` does not have that gap: an item offered with no active
+     * collector stays buffered in the channel until a collector (even a
+     * brand-new one from a re-opened sheet) consumes it, and each item is
+     * delivered to exactly one collector. `Channel.BUFFERED` gives a
+     * small buffer so [trySend] never fails for the at-most-one pending
+     * send the FSM allows.
      */
-    private val _sendRequests = MutableSharedFlow<SendRequest>(
-        replay = 0,
-        extraBufferCapacity = 1,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST,
-    )
-    public val sendRequests: SharedFlow<SendRequest> = _sendRequests.asSharedFlow()
+    private val _sendRequests = Channel<SendRequest>(capacity = Channel.BUFFERED)
+    public val sendRequests: Flow<SendRequest> = _sendRequests.receiveAsFlow()
 
     /**
      * Issue #211: one-shot Send queued by the user while the FSM was
@@ -319,7 +328,12 @@ public class PromptComposerViewModel @Inject constructor(
         // emit the SendRequest BEFORE clearing the draft so a slow
         // collector that re-reads `state.draft` still sees the text
         // that produced the send.
-        _sendRequests.tryEmit(SendRequest(text = text, withEnter = withEnter))
+        //
+        // Issue #254: a `Channel.trySend` buffers the item until a
+        // collector consumes it, so a send dispatched while the sheet's
+        // collector is mid-recreate (dismiss → re-open) is delivered to
+        // the next collector instead of being dropped.
+        _sendRequests.trySend(SendRequest(text = text, withEnter = withEnter))
         onDraftChange("")
     }
 

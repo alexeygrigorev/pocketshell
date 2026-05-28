@@ -9,6 +9,8 @@ import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestDispatcher
@@ -1390,6 +1392,46 @@ class PromptComposerViewModelTest {
         advanceUntilIdle()
 
         assertEquals(0, sent.size)
+    }
+
+    @Test
+    fun sendDispatchedDuringSubscriberGapIsDeliveredToNextCollector() = runTest {
+        // Issue #254 root cause + regression pin. The composer sheet's
+        // `sendRequests` collector lives in the sheet's composition: it is
+        // torn down when the sheet is dismissed and re-created when the
+        // sheet is re-opened. A Send dispatched into that subscriber gap —
+        // which is exactly what happens on a *subsequent* "Send + ↵ after
+        // dictation" (the first send dismisses the sheet, the next send's
+        // `dispatchSendNow` fires from the `viewModelScope` transcribe
+        // coroutine while the new collector has not yet re-subscribed) —
+        // MUST still reach the next collector.
+        //
+        // The pre-fix `MutableSharedFlow(replay = 0)` dropped this
+        // emission silently (no active subscriber at emit time, no replay
+        // for the late subscriber), which is the user-visible "works once,
+        // then not" bug. A `Channel.receiveAsFlow()` buffers the item
+        // until the next collector consumes it.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        vm.onDraftChange("first message")
+
+        // No collector subscribed (the sheet is dismissed). Dispatch a send.
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+
+        // The sheet re-opens: a brand-new collector subscribes only now.
+        val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job: Job = launch { vm.sendRequests.collect { sent += it } }
+        advanceUntilIdle()
+        job.cancelAndJoin()
+
+        assertEquals(
+            "a send dispatched during the dismiss→re-open subscriber gap must " +
+                "reach the next collector (#254)",
+            1,
+            sent.size,
+        )
+        assertEquals("first message", sent[0].text)
+        assertEquals(true, sent[0].withEnter)
     }
 
     @Test

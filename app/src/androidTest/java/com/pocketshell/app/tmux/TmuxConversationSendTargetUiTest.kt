@@ -18,16 +18,20 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Issue #197: connected coverage for the conversation composer's
- * "where does my message land?" surfaces. Drives [TmuxConversationPane]
- * directly because the surrounding [TmuxSessionScreen] needs Hilt + a
- * live tmux client to spin up — the unit under test is the per-pane
- * composer band, not the screen integration.
+ * Issue #197 / #255: connected coverage for the conversation composer's
+ * "where is the agent?" disambiguation surfaces. Drives
+ * [TmuxConversationPane] directly because the surrounding
+ * [TmuxSessionScreen] needs Hilt + a live tmux client to spin up — the
+ * unit under test is the per-pane composer band, not the screen
+ * integration.
  *
- * Three behaviours are covered:
+ * Issue #255 removed the always-visible "Sending to: Window N · Pane N"
+ * target-indicator strip — naming the underlying terminal pane as the
+ * send target was meaningless in the agent conversation. This test now
+ * asserts that strip never renders, while the multi-window
+ * disambiguation banners are preserved:
  *
- * 1. The target indicator strip always renders the agent's window /
- *    pane labels above the composer (acceptance criterion #1).
+ * 1. The conversation composer shows NO terminal send-target indicator.
  * 2. The one-time first-send banner appears until the user taps
  *    "Got it" and is hidden afterwards (acceptance criterion #2).
  * 3. The cross-window mismatch banner shows only when the user is
@@ -41,14 +45,18 @@ class TmuxConversationSendTargetUiTest {
     val compose = createComposeRule()
 
     @Test
-    fun targetIndicatorAlwaysShowsAgentWindowAndPane() {
+    fun conversationComposerShowsNoTerminalSendTargetIndicator() {
+        // Issue #255: in the Conversation pane the user is talking to the
+        // agent, not the shell. The "Sending to: Window N · Pane N"
+        // terminal send-target indicator must NOT render — not even in the
+        // fully-labelled, confirmed, same-window happy path where it used
+        // to always show.
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = {},
                     agentWindowLabel = "Window 1",
-                    agentPaneLabel = "Pane 1",
                     agentDisplayName = "Claude Code",
                     currentWindowMatchesAgent = true,
                     firstSendConfirmed = true,
@@ -56,9 +64,10 @@ class TmuxConversationSendTargetUiTest {
             }
         }
 
-        compose.onNodeWithTag(TMUX_CONVERSATION_TARGET_INDICATOR_TAG)
-            .assertIsDisplayed()
         compose.onNodeWithText("Sending to: Window 1 · Pane 1")
+            .assertDoesNotExist()
+        // The composer itself is still present and usable.
+        compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_INPUT_TAG)
             .assertIsDisplayed()
     }
 
@@ -71,7 +80,6 @@ class TmuxConversationSendTargetUiTest {
                     events = emptyList(),
                     onSendToAgent = {},
                     agentWindowLabel = "Window 1",
-                    agentPaneLabel = "Pane 1",
                     agentDisplayName = "Claude Code",
                     currentWindowMatchesAgent = true,
                     firstSendConfirmed = false,
@@ -104,7 +112,6 @@ class TmuxConversationSendTargetUiTest {
                     events = emptyList(),
                     onSendToAgent = {},
                     agentWindowLabel = "Window 1",
-                    agentPaneLabel = "Pane 1",
                     agentDisplayName = "Claude Code",
                     currentWindowMatchesAgent = true,
                     firstSendConfirmed = true,
@@ -124,7 +131,6 @@ class TmuxConversationSendTargetUiTest {
                     events = emptyList(),
                     onSendToAgent = {},
                     agentWindowLabel = "Window 1",
-                    agentPaneLabel = "Pane 1",
                     agentDisplayName = "Claude Code",
                     currentWindowMatchesAgent = false,
                     firstSendConfirmed = true,
@@ -147,7 +153,6 @@ class TmuxConversationSendTargetUiTest {
                     events = emptyList(),
                     onSendToAgent = {},
                     agentWindowLabel = "Window 1",
-                    agentPaneLabel = "Pane 1",
                     agentDisplayName = "Claude Code",
                     currentWindowMatchesAgent = true,
                     firstSendConfirmed = true,
@@ -160,17 +165,17 @@ class TmuxConversationSendTargetUiTest {
     }
 
     @Test
-    fun allThreeSurfacesCoexistWhenAppropriate() {
+    fun bothDisambiguationBannersCoexistWhenAppropriate() {
         // Worst-case clarity: user has navigated to a sibling window
         // AND hasn't yet acknowledged the first-send banner. Both
-        // banners + the target indicator must all be visible.
+        // disambiguation banners must be visible — but the removed
+        // terminal send-target indicator (#255) must NOT be.
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = {},
                     agentWindowLabel = "Window 1",
-                    agentPaneLabel = "Pane 1",
                     agentDisplayName = "Claude Code",
                     currentWindowMatchesAgent = false,
                     firstSendConfirmed = false,
@@ -182,23 +187,23 @@ class TmuxConversationSendTargetUiTest {
             .assertIsDisplayed()
         compose.onNodeWithTag(TMUX_CONVERSATION_FIRST_SEND_BANNER_TAG)
             .assertIsDisplayed()
-        compose.onNodeWithTag(TMUX_CONVERSATION_TARGET_INDICATOR_TAG)
-            .assertIsDisplayed()
+        // Issue #255: no "Sending to: ..." terminal send-target strip,
+        // even with full agent labels present.
+        compose.onNodeWithText("Sending to: Window 1 · Pane 1")
+            .assertDoesNotExist()
     }
 
     @Test
-    fun emptyAgentLabelsSuppressAllNewSurfaces() {
-        // Defensive: callers that don't have window / pane labels
-        // (older call sites, unit tests) pass empty strings — none of
-        // the new surfaces should render in that case so the
-        // pre-#197 composition is preserved bit-for-bit.
+    fun emptyAgentLabelsSuppressBothBanners() {
+        // Defensive: callers that don't have window labels (older call
+        // sites, unit tests) pass empty strings — neither disambiguation
+        // banner renders in that case.
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = {},
                     agentWindowLabel = "",
-                    agentPaneLabel = "",
                     agentDisplayName = "",
                     currentWindowMatchesAgent = true,
                     firstSendConfirmed = false,
@@ -206,8 +211,6 @@ class TmuxConversationSendTargetUiTest {
             }
         }
 
-        compose.onNodeWithTag(TMUX_CONVERSATION_TARGET_INDICATOR_TAG)
-            .assertDoesNotExist()
         compose.onNodeWithTag(TMUX_CONVERSATION_FIRST_SEND_BANNER_TAG)
             .assertDoesNotExist()
         compose.onNodeWithTag(TMUX_CONVERSATION_WINDOW_MISMATCH_BANNER_TAG)

@@ -788,9 +788,6 @@ public fun TmuxSessionScreen(
                     val agentWindowLabel = remember(lockedPane, panes, agentWindows) {
                         agentWindowLabelFor(lockedPane, panes, agentWindows)
                     }
-                    val agentPaneLabel = remember(lockedPane, panes) {
-                        agentPaneLabelFor(lockedPane, panes)
-                    }
                     val agentDisplayName = lockedConversation!!.detection?.agent?.displayName.orEmpty()
                     val currentWindowMatchesAgent =
                         currentPane?.windowId == lockedPane.windowId
@@ -805,7 +802,6 @@ public fun TmuxSessionScreen(
                             .testTag(TMUX_CONVERSATION_PANE_TAG),
                         showSystemNotes = appSettings.showSystemNotes,
                         agentWindowLabel = agentWindowLabel,
-                        agentPaneLabel = agentPaneLabel,
                         agentDisplayName = agentDisplayName,
                         currentWindowMatchesAgent = currentWindowMatchesAgent,
                         firstSendConfirmed = firstSendConfirmed,
@@ -1741,12 +1737,14 @@ internal const val TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX = "tmux:conversation:to
 internal const val TMUX_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX = "tmux:conversation:system-note:"
 internal const val TMUX_AGENT_HINT_TAG = "tmux:agent-hint"
 /**
- * Issue #197: stable test tags for the conversation pane's send-target
- * indicator and the two banners that disambiguate "where does this
- * message go?" when the user has multiple tmux windows.
+ * Issue #197 / #255: stable test tags for the conversation pane's two
+ * banners that disambiguate "where is the agent?" when the user has
+ * multiple tmux windows. Issue #255 removed the always-visible
+ * "Sending to: Window N · Pane N" target-indicator strip (and its tag)
+ * because naming the underlying terminal pane as the send target was
+ * meaningless in the agent conversation — the user is talking to the
+ * agent, not the shell.
  *
- * - [TMUX_CONVERSATION_TARGET_INDICATOR_TAG] is on the always-visible
- *   "Sending to: Window N · Pane N" strip above the composer.
  * - [TMUX_CONVERSATION_FIRST_SEND_BANNER_TAG] is on the one-time
  *   confirmation banner shown until the user acknowledges with "Got
  *   it" (the button tag is [TMUX_CONVERSATION_FIRST_SEND_CONFIRM_TAG]).
@@ -1755,8 +1753,6 @@ internal const val TMUX_AGENT_HINT_TAG = "tmux:agent-hint"
  *   when the user has navigated to a sibling window while the
  *   conversation pane is locked to the agent pane.
  */
-internal const val TMUX_CONVERSATION_TARGET_INDICATOR_TAG =
-    "tmux:conversation:target-indicator"
 internal const val TMUX_CONVERSATION_FIRST_SEND_BANNER_TAG =
     "tmux:conversation:first-send-banner"
 internal const val TMUX_CONVERSATION_FIRST_SEND_CONFIRM_TAG =
@@ -2047,24 +2043,6 @@ internal fun agentWindowLabelFor(
         .firstOrNull { it.windowId == pane.windowId }
         ?.title
         ?: "Window ?"
-}
-
-/**
- * Issue #197: derive a human-readable pane label for [pane] using the
- * same rule as [breadcrumbCrumbs] — pane's non-blank title wins,
- * otherwise the 1-based pane index within its window. So a Claude pane
- * that tmux reports as the first pane of Window 1 reads as "Pane 1"
- * inside the target indicator.
- */
-internal fun agentPaneLabelFor(
-    pane: TmuxPaneState,
-    panes: List<TmuxPaneState>,
-): String {
-    if (pane.title.isNotBlank()) return pane.title
-    val paneIndexInWindow = panes
-        .filter { it.windowId == pane.windowId }
-        .indexOfFirst { it.paneId == pane.paneId }
-    return if (paneIndexInWindow >= 0) "Pane ${paneIndexInWindow + 1}" else "Pane ?"
 }
 
 @Composable
@@ -2557,16 +2535,19 @@ internal fun TmuxConversationPane(
     // behaviour (notes visible but muted) so direct callers that did
     // not opt into the setting wire-up still see system notes.
     showSystemNotes: Boolean = true,
-    // Issue #197: the conversation composer now exposes "which window /
-    // pane will my message land in?" above the input field. Each of
-    // these surfaces is keyed off the agent pane the composer is bound
-    // to — not the currently-visible pane in the pager. Direct callers
-    // (unit tests, the connected ConversationInteractE2eTest) that
-    // don't yet care about the new surface can pass empty strings /
-    // `true` to opt out — those defaults render the pane in the
-    // pre-#197 shape.
+    // Issue #197 / #255: the conversation composer surfaces "where is the
+    // agent?" above the input field for the multi-window disambiguation
+    // case — the one-time first-send confirmation banner and the
+    // cross-window mismatch banner. Both are keyed off the agent pane the
+    // composer is bound to (not the currently-visible pane in the pager).
+    // Issue #255 removed the always-visible "Sending to: Window N · Pane N"
+    // target-indicator strip these labels also fed — naming the underlying
+    // terminal pane as the send target was meaningless in the agent
+    // conversation. Direct callers (unit tests, the connected
+    // ConversationInteractE2eTest) that don't care about the banners pass
+    // empty strings / `true` to opt out — those defaults render the pane
+    // with no banners.
     agentWindowLabel: String = "",
-    agentPaneLabel: String = "",
     agentDisplayName: String = "",
     currentWindowMatchesAgent: Boolean = true,
     firstSendConfirmed: Boolean = true,
@@ -2705,14 +2686,21 @@ internal fun TmuxConversationPane(
                     .padding(end = 12.dp, bottom = 12.dp),
             )
         }
-        // Issue #197: stack the three send-target surfaces directly
-        // above the composer so the user can read "where am I sending?"
-        // without taking their eyes off the input field. Order from top:
-        // 1. Window-mismatch banner (only when the user has navigated
+        // Issue #197 / #255: the conversation composer used to stack an
+        // always-visible "Sending to: Window N · Pane N" target-indicator
+        // strip above the input field. Issue #255 (v0.3.0 UI audit, finding
+        // A) removed it: in the Conversation pane the user is talking to the
+        // agent, not to a terminal pane, so naming the underlying terminal
+        // window/pane as the "send target" was meaningless noise. Per D22
+        // (hard-cut, no compat shim) the indicator is deleted outright.
+        //
+        // The remaining two banners are NOT terminal send-target
+        // indicators — they answer "where is the agent?" for the multi-
+        // window disambiguation case (#197):
+        // 1. Window-mismatch banner — only when the user has navigated
         //    away from the agent window while the composer is still
-        //    locked to the agent pane).
-        // 2. First-send confirmation banner (one-time per pane).
-        // 3. Always-visible target indicator strip.
+        //    locked to the agent pane.
+        // 2. First-send confirmation banner — one-time per pane.
         if (!currentWindowMatchesAgent && agentWindowLabel.isNotEmpty()) {
             TmuxConversationWindowMismatchBanner(
                 agentWindowLabel = agentWindowLabel,
@@ -2723,12 +2711,6 @@ internal fun TmuxConversationPane(
                 agentWindowLabel = agentWindowLabel,
                 agentDisplayName = agentDisplayName,
                 onConfirm = onConfirmFirstSend,
-            )
-        }
-        if (agentWindowLabel.isNotEmpty() && agentPaneLabel.isNotEmpty()) {
-            TmuxConversationTargetIndicator(
-                agentWindowLabel = agentWindowLabel,
-                agentPaneLabel = agentPaneLabel,
             )
         }
         AgentComposerRow(
@@ -2921,35 +2903,6 @@ private fun TabsRowWithPulse(
                     .testTag(TMUX_CONVERSATION_TAB_PULSE_TAG),
             )
         }
-    }
-}
-
-/**
- * Issue #197: always-visible strip directly above the composer that
- * answers "Sending to which window / pane?" The text uses the muted
- * secondary token (`docs/design-system.md` §3, §6) so it reads as
- * contextual metadata rather than a primary surface. Strip layout
- * mirrors the in-session usage badge row — left-aligned, single line,
- * no background fill — so it cohabits cleanly with the conversation
- * feed.
- */
-@Composable
-private fun TmuxConversationTargetIndicator(
-    agentWindowLabel: String,
-    agentPaneLabel: String,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 6.dp, bottom = 2.dp)
-            .testTag(TMUX_CONVERSATION_TARGET_INDICATOR_TAG),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = "Sending to: $agentWindowLabel · $agentPaneLabel",
-            color = PocketShellColors.TextSecondary,
-            fontSize = 11.sp,
-        )
     }
 }
 

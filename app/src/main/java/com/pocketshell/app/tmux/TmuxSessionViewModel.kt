@@ -402,6 +402,24 @@ public class TmuxSessionViewModel @Inject constructor(
         connectingTarget = target
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+        // Issue #257 (scope F): drop the previous session's panes from the
+        // rendered list SYNCHRONOUSLY, before the teardown coroutine even
+        // gets a turn. The actual per-pane producer/scrollback teardown
+        // still happens inside [closeCurrentClientKeepSession] /
+        // [closeCurrentConnectionAndJoin] under the #151 cancel-and-join
+        // ordering (so the SSH transport is never touched while the event
+        // loop is mid-write). But the screen collects [panes] directly, so
+        // emptying it here means the user never sees a stale frame of the
+        // session they are leaving: the moment they pick a different
+        // session the viewport flips to the loading/empty state and then
+        // to the new session, never lingering on the old content.
+        //
+        // We do NOT clear [paneRows] here — that map is the teardown
+        // coroutine's responsibility (it has to detach each producer first)
+        // and clearing it off-thread would race the event loop. Emptying
+        // only the rendered StateFlow is race-free: it is the same flow the
+        // teardown sets to empty a moment later.
+        _panes.value = emptyList()
         connectJob = viewModelScope.launch {
             // First: drain any in-flight connect() coroutine. `cancelAndJoin`
             // sends cancel and suspends until the prior job actually exits.
@@ -542,6 +560,16 @@ public class TmuxSessionViewModel @Inject constructor(
     private var pendingReattachTarget: ConnectionTarget? = null
     private var backgroundDetachJob: Job? = null
     private var foregroundReattachForTest: (() -> Unit)? = null
+
+    // Issue #257: the in-flight fire-and-forget `detach-client` of the
+    // PREVIOUS tmux client during a same-host session switch. The clean
+    // detach (#215 contract) still happens, but it runs off the switch's
+    // critical path so the new tmux session can attach on the shared SSH
+    // transport without waiting up to [TmuxClient.detachCleanly]'s 1s
+    // budget. Tracked so [onCleared] can let the framework cancel it with
+    // the rest of [viewModelScope], and so unit tests can assert the
+    // switch did not block on it.
+    private var orphanDetachJob: Job? = null
 
     /**
      * Issue #235: drop the tmux `-CC` control client cleanly while the
@@ -694,6 +722,16 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun setForegroundReattachForTest(handler: (() -> Unit)?) {
         foregroundReattachForTest = handler
     }
+
+    /**
+     * Issue #257 test seam: true while the previous tmux client's clean
+     * `detach-client` from a same-host fast-switch is still draining in
+     * the background (i.e. it was launched fire-and-forget rather than
+     * awaited on the switch's critical path). Lets a unit test assert the
+     * switch did not block on the old client's detach.
+     */
+    internal fun hasInFlightOrphanDetachForTest(): Boolean =
+        orphanDetachJob?.isActive == true
 
     /**
      * Issue #235 test seam: drive [onAppBackgrounded] and wait for the
@@ -2508,6 +2546,12 @@ public class TmuxSessionViewModel @Inject constructor(
      * wraps this in `NonCancellable`; tests may not need to).
      */
     private suspend fun closeCurrentConnectionAndJoin() {
+        // Issue #257: drain any background detach left in flight by a
+        // prior same-host fast-switch before we tear the rest down, so a
+        // full teardown (background-detach / cross-host reconnect) never
+        // races a lingering `detach-client` from the previous switch.
+        orphanDetachJob?.cancelAndJoin()
+        orphanDetachJob = null
         eventsJob?.cancelAndJoin()
         eventsJob = null
         projectRootsJob?.cancelAndJoin()
@@ -2636,8 +2680,32 @@ public class TmuxSessionViewModel @Inject constructor(
         // `detach-client` first removes that delay window and matches
         // the slow path's contract for "PocketShell promises to leave
         // a clean server when it tears a tmux client down".
-        runCatching { clientRef?.detachCleanly() }
+        //
+        // Issue #257 (perf): the previous version `await`ed
+        // [TmuxClient.detachCleanly] here, putting up to a 1s
+        // `detach-client` + reader-EOF round-trip directly on the
+        // session-switch critical path — the new session could not
+        // start attaching until the OLD client had finished detaching.
+        // Each tmux `-CC` client owns its own SSH shell channel
+        // ([SshSession.startShell] opens a fresh channel and closing one
+        // leaves the parent session + sibling channels alive), so the
+        // new client's [TmuxClient.connect] can open its channel
+        // immediately while the old client's clean detach drains in the
+        // background. We launch the detach fire-and-forget on
+        // [viewModelScope] (cancelled with the VM in [onCleared]) and
+        // null [clientRef] right away so [runFastSessionSwitch] proceeds
+        // without waiting. The #215 clean-server contract is preserved —
+        // the detach still runs, just not blocking the user's switch.
+        val previousClient = clientRef
         clientRef = null
+        orphanDetachJob?.cancel()
+        orphanDetachJob = previousClient?.let { client ->
+            viewModelScope.launch {
+                withContext(NonCancellable) {
+                    runCatching { client.detachCleanly() }
+                }
+            }
+        }
         registeredHostId?.let { activeTmuxClients.unregister(it) }
         registeredHostId = null
         // Intentionally NOT touching [sessionRef] — that is the
@@ -2681,6 +2749,12 @@ public class TmuxSessionViewModel @Inject constructor(
      * activity teardown beyond a fraction of a second.
      */
     private fun closeCurrentConnection() {
+        // Issue #257: cancel any in-flight background detach from a prior
+        // fast-switch. This path runs from [onCleared] (and the sync test
+        // seam), where [viewModelScope] is about to be cancelled anyway;
+        // the explicit cancel keeps the state field tidy.
+        orphanDetachJob?.cancel()
+        orphanDetachJob = null
         eventsJob?.cancel()
         eventsJob = null
         projectRootsJob?.cancel()

@@ -2938,6 +2938,89 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    /**
+     * Issue #257 (perf): a same-host fast switch must NOT block on the
+     * previous tmux client's clean `detach-client` round-trip. The old
+     * client owns its own SSH shell channel, so the new session can attach
+     * on the shared transport while the old client's detach drains in the
+     * background. We gate the old client's [FakeTmuxClient.detachCleanly]
+     * so it cannot complete, run the switch to the point where the
+     * coroutine yields, and assert the new client is already connected and
+     * registered while the old detach is still in flight.
+     */
+    @Test
+    fun fastSwitchDoesNotBlockOnPreviousClientDetach() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry = registry)
+        val session = FakeSshSession()
+        val detachGate = CompletableDeferred<Unit>()
+        val oldClient = FakeTmuxClient().apply { detachCleanlyGate = detachGate }
+        val newClient = FakeTmuxClient()
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+            session = session,
+        )
+
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = newClient,
+            session = session,
+        )
+        // Let the launched background-detach coroutine reach the gate, but
+        // do NOT release it.
+        runCurrent()
+
+        assertTrue(
+            "old client's clean detach must have been started",
+            oldClient.detachCleanlyCalled,
+        )
+        assertTrue(
+            "fast switch must leave the old detach in flight, not awaited",
+            vm.hasInFlightOrphanDetachForTest(),
+        )
+        // Critical: the switch reached the new session WITHOUT waiting for
+        // the gated detach to finish — the new client is connected and the
+        // registry already points at it.
+        assertTrue("new tmux client must be connect()ed", newClient.connectCalled)
+        assertSame(newClient, registry.clients.value[1L]?.client)
+        assertTrue(
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertFalse(
+            "old client must not be closed while its detach is gated",
+            oldClient.closed,
+        )
+
+        // Releasing the gate lets the background detach finish and close
+        // the old client — the #215 clean-server contract still holds, it
+        // just ran off the critical path.
+        detachGate.complete(Unit)
+        advanceUntilIdle()
+        assertTrue("old tmux client must be closed once the gate releases", oldClient.closed)
+        assertFalse(
+            "SSH session must be reused, never closed by a fast switch",
+            session.closed,
+        )
+        assertFalse(
+            "orphan detach must no longer be in flight after it completes",
+            vm.hasInFlightOrphanDetachForTest(),
+        )
+    }
+
     @Test
     fun fastSwitchIncrementsTmuxConnectCounterButNotSshHandshakeCounter() = runTest {
         val vm = newVm()

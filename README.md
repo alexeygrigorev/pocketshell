@@ -12,7 +12,7 @@ product direction is captured in [docs/vision.md](docs/vision.md).
 
 PocketShell is under active development; it is not production-ready and
 there is no install base to migrate. The latest GitHub Release is
-**v0.2.8** (2026-05-27). **v0.3.0 is in preparation** as the
+**v0.2.9** (2026-05-28). **v0.3.0 is in preparation** as the
 release that closes the open backlog — tmux nav IA polish, dictation/voice
 fixes, the unified `pocketshell` server helper, and the GitHub-aware
 project navigation tracks. Patch versions (v0.2.x) ship in the meantime

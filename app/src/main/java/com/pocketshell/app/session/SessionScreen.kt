@@ -176,6 +176,10 @@ public fun SessionScreen(
     }
 
     val status by viewModel.connectionStatus.collectAsState()
+    // Issue #249: gate the composer / send / dictation surfaces on a live
+    // SSH session. Off the live state a chip / key / dictation would be
+    // written into a dead PTY and silently lost.
+    val sessionLive = status is ConnectionStatus.Connected
     val modifierStates by viewModel.modifierStates.collectAsState()
     val agentConversation by viewModel.agentConversation.collectAsState()
     val voiceCommandReview by viewModel.voiceCommandReview.collectAsState()
@@ -323,6 +327,8 @@ public fun SessionScreen(
                         // survives Terminal ↔ Conversation tab flips.
                         query = agentConversation.searchQuery,
                         onQueryChange = viewModel::setAgentSearchQuery,
+                        // Issue #249: don't deliver-then-clear while down.
+                        sendEnabled = sessionLive,
                     )
                 } else {
                     TerminalSurface(
@@ -410,6 +416,8 @@ public fun SessionScreen(
                         }
                         inlineDictationViewModel.onMicTap()
                     },
+                    // Issue #249: gate key bar + mic on liveness.
+                    inputEnabled = sessionLive,
                 )
             } else {
                 BottomChipControls(
@@ -427,6 +435,8 @@ public fun SessionScreen(
                         { showSnippetPicker = true }
                     } else null,
                     onProjectNavigationTap = { showProjectNavigation = true },
+                    // Issue #249: gate chips + dictate mic on liveness.
+                    inputEnabled = sessionLive,
                 )
             }
         }
@@ -456,8 +466,13 @@ public fun SessionScreen(
         PromptComposerSheet(
             onDismiss = { showMicSheet = false },
             onSend = { text, withEnter ->
-                viewModel.sendText(text, withEnter)
-                showMicSheet = false
+                // Issue #249: if the session dropped while the sheet was
+                // open, don't write into a dead PTY and don't dismiss —
+                // keep the sheet (and the user's text) so nothing is lost.
+                if (sessionLive) {
+                    viewModel.sendText(text, withEnter)
+                    showMicSheet = false
+                }
             },
             hostId = hostId,
         )
@@ -477,8 +492,11 @@ public fun SessionScreen(
             hostId = hostId,
             onDismiss = { showSnippetPicker = false },
             onSnippetSend = { snippet, withEnter ->
-                viewModel.sendSnippet(snippet, withEnter)
-                showSnippetPicker = false
+                // Issue #249: same liveness guard as the prompt composer.
+                if (sessionLive) {
+                    viewModel.sendSnippet(snippet, withEnter)
+                    showSnippetPicker = false
+                }
             },
         )
     }
@@ -605,6 +623,11 @@ internal fun ConversationPane(
     // (notably the `ConversationInteractE2eTest`).
     query: String = "",
     onQueryChange: (String) -> Unit = NoOpStringChange,
+    // Issue #249: gate "Send" on whether the SSH session is live so a
+    // disconnected send can't deliver-then-clear the draft. Default true
+    // keeps direct callers (the connected `ConversationInteractE2eTest`)
+    // running with the always-enabled behaviour.
+    sendEnabled: Boolean = true,
 ) {
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     var composerText by remember { mutableStateOf("") }
@@ -724,7 +747,7 @@ internal fun ConversationPane(
                         composerText = ""
                     }
                 },
-                enabled = composerText.isNotBlank(),
+                enabled = sendEnabled && composerText.isNotBlank(),
                 modifier = Modifier.testTag(SESSION_CONVERSATION_COMPOSER_SEND_TAG),
             ) {
                 Text("Send")

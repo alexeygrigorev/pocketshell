@@ -1,5 +1,6 @@
 package com.pocketshell.app.proof
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.os.SystemClock
 import androidx.test.platform.app.InstrumentationRegistry
@@ -91,6 +92,38 @@ suspend fun waitForSshFixtureReady(
         SystemClock.sleep(1_000)
     }
     error("SSH fixture on $DEFAULT_HOST:$port was not ready after $attempt attempts:\n${failures.takeLast(10).joinToString("\n")}")
+}
+
+/**
+ * Issue #177: wipe the `last_session` fast-resume snapshot so a connected
+ * test that backgrounds an active tmux session (saving a blob on the way
+ * out via `MainActivity.onStop`) cannot leak that blob into a later test in
+ * the same instrumentation JVM that expects a clean "close + relaunch lands
+ * on the host list" start.
+ *
+ * Every emulator-run shares one app-data context (the instrumentation runs
+ * in the target process — see `ColdInstallE2eTest.resetAppToColdInstallState`
+ * for why we cannot `pm clear`), so `last_session` survives across test
+ * classes unless explicitly cleared. The `MainActivity` route-restore is
+ * already gated on `savedInstanceState != null` (it only fires on a genuine
+ * process-death resume, never on a fresh `ActivityScenario.launch`), but
+ * clearing the prefs in test setup is the belt-and-braces isolation the
+ * reviewer requires so no test can depend on, or be polluted by, a sibling's
+ * leftover snapshot.
+ *
+ * The prefs file name mirrors `LastSessionStore.PREFS_NAME` (`"last_session"`);
+ * it is duplicated here rather than exposed as `internal` because the store
+ * lives in `:app` main and this helper lives in androidTest — keeping the
+ * constant private to the store preserves its encapsulation, and a one-line
+ * string mirror is cheaper than widening the production API surface for a
+ * test-only concern.
+ */
+fun clearLastSessionPrefs() {
+    val ctx = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext
+    ctx.getSharedPreferences("last_session", Context.MODE_PRIVATE)
+        .edit()
+        .clear()
+        .commit()
 }
 
 object WalkthroughScreenshotArtifacts {

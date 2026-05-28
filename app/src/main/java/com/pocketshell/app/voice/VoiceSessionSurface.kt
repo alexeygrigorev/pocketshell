@@ -280,6 +280,14 @@ internal fun BottomChipControls(
     onShowKeyboardTap: (() -> Unit)? = null,
     onAddSnippetTap: (() -> Unit)? = null,
     onProjectNavigationTap: (() -> Unit)? = null,
+    // Issue #249: gate the command chips and the dictate mic on whether
+    // the SSH/tmux session is live. While disconnected or reconnecting a
+    // chip tap would `writeInputToPane` into a dead bridge — the bytes
+    // would be silently dropped. We disable the chips and render the mic
+    // in its [MicButtonState.Disabled] (muted, non-clickable) state — the
+    // existing prompt-composer pattern for "mic unavailable" — so the user
+    // sees that input is unavailable rather than losing a tap.
+    inputEnabled: Boolean = true,
 ) {
     Row(
         modifier = Modifier
@@ -290,7 +298,7 @@ internal fun BottomChipControls(
     ) {
         ScrollableChipStrip(
             chips = chips,
-            onChipTap = onChipTap,
+            onChipTap = if (inputEnabled) onChipTap else { _ -> },
             onProjectNavigationTap = onProjectNavigationTap,
             modifier = Modifier.weight(1f),
         )
@@ -306,7 +314,7 @@ internal fun BottomChipControls(
             contentAlignment = Alignment.CenterEnd,
         ) {
             MicButton(
-                state = MicButtonState.Idle,
+                state = if (inputEnabled) MicButtonState.Idle else MicButtonState.Disabled,
                 onClick = onDictateTap,
             )
         }

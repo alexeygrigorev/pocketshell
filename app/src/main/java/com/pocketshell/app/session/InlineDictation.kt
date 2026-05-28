@@ -467,6 +467,13 @@ public fun KeyBarWithMic(
     onDictationModeSelected: (InlineDictationViewModel.DictationMode) -> Unit,
     onMicTap: () -> Unit,
     modifier: Modifier = Modifier,
+    // Issue #249: gate the key bar + mic on whether the SSH/tmux session
+    // is live. While disconnected/reconnecting a key press routes through
+    // the dead input bridge and is silently dropped; a mic tap would
+    // dictate a prompt the user believes was delivered. When false we
+    // swallow [onKey] / [onMicTap] and render the mic slot in its muted
+    // (non-interactive) form so the user sees that input is unavailable.
+    inputEnabled: Boolean = true,
 ) {
     androidx.compose.foundation.layout.Column(
         modifier = modifier
@@ -496,7 +503,7 @@ public fun KeyBarWithMic(
             Box(modifier = Modifier.weight(1f)) {
                 KeyBar(
                     keys = keys,
-                    onKey = onKey,
+                    onKey = if (inputEnabled) onKey else { _ -> },
                     modifierStates = modifierStates,
                     onModifierStateChange = onModifierStateChange,
                 )
@@ -505,6 +512,7 @@ public fun KeyBarWithMic(
                 state = micState,
                 amplitude = micAmplitude,
                 onTap = onMicTap,
+                enabled = inputEnabled,
             )
         }
     }
@@ -585,6 +593,10 @@ private fun InlineMicSlot(
     state: InlineDictationViewModel.RecordingState,
     amplitude: Float,
     onTap: () -> Unit,
+    // Issue #249: when false (session not live) the slot is rendered
+    // muted and non-interactive so a tap can't kick off a dictation the
+    // user believes was sent into a dead session.
+    enabled: Boolean = true,
 ) {
     val (bg: Color, border: Color, glyph: Color) = when (state) {
         InlineDictationViewModel.RecordingState.Idle -> Triple(
@@ -608,8 +620,14 @@ private fun InlineMicSlot(
 
     // Transcribing is non-interactive — we don't let the user re-tap mid-
     // round-trip (avoids double-firing the recorder against an in-flight
-    // Whisper job).
-    val clickable: Boolean = state != InlineDictationViewModel.RecordingState.Transcribing
+    // Whisper job). Issue #249: also non-interactive when the session is
+    // not live.
+    val clickable: Boolean = enabled &&
+        state != InlineDictationViewModel.RecordingState.Transcribing
+    // Issue #249: a muted slot reads as "unavailable" the same way the
+    // disabled mic FAB does — mute the resting glyph/border when gated.
+    val effectiveGlyph: Color = if (enabled) glyph else PocketShellColors.TextMuted
+    val effectiveBorder: Color = if (enabled) border else PocketShellColors.BorderSoft
 
     Box(
         modifier = Modifier
@@ -625,7 +643,7 @@ private fun InlineMicSlot(
             }
             .background(color = bg, shape = RoundedCornerShape(8.dp))
             .border(
-                border = BorderStroke(1.dp, border),
+                border = BorderStroke(1.dp, effectiveBorder),
                 shape = RoundedCornerShape(8.dp),
             )
             .then(
@@ -660,7 +678,7 @@ private fun InlineMicSlot(
             Icon(
                 imageVector = DictateDotIcon,
                 contentDescription = null,
-                tint = glyph,
+                tint = effectiveGlyph,
                 modifier = Modifier.size(16.dp),
             )
         }

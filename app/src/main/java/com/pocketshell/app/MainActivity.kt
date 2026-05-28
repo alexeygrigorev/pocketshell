@@ -36,6 +36,7 @@ import com.pocketshell.app.portfwd.PortForwardPanelScreen
 import com.pocketshell.app.projects.FolderListScreen
 import com.pocketshell.app.projects.WatchedFoldersScreen
 import com.pocketshell.app.projects.WatchedFoldersViewModel
+import com.pocketshell.app.session.LastSessionStore
 import com.pocketshell.app.session.SessionScreen
 import com.pocketshell.app.session.SessionViewModel
 import com.pocketshell.app.settings.SettingsRepository
@@ -108,9 +109,95 @@ class MainActivity : FragmentActivity() {
     @Inject
     lateinit var usageScheduler: UsageScheduler
 
+    /**
+     * Issue #177: persists the last in-session view so a return-to-
+     * foreground (after an app-switch, or a process death while
+     * backgrounded) restores the previous tmux session optimistically
+     * instead of dumping the user on the host list.
+     */
+    @Inject
+    lateinit var lastSessionStore: LastSessionStore
+
+    /**
+     * Issue #177: the navigator's current top destination, reported up by
+     * [AppNavigator] so `onStop` can persist it. The session screen also
+     * reports its current composer draft here so the restored view comes
+     * back with the user's half-typed message intact.
+     */
+    private var currentTopDestination: AppDestination = AppDestination.HostList
+    private var currentComposerDraft: String = ""
+
+    /**
+     * Issue #177: the composer draft restored alongside a recent
+     * persisted session, handed to the session screen so the user's
+     * half-typed message comes back. Consumed once by the navigator;
+     * cleared after the restored destination has been seeded.
+     */
+    private var restoredComposerDraft by mutableStateOf("")
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestedDestination = initialDestinationFromIntent(intent)
+        // Issue #177: prefer the explicit intent route (deep links, the
+        // QS-tile forwarding chooser). Otherwise the launch lands on the
+        // host list — UNLESS this `onCreate` is the system re-creating the
+        // activity after it killed our process while backgrounded. In that
+        // one case we restore the last in-session view so the user picks up
+        // exactly where they left off (#177 fast resume), and the async SSH
+        // reconnect fires from `TmuxSessionScreen`'s existing
+        // connect-on-compose effect (the optimistic UI is usable
+        // immediately while it handshakes; input affordances stay gated
+        // until live per #249).
+        //
+        // Why gate on `savedInstanceState != null`:
+        //
+        // The DOMINANT app-switch case — Home then return while the process
+        // is still alive — never re-enters `onCreate`. The activity instance
+        // and the navigator's in-memory back stack survive the
+        // background/foreground cycle, and the existing #235 `ON_START`
+        // auto-reattach already returns the user straight to their live
+        // session. So that case needs nothing from this restore route.
+        //
+        // `onCreate` only re-runs when the activity is genuinely (re)created.
+        // Two flavours:
+        //
+        //  - A deliberate cold launch / explicit close + relaunch: the
+        //    system passes `savedInstanceState == null`. The user chose to
+        //    start fresh, so we MUST land them on the host list (this is the
+        //    documented "close + relaunch lands on host list" contract that
+        //    `ColdInstallE2eTest`, `RealAgentReleaseGateTest`, and
+        //    `EmulatorWorkflowE2eTest` assert against).
+        //
+        //  - Process death while backgrounded, then the user returns: the
+        //    system re-creates the activity with a NON-null
+        //    `savedInstanceState` (the saved-state bundle). This is the only
+        //    flavour where the restore route should fire — it is exactly the
+        //    "I came back and my process had been reaped" experience #177
+        //    targets.
+        //
+        // The recency cap inside [LastSessionStore.read] is the second guard:
+        // even on a genuine process-death resume, a snapshot older than 24h
+        // is not restored.
+        val intentDestination = initialDestinationFromIntent(intent)
+        val resumingFromProcessDeath = savedInstanceState != null
+        // Only read the persisted snapshot on the process-death resume path;
+        // a fresh launch must not even touch the store so the cold-launch
+        // route is always the host list (see [resolveInitialDestination]).
+        val restored =
+            if (intentDestination == AppDestination.HostList && resumingFromProcessDeath) {
+                lastSessionStore.read()
+            } else {
+                null
+            }
+        requestedDestination = resolveInitialDestination(
+            intentDestination = intentDestination,
+            resumingFromProcessDeath = resumingFromProcessDeath,
+            restoredDestination = restored?.let { with(lastSessionStore) { it.toDestination() } },
+        )
+        restoredComposerDraft = if (requestedDestination is AppDestination.TmuxSession) {
+            restored?.composerDraft.orEmpty()
+        } else {
+            ""
+        }
         pendingImportPayload = importPayloadFromIntent(intent)
         window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(DarkSystemBarColor))
         window.decorView.setBackgroundColor(DarkSystemBarColor)
@@ -149,10 +236,50 @@ class MainActivity : FragmentActivity() {
                         requestedDestination = requestedDestination,
                         pendingImportPayload = pendingImportPayload,
                         onImportPayloadConsumed = { pendingImportPayload = null },
+                        // Issue #177: the navigator reports its current top
+                        // destination + composer draft so `onStop` can
+                        // persist the in-session view for fast resume; the
+                        // restored draft flows the other way so the session
+                        // comes back with the user's half-typed message.
+                        onCurrentDestinationChanged = { dest -> currentTopDestination = dest },
+                        onComposerDraftChanged = { draft -> currentComposerDraft = draft },
+                        initialComposerDraft = restoredComposerDraft,
+                        onInitialComposerDraftConsumed = { restoredComposerDraft = "" },
                     )
                 }
             }
         }
+    }
+
+    /**
+     * Issue #177: persist the last in-session view on the way out (D21 —
+     * persistence happens at `onStop` time, nothing runs while
+     * backgrounded). When the user is sitting on a tmux session we record
+     * the destination + draft so the next foreground restores it; when
+     * they are anywhere else we clear the snapshot so a stale session is
+     * never silently restored after the user navigated away on purpose.
+     */
+    override fun onStop() {
+        val dest = currentTopDestination
+        if (dest is AppDestination.TmuxSession) {
+            lastSessionStore.save(
+                LastSessionStore.LastSession(
+                    hostId = dest.hostId,
+                    hostName = dest.hostName,
+                    hostname = dest.hostname,
+                    port = dest.port,
+                    username = dest.username,
+                    keyPath = dest.keyPath,
+                    sessionName = dest.sessionName,
+                    startDirectory = dest.startDirectory,
+                    composerDraft = currentComposerDraft,
+                    savedAtMillis = System.currentTimeMillis(),
+                ),
+            )
+        } else {
+            lastSessionStore.clear()
+        }
+        super.onStop()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -188,6 +315,17 @@ private fun AppNavigator(
     requestedDestination: AppDestination,
     pendingImportPayload: String? = null,
     onImportPayloadConsumed: () -> Unit = {},
+    // Issue #177: report the current top destination + the active session
+    // composer draft up to the activity so `onStop` can persist the
+    // in-session view for fast resume.
+    onCurrentDestinationChanged: (AppDestination) -> Unit = {},
+    onComposerDraftChanged: (String) -> Unit = {},
+    // Issue #177: the composer draft restored from the persisted session,
+    // seeded into the session screen on the restore path. Consumed once;
+    // [onInitialComposerDraftConsumed] clears it so a later in-session
+    // navigation does not re-seed a stale draft.
+    initialComposerDraft: String = "",
+    onInitialComposerDraftConsumed: () -> Unit = {},
 ) {
     // Issue #116: per-host worst-case usage record map, derived from
     // the scheduler's snapshot flow. Session destinations look up the
@@ -218,11 +356,21 @@ private fun AppNavigator(
         onImportPayloadConsumed()
     }
 
-    // Volatile in-memory state. Cold-launch (process death) always lands
-    // on `HostList`; full saved-state restoration arrives when
-    // navigation-compose lands and brings its own saver machinery.
+    // Volatile in-memory back-stack state. The initial destination comes
+    // from [requestedDestination], which the activity seeds with either an
+    // intent route or — for a plain launch that would otherwise land on
+    // the host list — the persisted last tmux session (#177 fast resume).
+    // The back stack itself is still volatile by design (a back gesture
+    // from a restored session returns the user to the host list).
     var current: AppDestination by remember {
         mutableStateOf(requestedDestination)
+    }
+
+    // Issue #177: report the current top destination up to the activity
+    // so `onStop` can persist the in-session view. Fires on every
+    // navigation, including the initial restored destination.
+    LaunchedEffect(current) {
+        onCurrentDestinationChanged(current)
     }
 
     val backStack = remember { mutableListOf<AppDestination>() }
@@ -602,6 +750,13 @@ private fun AppNavigator(
             onOpenUsage = { navigate(AppDestination.Usage) },
             // Issue #116: same per-host chip as the plain-SSH route.
             usageBadgeProvider = usageBadgesByHost[dest.hostId],
+            // Issue #177: seed the restored composer draft into the agent
+            // composer so a fast-resumed session comes back with the
+            // user's half-typed message, and report draft edits up so the
+            // next `onStop` persists them.
+            initialComposerDraft = initialComposerDraft,
+            onInitialComposerDraftConsumed = onInitialComposerDraftConsumed,
+            onComposerDraftChanged = onComposerDraftChanged,
         )
     }
 }
@@ -612,6 +767,40 @@ internal fun initialDestinationFromIntent(intent: Intent?): AppDestination =
     } else {
         AppDestination.HostList
     }
+
+/**
+ * Issue #177: decide the activity's initial destination, distinguishing a
+ * genuine app-switch / process-death resume from a deliberate cold launch.
+ *
+ * Pulled out as a pure function so the route-restore decision — the part the
+ * reviewer flagged as hijacking every plain relaunch — is unit-testable
+ * without an Activity. The rules, in priority order:
+ *
+ *  1. An explicit intent route (deep link, QS-tile forwarding chooser) always
+ *     wins; we never override it with a restored session.
+ *  2. Otherwise the base destination is the host list. We replace it with the
+ *     restored tmux session ONLY when [resumingFromProcessDeath] is true AND a
+ *     fresh [restoredDestination] was supplied. `resumingFromProcessDeath`
+ *     maps to `savedInstanceState != null` in `onCreate`: the system passes a
+ *     non-null bundle only when it re-creates the activity after reaping our
+ *     backgrounded process. A user-driven cold launch / explicit close +
+ *     relaunch passes a null bundle, so this returns the host list — the
+ *     documented contract `ColdInstallE2eTest`, `RealAgentReleaseGateTest`,
+ *     and `EmulatorWorkflowE2eTest` assert against.
+ *
+ * The dominant app-switch case (Home then return while the process is alive)
+ * never re-enters `onCreate`, so it never reaches this function; the existing
+ * #235 `ON_START` reattach handles it from the surviving navigator state.
+ */
+internal fun resolveInitialDestination(
+    intentDestination: AppDestination,
+    resumingFromProcessDeath: Boolean,
+    restoredDestination: AppDestination?,
+): AppDestination {
+    if (intentDestination != AppDestination.HostList) return intentDestination
+    if (!resumingFromProcessDeath) return AppDestination.HostList
+    return restoredDestination ?: AppDestination.HostList
+}
 
 /**
  * Issue #129: pull a `pocketshell://import?payload=...` (or

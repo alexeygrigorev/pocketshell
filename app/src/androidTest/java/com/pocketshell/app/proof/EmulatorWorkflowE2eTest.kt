@@ -36,6 +36,7 @@ import org.junit.After
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Assume
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -61,10 +62,22 @@ class EmulatorWorkflowE2eTest {
     private val timings = mutableListOf<String>()
     private val captures = mutableListOf<WorkflowCapture>()
 
+    /**
+     * Issue #177: clear the fast-resume `last_session` snapshot before and
+     * after each test so a sibling test that backgrounded an active tmux
+     * session cannot leak its blob into this test's fresh
+     * `ActivityScenario.launch` (which expects a clean host-list start).
+     */
+    @Before
+    fun clearFastResumeSnapshot() {
+        clearLastSessionPrefs()
+    }
+
     @After
     fun closeLaunchedActivity() {
         launchedActivity?.close()
         launchedActivity = null
+        clearLastSessionPrefs()
     }
 
     @Test

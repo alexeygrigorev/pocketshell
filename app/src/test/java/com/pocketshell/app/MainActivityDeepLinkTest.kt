@@ -2,6 +2,7 @@ package com.pocketshell.app
 
 import android.content.Intent
 import android.net.Uri
+import com.pocketshell.app.nav.AppDestination
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -68,5 +69,72 @@ class MainActivityDeepLinkTest {
             data = Uri.parse("pocketshell://import")
         }
         assertNull(importPayloadFromIntent(intent))
+    }
+
+    // ----------------------------------------------------------------
+    // Issue #177: resolveInitialDestination — the route-restore gate.
+    // ----------------------------------------------------------------
+
+    private fun restoredSession() = AppDestination.TmuxSession(
+        hostId = 7L,
+        hostName = "prod box",
+        hostname = "10.0.0.5",
+        port = 2222,
+        username = "me",
+        keyPath = "/data/keys/id_ed25519",
+        passphrase = null,
+        sessionName = "claude-main",
+        startDirectory = "/home/me/project",
+    )
+
+    @Test
+    fun resolveInitialDestination_freshColdLaunch_landsOnHostList() {
+        // savedInstanceState == null (deliberate close + relaunch). Even
+        // with a recent snapshot available, the user must land on the host
+        // list — this is the ColdInstall / RealAgentReleaseGate /
+        // EmulatorWorkflow close+relaunch contract.
+        val dest = resolveInitialDestination(
+            intentDestination = AppDestination.HostList,
+            resumingFromProcessDeath = false,
+            restoredDestination = restoredSession(),
+        )
+        assertEquals(AppDestination.HostList, dest)
+    }
+
+    @Test
+    fun resolveInitialDestination_processDeathResume_restoresSession() {
+        // savedInstanceState != null (system re-created the activity after
+        // reaping the backgrounded process) AND a fresh snapshot exists.
+        val restored = restoredSession()
+        val dest = resolveInitialDestination(
+            intentDestination = AppDestination.HostList,
+            resumingFromProcessDeath = true,
+            restoredDestination = restored,
+        )
+        assertEquals(restored, dest)
+    }
+
+    @Test
+    fun resolveInitialDestination_processDeathResume_noSnapshot_landsOnHostList() {
+        // Process-death resume but the snapshot was absent / stale (read()
+        // returned null), so we still land on the host list.
+        val dest = resolveInitialDestination(
+            intentDestination = AppDestination.HostList,
+            resumingFromProcessDeath = true,
+            restoredDestination = null,
+        )
+        assertEquals(AppDestination.HostList, dest)
+    }
+
+    @Test
+    fun resolveInitialDestination_explicitIntentRoute_alwaysWins() {
+        // A QS-tile / deep-link route is never overridden by a restored
+        // session, even on a process-death resume with a snapshot present.
+        val dest = resolveInitialDestination(
+            intentDestination = AppDestination.PortForwardChooser,
+            resumingFromProcessDeath = true,
+            restoredDestination = restoredSession(),
+        )
+        assertEquals(AppDestination.PortForwardChooser, dest)
     }
 }

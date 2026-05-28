@@ -48,6 +48,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -128,10 +129,25 @@ class ColdInstallE2eTest {
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
 
+    /**
+     * Issue #177: clear the fast-resume `last_session` snapshot before and
+     * after this test so neither a sibling test's leftover blob can pollute
+     * the cold-install start, nor this test's own Phase-7 relaunch (which
+     * closes an activity sitting on a tmux session, saving a blob via
+     * `onStop`) can leak into a later test. The activity route-restore is
+     * already gated on `savedInstanceState != null`, so a fresh launch lands
+     * on the host list regardless; this is belt-and-braces prefs isolation.
+     */
+    @Before
+    fun clearFastResumeSnapshot() {
+        clearLastSessionPrefs()
+    }
+
     @After
     fun closeLaunchedActivity() {
         launchedActivity?.close()
         launchedActivity = null
+        clearLastSessionPrefs()
     }
 
     @Test

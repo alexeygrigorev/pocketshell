@@ -29,6 +29,7 @@ import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -80,10 +81,23 @@ class RealAgentReleaseGateTest {
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
 
+    /**
+     * Issue #177: clear the fast-resume `last_session` snapshot before and
+     * after each test so a sibling test that backgrounded an active tmux
+     * session cannot leak its blob into this gate's fresh
+     * `ActivityScenario.launch` (which drives the full host -> session
+     * attach journey from a clean host-list start).
+     */
+    @Before
+    fun clearFastResumeSnapshot() {
+        clearLastSessionPrefs()
+    }
+
     @After
     fun closeLaunchedActivity() {
         launchedActivity?.close()
         launchedActivity = null
+        clearLastSessionPrefs()
     }
 
     @Test

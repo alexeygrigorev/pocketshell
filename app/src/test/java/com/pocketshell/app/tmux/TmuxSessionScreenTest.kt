@@ -190,6 +190,44 @@ class TmuxSessionScreenTest {
         assertEquals(listOf("dismiss", "replace:logs"), events)
     }
 
+    // ─── Issues #177 / #249: breadcrumb status mapping ──────────────────
+
+    @Test
+    fun toUiStatusMapsConnectedToConnected() {
+        assertEquals(
+            com.pocketshell.uikit.model.ConnectionStatus.Connected,
+            TmuxSessionViewModel.ConnectionStatus.Connected("h", 22, "u").toUiStatus(),
+        )
+    }
+
+    @Test
+    fun toUiStatusMapsConnectingToConnecting() {
+        // Connecting drives the amber pulse + "Reconnecting" pill while a
+        // background-detach reattach handshake (#177) is in flight.
+        assertEquals(
+            com.pocketshell.uikit.model.ConnectionStatus.Connecting,
+            TmuxSessionViewModel.ConnectionStatus.Connecting("h", 22, "u").toUiStatus(),
+        )
+    }
+
+    @Test
+    fun toUiStatusMapsFailedToError() {
+        // Failed is the dropped-socket state #249 rides on; it must read
+        // as a red "Disconnected" indicator, not a steady-state dot.
+        assertEquals(
+            com.pocketshell.uikit.model.ConnectionStatus.Error,
+            TmuxSessionViewModel.ConnectionStatus.Failed("Disconnected from ...").toUiStatus(),
+        )
+    }
+
+    @Test
+    fun toUiStatusMapsIdleToIdle() {
+        assertEquals(
+            com.pocketshell.uikit.model.ConnectionStatus.Idle,
+            TmuxSessionViewModel.ConnectionStatus.Idle.toUiStatus(),
+        )
+    }
+
     private fun pickerRequest(): HostTmuxSessionPickerRequest =
         HostTmuxSessionPickerRequest(
             host = HostEntity(

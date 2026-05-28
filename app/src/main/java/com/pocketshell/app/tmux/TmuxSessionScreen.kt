@@ -67,6 +67,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -176,6 +177,13 @@ public fun TmuxSessionScreen(
      * host id; `null` when no chip should render.
      */
     usageBadgeProvider: com.pocketshell.core.usage.UsageProviderRecord? = null,
+    // Issue #177: composer-draft persistence for fast resume. The
+    // restored draft (from the persisted last session) seeds the agent
+    // composer once; edits are reported back up so the next `onStop`
+    // persists them. Defaults keep direct callers / unit tests unchanged.
+    initialComposerDraft: String = "",
+    onInitialComposerDraftConsumed: () -> Unit = {},
+    onComposerDraftChanged: (String) -> Unit = {},
 ) {
     LaunchedEffect(hostId, hostName, host, port, user, keyPath, passphrase, sessionName, startDirectory) {
         viewModel.connect(
@@ -193,6 +201,30 @@ public fun TmuxSessionScreen(
 
     val panes by viewModel.panes.collectAsState()
     val status by viewModel.connectionStatus.collectAsState()
+    // Issue #249: the single source of truth that gates the composer /
+    // send / dictation path. Input only reaches the remote when the tmux
+    // `-CC` control channel is live (`Connected`). While Connecting (the
+    // background-detach reattach handshake of #177) or Failed (a dropped
+    // socket) a chip tap / key press / dictation would be written into a
+    // dead bridge and silently lost — exactly the data-loss the user
+    // reported. We disable those affordances and surface a visible
+    // "Reconnecting" / "Disconnected" pill instead.
+    val sessionLive = status is ConnectionStatus.Connected
+    // Issue #177: a one-shot holder for the restored composer draft. The
+    // conversation pane mounts/unmounts as the user flips the Terminal ↔
+    // Conversation tab, so we cannot rely on the pane's own `remember` to
+    // consume the draft exactly once — we consume it here at the screen
+    // level (returns the draft the first time, "" after) and notify the
+    // activity it was consumed so a later launch won't re-seed it.
+    var restoredDraftRemaining by rememberSaveable { mutableStateOf(initialComposerDraft) }
+    val consumeRestoredDraft: () -> String = {
+        val draft = restoredDraftRemaining
+        if (draft.isNotEmpty()) {
+            restoredDraftRemaining = ""
+            onInitialComposerDraftConsumed()
+        }
+        draft
+    }
     val sizeMismatchPrompt by viewModel.sizeMismatchPrompt.collectAsState()
     val agentConversations by viewModel.agentConversations.collectAsState()
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
@@ -543,6 +575,7 @@ public fun TmuxSessionScreen(
                                     showWindowSwitcher = true
                                 }
                             },
+                            connectionStatus = status.toUiStatus(),
                             modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
                         )
                     }
@@ -563,6 +596,7 @@ public fun TmuxSessionScreen(
                             sessionName = sessionName,
                             onBack = onBack,
                             onMore = { moreExpanded = true },
+                            connectionStatus = status.toUiStatus(),
                             modifier = Modifier.testTag(TMUX_COMPACT_BREADCRUMB_TAG),
                         )
                     }
@@ -771,6 +805,15 @@ public fun TmuxSessionScreen(
                         onQueryChange = { next ->
                             viewModel.setAgentSearchQuery(paneIdForSend, next)
                         },
+                        // Issue #249: don't let the agent composer deliver
+                        // -then-clear a message while the session is down.
+                        sendEnabled = sessionLive,
+                        // Issue #177: seed the restored draft once (the
+                        // holder consumes it on first read so a tab toggle
+                        // that re-mounts the pane doesn't re-seed a stale
+                        // draft), and report edits up for re-persistence.
+                        initialDraft = consumeRestoredDraft(),
+                        onDraftChanged = onComposerDraftChanged,
                     )
                 } else if (panes.isEmpty()) {
                     EmptyPanesPlaceholder()
@@ -858,6 +901,9 @@ public fun TmuxSessionScreen(
                         }
                         inlineDictationViewModel.onMicTap()
                     },
+                    // Issue #249: gate the key bar + mic on liveness so a
+                    // key press / dictation can't be dropped silently.
+                    inputEnabled = sessionLive,
                 )
             } else if (!isImeVisible && currentPane != null) {
                 BottomChipControls(
@@ -889,6 +935,8 @@ public fun TmuxSessionScreen(
                     // follow-up — see #123 notes on per-pane cwd /
                     // project-root wiring.
                     onProjectNavigationTap = null,
+                    // Issue #249: gate chips + dictate mic on liveness.
+                    inputEnabled = sessionLive,
                 )
             }
 
@@ -1058,14 +1106,20 @@ public fun TmuxSessionScreen(
         PromptComposerSheet(
             onDismiss = { showMicSheet = false },
             onSend = { text, withEnter ->
-                currentPane?.let { pane ->
-                    val payload = if (withEnter) text + "\r" else text
-                    viewModel.writeInputToPane(
-                        pane.paneId,
-                        payload.toByteArray(Charsets.UTF_8),
-                    )
+                // Issue #249: if the session dropped while the composer
+                // sheet was open, do NOT write into the dead pane and do
+                // NOT dismiss — keep the sheet (and the user's text) so
+                // nothing is lost; the user re-sends once reconnected.
+                if (sessionLive) {
+                    currentPane?.let { pane ->
+                        val payload = if (withEnter) text + "\r" else text
+                        viewModel.writeInputToPane(
+                            pane.paneId,
+                            payload.toByteArray(Charsets.UTF_8),
+                        )
+                    }
+                    showMicSheet = false
                 }
-                showMicSheet = false
             },
             hostId = hostId.takeIf { it != 0L },
         )
@@ -1083,14 +1137,18 @@ public fun TmuxSessionScreen(
             hostId = hostId,
             onDismiss = { showSnippetPicker = false },
             onSnippetSend = { snippet, withEnter ->
-                currentPane?.let { pane ->
-                    val payload = if (withEnter) snippet.body + "\r" else snippet.body
-                    viewModel.writeInputToPane(
-                        pane.paneId,
-                        payload.toByteArray(Charsets.UTF_8),
-                    )
+                // Issue #249: same liveness guard as the prompt composer —
+                // never write a snippet into a dead pane and lose the tap.
+                if (sessionLive) {
+                    currentPane?.let { pane ->
+                        val payload = if (withEnter) snippet.body + "\r" else snippet.body
+                        viewModel.writeInputToPane(
+                            pane.paneId,
+                            payload.toByteArray(Charsets.UTF_8),
+                        )
+                    }
+                    showSnippetPicker = false
                 }
-                showSnippetPicker = false
             },
         )
     }
@@ -1673,6 +1731,14 @@ internal const val TMUX_FULL_CHROME_BACK_BUTTON_TAG = "tmux:chrome:full:back"
 internal const val TMUX_FULL_CHROME_MORE_BUTTON_TAG = "tmux:chrome:full:more"
 internal const val TMUX_COMPACT_CHROME_BACK_BUTTON_TAG = "tmux:chrome:compact:back"
 internal const val TMUX_COMPACT_CHROME_MORE_BUTTON_TAG = "tmux:chrome:compact:more"
+
+/**
+ * Issues #177 / #249: the "Reconnecting" / "Disconnected" breadcrumb pill
+ * (see [ConnectionStatusPill]). Connected tests assert this appears while
+ * the reattach handshake is in flight and disappears once the session is
+ * live again.
+ */
+internal const val TMUX_CONNECTION_STATUS_PILL_TAG = "tmux:chrome:connection-pill"
 
 /**
  * Issue #145: stable test tags for the mid-session SSH disconnect band
@@ -2395,9 +2461,23 @@ internal fun TmuxConversationPane(
     // search field still types. See [rememberHoistedQuery] below.
     query: String = "",
     onQueryChange: (String) -> Unit = NoOpStringChange,
+    // Issue #249: gate the "Send" button on whether the SSH/tmux session
+    // is live. When false the button is disabled so a tap cannot route a
+    // message into a dead pane and then clear the composer — the draft
+    // stays in [composerText] (a `remember`, so it survives the
+    // disconnected -> reconnect recomposition) and the user re-sends once
+    // the session is live again. Defaults to true so direct callers
+    // (unit tests, the connected E2E) keep the always-enabled behaviour.
+    sendEnabled: Boolean = true,
+    // Issue #177: seed the composer with a draft restored from a
+    // persisted session, and report draft edits up so the activity can
+    // re-persist them on the next `onStop`. The default empty seed +
+    // no-op reporter keep direct callers unchanged.
+    initialDraft: String = "",
+    onDraftChanged: (String) -> Unit = {},
 ) {
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
-    var composerText by remember { mutableStateOf("") }
+    var composerText by rememberSaveable { mutableStateOf(initialDraft) }
     val visibleEvents = remember(events, showSystemNotes) {
         if (showSystemNotes) events else events.filterNot { it is ConversationEvent.SystemNote }
     }
@@ -2533,14 +2613,19 @@ internal fun TmuxConversationPane(
         }
         AgentComposerRow(
             text = composerText,
-            onTextChange = { composerText = it },
+            onTextChange = {
+                composerText = it
+                onDraftChanged(it)
+            },
             onSend = {
                 val trimmed = composerText.trim()
                 if (trimmed.isNotEmpty()) {
                     onSendToAgent(trimmed)
                     composerText = ""
+                    onDraftChanged("")
                 }
             },
+            sendEnabled = sendEnabled,
         )
     }
 }
@@ -2926,6 +3011,9 @@ private fun AgentComposerRow(
     text: String,
     onTextChange: (String) -> Unit,
     onSend: () -> Unit,
+    // Issue #249: extra gate on top of the non-blank check so a
+    // disconnected session can't deliver-then-clear the draft.
+    sendEnabled: Boolean = true,
 ) {
     Row(
         modifier = Modifier
@@ -2944,7 +3032,7 @@ private fun AgentComposerRow(
         )
         TextButton(
             onClick = onSend,
-            enabled = text.isNotBlank(),
+            enabled = sendEnabled && text.isNotBlank(),
             modifier = Modifier.testTag(TMUX_CONVERSATION_COMPOSER_SEND_TAG),
         ) {
             Text("Send")
@@ -3427,6 +3515,15 @@ internal fun ConsolidatedTopChrome(
     // wire detection state (the screenshot harness and unit tests pass
     // the labels directly without driving the pulse).
     pulseConversationTab: Boolean = false,
+    // Issues #177 / #249: the live connection state, surfaced through the
+    // breadcrumb's status dot (amber pulse while reconnecting, red while
+    // disconnected) plus a compact "Reconnecting" / "Disconnected" pill.
+    // This is the always-visible, unmissable indicator the user needs so
+    // they never type into a session they think is live. Default
+    // `Connected` keeps the screenshot harness / unit tests rendering the
+    // steady-state breadcrumb.
+    connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
+        com.pocketshell.uikit.model.ConnectionStatus.Connected,
 ) {
     Row(
         modifier = modifier
@@ -3454,9 +3551,10 @@ internal fun ConsolidatedTopChrome(
         }
         Spacer(modifier = Modifier.width(4.dp))
         com.pocketshell.uikit.components.StatusDot(
-            status = com.pocketshell.uikit.model.ConnectionStatus.Connected,
+            status = connectionStatus,
         )
         Spacer(modifier = Modifier.width(6.dp))
+        ConnectionStatusPill(connectionStatus)
 
         // Crumb body: session [› Window N]. The session segment is
         // non-interactive (current destination); the window segment is
@@ -3705,6 +3803,10 @@ private fun CompactBreadcrumb(
     onBack: () -> Unit,
     onMore: () -> Unit,
     modifier: Modifier = Modifier,
+    // Issues #177 / #249: even in the IME-up compact chrome the user must
+    // be able to tell the session is not live before they dictate into it.
+    connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
+        com.pocketshell.uikit.model.ConnectionStatus.Connected,
 ) {
     Row(
         modifier = modifier
@@ -3728,6 +3830,8 @@ private fun CompactBreadcrumb(
             )
         }
         Spacer(modifier = Modifier.width(4.dp))
+        com.pocketshell.uikit.components.StatusDot(status = connectionStatus)
+        Spacer(modifier = Modifier.width(6.dp))
         Text(
             text = sessionName,
             color = PocketShellColors.Text,
@@ -3737,6 +3841,8 @@ private fun CompactBreadcrumb(
             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
+        ConnectionStatusPill(connectionStatus)
+        Spacer(modifier = Modifier.width(4.dp))
         Box(
             modifier = Modifier
                 .size(36.dp)
@@ -3752,6 +3858,60 @@ private fun CompactBreadcrumb(
         }
     }
 }
+
+/**
+ * Issues #177 / #249: compact "Reconnecting" / "Disconnected" pill shown
+ * in the breadcrumb next to the [com.pocketshell.uikit.components.StatusDot].
+ *
+ * Rendered only for the non-live states so the steady-state breadcrumb
+ * stays uncluttered. It is the always-visible textual confirmation of
+ * what the dot's colour signals — the user should never have to guess
+ * whether the session is live before they dictate into it. Tagged with
+ * [TMUX_CONNECTION_STATUS_PILL_TAG] so connected tests can assert it
+ * appears while a reattach handshake is in flight and clears when live.
+ */
+@Composable
+private fun ConnectionStatusPill(
+    status: com.pocketshell.uikit.model.ConnectionStatus,
+) {
+    val (label, color) = when (status) {
+        com.pocketshell.uikit.model.ConnectionStatus.Connected -> return
+        com.pocketshell.uikit.model.ConnectionStatus.Connecting ->
+            "Reconnecting" to PocketShellColors.Amber
+        com.pocketshell.uikit.model.ConnectionStatus.Error ->
+            "Disconnected" to PocketShellColors.Red
+        com.pocketshell.uikit.model.ConnectionStatus.Idle ->
+            "Connecting" to PocketShellColors.TextMuted
+    }
+    Text(
+        text = label,
+        color = color,
+        fontSize = 11.sp,
+        fontWeight = FontWeight.Medium,
+        maxLines = 1,
+        modifier = Modifier
+            .background(
+                color = color.copy(alpha = 0.14f),
+                shape = RoundedCornerShape(6.dp),
+            )
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+            .testTag(TMUX_CONNECTION_STATUS_PILL_TAG),
+    )
+}
+
+/**
+ * Issues #177 / #249: map the tmux view-model connection state onto the
+ * design-system [com.pocketshell.uikit.model.ConnectionStatus] used by the
+ * breadcrumb dot + pill. `Failed` maps to `Error` (red, "Disconnected");
+ * `Connecting` maps to `Connecting` (amber pulse, "Reconnecting").
+ */
+internal fun ConnectionStatus.toUiStatus(): com.pocketshell.uikit.model.ConnectionStatus =
+    when (this) {
+        is ConnectionStatus.Connected -> com.pocketshell.uikit.model.ConnectionStatus.Connected
+        is ConnectionStatus.Connecting -> com.pocketshell.uikit.model.ConnectionStatus.Connecting
+        is ConnectionStatus.Failed -> com.pocketshell.uikit.model.ConnectionStatus.Error
+        ConnectionStatus.Idle -> com.pocketshell.uikit.model.ConnectionStatus.Idle
+    }
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable

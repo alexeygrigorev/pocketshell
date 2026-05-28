@@ -33,7 +33,28 @@ Subcommand coverage:
   per-job trigger subcommand the subprocess exit code + stderr are
   proxied through unchanged. The brief calls for the port today; the
   underlying tmuxctl coverage can grow without changes here.)
+- `pocketshell jobs add <session> --every <e> --message <m> [--start-now]`
+                                             -> `tmuxctl jobs add`
+- `pocketshell jobs edit <id> [--session <s>] [--every <e>]`
+  `[--message <m>] [--enable|--disable]`      -> `tmuxctl jobs edit`
+- `pocketshell jobs remove <id>`             -> `tmuxctl jobs remove`
 - `pocketshell jobs daemon start|stop|status`
+
+The `add` / `edit` / `remove` mutation verbs exist so the Android app's
+`PocketshellJobsRemoteSource` can manage recurring jobs end-to-end after
+the #231 parity swap (it emits `pocketshell jobs add|edit|remove` instead
+of the legacy `tmuxctl jobs ...` strings). Each flag the app sends maps
+one-to-one onto a flag `tmuxctl jobs <verb>` already accepts:
+
+- `add`:    `<session> --every <e> --message <m> [--start-now]`
+- `edit`:   `<id> [--session <s>] [--every <e>] [--message <m>]`
+            `[--enable | --disable]`
+- `remove`: `<id>`
+
+Like the read verbs, the mutation verbs delegate verbatim and proxy
+stdout/stderr + exit code unchanged. They use `ignore_unknown_options`
++ `allow_extra_args` so any flag `tmuxctl` grows (e.g. `--message-file`,
+`--enter-delay-ms`, `--no-enter`) forwards without a wrapper change.
 
 The `daemon` group is the only place where we do not literally
 forward to `tmuxctl jobs daemon <verb>` because `tmuxctl jobs daemon`
@@ -213,6 +234,169 @@ def jobs_trigger(ctx: click.Context, job_id: int) -> None:
     brief calls for parity, not a reimplementation.
     """
     args: list[str] = ["jobs", "trigger", str(job_id), *ctx.args]
+    exit_code = _run_tmuxctl(args)
+    if exit_code != 0:
+        ctx.exit(exit_code)
+
+
+# ----- jobs add / edit / remove --------------------------------------
+
+
+@jobs_group.command(
+    "add",
+    context_settings={
+        "help_option_names": ["-h", "--help"],
+        "ignore_unknown_options": True,
+        "allow_extra_args": True,
+    },
+)
+@click.argument("session_name", type=str)
+@click.option(
+    "--every",
+    "every",
+    type=str,
+    required=True,
+    help="Recurring interval like 15m or 2h (forwarded to `tmuxctl jobs add`).",
+)
+@click.option(
+    "--message",
+    "message",
+    type=str,
+    default=None,
+    help="Message text to send (forwarded to `tmuxctl jobs add`).",
+)
+@click.option(
+    "--start-now",
+    "start_now",
+    is_flag=True,
+    help="Run the job on the next daemon poll (forwarded to `tmuxctl jobs add`).",
+)
+@click.pass_context
+def jobs_add(
+    ctx: click.Context,
+    session_name: str,
+    every: str,
+    message: Optional[str],
+    start_now: bool,
+) -> None:
+    """Create a recurring message job (delegates to `tmuxctl jobs add`).
+
+    Mirrors the command the Android app's `PocketshellJobsRemoteSource.add`
+    emits: `pocketshell jobs add <session> --every <e> --message <m>
+    [--start-now]`. The argument order and flags map one-to-one onto
+    `tmuxctl jobs add`, so the wrapper just forwards them. Extra flags
+    `tmuxctl` accepts (`--message-file`, `--enter-delay-ms`, `--no-enter`)
+    pass through verbatim via `ctx.args`.
+    """
+    args: list[str] = ["jobs", "add", session_name, "--every", every]
+    if message is not None:
+        args.extend(["--message", message])
+    if start_now:
+        args.append("--start-now")
+    args.extend(ctx.args)
+    exit_code = _run_tmuxctl(args)
+    if exit_code != 0:
+        ctx.exit(exit_code)
+
+
+@jobs_group.command(
+    "edit",
+    context_settings={
+        "help_option_names": ["-h", "--help"],
+        "ignore_unknown_options": True,
+        "allow_extra_args": True,
+    },
+)
+@click.argument("job_id", type=int)
+@click.option(
+    "--session",
+    "session",
+    type=str,
+    default=None,
+    help="Replace the tmux session name (forwarded to `tmuxctl jobs edit`).",
+)
+@click.option(
+    "--every",
+    "every",
+    type=str,
+    default=None,
+    help="Replace the recurring interval (forwarded to `tmuxctl jobs edit`).",
+)
+@click.option(
+    "--message",
+    "message",
+    type=str,
+    default=None,
+    help="Replace the stored message text (forwarded to `tmuxctl jobs edit`).",
+)
+@click.option(
+    "--enable",
+    "enable",
+    is_flag=True,
+    help="Enable the job (forwarded to `tmuxctl jobs edit`).",
+)
+@click.option(
+    "--disable",
+    "disable",
+    is_flag=True,
+    help="Disable the job (forwarded to `tmuxctl jobs edit`).",
+)
+@click.pass_context
+def jobs_edit(
+    ctx: click.Context,
+    job_id: int,
+    session: Optional[str],
+    every: Optional[str],
+    message: Optional[str],
+    enable: bool,
+    disable: bool,
+) -> None:
+    """Update an existing job (delegates to `tmuxctl jobs edit`).
+
+    Mirrors the command the Android app's `PocketshellJobsRemoteSource.edit`
+    emits: `pocketshell jobs edit <id> [--session <s>] [--every <e>]
+    [--message <m>] [--enable | --disable]`. The app sends at most one of
+    `--enable` / `--disable`; if both are passed we reject locally before
+    invoking `tmuxctl` since they are contradictory. Every other flag maps
+    one-to-one onto `tmuxctl jobs edit`; extras pass through via `ctx.args`.
+    """
+    if enable and disable:
+        raise click.UsageError("--enable and --disable are mutually exclusive.")
+    args: list[str] = ["jobs", "edit", str(job_id)]
+    if session is not None:
+        args.extend(["--session", session])
+    if every is not None:
+        args.extend(["--every", every])
+    if message is not None:
+        args.extend(["--message", message])
+    if enable:
+        args.append("--enable")
+    if disable:
+        args.append("--disable")
+    args.extend(ctx.args)
+    exit_code = _run_tmuxctl(args)
+    if exit_code != 0:
+        ctx.exit(exit_code)
+
+
+@jobs_group.command(
+    "remove",
+    context_settings={
+        "help_option_names": ["-h", "--help"],
+        "ignore_unknown_options": True,
+        "allow_extra_args": True,
+    },
+)
+@click.argument("job_id", type=int)
+@click.pass_context
+def jobs_remove(ctx: click.Context, job_id: int) -> None:
+    """Remove a scheduled job (delegates to `tmuxctl jobs remove`).
+
+    Mirrors the command the Android app's `PocketshellJobsRemoteSource.remove`
+    emits: `pocketshell jobs remove <id>`. The job id maps directly onto
+    `tmuxctl jobs remove JOB_ID`.
+    """
+    args: list[str] = ["jobs", "remove", str(job_id), *ctx.args]
     exit_code = _run_tmuxctl(args)
     if exit_code != 0:
         ctx.exit(exit_code)

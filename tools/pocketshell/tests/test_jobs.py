@@ -3,11 +3,20 @@
 The second-PR scope exercises:
 
 - `pocketshell --help` lists the `jobs` subcommand.
-- `pocketshell jobs --help` lists `list`, `show`, `trigger`, `daemon`.
+- `pocketshell jobs --help` lists `list`, `show`, `trigger`, `add`,
+  `edit`, `remove`, `daemon`.
 - `pocketshell jobs list` (and `--session NAME`) forwards verbatim to
   `tmuxctl jobs list`.
 - `pocketshell jobs show <id>` forwards verbatim.
 - `pocketshell jobs trigger <id>` forwards verbatim.
+- `pocketshell jobs add <session> --every <e> --message <m>
+  [--start-now]` forwards verbatim to `tmuxctl jobs add` (matches the
+  command the Android app's `PocketshellJobsRemoteSource.add` emits).
+- `pocketshell jobs edit <id> [--session] [--every] [--message]
+  [--enable | --disable]` forwards verbatim to `tmuxctl jobs edit`;
+  `--enable` + `--disable` together is rejected locally.
+- `pocketshell jobs remove <id>` forwards verbatim to
+  `tmuxctl jobs remove`.
 - `pocketshell jobs daemon start` forwards to `tmuxctl jobs daemon`
   with optional `--poll-interval` / `--run-once`.
 - `pocketshell jobs daemon status` returns 0/3 based on `pgrep`.
@@ -81,6 +90,9 @@ def test_jobs_help_lists_subcommands() -> None:
     assert "list" in result.output
     assert "show" in result.output
     assert "trigger" in result.output
+    assert "add" in result.output
+    assert "edit" in result.output
+    assert "remove" in result.output
     assert "daemon" in result.output
     run.assert_not_called()
 
@@ -198,6 +210,334 @@ def test_jobs_trigger_proxies_unknown_subcommand_failure() -> None:
         result = runner.invoke(jobs_group, ["trigger", "7"])
     assert result.exit_code == 2
     assert "trigger" in result.output.lower()
+
+
+# ----- jobs add ------------------------------------------------------
+
+
+def test_jobs_add_forwards_session_every_and_message() -> None:
+    """Pins the contract the Android app's `PocketshellJobsRemoteSource.add`
+    emits: `pocketshell jobs add <session> --every <e> --message <m>`.
+    The session is a positional argument; `--every` and `--message`
+    map one-to-one onto `tmuxctl jobs add`.
+    """
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run",
+        return_value=_fake_completed(stdout="Created job 7\n"),
+    ) as run:
+        result = runner.invoke(
+            jobs_group,
+            ["add", "work", "--every", "15m", "--message", "poke claude"],
+        )
+    assert result.exit_code == 0, result.output
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == [
+        "/fake/tmuxctl",
+        "jobs",
+        "add",
+        "work",
+        "--every",
+        "15m",
+        "--message",
+        "poke claude",
+    ]
+
+
+def test_jobs_add_forwards_start_now_flag() -> None:
+    """`--start-now` is the optional flag the app appends when the user
+    asks to run the job on the next daemon poll.
+    """
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run",
+        return_value=_fake_completed(stdout="Created job 8\n"),
+    ) as run:
+        result = runner.invoke(
+            jobs_group,
+            ["add", "work", "--every", "2h", "--message", "status", "--start-now"],
+        )
+    assert result.exit_code == 0, result.output
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == [
+        "/fake/tmuxctl",
+        "jobs",
+        "add",
+        "work",
+        "--every",
+        "2h",
+        "--message",
+        "status",
+        "--start-now",
+    ]
+
+
+def test_jobs_add_requires_every() -> None:
+    """`--every` is required (matching `tmuxctl jobs add`), so click
+    rejects the invocation before reaching the subprocess.
+    """
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run"
+    ) as run:
+        result = runner.invoke(jobs_group, ["add", "work", "--message", "hi"])
+    assert result.exit_code != 0
+    run.assert_not_called()
+
+
+def test_jobs_add_forwards_unknown_options_verbatim() -> None:
+    """Flags `tmuxctl jobs add` accepts but the wrapper does not enumerate
+    (e.g. `--enter-delay-ms`, `--no-enter`, `--message-file`) forward
+    unchanged so upstream parity work is never blocked here.
+    """
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run",
+        return_value=_fake_completed(stdout="Created job 9\n"),
+    ) as run:
+        result = runner.invoke(
+            jobs_group,
+            [
+                "add",
+                "work",
+                "--every",
+                "30m",
+                "--message",
+                "deploy",
+                "--enter-delay-ms",
+                "500",
+                "--no-enter",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == [
+        "/fake/tmuxctl",
+        "jobs",
+        "add",
+        "work",
+        "--every",
+        "30m",
+        "--message",
+        "deploy",
+        "--enter-delay-ms",
+        "500",
+        "--no-enter",
+    ]
+
+
+def test_jobs_add_proxies_nonzero_exit_from_tmuxctl() -> None:
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run",
+        return_value=_fake_completed(stderr="tmuxctl: no such session 'work'\n", returncode=4),
+    ):
+        result = runner.invoke(
+            jobs_group,
+            ["add", "work", "--every", "15m", "--message", "hi"],
+        )
+    assert result.exit_code == 4
+    assert "no such session" in result.output
+
+
+def test_jobs_add_returns_127_when_tmuxctl_missing() -> None:
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value=None), patch(
+        "pocketshell.jobs.subprocess.run"
+    ) as run:
+        result = runner.invoke(
+            jobs_group,
+            ["add", "work", "--every", "15m", "--message", "hi"],
+            catch_exceptions=False,
+        )
+    assert result.exit_code == 127
+    assert "tmuxctl" in result.output.lower()
+    run.assert_not_called()
+
+
+# ----- jobs edit -----------------------------------------------------
+
+
+def test_jobs_edit_forwards_id_only() -> None:
+    """An edit with only the id and no fields still forwards the id; the
+    Android app may emit this when nothing changed but a save was issued.
+    """
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run",
+        return_value=_fake_completed(stdout="Updated job 7\n"),
+    ) as run:
+        result = runner.invoke(jobs_group, ["edit", "7"])
+    assert result.exit_code == 0, result.output
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == ["/fake/tmuxctl", "jobs", "edit", "7"]
+
+
+def test_jobs_edit_forwards_session_every_and_message() -> None:
+    """Pins the contract the app's `PocketshellJobsRemoteSource.edit`
+    emits for field updates: `--session`, `--every`, `--message` each map
+    one-to-one onto `tmuxctl jobs edit`.
+    """
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run",
+        return_value=_fake_completed(stdout="Updated job 7\n"),
+    ) as run:
+        result = runner.invoke(
+            jobs_group,
+            [
+                "edit",
+                "7",
+                "--session",
+                "ops",
+                "--every",
+                "45m",
+                "--message",
+                "rotate logs",
+            ],
+        )
+    assert result.exit_code == 0, result.output
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == [
+        "/fake/tmuxctl",
+        "jobs",
+        "edit",
+        "7",
+        "--session",
+        "ops",
+        "--every",
+        "45m",
+        "--message",
+        "rotate logs",
+    ]
+
+
+def test_jobs_edit_forwards_enable_flag() -> None:
+    """The app sends `--enable` when the user toggles a disabled job on."""
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run",
+        return_value=_fake_completed(stdout="Updated job 7\n"),
+    ) as run:
+        result = runner.invoke(jobs_group, ["edit", "7", "--enable"])
+    assert result.exit_code == 0, result.output
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == ["/fake/tmuxctl", "jobs", "edit", "7", "--enable"]
+
+
+def test_jobs_edit_forwards_disable_flag() -> None:
+    """The app sends `--disable` when the user toggles an enabled job off."""
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run",
+        return_value=_fake_completed(stdout="Updated job 7\n"),
+    ) as run:
+        result = runner.invoke(jobs_group, ["edit", "7", "--disable"])
+    assert result.exit_code == 0, result.output
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == ["/fake/tmuxctl", "jobs", "edit", "7", "--disable"]
+
+
+def test_jobs_edit_rejects_enable_and_disable_together() -> None:
+    """`--enable` and `--disable` are contradictory; the wrapper rejects the
+    pair locally before invoking `tmuxctl`. The app never sends both
+    (its `enabled: Boolean?` maps to exactly one flag), so this guards
+    against a malformed manual invocation.
+    """
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run"
+    ) as run:
+        result = runner.invoke(jobs_group, ["edit", "7", "--enable", "--disable"])
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output.lower()
+    run.assert_not_called()
+
+
+def test_jobs_edit_rejects_non_integer_id() -> None:
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run"
+    ) as run:
+        result = runner.invoke(jobs_group, ["edit", "not-an-int"])
+    assert result.exit_code != 0
+    run.assert_not_called()
+
+
+def test_jobs_edit_proxies_nonzero_exit_from_tmuxctl() -> None:
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run",
+        return_value=_fake_completed(stderr="tmuxctl: no job with id 99\n", returncode=4),
+    ):
+        result = runner.invoke(jobs_group, ["edit", "99", "--every", "1h"])
+    assert result.exit_code == 4
+    assert "no job with id 99" in result.output
+
+
+def test_jobs_edit_returns_127_when_tmuxctl_missing() -> None:
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value=None), patch(
+        "pocketshell.jobs.subprocess.run"
+    ) as run:
+        result = runner.invoke(
+            jobs_group, ["edit", "7", "--enable"], catch_exceptions=False
+        )
+    assert result.exit_code == 127
+    assert "tmuxctl" in result.output.lower()
+    run.assert_not_called()
+
+
+# ----- jobs remove ---------------------------------------------------
+
+
+def test_jobs_remove_forwards_id() -> None:
+    """Pins the contract the app's `PocketshellJobsRemoteSource.remove`
+    emits: `pocketshell jobs remove <id>`.
+    """
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run",
+        return_value=_fake_completed(stdout="Removed job 7\n"),
+    ) as run:
+        result = runner.invoke(jobs_group, ["remove", "7"])
+    assert result.exit_code == 0, result.output
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == ["/fake/tmuxctl", "jobs", "remove", "7"]
+
+
+def test_jobs_remove_rejects_non_integer_id() -> None:
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run"
+    ) as run:
+        result = runner.invoke(jobs_group, ["remove", "not-an-int"])
+    assert result.exit_code != 0
+    run.assert_not_called()
+
+
+def test_jobs_remove_proxies_nonzero_exit_from_tmuxctl() -> None:
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"), patch(
+        "pocketshell.jobs.subprocess.run",
+        return_value=_fake_completed(stderr="tmuxctl: no job with id 99\n", returncode=4),
+    ):
+        result = runner.invoke(jobs_group, ["remove", "99"])
+    assert result.exit_code == 4
+    assert "no job with id 99" in result.output
+
+
+def test_jobs_remove_returns_127_when_tmuxctl_missing() -> None:
+    runner = CliRunner()
+    with patch("pocketshell.jobs._resolve_tmuxctl_binary", return_value=None), patch(
+        "pocketshell.jobs.subprocess.run"
+    ) as run:
+        result = runner.invoke(
+            jobs_group, ["remove", "7"], catch_exceptions=False
+        )
+    assert result.exit_code == 127
+    assert "tmuxctl" in result.output.lower()
+    run.assert_not_called()
 
 
 # ----- daemon start --------------------------------------------------

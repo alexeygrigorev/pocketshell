@@ -87,7 +87,13 @@ class WatchedFoldersE2eTest {
 
     @After
     fun closeDatabase() {
-        db.close()
+        // The tests construct ViewModels directly instead of through a
+        // ViewModelStore, so their viewModelScope collectors can outlive the
+        // test method until instrumentation tears the process down. Closing
+        // the in-memory Room database here can race those collectors and crash
+        // the whole connected-test run with "connection pool has been closed".
+        // Let the short-lived instrumentation process reclaim these tiny
+        // in-memory databases instead.
     }
 
     @Test

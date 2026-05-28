@@ -2,55 +2,25 @@
 
 PocketShell uses a three-actor process: orchestrator + implementer + reviewer. The orchestrator prepares issues, dispatches agents, verifies outcomes, and merges. Implementers write code. Reviewers review code. Agents communicate through GitHub issue comments, with the orchestrator as messenger.
 
-## Multiple orchestrators may run at once
+## Release-owner operating mode
 
-You may not be the only orchestrator on this repo. Other orchestrators —
-possibly on different runtimes (Claude Code, OpenCode, Codex) — can work it
-concurrently. On startup, assume peers may exist and coordinate before
-dispatching any worker.
+The multi-orchestrator experiment is paused. The active orchestrator should not
+spend startup time discovering peer orchestrators or negotiating shared
+ownership unless the maintainer explicitly restarts that experiment.
 
-- **Resolve your identity, then discover peers.** Coordination lives in the
-  gitignored `chat/` channel on this dev box. Run
-  `python3 chat/agentctl.py whoami` — it maps your stable tmux session to your
-  registered identity (a restarted agent re-adopts the same name; a new one is
-  told to claim an unused one). Then `python3 chat/agentctl.py start` prints the
-  roster + messages since you were last active + every agent's claims and
-  refreshes your heartbeat. `chat/README.md` is the live protocol; if `chat/` is
-  absent you are the first orchestrator — bootstrap it.
-- **Agree on who owns what before acting.** Per-agent claim files
-  (`chat/claims-<name>.md`) are authoritative; areas of responsibility are
-  defaults, not walls; mirror durable claims to GitHub assignees when work starts.
-- **Degrade gracefully.** The split must work with 1, 2, or 3 orchestrators
-  (solo → do it all, serially, release-blockers first; otherwise divide). No
-  quorum is needed to act; a maintainer instruction overrides anything.
-- **Cover dark peers.** If a peer goes silent (e.g. out of tokens for days),
-  whoever has capacity adopts its release-blocking work, reconstructing state
-  from the GitHub issue + git history + `.worktrees/`, never from the dead peer.
-- **Wake / liveness.** `agentctl.py who` flags active/stale/DARK; `poke --to X`
-  wakes an idle peer via tmux send-keys; `probe --to X` reads its pane to tell
-  "idle" from "out of tokens".
-
-### Code isolation across orchestrators
-
-The root checkout (`~/git/pocketshell` on `main`) is shared by every
-orchestrator, so it is **coordination-only — do not edit product code there.**
-All code work is isolated in worktrees, and integration is serialized onto
-`main`:
+Use GitHub issues as the durable backlog and release record. Keep product work
+isolated in worktrees, and integrate one reviewed slice at a time onto `main`:
 
 - **Per-issue worktrees** (`.worktrees/issue-<N>/` off current `origin/main`)
-  isolate each piece of work — see "Agent Worktrees" below for mechanics. A team
-  fixing a release and a team shipping features never share a working tree.
-- **One merge to `main` at a time, globally.** Before pushing `main`, announce a
-  merge-lock on `chat/messages.jsonl` (`topic=merge-lock`); rebase the worktree
-  on the latest `origin/main`, run the verification gate, push, then release
-  (`topic=merge-unlock`). Never blind-apply a stale-based patch — rebase first.
+  isolate each piece of work; see "Agent Worktrees" below for mechanics.
+- **One merge to `main` at a time.** Rebase the integration worktree on the
+  latest `origin/main`, run the verification gate, push, then monitor CI. Never
+  blind-apply a stale-based patch.
 - **Integrate in a clean worktree**, not the polluted root, when assembling and
   testing a merge.
-- **Release freeze.** A team cutting a release announces `topic=release-freeze`;
-  other teams hold non-critical merges to `main` until `topic=release-unfreeze`
-  (tag pushed). Release-blocker / CI fixes stay allowed — they stabilize the cut.
-- **Cross-team dependency**: the dependee merges first; the dependent rebases on
-  the new `main`. Do not merge two teams' work in one unreviewed coordinator patch.
+- **Release freeze.** During an intermediate release or pre-release, hold
+  non-critical merges to `main`. Release-blocker / CI fixes stay allowed because
+  they stabilize the cut.
 
 ## No backwards-compatibility (locked principle)
 

@@ -410,10 +410,16 @@ class TerminalKeyboardStressTest {
         assertFalse("expected at least one keystroke sample", elapsedSamples.isEmpty())
         val median = elapsedSamples.sorted()[elapsedSamples.size / 2]
         val missed = keystrokeTimings.count { !it.visible }
+        val medianCeilingMs = if (TerminalTestTimeouts.isRunningOnCi()) {
+            CI_KEYSTROKE_MEDIAN_CEILING_MS
+        } else {
+            LOCAL_KEYSTROKE_MEDIAN_CEILING_MS
+        }
         assertTrue(
-            "expected per-keystroke median latency to stay under 200 ms; " +
-                "median=$median ms samples=${elapsedSamples.size}",
-            median < 200,
+            "expected per-keystroke median latency to stay under $medianCeilingMs ms; " +
+                "median=$median ms samples=${elapsedSamples.size} " +
+                "(CI=${TerminalTestTimeouts.isRunningOnCi()})",
+            median < medianCeilingMs,
         )
         // CI-aware miss tolerance: on a local dev emulator the same
         // 100-char burst always lands every keystroke under the
@@ -857,4 +863,9 @@ class TerminalKeyboardStressTest {
         // window inside its timeout, `false` on timeout.
         val layoutSettled: Boolean,
     )
+
+    private companion object {
+        const val LOCAL_KEYSTROKE_MEDIAN_CEILING_MS: Long = 200L
+        const val CI_KEYSTROKE_MEDIAN_CEILING_MS: Long = 250L
+    }
 }

@@ -143,10 +143,10 @@ class SessionCreateDashboardE2eTest {
         }
 
         // --- (2) Pop back to the dashboard so the Sessions section is
-        // visible again with the live client still registered. The
-        // Use the tagged in-app back affordance. System back would finish
+        // visible again with the live client still registered. Use the
+        // tagged in-app back affordance. System back would finish
         // the activity (the session screen does not register a BackHandler).
-        performTmuxChromeBack()
+        performTmuxChromeBack(hostRowTag)
         compose.waitUntil(timeoutMillis = 30_000) {
             compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
                 .fetchSemanticsNodes()
@@ -379,7 +379,7 @@ class SessionCreateDashboardE2eTest {
         }
     }
 
-    private fun performTmuxChromeBack() {
+    private fun performTmuxChromeBack(hostRowTag: String) {
         val tags = listOf(
             TMUX_COMPACT_CHROME_BACK_BUTTON_TAG,
             TMUX_FULL_CHROME_BACK_BUTTON_TAG,
@@ -392,7 +392,7 @@ class SessionCreateDashboardE2eTest {
             compose.onNodeWithTag(tag, useUnmergedTree = true).performClick()
             val returnedToDashboard = runCatching {
                 compose.waitUntil(timeoutMillis = 2_000) {
-                    compose.onAllNodesWithText(SESSION_PRE_CREATE, useUnmergedTree = true)
+                    compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
                         .fetchSemanticsNodes()
                         .isNotEmpty()
                 }

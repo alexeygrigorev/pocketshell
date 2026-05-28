@@ -7,9 +7,6 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.ui.semantics.SemanticsActions
-import androidx.compose.ui.test.hasAnyDescendant
-import androidx.compose.ui.test.hasTestTag
-import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -146,8 +143,8 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         val switchAt = SystemClock.elapsedRealtime()
         openMoreMenu()
         compose.onNodeWithText("Switch session").performClick()
-        waitForText(SESSION_B, timeoutMs = pickerWaitMs)
-        performSessionPagerPageClick(SESSION_B)
+        waitForSessionPagerReady(timeoutMs = pickerWaitMs)
+        performSessionPagerPageClick(page = 2)
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
         waitForTerminalText("B-READY")
@@ -323,6 +320,17 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         }
     }
 
+    private fun waitForSessionPagerReady(timeoutMs: Long) {
+        compose.waitUntil(timeoutMillis = timeoutMs) {
+            compose.onAllNodesWithTag(
+                "$TMUX_SESSION_PAGER_PAGE_TAG_PREFIX${2}",
+                useUnmergedTree = true,
+            )
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+    }
+
     private fun openMoreMenu() {
         val tags = listOf(
             TMUX_COMPACT_CHROME_MORE_BUTTON_TAG,
@@ -347,12 +355,8 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
             .performClick()
     }
 
-    private fun performSessionPagerPageClick(sessionName: String) {
-        val taggedSessionPage = hasAnyDescendant(hasText(sessionName)) and
-            (1..8)
-                .map { page -> hasTestTag("$TMUX_SESSION_PAGER_PAGE_TAG_PREFIX$page") }
-                .reduce { left, right -> left or right }
-        compose.onNode(taggedSessionPage, useUnmergedTree = true)
+    private fun performSessionPagerPageClick(page: Int) {
+        compose.onNodeWithTag("$TMUX_SESSION_PAGER_PAGE_TAG_PREFIX$page", useUnmergedTree = true)
             .performSemanticsAction(SemanticsActions.OnClick)
     }
 

@@ -9,12 +9,17 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.test.hasAnyDescendant
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -22,6 +27,9 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_MORE_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_FULL_CHROME_MORE_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_PAGE_TAG_PREFIX
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -134,29 +142,15 @@ class TmuxSessionSwitchE2eTest {
         }
         captureViewport("issue151-02-claude-main-marker-visible")
 
-        // ---- (3) Open the More menu, tap "Switch session", tap Attach on
-        // codex. This is the exact code path the crash report came from.
+        // ---- (3) Open the More menu, tap "Switch session", tap codex in
+        // the pager. This is the exact code path the crash report came from.
         val switchTapAt = SystemClock.elapsedRealtime()
-        compose.onNodeWithText("⋮").performClick()
+        openMoreMenu()
         compose.onNodeWithText("Switch session").performClick()
-        // The drawer fetches the session list asynchronously. Wait for both
-        // session names to be in the drawer so the tap is unambiguous —
-        // the More menu's "Switch session" already dismisses the menu.
+        // The pager fetches the session list asynchronously. Wait for codex
+        // so the semantic page click is unambiguous.
         waitForText(SESSION_CODEX, timeoutMs = 20_000)
-        // The Attach action is on the row labelled "Attach". The selected
-        // (claude-main) row says "Open"; codex's row says "Attach" because
-        // it is not the active session.
-        compose.onAllNodesWithText("Attach")
-            .fetchSemanticsNodes()
-            .also {
-                assertTrue(
-                    "expected at least one Attach row in the drawer; got ${it.size}",
-                    it.isNotEmpty(),
-                )
-            }
-        // Tap the codex row directly (the row itself is clickable; row
-        // label is the session name).
-        compose.onNodeWithText(SESSION_CODEX).performClick()
+        performSessionPagerPageClick(SESSION_CODEX)
 
         // ---- (4) Assert no crash: the route stays mounted and the
         // TerminalView re-mounts for the new pane. Without the fix this is
@@ -186,10 +180,10 @@ class TmuxSessionSwitchE2eTest {
         // doesn't crash either, and the original session is still alive on
         // the remote.
         val reattachTapAt = SystemClock.elapsedRealtime()
-        compose.onNodeWithText("⋮").performClick()
+        openMoreMenu()
         compose.onNodeWithText("Switch session").performClick()
         waitForText(SESSION_CLAUDE, timeoutMs = 20_000)
-        compose.onNodeWithText(SESSION_CLAUDE).performClick()
+        performSessionPagerPageClick(SESSION_CLAUDE)
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
         recordTiming(
@@ -321,6 +315,39 @@ class TmuxSessionSwitchE2eTest {
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
+    }
+
+    private fun openMoreMenu() {
+        val tags = listOf(
+            TMUX_COMPACT_CHROME_MORE_BUTTON_TAG,
+            TMUX_FULL_CHROME_MORE_BUTTON_TAG,
+        ).filter { tag ->
+            compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        tags.forEach { tag ->
+            compose.onNodeWithTag(tag, useUnmergedTree = true).performClick()
+            val opened = runCatching {
+                compose.waitUntil(timeoutMillis = 1_000) {
+                    compose.onAllNodesWithText("Switch session", useUnmergedTree = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+            }.isSuccess
+            if (opened) return
+        }
+        compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
+            .performClick()
+    }
+
+    private fun performSessionPagerPageClick(sessionName: String) {
+        val taggedSessionPage = hasAnyDescendant(hasText(sessionName)) and
+            (1..8)
+                .map { page -> hasTestTag("$TMUX_SESSION_PAGER_PAGE_TAG_PREFIX$page") }
+                .reduce { left, right -> left or right }
+        compose.onNode(taggedSessionPage, useUnmergedTree = true)
+            .performSemanticsAction(SemanticsActions.OnClick)
     }
 
     private fun waitForTerminalViewAttached() {

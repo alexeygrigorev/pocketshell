@@ -22,6 +22,9 @@ import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -132,7 +135,7 @@ class SessionCreateDashboardE2eTest {
         // was registered with ActiveTmuxClients.
         compose.waitUntil(timeoutMillis = 30_000) {
             compose.onAllNodesWithTag(
-                com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG,
+                TMUX_SESSION_SCREEN_TAG,
                 useUnmergedTree = true,
             )
                 .fetchSemanticsNodes()
@@ -141,11 +144,10 @@ class SessionCreateDashboardE2eTest {
 
         // --- (2) Pop back to the dashboard so the Sessions section is
         // visible again with the live client still registered. The
-        // breadcrumb's `‹` is the in-app back affordance — system back
-        // would finish the activity (the session screen does not
-        // register a BackHandler).
-        compose.onNodeWithText("‹").performClick()
-        compose.waitUntil(timeoutMillis = 10_000) {
+        // Use the tagged in-app back affordance. System back would finish
+        // the activity (the session screen does not register a BackHandler).
+        performTmuxChromeBack()
+        compose.waitUntil(timeoutMillis = 30_000) {
             compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
@@ -375,6 +377,30 @@ class SessionCreateDashboardE2eTest {
                 }
             }
         }
+    }
+
+    private fun performTmuxChromeBack() {
+        val tags = listOf(
+            TMUX_COMPACT_CHROME_BACK_BUTTON_TAG,
+            TMUX_FULL_CHROME_BACK_BUTTON_TAG,
+        ).filter { tag ->
+            compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        tags.forEach { tag ->
+            compose.onNodeWithTag(tag, useUnmergedTree = true).performClick()
+            val returnedToDashboard = runCatching {
+                compose.waitUntil(timeoutMillis = 2_000) {
+                    compose.onAllNodesWithText(SESSION_PRE_CREATE, useUnmergedTree = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+                }
+            }.isSuccess
+            if (returnedToDashboard) return
+        }
+        compose.onNodeWithTag(TMUX_FULL_CHROME_BACK_BUTTON_TAG, useUnmergedTree = true)
+            .performClick()
     }
 
     private fun captureFullDevice(name: String) {

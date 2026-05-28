@@ -113,6 +113,47 @@ class AgentDetectorTest {
     }
 
     @Test
+    fun acceptsRecentCandidateWithSmallRemoteClockFutureSkew() {
+        val detection = detector.detect(
+            cwd = "/workspace/pocketshell",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.Codex,
+                    path = "/home/testuser/.codex/sessions/2026/05/22/rollout-abc.jsonl",
+                    modifiedAtMillis = 10_500,
+                    sessionId = "codex-future",
+                    cwd = "/workspace/pocketshell",
+                ),
+            ),
+            processLines = listOf("1234 pts/0 00:00:01 codex"),
+        )
+
+        assertEquals(AgentKind.Codex, detection?.agent)
+        assertEquals("codex-future", detection?.sessionId)
+    }
+
+    @Test
+    fun rejectsCandidateBeyondRemoteClockFutureSkewTolerance() {
+        val detection = detector.detect(
+            cwd = "/workspace/pocketshell",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.Codex,
+                    path = "/home/testuser/.codex/sessions/2026/05/22/rollout-abc.jsonl",
+                    modifiedAtMillis = 310_001,
+                    sessionId = "codex-too-future",
+                    cwd = "/workspace/pocketshell",
+                ),
+            ),
+            processLines = listOf("1234 pts/0 00:00:01 codex"),
+        )
+
+        assertNull(detection)
+    }
+
+    @Test
     fun rejectsCodexCandidateOutsideExpectedDirectoryTree() {
         // A Codex candidate emitted from an unrelated location (e.g. a
         // backup directory, a manually-saved copy) must not register.

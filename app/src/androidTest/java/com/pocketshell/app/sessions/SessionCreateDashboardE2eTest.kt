@@ -22,8 +22,6 @@ import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.waitForSshFixtureReady
-import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
-import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -143,10 +141,8 @@ class SessionCreateDashboardE2eTest {
         }
 
         // --- (2) Pop back to the dashboard so the Sessions section is
-        // visible again with the live client still registered. Use the
-        // tagged in-app back affordance. System back would finish
-        // the activity (the session screen does not register a BackHandler).
-        performTmuxChromeBack(hostRowTag)
+        // visible again with the live client still registered.
+        performTmuxChromeBack()
         compose.waitUntil(timeoutMillis = 30_000) {
             compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
                 .fetchSemanticsNodes()
@@ -379,18 +375,10 @@ class SessionCreateDashboardE2eTest {
         }
     }
 
-    private fun performTmuxChromeBack(hostRowTag: String) {
-        val clicked = listOf(
-            TMUX_COMPACT_CHROME_BACK_BUTTON_TAG,
-            TMUX_FULL_CHROME_BACK_BUTTON_TAG,
-        ).any { tag ->
-            runCatching {
-                compose.onNodeWithTag(tag, useUnmergedTree = true).performClick()
-            }.isSuccess
-        }
-        if (!clicked) {
-            compose.onNodeWithText("‹", useUnmergedTree = true).performClick()
-        }
+    private fun performTmuxChromeBack() {
+        launchedActivity?.onActivity {
+            it.onBackPressedDispatcher.onBackPressed()
+        } ?: compose.onNodeWithText("‹", useUnmergedTree = true).performClick()
     }
 
     private fun captureFullDevice(name: String) {

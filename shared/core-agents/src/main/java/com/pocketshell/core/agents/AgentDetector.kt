@@ -40,6 +40,7 @@ public class AgentDetector(
     // completion). The wider window simply doesn't filter anything out
     // for Claude that the tighter window did.
     private val recentWindowMillis: Long = 120 * 60 * 1000L,
+    private val futureSkewToleranceMillis: Long = 5 * 60 * 1000L,
 ) {
     /**
      * Returns the best matching log candidate as an [AgentDetection], or
@@ -72,7 +73,7 @@ public class AgentDetector(
         val normalizedCwd = normalizeCwd(cwd)
         val expected = expectedPathHints(normalizedCwd)
         val matchingCandidates = candidates
-            .filter { nowMillis - it.modifiedAtMillis in 0..recentWindowMillis }
+            .filter { nowMillis - it.modifiedAtMillis in -futureSkewToleranceMillis..recentWindowMillis }
             .filter { candidate ->
                 expected[candidate.agent]?.any { candidate.path.contains(it) } ?: false
             }

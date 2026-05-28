@@ -317,6 +317,180 @@ class AgentConversationRepositoryTest {
         assertTrue(session.execCommands.any { it.contains("ps -t 'pts/3'") })
     }
 
+    // ----------------------------------------------------------------
+    // Issue #252 latency follow-up: detectForPanes must classify the
+    // whole list from a CONSTANT number of round-trips (one candidate
+    // enumeration + one host-wide ps), not 2 per session.
+    // ----------------------------------------------------------------
+
+    @Test
+    fun detectForPanesClassifiesMultiplePanesAndStaysAtTwoRoundTrips() = runTest {
+        val nowSeconds = System.currentTimeMillis() / 1000
+        // Five sessions: a Claude pane, a Codex pane, and three plain
+        // shells (different cwds, no agent JSONL for their cwd). This is
+        // the realistic "several sessions" list the maintainer flagged.
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$nowSeconds|/workspace/claude|/home/testuser/.claude/projects/-workspace-claude/c.jsonl
+                codex|$nowSeconds|/workspace/codex|/home/testuser/.codex/sessions/2026/05/28/rollout-x.jsonl
+            """.trimIndent(),
+            // One host-wide `ps -eo pid,tty,comm,args` snapshot. The
+            // claude process is on pts/1, the codex process on pts/2.
+            // The plain shells (pts/3, pts/4, pts/5) carry no agent rows.
+            hostWideProcessOutput = """
+                1001 pts/1 00:00:01 claude
+                2002 pts/2 00:00:01 codex
+            """.trimIndent(),
+        )
+
+        val panes = listOf(
+            AgentConversationRepository.PaneProbe("claude-sess", "/workspace/claude", "/dev/pts/1", "node"),
+            AgentConversationRepository.PaneProbe("codex-sess", "/workspace/codex", "/dev/pts/2", "node"),
+            AgentConversationRepository.PaneProbe("plain-1", "/workspace/plain1", "/dev/pts/3", "bash"),
+            AgentConversationRepository.PaneProbe("plain-2", "/workspace/plain2", "/dev/pts/4", "zsh"),
+            AgentConversationRepository.PaneProbe("plain-3", "/workspace/plain3", "/dev/pts/5", "sleep"),
+        )
+
+        val detections = AgentConversationRepository().detectForPanes(session, panes)
+
+        assertEquals(AgentKind.ClaudeCode, detections["claude-sess"]?.agent)
+        assertEquals(AgentKind.Codex, detections["codex-sess"]?.agent)
+        // The three plain shells must not classify — no JSONL for their
+        // cwd, no agent process on their TTY.
+        assertFalse(detections.containsKey("plain-1"))
+        assertFalse(detections.containsKey("plain-2"))
+        assertFalse(detections.containsKey("plain-3"))
+
+        // The latency contract: exactly TWO host-wide execs total for
+        // FIVE sessions — one candidate enumeration, one host-wide ps.
+        // A per-session detectForPane loop would have issued 2 * 5 = 10.
+        assertEquals(
+            "detectForPanes must issue a constant 2 execs regardless of session " +
+                "count; got ${session.execCommands}",
+            2,
+            session.execCommands.size,
+        )
+        assertEquals(1, session.execCommands.count { it.contains("claude_dir=") })
+        assertEquals(1, session.execCommands.count { it.contains("ps -eo pid,tty,comm,args") })
+        // It must NOT fall back to the per-pane `ps -t` round-trip.
+        assertFalse(session.execCommands.any { it.contains("ps -t ") })
+    }
+
+    @Test
+    fun detectForPanesScopesProcessScanPerTtySoSiblingPaneDoesNotBleed() = runTest {
+        val nowSeconds = System.currentTimeMillis() / 1000
+        // Two sessions in the SAME cwd. Only pts/1 runs Claude; pts/2 is a
+        // plain shell. The shared cwd means the same JSONL candidate
+        // applies to both — the per-TTY process slice is what keeps pts/2
+        // from lighting up (the #186 discipline, preserved in the batch).
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$nowSeconds|/workspace/shared|/home/testuser/.claude/projects/-workspace-shared/c.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = """
+                1001 pts/1 00:00:01 claude
+            """.trimIndent(),
+        )
+
+        val panes = listOf(
+            AgentConversationRepository.PaneProbe("agent-pane", "/workspace/shared", "/dev/pts/1", "node"),
+            AgentConversationRepository.PaneProbe("sibling-pane", "/workspace/shared", "/dev/pts/2", "bash"),
+        )
+
+        val detections = AgentConversationRepository().detectForPanes(session, panes)
+
+        assertEquals(AgentKind.ClaudeCode, detections["agent-pane"]?.agent)
+        assertFalse(
+            "a sibling pane sharing the cwd but with no agent on its own TTY must NOT " +
+                "classify — the per-TTY slice preserves the #186 per-window discipline",
+            detections.containsKey("sibling-pane"),
+        )
+    }
+
+    @Test
+    fun detectForPanesSkipsPanesWithBlankCwdOrTtyWithoutExtraRoundTrips() = runTest {
+        // All panes are unattributable (blank cwd or blank tty). The
+        // method must short-circuit to zero round-trips — no candidate
+        // enumeration, no ps.
+        val session = FakeSshSession()
+        val panes = listOf(
+            AgentConversationRepository.PaneProbe("no-cwd", "", "/dev/pts/1", "node"),
+            AgentConversationRepository.PaneProbe("no-tty", "/workspace/x", "", "node"),
+        )
+
+        val detections = AgentConversationRepository().detectForPanes(session, panes)
+
+        assertTrue(detections.isEmpty())
+        assertTrue(
+            "unattributable panes must not trigger any SSH round-trip; got ${session.execCommands}",
+            session.execCommands.isEmpty(),
+        )
+    }
+
+    @Test
+    fun detectForPanesEnumeratesEveryUniqueCwdInOneCandidateCommand() = runTest {
+        val nowSeconds = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                claude|$nowSeconds|/workspace/a|/home/testuser/.claude/projects/-workspace-a/c.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = "1001 pts/1 00:00:01 claude",
+        )
+        val panes = listOf(
+            AgentConversationRepository.PaneProbe("a", "/workspace/a", "/dev/pts/1", "node"),
+            AgentConversationRepository.PaneProbe("b", "/workspace/b", "/dev/pts/2", "bash"),
+        )
+
+        AgentConversationRepository().detectForPanes(session, panes)
+
+        val candidateCommand = session.execCommands.single { it.contains("claude_dir=") }
+        // The candidate enumeration must cover BOTH distinct cwds in the
+        // single round-trip — the per-cwd detectionCommand blocks are
+        // concatenated, so both cwd anchors appear in the one command.
+        assertTrue(candidateCommand.contains("cwd='/workspace/a'"))
+        assertTrue(candidateCommand.contains("cwd='/workspace/b'"))
+        // Each cwd's block is wrapped in its own subshell so state cannot
+        // leak between them.
+        assertTrue(candidateCommand.contains("("))
+        assertTrue(candidateCommand.contains(")"))
+    }
+
+    @Test
+    fun detectForPanesDoesNotBleedOpenCodeAcrossCwds() = runTest {
+        val nowSeconds = System.currentTimeMillis() / 1000
+        // An OpenCode session exists for /workspace/oc only. OpenCode's
+        // path-hint (the opencode.db) is cwd-AGNOSTIC, so without the
+        // per-cwd candidate slice the same candidate would bleed onto the
+        // plain pane in /workspace/other. The batch tags each candidate
+        // with the cwd that produced it and filters per pane, so it must
+        // not bleed.
+        val session = FakeSshSession(
+            detectionOutput = """
+                opencode|$nowSeconds|/workspace/oc|/home/testuser/.local/share/opencode/opencode.db#oc-1
+            """.trimIndent(),
+            hostWideProcessOutput = """
+                3003 pts/1 00:00:01 opencode
+                4004 pts/2 00:00:01 opencode
+            """.trimIndent(),
+        )
+        val panes = listOf(
+            AgentConversationRepository.PaneProbe("oc-sess", "/workspace/oc", "/dev/pts/1", "node"),
+            // Same agent process on pts/2 (e.g. another opencode elsewhere)
+            // but no candidate tagged for /workspace/other.
+            AgentConversationRepository.PaneProbe("other-sess", "/workspace/other", "/dev/pts/2", "node"),
+        )
+
+        val detections = AgentConversationRepository().detectForPanes(session, panes)
+
+        assertEquals(AgentKind.OpenCode, detections["oc-sess"]?.agent)
+        assertFalse(
+            "an OpenCode candidate discovered for /workspace/oc must not bleed onto a " +
+                "pane in /workspace/other — the per-cwd candidate slice replaces the " +
+                "shell-side detectionCommand(cwd) scoping the single-pane path gets",
+            detections.containsKey("other-sess"),
+        )
+    }
+
     @Test
     fun detectionCommandDoesNotMatchBlankOpenCodeCwdColumns() {
         val query = openCodeSqliteQuery(
@@ -415,6 +589,7 @@ class AgentConversationRepositoryTest {
         private val sqliteFailure: Throwable? = null,
         private val detectionOutput: String = "",
         private val paneProcessOutput: String = "",
+        private val hostWideProcessOutput: String = "",
         private val wcOutput: String = "0\n",
         private val tailLines: List<String> = emptyList(),
     ) : SshSession {
@@ -428,6 +603,7 @@ class AgentConversationRepositoryTest {
             execCommands += command
             val stdout = when {
                 command.contains("claude_dir=") -> detectionOutput
+                command.contains("ps -eo pid,tty,comm,args") -> hostWideProcessOutput
                 command.contains("ps -t ") -> paneProcessOutput
                 command.contains("stat -c '%Y' ") -> statOutputs.removeFirstOrNull() ?: statOutputs.lastOrNull() ?: "0\n"
                 command.contains("wc -l < ") -> wcOutput

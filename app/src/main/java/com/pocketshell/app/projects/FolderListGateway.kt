@@ -1,9 +1,8 @@
 package com.pocketshell.app.projects
 
 import com.pocketshell.app.repos.ReposRemoteSource
-import com.pocketshell.core.agents.AgentDetector
+import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.core.agents.AgentKind
-import com.pocketshell.core.agents.AgentLogCandidate
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -23,14 +22,21 @@ import javax.inject.Inject
  * session created without `-c`) — the view model surfaces those under
  * an "Untracked" group.
  *
- * `agentKind` is the LIVE detection state — issue #171 round 2. The
- * gateway runs an [AgentDetector]-driven pipeline (same shell-side
- * candidate enumeration as `AgentConversationRepository.detect`) per
- * session cwd, then merges the per-pane TTY-scoped process scan from
- * `tmux list-panes -a` to confirm the agent is actually running on the
- * session's active pane. Sessions without a detection match render as
- * [SessionAgentKind.Shell] — the spike's locked default for plain tmux
- * panes.
+ * `agentKind` is the LIVE detection state. Issue #252: the gateway
+ * delegates to the exact same detector the Conversation view uses
+ * ([com.pocketshell.app.session.AgentConversationRepository]), via the
+ * batched [com.pocketshell.app.session.AgentConversationRepository.detectForPanes]
+ * — every session is classified from a CONSTANT 2 host-wide SSH
+ * round-trips (one candidate enumeration across all cwds, one host-wide
+ * `ps`), scoped per pane by cwd + TTY + foreground command from
+ * `tmux list-panes -a`. That guarantees the session-list chip and the
+ * Conversation tab agree by construction (they previously drifted: the
+ * list kept a forked candidate-enumeration heuristic that predated
+ * #183/#186/#236 and so labelled live Claude Code / Codex / OpenCode
+ * sessions `Shell`) WITHOUT the ~2N sequential round-trips a per-session
+ * `detectForPane` loop would cost on a multi-session list. Sessions
+ * without a detection match render as [SessionAgentKind.Shell] — the
+ * locked default for plain tmux panes.
  */
 data class FolderSessionRow(
     val sessionName: String,
@@ -75,11 +81,15 @@ sealed interface FolderListResult {
  *    `session_path` when they disagree. Per the spike:
  *    `pane_current_path` is the primary signal, `session_path` is the
  *    fallback.
- *  - Agent detection probe (issue #171 round 2): host-wide JSONL
- *    candidate enumeration matching `AgentConversationRepository`'s
- *    detection command, plus a `ps -ef | grep ...` scan whose results
- *    are filtered per active-pane TTY to confirm the agent is live.
- *    Sessions whose cwd has no recent agent JSONL stay on
+ *  - Agent detection probe (issue #252): one batched
+ *    `AgentConversationRepository.detectForPanes` call for the whole
+ *    list — a CONSTANT 2 host-wide round-trips (candidate enumeration
+ *    across every cwd + one host-wide `ps`), each session then classified
+ *    in-memory scoped to its active pane's cwd, TTY, and foreground
+ *    command. This is the identical detector the Conversation view uses,
+ *    so the session-list chip and the Conversation tab can never
+ *    disagree, and the load does not scale with the session count.
+ *    Sessions whose active pane has no live agent stay on
  *    [SessionAgentKind.Shell].
  *
  * If any of the secondary probes fail (no active panes, exec error)
@@ -114,7 +124,19 @@ interface FolderListGateway {
 
 class SshFolderListGateway @Inject constructor() : FolderListGateway {
 
-    private val agentDetector = AgentDetector()
+    // Issue #252: reuse the SAME detection logic the Conversation view
+    // uses instead of maintaining a forked candidate-enumeration +
+    // process-scan heuristic here. The list path previously hard-coded a
+    // stale copy of the detection shell that predated #183 (Codex/OpenCode
+    // candidate enumeration), #186 (per-pane TTY-scoped process scan),
+    // OpenCode SQLite detection, and #236 (120-minute freshness window).
+    // That drift is exactly why a live Claude Code (and Codex/OpenCode)
+    // session classified as `Shell` in the list while the Conversation
+    // view rendered it correctly. Delegating to the batched
+    // [AgentConversationRepository.detectForPanes] keeps the two paths in
+    // lock-step by construction while collapsing the list-load to a
+    // constant 2 host-wide SSH round-trips (vs. ~2N sequential ones).
+    private val agentRepository = AgentConversationRepository()
 
     override suspend fun listSessionsWithFolder(
         host: HostEntity,
@@ -159,13 +181,13 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
                         row.copy(cwd = cwd)
                     }
 
-                    // Issue #171 round 2: per-session agent detection via
-                    // AgentDetector + JSONL candidate enumeration. The
-                    // host-wide candidate scan runs once per probe, then
-                    // we classify each session by matching candidates to
-                    // its cwd and confirming with a per-pane TTY-scoped
-                    // process line. Sessions without a match stay on
-                    // SessionAgentKind.Shell (the default).
+                    // Issue #252: per-session agent detection delegated to
+                    // the Conversation view's detector
+                    // (AgentConversationRepository.detectForPane) so the
+                    // list chip and the Conversation tab agree. Each
+                    // session is probed with its active pane's cwd, TTY,
+                    // and foreground command. Sessions without a live
+                    // agent stay on SessionAgentKind.Shell (the default).
                     val agentKinds = runCatching {
                         detectAgentKinds(
                             session = session,
@@ -241,175 +263,66 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
     }
 
     /**
-     * Run [AgentDetector] against every session's cwd in a single SSH
-     * round-trip. The detection command enumerates JSONL candidates
-     * under each engine's conventional log directory across every
-     * cwd we care about; the result is parsed per row and mapped back
-     * to [SessionAgentKind].
+     * Classify every session's active pane by delegating to the SAME
+     * detector the Conversation view uses
+     * ([AgentConversationRepository]). Issue #252: the list path used to
+     * keep its own forked candidate-enumeration + process scan that
+     * drifted out of sync with the conversation detector — it predated
+     * #183 (Codex/OpenCode candidate enumeration), #186 (per-pane
+     * TTY-scoped scan), OpenCode SQLite detection, and #236 (120-minute
+     * freshness window). The drift is why a live Claude Code session
+     * showed the Conversation tab yet was labelled `Shell` in the list.
      *
-     * A session is promoted to an agent kind only when:
+     * Latency follow-up (same issue): the per-session
+     * [AgentConversationRepository.detectForPane] call costs 2 SSH
+     * round-trips each, so an N-session list incurred ~2N SEQUENTIAL
+     * round-trips per load — a regression the maintainer flagged. This
+     * now uses the BATCHED [AgentConversationRepository.detectForPanes],
+     * which runs a CONSTANT 2 host-wide round-trips (one candidate
+     * enumeration across all cwds, one host-wide `ps`) and classifies
+     * each pane in-memory with the SAME [AgentDetector] + the same
+     * per-cwd / per-TTY `requireProcessMatch = true` discipline. So the
+     * list and the Conversation tab still agree by construction, but the
+     * load no longer scales with the session count.
      *
-     *  1. A recent (within 5 minutes) JSONL candidate exists under the
-     *     engine's expected path-hint for the session's cwd, AND
-     *  2. The engine's command name appears in the session's
-     *     active-pane TTY-scoped process scan.
-     *
-     * Rule 2 follows the same `requireProcessMatch = true` discipline
-     * `AgentConversationRepository.detectForPane` uses for per-pane
-     * detection — a JSONL log written by an agent in a sibling pane
-     * (same cwd) must NOT light up the badge on a plain-shell pane.
+     * Each session is probed with its active pane's `pane_current_path`
+     * (cwd), `pane_tty`, and `pane_current_command`. Sessions whose
+     * active pane has no TTY, no cwd, or no live agent stay on
+     * [SessionAgentKind.Shell].
      */
     private suspend fun detectAgentKinds(
         session: com.pocketshell.core.ssh.SshSession,
         rows: List<FolderSessionRow>,
         paneRows: Map<String, ActivePaneRow>,
     ): Map<String, SessionAgentKind> {
-        // Collect the unique cwds we want to probe. Sessions without a
-        // known cwd skip detection entirely (no anchor for the engine
-        // path-hint filter).
-        val cwds = rows.mapNotNull { row ->
+        val probes = rows.mapNotNull { row ->
             val cwd = row.cwd?.trim()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            row.sessionName to cwd
-        }
-        if (cwds.isEmpty()) return emptyMap()
-
-        val uniqueCwds = cwds.map { it.second }.distinct()
-        val candidates = enumerateAgentCandidates(session, uniqueCwds)
-        if (candidates.isEmpty()) return emptyMap()
-
-        // One ps scan per host probe — TTY-filtered downstream.
-        val processLines = runCatching {
-            session.exec(
-                "ps -eo pid,tty,comm,args 2>/dev/null | " +
-                    "grep -E 'claude|codex|opencode' | grep -v grep || true",
-            ).stdout.lines()
-        }.getOrDefault(emptyList())
-
-        val nowMillis = System.currentTimeMillis()
-        val result = mutableMapOf<String, SessionAgentKind>()
-        for ((sessionName, cwd) in cwds) {
-            val sessionCandidates = candidates.filter { it.cwd == cwd }
-            if (sessionCandidates.isEmpty()) continue
-            val paneTty = paneRows[sessionName]?.tty?.removePrefix("/dev/")?.takeIf { it.isNotBlank() }
-            val paneCommand = paneRows[sessionName]?.command.orEmpty()
-
-            // Filter process lines to this pane's TTY when available so
-            // a sibling pane's agent doesn't bleed across. Each `ps`
-            // line of `pid,tty,comm,args` has the TTY as the second
-            // whitespace token; we match it as a prefix of `pts/<n>`.
-            val ttyFiltered = if (paneTty != null) {
-                processLines.filter { line ->
-                    val tokens = line.trim().split(Regex("\\s+"), limit = 3)
-                    tokens.size >= 2 && tokens[1] == paneTty
-                }
-            } else {
-                processLines
-            }
-            val mergedProcessLines = if (paneCommand.isBlank()) ttyFiltered else ttyFiltered + paneCommand
-
-            val detection = agentDetector.detect(
+            val pane = paneRows[row.sessionName]
+            // No active-pane TTY ⇒ no per-pane attribution (same rule the
+            // Conversation view enforces via the detector's blank-TTY
+            // guard). Without a TTY there is no way to scope the process
+            // scan to this session's pane.
+            val paneTty = pane?.tty?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+            AgentConversationRepository.PaneProbe(
+                key = row.sessionName,
                 cwd = cwd,
-                nowMillis = nowMillis,
-                candidates = sessionCandidates,
-                processLines = mergedProcessLines,
-                requireProcessMatch = true,
+                paneTty = paneTty,
+                paneCommand = pane.command.orEmpty(),
             )
-            if (detection != null) {
-                result[sessionName] = when (detection.agent) {
-                    AgentKind.ClaudeCode -> SessionAgentKind.Claude
-                    AgentKind.Codex -> SessionAgentKind.Codex
-                    AgentKind.OpenCode -> SessionAgentKind.OpenCode
-                }
+        }
+        if (probes.isEmpty()) return emptyMap()
+
+        val detections = agentRepository.detectForPanes(
+            session = session,
+            panes = probes,
+        )
+        return detections.mapValues { (_, detection) ->
+            when (detection.agent) {
+                AgentKind.ClaudeCode -> SessionAgentKind.Claude
+                AgentKind.Codex -> SessionAgentKind.Codex
+                AgentKind.OpenCode -> SessionAgentKind.OpenCode
             }
         }
-        return result
-    }
-
-    private suspend fun enumerateAgentCandidates(
-        session: com.pocketshell.core.ssh.SshSession,
-        cwds: List<String>,
-    ): List<AgentLogCandidate> {
-        val script = buildCandidateEnumScript(cwds)
-        val result = runCatching { session.exec(script) }.getOrNull() ?: return emptyList()
-        if (result.exitCode != 0 && result.stdout.isBlank()) return emptyList()
-        return result.stdout
-            .lineSequence()
-            .mapNotNull(::parseCandidate)
-            .toList()
-    }
-
-    /**
-     * Build a shell script that enumerates JSONL candidates for every
-     * supported engine across every requested cwd. Mirrors
-     * [com.pocketshell.app.session.AgentConversationRepository.detectionCommand]
-     * but emits rows for multiple cwds in a single SSH round-trip.
-     *
-     * Output rows are pipe-delimited: `agent|epoch_seconds|cwd|path`,
-     * matching the upstream candidate parser.
-     */
-    private fun buildCandidateEnumScript(cwds: List<String>): String {
-        val sb = StringBuilder()
-        for (cwd in cwds) {
-            val claudeEnc = agentDetector.encodeClaudeCwd(cwd)
-            val quotedCwd = shellQuote(cwd)
-            val quotedClaudeDir = shellQuote("\$HOME/.claude/projects/$claudeEnc")
-            // Claude: cwd-encoded per-project dir.
-            sb.append(
-                """
-                find $quotedClaudeDir -maxdepth 1 -type f -name '*.jsonl' -mmin -5 -print 2>/dev/null | while IFS= read -r f; do
-                  mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
-                  printf 'claude|%s|%s|%s\n' "${'$'}mtime" $quotedCwd "${'$'}f"
-                done
-                """.trimIndent(),
-            ).append('\n')
-        }
-        // Codex + OpenCode: shared scan once per probe — the detector's
-        // path-hint filter would route any matching candidate to every
-        // listed cwd anyway, so we emit one row per (cwd, file). To keep
-        // the script simple and the SSH round-trip cheap, the script
-        // emits one canonical row per file, and the caller's per-cwd
-        // filter (candidates.filter { it.cwd == cwd }) needs the rows to
-        // be tagged with EACH cwd we want to inspect. We achieve that by
-        // a nested loop in shell.
-        val cwdList = cwds.joinToString(" ") { shellQuote(it) }
-        sb.append(
-            """
-            codex_dir="${'$'}HOME/.codex/sessions"
-            opencode_dir="${'$'}HOME/.local/share/opencode"
-            for c in $cwdList; do
-              find "${'$'}codex_dir" -type f -name '*.jsonl' -mmin -5 -print 2>/dev/null | while IFS= read -r f; do
-                mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
-                printf 'codex|%s|%s|%s\n' "${'$'}mtime" "${'$'}c" "${'$'}f"
-              done
-              find "${'$'}opencode_dir" -maxdepth 1 -type f -name '*.jsonl' -mmin -5 -print 2>/dev/null | while IFS= read -r f; do
-                mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
-                printf 'opencode|%s|%s|%s\n' "${'$'}mtime" "${'$'}c" "${'$'}f"
-              done
-            done
-            """.trimIndent(),
-        )
-        return sb.toString()
-    }
-
-    private fun parseCandidate(line: String): AgentLogCandidate? {
-        val parts = line.split("|", limit = 4)
-        if (parts.size != 4) return null
-        val agent = when (parts[0]) {
-            "claude" -> AgentKind.ClaudeCode
-            "codex" -> AgentKind.Codex
-            "opencode" -> AgentKind.OpenCode
-            else -> return null
-        }
-        val seconds = parts[1].toDoubleOrNull() ?: return null
-        val cwd = parts[2]
-        val path = parts[3]
-        return AgentLogCandidate(
-            agent = agent,
-            path = path,
-            modifiedAtMillis = (seconds * 1000).toLong(),
-            sessionId = path.substringAfterLast('/').substringBeforeLast('.'),
-            cwd = cwd,
-        )
     }
 
     private fun pathAware(command: String): String =

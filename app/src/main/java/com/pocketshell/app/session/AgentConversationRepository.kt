@@ -251,6 +251,157 @@ internal class AgentConversationRepository(
         )
     }
 
+    /**
+     * A single pane to classify in [detectForPanes]. Carries the same
+     * three per-pane signals [detectForPane] takes, plus the caller's
+     * own key so the batched result can be mapped back to the caller's
+     * domain (e.g. the session name in the folder list).
+     */
+    data class PaneProbe(
+        val key: String,
+        val cwd: String,
+        val paneTty: String,
+        val paneCommand: String,
+    )
+
+    /**
+     * Issue #252 (latency follow-up): batched, host-wide equivalent of
+     * [detectForPane] for callers that need to classify MANY panes at
+     * once (the session list). [detectForPane] costs 2 SSH round-trips
+     * per call — the cwd-scoped candidate enumeration plus the TTY-scoped
+     * `ps`. Calling it once per session made the session-list load scale
+     * as ~2N sequential round-trips, a real latency regression on a list
+     * with several sessions.
+     *
+     * This method collapses that to a CONSTANT 2 round-trips regardless of
+     * N:
+     *
+     *  1. ONE candidate-enumeration exec covering every unique cwd. The
+     *     per-cwd shell block is the SAME [detectionCommand] used by
+     *     [detectForPane] / [detect] — concatenated in subshells, one per
+     *     cwd — so each row stays tagged with the cwd it was discovered
+     *     for (Claude's path-hint is cwd-encoded; Codex's tree is
+     *     host-wide; OpenCode's SQL is cwd-scoped). No shell logic is
+     *     forked.
+     *  2. ONE host-wide `ps` exec carrying the controlling TTY column, so
+     *     each pane's process list can be sliced by its own TTY in-memory
+     *     — preserving the per-pane `requireProcessMatch = true`
+     *     discipline (a sibling pane's agent must not light up a
+     *     plain-shell pane that shares the cwd).
+     *
+     * Classification itself is delegated to the SAME [AgentDetector.detect]
+     * the single-pane path uses, with the same `requireProcessMatch = true`
+     * gate and the same per-cwd candidate slice
+     * (`candidate.cwd == pane.cwd`) the shell-side `detectionCommand(cwd)`
+     * scoping enforces for [detectForPane]. So the list and the
+     * Conversation tab still agree by construction — only the remote I/O
+     * is hoisted out of the loop.
+     *
+     * Panes with a blank cwd or blank TTY are skipped (no per-pane
+     * attribution is possible), exactly as [detectForPane] returns null
+     * for them. Returned map only contains keys that produced a detection.
+     */
+    suspend fun detectForPanes(
+        session: SshSession,
+        panes: List<PaneProbe>,
+    ): Map<String, AgentDetection> {
+        // Normalise + drop panes that cannot be attributed (no cwd / no
+        // TTY) up front — same guards detectForPane applies per call.
+        val normalizedPanes = panes.mapNotNull { pane ->
+            val cwd = pane.cwd.trim().ifBlank { return@mapNotNull null }
+            val tty = pane.paneTty.trim().ifBlank { return@mapNotNull null }
+            NormalizedPaneProbe(
+                key = pane.key,
+                cwd = cwd,
+                ttyArg = tty.removePrefix("/dev/"),
+                paneCommand = pane.paneCommand,
+            )
+        }
+        if (normalizedPanes.isEmpty()) return emptyMap()
+
+        val nowMillis = System.currentTimeMillis()
+        val uniqueCwds = normalizedPanes.map { it.cwd }.distinct()
+
+        // Round-trip 1: one candidate enumeration across every cwd.
+        val candidates = session.exec(detectionCommandForCwds(uniqueCwds))
+            .stdout
+            .lineSequence()
+            .mapNotNull(::parseCandidate)
+            .toList()
+
+        // Round-trip 2: one host-wide process scan. The `tty` column lets
+        // us slice per pane in-memory rather than paying a `ps -t` round
+        // trip per session.
+        val processLines = session.exec(
+            "ps -eo pid,tty,comm,args 2>/dev/null | " +
+                "grep -E 'claude|codex|opencode' | grep -v grep || true",
+        )
+            .stdout
+            .lines()
+            .filter { it.isNotBlank() }
+
+        val result = mutableMapOf<String, AgentDetection>()
+        for (pane in normalizedPanes) {
+            // Per-cwd candidate slice — mirrors the shell-side
+            // detectionCommand(cwd) scoping that detectForPane gets for
+            // free by enumerating a single cwd. Without this, an OpenCode
+            // session whose path-hint is cwd-agnostic could bleed onto a
+            // pane in a different cwd.
+            val paneCandidates = candidates.filter { it.cwd == pane.cwd }
+            if (paneCandidates.isEmpty()) continue
+
+            // Slice the host-wide ps output to THIS pane's TTY. The `ps
+            // -eo pid,tty,comm,args` layout puts the controlling terminal
+            // in the second whitespace token (e.g. `pts/3`); a process
+            // with no controlling terminal reports `?`. Matching the
+            // unprefixed tty arg (e.g. `pts/3`) reproduces the `ps -t`
+            // selection detectForPane uses.
+            val ttyFiltered = processLines.filter { line ->
+                val tokens = line.trim().split(Regex("\\s+"), limit = 3)
+                tokens.size >= 2 && tokens[1] == pane.ttyArg
+            }
+            val merged = if (pane.paneCommand.isBlank()) {
+                ttyFiltered
+            } else {
+                ttyFiltered + pane.paneCommand
+            }
+
+            val detection = detector.detect(
+                cwd = pane.cwd,
+                nowMillis = nowMillis,
+                candidates = paneCandidates,
+                processLines = merged,
+                requireProcessMatch = true,
+            )
+            if (detection != null) {
+                result[pane.key] = detection
+            }
+        }
+        return result
+    }
+
+    private data class NormalizedPaneProbe(
+        val key: String,
+        val cwd: String,
+        val ttyArg: String,
+        val paneCommand: String,
+    )
+
+    /**
+     * Concatenate the per-cwd [detectionCommand] into one script, each cwd
+     * in its own subshell so a `set`/`cd`/variable from one block cannot
+     * leak into the next. The whole thing runs in a single SSH round-trip
+     * and emits the same `agent|epoch|cwd|path` rows [parseCandidate]
+     * already understands, each tagged with the cwd that produced it.
+     *
+     * Reusing [detectionCommand] verbatim keeps it the single source of
+     * truth for the candidate-enumeration shell — no forked heuristic.
+     */
+    internal fun detectionCommandForCwds(cwds: List<String>): String =
+        cwds.joinToString(separator = "\n") { cwd ->
+            "(\n${detectionCommand(cwd)}\n)"
+        }
+
     suspend fun readInitialEvents(
         session: SshSession,
         detection: AgentDetection,

@@ -76,6 +76,37 @@ class AgentConversationRepositoryTest {
     }
 
     @Test
+    fun legacyOpenCodeJsonlDetectionUsesJsonlTailAndLineCount() = runTest {
+        val session = FakeSshSession(
+            wcOutput = "7\n",
+            tailLines = listOf(
+                """{"id":"real-user","role":"user","content":"type-back-e2e-opencode","createdAtMillis":12}""",
+            ),
+        )
+        val detection = AgentDetection(
+            agent = AgentKind.OpenCode,
+            sourcePath = "/home/testuser/.local/share/opencode/pocketshell-rows.jsonl",
+            sessionId = "pocketshell-rows",
+            confidence = AgentDetection.Confidence.RecentFile,
+        )
+        val events = mutableListOf<ConversationEvent>()
+
+        val count = AgentConversationRepository().lineCount(session, detection)
+        val job = AgentConversationRepository().tailEventsFromLine(session, detection, fromLineExclusive = count) {
+            events += it
+        }
+        job?.cancel()
+
+        assertEquals(7L, count)
+        assertEquals(listOf("type-back-e2e-opencode"), events.map { (it as ConversationEvent.Message).text })
+        assertEquals(listOf("real-user"), events.map { it.id })
+        assertEquals(1, session.tailCalls)
+        assertEquals(listOf("/home/testuser/.local/share/opencode/pocketshell-rows.jsonl" to 7L), session.tailFromLineCalls)
+        assertTrue(session.execCommands.single().contains("wc -l < "))
+        assertFalse(session.execCommands.any { it.contains("sqlite3 -readonly") })
+    }
+
+    @Test
     fun openCodeTailExportsSnapshotAndEmitsNewRowsWithoutStartupSeed() = runTest {
         val initialOutput = """
             {"message_id":"m1","message_data":"{\"role\":\"user\"}","message_time_created":100,"part_id":"p1","part_data":"{\"type\":\"text\",\"text\":\"old\"}","part_time_created":101}
@@ -384,8 +415,11 @@ class AgentConversationRepositoryTest {
         private val sqliteFailure: Throwable? = null,
         private val detectionOutput: String = "",
         private val paneProcessOutput: String = "",
+        private val wcOutput: String = "0\n",
+        private val tailLines: List<String> = emptyList(),
     ) : SshSession {
         val execCommands = mutableListOf<String>()
+        val tailFromLineCalls = mutableListOf<Pair<String, Long>>()
         var tailCalls = 0
 
         override val isConnected: Boolean = true
@@ -396,6 +430,7 @@ class AgentConversationRepositoryTest {
                 command.contains("claude_dir=") -> detectionOutput
                 command.contains("ps -t ") -> paneProcessOutput
                 command.contains("stat -c '%Y' ") -> statOutputs.removeFirstOrNull() ?: statOutputs.lastOrNull() ?: "0\n"
+                command.contains("wc -l < ") -> wcOutput
                 command.contains("sqlite3 -readonly") -> {
                     sqliteFailure?.let { throw it }
                     sqliteOutputs.removeFirstOrNull() ?: sqliteOutput
@@ -407,6 +442,14 @@ class AgentConversationRepositoryTest {
 
         override fun tail(path: String, onLine: (String) -> Unit): Job {
             tailCalls += 1
+            tailLines.forEach(onLine)
+            return Job()
+        }
+
+        override fun tail(path: String, fromLineExclusive: Long, onLine: (String) -> Unit): Job {
+            tailFromLineCalls += path to fromLineExclusive
+            tailCalls += 1
+            tailLines.forEach(onLine)
             return Job()
         }
 

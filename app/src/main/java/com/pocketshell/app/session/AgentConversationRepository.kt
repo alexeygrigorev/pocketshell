@@ -256,7 +256,7 @@ internal class AgentConversationRepository(
         detection: AgentDetection,
         maxLines: Int = 200,
     ): List<ConversationEvent> {
-        if (detection.agent == AgentKind.OpenCode) {
+        if (detection.isOpenCodeSqlite()) {
             val output = exportOpenCodeSqliteRows(session, detection, maxMessages = maxLines)
             return OpenCodeReader().parseSqliteJsonRows(output)
         }
@@ -270,7 +270,7 @@ internal class AgentConversationRepository(
         detection: AgentDetection,
         onEvent: (ConversationEvent) -> Unit,
     ): Job? {
-        if (detection.agent == AgentKind.OpenCode) {
+        if (detection.isOpenCodeSqlite()) {
             return tailEventsFromLine(session, detection, fromLineExclusive = 0L, onEvent)
         }
         val parser = parserFor(detection.agent) ?: return null
@@ -281,7 +281,7 @@ internal class AgentConversationRepository(
 
     suspend fun lineCount(session: SshSession, detection: AgentDetection): Long =
         session.exec(
-            if (detection.agent == AgentKind.OpenCode) {
+            if (detection.isOpenCodeSqlite()) {
                 "(stat -c '%Y' ${shellQuote(openCodeDbPath(detection))} 2>/dev/null || stat -f '%m' ${shellQuote(openCodeDbPath(detection))} 2>/dev/null || printf 0)"
             } else {
                 "wc -l < ${shellQuote(detection.sourcePath)} 2>/dev/null || printf 0"
@@ -297,7 +297,7 @@ internal class AgentConversationRepository(
         fromLineExclusive: Long,
         onEvent: (ConversationEvent) -> Unit,
     ): Job? {
-        if (detection.agent == AgentKind.OpenCode) {
+        if (detection.isOpenCodeSqlite()) {
             val sessionId = openCodeSessionId(detection) ?: return null
             return tailScope.launch {
                 val reader = OpenCodeReader()
@@ -502,4 +502,8 @@ internal class AgentConversationRepository(
     private fun openCodeSessionId(detection: AgentDetection): String? =
         detection.sessionId?.takeIf { it.isNotBlank() }
             ?: detection.sourcePath.substringAfter('#', "").takeIf { it.isNotBlank() }
+
+    private fun AgentDetection.isOpenCodeSqlite(): Boolean =
+        agent == AgentKind.OpenCode &&
+            sourcePath.substringBefore('#').endsWith("/.local/share/opencode/opencode.db")
 }

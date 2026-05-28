@@ -297,7 +297,7 @@ class AgentDetectorTest {
     }
 
     @Test
-    fun nonStrictDetectionPreservesMostRecentCandidateEvenWhenOlderCandidateIsConfirmed() {
+    fun nonStrictDetectionPrefersOlderConfirmedCandidateOverNewerRecentFile() {
         val detection = detector.detect(
             cwd = "/workspace/pocketshell",
             nowMillis = 10_000,
@@ -320,9 +320,29 @@ class AgentDetectorTest {
             requireProcessMatch = false,
         )
 
-        assertEquals(AgentKind.ClaudeCode, detection?.agent)
-        assertEquals("claude-newer", detection?.sessionId)
-        assertEquals(AgentDetection.Confidence.RecentFile, detection?.confidence)
+        assertEquals(AgentKind.OpenCode, detection?.agent)
+        assertEquals("opencode-1", detection?.sessionId)
+        assertEquals(AgentDetection.Confidence.ProcessConfirmed, detection?.confidence)
+    }
+
+    @Test
+    fun quotedExecArgvTokenConfirmsAgentProcess() {
+        val detection = detector.detect(
+            cwd = "/workspace/pocketshell",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.Codex,
+                    path = "/home/testuser/.codex/sessions/2026/05/22/rollout-abc.jsonl",
+                    modifiedAtMillis = 9_500,
+                    sessionId = "codex-1",
+                ),
+            ),
+            processLines = listOf("123 sh -c exec -a 'codex' sleep 30"),
+        )
+
+        assertEquals(AgentKind.Codex, detection?.agent)
+        assertEquals(AgentDetection.Confidence.ProcessConfirmed, detection?.confidence)
     }
 
     @Test

@@ -85,7 +85,11 @@ public class AgentDetector(
                 .maxByOrNull { (candidate, _) -> candidate.modifiedAtMillis }
                 ?: return null
         } else {
-            ranked.maxByOrNull { (candidate, _) -> candidate.modifiedAtMillis }
+            ranked
+                .maxWithOrNull(
+                    compareBy<Pair<AgentLogCandidate, Boolean>> { (_, confirmed) -> confirmed }
+                        .thenBy { (candidate, _) -> candidate.modifiedAtMillis },
+                )
         } ?: return null
         val recent = selected.first
         val confirmed = selected.second
@@ -146,5 +150,5 @@ public class AgentDetector(
     }
 
     private fun String.containsCommandToken(commandPattern: String): Boolean =
-        Regex("(^|[\\s/|;&(])$commandPattern(?=$|[\\s/|;&):])").containsMatchIn(this)
+        Regex("(^|[\\s/|;&('\"`])$commandPattern(?=$|[\\s/|;&):'\"`])").containsMatchIn(this)
 }

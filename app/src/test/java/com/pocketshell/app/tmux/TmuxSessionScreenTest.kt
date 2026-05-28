@@ -118,6 +118,28 @@ class TmuxSessionScreenTest {
     }
 
     @Test
+    fun sessionSwitcherPagesKeepCurrentSessionFirstWhenRowsAreActivitySorted() {
+        val pages = sessionSwitcherPages(
+            state = HostTmuxSessionPickerState.Ready(
+                request = pickerRequest(),
+                rows = listOf(
+                    HostTmuxSessionRow(name = "logs", attached = true),
+                    HostTmuxSessionRow(name = "work"),
+                ),
+            ),
+            currentSessionName = "work",
+        )
+
+        assertEquals(
+            listOf(
+                SessionSwitcherPage(name = "work", statusLabel = "current", selectable = true),
+                SessionSwitcherPage(name = "logs", statusLabel = "attached", selectable = true),
+            ),
+            pages,
+        )
+    }
+
+    @Test
     fun sessionSwitcherPagesFallbackIsNotSelectable() {
         val pages = sessionSwitcherPages(
             state = HostTmuxSessionPickerState.Fallback(

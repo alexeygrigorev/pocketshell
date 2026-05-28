@@ -1475,7 +1475,10 @@ internal fun sessionSwitcherPages(
                     selectable = true,
                 )
             }
-            if (rows.any { it.name == currentSessionName }) rows else listOf(current) + rows
+            val currentPage = rows.firstOrNull { it.name == currentSessionName }
+                ?.copy(statusLabel = "current")
+                ?: current
+            listOf(currentPage) + rows.filterNot { it.name == currentSessionName }
         }
         is HostTmuxSessionPickerState.Fallback -> listOf(
             current.copy(statusLabel = state.message, selectable = false),

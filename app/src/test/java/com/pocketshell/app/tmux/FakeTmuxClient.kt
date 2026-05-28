@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux
 
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
+import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -63,6 +64,10 @@ internal class FakeTmuxClient : TmuxClient {
 
     val capturePaneResponses: ArrayDeque<CommandResponse> = ArrayDeque()
 
+    var closeAndThrowOnCommandPrefix: String? = null
+
+    var closeAndThrowException: Throwable = TmuxClientException("tmux command timed out")
+
     @Volatile
     var closed: Boolean = false
 
@@ -75,6 +80,12 @@ internal class FakeTmuxClient : TmuxClient {
 
     override suspend fun sendCommand(cmd: String): CommandResponse {
         sentCommands += cmd
+        closeAndThrowOnCommandPrefix?.let { prefix ->
+            if (cmd.startsWith(prefix)) {
+                close()
+                throw closeAndThrowException
+            }
+        }
         if (cmd.startsWith("capture-pane")) {
             return capturePaneResponses.removeFirstOrNull() ?: CommandResponse(
                 number = 0L,

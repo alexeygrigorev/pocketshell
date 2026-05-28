@@ -23,11 +23,14 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.PipedInputStream
 import java.io.PipedOutputStream
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Unit tests for [RealTmuxClient] driven against a fake [SshSession] / fake
@@ -383,6 +386,104 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `sendCommand timeout closes client and fails visibly`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        try {
+            client.connect()
+            // Eat the spawn line so the command write is easy to assert.
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val outcome = withTimeout(2_000) {
+                runCatching { client.sendCommand("send-keys -t %0 Enter") }
+            }
+
+            assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
+            val ex = outcome.exceptionOrNull()!!
+            assertTrue("expected TmuxClientException, got ${ex.javaClass.name}", ex is TmuxClientException)
+            assertTrue(
+                "timeout message must identify the command kind without logging full arguments",
+                ex.message?.contains("tmux command `send-keys` timed out") == true,
+            )
+            assertEquals("send-keys -t %0 Enter\n", shell.stdinAsString())
+            assertTrue("timeout must close the shell", shell.closed)
+            assertTrue("timeout must trip the disconnected latch", client.disconnected.value)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `sendCommand write failure closes client and fails visibly`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 5_000L)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+            shell.failFutureStdinWrites()
+
+            val outcome = withTimeout(2_000) {
+                runCatching { client.sendCommand("send-keys -t %0 Enter") }
+            }
+
+            assertTrue("expected write failure, got ${outcome.getOrNull()}", outcome.isFailure)
+            val ex = outcome.exceptionOrNull()!!
+            assertTrue("expected TmuxClientException, got ${ex.javaClass.name}", ex is TmuxClientException)
+            assertTrue(
+                "write failure message must identify the command kind without logging full arguments",
+                ex.message?.contains("failed to write tmux command `send-keys`") == true,
+            )
+            assertTrue("write failure must close the shell", shell.closed)
+            assertTrue("write failure must trip the disconnected latch", client.disconnected.value)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `sendCommand timeout covers blocking stdin write and closes client`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 100L)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+            shell.blockFutureStdinWrites()
+
+            val response = scope.async {
+                runCatching { client.sendCommand("send-keys -t %0 Enter") }
+            }
+
+            assertTrue("expected stdin write to block", shell.awaitBlockedStdinWrite(2_000))
+            val outcome = withTimeout(2_000) { response.await() }
+
+            assertTrue("expected timeout failure, got ${outcome.getOrNull()}", outcome.isFailure)
+            val ex = outcome.exceptionOrNull()!!
+            assertTrue("expected TmuxClientException, got ${ex.javaClass.name}", ex is TmuxClientException)
+            assertTrue(
+                "timeout message must identify the command kind without logging full arguments",
+                ex.message?.contains("tmux command `send-keys` timed out") == true,
+            )
+            assertEquals("", shell.stdinAsString())
+            assertTrue("blocking write timeout must close the shell", shell.closed)
+            assertTrue("blocking write timeout must trip the disconnected latch", client.disconnected.value)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `sendCommand on closed client throws TmuxClientException`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
@@ -716,6 +817,14 @@ class TmuxClientTest {
         fun resetStdin() {
             stdinCapture.reset()
         }
+        fun failFutureStdinWrites() {
+            stdinCapture.failWrites = true
+        }
+        fun blockFutureStdinWrites() {
+            stdinCapture.blockFutureWrites()
+        }
+        fun awaitBlockedStdinWrite(timeoutMs: Long): Boolean =
+            stdinCapture.awaitBlockedWrite(timeoutMs)
     }
 
     /**
@@ -726,12 +835,74 @@ class TmuxClientTest {
      * copy is what we actually need.
      */
     private class SynchronizedByteArrayOutputStream : ByteArrayOutputStream() {
+        @Volatile
+        var failWrites: Boolean = false
+
+        @Volatile
+        private var closedForWrites: Boolean = false
+
+        private val blockLock = Object()
+        private val blockedWriteEntered = CountDownLatch(1)
+
+        @Volatile
+        private var blockWrites: Boolean = false
+
+        fun blockFutureWrites() {
+            blockWrites = true
+        }
+
+        fun awaitBlockedWrite(timeoutMs: Long): Boolean =
+            blockedWriteEntered.await(timeoutMs, TimeUnit.MILLISECONDS)
+
+        override fun write(b: Int) {
+            maybeBlockOrThrow()
+            synchronized(this) {
+                maybeThrowIfClosed()
+                super.write(b)
+            }
+        }
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            maybeBlockOrThrow()
+            synchronized(this) {
+                maybeThrowIfClosed()
+                super.write(b, off, len)
+            }
+        }
+
+        override fun close() {
+            synchronized(blockLock) {
+                closedForWrites = true
+                blockWrites = false
+                blockLock.notifyAll()
+            }
+            synchronized(this) {
+                super.close()
+            }
+        }
+
         @Synchronized
         fun snapshot(): ByteArray = toByteArray()
 
         @Synchronized
         override fun reset() {
             super.reset()
+        }
+
+        private fun maybeBlockOrThrow() {
+            maybeThrowIfClosed()
+            if (!blockWrites) return
+            blockedWriteEntered.countDown()
+            synchronized(blockLock) {
+                while (blockWrites && !closedForWrites) {
+                    blockLock.wait()
+                }
+            }
+            maybeThrowIfClosed()
+        }
+
+        private fun maybeThrowIfClosed() {
+            if (failWrites || closedForWrites) throw IOException("stdin closed")
         }
     }
 }

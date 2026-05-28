@@ -219,12 +219,17 @@ public class TmuxClientException(message: String, cause: Throwable? = null) :
  *   name are reattached rather than refused.
  * @param startDirectory optional tmux `-c` start directory for newly
  *   created sessions. Existing sessions are still attached via `-A`.
+ * @param commandTimeoutMs ceiling for a single control-mode command
+ *   transaction, including stdin write/flush and response wait. A
+ *   timeout closes the client so callers see a disconnect instead of
+ *   waiting forever behind a stalled SSH/tmux channel.
  */
 internal class RealTmuxClient(
     private val session: SshSession,
     scope: CoroutineScope,
     private val sessionName: String = DEFAULT_SESSION_NAME,
     private val startDirectory: String? = null,
+    private val commandTimeoutMs: Long = DEFAULT_COMMAND_TIMEOUT_MS,
 ) : TmuxClient {
 
     // Child scope rooted under the caller's scope. SupervisorJob() so a
@@ -343,29 +348,64 @@ internal class RealTmuxClient(
     override suspend fun sendCommand(cmd: String): CommandResponse {
         if (closed) throw TmuxClientException("client is closed")
         if (!connected) throw TmuxClientException("client is not connected")
-        val sh = shell ?: throw TmuxClientException("client has no active shell")
         // Single-flight: tmux only honours one outstanding command at a
         // time. The deferred is registered (queued) BEFORE we write the
         // bytes so we can't lose a response that arrives before we've
         // returned from the write.
         return sendMutex.withLock {
+            if (closed) throw TmuxClientException("client is closed")
+            if (!connected) throw TmuxClientException("client is not connected")
+            val sh = shell ?: throw TmuxClientException("client has no active shell")
             val deferred = CompletableDeferred<CommandResponse>()
             val pendingCmd = PendingCommand(deferred = deferred)
             pendingQueue.offer(pendingCmd)
 
-            try {
-                writeLine(sh.stdin, cmd)
-            } catch (t: Throwable) {
-                pendingQueue.remove(pendingCmd)
-                throw TmuxClientException("failed to write command `$cmd`: ${t.message}", t)
+            val writeResult = CompletableDeferred<Unit>()
+            val writeJob = clientScope.launch {
+                try {
+                    writeLine(sh.stdin, cmd)
+                    writeResult.complete(Unit)
+                } catch (t: Throwable) {
+                    writeResult.completeExceptionally(t)
+                }
             }
+            var writeCompleted = false
 
-            try {
-                deferred.await()
+            val response = try {
+                withTimeoutOrNull(commandTimeoutMs) {
+                    writeResult.await()
+                    writeCompleted = true
+                    deferred.await()
+                }
             } catch (t: Throwable) {
                 pendingQueue.remove(pendingCmd)
+                writeJob.cancel()
+                if (!writeCompleted) {
+                    val kind = commandKind(cmd)
+                    Log.w(
+                        ISSUE_244_DIAG_TAG,
+                        "tmux-command-write-failed kind=$kind cause=${t.javaClass.simpleName}",
+                    )
+                    close()
+                    throw TmuxClientException("failed to write tmux command `$kind`: ${t.message}", t)
+                }
                 throw t
             }
+            if (response != null) return@withLock response
+
+            pendingQueue.remove(pendingCmd)
+            writeJob.cancel()
+            val kind = commandKind(cmd)
+            val exception = TmuxClientException(
+                "tmux command `$kind` timed out after ${commandTimeoutMs}ms",
+            )
+            deferred.completeExceptionally(exception)
+            Log.w(
+                ISSUE_244_DIAG_TAG,
+                "tmux-command-timeout kind=$kind timeoutMs=$commandTimeoutMs",
+            )
+            close()
+            throw exception
         }
     }
 
@@ -644,9 +684,13 @@ internal class RealTmuxClient(
 
     private companion object {
         private const val DEFAULT_SESSION_NAME = "pocketshell"
+        private const val DEFAULT_COMMAND_TIMEOUT_MS = 10_000L
 
         private fun escapeSingleQuoted(input: String): String =
             input.replace("'", "'\\''")
+
+        private fun commandKind(command: String): String =
+            command.trim().substringBefore(' ').ifBlank { "unknown" }
 
         /**
          * Buffer slack in the event bus so a brief subscriber stall
@@ -681,6 +725,7 @@ internal class RealTmuxClient(
          *     class.
          */
         private const val ISSUE_105_DIAG_TAG = "issue105-diag"
+        private const val ISSUE_244_DIAG_TAG = "issue244-diag"
     }
 
     /**

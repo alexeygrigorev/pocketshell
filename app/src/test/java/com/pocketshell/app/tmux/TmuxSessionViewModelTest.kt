@@ -8,6 +8,7 @@ import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.CoroutineScope
@@ -78,6 +79,36 @@ class TmuxSessionViewModelTest {
     fun connectionStatusStartsIdle() {
         val vm = newVm()
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Idle)
+    }
+
+    @Test
+    fun commandTimeoutDuringReconcileSurfacesFailedStatus() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            closeAndThrowOnCommandPrefix = "list-panes"
+            closeAndThrowException = TmuxClientException(
+                "tmux command `list-panes` timed out after 100ms",
+            )
+        }
+        vm.attachClientForTest(client)
+        runCurrent()
+
+        client.emittedEvents.emit(ControlEvent.WindowAdd("", "@1", ""))
+        advanceUntilIdle()
+
+        assertTrue(
+            "expected list-panes reconcile, got ${client.sentCommands}",
+            client.sentCommands.any { it.startsWith("list-panes") },
+        )
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "expected Failed after tmux command timeout, got $status",
+            status is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertEquals(
+            "Disconnected from test@test:0. Tap Reconnect to retry.",
+            (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+        )
     }
 
     @Test
@@ -488,6 +519,36 @@ class TmuxSessionViewModelTest {
         assertEquals(sent.toString(), 2, sent.size)
         assertEquals("send-keys -l -t %0 -- 'ls'", sent[0])
         assertEquals("send-keys -t %0 Enter", sent[1])
+    }
+
+    @Test
+    fun writeInputToPaneSendKeysFailureSurfacesFailedStatus() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            closeAndThrowOnCommandPrefix = "send-keys"
+            closeAndThrowException = TmuxClientException(
+                "tmux command `send-keys` timed out after 100ms",
+            )
+        }
+        vm.attachClientForTest(client)
+        runCurrent()
+
+        vm.writeInputToPane("%0", "ls\r".toByteArray(Charsets.UTF_8))
+        advanceUntilIdle()
+
+        assertTrue(
+            "expected send-keys dispatch, got ${client.sentCommands}",
+            client.sentCommands.any { it.startsWith("send-keys") },
+        )
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "expected Failed after send-keys failure, got $status",
+            status is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertEquals(
+            "Disconnected from test@test:0. Tap Reconnect to retry.",
+            (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+        )
     }
 
     @Test

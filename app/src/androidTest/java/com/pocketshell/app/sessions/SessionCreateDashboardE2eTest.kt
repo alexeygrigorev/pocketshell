@@ -9,6 +9,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onLast
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.room.Room
@@ -22,6 +23,8 @@ import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -376,9 +379,22 @@ class SessionCreateDashboardE2eTest {
     }
 
     private fun performTmuxChromeBack() {
-        launchedActivity?.onActivity {
-            it.onBackPressedDispatcher.onBackPressed()
-        } ?: compose.onNodeWithText("‹", useUnmergedTree = true).performClick()
+        val fullChromeBackCount = compose
+            .onAllNodesWithTag(TMUX_FULL_CHROME_BACK_BUTTON_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .size
+        if (fullChromeBackCount > 0) {
+            compose
+                .onAllNodesWithTag(TMUX_FULL_CHROME_BACK_BUTTON_TAG, useUnmergedTree = true)
+                .onFirst()
+                .performClick()
+            return
+        }
+
+        compose
+            .onAllNodesWithTag(TMUX_COMPACT_CHROME_BACK_BUTTON_TAG, useUnmergedTree = true)
+            .onFirst()
+            .performClick()
     }
 
     private fun captureFullDevice(name: String) {

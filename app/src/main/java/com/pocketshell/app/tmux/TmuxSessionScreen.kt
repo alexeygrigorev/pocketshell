@@ -3135,29 +3135,20 @@ private fun AgentComposerRow(
     // disconnected session can't deliver-then-clear the draft.
     sendEnabled: Boolean = true,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        OutlinedTextField(
-            value = text,
-            onValueChange = onTextChange,
-            modifier = Modifier
-                .weight(1f)
-                .testTag(TMUX_CONVERSATION_COMPOSER_INPUT_TAG),
-            placeholder = { Text("Message agent") },
-        )
-        TextButton(
-            onClick = onSend,
-            enabled = sendEnabled && text.isNotBlank(),
-            modifier = Modifier.testTag(TMUX_CONVERSATION_COMPOSER_SEND_TAG),
-        ) {
-            Text("Send")
-        }
-    }
+    // Issue #196: the agent-pane composer now uses the shared
+    // [com.pocketshell.app.composer.AgentComposerSurface] so it has the
+    // identical styled draft box (surface-elev fill, accent cursor, muted
+    // placeholder) and the identical accent primary Send button as the
+    // terminal-shell prompt composer. The surface-specific test tags keep
+    // the existing tmux connected tests resolving the same nodes.
+    com.pocketshell.app.composer.AgentComposerSurface(
+        value = text,
+        onValueChange = onTextChange,
+        onSend = onSend,
+        inputFieldTag = TMUX_CONVERSATION_COMPOSER_INPUT_TAG,
+        sendButtonTag = TMUX_CONVERSATION_COMPOSER_SEND_TAG,
+        sendEnabled = sendEnabled,
+    )
 }
 
 /**

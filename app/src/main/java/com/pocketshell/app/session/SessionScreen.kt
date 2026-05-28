@@ -724,35 +724,26 @@ internal fun ConversationPane(
                     .padding(end = 12.dp, bottom = 12.dp),
             )
         }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            OutlinedTextField(
-                value = composerText,
-                onValueChange = { composerText = it },
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag(SESSION_CONVERSATION_COMPOSER_INPUT_TAG),
-                placeholder = { Text("Message agent") },
-            )
-            TextButton(
-                onClick = {
-                    val trimmed = composerText.trim()
-                    if (trimmed.isNotEmpty()) {
-                        onSendToAgent(trimmed)
-                        composerText = ""
-                    }
-                },
-                enabled = sendEnabled && composerText.isNotBlank(),
-                modifier = Modifier.testTag(SESSION_CONVERSATION_COMPOSER_SEND_TAG),
-            ) {
-                Text("Send")
-            }
-        }
+        // Issue #196: the raw-SSH agent composer uses the same shared
+        // [com.pocketshell.app.composer.AgentComposerSurface] as the tmux
+        // agent pane and the terminal-shell prompt composer, so all three
+        // surfaces share the styled draft box and accent primary Send
+        // button. The surface-specific test tags keep the existing
+        // raw-SSH connected tests resolving the same nodes.
+        com.pocketshell.app.composer.AgentComposerSurface(
+            value = composerText,
+            onValueChange = { composerText = it },
+            onSend = {
+                val trimmed = composerText.trim()
+                if (trimmed.isNotEmpty()) {
+                    onSendToAgent(trimmed)
+                    composerText = ""
+                }
+            },
+            inputFieldTag = SESSION_CONVERSATION_COMPOSER_INPUT_TAG,
+            sendButtonTag = SESSION_CONVERSATION_COMPOSER_SEND_TAG,
+            sendEnabled = sendEnabled,
+        )
     }
 }
 

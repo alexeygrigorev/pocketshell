@@ -14,7 +14,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,10 +27,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -39,7 +36,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SheetState
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -59,19 +55,11 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
-import androidx.compose.ui.unit.IntOffset
-import androidx.compose.ui.unit.IntRect
-import androidx.compose.ui.unit.LayoutDirection
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Popup
-import androidx.compose.ui.window.PopupPositionProvider
-import androidx.compose.ui.window.PopupProperties
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
@@ -451,49 +439,18 @@ internal fun SheetContent(
             }
         }
 
-        // The composer text area. `.composer-text` in the mockup is a
-        // surface-elev fill with a single border and 12dp radius; we
-        // mirror that with a Box wrapping a BasicTextField rather than
-        // OutlinedTextField (whose label / supporting-text affordances
-        // are not present in the mockup).
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .heightIn(min = 110.dp)
-                .background(
-                    color = PocketShellColors.SurfaceElev,
-                    shape = RoundedCornerShape(12.dp),
-                )
-                .border(
-                    width = 1.dp,
-                    color = PocketShellColors.Border,
-                    shape = RoundedCornerShape(12.dp),
-                )
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-        ) {
-            BasicTextField(
-                value = state.draft,
-                onValueChange = onDraftChange,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag(COMPOSER_DRAFT_TAG),
-                textStyle = TextStyle(
-                    color = PocketShellColors.Text,
-                    fontSize = 14.sp,
-                ),
-                cursorBrush = androidx.compose.ui.graphics.SolidColor(PocketShellColors.Accent),
-                decorationBox = { inner ->
-                    if (state.draft.isEmpty()) {
-                        Text(
-                            text = state.placeholderHint(),
-                            color = PocketShellColors.TextMuted,
-                            fontSize = 14.sp,
-                        )
-                    }
-                    inner()
-                },
-            )
-        }
+        // The composer text area. Issue #196: shared with the agent-pane
+        // composer via [ComposerDraftField] so both surfaces have an
+        // identical surface-elev fill, accent cursor, and muted
+        // placeholder. `.composer-text` in the mockup is a surface-elev
+        // fill with a single border and 12dp radius.
+        ComposerDraftField(
+            value = state.draft,
+            onValueChange = onDraftChange,
+            placeholder = state.placeholderHint(),
+            fieldTag = COMPOSER_DRAFT_TAG,
+            minHeight = 110.dp,
+        )
 
         Spacer(modifier = Modifier.height(4.dp))
 
@@ -702,10 +659,10 @@ internal fun SheetContent(
                 modifier = Modifier.weight(1f),
                 enabled = !isTranscribing,
             )
-            // Issue #153 fix 3: Send / Send+↵ buttons used to share the
-            // same neutral-surface fill, which made them too easy to
-            // mis-tap on a Pixel 7 viewport (the audit flagged this as a
-            // tier-1 friction point). The visual differentiation now is:
+            // Issue #196: the Send / Send + ↵ buttons are shared with the
+            // agent-pane composer via [ComposerSendButton] /
+            // [ComposerSendEnterButton] in `UnifiedComposer.kt` so both
+            // surfaces use the identical tier-differentiated treatment:
             //  - Plain "Send" → outline-only (transparent fill, accent
             //    border + accent text) — clearly the secondary action.
             //  - "Send + ↵" → solid accent fill + on-accent text — stays
@@ -713,25 +670,16 @@ internal fun SheetContent(
             //    mic FAB uses, so the user sees one "do the thing"
             //    coloured affordance per row).
             //
-            // Each button is wrapped in a [TooltipBox] so a long-press
-            // surfaces the difference for users who don't already know
-            // what the trailing ↵ glyph means. The tooltips are
-            // intentionally short: no model breakdown, just "this sends"
-            // vs "this sends and submits". Long-press is the standard
-            // Android affordance for "explain this control" and Material 3
-            // wires the gesture for us via `TooltipBox`.
+            // Each button surfaces a long-press tooltip (the #153 "explain
+            // this control" affordance) via the shared
+            // [ComposerTooltipButton], whose [Modifier.combinedClickable]
+            // keeps `performClick()` in connected tests firing the same
+            // onClick lambda the user's finger does.
             //
-            // The semantic `OnClick` action lives on the inner Button —
-            // `TooltipBox` only adds an anchor pointer-input modifier for
-            // long-press detection — so `performClick()` in connected
-            // tests still triggers the Button's onClick lambda directly.
-            // The `Modifier.weight(1f)` is applied to the `TooltipBox`
-            // and the Button is `fillMaxWidth()` inside it so the visual
-            // layout matches the previous direct-Button layout.
             // Issue #211: label flips while a queued Whisper round-trip
             // is in flight so the user knows the tap was registered but
             // the bytes are not yet flying.
-            OutlineSendButton(
+            ComposerSendButton(
                 label = if (hasQueuedAffordance) "Send after transcribe" else "Send",
                 tooltipLabel = SEND_TOOLTIP_LABEL,
                 onClick = { onSend(false) },
@@ -740,7 +688,7 @@ internal fun SheetContent(
                     .testTag(COMPOSER_SEND_TAG),
                 enabled = sendEnabled,
             )
-            PrimaryButton(
+            ComposerSendEnterButton(
                 label = if (hasQueuedAffordance) "Send + ↵ after" else "Send + ↵",
                 tooltipLabel = SEND_ENTER_TOOLTIP_LABEL,
                 onClick = { onSend(true) },
@@ -1285,205 +1233,6 @@ private fun GhostButton(
         colors = ButtonDefaults.textButtonColors(contentColor = PocketShellColors.TextSecondary),
     ) {
         Text(label, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-    }
-}
-
-/**
- * Issue #153 fix 3: secondary Send button.
- *
- * Renders as an outline-only chip with a transparent fill, a 1dp accent
- * stroke, and accent-tinted text. This is the deliberate visual
- * downgrade from the previous neutral-surface fill: the audit found
- * that side-by-side neutral + accent Send buttons read as a single
- * grouped pair, which made mis-taps common on a Pixel 7 viewport.
- *
- * The accent border + accent text means the button still reads as
- * actionable, but clearly subordinate to the solid-fill primary "Send +
- * ↵" sibling — exactly the tier difference the audit asked for.
- *
- * Disabled state: text drops to `TextMuted` and the border to `Border`
- * so the button still occupies the same footprint but reads as inert.
- *
- * Implemented as a `Box` with [Modifier.combinedClickable] rather than
- * Material 3's [Button] + [androidx.compose.material3.TooltipBox] pair
- * because, in Compose BOM 2025.05 (Material 3 1.3.2), wrapping a Button
- * in a `TooltipBox` swallows synthesised tap events from
- * `performClick()` in connected tests — the long-press detector consumes
- * the entire pointer stream. Rolling the click + long-press into a
- * single `combinedClickable` keeps the test path intact and gives us
- * full control over the visual tooltip surface.
- */
-@Composable
-private fun OutlineSendButton(
-    label: String,
-    tooltipLabel: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-) {
-    LongPressTooltipBoxButton(
-        label = label,
-        tooltipLabel = tooltipLabel,
-        onClick = onClick,
-        modifier = modifier,
-        enabled = enabled,
-        containerColor = androidx.compose.ui.graphics.Color.Transparent,
-        contentColor = PocketShellColors.Accent,
-        disabledContentColor = PocketShellColors.TextMuted,
-        borderColor = PocketShellColors.Accent,
-        disabledBorderColor = PocketShellColors.Border,
-    )
-}
-
-@Composable
-private fun PrimaryButton(
-    label: String,
-    tooltipLabel: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-) {
-    LongPressTooltipBoxButton(
-        label = label,
-        tooltipLabel = tooltipLabel,
-        onClick = onClick,
-        modifier = modifier,
-        enabled = enabled,
-        containerColor = PocketShellColors.Accent,
-        contentColor = PocketShellColors.OnAccent,
-        disabledContentColor = PocketShellColors.TextMuted,
-        borderColor = PocketShellColors.Accent,
-        disabledBorderColor = PocketShellColors.Border,
-    )
-}
-
-/**
- * Issue #153 fix 3: hand-rolled Send button used by both the outline
- * (secondary) and the filled (primary) variants in the action row.
- *
- * Combines:
- *  - A styled [Box] with the visual treatment (fill, border, label).
- *  - A [Modifier.combinedClickable] that handles regular click +
- *    long-press in a single gesture handler — `performClick()` in tests
- *    triggers the same path the user's finger does.
- *  - A [Popup] showing the [tooltipLabel] copy above the button when
- *    long-press fires. The popup auto-dismisses on outside touch via
- *    [PopupProperties.dismissOnClickOutside].
- *
- * Why not Material 3's [androidx.compose.material3.TooltipBox]: in
- * Compose BOM 2025.05 (Material 3 1.3.2), wrapping a clickable child
- * in `TooltipBox` swallows the synthesised tap events emitted by
- * `androidx.compose.ui.test.performClick`. The connected smoke test
- * (`PromptComposerSmokeTest.typedDraftSendEnterReachesDockerShell`)
- * relies on `performClick` to fire the Send + ↵ action against a real
- * Docker SSH shell — the TooltipBox wrapping regressed that test 100%.
- * `combinedClickable` does NOT have that interaction.
- */
-@Composable
-private fun LongPressTooltipBoxButton(
-    label: String,
-    tooltipLabel: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    containerColor: androidx.compose.ui.graphics.Color = PocketShellColors.Accent,
-    contentColor: androidx.compose.ui.graphics.Color = PocketShellColors.OnAccent,
-    disabledContentColor: androidx.compose.ui.graphics.Color = PocketShellColors.TextMuted,
-    borderColor: androidx.compose.ui.graphics.Color = PocketShellColors.Accent,
-    disabledBorderColor: androidx.compose.ui.graphics.Color = PocketShellColors.Border,
-) {
-    var showTooltip by remember { mutableStateOf(false) }
-    Box(
-        modifier = modifier
-            .height(44.dp)
-            .background(
-                color = if (enabled) containerColor else androidx.compose.ui.graphics.Color.Transparent,
-                shape = RoundedCornerShape(10.dp),
-            )
-            .border(
-                width = 1.dp,
-                color = if (enabled) borderColor else disabledBorderColor,
-                shape = RoundedCornerShape(10.dp),
-            )
-            .combinedClickable(
-                enabled = enabled,
-                role = androidx.compose.ui.semantics.Role.Button,
-                onClick = onClick,
-                onLongClick = { showTooltip = true },
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = if (enabled) contentColor else disabledContentColor,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-
-        if (showTooltip) {
-            // Position the tooltip directly above the button anchor so
-            // it does not occlude the user's finger. `dismissOnClickOutside`
-            // gives the user the standard Android escape hatch — tap
-            // anywhere off the popup to clear it.
-            Popup(
-                popupPositionProvider = AboveAnchorPopupPositionProvider,
-                onDismissRequest = { showTooltip = false },
-                properties = PopupProperties(
-                    focusable = false,
-                    dismissOnBackPress = true,
-                    dismissOnClickOutside = true,
-                ),
-            ) {
-                Surface(
-                    color = PocketShellColors.SurfaceElev,
-                    contentColor = PocketShellColors.Text,
-                    shape = RoundedCornerShape(8.dp),
-                    border = androidx.compose.foundation.BorderStroke(
-                        width = 1.dp,
-                        color = PocketShellColors.Border,
-                    ),
-                    modifier = Modifier.testTag(composerSendTooltipTestTag(tooltipLabel)),
-                ) {
-                    Text(
-                        text = tooltipLabel,
-                        color = PocketShellColors.Text,
-                        fontSize = 12.sp,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    )
-                }
-            }
-        }
-    }
-}
-
-/**
- * Issue #153 fix 3: position provider for the long-press tooltip popup.
- *
- * Anchors the tooltip directly above the source button, horizontally
- * centred on it, with an 8dp gap. Clamps to the window so the popup
- * never spills off the left / right / top edges (it falls back to
- * appearing below the anchor if there isn't enough space above).
- */
-private object AboveAnchorPopupPositionProvider : PopupPositionProvider {
-    override fun calculatePosition(
-        anchorBounds: IntRect,
-        windowSize: IntSize,
-        layoutDirection: LayoutDirection,
-        popupContentSize: IntSize,
-    ): IntOffset {
-        val gapPx = 24 // ~8dp at xhdpi; close enough for a tooltip offset
-        val centreX = anchorBounds.left + (anchorBounds.width - popupContentSize.width) / 2
-        val x = centreX.coerceIn(0, (windowSize.width - popupContentSize.width).coerceAtLeast(0))
-        val yAbove = anchorBounds.top - popupContentSize.height - gapPx
-        val y = if (yAbove >= 0) {
-            yAbove
-        } else {
-            // Not enough space above — render below the anchor instead.
-            (anchorBounds.bottom + gapPx).coerceAtMost(
-                (windowSize.height - popupContentSize.height).coerceAtLeast(0),
-            )
-        }
-        return IntOffset(x, y)
     }
 }
 

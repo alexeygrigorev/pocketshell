@@ -39,8 +39,8 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Issue #173 — regression test for the v0.2.7 crash on resume after
- * backgrounding.
+ * Issue #173 — regression test for the v0.2.7 crash on resume after a
+ * pause-only lifecycle transition.
  *
  * Reproduces the user-reported sequence on the deterministic Docker `agents`
  * fixture:
@@ -49,9 +49,9 @@ import java.io.FileOutputStream
  *     (host picker -> session picker -> Attach), proving the live
  *     control channel + per-pane TerminalView is in place.
  *  2. Send a marker command to confirm the wire is alive end-to-end.
- *  3. `ActivityScenario.moveToState(Lifecycle.State.CREATED)` to mimic the
- *     user pausing the app (e.g. taking a screenshot or briefly switching
- *     apps).
+ *  3. `ActivityScenario.moveToState(Lifecycle.State.STARTED)` to mimic a
+ *     pause-only interruption (e.g. a transient overlay) while keeping the
+ *     process foregrounded.
  *  4. From a sidecar SSH session, identify the sshd worker process that
  *     belongs to the app's tmux-CC connection and `kill -9` it. This
  *     reproduces the kernel-side ECONNABORTED ("Software caused connection
@@ -60,7 +60,14 @@ import java.io.FileOutputStream
  *     a read is in flight. Killing the remote sshd is the closest
  *     deterministic local trigger to what Android did to the user.
  *  5. `ActivityScenario.moveToState(Lifecycle.State.RESUMED)` to mimic the
- *     user returning from the screenshot intent.
+ *     user returning from the interruption.
+ *
+ * Note: this intentionally does not move to [Lifecycle.State.CREATED].
+ * The issue #235 production behavior auto-detaches tmux `-CC` clients on
+ * process background / `ON_STOP`; that full-background path has its own
+ * E2E. This test needs the control socket to remain live while paused so
+ * killing the remote sshd still exercises the issue #173 sshj
+ * `SSHException` -> flow termination -> Failed connection state route.
  *
  * Acceptance:
  *
@@ -162,13 +169,16 @@ class BackgroundResumeSocketDeathE2eTest {
             appSshdPids.isNotEmpty(),
         )
 
-        // ---- (4) Background the app. ActivityScenario.moveToState(CREATED)
-        // drives onPause + onStop just like Android does when the user
-        // launches the screenshot intent or briefly switches apps.
-        val backgroundedAt = SystemClock.elapsedRealtime()
-        launchedActivity?.moveToState(Lifecycle.State.CREATED)
+        // ---- (4) Pause the activity without stopping the process.
+        // Moving to CREATED would now trigger the issue #235
+        // ProcessLifecycleOwner.ON_STOP auto-detach path, intentionally
+        // closing the tmux control socket before this test can kill it.
+        // STARTED drives onPause while keeping the process foregrounded,
+        // preserving the live socket for the issue #173 regression.
+        val pausedAt = SystemClock.elapsedRealtime()
+        launchedActivity?.moveToState(Lifecycle.State.STARTED)
         delay(LIFECYCLE_DRAIN_MS)
-        recordTiming("background_drain_ms", SystemClock.elapsedRealtime() - backgroundedAt)
+        recordTiming("pause_drain_ms", SystemClock.elapsedRealtime() - pausedAt)
 
         // ---- (5) Kill the app's sshd worker from a sidecar SSH session.
         // The Docker testuser is non-root, so we can only kill processes
@@ -533,7 +543,7 @@ class BackgroundResumeSocketDeathE2eTest {
 
         /**
          * After the sshd kill we wait this long while the activity is
-         * still backgrounded so the Reader thread's blocking read fully
+         * still paused so the Reader thread's blocking read fully
          * observes the socket tear-down and propagates through the
          * coroutine layer. Empirically ~1 s is enough; we hold for 2 s to
          * stay comfortably above CI swiftshader noise.

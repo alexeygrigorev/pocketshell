@@ -1306,6 +1306,7 @@ public class TmuxSessionViewModel @Inject constructor(
                         // tmux -CC has no per-pane PTY fd, so the terminal's
                         // input queue is bridged to tmux `send-keys`.
                         remoteStdin = inputSinkForPane(p.paneId),
+                        suppressQueryResponses = true,
                     )
                     paneProducerJobs[p.paneId] = job
                 }

@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import android.os.Looper
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -37,6 +38,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
@@ -604,7 +606,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun terminalQueryResponsesSuppressedInBridgeMode() = runTest {
+    fun terminalDaQueryResponsesSuppressedInBridgeMode() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -615,14 +617,40 @@ class TmuxSessionViewModelTest {
         advanceUntilIdle()
 
         val state = vm.panes.value.single().terminalState
-        val queryBytes = "\u001b]11;?\u001b\\\u001b[c".toByteArray(Charsets.US_ASCII)
+        val queryBytes = "\u001b[c".toByteArray(Charsets.US_ASCII)
         state.appendRemoteOutput(queryBytes)
+        drainTerminalBridgeHandler()
 
         advanceUntilIdle()
 
         val sent = client.sentCommands.filter { it.startsWith("send-keys") }
         assertTrue(
-            "bridge-mode emulator must not generate terminal query responses, got $sent",
+            "bridge-mode emulator must not generate DA query responses, got $sent",
+            sent.none { it.contains("send-keys -H") || it.contains("send-keys -l") },
+        )
+    }
+
+    @Test
+    fun terminalOsc11QueryResponsesSuppressedInBridgeMode() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+        )
+        advanceUntilIdle()
+
+        val state = vm.panes.value.single().terminalState
+        val queryBytes = "\u001b]11;?\u001b\\".toByteArray(Charsets.US_ASCII)
+        state.appendRemoteOutput(queryBytes)
+        drainTerminalBridgeHandler()
+
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertTrue(
+            "bridge-mode emulator must not generate OSC 11 color query responses, got $sent",
             sent.none { it.contains("send-keys -H") || it.contains("send-keys -l") },
         )
     }
@@ -872,6 +900,10 @@ class TmuxSessionViewModelTest {
             "expected at least $expectedCount send-keys commands, got ${client.sentCommands}",
             client.sentCommands.count { it.startsWith("send-keys") } >= expectedCount,
         )
+    }
+
+    private fun drainTerminalBridgeHandler() {
+        shadowOf(Looper.getMainLooper()).idle()
     }
 
     @Test

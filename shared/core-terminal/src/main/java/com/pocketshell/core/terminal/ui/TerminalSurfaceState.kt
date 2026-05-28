@@ -428,6 +428,10 @@ class TerminalSurfaceState internal constructor(
      * @param remoteStdin optional sink for user input typed into the
      *   emulator. If `null`, the emulator still renders output but user
      *   keystrokes are dropped at the bridge's input drainer.
+     * @param suppressQueryResponses when true, terminal-generated query
+     *   replies are not written back to [remoteStdin]. Keep this false for
+     *   normal SSH surfaces; tmux control-mode bridges enable it because
+     *   replies would otherwise leak through `send-keys`.
      * @return a [Job] that completes when the producer flow terminates or
      *   the scope is cancelled.
      */
@@ -435,6 +439,7 @@ class TerminalSurfaceState internal constructor(
         scope: CoroutineScope,
         stdout: Flow<ByteArray>,
         remoteStdin: OutputStream? = null,
+        suppressQueryResponses: Boolean = false,
     ): Job {
         // Tear down any existing bridge so we never have two producers
         // racing on the same emulator.
@@ -442,7 +447,7 @@ class TerminalSurfaceState internal constructor(
 
         val newBridge = SshTerminalBridge(client = sessionClient)
         newBridge.setRemoteStdin(remoteStdin)
-        newBridge.emulator.setSuppressQueryResponses(true)
+        newBridge.emulator.setSuppressQueryResponses(suppressQueryResponses)
         bridge = newBridge
 
         // Bind the bridge's session to the View via the existing `attach`

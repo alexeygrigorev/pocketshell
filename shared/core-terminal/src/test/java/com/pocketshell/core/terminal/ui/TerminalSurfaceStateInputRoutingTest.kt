@@ -116,6 +116,35 @@ class TerminalSurfaceStateInputRoutingTest {
     }
 
     @Test
+    fun externalProducerPreservesQueryResponsesByDefault() = runBlocking {
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val remoteStdin = RecordingOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = remoteStdin,
+        )
+
+        try {
+            state.appendRemoteOutput("\u001b[c".toByteArray(Charsets.US_ASCII))
+            shadowOf(Looper.getMainLooper()).idle()
+
+            withTimeout(2_000) {
+                while (remoteStdin.snapshot().isEmpty()) {
+                    delay(10)
+                }
+            }
+            assertEquals("\u001b[?64;1;2;6;9;15;18;21;22c", remoteStdin.snapshot())
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    }
+
+    @Test
     fun externalProducerOutputEmitsRenderRequestWithoutComposeStateTick() = runBlocking {
         val state = TerminalSurfaceState()
         val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)

@@ -407,4 +407,22 @@ public class TerminalTest extends TerminalTestCase {
 		assertEnteringStringGivesResponse("\033[6n", "\033[1;1R");
 	}
 
+	public void testSuppressQueryResponsesOSC11() {
+		withTerminalSized(5, 5);
+		enterString("\033]11;?\033\\");
+		String response = mOutput.getOutputAndClear();
+		assertTrue(response.startsWith("\033]11;rgb:"));
+		assertTrue(response.endsWith("\033\\"));
+
+		mTerminal.setSuppressQueryResponses(true);
+		enterString("\033]11;?\033\\");
+		assertEquals("", mOutput.getOutputAndClear());
+
+		mTerminal.setSuppressQueryResponses(false);
+		enterString("\033]11;?\033\\");
+		response = mOutput.getOutputAndClear();
+		assertTrue(response.startsWith("\033]11;rgb:"));
+		assertTrue(response.endsWith("\033\\"));
+	}
+
 }

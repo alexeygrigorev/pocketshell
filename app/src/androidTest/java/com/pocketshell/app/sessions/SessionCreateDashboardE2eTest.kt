@@ -144,7 +144,7 @@ class SessionCreateDashboardE2eTest {
         // visible again with the live client still registered.
         performTmuxChromeBack()
         compose.waitUntil(timeoutMillis = 30_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+            compose.onAllNodesWithTag(DASHBOARD_SESSIONS_SECTION_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }

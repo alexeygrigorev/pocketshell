@@ -72,12 +72,15 @@ internal object TerminalTestTimeouts {
     //    inset is removed and settles within a frame or two of the IME
     //    ack landing. This is "our code's responsibility" — Compose
     //    recomposition and AndroidView interop — and is held to a tight
-    //    2 s on CI / 1 s local ceiling.
+    //    3 s on CI / 1 s local ceiling. CI has produced valid passes
+    //    around 2.6 s while the emulator is under full connected-test
+    //    load; the local ceiling stays tight so a dev-box regression still
+    //    surfaces.
     private const val LOCAL_KEYBOARD_HIDE_IME_ACK_CEILING_MS: Long = 2_500L
     private const val CI_KEYBOARD_HIDE_IME_ACK_CEILING_MS: Long = 5_000L
 
     private const val LOCAL_KEYBOARD_HIDE_LAYOUT_STABLE_CEILING_MS: Long = 1_000L
-    private const val CI_KEYBOARD_HIDE_LAYOUT_STABLE_CEILING_MS: Long = 2_000L
+    private const val CI_KEYBOARD_HIDE_LAYOUT_STABLE_CEILING_MS: Long = 3_000L
 
     /**
      * Timeout for a single `waitForVisibleTerminalText` poll loop. The

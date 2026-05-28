@@ -153,6 +153,9 @@ class BackgroundResumeSocketDeathE2eTest {
         // crash repro is the SOCKET dying, not anything to do with input —
         // just observing that the terminal emulator has bytes from the
         // remote is enough to prove the reader path is running.
+        compose.waitUntil(timeoutMillis = 20_000) {
+            visibleTerminalText().isNotBlank()
+        }
         val initialTerminal = visibleTerminalText()
         assertTrue(
             "expected visible terminal text after attach (was empty), got len=${initialTerminal.length}",

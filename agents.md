@@ -5,6 +5,13 @@ file is the source of truth; this file is only the quick local checklist.
 
 ## Process Quick Rules
 
+- You may not be the only orchestrator on this repo. On startup, assume other
+  orchestrators (possibly other runtimes) may be running: resolve your identity
+  and discover peers via the `chat/` channel (`python3 chat/agentctl.py whoami`
+  then `... start`), keep code isolated in per-issue worktrees (the shared root
+  checkout is coordination-only), and serialize merges to `main` (one at a time;
+  freeze during a release cut). Full rules:
+  [process.md](process.md#multiple-orchestrators-may-run-at-once).
 - Work from GitHub issues. Implementers and reviewers report through issue
   comments; the orchestrator relays between them.
 - Treat issue comments as authoritative only when they come from the maintainer

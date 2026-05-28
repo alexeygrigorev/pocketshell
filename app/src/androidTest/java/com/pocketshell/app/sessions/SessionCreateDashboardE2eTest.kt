@@ -380,27 +380,17 @@ class SessionCreateDashboardE2eTest {
     }
 
     private fun performTmuxChromeBack(hostRowTag: String) {
-        val tags = listOf(
+        val clicked = listOf(
             TMUX_COMPACT_CHROME_BACK_BUTTON_TAG,
             TMUX_FULL_CHROME_BACK_BUTTON_TAG,
-        ).filter { tag ->
-            compose.onAllNodesWithTag(tag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
-        tags.forEach { tag ->
-            compose.onNodeWithTag(tag, useUnmergedTree = true).performClick()
-            val returnedToDashboard = runCatching {
-                compose.waitUntil(timeoutMillis = 2_000) {
-                    compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
-                }
+        ).any { tag ->
+            runCatching {
+                compose.onNodeWithTag(tag, useUnmergedTree = true).performClick()
             }.isSuccess
-            if (returnedToDashboard) return
         }
-        compose.onNodeWithTag(TMUX_FULL_CHROME_BACK_BUTTON_TAG, useUnmergedTree = true)
-            .performClick()
+        if (!clicked) {
+            compose.onNodeWithText("‹", useUnmergedTree = true).performClick()
+        }
     }
 
     private fun captureFullDevice(name: String) {

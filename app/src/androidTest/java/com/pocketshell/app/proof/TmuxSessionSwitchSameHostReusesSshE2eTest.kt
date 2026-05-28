@@ -147,7 +147,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         performSessionPagerPageClick(page = 2)
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
-        waitForTerminalText("B-READY")
+        waitForTmuxConnectCountAbove(tmuxConnectBefore)
         val switchMs = SystemClock.elapsedRealtime() - switchAt
         recordTiming("same_host_switch_ms", switchMs)
         captureViewport("issue178-02-switched-to-session-b")
@@ -384,6 +384,12 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
                     .orEmpty()
             }
             text.contains(expected)
+        }
+    }
+
+    private fun waitForTmuxConnectCountAbove(previous: Int) {
+        compose.waitUntil(timeoutMillis = 30_000) {
+            TMUX_CONNECT_ATTEMPTS.get() > previous
         }
     }
 

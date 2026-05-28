@@ -40,7 +40,7 @@ TIMING_DIR="$RUN_DIR/timings"
 DEVICE_ARTIFACT_ROOT="$RUN_DIR/device-artifacts"
 export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$LOG_ROOT/gradle-home}"
 BUILD_APKS="${BUILD_APKS:-1}"
-PHONE_WALKTHROUGH_CLEAN_GENERATED="${PHONE_WALKTHROUGH_CLEAN_GENERATED:-1}"
+PHONE_WALKTHROUGH_CLEAN_GENERATED="${PHONE_WALKTHROUGH_CLEAN_GENERATED:-${PHONE_DOGFOOD_CLEAN_GENERATED:-1}}"
 LOGCAT_LINES="${LOGCAT_LINES:-4000}"
 SSH_KEY="${SSH_KEY:-$ROOT_DIR/tests/docker/test_key}"
 SSH_HOST="${SSH_HOST:-127.0.0.1}"
@@ -464,12 +464,12 @@ install_apk() {
 
 build_and_install_apks() {
   if [[ "$BUILD_APKS" = "1" ]]; then
-    if [[ "$PHONE_DOGFOOD_CLEAN_GENERATED" = "1" ]]; then
+    if [[ "$PHONE_WALKTHROUGH_CLEAN_GENERATED" = "1" ]]; then
       run_logged "07-clean-app-generated-build-outputs" rm -rf "$ROOT_DIR/app/build"
     else
       {
         printf '[%s] 07-clean-app-generated-build-outputs\n' "$(date -Is)"
-        printf 'Skipped because PHONE_DOGFOOD_CLEAN_GENERATED=0\n'
+        printf 'Skipped because PHONE_WALKTHROUGH_CLEAN_GENERATED=0\n'
       } | tee "$LOG_DIR/07-clean-app-generated-build-outputs.log"
     fi
     run_logged "08-build-apks" ./gradlew --no-daemon --no-build-cache --no-parallel :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace

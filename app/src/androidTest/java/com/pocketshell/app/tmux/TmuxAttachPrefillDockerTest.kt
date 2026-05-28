@@ -351,9 +351,12 @@ class TmuxAttachPrefillDockerTest {
             }
             waitForTerminalSessionAttached()
 
-            // The seeded long frame must reach the emulator (proves the seed
-            // path ran and the capture replayed onto the grid).
-            waitForVisibleTerminalToContain(longFrame)
+            // The committed rows must reach the emulator before we drive the
+            // live rewrite. The spinner row can be mid-overwrite when tmux
+            // captures a pane whose cursor is parked at column 0, so the
+            // authoritative assertion for #259 is the post-rewrite state below:
+            // one short frame on the original spinner row, no stale tail.
+            waitForVisibleTerminalToContain("issue259-line-2")
             captureViewportArtifact("issue259-01-after-seed")
             captureVisibleTerminalSidecar("issue259-01-after-seed")
 

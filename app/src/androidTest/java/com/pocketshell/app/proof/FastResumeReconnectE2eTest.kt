@@ -150,9 +150,8 @@ class FastResumeReconnectE2eTest {
         compose.onNodeWithText(SEEDED_SESSION).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
+        val attachedTerminal = waitForVisibleTerminalText("initial attach")
         captureViewport("issue177-01-attached")
-
-        val attachedTerminal = visibleTerminalText()
         assertTrue(
             "expected visible terminal text after attach (was empty), len=${attachedTerminal.length}",
             attachedTerminal.isNotBlank(),
@@ -368,6 +367,16 @@ class FastResumeReconnectE2eTest {
         return text
     }
 
+    private fun waitForVisibleTerminalText(label: String): String {
+        var terminalText = ""
+        compose.waitUntil(timeoutMillis = INITIAL_TERMINAL_TEXT_TIMEOUT_MS) {
+            terminalText = visibleTerminalText()
+            terminalText.isNotBlank()
+        }
+        Log.i(LOG_TAG, "$label terminal text length=${terminalText.length}")
+        return terminalText
+    }
+
     private fun captureViewport(name: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.waitForIdleSync()
@@ -475,5 +484,8 @@ class FastResumeReconnectE2eTest {
          */
         val RELIVE_TIMEOUT_MS: Long =
             if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 15_000L
+
+        val INITIAL_TERMINAL_TEXT_TIMEOUT_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 20_000L else 10_000L
     }
 }

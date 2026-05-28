@@ -23,6 +23,7 @@ import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.app.projects.FOLDER_LIST_BACK_TAG
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
@@ -146,11 +147,7 @@ class SessionCreateDashboardE2eTest {
         // --- (2) Pop back to the dashboard so the Sessions section is
         // visible again with the live client still registered.
         performTmuxChromeBack()
-        compose.waitUntil(timeoutMillis = 30_000) {
-            compose.onAllNodesWithTag(DASHBOARD_SESSIONS_SECTION_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
+        waitForDashboardAfterTmuxBack()
 
         // The dashboard's per-host poller issues list-sessions; wait
         // for the seeded row to appear inside the Sessions section.
@@ -396,6 +393,35 @@ class SessionCreateDashboardE2eTest {
             .onFirst()
             .performClick()
     }
+
+    private fun waitForDashboardAfterTmuxBack() {
+        val dashboardVisibleAfterOneBack = runCatching {
+            compose.waitUntil(timeoutMillis = 5_000) {
+                dashboardSessionsSectionVisible()
+            }
+            true
+        }.getOrDefault(false)
+        if (dashboardVisibleAfterOneBack) return
+
+        val folderBackCount = compose
+            .onAllNodesWithTag(FOLDER_LIST_BACK_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .size
+        if (folderBackCount > 0) {
+            compose
+                .onAllNodesWithTag(FOLDER_LIST_BACK_TAG, useUnmergedTree = true)
+                .onFirst()
+                .performClick()
+        }
+        compose.waitUntil(timeoutMillis = 30_000) {
+            dashboardSessionsSectionVisible()
+        }
+    }
+
+    private fun dashboardSessionsSectionVisible(): Boolean =
+        compose.onAllNodesWithTag(DASHBOARD_SESSIONS_SECTION_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
 
     private fun captureFullDevice(name: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()

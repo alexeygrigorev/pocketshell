@@ -13,7 +13,7 @@ Subcommands
   stderr, unreadable repos produce ``None`` metadata rather than
   aborting the scan.
 - ``pocketshell repos list --remote`` — delegate to
-  ``gh api user/repos --paginate`` (subprocess; same pattern as
+  ``gh api user/repos --paginate --slurp`` (subprocess; same pattern as
   ``pocketshell usage`` delegating to ``quse``). Phone holds zero
   GitHub credentials — locked as D23.
 - ``pocketshell repos list`` (no flag) — defaults to ``--local`` and
@@ -470,7 +470,7 @@ def scan_roots(
 
 
 # ---------------------------------------------------------------------------
-# Remote scan (gh api user/repos --paginate)
+# Remote scan (gh api user/repos --paginate --slurp)
 # ---------------------------------------------------------------------------
 
 
@@ -511,7 +511,7 @@ def fetch_remote_repos(
     per_page: int = GH_API_PER_PAGE,
     gh_binary: Optional[str] = None,
 ) -> list[Repo]:
-    """Call ``gh api user/repos --paginate`` and return parsed repos.
+    """Call ``gh api user/repos --paginate --slurp`` and return parsed repos.
 
     Sorted by ``updated_at`` descending so the picker can show
     most-recently-touched repositories first. Each :class:`Repo` has
@@ -548,11 +548,16 @@ def fetch_remote_repos(
         # page round-trip when ``--limit 5`` is set.
         effective_per_page = min(effective_per_page, limit)
 
+    # Keep PR-A's remote list owner-only. GitHub's default for
+    # /user/repos also includes collaborator/org-member repos, which
+    # makes the picker noisy and was explicitly deferred to a future
+    # --include-orgs style affordance in the #205 spike.
     args = [
         binary,
         "api",
-        f"user/repos?per_page={effective_per_page}",
+        f"user/repos?per_page={effective_per_page}&affiliation=owner&sort=updated",
         "--paginate",
+        "--slurp",
     ]
     completed = subprocess.run(
         args,
@@ -577,12 +582,12 @@ def fetch_remote_repos(
 
 
 def _parse_gh_api_output(raw: str) -> list[dict[str, Any]]:
-    """Parse the stdout of ``gh api ... --paginate``.
+    """Parse the stdout of ``gh api ... --paginate --slurp``.
 
-    ``gh --paginate`` merges all pages into a single JSON array on
-    stdout (verified empirically against ``gh 2.87.0``). We still
-    accept the (defensive) edge case where stdout is empty by
-    returning an empty list.
+    ``gh --paginate`` emits each page separately. ``--slurp`` wraps
+    those page payloads in one outer array, so list endpoints become
+    ``[[repo, ...], [repo, ...]]``. A flat ``[repo, ...]`` is accepted
+    defensively for direct parser callers and older stubs.
     """
     text = raw.strip()
     if not text:
@@ -593,7 +598,14 @@ def _parse_gh_api_output(raw: str) -> list[dict[str, Any]]:
         # (e.g. on an error already surfaced via stderr); treat as
         # empty rather than crashing the scan.
         return []
-    return [entry for entry in data if isinstance(entry, dict)]
+
+    entries: list[dict[str, Any]] = []
+    for item in data:
+        if isinstance(item, dict):
+            entries.append(item)
+        elif isinstance(item, list):
+            entries.extend(entry for entry in item if isinstance(entry, dict))
+    return entries
 
 
 def _repo_from_gh_entry(entry: dict[str, Any]) -> Repo:
@@ -788,7 +800,7 @@ def _try_daemon_list_remote(
         "Discover and operate on git repositories.\n\n"
         "``list --local`` enumerates cloned repos under the configured "
         "scan roots (default ``~/git``). ``list --remote`` delegates to "
-        "``gh api user/repos --paginate`` to enumerate the authenticated "
+        "``gh api user/repos --paginate --slurp`` to enumerate the authenticated "
         "user's GitHub repositories. The JSON shape is unified across "
         "both modes; see ``pocketshell.repos`` module docstring."
     ),
@@ -817,7 +829,7 @@ def repos_group() -> None:
     is_flag=True,
     help=(
         "Enumerate the authenticated user's GitHub repositories via "
-        "``gh api user/repos --paginate``. Requires `gh` on PATH and a "
+        "``gh api user/repos --paginate --slurp``. Requires `gh` on PATH and a "
         "successful prior `gh auth login -s repo:read`."
     ),
 )

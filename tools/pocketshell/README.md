@@ -75,7 +75,7 @@ them transparently.
 ```bash
 pocketshell repos list --local            # scan ~/git for clones (human)
 pocketshell repos list --local --json     # same, JSON output
-pocketshell repos list --remote --json    # via `gh api user/repos --paginate`
+pocketshell repos list --remote --json    # via owner-only `gh api user/repos`
 pocketshell repos list --remote --limit 20
 ```
 
@@ -105,13 +105,13 @@ populates `local` for every entry. `owner` and `full_name` are
 best-effort from the parsed `remote.origin.url`; non-GitHub remotes
 leave them `null`.
 
-`--remote` delegates to `gh api user/repos --paginate`. Requires `gh`
-on PATH (`apt install gh` on Debian/Ubuntu, `brew install gh` on
-macOS) authenticated via `gh auth login -s repo:read`. Sorted by
-`updated_at` descending so the picker shows the most-recently-touched
-repos first. Missing `gh` exits 127 with an install hint; a non-zero
-`gh` exit (auth missing, rate-limit, etc.) propagates the exit code
-and stderr verbatim.
+`--remote` delegates to `gh api 'user/repos?affiliation=owner&sort=updated' --paginate --slurp`.
+Requires `gh` on PATH (`apt install gh` on Debian/Ubuntu,
+`brew install gh` on macOS) authenticated via
+`gh auth login -s repo:read`. Sorted by `updated_at` descending so the
+picker shows the most-recently-touched repos first. Missing `gh` exits
+127 with an install hint; a non-zero `gh` exit (auth missing,
+rate-limit, etc.) propagates the exit code and stderr verbatim.
 
 With neither flag, defaults to `--local` and prints a one-line
 discoverability hint mentioning `--remote`.

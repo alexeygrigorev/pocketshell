@@ -1,6 +1,6 @@
 """Unit tests for `pocketshell repos`.
 
-Scope (issue #242 — first slice of #205):
+Scope (issue #230 PR-A — first slice of #205):
 
 - Existing ``--local`` coverage (carried from #220):
 
@@ -25,7 +25,7 @@ Scope (issue #242 — first slice of #205):
 
 - ``--remote`` coverage (new in #242):
 
-  - Stubbed ``gh api user/repos --paginate`` round-trip (single page
+  - Stubbed ``gh api user/repos --paginate --slurp`` round-trip (single page
     + multi-page) produces the unified ``RemoteInfo`` shape.
   - Missing ``gh`` exits 127 with the friendly install hint.
   - Non-zero ``gh`` exit propagates returncode and stderr.
@@ -125,8 +125,8 @@ def _write_fake_gh(
 
     Two modes:
 
-    - ``pages`` is a list of JSON arrays — the script concatenates them
-      (matching ``gh api --paginate`` which merges pages into one array).
+    - ``pages`` is a list of JSON arrays — the script emits the
+      ``--slurp`` shape, an outer array containing one array per page.
     - ``payload`` is the raw stdout body verbatim.
 
     ``exit_code`` lets us simulate auth failures and rate limits.
@@ -137,13 +137,7 @@ def _write_fake_gh(
     payload_file = target_dir / "_gh_payload.txt"
 
     if pages is not None:
-        # `gh --paginate` returns ONE merged JSON array on stdout for
-        # repository-list endpoints (verified empirically against
-        # gh 2.87.0). Concatenate pages into a single array.
-        merged: list[dict] = []
-        for page in pages:
-            merged.extend(page)
-        payload_file.write_text(json.dumps(merged))
+        payload_file.write_text(json.dumps(pages))
     elif payload is not None:
         payload_file.write_text(payload)
     else:
@@ -687,13 +681,8 @@ def test_fetch_remote_repos_single_page(tmp_path: Path) -> None:
     assert first.remote.updated_at == "2026-05-27T12:00:00Z"
 
 
-def test_fetch_remote_repos_multi_page_concat(tmp_path: Path) -> None:
-    """`gh --paginate` for list endpoints emits a single merged array.
-
-    Verified empirically against gh 2.87.0; the stub reflects that
-    behaviour. Walking multiple pages must therefore still produce one
-    flat array of repos.
-    """
+def test_fetch_remote_repos_multi_page_slurp_output(tmp_path: Path) -> None:
+    """`gh --paginate --slurp` wraps page arrays in one outer array."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     page_one = [
@@ -726,6 +715,36 @@ def test_fetch_remote_repos_respects_limit(tmp_path: Path) -> None:
     assert len(repos) == 3
     # Top 3 by updated_at descending.
     assert [r.name for r in repos] == ["r10", "r9", "r8"]
+
+
+def test_fetch_remote_repos_requests_owner_affiliation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    class Completed:
+        returncode = 0
+        stdout = "[]"
+        stderr = ""
+
+    def fake_run(args: list[str], **_kwargs: object) -> Completed:
+        calls.append(args)
+        return Completed()
+
+    monkeypatch.setattr(repos_mod, "_resolve_gh_binary", lambda: "/usr/bin/gh")
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    fetch_remote_repos()
+
+    assert calls == [
+        [
+            "/usr/bin/gh",
+            "api",
+            "user/repos?per_page=100&affiliation=owner&sort=updated",
+            "--paginate",
+            "--slurp",
+        ]
+    ]
 
 
 def test_fetch_remote_repos_missing_gh_raises() -> None:

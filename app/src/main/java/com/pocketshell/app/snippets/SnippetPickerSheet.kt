@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -171,6 +173,16 @@ internal fun SnippetPickerContent(
     Column(
         modifier = modifier
             .fillMaxWidth()
+            // Issue #253: consume the bottom system insets inside the sheet
+            // content so the lower snippet rows (the explicit Send / Send + ↵
+            // chips) are never drawn under the system navigation bar or the
+            // IME / terminal key-bar region. Without this the sheet content
+            // ran to the very bottom edge and the bottom-most chips rendered
+            // *behind* the bottom controls. `navigationBarsPadding` covers the
+            // gesture / 3-button nav bar; `imePadding` lifts the whole sheet
+            // above the soft keyboard when it is raised.
+            .navigationBarsPadding()
+            .imePadding()
             .padding(horizontal = 18.dp)
             .padding(bottom = 18.dp),
     ) {

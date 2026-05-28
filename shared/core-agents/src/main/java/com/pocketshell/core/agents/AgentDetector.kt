@@ -107,18 +107,15 @@ public class AgentDetector(
      *   the originating cwd as part of the rollout payload; the upstream
      *   candidate-emission step is responsible for filtering to the active
      *   pane's project before handing rows to the detector.
-     * - **OpenCode**: historically a global SQLite at
-     *   `~/.local/share/opencode/opencode.db`, but the deterministic
-     *   PocketShell fixture and tail-friendly newer releases use
-     *   `~/.local/share/opencode/<name>.jsonl` rows. The
-     *   `.local/share/opencode/` prefix matches both. As with Codex, the
-     *   candidate emitter must verify the row's project/cwd before
-     *   treating it as the active pane's conversation log.
+     * - **OpenCode**: global SQLite at
+     *   `~/.local/share/opencode/opencode.db`. The candidate emitter
+     *   scopes rows by `session.directory` / `project.worktree` before
+     *   passing a `opencode.db#<session-id>` source path to the detector.
      */
     public fun expectedPathHints(cwd: String): Map<AgentKind, List<String>> = mapOf(
         AgentKind.ClaudeCode to listOf(".claude/projects/${encodeClaudeCwd(cwd)}"),
         AgentKind.Codex to listOf(".codex/sessions/"),
-        AgentKind.OpenCode to listOf(".local/share/opencode/"),
+        AgentKind.OpenCode to listOf(".local/share/opencode/opencode.db"),
     )
 
     public fun encodeClaudeCwd(cwd: String): String =

@@ -292,6 +292,7 @@ internal class AgentConversationRepository(
     internal fun detectionCommand(cwd: String): String {
         val encodedClaudeCwd = detector.encodeClaudeCwd(cwd)
         val quotedCwd = shellQuote(cwd)
+        val sqlCwd = sqlQuote(cwd.trim().trimEnd('/').ifBlank { "/" })
         // Issue #183: enumerate JSONL candidates for every supported
         // engine. Each engine's discovery walks its conventional log
         // directory and emits one PSV row per recently-modified file
@@ -302,11 +303,11 @@ internal class AgentConversationRepository(
         //
         // Codex's `.codex/sessions/` tree is date-keyed (e.g.
         // `~/.codex/sessions/2026/05/22/rollout-<uuid>.jsonl`), so the
-        // find walks the full subtree. OpenCode rows live one level
-        // deep under `~/.local/share/opencode/`, including the legacy
-        // `opencode.db` SQLite (filtered out — only `*.jsonl` are
-        // tailable). Each branch is best-effort: missing directories
-        // (e.g. user has never run Codex) silently emit nothing.
+        // find walks the full subtree. OpenCode uses a SQLite database
+        // at `~/.local/share/opencode/opencode.db`; the command queries
+        // recent sessions whose directory/worktree matches [cwd].
+        // Each branch is best-effort: missing directories, missing
+        // `sqlite3`, or absent OpenCode databases silently emit nothing.
         //
         // Issue #236: freshness windows differ per engine.
         //  - Claude (`-mmin -5`): Claude streams JSONL writes
@@ -320,15 +321,17 @@ internal class AgentConversationRepository(
         //    2-hour window matches the detector's recency gate
         //    ([AgentDetector.recentWindowMillis]) so a stale-yet-active
         //    Codex/OpenCode rollout survives both filters. The same
-        //    bound applies on the OpenCode branch even though real
-        //    OpenCode persists to SQLite — that mismatch is a separate
-        //    follow-up (real-world OpenCode JSONL discovery is
-        //    aspirational).
+        //    bound also applies to OpenCode's SQLite session rows by
+        //    emitting their `time_updated` as the candidate mtime. The
+        //    candidate path uses `opencode.db#<session-id>` so the
+        //    reader can re-query the selected session instead of trying
+        //    to tail the database file.
         return """
             cwd=$quotedCwd
             claude_dir="${'$'}HOME/.claude/projects/$encodedClaudeCwd"
             codex_dir="${'$'}HOME/.codex/sessions"
             opencode_dir="${'$'}HOME/.local/share/opencode"
+            opencode_db="${'$'}opencode_dir/opencode.db"
             find "${'$'}claude_dir" -maxdepth 1 -type f -name '*.jsonl' -mmin -5 -print 2>/dev/null | while IFS= read -r f; do
               mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
               printf 'claude|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
@@ -337,10 +340,13 @@ internal class AgentConversationRepository(
               mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
               printf 'codex|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
             done
-            find "${'$'}opencode_dir" -maxdepth 1 -type f -name '*.jsonl' -mmin -120 -print 2>/dev/null | while IFS= read -r f; do
-              mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
-              printf 'opencode|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
-            done
+            if [ -f "${'$'}opencode_db" ] && command -v sqlite3 >/dev/null 2>&1; then
+              sqlite3 -readonly -separator '|' "${'$'}opencode_db" "SELECT s.id, COALESCE(s.time_updated, s.time_created, strftime('%s','now') * 1000), COALESCE(p.worktree, ''), COALESCE(s.directory, '') FROM session s LEFT JOIN project p ON p.id = s.project_id WHERE ($sqlCwd = COALESCE(p.worktree, '') OR $sqlCwd LIKE COALESCE(p.worktree, '') || '/%' OR $sqlCwd = COALESCE(s.directory, '') OR $sqlCwd LIKE COALESCE(s.directory, '') || '/%') ORDER BY s.time_updated DESC;" 2>/dev/null | while IFS='|' read -r sid updated _worktree _directory; do
+                [ -n "${'$'}sid" ] || continue
+                mtime=${'$'}(awk 'BEGIN { v = ARGV[1] + 0; if (v > 100000000000) printf "%.3f", v / 1000; else printf "%.3f", v }' "${'$'}updated")
+                printf 'opencode|%s|%s|%s#%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}opencode_db" "${'$'}sid"
+              done
+            fi
         """.trimIndent()
     }
 
@@ -365,11 +371,17 @@ internal class AgentConversationRepository(
             agent = agent,
             path = path,
             modifiedAtMillis = (seconds * 1000).toLong(),
-            sessionId = path.substringAfterLast('/').substringBeforeLast('.'),
+            sessionId = when {
+                agent == AgentKind.OpenCode && "#" in path -> path.substringAfter('#')
+                else -> path.substringAfterLast('/').substringBeforeLast('.')
+            },
             cwd = cwd,
         )
     }
 
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\\''") + "'"
+
+    private fun sqlQuote(value: String): String =
+        "'" + value.replace("'", "''") + "'"
 }

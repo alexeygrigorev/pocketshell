@@ -41,8 +41,8 @@ class AgentDetectorTest {
             hints[AgentKind.Codex],
         )
         assertEquals(
-            "OpenCode hint must point at the .local/share/opencode/ tree",
-            listOf(".local/share/opencode/"),
+            "OpenCode hint must point at the opencode.db store",
+            listOf(".local/share/opencode/opencode.db"),
             hints[AgentKind.OpenCode],
         )
     }
@@ -141,7 +141,7 @@ class AgentDetectorTest {
             candidates = listOf(
                 AgentLogCandidate(
                     agent = AgentKind.OpenCode,
-                    path = "/home/testuser/.local/share/opencode/pocketshell-rows.jsonl",
+                    path = "/home/testuser/.local/share/opencode/opencode.db#opencode-1",
                     modifiedAtMillis = 9_500,
                     sessionId = "opencode-1",
                     cwd = "/workspace/pocketshell",

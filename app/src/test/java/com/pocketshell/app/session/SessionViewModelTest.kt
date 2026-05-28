@@ -913,19 +913,19 @@ class SessionViewModelTest {
     }
 
     @Test
-    fun runtimeDetectionCommandProbesOpenCodeJsonlDirectory() {
-        // Issue #183: OpenCode runtime detection is re-enabled. The
-        // detection command must walk `~/.local/share/opencode/` for
-        // tailable JSONL rows so the conversation pane lights up when
-        // the user attaches to an existing OpenCode session. The legacy
-        // SQLite store is intentionally not probed via `sqlite3` — only
-        // the tail-friendly JSONL rows that share the same per-line
-        // envelope shape used by Claude and Codex.
+    fun runtimeDetectionCommandProbesOpenCodeSqliteDatabase() {
+        // Issue #247: real OpenCode stores sessions in SQLite, not JSONL.
+        // Runtime detection must query opencode.db and match the active
+        // pane cwd against the session/project cwd columns.
         val command = AgentConversationRepository().detectionCommand("/home/alexey/git/pocketshell")
 
         assertTrue("OpenCode runtime detection scans .local/share/opencode/", ".local/share/opencode" in command)
+        assertTrue("OpenCode runtime detection uses opencode.db", "opencode.db" in command)
+        assertTrue("OpenCode runtime detection uses sqlite3", "sqlite3" in command)
+        assertTrue("OpenCode runtime detection checks project worktree", "p.worktree" in command)
+        assertTrue("OpenCode runtime detection checks session directory", "s.directory" in command)
         assertTrue("OpenCode detection emits an 'opencode|...' candidate row", "opencode|" in command)
-        assertTrue("SQLite export path must stay out of runtime detection", "sqlite3" !in command)
+        assertTrue("OpenCode detection must not scan JSONL rows", "find \"\$opencode_dir\" -maxdepth 1 -type f -name '*.jsonl'" !in command)
     }
 
     @Test
@@ -969,12 +969,13 @@ class SessionViewModelTest {
     }
 
     @Test
-    fun runtimeDetectionAcceptsOpenCodeCandidatesFromRemoteOutput() = runTest {
-        // Issue #183: same as the Codex case but for OpenCode JSONL
-        // rows under `.local/share/opencode/`.
+    fun runtimeDetectionAcceptsOpenCodeSqliteCandidatesFromRemoteOutput() = runTest {
+        // Issue #247: OpenCode candidates encode the selected session as
+        // `opencode.db#<session-id>` so downstream reads can query that
+        // database/session pair instead of tailing a JSONL file.
         val recentMtimeSeconds = System.currentTimeMillis() / 1000
         val session = FakeSshSession(
-            execStdout = "opencode|$recentMtimeSeconds|/home/alexey/git/pocketshell|/home/alexey/.local/share/opencode/pocketshell-rows.jsonl\n",
+            execStdout = "opencode|$recentMtimeSeconds|/home/alexey/git/pocketshell|/home/alexey/.local/share/opencode/opencode.db#session-1\n",
         )
         val detection = AgentConversationRepository().detect(
             session = session,
@@ -984,9 +985,10 @@ class SessionViewModelTest {
 
         assertEquals(AgentKind.OpenCode, detection?.agent)
         assertEquals(
-            "/home/alexey/.local/share/opencode/pocketshell-rows.jsonl",
+            "/home/alexey/.local/share/opencode/opencode.db#session-1",
             detection?.sourcePath,
         )
+        assertEquals("session-1", detection?.sessionId)
         assertEquals(AgentDetection.Confidence.ProcessConfirmed, detection?.confidence)
     }
 

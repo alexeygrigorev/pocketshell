@@ -605,6 +605,46 @@ class HostListViewModelTest {
     )
 
     @Test
+    fun createSharePayload_wrapsKeyReferenceImportInQrEnvelope() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "shared-key", privateKeyPath = "/tmp/shared-key"),
+        )
+        val host = HostEntity(
+            name = "shared",
+            hostname = "shared.example.com",
+            port = 2222,
+            username = "ubuntu",
+            keyId = keyId,
+        )
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
+            settingsRepository = newSettingsRepository(),
+        )
+
+        viewModel.createSharePayload(host)
+
+        val share = viewModel.sharePayload.value
+        assertNotNull(share)
+        assertTrue(QrChunkCodec.isEnvelope(share!!.payload))
+        val part = QrChunkCodec.decodePart(share.payload).getOrThrow()
+        assertEquals(1, part.total)
+        val decoded = SshImportPayloadCodec.decode(
+            String(part.chunk, Charsets.UTF_8),
+        ).getOrThrow()
+        assertEquals("shared", decoded.name)
+        assertEquals("shared.example.com", decoded.host)
+        assertEquals(2222, decoded.port)
+        assertEquals("ubuntu", decoded.username)
+        assertEquals(SshImportAuth.KeyReference("shared-key"), decoded.auth)
+    }
+
+    @Test
     fun importSharedHostPayload_insertsHost_whenMatchingKeyExists() = runTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "shared-key", privateKeyPath = "/tmp/shared-key"),

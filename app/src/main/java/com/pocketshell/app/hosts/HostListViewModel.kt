@@ -408,11 +408,11 @@ class HostListViewModel @Inject constructor(
                 _shareMessage.value = "Cannot share ${host.name}: its SSH key is missing"
                 return@launch
             }
-            // Share-out uses the canonical [SshImportPayloadCodec] envelope
-            // with a [SshImportAuth.KeyReference] so private-key material
-            // never leaves the device. The receiver must already have an
-            // SSH key with the same name imported locally.
-            val payload = SshImportPayloadCodec.encode(
+            // Share-out uses the canonical SSH-import payload with a
+            // [SshImportAuth.KeyReference] so private-key material never
+            // leaves the device. Wrap it in the QR envelope because the
+            // live scanner accepts envelope payloads only.
+            val importPayload = SshImportPayloadCodec.encode(
                 SshImportConfig(
                     name = host.name,
                     host = host.hostname,
@@ -421,6 +421,7 @@ class HostListViewModel @Inject constructor(
                     auth = SshImportAuth.KeyReference(name = key.name),
                 ),
             )
+            val payload = QrChunkCodec.encode(importPayload).single()
             _sharePayload.value = HostSharePayload(
                 hostName = host.name,
                 payload = payload,

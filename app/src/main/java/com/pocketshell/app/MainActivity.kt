@@ -334,10 +334,8 @@ private fun AppNavigator(
         AppDestination.SshKeys -> SshKeysScreen(onBack = ::back)
 
         // Issue #129: live camera QR scanner. Dispatches the decoded
-        // payload through the existing host-list import path so both
-        // the legacy single-QR (`pocketshell.ssh-import.v1` JSON) and
-        // the new multi-QR envelope (`pocketshell.qr.v1?...`) share one
-        // code path. The view model is the activity-scoped
+        // envelope payload through the existing host-list import path.
+        // The view model is the activity-scoped
         // [HostListViewModel] so the resulting "Imported …" banner /
         // host insertion are observable in the host list when the
         // navigator pops back.

@@ -37,9 +37,8 @@ sealed interface AppDestination {
      * [com.pocketshell.app.hosts.QrScannerScreen]; on success the
      * payload is dispatched through the existing
      * [com.pocketshell.app.hosts.HostListViewModel.importSharedHostPayload]
-     * entry point, which already understands both the legacy
-     * single-QR payload and the multi-QR envelope from
-     * [com.pocketshell.app.hosts.QrChunkCodec].
+     * entry point, which unwraps [com.pocketshell.app.hosts.QrChunkCodec]
+     * envelopes before importing the SSH host payload.
      */
     data object Scan : AppDestination
 

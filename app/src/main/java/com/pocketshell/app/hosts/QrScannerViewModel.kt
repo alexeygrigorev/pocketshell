@@ -18,10 +18,9 @@ import javax.inject.Inject
  *    [onPermissionGranted] / [State.PermissionDenied] once it calls
  *    [onPermissionDenied].
  *  - [State.Scanning] — the camera preview is live. Each decoded QR
- *    arrives via [onPayloadDecoded]; if it parses as a single-QR
- *    legacy payload OR a single envelope completes the assembly, we
- *    flip to [State.Decoded] and the screen finishes. Otherwise the
- *    progress counter on [State.Scanning] advances.
+ *    arrives via [onPayloadDecoded]; a complete single- or multi-part
+ *    envelope flips to [State.Decoded] and the screen finishes.
+ *    Otherwise the progress counter on [State.Scanning] advances.
  *  - [State.Decoded] — terminal success state. The screen reads the
  *    payload and forwards to the host-list import path.
  *  - [State.Error] — terminal failure state. The screen renders a
@@ -103,7 +102,7 @@ class QrScannerViewModel @Inject constructor() : ViewModel() {
         if (current !is State.Scanning) return
         val payload = text.trim()
         // D22 hard-cut: only the envelope path is accepted. Non-envelope
-        // QR payloads transition to State.Error (no legacy fallback).
+        // QR payloads transition to State.Error.
         if (!QrChunkCodec.isEnvelope(payload)) {
             _state.value = State.Error("QR payload is not a PocketShell envelope")
             return

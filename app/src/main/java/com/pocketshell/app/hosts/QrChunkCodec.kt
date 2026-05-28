@@ -35,10 +35,10 @@ import java.util.zip.CRC32
  * inner payload directly; the assembled output for the single-part case
  * is identical to the raw payload bytes interpreted as UTF-8 text.
  *
- * Un-wrapped single-QR payloads (raw `pocketshell.ssh-import.v1` JSON)
- * are still accepted by [HostListViewModel.importSharedHostPayload].
- * The scanner / decoder probes for the envelope first and falls through
- * to the raw-payload path on mismatch.
+ * The live camera scanner accepts only this envelope. Other import
+ * surfaces may still hand raw `pocketshell.ssh-import.v1` JSON to
+ * [HostListViewModel.importSharedHostPayload] after decoding a file,
+ * pasted text, or deep link.
  */
 object QrChunkCodec {
     /** Envelope prefix. Bumped only on protocol-breaking changes. */

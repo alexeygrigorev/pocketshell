@@ -1094,6 +1094,123 @@ body.standalone {
   color: var(--text-secondary);
 }
 
+/* ============================================
+ * Session swipe affordance + session pager overlay
+ * ============================================ */
+.breadcrumb .swipe-hint {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+/* When the swipe-hint is present it owns the margin-left:auto, so the
+ * kebab sits flush after it rather than being pushed to the far edge. */
+.breadcrumb .swipe-hint + .more {
+  margin-left: 4px;
+}
+
+/* Dimmed full-frame scrim — same 0.92 alpha as the real overlay. */
+.session-pager-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  background: rgba(13, 17, 23, 0.92);
+  display: flex;
+  align-items: flex-end;
+  padding: 16px;
+}
+
+/* Bottom-anchored card sheet — slides up on swipe-down (#237). */
+.session-pager-sheet {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 14px;
+}
+
+.session-pager-head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.session-pager-title { flex: 1; }
+.session-pager-title .label { color: var(--text); font-size: 15px; }
+.session-pager-title .sub { color: var(--text-secondary); font-size: 12px; }
+
+.session-pager-action {
+  color: var(--accent);
+  font-size: 14px;
+  font-weight: 500;
+  padding: 6px 10px;
+}
+
+/* Horizontal pager track: the active card centered, neighbours peeking. */
+.session-pager-track {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  height: 118px;
+}
+
+.session-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding: 16px;
+  border-radius: 8px;
+  background: var(--surface-elev);
+}
+
+.session-card.peek {
+  flex: 0 0 22%;
+  opacity: 0.5;
+}
+
+.session-card.current {
+  background: var(--accent);
+}
+
+.session-card .name {
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.session-card .state {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.session-card.current .name,
+.session-card.current .state,
+.session-card.current .page-indicator {
+  color: var(--bg);
+}
+
+.session-card .page-indicator {
+  font-size: 12px;
+  font-family: var(--font-mono);
+}
+
+.session-pager-hint {
+  margin-top: 12px;
+  text-align: center;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+
 /* Scrollbars */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }

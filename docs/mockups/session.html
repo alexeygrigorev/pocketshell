@@ -21,6 +21,7 @@
       <span class="crumb current">agent-main</span>
       <span class="crumb-sep">›</span>
       <span class="crumb">pane 1</span>
+      <span class="swipe-hint" title="Swipe down to switch sessions">⌄ sessions</span>
       <div class="more">⋮</div>
     </div>
 
@@ -106,6 +107,40 @@
         <div class="kbkey spacebar">&nbsp;</div>
         <div class="kbkey">.</div>
         <div class="kbkey wide">↵</div>
+      </div>
+    </div>
+
+    <!-- Session pager overlay: opened by a swipe-DOWN gesture on the top
+         chrome. A horizontal pager of same-host sessions; swiping left/right
+         (or tapping a card) lazy-attaches the selected session, reusing the
+         live SSH transport and cleanly detaching the previous tmux client.
+         Mirrors the window-switcher pager pattern (swipe-UP). -->
+    <div class="session-pager-overlay">
+      <div class="session-pager-sheet">
+        <div class="session-pager-head">
+          <div class="session-pager-title">
+            <div class="label">Sessions</div>
+            <div class="sub">hetzner</div>
+          </div>
+          <div class="session-pager-action">New</div>
+          <div class="session-pager-action">Close</div>
+        </div>
+        <div class="session-pager-track">
+          <div class="session-card peek">
+            <div class="name">deploy</div>
+            <div class="state">available</div>
+          </div>
+          <div class="session-card current">
+            <div class="name">agent-main</div>
+            <div class="state">current</div>
+            <div class="page-indicator">2 / 3</div>
+          </div>
+          <div class="session-card peek">
+            <div class="name">logs</div>
+            <div class="state">attached</div>
+          </div>
+        </div>
+        <div class="session-pager-hint">⌄ Swipe down opens this · swipe ‹ › between sessions</div>
       </div>
     </div>
   </div>

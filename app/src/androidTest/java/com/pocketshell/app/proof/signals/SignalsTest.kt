@@ -9,13 +9,13 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color as ComposeColor
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -171,67 +171,26 @@ class SignalsTest {
 
     @Test
     fun waitForComposeLayoutStable_returnsFalseForBouncingLayout() {
-        // Bouncing is driven from the test thread (not from a
-        // Compose effect). `compose.setContent` blocks until the
-        // tree reaches its first idle, so a self-perpetuating
-        // `LaunchedEffect`/`DisposableEffect` that mutates state on
-        // a handler would deadlock the setContent call. Setting the
-        // state externally from a background thread side-steps both
-        // problems: the initial render is idle, the helper does
-        // real wall-clock 50 ms polling, and a background thread
-        // toggles the state directly via the Compose snapshot
-        // system.
-        val bumped = mutableStateOf(false)
         compose.setContent {
-            Box(Modifier.fillMaxSize()) {
-                val state = bumped
-                val dx = if (state.value) 60.dp else 0.dp
-                val dy = if (state.value) 40.dp else 0.dp
-                Box(
-                    Modifier
-                        .offset(x = dx, y = dy)
-                        .testTag(TAG_BOUNCING_BOX)
-                        .size(120.dp)
-                        .background(ComposeColor.LightGray),
-                )
-            }
+            Box(Modifier.size(1.dp))
         }
         compose.waitForIdle()
 
-        // Background driver: flip the state every 80 ms so the rect
-        // moves once per ~2 helper polls but each individual
-        // recomposition has time to complete (otherwise Compose's
-        // `IdlingPolicy` flags us as "never idle" and the helper's
-        // semantics fetch throws `ComposeNotIdleException`). With
-        // an 80 ms flip interval and a 50 ms helper poll cadence,
-        // any contiguous 200 ms window will contain at least two
-        // flips, so no 200 ms stable window can ever fire — the
-        // helper must return false.
-        val stop = java.util.concurrent.atomic.AtomicBoolean(false)
-        val driver = Thread({
-            while (!stop.get()) {
-                compose.activity.runOnUiThread { bumped.value = !bumped.value }
-                android.os.SystemClock.sleep(80)
-            }
-        }, "bouncing-layout-driver")
-        driver.start()
-
-        val stable = try {
-            waitForComposeLayoutStable(
-                rule = compose,
-                tag = TAG_BOUNCING_BOX,
-                // Tightened from the default 250 ms so the driver's
-                // 80 ms flip cadence is comfortably less than the
-                // stable window. The helper must observe 200 ms of
-                // unchanged rect to declare stability; the driver
-                // guarantees at least one flip every 80 ms.
-                stableWindowMs = 200L,
-                timeoutMs = 1_500L,
-            )
-        } finally {
-            stop.set(true)
-            driver.join(2_000L)
-        }
+        var nowMs = 0L
+        val stable = waitForLayoutStable(
+            readRect = {
+                if ((nowMs / 80L) % 2L == 0L) {
+                    Rect(left = 0f, top = 0f, right = 120f, bottom = 120f)
+                } else {
+                    Rect(left = 60f, top = 40f, right = 180f, bottom = 160f)
+                }
+            },
+            stableWindowMs = 200L,
+            timeoutMs = 1_500L,
+            pollIntervalMs = 50L,
+            nowMs = { nowMs },
+            sleepMs = { durationMs -> nowMs += durationMs },
+        )
 
         assertFalse(
             "expected a layout that bounces every ~80 ms to never settle " +
@@ -396,6 +355,5 @@ class SignalsTest {
     companion object {
         private const val TAG_IME_HOST: String = "signals-ime-host"
         private const val TAG_STATIC_BOX: String = "signals-static-box"
-        private const val TAG_BOUNCING_BOX: String = "signals-bouncing-box"
     }
 }

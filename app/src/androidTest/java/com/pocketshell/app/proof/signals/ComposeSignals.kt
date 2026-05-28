@@ -73,14 +73,27 @@ fun waitForComposeLayoutStable(
     tag: String,
     stableWindowMs: Long = LAYOUT_STABLE_DEFAULT_WINDOW_MS,
     timeoutMs: Long = LAYOUT_STABLE_DEFAULT_TIMEOUT_MS,
+): Boolean = waitForLayoutStable(
+    readRect = { readRect(rule, tag) },
+    stableWindowMs = stableWindowMs,
+    timeoutMs = timeoutMs,
+)
+
+internal fun waitForLayoutStable(
+    readRect: () -> Rect?,
+    stableWindowMs: Long,
+    timeoutMs: Long,
+    pollIntervalMs: Long = 50L,
+    nowMs: () -> Long = { SystemClock.elapsedRealtime() },
+    sleepMs: (Long) -> Unit = { SystemClock.sleep(it) },
 ): Boolean {
-    val start = SystemClock.elapsedRealtime()
+    val start = nowMs()
     val deadline = start + timeoutMs
-    var lastRect: Rect? = readRect(rule, tag)
-    var lastChangedAt = SystemClock.elapsedRealtime()
-    while (SystemClock.elapsedRealtime() < deadline) {
-        val now = SystemClock.elapsedRealtime()
-        val current = readRect(rule, tag)
+    var lastRect: Rect? = readRect()
+    var lastChangedAt = nowMs()
+    while (nowMs() < deadline) {
+        val now = nowMs()
+        val current = readRect()
         when {
             current == null -> {
                 // The node is not currently mounted/measured — reset the
@@ -95,7 +108,7 @@ fun waitForComposeLayoutStable(
             }
             now - lastChangedAt >= stableWindowMs -> return true
         }
-        SystemClock.sleep(50)
+        sleepMs(pollIntervalMs)
     }
     return false
 }

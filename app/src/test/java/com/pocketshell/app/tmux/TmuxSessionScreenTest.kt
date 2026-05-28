@@ -6,6 +6,7 @@ import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TmuxSessionScreenTest {
@@ -91,7 +92,7 @@ class TmuxSessionScreenTest {
 
         assertEquals(
             listOf(
-                SessionSwitcherPage(name = "work", statusLabel = "current", selectable = true),
+                SessionSwitcherPage(name = "work", statusLabel = "current", selectable = false),
                 SessionSwitcherPage(name = "logs", statusLabel = "attached", selectable = true),
             ),
             pages,
@@ -110,7 +111,7 @@ class TmuxSessionScreenTest {
 
         assertEquals(
             listOf(
-                SessionSwitcherPage(name = "work", statusLabel = "current", selectable = true),
+                SessionSwitcherPage(name = "work", statusLabel = "current", selectable = false),
                 SessionSwitcherPage(name = "logs", statusLabel = "available", selectable = true),
             ),
             pages,
@@ -132,7 +133,7 @@ class TmuxSessionScreenTest {
 
         assertEquals(
             listOf(
-                SessionSwitcherPage(name = "work", statusLabel = "current", selectable = true),
+                SessionSwitcherPage(name = "work", statusLabel = "current", selectable = false),
                 SessionSwitcherPage(name = "logs", statusLabel = "attached", selectable = true),
             ),
             pages,
@@ -159,6 +160,34 @@ class TmuxSessionScreenTest {
             ),
             pages,
         )
+    }
+
+    @Test
+    fun handleTmuxSessionSelectionIgnoresCurrentSessionWithoutDismissing() {
+        val events = mutableListOf<String>()
+
+        handleTmuxSessionSelection(
+            currentSessionName = "work",
+            selectedSessionName = "work",
+            onDismiss = { events += "dismiss" },
+            onReplace = { events += "replace:$it" },
+        )
+
+        assertTrue(events.isEmpty())
+    }
+
+    @Test
+    fun handleTmuxSessionSelectionDismissesThenReplacesDifferentSession() {
+        val events = mutableListOf<String>()
+
+        handleTmuxSessionSelection(
+            currentSessionName = "work",
+            selectedSessionName = "logs",
+            onDismiss = { events += "dismiss" },
+            onReplace = { events += "replace:$it" },
+        )
+
+        assertEquals(listOf("dismiss", "replace:logs"), events)
     }
 
     private fun pickerRequest(): HostTmuxSessionPickerRequest =

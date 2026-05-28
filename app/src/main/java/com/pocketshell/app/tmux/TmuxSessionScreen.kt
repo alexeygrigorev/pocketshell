@@ -997,11 +997,15 @@ public fun TmuxSessionScreen(
                 sessionPickerViewModel.dismiss()
             },
             onSelectSession = { selectedSessionName ->
-                showSessionSwitcher = false
-                sessionPickerViewModel.dismiss()
-                if (selectedSessionName != sessionName) {
-                    onReplaceTmuxSession(selectedSessionName)
-                }
+                handleTmuxSessionSelection(
+                    currentSessionName = sessionName,
+                    selectedSessionName = selectedSessionName,
+                    onDismiss = {
+                        showSessionSwitcher = false
+                        sessionPickerViewModel.dismiss()
+                    },
+                    onReplace = onReplaceTmuxSession,
+                )
             },
             onCreate = {
                 showSessionSwitcher = false
@@ -1021,11 +1025,15 @@ public fun TmuxSessionScreen(
                 sessionPickerViewModel.dismiss()
             },
             onAttach = { selectedSessionName ->
-                showSessionDrawer = false
-                sessionPickerViewModel.dismiss()
-                if (selectedSessionName != sessionName) {
-                    onReplaceTmuxSession(selectedSessionName)
-                }
+                handleTmuxSessionSelection(
+                    currentSessionName = sessionName,
+                    selectedSessionName = selectedSessionName,
+                    onDismiss = {
+                        showSessionDrawer = false
+                        sessionPickerViewModel.dismiss()
+                    },
+                    onReplace = onReplaceTmuxSession,
+                )
             },
             onCreate = {
                 showSessionDrawer = false
@@ -1186,7 +1194,8 @@ private fun SessionSwitcherOverlay(
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(118.dp)
-                        .padding(top = 8.dp),
+                        .padding(top = 8.dp)
+                        .testTag(TMUX_SESSION_PAGER_TAG),
                 ) { page ->
                     val session = pages[page]
                     val selected = session.name == currentSessionName
@@ -1353,6 +1362,7 @@ internal fun TmuxSessionDrawer(
                                 TmuxSessionDrawerRow(
                                     row = row,
                                     selected = row.name == currentSessionName,
+                                    enabled = row.name != currentSessionName,
                                     onClick = { onAttach(row.name) },
                                 )
                             }
@@ -1406,6 +1416,7 @@ private fun TmuxSessionDrawerMessage(text: String) {
 private fun TmuxSessionDrawerRow(
     row: HostTmuxSessionRow,
     selected: Boolean,
+    enabled: Boolean,
     onClick: () -> Unit,
 ) {
     Row(
@@ -1415,7 +1426,11 @@ private fun TmuxSessionDrawerRow(
                 color = if (selected) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
                 shape = RoundedCornerShape(8.dp),
             )
-            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
+            .clickable(
+                enabled = enabled,
+                role = androidx.compose.ui.semantics.Role.Button,
+                onClick = onClick,
+            )
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1450,6 +1465,17 @@ internal data class SessionSwitcherPage(
     val selectable: Boolean,
 )
 
+internal fun handleTmuxSessionSelection(
+    currentSessionName: String,
+    selectedSessionName: String,
+    onDismiss: () -> Unit,
+    onReplace: (String) -> Unit,
+) {
+    if (selectedSessionName == currentSessionName) return
+    onDismiss()
+    onReplace(selectedSessionName)
+}
+
 internal fun sessionSwitcherPages(
     state: HostTmuxSessionPickerState,
     currentSessionName: String,
@@ -1457,7 +1483,7 @@ internal fun sessionSwitcherPages(
     val current = SessionSwitcherPage(
         name = currentSessionName,
         statusLabel = "current",
-        selectable = true,
+        selectable = false,
     )
     return when (state) {
         HostTmuxSessionPickerState.Idle,
@@ -1476,7 +1502,7 @@ internal fun sessionSwitcherPages(
                 )
             }
             val currentPage = rows.firstOrNull { it.name == currentSessionName }
-                ?.copy(statusLabel = "current")
+                ?.copy(statusLabel = "current", selectable = false)
                 ?: current
             listOf(currentPage) + rows.filterNot { it.name == currentSessionName }
         }
@@ -1728,6 +1754,7 @@ internal const val TMUX_NEW_WINDOW_BUTTON_TAG = "tmux:new-window-button"
 internal const val TMUX_WINDOW_SWITCHER_OVERLAY_TAG = "tmux:window-switcher"
 internal const val TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX = "tmux:window-switcher-page:"
 internal const val TMUX_SESSION_PAGER_OVERLAY_TAG = "tmux:session-pager"
+internal const val TMUX_SESSION_PAGER_TAG = "tmux:session-pager-control"
 internal const val TMUX_SESSION_PAGER_PAGE_TAG_PREFIX = "tmux:session-pager-page:"
 internal const val TMUX_SESSION_PAGER_INDICATOR_TAG = "tmux:session-pager-indicator"
 

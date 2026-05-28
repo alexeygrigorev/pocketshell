@@ -535,8 +535,8 @@ class BackgroundResumeSocketDeathE2eTest {
         const val CONNECTION_LOST_MARKER: String = "Disconnected from"
 
         /**
-         * After moveToState(CREATED) we wait this long for the lifecycle
-         * dispatcher to drain (ON_PAUSE + ON_STOP) so the kill lands on a
+         * After moveToState(STARTED) we wait this long for the lifecycle
+         * dispatcher to drain (ON_PAUSE) so the kill lands on a
          * cleanly paused activity.
          */
         const val LIFECYCLE_DRAIN_MS: Long = 750L

@@ -12,6 +12,8 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeLeft
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -21,6 +23,7 @@ import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.tmux.SSH_HANDSHAKE_ATTEMPTS
 import com.pocketshell.app.tmux.TMUX_CONNECT_ATTEMPTS
+import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -118,9 +121,10 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
         waitForText(SESSION_A, timeoutMs = pickerWaitMs)
-        compose.onNodeWithText(SESSION_A).performClick()
+        compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
+        waitForTerminalText("A-READY")
         captureViewport("issue178-01-attached-session-a")
 
         // ---- (2) Snapshot the SSH handshake counter and tmux connect
@@ -138,17 +142,11 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         compose.onNodeWithText("⋮").performClick()
         compose.onNodeWithText("Switch session").performClick()
         waitForText(SESSION_B, timeoutMs = pickerWaitMs)
-        compose.onAllNodesWithText("Attach")
-            .fetchSemanticsNodes()
-            .also {
-                assertTrue(
-                    "expected at least one Attach row in the drawer; got ${it.size}",
-                    it.isNotEmpty(),
-                )
-            }
-        compose.onNodeWithText(SESSION_B).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_PAGER_TAG, useUnmergedTree = true)
+            .performTouchInput { swipeLeft() }
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
+        waitForTerminalText("B-READY")
         val switchMs = SystemClock.elapsedRealtime() - switchAt
         recordTiming("same_host_switch_ms", switchMs)
         captureViewport("issue178-02-switched-to-session-b")
@@ -234,6 +232,25 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
             appendLine("set -eu")
             appendLine("tmux kill-session -t ${shellQuote(SESSION_A)} 2>/dev/null || true")
             appendLine("tmux kill-session -t ${shellQuote(SESSION_B)} 2>/dev/null || true")
+            appendLine("mkdir -p \"\$HOME/.local/bin\"")
+            appendLine("if [ -f \"\$HOME/.local/bin/tmuxctl\" ] && [ ! -f \"\$HOME/.local/bin/tmuxctl.issue178-backup\" ]; then")
+            appendLine("  mv \"\$HOME/.local/bin/tmuxctl\" \"\$HOME/.local/bin/tmuxctl.issue178-backup\"")
+            appendLine("fi")
+            appendLine("cat > \"\$HOME/.local/bin/tmuxctl\" <<'ISSUE178_TMUXCTL'")
+            appendLine("#!/bin/sh")
+            appendLine("if [ \"\${1:-}\" = \"list\" ]; then")
+            appendLine("  printf 'IDX  SESSION               CREATED\\n'")
+            appendLine("  printf '1    $SESSION_A           2026-05-28 11:00:00\\n'")
+            appendLine("  printf '2    $SESSION_B           2026-05-28 11:00:01\\n'")
+            appendLine("  printf '\\nJoin a session: tmuxctl <id> or tmuxctl <session>\\n'")
+            appendLine("  printf 'Create a new one: tmuxctl :<session>\\n'")
+            appendLine("  printf 'Use current folder: tmuxctl - or tmuxctl -name\\n'")
+            appendLine("  printf 'Help: tmuxctl --help\\n'")
+            appendLine("  exit 0")
+            appendLine("fi")
+            appendLine("exec tmux \"\$@\"")
+            appendLine("ISSUE178_TMUXCTL")
+            appendLine("chmod +x \"\$HOME/.local/bin/tmuxctl\"")
             appendLine(
                 "tmux new-session -d -s ${shellQuote(SESSION_A)} " +
                     shellQuote("printf 'A-READY\\n'; exec sh"),
@@ -277,7 +294,10 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
                     session.use {
                         it.exec(
                             "tmux kill-session -t ${shellQuote(SESSION_A)} 2>/dev/null || true; " +
-                                "tmux kill-session -t ${shellQuote(SESSION_B)} 2>/dev/null || true",
+                                "tmux kill-session -t ${shellQuote(SESSION_B)} 2>/dev/null || true; " +
+                                "if [ -f \"\$HOME/.local/bin/tmuxctl.issue178-backup\" ]; then " +
+                                "mv \"\$HOME/.local/bin/tmuxctl.issue178-backup\" \"\$HOME/.local/bin/tmuxctl\"; " +
+                                "else rm -f \"\$HOME/.local/bin/tmuxctl\"; fi",
                         )
                     }
                 }
@@ -301,6 +321,22 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
                 attached = view?.currentSession != null && view.mEmulator != null
             }
             attached
+        }
+    }
+
+    private fun waitForTerminalText(expected: String) {
+        compose.waitUntil(timeoutMillis = 30_000) {
+            var text = ""
+            launchedActivity?.onActivity { activity ->
+                text = activity.window.decorView
+                    .findTerminalView()
+                    ?.currentSession
+                    ?.emulator
+                    ?.screen
+                    ?.transcriptText
+                    .orEmpty()
+            }
+            text.contains(expected)
         }
     }
 

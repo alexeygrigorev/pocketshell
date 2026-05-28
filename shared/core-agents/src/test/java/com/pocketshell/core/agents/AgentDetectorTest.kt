@@ -268,6 +268,96 @@ class AgentDetectorTest {
     }
 
     @Test
+    fun requireProcessMatchPrefersConfirmedOpenCodeOverNewerUnconfirmedClaudeCandidate() {
+        val detection = detector.detect(
+            cwd = "/workspace/pocketshell",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.ClaudeCode,
+                    path = "/home/testuser/.claude/projects/-workspace-pocketshell/pocketshell-claude.jsonl",
+                    modifiedAtMillis = 9_900,
+                    sessionId = "pocketshell-claude",
+                ),
+                AgentLogCandidate(
+                    agent = AgentKind.OpenCode,
+                    path = "/home/testuser/.local/share/opencode/opencode.db#opencode-1",
+                    modifiedAtMillis = 9_000,
+                    sessionId = "opencode-1",
+                    cwd = "/workspace/pocketshell",
+                ),
+            ),
+            processLines = listOf("4242 pts/3 00:00:00 node /usr/local/bin/opencode"),
+            requireProcessMatch = true,
+        )
+
+        assertEquals(AgentKind.OpenCode, detection?.agent)
+        assertEquals("opencode-1", detection?.sessionId)
+        assertEquals(AgentDetection.Confidence.ProcessConfirmed, detection?.confidence)
+    }
+
+    @Test
+    fun nonStrictDetectionPreservesMostRecentCandidateEvenWhenOlderCandidateIsConfirmed() {
+        val detection = detector.detect(
+            cwd = "/workspace/pocketshell",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.OpenCode,
+                    path = "/home/testuser/.local/share/opencode/opencode.db#opencode-1",
+                    modifiedAtMillis = 9_000,
+                    sessionId = "opencode-1",
+                    cwd = "/workspace/pocketshell",
+                ),
+                AgentLogCandidate(
+                    agent = AgentKind.ClaudeCode,
+                    path = "/home/testuser/.claude/projects/-workspace-pocketshell/claude-newer.jsonl",
+                    modifiedAtMillis = 9_900,
+                    sessionId = "claude-newer",
+                ),
+            ),
+            processLines = listOf("4242 pts/3 00:00:00 node /usr/local/bin/opencode"),
+            requireProcessMatch = false,
+        )
+
+        assertEquals(AgentKind.ClaudeCode, detection?.agent)
+        assertEquals("claude-newer", detection?.sessionId)
+        assertEquals(AgentDetection.Confidence.RecentFile, detection?.confidence)
+    }
+
+    @Test
+    fun claudeLogPathInOpenCodeProcessArgsDoesNotConfirmClaudeCandidate() {
+        val detection = detector.detect(
+            cwd = "/workspace/pocketshell",
+            nowMillis = 10_000,
+            candidates = listOf(
+                AgentLogCandidate(
+                    agent = AgentKind.ClaudeCode,
+                    path = "/home/testuser/.claude/projects/-workspace-pocketshell/pocketshell-claude.jsonl",
+                    modifiedAtMillis = 9_900,
+                    sessionId = "pocketshell-claude",
+                ),
+                AgentLogCandidate(
+                    agent = AgentKind.OpenCode,
+                    path = "/home/testuser/.local/share/opencode/opencode.db#opencode-1",
+                    modifiedAtMillis = 9_000,
+                    sessionId = "opencode-1",
+                    cwd = "/workspace/pocketshell",
+                ),
+            ),
+            processLines = listOf(
+                "4242 pts/3 00:00:00 node /usr/local/bin/opencode --fixture " +
+                    "/home/testuser/.claude/projects/-workspace-pocketshell/pocketshell-claude.jsonl",
+            ),
+            requireProcessMatch = true,
+        )
+
+        assertEquals(AgentKind.OpenCode, detection?.agent)
+        assertEquals("opencode-1", detection?.sessionId)
+        assertEquals(AgentDetection.Confidence.ProcessConfirmed, detection?.confidence)
+    }
+
+    @Test
     fun requireProcessMatchDefaultsToFalseAndPreservesPreviousBehaviour() {
         // The session-scoped call path
         // ([AgentConversationRepository.detect]) still wants

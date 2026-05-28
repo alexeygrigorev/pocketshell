@@ -42,9 +42,12 @@ public class AgentDetector(
     private val recentWindowMillis: Long = 120 * 60 * 1000L,
 ) {
     /**
-     * Returns the most-recent matching JSONL candidate as an
-     * [AgentDetection], or `null` if no candidate satisfies the recency +
-     * path-hint filter.
+     * Returns the best matching log candidate as an [AgentDetection], or
+     * `null` if no candidate satisfies the recency + path-hint filter.
+     * For the default session-scoped path, the most-recent candidate
+     * wins. When [requireProcessMatch] is `true`, process-confirmed
+     * candidates are preferred over unconfirmed recent files; within
+     * each group the most-recent candidate wins.
      *
      * Confidence is `ProcessConfirmed` when [processLines] contains a row
      * naming the same agent; otherwise `RecentFile`.
@@ -68,15 +71,24 @@ public class AgentDetector(
     ): AgentDetection? {
         val normalizedCwd = normalizeCwd(cwd)
         val expected = expectedPathHints(normalizedCwd)
-        val recent = candidates
+        val matchingCandidates = candidates
             .filter { nowMillis - it.modifiedAtMillis in 0..recentWindowMillis }
             .filter { candidate ->
                 expected[candidate.agent]?.any { candidate.path.contains(it) } ?: false
             }
-            .maxByOrNull { it.modifiedAtMillis }
-            ?: return null
-        val confirmed = processLines.any { line -> line.namesAgent(recent.agent) }
-        if (requireProcessMatch && !confirmed) return null
+        val ranked = matchingCandidates.map { candidate ->
+            candidate to processLines.any { line -> line.namesAgent(candidate.agent) }
+        }
+        val selected = if (requireProcessMatch) {
+            ranked
+                .filter { (_, confirmed) -> confirmed }
+                .maxByOrNull { (candidate, _) -> candidate.modifiedAtMillis }
+                ?: return null
+        } else {
+            ranked.maxByOrNull { (candidate, _) -> candidate.modifiedAtMillis }
+        } ?: return null
+        val recent = selected.first
+        val confirmed = selected.second
         return AgentDetection(
             agent = recent.agent,
             sourcePath = recent.path,
@@ -127,9 +139,12 @@ public class AgentDetector(
     private fun String.namesAgent(agent: AgentKind): Boolean {
         val lower = lowercase()
         return when (agent) {
-            AgentKind.ClaudeCode -> lower.contains("claude")
-            AgentKind.Codex -> lower.contains("codex")
-            AgentKind.OpenCode -> lower.contains("opencode")
+            AgentKind.ClaudeCode -> lower.containsCommandToken("claude(?:-?code)?")
+            AgentKind.Codex -> lower.containsCommandToken("codex")
+            AgentKind.OpenCode -> lower.containsCommandToken("open[-_]?code(?:[-_][a-z0-9]+)?")
         }
     }
+
+    private fun String.containsCommandToken(commandPattern: String): Boolean =
+        Regex("(^|[\\s/|;&(])$commandPattern(?=$|[\\s/|;&):])").containsMatchIn(this)
 }

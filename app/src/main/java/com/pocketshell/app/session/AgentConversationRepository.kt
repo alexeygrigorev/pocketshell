@@ -10,8 +10,17 @@ import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationParser
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.agents.OpenCodeReader
+import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshSession
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import java.io.IOException
 
 /**
  * Issue #160 (review round 2): every locally-inserted "optimistic" user
@@ -114,6 +123,8 @@ internal const val DEFAULT_MAX_AGENT_EVENTS: Int = 500
 
 internal class AgentConversationRepository(
     private val detector: AgentDetector = AgentDetector(),
+    private val tailScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    private val openCodePollIntervalMillis: Long = 2_000L,
 ) {
     suspend fun detect(
         session: SshSession,
@@ -245,6 +256,10 @@ internal class AgentConversationRepository(
         detection: AgentDetection,
         maxLines: Int = 200,
     ): List<ConversationEvent> {
+        if (detection.agent == AgentKind.OpenCode) {
+            val output = exportOpenCodeSqliteRows(session, detection, maxMessages = maxLines)
+            return OpenCodeReader().parseSqliteJsonRows(output)
+        }
         val parser = parserFor(detection.agent) ?: return emptyList()
         val result = session.exec("tail -n $maxLines ${shellQuote(detection.sourcePath)} 2>/dev/null || true")
         return result.stdout.lineSequence().flatMap { parser.parseLine(it) }.toList()
@@ -255,10 +270,9 @@ internal class AgentConversationRepository(
         detection: AgentDetection,
         onEvent: (ConversationEvent) -> Unit,
     ): Job? {
-        // Issue #160: OpenCode now tails its JSONL via `session.tail`
-        // identically to Claude and Codex. Polling has been removed —
-        // the row shape is the same per-line JSON envelope used by the
-        // batch [OpenCodeReader.parseRows] path (see [parserFor]).
+        if (detection.agent == AgentKind.OpenCode) {
+            return tailEventsFromLine(session, detection, fromLineExclusive = 0L, onEvent)
+        }
         val parser = parserFor(detection.agent) ?: return null
         return session.tail(detection.sourcePath) { line ->
             parser.parseLine(line).forEach(onEvent)
@@ -266,7 +280,13 @@ internal class AgentConversationRepository(
     }
 
     suspend fun lineCount(session: SshSession, detection: AgentDetection): Long =
-        session.exec("wc -l < ${shellQuote(detection.sourcePath)} 2>/dev/null || printf 0")
+        session.exec(
+            if (detection.agent == AgentKind.OpenCode) {
+                "(stat -c '%Y' ${shellQuote(openCodeDbPath(detection))} 2>/dev/null || stat -f '%m' ${shellQuote(openCodeDbPath(detection))} 2>/dev/null || printf 0)"
+            } else {
+                "wc -l < ${shellQuote(detection.sourcePath)} 2>/dev/null || printf 0"
+            },
+        )
             .stdout
             .trim()
             .toLongOrNull() ?: 0L
@@ -277,10 +297,95 @@ internal class AgentConversationRepository(
         fromLineExclusive: Long,
         onEvent: (ConversationEvent) -> Unit,
     ): Job? {
+        if (detection.agent == AgentKind.OpenCode) {
+            val sessionId = openCodeSessionId(detection) ?: return null
+            return tailScope.launch {
+                val reader = OpenCodeReader()
+                val emittedEvents = linkedMapOf<String, ConversationEvent>()
+                while (isActive) {
+                    val output = try {
+                        exportOpenCodeSqliteRows(
+                            session = session,
+                            detection = detection,
+                            sessionId = sessionId,
+                            maxMessages = DEFAULT_MAX_AGENT_EVENTS * 2,
+                        )
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: SshException) {
+                        return@launch
+                    } catch (_: IOException) {
+                        return@launch
+                    }
+                    val snapshotEvents = reader.parseSqliteJsonRows(output)
+                    val snapshotIds = snapshotEvents.mapTo(mutableSetOf()) { it.id }
+                    // Emit the first snapshot instead of seeding it as "seen":
+                    // rows inserted between the initial read and tail startup
+                    // must still reach the UI, where reconciliation replaces
+                    // same-id events.
+                    snapshotEvents.forEach { event ->
+                        if (emittedEvents[event.id] != event) {
+                            emittedEvents.remove(event.id)
+                            emittedEvents[event.id] = event
+                            onEvent(event)
+                        }
+                    }
+                    val iterator = emittedEvents.entries.iterator()
+                    while (iterator.hasNext()) {
+                        if (iterator.next().key !in snapshotIds) {
+                            iterator.remove()
+                        }
+                    }
+                    delay(openCodePollIntervalMillis)
+                }
+            }
+        }
         val parser = parserFor(detection.agent) ?: return null
         return session.tail(detection.sourcePath, fromLineExclusive) { line ->
             parser.parseLine(line).forEach(onEvent)
         }
+    }
+
+    private suspend fun exportOpenCodeSqliteRows(
+        session: SshSession,
+        detection: AgentDetection,
+        maxMessages: Int,
+    ): String {
+        val sessionId = openCodeSessionId(detection) ?: return ""
+        return exportOpenCodeSqliteRows(session, detection, sessionId, maxMessages)
+    }
+
+    private suspend fun exportOpenCodeSqliteRows(
+        session: SshSession,
+        detection: AgentDetection,
+        sessionId: String,
+        maxMessages: Int,
+    ): String {
+        val dbPath = openCodeDbPath(detection)
+        val boundedMaxMessages = maxMessages.coerceAtLeast(1)
+        val query = """
+            WITH recent_messages AS (
+              SELECT *
+              FROM message
+              WHERE session_id = ${sqlQuote(sessionId)}
+              ORDER BY COALESCE(time_updated, time_created) DESC, time_created DESC, id DESC
+              LIMIT $boundedMaxMessages
+            )
+            SELECT json_object(
+              'message_id', m.id,
+              'message_data', m.data,
+              'message_time_created', m.time_created,
+              'message_time_updated', m.time_updated,
+              'part_id', p.id,
+              'part_data', p.data,
+              'part_time_created', p.time_created
+            )
+            FROM recent_messages m
+            LEFT JOIN part p ON p.message_id = m.id
+            ORDER BY m.time_created, m.id, p.time_created, p.id;
+        """.trimIndent().replace("\n", " ")
+        return session.exec("sqlite3 -readonly ${shellQuote(dbPath)} ${shellQuote(query)} 2>/dev/null || true")
+            .stdout
     }
 
     private fun parserFor(agent: AgentKind): ConversationParser? = when (agent) {
@@ -293,6 +398,12 @@ internal class AgentConversationRepository(
         val encodedClaudeCwd = detector.encodeClaudeCwd(cwd)
         val quotedCwd = shellQuote(cwd)
         val sqlCwd = sqlQuote(cwd.trim().trimEnd('/').ifBlank { "/" })
+        val openCodeCwdWhere = """
+            ((p.worktree IS NOT NULL AND p.worktree != '' AND ($sqlCwd = p.worktree OR substr($sqlCwd, 1, length(p.worktree) + 1) = p.worktree || '/')) OR (s.directory IS NOT NULL AND s.directory != '' AND ($sqlCwd = s.directory OR substr($sqlCwd, 1, length(s.directory) + 1) = s.directory || '/')))
+        """.trimIndent().replace("\n", " ")
+        val openCodeSessionQuery = """
+            SELECT s.id, COALESCE(s.time_updated, s.time_created, strftime('%s','now') * 1000), COALESCE(p.worktree, ''), COALESCE(s.directory, '') FROM session s LEFT JOIN project p ON p.id = s.project_id WHERE $openCodeCwdWhere ORDER BY s.time_updated DESC;
+        """.trimIndent()
         // Issue #183: enumerate JSONL candidates for every supported
         // engine. Each engine's discovery walks its conventional log
         // directory and emits one PSV row per recently-modified file
@@ -341,7 +452,7 @@ internal class AgentConversationRepository(
               printf 'codex|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
             done
             if [ -f "${'$'}opencode_db" ] && command -v sqlite3 >/dev/null 2>&1; then
-              sqlite3 -readonly -separator '|' "${'$'}opencode_db" "SELECT s.id, COALESCE(s.time_updated, s.time_created, strftime('%s','now') * 1000), COALESCE(p.worktree, ''), COALESCE(s.directory, '') FROM session s LEFT JOIN project p ON p.id = s.project_id WHERE ($sqlCwd = COALESCE(p.worktree, '') OR $sqlCwd LIKE COALESCE(p.worktree, '') || '/%' OR $sqlCwd = COALESCE(s.directory, '') OR $sqlCwd LIKE COALESCE(s.directory, '') || '/%') ORDER BY s.time_updated DESC;" 2>/dev/null | while IFS='|' read -r sid updated _worktree _directory; do
+              sqlite3 -readonly -separator '|' "${'$'}opencode_db" ${shellQuote(openCodeSessionQuery)} 2>/dev/null | while IFS='|' read -r sid updated _worktree _directory; do
                 [ -n "${'$'}sid" ] || continue
                 mtime=${'$'}(awk 'BEGIN { v = ARGV[1] + 0; if (v > 100000000000) printf "%.3f", v / 1000; else printf "%.3f", v }' "${'$'}updated")
                 printf 'opencode|%s|%s|%s#%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}opencode_db" "${'$'}sid"
@@ -384,4 +495,11 @@ internal class AgentConversationRepository(
 
     private fun sqlQuote(value: String): String =
         "'" + value.replace("'", "''") + "'"
+
+    private fun openCodeDbPath(detection: AgentDetection): String =
+        detection.sourcePath.substringBefore('#')
+
+    private fun openCodeSessionId(detection: AgentDetection): String? =
+        detection.sessionId?.takeIf { it.isNotBlank() }
+            ?: detection.sourcePath.substringAfter('#', "").takeIf { it.isNotBlank() }
 }

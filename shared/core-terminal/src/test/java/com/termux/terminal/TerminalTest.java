@@ -347,6 +347,26 @@ public class TerminalTest extends TerminalTestCase {
 		withTerminalSized(11, 2).enterString("01234567890\033[44m\r\tXX").assertLinesAre("01234567XX0", "           ");
 	}
 
+	public void testCarriageReturnOverwriteClearsStaleTailBeforeLinefeed() {
+		withTerminalSized(12, 3)
+				.enterString("thinking...\rDone\r\nNext")
+				.assertLinesAre("Done        ", "Next        ", "            ");
+		assertEquals("Done\nNext", mTerminal.getScreen().getTranscriptText());
+	}
+
+	public void testCursorOverwriteClearsStaleTailBeforeLinefeed() {
+		withTerminalSized(12, 3)
+				.enterString("Claude Code\033[1GDone\r\nNext")
+				.assertLinesAre("Done        ", "Next        ", "            ");
+		assertEquals("Done\nNext", mTerminal.getScreen().getTranscriptText());
+	}
+
+	public void testCarriageReturnLinefeedWithoutOverwriteKeepsLine() {
+		withTerminalSized(8, 2)
+				.enterString("abc\r\nnext")
+				.assertLinesAre("abc     ", "next    ");
+	}
+
 	public void testSuppressQueryResponsesXTWINOPS() {
 		withTerminalSized(5, 5);
 		assertEnteringStringGivesResponse("\033[14t", "\033[4;75;65t");

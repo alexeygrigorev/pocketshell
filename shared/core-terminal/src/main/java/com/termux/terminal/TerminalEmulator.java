@@ -182,6 +182,12 @@ public final class TerminalEmulator {
         mSuppressQueryResponses = suppress;
     }
 
+    private int mCarriageReturnOverwriteRow = -1;
+    private int mCarriageReturnOverwriteOriginalEndCol = -1;
+    private int mCarriageReturnOverwriteNewEndCol = -1;
+    private boolean mCarriageReturnOverwriteHasOutput = false;
+    private boolean mCarriageReturnOverwriteFromCarriageReturn = false;
+
     TerminalSessionClient mClient;
 
     /** Keeps track of the current argument of the current escape sequence. Ranges from 0 to MAX_ESCAPE_PARAMETERS-1. */
@@ -620,6 +626,8 @@ public final class TerminalEmulator {
                 doLinefeed();
                 break;
             case 13: // Carriage return (CR, \r).
+                finishCarriageReturnOverwrite();
+                recordCarriageReturnOverwrite(true);
                 setCursorCol(mLeftMargin);
                 break;
             case 14: // Shift Out (Ctrl-N, SO) → Switch to Alternate Character Set. This invokes the G1 character set.
@@ -1377,6 +1385,7 @@ public final class TerminalEmulator {
     }
 
     private void doLinefeed() {
+        if (mCarriageReturnOverwriteFromCarriageReturn) finishCarriageReturnOverwrite();
         boolean belowScrollingRegion = mCursorRow >= mBottomMargin;
         int newCursorRow = mCursorRow + 1;
         if (belowScrollingRegion) {
@@ -2213,6 +2222,7 @@ public final class TerminalEmulator {
     }
 
     private void scrollDownOneLine() {
+        finishCarriageReturnOverwrite();
         mScrollCounter++;
         long currentStyle = getStyle();
         if (mLeftMargin != 0 || mRightMargin != mColumns) {
@@ -2498,6 +2508,8 @@ public final class TerminalEmulator {
         if (column < 0) column = 0;
         mScreen.setChar(column, mCursorRow, codePoint, getStyle());
 
+        markCarriageReturnOverwriteOutput(displayWidth);
+
         if (autoWrap && displayWidth > 0)
             mAboutToAutoWrap = (mCursorCol == mRightMargin - displayWidth);
 
@@ -2510,6 +2522,7 @@ public final class TerminalEmulator {
     }
 
     private void setCursorCol(int col) {
+        if (col < mCursorCol && mCarriageReturnOverwriteRow == -1) recordCarriageReturnOverwrite(false);
         mCursorCol = col;
         mAboutToAutoWrap = false;
     }
@@ -2524,6 +2537,48 @@ public final class TerminalEmulator {
         mCursorRow = Math.max(0, Math.min(row, mRows - 1));
         mCursorCol = Math.max(0, Math.min(col, mColumns - 1));
         mAboutToAutoWrap = false;
+    }
+
+    private void recordCarriageReturnOverwrite(boolean fromCarriageReturn) {
+        int originalEndCol = mAboutToAutoWrap ? mRightMargin : mCursorCol;
+        if (originalEndCol <= mLeftMargin) {
+            clearCarriageReturnOverwrite();
+            return;
+        }
+        mCarriageReturnOverwriteRow = mCursorRow;
+        mCarriageReturnOverwriteOriginalEndCol = originalEndCol;
+        mCarriageReturnOverwriteNewEndCol = mLeftMargin;
+        mCarriageReturnOverwriteHasOutput = false;
+        mCarriageReturnOverwriteFromCarriageReturn = fromCarriageReturn;
+    }
+
+    private void markCarriageReturnOverwriteOutput(int displayWidth) {
+        if (displayWidth <= 0 || mCarriageReturnOverwriteRow != mCursorRow) return;
+        mCarriageReturnOverwriteHasOutput = true;
+        mCarriageReturnOverwriteNewEndCol = Math.max(
+            mCarriageReturnOverwriteNewEndCol,
+            Math.min(mCursorCol + displayWidth, mRightMargin)
+        );
+    }
+
+    private void finishCarriageReturnOverwrite() {
+        if (mCarriageReturnOverwriteRow == mCursorRow && mCarriageReturnOverwriteHasOutput
+            && mCarriageReturnOverwriteNewEndCol < mCarriageReturnOverwriteOriginalEndCol) {
+            blockClear(
+                mCarriageReturnOverwriteNewEndCol,
+                mCarriageReturnOverwriteRow,
+                mCarriageReturnOverwriteOriginalEndCol - mCarriageReturnOverwriteNewEndCol
+            );
+        }
+        clearCarriageReturnOverwrite();
+    }
+
+    private void clearCarriageReturnOverwrite() {
+        mCarriageReturnOverwriteRow = -1;
+        mCarriageReturnOverwriteOriginalEndCol = -1;
+        mCarriageReturnOverwriteNewEndCol = -1;
+        mCarriageReturnOverwriteHasOutput = false;
+        mCarriageReturnOverwriteFromCarriageReturn = false;
     }
 
     public int getScrollCounter() {

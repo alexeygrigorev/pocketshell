@@ -11,11 +11,10 @@ import com.pocketshell.core.terminal.selection.TerminalMatcher
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import com.termux.view.TerminalView
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -28,6 +27,7 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.OutputStream
 
 /**
@@ -81,7 +81,11 @@ import java.io.OutputStream
  * @see rememberTerminalSurfaceState
  */
 @Stable
-class TerminalSurfaceState {
+class TerminalSurfaceState internal constructor(
+    private val externalProducerDispatcher: CoroutineDispatcher,
+) {
+
+    public constructor() : this(Dispatchers.IO)
 
     private var _session: TerminalSession? by mutableStateOf(null)
 
@@ -383,10 +387,10 @@ class TerminalSurfaceState {
     private var bridge: SshTerminalBridge? = null
 
     /**
-     * Scope owning the producer-collection coroutine. Cancelled by
+     * Job owning the producer-collection coroutine. Cancelled by
      * [detachExternalProducer] or when the surface leaves the composition.
      */
-    private var producerScope: CoroutineScope? = null
+    private var producerJob: Job? = null
 
     /**
      * Attach a remote byte producer (typically the stdout of an SSH shell
@@ -405,8 +409,8 @@ class TerminalSurfaceState {
      *   are safe too.
      * - Starts a background drainer that forwards user input from the
      *   session's outbound queue to [remoteStdin].
-     * - Launches a coroutine in [scope] that collects [stdout] and pumps
-     *   each byte array into the emulator.
+     * - Launches a coroutine parented by [scope] that collects [stdout] on
+     *   a background dispatcher and pumps each byte array into the emulator.
      *
      * The [TerminalSurface] composable will pick up the bridge's
      * [TerminalSession] from this state and attach it to the view, so the
@@ -447,10 +451,7 @@ class TerminalSurfaceState {
         // the on-screen size.
         attach(newBridge.session)
 
-        val collectorScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
-        producerScope = collectorScope
-
-        return scope.launch {
+        val job = scope.launch(externalProducerDispatcher) {
             try {
                 stdout.collect { bytes ->
                     if (bytes.isNotEmpty()) {
@@ -466,9 +467,15 @@ class TerminalSurfaceState {
                 // If the producer flow completes naturally (SSH session
                 // closed), tear the bridge down so the View's references
                 // drop cleanly.
-                detachExternalProducer()
+                withContext(Dispatchers.Main.immediate) {
+                    if (bridge === newBridge) {
+                        detachExternalProducer()
+                    }
+                }
             }
         }
+        producerJob = job
+        return job
     }
 
     /**
@@ -480,8 +487,8 @@ class TerminalSurfaceState {
      * stale session.
      */
     public fun detachExternalProducer() {
-        producerScope?.cancel()
-        producerScope = null
+        producerJob?.cancel()
+        producerJob = null
         bridge?.stop()
         bridge = null
         detach()

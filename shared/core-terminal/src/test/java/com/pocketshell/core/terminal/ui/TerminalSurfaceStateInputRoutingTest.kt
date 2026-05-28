@@ -5,8 +5,10 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -18,6 +20,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import java.io.OutputStream
+import java.util.concurrent.Executors
 
 @RunWith(RobolectricTestRunner::class)
 class TerminalSurfaceStateInputRoutingTest {
@@ -74,6 +77,41 @@ class TerminalSurfaceStateInputRoutingTest {
             producerJob.cancel()
             producerScope.cancel()
             state.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun externalProducerCollectsStdoutOffMainThread() = runBlocking {
+        val feedExecutor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "PocketShellTerminalFeedTest")
+        }
+        val feedDispatcher = feedExecutor.asCoroutineDispatcher()
+        val collectionThread = CompletableDeferred<String>()
+        val state = TerminalSurfaceState(externalProducerDispatcher = feedDispatcher)
+        val stdout = flow {
+            collectionThread.complete(Thread.currentThread().name)
+            emit("remote output\n".toByteArray(Charsets.UTF_8))
+        }
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = RecordingOutputStream(),
+        )
+
+        try {
+            val threadName = withTimeout(2_000) { collectionThread.await() }
+
+            assertTrue(
+                "stdout collection and ByteQueue feeding must run on the configured background dispatcher",
+                threadName.startsWith("PocketShellTerminalFeedTest"),
+            )
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+            feedDispatcher.close()
+            feedExecutor.shutdownNow()
         }
     }
 

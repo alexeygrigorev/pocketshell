@@ -708,6 +708,26 @@ def test_unknown_method_returns_method_not_found(
     assert "-32601" in str(excinfo.value) or "unknown method" in str(excinfo.value)
 
 
+def test_cache_invalidate_method_drops_only_that_method() -> None:
+    """`_Cache.invalidate_method` evicts every key for one method only."""
+    cache = daemon_mod._Cache()
+    key_a1 = daemon_mod._CacheKey.of("repos.list_local", {"roots": ["/a"]})
+    key_a2 = daemon_mod._CacheKey.of("repos.list_local", {"roots": ["/b"]})
+    key_b = daemon_mod._CacheKey.of("usage.fetch", {})
+    cache.put(key_a1, ["a1"], ttl_secs=999)
+    cache.put(key_a2, ["a2"], ttl_secs=999)
+    cache.put(key_b, {"stdout": "x"}, ttl_secs=999)
+
+    evicted = cache.invalidate_method("repos.list_local")
+    assert evicted == 2
+    # Both list_local entries gone; the unrelated method survives.
+    assert cache.get(key_a1) is None
+    assert cache.get(key_a2) is None
+    assert cache.get(key_b) == {"stdout": "x"}
+    # Idempotent: invalidating again evicts nothing.
+    assert cache.invalidate_method("repos.list_local") == 0
+
+
 def test_failed_usage_fetch_is_not_cached(
     sandbox_socket: Path,
     tmp_path: Path,

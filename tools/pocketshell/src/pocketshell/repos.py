@@ -294,8 +294,17 @@ def clone_repo(
     folder_name: Optional[str] = None,
     protocol: str = "ssh",
     git_binary: str = "git",
+    capture_output: bool = False,
 ) -> Path:
-    """Clone ``full_name`` into ``root`` and return the target path."""
+    """Clone ``full_name`` into ``root`` and return the target path.
+
+    ``capture_output`` controls whether ``git clone``'s stdout/stderr is
+    captured (``True``, used by the daemon RPC handler so it can surface
+    git's stderr in the failure envelope) or streamed to the terminal
+    (``False``, the CLI default so the user sees clone progress live).
+    Either way a non-zero exit raises :class:`subprocess.CalledProcessError`;
+    when captured, its ``stderr`` attribute carries git's diagnostics.
+    """
     target = safe_clone_target(root, full_name, folder_name)
     if target.exists():
         raise FileExistsError(f"clone target already exists: {target}")
@@ -304,6 +313,8 @@ def clone_repo(
     subprocess.run(
         [git_binary, "clone", url, str(target)],
         check=True,
+        capture_output=capture_output,
+        text=True if capture_output else None,
     )
     return target
 
@@ -579,17 +590,95 @@ def _gh_missing_message() -> str:
     )
 
 
+# Machine-readable error tokens carried on the gh-failure exceptions so
+# the daemon (and, downstream, the Android bootstrap UI in #230) can
+# branch on a stable string rather than re-parsing stderr. Kept here as
+# constants so the daemon handler, the CLI, and the test suite agree on
+# the exact spelling.
+GH_ERROR_MISSING = "gh_missing"
+GH_ERROR_UNAUTHENTICATED = "gh_unauthenticated"
+GH_ERROR_OTHER = "gh_error"
+
+# Substrings that mark a ``gh`` non-zero exit as an *authentication*
+# failure rather than a generic error (rate limit, network, server 5xx).
+# ``gh`` prints variations of these to stderr when no valid token is
+# configured. Matched case-insensitively. Kept deliberately broad: the
+# remediation for any of them is identical (``gh auth login``), so a
+# false positive here only changes which bootstrap affordance the client
+# shows, never whether the call can succeed.
+_GH_AUTH_FAILURE_MARKERS: tuple[str, ...] = (
+    "gh auth login",
+    "not logged in",
+    "no logged-in",
+    "authentication required",
+    "requires authentication",
+    "must authenticate",
+    "bad credentials",
+    "401",
+)
+
+
 class GhMissingError(RuntimeError):
-    """Raised when ``gh`` cannot be located on PATH."""
+    """Raised when ``gh`` cannot be located on PATH.
+
+    Carries :attr:`error_code` == :data:`GH_ERROR_MISSING` so callers can
+    branch on a machine-readable token rather than the message text.
+    """
+
+    error_code = GH_ERROR_MISSING
 
 
 class GhCommandError(RuntimeError):
-    """Raised when ``gh`` exits non-zero. Carries returncode + stderr."""
+    """Raised when ``gh`` exits non-zero. Carries returncode + stderr.
+
+    The generic-failure case (rate limit, network, server error). The
+    authentication-specific subclass :class:`GhUnauthenticatedError`
+    carries a distinct :attr:`error_code` so the client can offer a
+    ``gh auth login`` affordance instead of a generic retry.
+    """
+
+    error_code = GH_ERROR_OTHER
 
     def __init__(self, returncode: int, stderr: str) -> None:
         super().__init__(f"gh exited {returncode}: {stderr.strip()}")
         self.returncode = returncode
         self.stderr = stderr
+
+
+class GhUnauthenticatedError(GhCommandError):
+    """Raised when ``gh`` is installed but has no valid GitHub login.
+
+    A subclass of :class:`GhCommandError` so existing ``except
+    GhCommandError`` handlers keep catching it, but it carries a distinct
+    :attr:`error_code` (:data:`GH_ERROR_UNAUTHENTICATED`) so the daemon
+    and Android client can show "run ``gh auth login``" instead of a
+    generic error banner.
+    """
+
+    error_code = GH_ERROR_UNAUTHENTICATED
+
+
+def _is_gh_auth_failure(stderr: str) -> bool:
+    """Return True when ``gh`` stderr indicates an authentication failure.
+
+    Inspects ``stderr`` for any of :data:`_GH_AUTH_FAILURE_MARKERS`
+    (case-insensitive). Used to split a generic non-zero ``gh`` exit into
+    :class:`GhUnauthenticatedError` vs :class:`GhCommandError`.
+    """
+    lowered = stderr.lower()
+    return any(marker in lowered for marker in _GH_AUTH_FAILURE_MARKERS)
+
+
+def _classify_gh_command_error(returncode: int, stderr: str) -> GhCommandError:
+    """Build the right ``gh`` failure exception from a non-zero exit.
+
+    Returns :class:`GhUnauthenticatedError` when ``stderr`` matches an
+    auth-failure marker, else :class:`GhCommandError`. The caller raises
+    the returned instance.
+    """
+    if _is_gh_auth_failure(stderr):
+        return GhUnauthenticatedError(returncode, stderr)
+    return GhCommandError(returncode, stderr)
 
 
 def fetch_remote_repos(
@@ -621,9 +710,13 @@ def fetch_remote_repos(
     ------
     GhMissingError
         ``gh`` not on PATH.
+    GhUnauthenticatedError
+        ``gh`` is installed but has no valid login (the stderr matches an
+        auth-failure marker). A subclass of :class:`GhCommandError`.
     GhCommandError
-        ``gh`` exited non-zero (auth missing, rate-limit, etc.). The
-        stderr is preserved so the CLI can surface it to the user.
+        ``gh`` exited non-zero for any other reason (rate-limit, network,
+        server error). The stderr is preserved so the CLI can surface it
+        to the user.
     """
     binary = gh_binary or _resolve_gh_binary()
     if binary is None:
@@ -653,7 +746,7 @@ def fetch_remote_repos(
         text=True,
     )
     if completed.returncode != 0:
-        raise GhCommandError(completed.returncode, completed.stderr)
+        raise _classify_gh_command_error(completed.returncode, completed.stderr)
 
     payload = _parse_gh_api_output(completed.stdout)
     repos = [_repo_from_gh_entry(entry) for entry in payload]
@@ -1256,6 +1349,190 @@ def daemon_handler_remote(params: dict[str, Any]) -> list[dict[str, Any]]:
         limit = None
     repos = fetch_remote_repos(limit=limit)
     return _to_jsonable(repos)
+
+
+# Machine-readable error tokens for the clone/open RPC result envelopes.
+# Kept as constants so the daemon handler, the CLI, and the test suite
+# agree on the exact spelling. The clone over SSH (``git clone
+# git@github.com:...``) does not touch ``gh`` at all, so the gh_missing /
+# gh_unauthenticated split applies to the remote-list path; clone failures
+# get their own tokens here.
+CLONE_ERROR_INVALID_REPOSITORY = "invalid_repository"
+CLONE_ERROR_TARGET_EXISTS = "clone_target_exists"
+CLONE_ERROR_GIT_MISSING = "git_missing"
+CLONE_ERROR_FAILED = "clone_failed"
+
+OPEN_ERROR_INVALID_REPOSITORY = "invalid_repository"
+OPEN_ERROR_NOT_CLONED = "not_cloned"
+
+
+def daemon_handler_clone(params: dict[str, Any]) -> dict[str, Any]:
+    """JSON-RPC handler for ``repos.clone``.
+
+    Mirrors the ``pocketshell repos clone`` CLI: clone ``repository``
+    (``owner/repo``) into ``root`` (default ``~/git``) using ``protocol``
+    (``ssh`` | ``https``) and return a structured result envelope.
+
+    Accepts params:
+
+    - ``repository`` (str, required) — GitHub ``owner/repo`` slug.
+    - ``root`` (str, optional) — clone root; defaults to ``~/git``.
+    - ``folder`` (str, optional) — single-segment target folder name.
+    - ``protocol`` (str, optional) — ``ssh`` (default) or ``https``.
+
+    Returns the success envelope:
+
+    .. code-block:: json
+
+       {"status": "cloned", "path": "/home/.../repo",
+        "full_name": "owner/repo"}
+
+    On failure it returns an envelope carrying a machine-readable
+    ``error_code`` (one of the ``CLONE_ERROR_*`` tokens) so the client
+    can pick the right remediation affordance:
+
+    .. code-block:: json
+
+       {"status": "error", "error_code": "clone_target_exists",
+        "message": "clone target already exists: /home/.../repo"}
+
+    The result is intentionally NOT raised as an exception: the daemon's
+    cache layer keys cache invalidation off a *successful* return, and a
+    structured envelope keeps the failure modes machine-readable on the
+    happy request/response path rather than collapsing them into a single
+    JSON-RPC internal-error string.
+    """
+    repository = params.get("repository")
+    if not isinstance(repository, str) or not repository.strip():
+        return {
+            "status": "error",
+            "error_code": CLONE_ERROR_INVALID_REPOSITORY,
+            "message": "repos.clone: `repository` (owner/repo) is required",
+        }
+
+    root_raw = params.get("root")
+    root = root_raw if isinstance(root_raw, str) and root_raw else DEFAULT_ROOT_PATHS[0]
+
+    folder_raw = params.get("folder")
+    folder_name = folder_raw if isinstance(folder_raw, str) and folder_raw else None
+
+    protocol_raw = params.get("protocol")
+    protocol = protocol_raw if protocol_raw in ("ssh", "https") else "ssh"
+
+    try:
+        # Validate the slug up front so an invalid identifier reports a
+        # clean ``invalid_repository`` rather than a generic clone error.
+        full_owner, full_repo = normalize_full_name(repository)
+        full_name = f"{full_owner}/{full_repo}"
+        target = clone_repo(
+            repository,
+            root=Path(os.path.expanduser(root)),
+            folder_name=folder_name,
+            protocol=protocol,
+            capture_output=True,
+        )
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "error_code": CLONE_ERROR_INVALID_REPOSITORY,
+            "message": f"repos.clone: {exc}",
+        }
+    except FileExistsError as exc:
+        return {
+            "status": "error",
+            "error_code": CLONE_ERROR_TARGET_EXISTS,
+            "message": f"repos.clone: {exc}",
+        }
+    except FileNotFoundError:
+        # ``git`` itself is not installed on the host.
+        return {
+            "status": "error",
+            "error_code": CLONE_ERROR_GIT_MISSING,
+            "message": "repos.clone: `git` is not installed on this host.",
+        }
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        return {
+            "status": "error",
+            "error_code": CLONE_ERROR_FAILED,
+            "message": f"repos.clone: git clone failed (exit {exc.returncode})",
+            "returncode": exc.returncode,
+            "stderr": stderr,
+        }
+
+    return {
+        "status": "cloned",
+        "path": str(target),
+        "full_name": full_name,
+    }
+
+
+def daemon_handler_open(params: dict[str, Any]) -> dict[str, Any]:
+    """JSON-RPC handler for ``repos.open``.
+
+    Mirrors the ``pocketshell repos open`` CLI: locate the local clone of
+    ``repository`` (``owner/repo``) under the configured roots and return
+    its path.
+
+    Accepts params:
+
+    - ``repository`` (str, required) — GitHub ``owner/repo`` slug.
+    - ``roots`` (list[str], optional) — scan roots; default ``~/git``.
+    - ``max_depth`` (int, optional) — scan depth; default
+      :data:`DEFAULT_MAX_DEPTH`.
+
+    Returns the success envelope:
+
+    .. code-block:: json
+
+       {"status": "open", "path": "/home/.../repo",
+        "full_name": "owner/repo"}
+
+    On failure (bad slug, or repo not cloned) it returns an envelope with
+    a machine-readable ``error_code`` (an ``OPEN_ERROR_*`` token).
+    """
+    repository = params.get("repository")
+    if not isinstance(repository, str) or not repository.strip():
+        return {
+            "status": "error",
+            "error_code": OPEN_ERROR_INVALID_REPOSITORY,
+            "message": "repos.open: `repository` (owner/repo) is required",
+        }
+
+    try:
+        normalize_full_name(repository)
+    except ValueError as exc:
+        return {
+            "status": "error",
+            "error_code": OPEN_ERROR_INVALID_REPOSITORY,
+            "message": f"repos.open: {exc}",
+        }
+
+    raw_roots = params.get("roots")
+    if isinstance(raw_roots, list) and all(isinstance(item, str) for item in raw_roots):
+        root_paths = resolve_scan_roots(tuple(raw_roots))
+    else:
+        root_paths = resolve_scan_roots()
+
+    max_depth_raw = params.get("max_depth")
+    if isinstance(max_depth_raw, int) and max_depth_raw >= 0:
+        max_depth = max_depth_raw
+    else:
+        max_depth = DEFAULT_MAX_DEPTH
+
+    repo = find_local_repo(repository, roots=root_paths, max_depth=max_depth)
+    if repo is None or repo.local is None:
+        return {
+            "status": "error",
+            "error_code": OPEN_ERROR_NOT_CLONED,
+            "message": f"repos.open: repository is not cloned: {repository}",
+        }
+
+    return {
+        "status": "open",
+        "path": repo.local.path,
+        "full_name": repo.full_name,
+    }
 
 
 # Back-compat re-export so any in-tree caller that imports

@@ -49,13 +49,25 @@ from pocketshell import daemon as daemon_mod
 from pocketshell import repos as repos_mod
 from pocketshell.cli import cli
 from pocketshell.repos import (
+    CLONE_ERROR_FAILED,
+    CLONE_ERROR_GIT_MISSING,
+    CLONE_ERROR_INVALID_REPOSITORY,
+    CLONE_ERROR_TARGET_EXISTS,
     DAEMON_CACHE_TTL_SECS,
     DAEMON_REMOTE_CACHE_TTL_SECS,
     DEFAULT_MAX_DEPTH,
     DEFAULT_ROOT_PATHS,
+    GH_ERROR_MISSING,
+    GH_ERROR_OTHER,
+    GH_ERROR_UNAUTHENTICATED,
     GhCommandError,
     GhMissingError,
+    GhUnauthenticatedError,
+    OPEN_ERROR_INVALID_REPOSITORY,
+    OPEN_ERROR_NOT_CLONED,
+    daemon_handler_clone,
     daemon_handler_local,
+    daemon_handler_open,
     daemon_handler_remote,
     fetch_remote_repos,
     find_local_repo,
@@ -632,6 +644,139 @@ def test_cli_repos_clone_rejects_existing_target(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# daemon_handler_clone / daemon_handler_open (in-process)
+# ---------------------------------------------------------------------------
+
+
+def test_daemon_handler_clone_happy_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Successful clone returns a ``{status: cloned, path, full_name}`` envelope."""
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args=args, returncode=0)
+
+    monkeypatch.setattr(repos_mod.subprocess, "run", fake_run)
+    result = daemon_handler_clone(
+        {
+            "repository": "alexeygrigorev/pocketshell",
+            "root": str(tmp_path),
+            "protocol": "https",
+        }
+    )
+    assert result["status"] == "cloned"
+    assert result["path"] == str(tmp_path / "pocketshell")
+    assert result["full_name"] == "alexeygrigorev/pocketshell"
+    assert "error_code" not in result
+    assert calls == [
+        [
+            "git",
+            "clone",
+            "https://github.com/alexeygrigorev/pocketshell.git",
+            str(tmp_path / "pocketshell"),
+        ]
+    ]
+
+
+def test_daemon_handler_clone_defaults_to_ssh_and_home_git(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No root/protocol params => default ``~/git`` root + ssh URL."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    calls: list[list[str]] = []
+
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args=args, returncode=0)
+
+    monkeypatch.setattr(repos_mod.subprocess, "run", fake_run)
+    result = daemon_handler_clone({"repository": "o/r"})
+    assert result["status"] == "cloned"
+    assert result["path"] == str(tmp_path / "git" / "r")
+    assert calls[0][2] == "git@github.com:o/r.git"
+
+
+def test_daemon_handler_clone_invalid_repository() -> None:
+    for bad in ("", "  ", "not-a-slug", "../escape/repo"):
+        result = daemon_handler_clone({"repository": bad})
+        assert result["status"] == "error"
+        assert result["error_code"] == CLONE_ERROR_INVALID_REPOSITORY
+
+
+def test_daemon_handler_clone_missing_repository_param() -> None:
+    result = daemon_handler_clone({})
+    assert result["status"] == "error"
+    assert result["error_code"] == CLONE_ERROR_INVALID_REPOSITORY
+
+
+def test_daemon_handler_clone_target_exists(tmp_path: Path) -> None:
+    (tmp_path / "r").mkdir()
+    result = daemon_handler_clone({"repository": "o/r", "root": str(tmp_path)})
+    assert result["status"] == "error"
+    assert result["error_code"] == CLONE_ERROR_TARGET_EXISTS
+    assert "already exists" in result["message"]
+
+
+def test_daemon_handler_clone_git_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(repos_mod.subprocess, "run", fake_run)
+    result = daemon_handler_clone({"repository": "o/r", "root": str(tmp_path)})
+    assert result["status"] == "error"
+    assert result["error_code"] == CLONE_ERROR_GIT_MISSING
+
+
+def test_daemon_handler_clone_clone_failure_carries_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(
+            returncode=128, cmd=args, stderr="fatal: repository not found\n"
+        )
+
+    monkeypatch.setattr(repos_mod.subprocess, "run", fake_run)
+    result = daemon_handler_clone({"repository": "o/r", "root": str(tmp_path)})
+    assert result["status"] == "error"
+    assert result["error_code"] == CLONE_ERROR_FAILED
+    assert result["returncode"] == 128
+    assert "repository not found" in result["stderr"]
+
+
+def test_daemon_handler_open_happy_path(tmp_path: Path) -> None:
+    repo_path = _make_real_repo(
+        tmp_path,
+        "pocketshell",
+        remote_url="git@github.com:alexeygrigorev/pocketshell.git",
+    )
+    result = daemon_handler_open(
+        {"repository": "alexeygrigorev/pocketshell", "roots": [str(tmp_path)]}
+    )
+    assert result["status"] == "open"
+    assert result["path"] == str(repo_path)
+    assert result["full_name"] == "alexeygrigorev/pocketshell"
+
+
+def test_daemon_handler_open_not_cloned(tmp_path: Path) -> None:
+    result = daemon_handler_open(
+        {"repository": "alexeygrigorev/pocketshell", "roots": [str(tmp_path)]}
+    )
+    assert result["status"] == "error"
+    assert result["error_code"] == OPEN_ERROR_NOT_CLONED
+
+
+def test_daemon_handler_open_invalid_repository() -> None:
+    for bad in ("", "not-a-slug"):
+        result = daemon_handler_open({"repository": bad})
+        assert result["status"] == "error"
+        assert result["error_code"] == OPEN_ERROR_INVALID_REPOSITORY
+
+
+# ---------------------------------------------------------------------------
 # CLI output: --json + human (local mode)
 # ---------------------------------------------------------------------------
 
@@ -917,6 +1062,85 @@ def test_fetch_remote_repos_empty_stdout(tmp_path: Path) -> None:
     _write_fake_gh(bin_dir, payload="   \n")
     repos = fetch_remote_repos(gh_binary=str(bin_dir / "gh"))
     assert repos == []
+
+
+# ---------------------------------------------------------------------------
+# gh error split: gh_missing vs gh_unauthenticated vs gh_error
+# ---------------------------------------------------------------------------
+
+
+def test_gh_missing_error_carries_machine_readable_code() -> None:
+    err = GhMissingError("install gh first")
+    assert err.error_code == GH_ERROR_MISSING
+    assert GH_ERROR_MISSING == "gh_missing"
+
+
+def test_gh_command_error_default_code_is_other() -> None:
+    err = GhCommandError(2, "boom")
+    assert err.error_code == GH_ERROR_OTHER
+    assert GH_ERROR_OTHER == "gh_error"
+
+
+def test_gh_unauthenticated_error_is_subclass_with_distinct_code() -> None:
+    err = GhUnauthenticatedError(4, "gh: To get started run `gh auth login`")
+    # Subclass so existing ``except GhCommandError`` handlers still catch it.
+    assert isinstance(err, GhCommandError)
+    assert err.error_code == GH_ERROR_UNAUTHENTICATED
+    assert GH_ERROR_UNAUTHENTICATED == "gh_unauthenticated"
+    assert err.error_code != GhCommandError(4, "x").error_code
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "gh: To get started with GitHub CLI, please run: gh auth login\n",
+        "You are not logged in to any GitHub hosts.\n",
+        "error: authentication required\n",
+        "HTTP 401: Bad credentials\n",
+    ],
+)
+def test_fetch_remote_repos_unauthenticated_stderr_raises_unauthenticated(
+    tmp_path: Path, stderr: str
+) -> None:
+    """A non-zero gh exit whose stderr mentions auth => GhUnauthenticatedError."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_gh(bin_dir, payload="", exit_code=4, stderr=stderr)
+    with pytest.raises(GhUnauthenticatedError) as excinfo:
+        fetch_remote_repos(gh_binary=str(bin_dir / "gh"))
+    assert excinfo.value.error_code == GH_ERROR_UNAUTHENTICATED
+    assert excinfo.value.returncode == 4
+
+
+def test_fetch_remote_repos_generic_failure_raises_plain_command_error(
+    tmp_path: Path,
+) -> None:
+    """A non-auth non-zero exit (rate limit / server) stays GhCommandError."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_gh(
+        bin_dir,
+        payload="",
+        exit_code=1,
+        stderr="HTTP 403: API rate limit exceeded\n",
+    )
+    with pytest.raises(GhCommandError) as excinfo:
+        fetch_remote_repos(gh_binary=str(bin_dir / "gh"))
+    # Generic, NOT the unauthenticated subclass.
+    assert not isinstance(excinfo.value, GhUnauthenticatedError)
+    assert excinfo.value.error_code == GH_ERROR_OTHER
+    assert "rate limit" in excinfo.value.stderr
+
+
+def test_fetch_remote_repos_missing_gh_carries_missing_code() -> None:
+    original = repos_mod._resolve_gh_binary
+    repos_mod._resolve_gh_binary = lambda: None
+    try:
+        with pytest.raises(GhMissingError) as excinfo:
+            fetch_remote_repos()
+        assert excinfo.value.error_code == GH_ERROR_MISSING
+    finally:
+        repos_mod._resolve_gh_binary = original
 
 
 # ---------------------------------------------------------------------------
@@ -1367,3 +1591,243 @@ def test_repos_list_remote_caches_within_ttl(
         assert counter_file.read_text().strip() == "2"
     finally:
         _terminate(proc)
+
+
+def _write_fake_git_clone(target_dir: Path) -> Path:
+    """Write a fake ``git`` whose ``clone`` mkdir-s the destination dir.
+
+    The daemon child runs in its own process, so we cannot monkeypatch
+    ``subprocess.run`` to reach it; instead we inject a tiny ``git`` stub
+    onto the daemon's PATH. The stub handles ``git clone <url> <dest>`` by
+    creating ``<dest>/.git`` so a subsequent ``repos.list_local`` scan
+    detects the new clone, and proxies every other ``git`` invocation
+    (``config``, ``rev-parse``, ``symbolic-ref`` used by the local scan's
+    metadata read) to the real git binary so repo metadata still resolves.
+    """
+    real_git = shutil.which("git")
+    if real_git is None:
+        pytest.skip("git binary not available")
+    script = target_dir / "git"
+    script.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "clone" ]; then\n'
+        # args: clone <url> <dest>
+        '    dest="$3"\n'
+        f'    "{real_git}" init -q -b main "$dest" >/dev/null 2>&1\n'
+        '    exit $?\n'
+        "fi\n"
+        f'exec "{real_git}" "$@"\n'
+    )
+    script.chmod(0o755)
+    return script
+
+
+def test_repos_clone_round_trips_via_daemon(
+    sandbox_socket: Path, tmp_path: Path
+) -> None:
+    """`repos.clone` RPC clones and returns the structured success envelope."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_git_clone(bin_dir)
+    clone_root = tmp_path / "git"
+    clone_root.mkdir()
+
+    env = {"PATH": f"{bin_dir}:{os.environ.get('PATH', '')}"}
+    proc = _spawn_daemon(sandbox_socket, extra_env=env)
+    try:
+        result = daemon_mod.call(
+            "repos.clone",
+            params={
+                "repository": "alexeygrigorev/pocketshell",
+                "root": str(clone_root),
+            },
+            socket_path=sandbox_socket,
+            timeout=15.0,
+        )
+        assert result["status"] == "cloned"
+        assert result["path"] == str(clone_root / "pocketshell")
+        assert result["full_name"] == "alexeygrigorev/pocketshell"
+        # The clone really happened on disk.
+        assert (clone_root / "pocketshell" / ".git").exists()
+    finally:
+        _terminate(proc)
+
+
+def test_repos_clone_invalidates_list_local_cache(
+    sandbox_socket: Path, tmp_path: Path
+) -> None:
+    """After a successful clone, the next list_local must reflect the new repo.
+
+    Sequence:
+      1. ``repos.list_local`` warms the cache with the pre-clone scan.
+      2. ``repos.clone`` lands a new repo on disk under the same root.
+      3. ``repos.list_local`` (within the 10 s TTL) must show the clone,
+         proving ``repos.clone`` evicted the stale cached scan.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_git_clone(bin_dir)
+    work = tmp_path / "git"
+    work.mkdir()
+    _make_bare_repo(work, "existing")
+
+    env = {"PATH": f"{bin_dir}:{os.environ.get('PATH', '')}"}
+    proc = _spawn_daemon(sandbox_socket, extra_env=env)
+    try:
+        # 1. Warm the list_local cache (only "existing" present).
+        first = daemon_mod.call(
+            "repos.list_local",
+            params={"roots": [str(work)], "max_depth": DEFAULT_MAX_DEPTH},
+            socket_path=sandbox_socket,
+            timeout=15.0,
+        )
+        assert [entry["name"] for entry in first] == ["existing"]
+
+        # Sanity: a second cached read does NOT see a repo we sneak in
+        # without a clone (proves the cache is genuinely warm).
+        _make_bare_repo(work, "snuck-in")
+        cached = daemon_mod.call(
+            "repos.list_local",
+            params={"roots": [str(work)], "max_depth": DEFAULT_MAX_DEPTH},
+            socket_path=sandbox_socket,
+            timeout=15.0,
+        )
+        assert [entry["name"] for entry in cached] == ["existing"]
+
+        # 2. Clone a new repo via the daemon RPC into the same root.
+        clone_result = daemon_mod.call(
+            "repos.clone",
+            params={"repository": "owner/freshclone", "root": str(work)},
+            socket_path=sandbox_socket,
+            timeout=15.0,
+        )
+        assert clone_result["status"] == "cloned"
+
+        # 3. Within TTL, list_local must now reflect the clone (and the
+        #    snuck-in repo too, since the cache was fully invalidated).
+        after = daemon_mod.call(
+            "repos.list_local",
+            params={"roots": [str(work)], "max_depth": DEFAULT_MAX_DEPTH},
+            socket_path=sandbox_socket,
+            timeout=15.0,
+        )
+        names = sorted(entry["name"] for entry in after)
+        assert "freshclone" in names
+        assert names == ["existing", "freshclone", "snuck-in"]
+    finally:
+        _terminate(proc)
+
+
+def test_repos_clone_failure_does_not_invalidate_cache(
+    sandbox_socket: Path, tmp_path: Path
+) -> None:
+    """A failed clone (target exists) must NOT evict the list_local cache."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake_git_clone(bin_dir)
+    work = tmp_path / "git"
+    work.mkdir()
+    _make_bare_repo(work, "existing")
+    # Pre-create the clone target so the clone fails with target_exists.
+    (work / "freshclone").mkdir()
+
+    env = {"PATH": f"{bin_dir}:{os.environ.get('PATH', '')}"}
+    proc = _spawn_daemon(sandbox_socket, extra_env=env)
+    try:
+        first = daemon_mod.call(
+            "repos.list_local",
+            params={"roots": [str(work)], "max_depth": DEFAULT_MAX_DEPTH},
+            socket_path=sandbox_socket,
+            timeout=15.0,
+        )
+        assert [entry["name"] for entry in first] == ["existing"]
+
+        # Sneak a repo in so we can prove the cache was NOT invalidated.
+        _make_bare_repo(work, "snuck-in")
+
+        clone_result = daemon_mod.call(
+            "repos.clone",
+            params={"repository": "owner/freshclone", "root": str(work)},
+            socket_path=sandbox_socket,
+            timeout=15.0,
+        )
+        assert clone_result["status"] == "error"
+        assert clone_result["error_code"] == "clone_target_exists"
+
+        # The cache must still be warm: snuck-in is not visible.
+        after = daemon_mod.call(
+            "repos.list_local",
+            params={"roots": [str(work)], "max_depth": DEFAULT_MAX_DEPTH},
+            socket_path=sandbox_socket,
+            timeout=15.0,
+        )
+        assert [entry["name"] for entry in after] == ["existing"]
+    finally:
+        _terminate(proc)
+
+
+def test_repos_open_round_trips_via_daemon(
+    sandbox_socket: Path, tmp_path: Path
+) -> None:
+    """`repos.open` RPC returns the local clone path for a known repo."""
+    work = tmp_path / "git"
+    work.mkdir()
+    repo_path = _make_real_repo(
+        work,
+        "pocketshell",
+        remote_url="git@github.com:alexeygrigorev/pocketshell.git",
+    )
+
+    proc = _spawn_daemon(sandbox_socket)
+    try:
+        result = daemon_mod.call(
+            "repos.open",
+            params={
+                "repository": "alexeygrigorev/pocketshell",
+                "roots": [str(work)],
+            },
+            socket_path=sandbox_socket,
+            timeout=15.0,
+        )
+        assert result["status"] == "open"
+        assert result["path"] == str(repo_path)
+        assert result["full_name"] == "alexeygrigorev/pocketshell"
+    finally:
+        _terminate(proc)
+
+
+def test_repos_open_not_cloned_via_daemon(
+    sandbox_socket: Path, tmp_path: Path
+) -> None:
+    """`repos.open` for a repo that is not cloned returns the not_cloned code."""
+    work = tmp_path / "git"
+    work.mkdir()
+
+    proc = _spawn_daemon(sandbox_socket)
+    try:
+        result = daemon_mod.call(
+            "repos.open",
+            params={
+                "repository": "alexeygrigorev/pocketshell",
+                "roots": [str(work)],
+            },
+            socket_path=sandbox_socket,
+            timeout=15.0,
+        )
+        assert result["status"] == "error"
+        assert result["error_code"] == OPEN_ERROR_NOT_CLONED
+    finally:
+        _terminate(proc)
+
+
+def test_repos_clone_and_open_are_registered_methods() -> None:
+    """The daemon's default method registry includes the new clone/open RPCs."""
+    assert "repos.clone" in daemon_mod.DEFAULT_METHODS
+    assert "repos.open" in daemon_mod.DEFAULT_METHODS
+    # clone/open carry no TTL: clone is a mutation, open is a cheap lookup.
+    assert "repos.clone" not in daemon_mod.METHOD_TTLS
+    assert "repos.open" not in daemon_mod.METHOD_TTLS
+    # A successful clone evicts the local-scan cache.
+    assert daemon_mod.METHOD_CACHE_INVALIDATIONS["repos.clone"] == (
+        "repos.list_local",
+    )

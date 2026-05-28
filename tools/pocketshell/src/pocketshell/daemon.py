@@ -302,6 +302,20 @@ class _Cache:
         with self._lock:
             self._entries[key] = (expires_at, value)
 
+    def invalidate_method(self, method: str) -> int:
+        """Drop every cache entry for ``method``, regardless of params.
+
+        Used after a side-effecting call (e.g. ``repos.clone``) so the
+        next read of an affected method (``repos.list_local``) recomputes
+        rather than serving a now-stale cached scan. Returns the number of
+        entries evicted (handy for tests asserting the invalidation fired).
+        """
+        with self._lock:
+            stale = [key for key in self._entries if key.method == method]
+            for key in stale:
+                self._entries.pop(key, None)
+            return len(stale)
+
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()
@@ -419,6 +433,33 @@ def _repos_list_remote_handler(params: Mapping[str, Any]) -> list[dict[str, Any]
     return _repos.daemon_handler_remote(dict(params))
 
 
+def _repos_clone_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Clone a GitHub repository and return a structured status envelope.
+
+    Same lazy-import pattern as the other ``repos.*`` handlers. Returns a
+    success envelope ``{"status": "cloned", "path": ..., "full_name": ...}``
+    or a failure envelope carrying a machine-readable ``error_code``. A
+    *successful* clone invalidates the ``repos.list_local`` cache (see
+    :data:`METHOD_CACHE_INVALIDATIONS`) so the very next ``repos.list_local``
+    reflects the new clone instead of serving the pre-clone cached scan.
+    """
+    from pocketshell import repos as _repos
+
+    return _repos.daemon_handler_clone(dict(params))
+
+
+def _repos_open_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Locate a cloned repository and return its path.
+
+    Same lazy-import pattern as the other ``repos.*`` handlers. Returns
+    ``{"status": "open", "path": ..., "full_name": ...}`` on success or a
+    failure envelope with a machine-readable ``error_code``.
+    """
+    from pocketshell import repos as _repos
+
+    return _repos.daemon_handler_open(dict(params))
+
+
 # Single shared registry; tests can register additional methods via
 # :meth:`Daemon.register_method` on a fresh instance without touching
 # this dict.
@@ -426,6 +467,24 @@ DEFAULT_METHODS: Mapping[str, RpcHandler] = {
     "usage.fetch": _usage_fetch_handler,
     "repos.list_local": _repos_list_local_handler,
     "repos.list_remote": _repos_list_remote_handler,
+    "repos.clone": _repos_clone_handler,
+    "repos.open": _repos_open_handler,
+}
+
+
+# Cache-invalidation policy. Maps a method name to the cache entries that
+# a *successful* call to it must evict. ``repos.clone`` writes a new
+# repository to disk, so after it succeeds the cached ``repos.list_local``
+# scan is stale and must be dropped — otherwise the Android picker would
+# keep showing the pre-clone repo set for up to the 10 s TTL. Kept next to
+# :data:`METHOD_TTLS` so the cache policy stays auditable in one place.
+#
+# ``repos.clone`` and ``repos.open`` themselves carry no TTL (not in
+# METHOD_TTLS) so their own results are never cached: a clone is a
+# side-effecting mutation and ``open`` is a cheap lookup whose answer can
+# change as soon as a clone lands.
+METHOD_CACHE_INVALIDATIONS: Mapping[str, tuple[str, ...]] = {
+    "repos.clone": ("repos.list_local",),
 }
 
 
@@ -711,11 +770,23 @@ class Daemon:
         # Only cache successful results. ``usage.fetch`` carries its
         # own returncode inside the envelope; treat non-zero as a
         # failure so a transient quse error does not pin a bad result.
+        # The ``repos.*`` envelopes carry a ``status`` field instead;
+        # treat ``"error"`` as a failure for cache purposes.
         success_for_cache = True
         if isinstance(result, dict) and "returncode" in result:
             success_for_cache = result.get("returncode") == 0
-        if success_for_cache and not no_cache:
+        elif isinstance(result, dict) and result.get("status") == "error":
+            success_for_cache = False
+        if success_for_cache and ttl > 0 and not no_cache:
             self._cache.put(cache_key, result, ttl)
+
+        # Invalidate dependent caches after a side-effecting success
+        # (e.g. a successful ``repos.clone`` evicts ``repos.list_local``)
+        # so the next read reflects the mutation immediately rather than
+        # serving a stale cached scan for the remainder of its TTL.
+        if success_for_cache:
+            for dependent in METHOD_CACHE_INVALIDATIONS.get(method, ()):
+                self._cache.invalidate_method(dependent)
 
         self._send_result(client_sock, request_id, result, cached_hit=False)
 

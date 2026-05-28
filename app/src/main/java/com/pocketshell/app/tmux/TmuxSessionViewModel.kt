@@ -26,6 +26,7 @@ import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientFactory
+import com.pocketshell.core.tmux.TmuxWindowDimensions
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import com.pocketshell.core.voice.CommandPlannerException
 import com.pocketshell.core.voice.CommandPlannerRequest
@@ -209,6 +210,12 @@ public class TmuxSessionViewModel @Inject constructor(
     )
     public val userMessages: SharedFlow<String> = _userMessages.asSharedFlow()
 
+    private val _sizeMismatchPrompt: MutableStateFlow<TmuxSizeMismatchPrompt?> =
+        MutableStateFlow(null)
+
+    public val sizeMismatchPrompt: StateFlow<TmuxSizeMismatchPrompt?> =
+        _sizeMismatchPrompt.asStateFlow()
+
     // Voice Command-mode planner state — mirrors
     // [com.pocketshell.app.session.SessionViewModel]'s voice planner so the
     // tmux route (host tap → tmux picker → "Attach to session") gets the
@@ -261,15 +268,14 @@ public class TmuxSessionViewModel @Inject constructor(
     private val _canReconnect: MutableStateFlow<Boolean> = MutableStateFlow(false)
     public val canReconnect: StateFlow<Boolean> = _canReconnect.asStateFlow()
 
-    // Issue #102 (reopen): last on-screen terminal grid we propagated to
-    // tmux via `resize-window`. Tracked so [resizeRemotePty] is a no-op
-    // when Compose re-fires onTerminalSizeChanged with the same numbers
-    // (which it does on every layout pass), and so a fresh
-    // [closeCurrentConnection] resets back to "unknown" — the new
-    // tmux-CC client will get its own resize-window when the surface
-    // lays out against the freshly attached pane.
+    // Last on-screen terminal grid reported by Compose. The manual
+    // resize and issue #240 mismatch prompt both use this phone-side
+    // grid. Tracked so repeated onTerminalSizeChanged calls with the
+    // same numbers do not re-query tmux on every layout pass.
     private var remoteColumns: Int = 0
     private var remoteRows: Int = 0
+    private var sizeMismatchDismissedForAttach: Boolean = false
+    private var sizeMismatchGeneration: Long = 0L
     private val agentRepository: AgentConversationRepository = AgentConversationRepository()
     private val paneAgentJobs: MutableMap<String, Job> = ConcurrentHashMap()
     // Issue #186: dedup key is (cwd, foreground-command, tty). Adding
@@ -792,6 +798,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 target.port,
                 target.user,
             )
+            maybeCheckSizeMismatch()
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
             connectingTarget = null
@@ -869,6 +876,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 target.port,
                 target.user,
             )
+            maybeCheckSizeMismatch()
             Log.i(
                 ISSUE_145_RECONNECT_TAG,
                 "tmux-fast-switch host=${target.host} port=${target.port} " +
@@ -896,6 +904,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * caught by the buffered shared flow.
      */
     internal fun attachClient(client: TmuxClient) {
+        resetSizeMismatchPromptForAttach()
         clientRef = client
         // Cancel any previous subscription before re-binding (idempotency
         // for tests that swap clients on the same ViewModel instance).
@@ -1015,6 +1024,7 @@ public class TmuxSessionViewModel @Inject constructor(
         activeTarget = target
         bindProjectRootsForHost(hostId)
         _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+        maybeCheckSizeMismatch()
     }
 
     /**
@@ -1082,6 +1092,7 @@ public class TmuxSessionViewModel @Inject constructor(
         connectingTarget = null
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+        maybeCheckSizeMismatch()
     }
 
     /**
@@ -2042,62 +2053,88 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #102 (reopen): propagate the on-screen [TerminalView]'s grid
-     * dimensions to the **remote tmux pane** so opencode / Codex / Claude
-     * Code (which draw their alternate-screen UI for whatever size tmux
-     * reports) line up with the cells the local emulator is rendering.
+     * Cache the on-screen [TerminalView] grid dimensions reported by
+     * Compose.
      *
-     * The raw-SSH route ([com.pocketshell.app.session.SessionViewModel.resizeRemotePty])
-     * forwards via the SSH session channel's `changeWindowDimensions`
-     * (TIOCSWINSZ on the remote PTY) so the shell sees a SIGWINCH and
-     * re-flows. The tmux-CC route cannot do the same — the SSH PTY
-     * carries the tmux *control* channel, not the inner pane's PTY.
-     * tmux owns the per-pane terminal size; we must ask tmux to resize
-     * the session window via the control protocol.
-     *
-     * `resize-window -t <session> -x <cols> -y <rows>` does exactly that:
-     * tmux resizes the named session's active window (and its panes) to
-     * the requested geometry and refreshes attached clients. The change
-     * is wire-only (no `set-option -g window-size manual` toggling) so
-     * the next reattach without a connected client of our size falls
-     * back to tmux defaults — the right behaviour for an SSH-CC client
-     * that may be detached and reattached from different devices.
-     *
-     * Idempotent: a re-call with the same dimensions is a no-op (the
-     * Compose layout system re-fires `onTerminalSizeChanged` on every
-     * pass even when nothing visibly changed). Initial dimensions of
-     * `0` (i.e. the view never laid out) are also a no-op.
-     *
-     * Without this, the user reported "typing into opencode places the
-     * input somewhere in the center" on v0.2.6: tmux thought the
-     * window was 80x24 (the size the SSH PTY allocated in
-     * [com.pocketshell.core.ssh.RealSshSession.startShell]), opencode
-     * drew its UI box for an 80x24 grid, and the local emulator
-     * rendered a different on-screen grid — so the box edges and
-     * cursor positions landed at the wrong cells of the visible
-     * viewport. The TerminalLab path in the original #102 round did
-     * not have this bug because it owns the SSH PTY directly and
-     * already calls `changeWindowDimensions` from
-     * [com.pocketshell.app.terminal.TerminalLabActivity].
+     * Issue #240 hard-cuts the previous tmux auto-resize behaviour:
+     * layout changes no longer send `resize-window` on their own. The
+     * phone grid is still captured here because the manual #238 Resize
+     * action needs it, and because attach-time mismatch detection compares
+     * it with tmux's current `#{window_width}|#{window_height}`. A
+     * repeated call with the same dimensions is a no-op so Compose layout
+     * churn does not spam `tmux display`.
      */
     public fun resizeRemotePty(columns: Int, rows: Int) {
         if (columns <= 0 || rows <= 0) return
         if (columns == remoteColumns && rows == remoteRows) return
-        val client = clientRef ?: return
-        val target = activeTarget ?: return
         remoteColumns = columns
         remoteRows = rows
+        maybeCheckSizeMismatch()
+    }
+
+    private fun maybeCheckSizeMismatch() {
+        if (sizeMismatchDismissedForAttach) return
+        if (_sizeMismatchPrompt.value != null) return
+        val client = clientRef ?: return
+        val target = activeTarget ?: return
+        val phoneColumns = remoteColumns
+        val phoneRows = remoteRows
+        if (phoneColumns <= 0 || phoneRows <= 0) return
+        val generation = ++sizeMismatchGeneration
         bridgeScope.launch {
-            runCatching {
-                // Issue #238: route through the typed [TmuxClient.resizeWindow]
-                // helper so the manual "Resize session" path and this
-                // automatic layout-driven path share one escaping +
-                // wire-format implementation. The recorded `sentCommands`
-                // shape ("resize-window -t '<name>' -x <cols> -y <rows>")
-                // is unchanged — see [FakeTmuxClient.resizeWindow].
-                client.resizeWindow(target.sessionName, columns, rows)
-            }
+            val dimensions = runCatching {
+                client.getWindowDimensions(target.sessionName)
+            }.getOrNull() ?: return@launch
+            if (clientRef !== client || activeTarget != target) return@launch
+            if (sizeMismatchGeneration != generation) return@launch
+            if (remoteColumns != phoneColumns || remoteRows != phoneRows) return@launch
+            if (sizeMismatchDismissedForAttach) return@launch
+            _sizeMismatchPrompt.value = buildSizeMismatchPrompt(
+                sessionDimensions = dimensions,
+                phoneColumns = phoneColumns,
+                phoneRows = phoneRows,
+            )
         }
+    }
+
+    private fun buildSizeMismatchPrompt(
+        sessionDimensions: TmuxWindowDimensions,
+        phoneColumns: Int,
+        phoneRows: Int,
+    ): TmuxSizeMismatchPrompt? {
+        val columnDelta = kotlin.math.abs(sessionDimensions.columns - phoneColumns)
+        val rowDelta = kotlin.math.abs(sessionDimensions.rows - phoneRows)
+        if (columnDelta <= SIZE_MISMATCH_COLUMN_THRESHOLD &&
+            rowDelta <= SIZE_MISMATCH_ROW_THRESHOLD
+        ) {
+            return null
+        }
+        return TmuxSizeMismatchPrompt(
+            sessionColumns = sessionDimensions.columns,
+            sessionRows = sessionDimensions.rows,
+            phoneColumns = phoneColumns,
+            phoneRows = phoneRows,
+        )
+    }
+
+    private fun resetSizeMismatchPromptForAttach() {
+        sizeMismatchGeneration += 1
+        sizeMismatchDismissedForAttach = false
+        _sizeMismatchPrompt.value = null
+    }
+
+    public fun keepCurrentSessionSize() {
+        sizeMismatchGeneration += 1
+        sizeMismatchDismissedForAttach = true
+        _sizeMismatchPrompt.value = null
+    }
+
+    public fun resizeFromSizeMismatchPrompt() {
+        val prompt = _sizeMismatchPrompt.value ?: return
+        sizeMismatchGeneration += 1
+        sizeMismatchDismissedForAttach = true
+        _sizeMismatchPrompt.value = null
+        requestResizeTo(prompt.phoneColumns, prompt.phoneRows)
     }
 
     /**
@@ -2109,10 +2146,9 @@ public class TmuxSessionViewModel @Inject constructor(
      * can be off-screen because the session window is still at the
      * desktop's 200×50 (or similar) layout. This handler runs `tmux
      * resize-window -t '<session>' -x <cols> -y <rows>` against the
-     * latest known phone dimensions ([remoteColumns] / [remoteRows] —
-     * already propagated to the remote in the automatic path by
-     * [resizeRemotePty] on every layout pass since commit `39cddd8`) so
-     * tmux re-flows the inner panes for the phone.
+     * latest known phone dimensions ([remoteColumns] / [remoteRows],
+     * captured by [resizeRemotePty]) so tmux re-flows the inner panes
+     * for the phone.
      *
      * Per the issue's explicit scope: NO automatic on-attach behaviour.
      * This handler is only invoked by the user tapping "Resize session"
@@ -2127,10 +2163,12 @@ public class TmuxSessionViewModel @Inject constructor(
      * never sees a tap with no feedback.
      */
     public fun requestManualResize() {
+        requestResizeTo(remoteColumns, remoteRows)
+    }
+
+    private fun requestResizeTo(cols: Int, rows: Int) {
         val client = clientRef
         val target = activeTarget
-        val cols = remoteColumns
-        val rows = remoteRows
         if (client == null || target == null) {
             _userMessages.tryEmit("Not connected — can't resize yet.")
             return
@@ -2154,14 +2192,9 @@ public class TmuxSessionViewModel @Inject constructor(
                         val detail = response.output.joinToString(separator = " ").trim()
                         if (detail.isNotEmpty()) "Resize failed: $detail" else "Resize failed."
                     } else {
-                        // The locked-in dimensions are now what the remote
-                        // tmux session is on. Mirror them into
-                        // [remoteColumns] / [remoteRows] so the next layout
-                        // pass's idempotency check in [resizeRemotePty]
-                        // sees them as already-applied — without this, a
-                        // user tap immediately followed by a layout
-                        // recomputation would dispatch a duplicate
-                        // resize-window for the same dimensions.
+                        sizeMismatchGeneration += 1
+                        sizeMismatchDismissedForAttach = true
+                        _sizeMismatchPrompt.value = null
                         remoteColumns = cols
                         remoteRows = rows
                         "Resized to ${cols}×${rows}"
@@ -2530,10 +2563,11 @@ public class TmuxSessionViewModel @Inject constructor(
         sessionRef = null
         activeTarget = null
         connectingTarget = null
-        // Issue #102 (reopen): a fresh attach must re-fire `resize-window`
-        // against the new tmux session's pane on the next layout pass.
+        // A fresh attach must capture a fresh phone grid and re-run the
+        // size-mismatch check.
         remoteColumns = 0
         remoteRows = 0
+        resetSizeMismatchPromptForAttach()
     }
 
     /**
@@ -2612,11 +2646,11 @@ public class TmuxSessionViewModel @Inject constructor(
         // Keep [connectingTarget] — connect() set it to the new
         // target before invoking us; clearing it here would lose the
         // intent.
-        // Issue #102 (reopen): a fresh attach must re-fire
-        // `resize-window` against the new tmux session's pane on the
-        // next layout pass.
+        // A fresh attach must capture a fresh phone grid and re-run the
+        // size-mismatch check.
         remoteColumns = 0
         remoteRows = 0
+        resetSizeMismatchPromptForAttach()
     }
 
     /**
@@ -2712,10 +2746,11 @@ public class TmuxSessionViewModel @Inject constructor(
         // clears the reconnect availability flag so the screen never
         // re-renders the Reconnect button against a stale target.
         refreshReconnectAvailability()
-        // Issue #102 (reopen): a fresh attach must re-fire `resize-window`
-        // against the new tmux session's pane on the next layout pass.
+        // A fresh attach must capture a fresh phone grid and re-run the
+        // size-mismatch check.
         remoteColumns = 0
         remoteRows = 0
+        resetSizeMismatchPromptForAttach()
     }
 
     /**
@@ -2813,7 +2848,17 @@ public class TmuxSessionViewModel @Inject constructor(
             ConnectionStatus
         public data class Failed(val message: String) : ConnectionStatus
     }
+
+    public data class TmuxSizeMismatchPrompt(
+        val sessionColumns: Int,
+        val sessionRows: Int,
+        val phoneColumns: Int,
+        val phoneRows: Int,
+    )
 }
+
+private const val SIZE_MISMATCH_COLUMN_THRESHOLD: Int = 20
+private const val SIZE_MISMATCH_ROW_THRESHOLD: Int = 5
 
 private fun boundedDistinctEvents(events: List<ConversationEvent>): List<ConversationEvent> =
     reconcileAgentEvents(events, maxEvents = MaxAgentEvents)

@@ -152,6 +152,16 @@ public interface TmuxClient : AutoCloseable {
     public suspend fun resizeWindow(sessionId: String, cols: Int, rows: Int): CommandResponse
 
     /**
+     * Issue #240: read the active tmux window dimensions for [sessionId].
+     *
+     * Uses `display -t '<sessionId>' -p '#{window_width}|#{window_height}'`
+     * and parses the first non-blank response row. Returns `null` when
+     * tmux rejects the command or returns an unexpected / non-positive
+     * shape so callers can treat detection as best-effort UI hinting.
+     */
+    public suspend fun getWindowDimensions(sessionId: String): TmuxWindowDimensions?
+
+    /**
      * Issue #215: server-clean teardown of the tmux `-CC` control client.
      *
      * Sends `detach-client` to the tmux server before tearing the SSH
@@ -196,6 +206,12 @@ public interface TmuxClient : AutoCloseable {
  */
 public class TmuxClientException(message: String, cause: Throwable? = null) :
     RuntimeException(message, cause)
+
+/** Current tmux window geometry in character cells. */
+public data class TmuxWindowDimensions(
+    val columns: Int,
+    val rows: Int,
+)
 
 /**
  * Real implementation of [TmuxClient] backed by an [SshSession]'s shell
@@ -437,6 +453,20 @@ internal class RealTmuxClient(
         return sendCommand(
             "resize-window -t '${escapeSingleQuoted(sessionId)}' -x $cols -y $rows",
         )
+    }
+
+    override suspend fun getWindowDimensions(sessionId: String): TmuxWindowDimensions? {
+        val response = sendCommand(
+            "display -t '${escapeSingleQuoted(sessionId)}' -p '#{window_width}|#{window_height}'",
+        )
+        if (response.isError) return null
+        val row = response.output.firstOrNull { it.isNotBlank() }?.trim() ?: return null
+        val parts = row.split('|', limit = 2)
+        if (parts.size != 2) return null
+        val columns = parts[0].trim().toIntOrNull() ?: return null
+        val rows = parts[1].trim().toIntOrNull() ?: return null
+        if (columns <= 0 || rows <= 0) return null
+        return TmuxWindowDimensions(columns = columns, rows = rows)
     }
 
     override suspend fun detachCleanly(timeoutMs: Long) {

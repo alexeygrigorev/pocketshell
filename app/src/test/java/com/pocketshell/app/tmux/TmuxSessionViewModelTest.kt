@@ -11,6 +11,7 @@ import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxClientFactory
+import com.pocketshell.core.tmux.TmuxWindowDimensions
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -984,12 +985,14 @@ class TmuxSessionViewModelTest {
         assertEquals("", vm.escapeSingleQuoted(""))
     }
 
-    // ----- Issue #102 (reopen): resizeRemotePty for the tmux path.
+    // ----- Issue #240: attach-time size-mismatch prompt.
 
     @Test
-    fun resizeRemotePtyIssuesResizeWindowAgainstActiveSession() = runTest {
+    fun resizeRemotePtyCachesPhoneSizeAndPromptsWhenTmuxWindowDiffers() = runTest {
         val vm = newVm()
-        val client = FakeTmuxClient()
+        val client = FakeTmuxClient().apply {
+            windowDimensionsResponse = TmuxWindowDimensions(columns = 200, rows = 50)
+        }
         vm.replaceClientForTest(
             hostId = 1L,
             hostName = "alpha",
@@ -1001,21 +1004,31 @@ class TmuxSessionViewModelTest {
             client = client,
         )
 
-        vm.resizeRemotePty(columns = 48, rows = 96)
+        vm.resizeRemotePty(columns = 85, rows = 30)
         advanceUntilIdle()
 
-        val command = client.sentCommands.single { it.startsWith("resize-window") }
-        // Single-quoted session target keeps shell parsing safe; -x/-y
-        // carry the on-screen grid so tmux re-flows the inner pane
-        // (which is what opencode / Codex / Claude Code's alt-screen
-        // input boxes are anchored to).
-        assertEquals("resize-window -t 'work' -x 48 -y 96", command)
+        assertTrue(client.sentCommands.none { it.startsWith("resize-window") })
+        assertEquals(
+            "display -t 'work' -p '#{window_width}|#{window_height}'",
+            client.sentCommands.single { it.startsWith("display") },
+        )
+        assertEquals(
+            TmuxSessionViewModel.TmuxSizeMismatchPrompt(
+                sessionColumns = 200,
+                sessionRows = 50,
+                phoneColumns = 85,
+                phoneRows = 30,
+            ),
+            vm.sizeMismatchPrompt.value,
+        )
     }
 
     @Test
     fun resizeRemotePtyIsIdempotentForSameDimensions() = runTest {
         val vm = newVm()
-        val client = FakeTmuxClient()
+        val client = FakeTmuxClient().apply {
+            windowDimensionsResponse = TmuxWindowDimensions(columns = 200, rows = 50)
+        }
         vm.replaceClientForTest(
             hostId = 1L,
             hostName = "alpha",
@@ -1032,16 +1045,19 @@ class TmuxSessionViewModelTest {
         vm.resizeRemotePty(columns = 48, rows = 96)
         advanceUntilIdle()
 
-        // Compose re-fires onTerminalSizeChanged on every layout pass —
-        // we must dedup so tmux is not bombarded with no-op resize
-        // commands. A single dispatch is the contract.
-        assertEquals(1, client.sentCommands.count { it.startsWith("resize-window") })
+        // Compose re-fires onTerminalSizeChanged on every layout pass.
+        // We dedup so tmux is queried once for the same phone grid and
+        // never resized without an explicit user tap.
+        assertEquals(1, client.sentCommands.count { it.startsWith("display") })
+        assertTrue(client.sentCommands.none { it.startsWith("resize-window") })
     }
 
     @Test
-    fun resizeRemotePtyFiresAgainWhenDimensionsChange() = runTest {
+    fun resizeRemotePtyChecksAgainWhenPhoneDimensionsChange() = runTest {
         val vm = newVm()
-        val client = FakeTmuxClient()
+        val client = FakeTmuxClient().apply {
+            windowDimensionsResponse = TmuxWindowDimensions(columns = 60, rows = 90)
+        }
         vm.replaceClientForTest(
             hostId = 1L,
             hostName = "alpha",
@@ -1053,16 +1069,65 @@ class TmuxSessionViewModelTest {
             client = client,
         )
 
-        vm.resizeRemotePty(columns = 48, rows = 96)
-        vm.resizeRemotePty(columns = 50, rows = 96)
-        vm.resizeRemotePty(columns = 50, rows = 80)
+        vm.resizeRemotePty(columns = 48, rows = 95)
+        advanceUntilIdle()
+        vm.resizeRemotePty(columns = 50, rows = 95)
+        advanceUntilIdle()
+        vm.resizeRemotePty(columns = 50, rows = 94)
         advanceUntilIdle()
 
-        val sent = client.sentCommands.filter { it.startsWith("resize-window") }
-        assertEquals(3, sent.size)
-        assertEquals("resize-window -t 'work' -x 48 -y 96", sent[0])
-        assertEquals("resize-window -t 'work' -x 50 -y 96", sent[1])
-        assertEquals("resize-window -t 'work' -x 50 -y 80", sent[2])
+        assertEquals(3, client.sentCommands.count { it.startsWith("display") })
+        assertTrue(client.sentCommands.none { it.startsWith("resize-window") })
+        assertNull(vm.sizeMismatchPrompt.value)
+    }
+
+    @Test
+    fun sizeMismatchChecksFinishWithoutCancellingStaleDisplayCommands() = runTest {
+        val vm = newVm()
+        val firstGate = CompletableDeferred<Unit>()
+        val secondGate = CompletableDeferred<Unit>()
+        val client = FakeTmuxClient().apply {
+            windowDimensionsGates.addLast(firstGate)
+            windowDimensionsGates.addLast(secondGate)
+            windowDimensionsResponses.addLast(TmuxWindowDimensions(columns = 200, rows = 50))
+            windowDimensionsResponses.addLast(TmuxWindowDimensions(columns = 180, rows = 44))
+        }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        vm.resizeRemotePty(columns = 85, rows = 30)
+        runCurrent()
+        vm.resizeRemotePty(columns = 90, rows = 31)
+        runCurrent()
+
+        assertEquals(2, client.sentCommands.count { it.startsWith("display") })
+        firstGate.complete(Unit)
+        runCurrent()
+        assertNull(
+            "first display result is stale after phone size changed and must be ignored",
+            vm.sizeMismatchPrompt.value,
+        )
+
+        secondGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(
+            TmuxSessionViewModel.TmuxSizeMismatchPrompt(
+                sessionColumns = 180,
+                sessionRows = 44,
+                phoneColumns = 90,
+                phoneRows = 31,
+            ),
+            vm.sizeMismatchPrompt.value,
+        )
     }
 
     @Test
@@ -1089,6 +1154,7 @@ class TmuxSessionViewModelTest {
         vm.resizeRemotePty(columns = 48, rows = 0)
         advanceUntilIdle()
 
+        assertTrue(client.sentCommands.none { it.startsWith("display") })
         assertTrue(client.sentCommands.none { it.startsWith("resize-window") })
     }
 
@@ -1105,9 +1171,11 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun resizeRemotePtyEscapesSessionNameSingleQuotes() = runTest {
+    fun resizeRemotePtyEscapesSessionNameSingleQuotesForDisplayQuery() = runTest {
         val vm = newVm()
-        val client = FakeTmuxClient()
+        val client = FakeTmuxClient().apply {
+            windowDimensionsResponse = TmuxWindowDimensions(columns = 200, rows = 50)
+        }
         vm.replaceClientForTest(
             hostId = 1L,
             hostName = "alpha",
@@ -1125,8 +1193,99 @@ class TmuxSessionViewModelTest {
         vm.resizeRemotePty(columns = 60, rows = 24)
         advanceUntilIdle()
 
-        val command = client.sentCommands.single { it.startsWith("resize-window") }
-        assertEquals("resize-window -t 'it'\\''s work' -x 60 -y 24", command)
+        val command = client.sentCommands.single { it.startsWith("display") }
+        assertEquals(
+            "display -t 'it'\\''s work' -p '#{window_width}|#{window_height}'",
+            command,
+        )
+    }
+
+    @Test
+    fun sizeMismatchPromptStaysHiddenWithinThreshold() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            windowDimensionsResponse = TmuxWindowDimensions(columns = 104, rows = 35)
+        }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        vm.resizeRemotePty(columns = 85, rows = 30)
+        advanceUntilIdle()
+
+        assertNull(vm.sizeMismatchPrompt.value)
+    }
+
+    @Test
+    fun keepCurrentSessionSizeSuppressesPromptForSameAttach() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            windowDimensionsResponse = TmuxWindowDimensions(columns = 200, rows = 50)
+        }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        vm.resizeRemotePty(columns = 85, rows = 30)
+        advanceUntilIdle()
+        assertNotNull(vm.sizeMismatchPrompt.value)
+
+        vm.keepCurrentSessionSize()
+        vm.resizeRemotePty(columns = 86, rows = 30)
+        advanceUntilIdle()
+
+        assertNull(vm.sizeMismatchPrompt.value)
+        assertEquals(1, client.sentCommands.count { it.startsWith("display") })
+    }
+
+    @Test
+    fun resizeFromSizeMismatchPromptUsesManualResizeAndClearsPrompt() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            windowDimensionsResponse = TmuxWindowDimensions(columns = 200, rows = 50)
+        }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        vm.resizeRemotePty(columns = 85, rows = 30)
+        advanceUntilIdle()
+        assertNotNull(vm.sizeMismatchPrompt.value)
+        vm.resizeRemotePty(columns = 85, rows = 24)
+        advanceUntilIdle()
+
+        vm.resizeFromSizeMismatchPrompt()
+        advanceUntilIdle()
+
+        assertNull(vm.sizeMismatchPrompt.value)
+        assertEquals(
+            "resize-window -t 'work' -x 85 -y 30",
+            client.sentCommands.single { it.startsWith("resize-window") },
+        )
+        assertEquals(
+            "prompt-visible terminal rows must not overwrite the prompt's captured resize target",
+            1,
+            client.sentCommands.count { it.startsWith("display") },
+        )
     }
 
     // ----- Issue #238: manual "Resize session" kebab handler.
@@ -1147,25 +1306,19 @@ class TmuxSessionViewModelTest {
         )
 
         // First, the Compose layout pass populates the cached phone
-        // dimensions (this is what production does on every layout pass
-        // via [resizeRemotePty]).
+        // dimensions. It may query tmux for mismatch detection, but it
+        // must not resize without an explicit user tap.
         vm.resizeRemotePty(columns = 85, rows = 30)
         advanceUntilIdle()
-        // Drop the layout-pass dispatch so the manual tap's dispatch is
-        // visible in isolation.
         val priorResizeCount = client.sentCommands.count { it.startsWith("resize-window") }
-        assertEquals(1, priorResizeCount)
+        assertEquals(0, priorResizeCount)
 
         vm.requestManualResize()
         advanceUntilIdle()
 
-        // Manual tap re-issues resize-window with the cached dimensions
-        // even though the dimensions have not changed since the last
-        // layout pass — the maintainer's pain point was attaching to a
-        // session that tmux had at a different size, so the manual button
-        // must trigger an actual round-trip.
+        // Manual tap issues resize-window with the cached dimensions.
         val resizeCommands = client.sentCommands.filter { it.startsWith("resize-window") }
-        assertEquals(2, resizeCommands.size)
+        assertEquals(1, resizeCommands.size)
         assertEquals("resize-window -t 'work' -x 85 -y 30", resizeCommands.last())
     }
 
@@ -1307,21 +1460,16 @@ class TmuxSessionViewModelTest {
         vm.requestManualResize()
         advanceUntilIdle()
 
-        // After a successful manual resize the cached remote dims must
-        // match what we just told tmux. Otherwise a subsequent layout
-        // pass with the same dims would re-fire `resize-window` because
-        // the idempotency check in [resizeRemotePty] would see a stale
-        // cache. (Production exercise: user taps Resize, no layout
-        // change follows, automatic resize must NOT bombard tmux.)
+        // After a successful manual resize the cached phone dims remain
+        // what we just told tmux. A redundant layout pass with the same
+        // dims must not dispatch another resize.
         val (cachedCols, cachedRows) = vm.remoteDimensionsForTest()
         assertEquals(85, cachedCols)
         assertEquals(30, cachedRows)
         vm.resizeRemotePty(columns = 85, rows = 30)
         advanceUntilIdle()
-        // Exactly one resize from the initial layout pass + one from the
-        // manual tap = 2. No third dispatch from the redundant layout pass.
         assertEquals(
-            2,
+            1,
             client.sentCommands.count { it.startsWith("resize-window") },
         )
     }
@@ -2484,6 +2632,8 @@ class TmuxSessionViewModelTest {
         // to reason about manual-resize behaviour.
         override suspend fun resizeWindow(sessionId: String, cols: Int, rows: Int) =
             delegate.resizeWindow(sessionId, cols, rows)
+        override suspend fun getWindowDimensions(sessionId: String) =
+            delegate.getWindowDimensions(sessionId)
     }
 
     // ─── Issue #178: same-host fast-switch reuses the SSH transport ───

@@ -45,14 +45,9 @@ import java.io.FileOutputStream
  *     having attached before the phone).
  *  2. Launch [MainActivity], tap the seeded host, attach to the session
  *     via the picker — phone's Compose grid is ~85x30 (Pixel 7 viewport).
- *  3. After attach, the automatic [TmuxSessionViewModel.resizeRemotePty]
- *     path will already have pushed phone dims to tmux on the first
- *     layout pass — but the dogfood story is "PocketShell previously did
- *     not do this", and the maintainer wants the MANUAL button. So this
- *     test re-forces the session back to `200x50` from the remote side
- *     AFTER the phone has attached (simulating "another client just
- *     resized us back up"), then taps "Resize session" and asserts the
- *     phone dims are restored.
+ *  3. After attach, [TmuxSessionViewModel.resizeRemotePty] has cached
+ *     the phone's Compose grid. The session remains desktop-sized until
+ *     the user explicitly taps "Resize session".
  *  4. Verify `tmux display-message -p '#{window_width}x#{window_height}'`
  *     reports the phone dims (not the desktop dims).
  *
@@ -115,25 +110,15 @@ class TmuxResizeSessionE2eTest {
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        // Give the phone a moment to lay out + propagate its Compose
-        // grid via the automatic [resizeRemotePty] path. We do NOT
-        // require that propagation to land below the desktop dims here
-        // — some emulator layout paths report 0x0 on the very first
-        // pass and the auto-resize is gated on >0 dims. The maintainer
-        // pain point is "PocketShell does NOT auto-resize to my phone";
-        // the manual button is the contract we're testing.
-        //
-        // The wait period is sized to be larger than the
-        // SSH-handshake + tmux-CC bootstrap + first-layout window so
-        // the [TmuxSessionViewModel] cache (remoteColumns / remoteRows)
-        // is populated before the manual tap.
+        // Give the phone a moment to lay out and cache its Compose grid.
+        // The wait period is sized to be larger than the SSH-handshake +
+        // tmux-CC bootstrap + first-layout window so the ViewModel cache
+        // (remoteColumns / remoteRows) is populated before the manual tap.
         kotlinx.coroutines.delay(PHONE_LAYOUT_WAIT_MS)
 
-        // Force the remote BACK to the desktop dimensions to undo any
-        // automatic resize the phone may have fired during attach.
-        // This is the deterministic "now the session is desktop-sized
-        // and the phone hasn't snapped it yet" state the manual button
-        // must fix.
+        // Force the remote to desktop dimensions so the manual button has
+        // a deterministic "session is desktop-sized, phone has not snapped
+        // it yet" state to fix.
         forceSessionToDesktopDims(key)
         val pushedUpDims = readRemoteDims(key)
         assertEquals(
@@ -309,12 +294,10 @@ class TmuxResizeSessionE2eTest {
 
     /**
      * Re-force the seeded session to desktop dims AFTER the app has
-     * attached. The view model's `[TmuxSessionViewModel.resizeRemotePty]`
-     * caches the last-applied dims and will NOT immediately fight back
-     * (its idempotency check sees the local Compose grid hasn't changed),
-     * so this gives us a deterministic "remote is now desktop-sized,
-     * phone hasn't snapped it yet" state to verify the manual tap drives
-     * the actual round-trip.
+     * attached. The ViewModel caches phone dims but does not resize
+     * automatically, so this gives us a deterministic "remote is now
+     * desktop-sized, phone hasn't snapped it yet" state to verify the
+     * manual tap drives the actual round-trip.
      */
     private suspend fun forceSessionToDesktopDims(key: String) {
         val script = "tmux resize-window -t ${shellQuote(SESSION_LAB)} " +

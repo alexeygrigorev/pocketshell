@@ -269,6 +269,72 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `getWindowDimensions sends display command and parses dimensions`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val response = scope.async {
+                client.getWindowDimensions("work")
+            }
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            assertEquals(
+                "display -t 'work' -p '#{window_width}|#{window_height}'\n",
+                shell.stdinAsString(),
+            )
+
+            shell.feed(
+                "%begin 1700000000 8 0\n" +
+                    "200|50\n" +
+                    "%end 1700000000 8 0\n",
+            )
+            assertEquals(
+                TmuxWindowDimensions(columns = 200, rows = 50),
+                withTimeout(3_000) { response.await() },
+            )
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `getWindowDimensions returns null for malformed output`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val response = scope.async {
+                client.getWindowDimensions("work")
+            }
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.feed(
+                "%begin 1700000000 9 0\n" +
+                    "wide|tall\n" +
+                    "%end 1700000000 9 0\n",
+            )
+            assertEquals(null, withTimeout(3_000) { response.await() })
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
     fun `sendCommand serialises concurrent calls FIFO`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)

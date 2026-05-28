@@ -3,6 +3,7 @@ package com.pocketshell.app.tmux
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientException
+import com.pocketshell.core.tmux.TmuxWindowDimensions
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
@@ -126,6 +127,22 @@ internal class FakeTmuxClient : TmuxClient {
         val escaped = sessionId.replace("'", "'\\''")
         sentCommands += "resize-window -t '$escaped' -x $cols -y $rows"
         return resizeWindowResponse
+    }
+
+    var windowDimensionsResponse: TmuxWindowDimensions? = null
+
+    var windowDimensionsException: Throwable? = null
+
+    val windowDimensionsResponses: ArrayDeque<TmuxWindowDimensions?> = ArrayDeque()
+
+    val windowDimensionsGates: ArrayDeque<CompletableDeferred<Unit>> = ArrayDeque()
+
+    override suspend fun getWindowDimensions(sessionId: String): TmuxWindowDimensions? {
+        val escaped = sessionId.replace("'", "'\\''")
+        sentCommands += "display -t '$escaped' -p '#{window_width}|#{window_height}'"
+        windowDimensionsException?.let { throw it }
+        windowDimensionsGates.removeFirstOrNull()?.await()
+        return windowDimensionsResponses.removeFirstOrNull() ?: windowDimensionsResponse
     }
 
     override fun close() {

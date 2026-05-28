@@ -1134,5 +1134,7 @@ class SessionsDashboardViewModelTest {
         // about manual-resize behaviour.
         override suspend fun resizeWindow(sessionId: String, cols: Int, rows: Int) =
             delegate.resizeWindow(sessionId, cols, rows)
+        override suspend fun getWindowDimensions(sessionId: String) =
+            delegate.getWindowDimensions(sessionId)
     }
 }

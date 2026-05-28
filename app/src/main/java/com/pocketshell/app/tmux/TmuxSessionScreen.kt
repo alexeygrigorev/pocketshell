@@ -193,6 +193,7 @@ public fun TmuxSessionScreen(
 
     val panes by viewModel.panes.collectAsState()
     val status by viewModel.connectionStatus.collectAsState()
+    val sizeMismatchPrompt by viewModel.sizeMismatchPrompt.collectAsState()
     val agentConversations by viewModel.agentConversations.collectAsState()
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
     val voiceCommandReview by viewModel.voiceCommandReview.collectAsState()
@@ -610,10 +611,9 @@ public fun TmuxSessionScreen(
                         showWindowSwitcher = true
                     },
                     // Issue #238: maintainer-asked "Resize session" — snap
-                    // tmux session window dims to phone cols × rows. The
-                    // viewmodel reads the dimensions Compose has already
-                    // propagated via [TmuxSessionViewModel.resizeRemotePty]
-                    // and posts a [TmuxSessionViewModel.userMessages]
+                    // tmux session window dims to the phone cols × rows
+                    // cached from Compose by [TmuxSessionViewModel.resizeRemotePty].
+                    // The handler posts a [TmuxSessionViewModel.userMessages]
                     // string the LaunchedEffect below surfaces as a Toast.
                     onResizeSession = {
                         moreExpanded = false
@@ -664,6 +664,13 @@ public fun TmuxSessionScreen(
                     message = failed.message,
                     onReconnect = { viewModel.reconnect() },
                     canReconnect = canReconnect,
+                )
+            }
+            sizeMismatchPrompt?.let { prompt ->
+                SizeMismatchPromptRow(
+                    prompt = prompt,
+                    onResize = viewModel::resizeFromSizeMismatchPrompt,
+                    onKeep = viewModel::keepCurrentSessionSize,
                 )
             }
             // Issue #116 (usage-panel Fix B): in-session blocked /
@@ -774,16 +781,11 @@ public fun TmuxSessionScreen(
                         val pane = panes[pageIndex]
                         TerminalSurface(
                             state = pane.terminalState,
-                            // Issue #102 (reopen): propagate the on-screen
-                            // grid to the remote tmux pane so opencode /
-                            // Codex / Claude Code render their UI for the
-                            // grid the local emulator is actually painting.
-                            // Without this, tmux keeps the pane at the
-                            // SSH-PTY-time 80x24 default and the inner
-                            // CLI's input box / cursor land at the wrong
-                            // on-screen cells. The raw-SSH route has the
-                            // equivalent wiring via SessionScreen ->
-                            // SessionViewModel.resizeRemotePty.
+                            // Issue #240: cache the phone grid so the
+                            // view model can compare it with tmux's
+                            // current window size and offer an explicit
+                            // Resize prompt instead of resizing
+                            // automatically on attach.
                             onTerminalSizeChanged = viewModel::resizeRemotePty,
                             modifier = Modifier
                                 .fillMaxSize()
@@ -1471,6 +1473,9 @@ internal const val CANCEL_AVAILABLE_AFTER_MS: Long = 15_000L
  * it drops the remote `#{window_width}×#{window_height}` to phone dims.
  */
 internal const val TMUX_RESIZE_BUTTON_TAG = "tmux:resize-button"
+internal const val TMUX_SIZE_MISMATCH_PROMPT_TAG = "tmux:size-mismatch-prompt"
+internal const val TMUX_SIZE_MISMATCH_RESIZE_TAG = "tmux:size-mismatch-prompt:resize"
+internal const val TMUX_SIZE_MISMATCH_KEEP_TAG = "tmux:size-mismatch-prompt:keep"
 /** Issue #158: the WindowStrip is the per-session window tabs row. Hidden when only one window exists. */
 internal const val TMUX_WINDOW_STRIP_TAG = "tmux:window-strip"
 /**
@@ -1790,6 +1795,47 @@ private fun FailedConnectionRow(
                 modifier = Modifier.testTag(TMUX_SESSION_RECONNECT_TAG),
             ) {
                 Text("Reconnect")
+            }
+        }
+    }
+}
+
+@Composable
+private fun SizeMismatchPromptRow(
+    prompt: TmuxSessionViewModel.TmuxSizeMismatchPrompt,
+    onResize: () -> Unit,
+    onKeep: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.AccentSoft)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .testTag(TMUX_SIZE_MISMATCH_PROMPT_TAG),
+    ) {
+        Text(
+            text = "Session is ${prompt.sessionColumns}×${prompt.sessionRows}; phone is " +
+                "${prompt.phoneColumns}×${prompt.phoneRows}.",
+            color = PocketShellColors.Text,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(
+                onClick = onKeep,
+                modifier = Modifier.testTag(TMUX_SIZE_MISMATCH_KEEP_TAG),
+            ) {
+                Text("Keep size")
+            }
+            TextButton(
+                onClick = onResize,
+                modifier = Modifier.testTag(TMUX_SIZE_MISMATCH_RESIZE_TAG),
+            ) {
+                Text("Resize to ${prompt.phoneColumns}×${prompt.phoneRows}")
             }
         }
     }

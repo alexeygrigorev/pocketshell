@@ -17,6 +17,10 @@ file is the source of truth; this file is only the quick local checklist.
 - Keep orchestration asynchronous and nonblocking when possible. Launch agents
   only in asynchronous mode; do not use blocked agent runs while useful
   non-overlapping coordinator work is available.
+- Do not let agents, automation, or tests use the maintainer's default tmux
+  socket at `/tmp/tmux-$UID/default` unless explicitly requested. Use
+  `tmux -L`, `tmux -S`, or an isolated `TMUX_TMPDIR`, and see
+  [docs/tmux-socket-recovery.md](docs/tmux-socket-recovery.md).
 - Implementers edit and test, then report changed files and verification. They
   do not commit, push, close issues, or edit outside scope.
 - Reviewers inspect the latest issue evidence and working-tree diff, run the

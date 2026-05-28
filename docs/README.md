@@ -16,6 +16,7 @@ Conceptual planning. Captured 2026-05-21, before any code is written.
 | [decisions.md](decisions.md) | Log of what's locked, what's still open |
 | [testing.md](testing.md) | Android emulator + Docker remote-server test environment |
 | [docker-emulator-runbook.md](docker-emulator-runbook.md) | Docker profiles, ports, emulator commands, connected-test runbook |
+| [tmux-socket-recovery.md](tmux-socket-recovery.md) | Default tmux socket split-brain detection, safe recovery, and automation namespace guardrails |
 | [release-terminal-gate.md](release-terminal-gate.md) | Optional high-confidence terminal release gate (emulator + Docker chain) |
 | [../agents.md](../agents.md) | Orchestrator + sub-agent process (auto-loaded via [../CLAUDE.md](../CLAUDE.md)) |
 | [mockups/](mockups/) | Static HTML mockups, Pixel 7 viewport — open `mockups/index.html` in a browser |

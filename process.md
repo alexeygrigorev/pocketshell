@@ -214,6 +214,26 @@ output is another issue's input. Even with isolated worktrees, the
 orchestrator must assign disjoint file ownership in each brief and merge
 approved worktrees back to `main` one at a time.
 
+### tmux socket isolation
+
+Agents, automation, and tests must not use the maintainer's default tmux socket
+at `/tmp/tmux-$UID/default` unless the maintainer explicitly asks for a live
+default-socket repro or recovery task.
+
+Use an isolated tmux namespace instead:
+
+```bash
+tmux -L "pocketshell-$RUN_ID" new-session -d -s test
+tmux -S "/tmp/pocketshell-tmux-$RUN_ID.sock" new-session -d -s test
+TMUX_TMPDIR="$(mktemp -d)" tmux new-session -d -s test
+```
+
+This prevents automation from replacing the maintainer's default socket and
+hiding live tmux sessions from PocketShell or normal `tmux ls`. If the default
+socket already looks missing, replaced, or split-brained, follow
+[docs/tmux-socket-recovery.md](docs/tmux-socket-recovery.md) before starting
+new default-socket tmux sessions.
+
 ## Agent Worktrees
 
 Implementer and reviewer agents do NOT edit the orchestrator's main

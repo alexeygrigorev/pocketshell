@@ -18,7 +18,7 @@ MAIN_TEST_CLASS="com.pocketshell.app.proof.WalkthroughVisualScreenshotTest"
 COMPOSER_TEST_CLASS="com.pocketshell.app.composer.PromptComposerVisualScreenshotTest"
 MAIN_SCREENSHOTS=(
   "01-host-list.png"
-  "02-host-setup-session-picker.png"
+  "02-host-setup-folder-list.png"
   "03-terminal-session-input-controls.png"
   "04-snippets.png"
   "05-composer-draft.png"

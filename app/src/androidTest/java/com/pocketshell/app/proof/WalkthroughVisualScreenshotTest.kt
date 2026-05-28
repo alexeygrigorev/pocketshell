@@ -12,7 +12,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -120,8 +120,9 @@ class WalkthroughVisualScreenshotTest {
             }
             compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
             waitForSessionConnectUiToSettle()
+            dismissSizeMismatchPromptIfPresent()
 
-            sendCommandViaComposer("printf '%s\\n' '$marker'")
+            sendCommandViaComposer("echo $marker")
             waitForTerminalTranscript("walkthrough marker") { transcript ->
                 transcript.lineSequence().map { it.trim() }.any { it == marker }
             }
@@ -197,7 +198,7 @@ class WalkthroughVisualScreenshotTest {
                 it.exec(
                     "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true; " +
                         "tmux new-session -d -s ${shellQuote(sessionName)} " +
-                        "${shellQuote("printf 'tmux visual pass ready\\n'; sleep 300")}",
+                        "${shellQuote("printf 'tmux visual pass ready\\n'; exec sh -i")}",
                 )
             }
         }
@@ -213,6 +214,26 @@ class WalkthroughVisualScreenshotTest {
                 "connecting to $DEFAULT_USER@$DEFAULT_HOST:$DEFAULT_PORT",
                 substring = false,
             ).fetchSemanticsNodes().isEmpty()
+        }
+    }
+
+    private fun dismissSizeMismatchPromptIfPresent() {
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("Resize to", substring = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty() ||
+                terminalTranscriptSnapshot().contains("tmux visual pass ready")
+        }
+        Thread.sleep(500)
+        val resizeNodes = compose.onAllNodesWithText("Resize to", substring = true)
+            .fetchSemanticsNodes()
+        if (resizeNodes.isNotEmpty()) {
+            compose.onNodeWithText("Resize to", substring = true).performClick()
+            compose.waitUntil(timeoutMillis = 10_000) {
+                compose.onAllNodesWithText("Resize to", substring = true)
+                    .fetchSemanticsNodes()
+                    .isEmpty()
+            }
         }
     }
 
@@ -238,7 +259,8 @@ class WalkthroughVisualScreenshotTest {
         }
         compose.onNodeWithTag(SESSION_MIC_FAB_TAG, useUnmergedTree = true).performClick()
         compose.onNodeWithText("Prompt Composer").assertExists()
-        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput(command)
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextReplacement(command)
+        compose.onNodeWithText(command, useUnmergedTree = true).assertExists()
         WalkthroughScreenshotArtifacts.capture("05-composer-draft")
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).performClick()
         hideSoftKeyboard()

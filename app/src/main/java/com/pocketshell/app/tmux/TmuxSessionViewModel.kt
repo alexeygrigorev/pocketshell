@@ -2131,11 +2131,11 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     public fun resizeFromSizeMismatchPrompt() {
-        val prompt = _sizeMismatchPrompt.value ?: return
+        if (_sizeMismatchPrompt.value == null) return
         sizeMismatchGeneration += 1
         sizeMismatchDismissedForAttach = true
         _sizeMismatchPrompt.value = null
-        requestResizeTo(prompt.phoneColumns, prompt.phoneRows)
+        requestResizeTo(remoteColumns, remoteRows)
     }
 
     /**

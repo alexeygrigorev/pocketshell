@@ -1252,7 +1252,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun resizeFromSizeMismatchPromptUsesManualResizeAndClearsPrompt() = runTest {
+    fun resizeFromSizeMismatchPromptUsesLatestCachedPhoneSizeAndClearsPrompt() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
             windowDimensionsResponse = TmuxWindowDimensions(columns = 200, rows = 50)
@@ -1278,11 +1278,11 @@ class TmuxSessionViewModelTest {
 
         assertNull(vm.sizeMismatchPrompt.value)
         assertEquals(
-            "resize-window -t 'work' -x 85 -y 30",
+            "resize-window -t 'work' -x 85 -y 24",
             client.sentCommands.single { it.startsWith("resize-window") },
         )
         assertEquals(
-            "prompt-visible terminal rows must not overwrite the prompt's captured resize target",
+            "prompt-visible terminal rows must update the resize target without re-querying tmux",
             1,
             client.sentCommands.count { it.startsWith("display") },
         )

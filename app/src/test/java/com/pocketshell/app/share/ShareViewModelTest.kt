@@ -8,6 +8,7 @@ import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.tmux.FakeTmuxClient
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.tmux.CommandResponse
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.first
@@ -368,6 +369,177 @@ class ShareViewModelTest {
 
         val state = vm.uploadState.first { it is UploadState.Failed }
         assertTrue(state is UploadState.Failed)
+    }
+
+    // ---- Issue #258: multi-file share upload loop + partial failure ----
+
+    @Test
+    fun startUploadSendsEveryStagedItemToTheHost() = runTest {
+        val vm = newVm(ActiveTmuxClients())
+        val host = seededHost(id = 30L, name = "hetzner")
+        val fake = FakeUploader().also { vm.uploader = it }
+        vm.setItems(
+            listOf(
+                uriItem("a.png"),
+                uriItem("b.png"),
+                uriItem("c.png"),
+            ),
+        )
+
+        vm.startUpload(host)
+        advanceUntilIdle()
+
+        assertEquals(
+            "expected the loop to upload all three staged items, got ${fake.uploadedNames}",
+            listOf("a.png", "b.png", "c.png"),
+            fake.uploadedNames,
+        )
+        val success = vm.uploadState.first { it is UploadState.Success } as UploadState.Success
+        assertEquals(3, success.totalCount)
+        assertEquals(3, success.successCount)
+        assertTrue(
+            "expected the multi-file success detail to list every remote path, got '${success.remotePath}'",
+            success.remotePath.contains("a.png") &&
+                success.remotePath.contains("b.png") &&
+                success.remotePath.contains("c.png"),
+        )
+    }
+
+    @Test
+    fun startUploadWithSingleItemKeepsSinglePathSuccess() = runTest {
+        val vm = newVm(ActiveTmuxClients())
+        val host = seededHost(id = 31L, name = "hetzner")
+        val fake = FakeUploader().also { vm.uploader = it }
+        vm.setItem(uriItem("only.png"))
+
+        vm.startUpload(host)
+        advanceUntilIdle()
+
+        assertEquals(listOf("only.png"), fake.uploadedNames)
+        val success = vm.uploadState.first { it is UploadState.Success } as UploadState.Success
+        assertEquals(1, success.totalCount)
+        assertEquals(1, success.successCount)
+        assertEquals(
+            "single-file success detail must be just the one remote path",
+            "~/inbox/pocketshell/only.png",
+            success.remotePath,
+        )
+    }
+
+    @Test
+    fun startUploadReportsPartialFailureWhenSomeItemsFail() = runTest {
+        val vm = newVm(ActiveTmuxClients())
+        val host = seededHost(id = 32L, name = "hetzner")
+        // The middle file fails; the other two succeed.
+        val fake = FakeUploader(failNames = setOf("bad.png")).also { vm.uploader = it }
+        vm.setItems(
+            listOf(
+                uriItem("ok1.png"),
+                uriItem("bad.png"),
+                uriItem("ok2.png"),
+            ),
+        )
+
+        vm.startUpload(host)
+        advanceUntilIdle()
+
+        // All three were attempted — the failure does not abort the loop.
+        assertEquals(listOf("ok1.png", "bad.png", "ok2.png"), fake.uploadedNames)
+        val failed = vm.uploadState.first { it is UploadState.Failed } as UploadState.Failed
+        assertEquals(3, failed.totalCount)
+        assertEquals(2, failed.successCount)
+        assertEquals(
+            "the failed-name list must name only the file that failed",
+            listOf("bad.png"),
+            failed.failedNames,
+        )
+        assertTrue(
+            "partial-failure message should report the 2 of 3 success and name the failure, got '${failed.message}'",
+            failed.message.contains("2 of 3") && failed.message.contains("bad.png"),
+        )
+    }
+
+    @Test
+    fun startUploadReportsTotalFailureWhenAllItemsFail() = runTest {
+        val vm = newVm(ActiveTmuxClients())
+        val host = seededHost(id = 33L, name = "hetzner")
+        val fake = FakeUploader(failNames = setOf("x.png", "y.png"))
+            .also { vm.uploader = it }
+        vm.setItems(listOf(uriItem("x.png"), uriItem("y.png")))
+
+        vm.startUpload(host)
+        advanceUntilIdle()
+
+        val failed = vm.uploadState.first { it is UploadState.Failed } as UploadState.Failed
+        assertEquals(2, failed.totalCount)
+        assertEquals(0, failed.successCount)
+        assertEquals(setOf("x.png", "y.png"), failed.failedNames.toSet())
+    }
+
+    @Test
+    fun startUploadWithNoStagedItemsIsNoOp() = runTest {
+        val vm = newVm(ActiveTmuxClients())
+        val host = seededHost(id = 34L, name = "hetzner")
+        val fake = FakeUploader().also { vm.uploader = it }
+
+        vm.startUpload(host)
+        advanceUntilIdle()
+
+        assertTrue("nothing staged -> uploader must not be called", fake.uploadedNames.isEmpty())
+        assertTrue(vm.uploadState.first() is UploadState.Idle)
+    }
+
+    /**
+     * Records the order of uploaded item names and lets a test pin which
+     * items fail, so the [ShareViewModel] multi-file loop + partial-
+     * failure aggregation can be asserted without a live SSH session.
+     */
+    private class FakeUploader(
+        private val failNames: Set<String> = emptySet(),
+    ) : ShareItemUploader {
+        val uploadedNames = mutableListOf<String>()
+
+        override suspend fun upload(
+            host: HostEntity,
+            keyEntity: SshKeyEntity,
+            item: ShareableItem,
+        ): Result<String> {
+            val name = item.displayName.orEmpty()
+            uploadedNames += name
+            return if (name in failNames) {
+                Result.failure(IllegalStateException("Permission denied"))
+            } else {
+                Result.success("~/inbox/pocketshell/$name")
+            }
+        }
+    }
+
+    private fun uriItem(name: String): ShareableItem.UriItem =
+        ShareableItem.UriItem(
+            uri = android.net.Uri.parse("content://x/$name"),
+            displayName = name,
+            size = null,
+            mimeType = "image/png",
+            fallbackExtension = "png",
+        )
+
+    /**
+     * Insert a host plus an SSH-key row so the ViewModel's
+     * `sshKeyDao.getById(host.keyId)` lookup succeeds and the upload loop
+     * runs against the [FakeUploader].
+     */
+    private suspend fun seededHost(id: Long, name: String): HostEntity {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "key-$id", privateKeyPath = "/tmp/key-$id"),
+        )
+        return HostEntity(
+            id = id,
+            name = name,
+            hostname = "$name.example",
+            port = 22,
+            username = "alex",
+            keyId = keyId,
+        )
     }
 
     private fun newVm(registry: ActiveTmuxClients): ShareViewModel {

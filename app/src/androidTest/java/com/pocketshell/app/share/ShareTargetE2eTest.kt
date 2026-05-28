@@ -55,6 +55,7 @@ class ShareTargetE2eTest {
 
     private var launchedActivity: ActivityScenario<ShareActivity>? = null
     private var stagedFile: File? = null
+    private val stagedFiles = mutableListOf<File>()
 
     @After
     fun teardown() {
@@ -62,6 +63,8 @@ class ShareTargetE2eTest {
         launchedActivity = null
         stagedFile?.delete()
         stagedFile = null
+        stagedFiles.forEach { it.delete() }
+        stagedFiles.clear()
     }
 
     @Test
@@ -203,6 +206,152 @@ class ShareTargetE2eTest {
         } finally {
             // Best-effort cleanup so re-runs don't accumulate junk on
             // the Docker remote.
+            cleanInboxOnRemote(key)
+        }
+        Unit
+    }
+
+    /**
+     * Issue #258: selecting several files and sharing them must upload
+     * EVERY one, not just the first. Drives an `ACTION_SEND_MULTIPLE`
+     * intent carrying three staged files, picks the seeded host, and
+     * asserts all three land under `~/inbox/pocketshell/` with their
+     * round-tripped contents.
+     */
+    @Test
+    fun shareMultipleIntentUploadsEveryFileToHostInbox() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val targetContext = instrumentation.targetContext
+        val key = instrumentation.context
+            .assets
+            .open("test_key")
+            .bufferedReader()
+            .use { it.readText() }
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        val marker = "psmulti${System.currentTimeMillis()}"
+        val hostId = seedHost(targetContext, key, marker)
+
+        // Stage three distinct files; each carries its own marker suffix
+        // so we can verify all three land independently.
+        val markers = listOf("$marker-a", "$marker-b", "$marker-c")
+        val staged = markers.map { fileMarker ->
+            val (file, contents) = stageSharedFile(targetContext, fileMarker)
+            stagedFiles += file
+            Triple(fileMarker, file, contents)
+        }
+
+        try {
+            cleanInboxOnRemote(key)
+            val uris = ArrayList(
+                staged.map { (_, file, _) ->
+                    FileProvider.getUriForFile(
+                        targetContext,
+                        "${targetContext.packageName}.shareprovider",
+                        file,
+                    )
+                },
+            )
+
+            val shareIntent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                setClassName(targetContext, ShareActivity::class.java.name)
+                type = "text/plain"
+                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+
+            launchedActivity = ActivityScenario.launch(shareIntent)
+            compose.waitUntil(timeoutMillis = 15_000) {
+                compose.onAllNodesWithTag(SHARE_PICKER_ROOT_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            val hostTag = SHARE_HOST_ROW_TAG_PREFIX + hostId
+            compose.waitUntil(timeoutMillis = 15_000) {
+                compose.onAllNodesWithTag(hostTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag(hostTag, useUnmergedTree = true).performClick()
+
+            compose.waitUntil(timeoutMillis = 90_000) {
+                val success = compose
+                    .onAllNodesWithTag(SHARE_RESULT_SUCCESS_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+                val failure = compose
+                    .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+                success || failure
+            }
+            val showedFailure = compose
+                .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+            if (showedFailure) {
+                val detailText = compose
+                    .onAllNodesWithTag(SHARE_RESULT_DETAIL_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .joinToString(" / ") { it.toString() }
+                throw AssertionError("multi-file upload reported a failure state: $detailText")
+            }
+
+            // Every staged file must have landed under the inbox with
+            // its own marker and round-tripped contents.
+            for ((fileMarker, _, contents) in staged) {
+                val remoteListing = withTimeout(30_000) {
+                    pollRemoteUntilFileExists(key, fileMarker)
+                }
+                assertNotNull(
+                    "expected file with marker '$fileMarker' under ~/inbox/pocketshell/",
+                    remoteListing,
+                )
+                val remotePath = remoteListing!!
+                assertTrue(
+                    "expected remote path under ~/inbox/pocketshell/ but got $remotePath",
+                    remotePath.contains("/inbox/pocketshell/"),
+                )
+                val readBack = SshConnection.connect(
+                    host = DEFAULT_HOST,
+                    port = DEFAULT_PORT,
+                    user = DEFAULT_USER,
+                    key = SshKey.Pem(key),
+                    knownHosts = KnownHostsPolicy.AcceptAll,
+                ).getOrThrow().use { session ->
+                    session.exec("cat \"$remotePath\"")
+                }
+                assertEquals(
+                    "expected contents of '$fileMarker' to round-trip, stderr='${readBack.stderr}'",
+                    0,
+                    readBack.exitCode,
+                )
+                assertEquals(
+                    "expected uploaded contents of '$fileMarker' to match local payload",
+                    contents,
+                    readBack.stdout,
+                )
+            }
+
+            // Sanity: exactly three files should be present in the inbox.
+            val count = SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+            ).getOrThrow().use { session ->
+                session.exec(
+                    "ls -1 \"\$HOME/inbox/pocketshell\" 2>/dev/null | grep \"$marker\" | wc -l",
+                )
+            }
+            assertEquals(
+                "expected all 3 shared files in the inbox, listing said '${count.stdout.trim()}'",
+                "3",
+                count.stdout.trim(),
+            )
+        } finally {
             cleanInboxOnRemote(key)
         }
         Unit

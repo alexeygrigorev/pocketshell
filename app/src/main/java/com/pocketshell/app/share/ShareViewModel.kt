@@ -56,8 +56,23 @@ internal class ShareViewModel @Inject constructor(
     val hosts: StateFlow<List<HostEntity>> = hostDao.getAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
 
-    private val _item = MutableStateFlow<ShareableItem?>(null)
-    val item: StateFlow<ShareableItem?> = _item.asStateFlow()
+    /**
+     * The staged share payload. Issue #258: a share can carry more than
+     * one file (`ACTION_SEND_MULTIPLE`); the list holds every selected
+     * item so the upload loop can route them all to the chosen host.
+     * Single-file (`ACTION_SEND`) shares stage a one-element list.
+     */
+    private val _items = MutableStateFlow<List<ShareableItem>>(emptyList())
+    val items: StateFlow<List<ShareableItem>> = _items.asStateFlow()
+
+    /**
+     * Convenience view of the first staged item. The text-dispatch and
+     * paste-into-session branches (issue #193 / #209) are inherently
+     * single-payload (text only), so they operate on this head item.
+     */
+    val item: StateFlow<ShareableItem?> = _items
+        .map { it.firstOrNull() }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private val _uploadState = MutableStateFlow<UploadState>(UploadState.Idle)
     val uploadState: StateFlow<UploadState> = _uploadState.asStateFlow()
@@ -93,24 +108,44 @@ internal class ShareViewModel @Inject constructor(
         .map { it.keys.toSet() }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptySet())
 
-    private val uploader: ShareUploader = ShareUploader(applicationContext)
+    /**
+     * The per-file uploader. A `var` so unit tests can substitute a
+     * fake that records calls and drives success/failure per item,
+     * exercising the multi-file loop + partial-failure aggregation
+     * (issue #258) without a live SSH session. Production code never
+     * reassigns it.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal var uploader: ShareItemUploader = ShareUploader(applicationContext)
 
     /**
-     * Stage the [item] the activity extracted from the share intent.
+     * Stage the [items] the activity extracted from the share intent.
      * Idempotent; replaces any earlier staging (e.g. if the activity
      * is re-created across configuration change).
+     *
+     * Issue #258: a multi-file share (`ACTION_SEND_MULTIPLE`) stages
+     * more than one item. The text-vs-file dispatch dialog only makes
+     * sense for a single short text payload, so a multi-item share
+     * always goes straight to the host picker as a file save.
      */
-    fun setItem(item: ShareableItem) {
-        _item.value = item
+    fun setItems(items: List<ShareableItem>) {
+        _items.value = items
         // Decide whether to surface the text-vs-file dispatch dialog.
-        // `text/plain` payloads under 8 KB get the choice; everything
-        // else goes straight to the host picker.
-        if (item is ShareableItem.TextItem && item.text.toByteArray(Charsets.UTF_8).size <= TEXT_PASTE_BUDGET_BYTES) {
+        // A single `text/plain` payload under 8 KB gets the choice;
+        // everything else (URIs, oversized text, or multi-file shares)
+        // goes straight to the host picker.
+        val single = items.singleOrNull()
+        if (single is ShareableItem.TextItem &&
+            single.text.toByteArray(Charsets.UTF_8).size <= TEXT_PASTE_BUDGET_BYTES
+        ) {
             _dispatchChoice.value = TextDispatchChoice.PromptUser
         } else {
             _dispatchChoice.value = TextDispatchChoice.SaveAsFile
         }
     }
+
+    /** Single-item staging convenience used by tests and callers. */
+    fun setItem(item: ShareableItem) = setItems(listOf(item))
 
     fun chooseSaveAsFile() {
         _dispatchChoice.value = TextDispatchChoice.SaveAsFile
@@ -122,9 +157,20 @@ internal class ShareViewModel @Inject constructor(
         }
     }
 
-    /** User tapped a host in the picker. Run the upload. */
+    /**
+     * User tapped a host in the picker. Upload every staged item to that
+     * host's inbox.
+     *
+     * Issue #258: a multi-file share stages more than one item; the loop
+     * uploads each in turn and aggregates the outcome so the result
+     * surface can report partial failure ("3 of 4 uploaded" / lists the
+     * names that failed) rather than silently dropping files. A single-
+     * file share still produces the familiar one-path success/failure
+     * surface because [UploadState.totalCount] is 1.
+     */
     fun startUpload(host: HostEntity) {
-        val payload = _item.value ?: return
+        val payload = _items.value
+        if (payload.isEmpty()) return
         if (_uploadState.value is UploadState.Running) return
         _uploadState.value = UploadState.Running(host.name)
         viewModelScope.launch {
@@ -132,24 +178,108 @@ internal class ShareViewModel @Inject constructor(
             if (keyEntity == null) {
                 val message = "No SSH key for host ${host.name}"
                 android.util.Log.w(LOG_TAG, "share upload aborted: $message")
-                _uploadState.value = UploadState.Failed(host.name, message)
+                _uploadState.value =
+                    UploadState.Failed(host.name, message, totalCount = payload.size)
                 ShareUploadNotifications.showFailure(applicationContext, host.name, message)
                 return@launch
             }
-            val result = uploader.upload(host, keyEntity, payload)
-            result.fold(
-                onSuccess = { remotePath ->
-                    android.util.Log.i(LOG_TAG, "share upload succeeded: $remotePath")
-                    _uploadState.value = UploadState.Success(host.name, remotePath)
-                    ShareUploadNotifications.showSuccess(applicationContext, host.name, remotePath)
-                },
-                onFailure = { error ->
-                    val message = error.message ?: "Upload failed"
-                    android.util.Log.w(LOG_TAG, "share upload failed: $message", error)
-                    _uploadState.value = UploadState.Failed(host.name, message)
-                    ShareUploadNotifications.showFailure(applicationContext, host.name, message)
-                },
+
+            val succeededPaths = mutableListOf<String>()
+            val failedNames = mutableListOf<String>()
+            var lastError: String? = null
+
+            for (item in payload) {
+                val itemLabel = item.displayName?.takeIf { it.isNotBlank() } ?: "file"
+                uploader.upload(host, keyEntity, item).fold(
+                    onSuccess = { remotePath ->
+                        android.util.Log.i(LOG_TAG, "share upload succeeded: $remotePath")
+                        succeededPaths += remotePath
+                    },
+                    onFailure = { error ->
+                        val message = error.message ?: "Upload failed"
+                        android.util.Log.w(
+                            LOG_TAG,
+                            "share upload failed for $itemLabel: $message",
+                            error,
+                        )
+                        failedNames += itemLabel
+                        lastError = message
+                    },
+                )
+            }
+
+            publishUploadOutcome(
+                host = host,
+                total = payload.size,
+                succeededPaths = succeededPaths,
+                failedNames = failedNames,
+                lastError = lastError,
             )
+        }
+    }
+
+    /**
+     * Map the accumulated per-file results into a single terminal
+     * [UploadState] and drive the matching notification.
+     *
+     * - All succeeded -> [UploadState.Success] (detail is the single
+     *   remote path for a one-file share, or an "N files" summary).
+     * - Some succeeded, some failed -> [UploadState.Failed] surfaced as
+     *   a partial failure that names what did not upload, while still
+     *   reporting the success count so the user knows the rest landed.
+     * - None succeeded -> [UploadState.Failed] with the last error.
+     */
+    private fun publishUploadOutcome(
+        host: HostEntity,
+        total: Int,
+        succeededPaths: List<String>,
+        failedNames: List<String>,
+        lastError: String?,
+    ) {
+        val successCount = succeededPaths.size
+        when {
+            failedNames.isEmpty() -> {
+                val detail = if (total > 1) {
+                    "$successCount files uploaded:\n" + succeededPaths.joinToString("\n")
+                } else {
+                    succeededPaths.firstOrNull().orEmpty()
+                }
+                _uploadState.value = UploadState.Success(
+                    hostName = host.name,
+                    remotePath = detail,
+                    successCount = successCount,
+                    totalCount = total,
+                )
+                ShareUploadNotifications.showSuccess(applicationContext, host.name, detail)
+            }
+            successCount == 0 -> {
+                val message = lastError ?: "Upload failed"
+                _uploadState.value = UploadState.Failed(
+                    hostName = host.name,
+                    message = message,
+                    totalCount = total,
+                    successCount = 0,
+                    failedNames = failedNames,
+                )
+                ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+            }
+            else -> {
+                val message = buildString {
+                    append("$successCount of $total uploaded. ")
+                    append("Failed: ")
+                    append(failedNames.joinToString(", "))
+                    lastError?.let { append(" ($it)") }
+                }
+                android.util.Log.w(LOG_TAG, "partial share upload: $message")
+                _uploadState.value = UploadState.Failed(
+                    hostName = host.name,
+                    message = message,
+                    totalCount = total,
+                    successCount = successCount,
+                    failedNames = failedNames,
+                )
+                ShareUploadNotifications.showFailure(applicationContext, host.name, message)
+            }
         }
     }
 
@@ -174,7 +304,7 @@ internal class ShareViewModel @Inject constructor(
      * pasted text (truncated to keep the notification short).
      */
     fun pasteIntoSession(host: HostEntity) {
-        val staged = _item.value
+        val staged = _items.value.firstOrNull()
         if (staged !is ShareableItem.TextItem) {
             val message = "Nothing to paste"
             _uploadState.value = UploadState.Failed(host.name, message)
@@ -328,16 +458,37 @@ internal sealed interface UploadState {
      * Operation succeeded.
      *
      * For file uploads, [remotePath] is the absolute remote path (e.g.
-     * `$HOME/inbox/pocketshell/<filename>`).
+     * `$HOME/inbox/pocketshell/<filename>`). For a multi-file share
+     * (issue #258) it is a newline-joined summary of every uploaded
+     * path; [successCount]/[totalCount] carry the counts so the result
+     * surface and toast can say "uploaded N/N".
      *
      * For send-keys paste (issue #193), [remotePath] holds a short
      * preview of the pasted text — the field name is preserved for
      * call-site compatibility but the value is a UI-facing string.
      */
-    data class Success(val hostName: String, val remotePath: String) : UploadState
+    data class Success(
+        val hostName: String,
+        val remotePath: String,
+        val successCount: Int = 1,
+        val totalCount: Int = 1,
+    ) : UploadState
 
-    /** Upload (or paste) failed with the human-readable [message]. */
-    data class Failed(val hostName: String, val message: String) : UploadState
+    /**
+     * Upload (or paste) failed with the human-readable [message].
+     *
+     * Issue #258: a multi-file share can fail partially. [successCount]
+     * reports how many of [totalCount] files did upload (0 for a total
+     * failure), and [failedNames] lists the items that did not so the
+     * UI can show the user exactly what to retry.
+     */
+    data class Failed(
+        val hostName: String,
+        val message: String,
+        val totalCount: Int = 1,
+        val successCount: Int = 0,
+        val failedNames: List<String> = emptyList(),
+    ) : UploadState
 }
 
 /**

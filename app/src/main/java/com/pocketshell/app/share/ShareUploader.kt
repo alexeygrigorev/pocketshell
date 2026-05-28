@@ -41,6 +41,20 @@ import java.util.TimeZone
  * caller never has to expose a raw stack trace to the user (acceptance
  * criterion in #138).
  */
+/**
+ * Uploads one [ShareableItem] to a host's inbox, returning the absolute
+ * remote path on success. Extracted as an interface (issue #258) so the
+ * [ShareViewModel] multi-file upload loop can be unit tested against a
+ * fake that drives per-item success/failure without a live SSH session.
+ */
+internal interface ShareItemUploader {
+    suspend fun upload(
+        host: HostEntity,
+        keyEntity: SshKeyEntity,
+        item: ShareableItem,
+    ): Result<String>
+}
+
 internal class ShareUploader(
     private val context: Context,
     /**
@@ -62,7 +76,7 @@ internal class ShareUploader(
      * but injectable so tests can pin the value.
      */
     private val now: () -> Long = { System.currentTimeMillis() },
-) {
+) : ShareItemUploader {
 
     /**
      * Run the upload. Returns the absolute remote path on success, a
@@ -70,7 +84,7 @@ internal class ShareUploader(
      * `Result.failure(SshException)` so the caller can map to a
      * notification without try/catch).
      */
-    suspend fun upload(
+    override suspend fun upload(
         host: HostEntity,
         keyEntity: SshKeyEntity,
         item: ShareableItem,

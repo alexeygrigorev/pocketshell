@@ -49,12 +49,12 @@ class ShareActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val staged = decodeShareIntent(intent)
-        if (staged == null) {
+        if (staged.isEmpty()) {
             Toast.makeText(this, "Nothing to share", Toast.LENGTH_SHORT).show()
             finish()
             return
         }
-        viewModel.setItem(staged)
+        viewModel.setItems(staged)
         setContent {
             val settings by settingsRepository.settings.collectAsState()
             PocketShellTheme(mode = settings.theme.toThemeMode()) {
@@ -87,7 +87,11 @@ class ShareActivity : FragmentActivity() {
                         is UploadState.Success ->
                             Toast.makeText(
                                 this@ShareActivity,
-                                "Uploaded to ${state.hostName}: ${state.remotePath}",
+                                if (state.totalCount > 1) {
+                                    "Uploaded ${state.successCount}/${state.totalCount} to ${state.hostName}"
+                                } else {
+                                    "Uploaded to ${state.hostName}: ${state.remotePath}"
+                                },
                                 Toast.LENGTH_LONG,
                             ).show()
                         is UploadState.Failed ->
@@ -104,80 +108,107 @@ class ShareActivity : FragmentActivity() {
     }
 
     /**
-     * Convert an inbound Android share `Intent` into our internal
-     * [ShareableItem] union. Returns null when the intent doesn't
-     * carry anything we can route.
-     *
-     * Supported shapes:
-     *
-     * - `ACTION_SEND` + `text/plain` + `EXTRA_TEXT` -> [ShareableItem.TextItem]
-     * - `ACTION_SEND` + `EXTRA_STREAM` -> [ShareableItem.UriItem]
-     *   (the common share-image / share-audio / share-file shape)
-     * - `ACTION_SEND_MULTIPLE` + `EXTRA_STREAM` (parcelable list) ->
-     *   takes the **first** URI from the list and treats it as a
-     *   single-file upload. The first-cut spec defers multi-file
-     *   upload as a non-goal.
+     * Convert the inbound share `Intent` into the staged item list,
+     * resolving display names against this activity's
+     * [ContentResolver]. Thin wrapper over the pure
+     * [decodeShareIntent] free function so the parsing logic is unit
+     * testable without instantiating a Hilt activity.
      */
-    internal fun decodeShareIntent(intent: Intent?): ShareableItem? {
-        if (intent == null) return null
-        val mime = intent.type
-        return when (intent.action) {
-            Intent.ACTION_SEND -> {
-                val stream = extractStream(intent)
-                if (stream != null) {
-                    buildUriItem(stream, intent, mime)
-                } else {
-                    val text = intent.getStringExtra(Intent.EXTRA_TEXT)
-                    val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT)
-                    if (!text.isNullOrEmpty()) {
+    internal fun decodeShareIntent(intent: Intent?): List<ShareableItem> =
+        decodeShareIntent(intent, contentResolver)
+}
+
+/**
+ * Convert an inbound Android share `Intent` into a list of internal
+ * [ShareableItem]s. Returns an empty list when the intent doesn't carry
+ * anything we can route.
+ *
+ * Pure function (no `Activity` state) — display names are resolved via
+ * the supplied [resolver] so this can be exercised in a Robolectric
+ * unit test without a live activity. The [ShareActivity] member of the
+ * same name simply forwards its `contentResolver`.
+ *
+ * Supported shapes:
+ *
+ * - `ACTION_SEND` + `text/plain` + `EXTRA_TEXT` -> single
+ *   [ShareableItem.TextItem]
+ * - `ACTION_SEND` + `EXTRA_STREAM` -> single [ShareableItem.UriItem]
+ *   (the common share-image / share-audio / share-file shape)
+ * - `ACTION_SEND_MULTIPLE` + `EXTRA_STREAM` (parcelable list) -> one
+ *   [ShareableItem.UriItem] per URI in the list. Issue #258: previously
+ *   this took only the first URI and silently dropped the rest —
+ *   selecting N screenshots uploaded just one. Now every selected file
+ *   is staged and uploaded.
+ */
+internal fun decodeShareIntent(
+    intent: Intent?,
+    resolver: android.content.ContentResolver,
+): List<ShareableItem> {
+    if (intent == null) return emptyList()
+    val mime = intent.type
+    return when (intent.action) {
+        Intent.ACTION_SEND -> {
+            val stream = extractStream(intent)
+            if (stream != null) {
+                listOf(buildUriItem(stream, intent, mime, resolver))
+            } else {
+                val text = intent.getStringExtra(Intent.EXTRA_TEXT)
+                val subject = intent.getStringExtra(Intent.EXTRA_SUBJECT)
+                if (!text.isNullOrEmpty()) {
+                    listOf(
                         ShareableItem.TextItem(
                             text = text,
                             displayName = subject?.takeIf { it.isNotBlank() } ?: "shared-text",
-                        )
-                    } else {
-                        null
-                    }
+                        ),
+                    )
+                } else {
+                    emptyList()
                 }
             }
-            Intent.ACTION_SEND_MULTIPLE -> {
-                @Suppress("DEPRECATION")
-                val list: ArrayList<Uri>? =
-                    if (android.os.Build.VERSION.SDK_INT >= 33) {
-                        intent.getParcelableArrayListExtra(
-                            Intent.EXTRA_STREAM,
-                            Uri::class.java,
-                        )
-                    } else {
-                        intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
-                    }
-                list?.firstOrNull()?.let { buildUriItem(it, intent, mime) }
-            }
-            else -> null
         }
-    }
-
-    private fun extractStream(intent: Intent): Uri? {
-        @Suppress("DEPRECATION")
-        return if (android.os.Build.VERSION.SDK_INT >= 33) {
-            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-        } else {
-            intent.getParcelableExtra(Intent.EXTRA_STREAM)
+        Intent.ACTION_SEND_MULTIPLE -> {
+            @Suppress("DEPRECATION")
+            val list: ArrayList<Uri>? =
+                if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    intent.getParcelableArrayListExtra(
+                        Intent.EXTRA_STREAM,
+                        Uri::class.java,
+                    )
+                } else {
+                    intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM)
+                }
+            list.orEmpty().map { buildUriItem(it, intent, mime, resolver) }
         }
+        else -> emptyList()
     }
+}
 
-    private fun buildUriItem(uri: Uri, intent: Intent, mime: String?): ShareableItem.UriItem {
-        val resolverName = queryUriDisplayName(contentResolver, uri)
-        val intentName = intent.getStringExtra(Intent.EXTRA_TITLE)
-        val displayName = resolverName ?: intentName ?: uri.lastPathSegment
-        val fallback = extensionForMimeType(mime)
-        return ShareableItem.UriItem(
-            uri = uri,
-            displayName = displayName,
-            size = null,
-            mimeType = mime,
-            fallbackExtension = fallback,
-        )
+private fun extractStream(intent: Intent): Uri? {
+    @Suppress("DEPRECATION")
+    return if (android.os.Build.VERSION.SDK_INT >= 33) {
+        intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+    } else {
+        intent.getParcelableExtra(Intent.EXTRA_STREAM)
     }
+}
+
+private fun buildUriItem(
+    uri: Uri,
+    intent: Intent,
+    mime: String?,
+    resolver: android.content.ContentResolver,
+): ShareableItem.UriItem {
+    val resolverName = queryUriDisplayName(resolver, uri)
+    val intentName = intent.getStringExtra(Intent.EXTRA_TITLE)
+    val displayName = resolverName ?: intentName ?: uri.lastPathSegment
+    val fallback = extensionForMimeType(mime)
+    return ShareableItem.UriItem(
+        uri = uri,
+        displayName = displayName,
+        size = null,
+        mimeType = mime,
+        fallbackExtension = fallback,
+    )
 }
 
 private fun com.pocketshell.app.settings.ThemePreference.toThemeMode(): PocketShellThemeMode =

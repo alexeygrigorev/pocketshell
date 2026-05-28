@@ -58,6 +58,7 @@ internal fun HostPickerScreen(
     modifier: Modifier = Modifier,
 ) {
     val hosts by viewModel.hosts.collectAsStateWithLifecycle()
+    val items by viewModel.items.collectAsStateWithLifecycle()
     val item by viewModel.item.collectAsStateWithLifecycle()
     val uploadState by viewModel.uploadState.collectAsStateWithLifecycle()
     val dispatchChoice by viewModel.dispatchChoice.collectAsStateWithLifecycle()
@@ -113,7 +114,14 @@ internal fun HostPickerScreen(
                     else ->
                         HostList(
                             hosts = hosts,
-                            title = "Send to host",
+                            // Issue #258: when several files are staged,
+                            // tell the user up front that all of them go
+                            // to the host they pick.
+                            title = if (items.size > 1) {
+                                "Send ${items.size} files to host"
+                            } else {
+                                "Send to host"
+                            },
                             subtitle = "Files land under ${ShareUploader.INBOX_DISPLAY_PATH}",
                             onHostClick = { host -> viewModel.startUpload(host) },
                         )
@@ -123,10 +131,11 @@ internal fun HostPickerScreen(
             is UploadState.Success -> {
                 val isPaste = dispatchChoice == TextDispatchChoice.PasteIntoSession
                 UploadResultSurface(
-                    title = if (isPaste) {
-                        "Pasted into ${state.hostName}"
-                    } else {
-                        "Uploaded to ${state.hostName}"
+                    title = when {
+                        isPaste -> "Pasted into ${state.hostName}"
+                        state.totalCount > 1 ->
+                            "Uploaded ${state.successCount} files to ${state.hostName}"
+                        else -> "Uploaded to ${state.hostName}"
                     },
                     detail = state.remotePath,
                     isError = false,
@@ -139,10 +148,16 @@ internal fun HostPickerScreen(
             is UploadState.Failed -> {
                 val isPaste = dispatchChoice == TextDispatchChoice.PasteIntoSession
                 UploadResultSurface(
-                    title = if (isPaste) {
-                        "Could not paste into ${state.hostName}"
-                    } else {
-                        "Could not upload to ${state.hostName}"
+                    title = when {
+                        isPaste -> "Could not paste into ${state.hostName}"
+                        // Issue #258: a partial multi-file failure (some
+                        // files landed) deserves a distinct title so the
+                        // user does not think the whole share was lost.
+                        state.totalCount > 1 && state.successCount > 0 ->
+                            "Uploaded ${state.successCount} of ${state.totalCount} to ${state.hostName}"
+                        state.totalCount > 1 ->
+                            "Could not upload to ${state.hostName}"
+                        else -> "Could not upload to ${state.hostName}"
                     },
                     detail = state.message,
                     isError = true,

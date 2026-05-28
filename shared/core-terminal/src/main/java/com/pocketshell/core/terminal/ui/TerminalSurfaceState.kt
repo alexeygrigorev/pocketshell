@@ -442,6 +442,7 @@ class TerminalSurfaceState internal constructor(
 
         val newBridge = SshTerminalBridge(client = sessionClient)
         newBridge.setRemoteStdin(remoteStdin)
+        newBridge.emulator.setSuppressQueryResponses(true)
         bridge = newBridge
 
         // Bind the bridge's session to the View via the existing `attach`

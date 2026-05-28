@@ -1,6 +1,5 @@
 package com.pocketshell.app.tmux
 
-import android.os.Looper
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -38,7 +37,6 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
-import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
@@ -606,7 +604,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun terminalQueryResponsesRouteAsRawBytesNotPrintableEscapeTail() = runTest {
+    fun terminalQueryResponsesSuppressedInBridgeMode() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
@@ -620,24 +618,12 @@ class TmuxSessionViewModelTest {
         val queryBytes = "\u001b]11;?\u001b\\\u001b[c".toByteArray(Charsets.US_ASCII)
         state.appendRemoteOutput(queryBytes)
 
-        waitForSentCommandContaining(client, "1b 5b 3f")
+        advanceUntilIdle()
 
         val sent = client.sentCommands.filter { it.startsWith("send-keys") }
         assertTrue(
-            "terminal responses must be sent through raw hex input, got $sent",
-            sent.isNotEmpty() && sent.all { it.startsWith("send-keys -H -t %0 ") },
-        )
-        assertTrue(
-            "OSC 11 response must keep its leading ESC byte, got $sent",
-            sent.any { it.contains("1b 5d 31 31 3b 72 67 62 3a") },
-        )
-        assertTrue(
-            "primary DA response must keep its leading ESC byte, got $sent",
-            sent.any { it.contains("1b 5b 3f") && it.endsWith("63") },
-        )
-        assertTrue(
-            "terminal responses must not leak as printable literal tails, got $sent",
-            sent.none { it.contains("send-keys -l") || it.contains(" Escape") || it.contains("rgb:") },
+            "bridge-mode emulator must not generate terminal query responses, got $sent",
+            sent.none { it.contains("send-keys -H") || it.contains("send-keys -l") },
         )
     }
 
@@ -885,24 +871,6 @@ class TmuxSessionViewModelTest {
         assertTrue(
             "expected at least $expectedCount send-keys commands, got ${client.sentCommands}",
             client.sentCommands.count { it.startsWith("send-keys") } >= expectedCount,
-        )
-    }
-
-    private fun TestScope.waitForSentCommandContaining(client: FakeTmuxClient, fragment: String) {
-        val mainLooperShadow = shadowOf(Looper.getMainLooper())
-        repeat(200) {
-            mainLooperShadow.idle()
-            advanceUntilIdle()
-            if (client.sentCommands.any { it.contains(fragment) }) {
-                return
-            }
-            Thread.sleep(10)
-        }
-        mainLooperShadow.idle()
-        advanceUntilIdle()
-        assertTrue(
-            "expected send-keys command containing '$fragment', got ${client.sentCommands}",
-            client.sentCommands.any { it.contains(fragment) },
         )
     }
 

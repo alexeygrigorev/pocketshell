@@ -631,10 +631,9 @@ private fun AppNavigator(
         }
 
         // Issue #171: per-host folder list — the default destination
-        // after a host tap. Replaces the inline picker sheet for the
-        // post-tap surface; routes onward to `TmuxSession` (via tap)
-        // and the existing `HostTmuxSessionPickerSheet` (via the
-        // "Show all sessions on this host" fallback link).
+        // after a host tap. Routes onward to `TmuxSession` (via tap);
+        // its "Show all sessions on this host" link expands an inline
+        // flat session list in place.
         is AppDestination.FolderList -> FolderListScreen(
             hostId = dest.hostId,
             hostName = dest.hostName,

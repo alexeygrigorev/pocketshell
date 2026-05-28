@@ -17,9 +17,10 @@ package com.pocketshell.uikit.model
  * - [Probing] -> `Amber` (detection in flight)
  * - [Exited] -> `TextMuted` (an agent was seen recently but has exited)
  *
- * Pass `null` to fall back to the legacy cyan `AccentSoft` badge — that
- * preserves the existing dashboard rendering and keeps the
- * `SessionRow` API backwards-compatible at the source level.
+ * Pass `null` for the neutral cyan `AccentSoft` badge used by the
+ * dashboard (#202), where the badge is a plain visual anchor and
+ * deliberately does not encode agent kind. The folder-list surface
+ * (#171) passes an explicit kind to tint the badge instead.
  */
 enum class SessionAgentKind {
     Claude,

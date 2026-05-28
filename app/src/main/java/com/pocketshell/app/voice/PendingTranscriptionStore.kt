@@ -32,10 +32,10 @@ import javax.inject.Singleton
  *    request finishing and the success/failure call, the row stays put;
  *    the user sees a stale "pending" entry but the audio is not lost.
  *  - **10 MB cap per recording.** Audio larger than [MAX_AUDIO_BYTES] is
- *    silently dropped by [enqueueAudio] (returns `null`). The composer
- *    falls back to the legacy "fail fast" path in that case — a 10 MB
- *    cap allows ≥ 5 minutes of 16 kHz mono 16-bit speech, which already
- *    far exceeds the cognitive-effort ceiling a single voice prompt
+ *    silently dropped by [enqueueAudio] (returns `null`); the
+ *    recording is then not queued for retry. A 10 MB cap allows
+ *    ≥ 5 minutes of 16 kHz mono 16-bit speech, which already far
+ *    exceeds the cognitive-effort ceiling a single voice prompt
  *    represents.
  *  - **Orphan reconciliation.** [reconcile] is called once per
  *    `ViewModelScope` startup. It deletes file-without-row leftovers
@@ -87,8 +87,8 @@ class PendingTranscriptionStore @Inject constructor(
      *
      * Returns `null` when:
      *  - [audio] is empty (nothing to retry).
-     *  - [audio] is larger than [MAX_AUDIO_BYTES] (cap-violation; caller
-     *    falls back to the legacy fail-fast behaviour).
+     *  - [audio] is larger than [MAX_AUDIO_BYTES] (cap-violation; the
+     *    recording is then not queued for retry).
      *
      * The file is fsync-equivalent (Java `FileOutputStream.close()` does
      * not force a fsync, but the kernel's writeback is observable within
@@ -111,8 +111,8 @@ class PendingTranscriptionStore @Inject constructor(
             file.outputStream().use { out -> out.write(audio) }
         } catch (e: java.io.IOException) {
             // Disk full / permission error / IO surface — best-effort
-            // delete the partial file then bail. The caller falls back
-            // to the legacy fail-fast path.
+            // delete the partial file then bail. The recording is
+            // then not queued for retry.
             runCatching { file.delete() }
             return@withContext null
         }

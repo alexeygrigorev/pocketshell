@@ -82,14 +82,14 @@ fun SessionRow(
     modifier: Modifier = Modifier,
     onLongClick: (() -> Unit)? = null,
     /**
-     * Issue #171: agent classifier that tints the leading badge. The
-     * mockup-faithful default (`null`) preserves the original
-     * `AccentSoft` / `Accent` cyan rendering used by the dashboard
-     * (#202) so existing call sites don't shift visually. New
-     * folder-list call sites map their `AgentKind` -> [SessionAgentKind]
-     * so plain-shell sessions read as neutral, Claude reads as cyan,
-     * Codex / OpenCode read as purple, and edge states (probing /
-     * exited) read as amber / muted per the spike's locked tokens.
+     * Issue #171: agent classifier that tints the leading badge. `null`
+     * selects the neutral `AccentSoft` / `Accent` cyan badge the
+     * dashboard (#202) uses by design — there the badge is a plain
+     * visual anchor and does not encode agent kind. The folder-list
+     * surface maps its `AgentKind` -> [SessionAgentKind] so plain-shell
+     * sessions read as neutral, Claude reads as cyan, Codex / OpenCode
+     * read as purple, and edge states (probing / exited) read as
+     * amber / muted per the spike's locked tokens.
      */
     agentKind: SessionAgentKind? = null,
 ) {
@@ -124,8 +124,8 @@ fun SessionRow(
         // path), the badge tint switches to the kind's semantic colour
         // so a glance at the folder detail screen surfaces
         // shell-vs-agent at the row's most prominent visual anchor.
-        // The fallback (`null`) preserves the original cyan rendering
-        // so existing dashboard call sites are unchanged.
+        // `null` selects the neutral cyan badge the dashboard uses by
+        // design (the dashboard badge does not encode agent kind).
         val badgeTint = agentBadgeColors(agentKind)
         Box(
             modifier = Modifier
@@ -229,9 +229,9 @@ fun SessionRow(
  * 38dp tile fill; [foreground] is the mono initial drawn on top. The
  * mapping mirrors the spike's locked tokens (`Accent` for Claude,
  * `Purple` for Codex/OpenCode, `TextSecondary` for plain shell,
- * `Amber` for probing, `TextMuted` for exited) and uses the existing
- * `AccentSoft` translucent-cyan default when [kind] is null so existing
- * dashboard rows are unchanged.
+ * `Amber` for probing, `TextMuted` for exited) and uses the neutral
+ * `AccentSoft` translucent-cyan badge when [kind] is null — the
+ * dashboard's by-design plain anchor.
  */
 internal data class SessionBadgeColors(
     val background: androidx.compose.ui.graphics.Color,

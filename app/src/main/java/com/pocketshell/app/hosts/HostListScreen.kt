@@ -119,15 +119,10 @@ fun HostListScreen(
     // production nav graph in `MainActivity` always supplies it.
     onOpenScan: () -> Unit = {},
     /**
-     * Issue #171: navigate to the per-host folder list — the new default
-     * destination after a host tap. Replaces the inline
-     * `HostTmuxSessionPickerSheet` route as the post-tap surface.
-     *
-     * The previous `onOpenSession` / `onOpenTmuxHostSession` callbacks
-     * were removed when the picker sheet mount was dropped from this
-     * screen — those routes lived only on the picker's "Continue with
-     * SSH" / row-attach branches and are now owned by [FolderListScreen]
-     * and its onward navigation in MainActivity (per D22 hard-cut).
+     * Issue #171: navigate to the per-host folder list — the default
+     * destination after a host tap. Session navigation (attach /
+     * continue-with-SSH) is owned by [FolderListScreen] and its onward
+     * navigation in MainActivity.
      */
     onOpenFolderList: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit = { _, _, _ -> },
     onOpenPortForwardPanel: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit = { _, _, _ -> },
@@ -334,13 +329,9 @@ fun HostListScreen(
     // as well as the sheet-driven slow path (ready after Skip /
     // Continue / Close).
     //
-    // Issue #171: the post-tap surface flipped from the inline
-    // `HostTmuxSessionPickerSheet` to the new `FolderListScreen`. The
-    // picker sheet stays mounted below for the legacy paths that still
-    // need the cwd-blind session list (no current call sites in v1, but
-    // the wiring is preserved so the "Show all sessions on this host"
-    // fallback inside the folder list can route back through it if a
-    // future iteration wants the bottom-sheet UX).
+    // Issue #171: the post-tap surface is `FolderListScreen`. Its
+    // "Show all sessions on this host" link expands an inline flat
+    // session list in place.
     LaunchedEffect(pendingNavigation) {
         val pending = pendingNavigation
         if (pending != null && pending.ready) {
@@ -686,12 +677,9 @@ fun HostListScreen(
             )
         }
 
-        // Issue #171: the inline `HostTmuxSessionPickerSheet` mount was
-        // removed when the post-tap surface flipped to
-        // [FolderListScreen]. The picker sheet itself stays alive for
-        // the in-session "switch session" drawer hosted by
-        // `TmuxSessionScreen`; the dashboard screen no longer owns a
-        // picker instance.
+        // Issue #171: the post-tap surface is [FolderListScreen]; the
+        // dashboard screen does not own a session picker. The in-session
+        // "switch session" drawer lives in `TmuxSessionScreen`.
     }
 }
 

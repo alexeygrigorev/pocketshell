@@ -176,11 +176,10 @@ sealed interface AppDestination {
     /**
      * Per-host folder list — issue #171.
      *
-     * The landing destination after a user taps a host card. Replaces
-     * the inline `HostTmuxSessionPickerSheet` route as the default
-     * post-tap surface (per the spike's locked decisions). Sessions
-     * remain reachable from the flat "Show all sessions on this host"
-     * link that the folder screen renders at the bottom.
+     * The landing destination after a user taps a host card (per the
+     * spike's locked decisions). Sessions remain reachable from the flat
+     * "Show all sessions on this host" link that the folder screen
+     * renders at the bottom.
      *
      * SSH connection parameters are required because the screen
      * issues `tmux list-sessions` and a sibling `list-panes` exec via

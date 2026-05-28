@@ -47,8 +47,8 @@ import com.pocketshell.uikit.theme.PocketShellColors
 /**
  * Per-host folder list — issue #171.
  *
- * Replaces the inline `HostTmuxSessionPickerSheet` as the default
- * destination after a user taps a host card. The screen renders a
+ * The default destination after a user taps a host card. The screen
+ * renders a
  * folder header per discovered cwd (auto-discovered from
  * `pane_current_path` / `session_path` with the user's
  * `ProjectRootEntity` rows overlaid), with the folder's sessions

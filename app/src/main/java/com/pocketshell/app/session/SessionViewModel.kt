@@ -456,39 +456,17 @@ public class SessionViewModel @Inject constructor(
     internal fun dismissedHintKeysForTest(): Set<String> = dismissedAgentHints.toSet()
 
     /**
-     * Handle a tap on the key bar.
+     * Handle a tap on a non-modifier key bar key (`Esc`, `Tab`, arrows).
      *
-     * `Esc`, `Tab`, arrows and the modifier names (`Ctrl`, `Alt`) all flow
-     * through here. Modern callers should route modifier taps through
-     * [onKeyBarModifierState] so the ui-kit visuals can own double-tap
-     * detection; the modifier cases here remain for legacy/test callers.
+     * Modifier taps (`Ctrl`, `Alt`) never reach here: the ui-kit [KeyBar]
+     * fires modifier taps through [onKeyBarModifierState] only, owning the
+     * double-tap lock detection, while non-modifier taps fire through here.
      */
     public fun onKeyBarKey(label: String) {
-        when (label) {
-            "Ctrl" -> toggleModifier(Modifier.Ctrl)
-            "Alt" -> toggleModifier(Modifier.Alt)
-            else -> {
-                val unmodified: ByteArray = unmodifiedBytesFor(label) ?: return
-                val modified = applyArmedModifiers(unmodified, label)
-                sendTerminalInput(modified)
-                clearOneShotModifiers()
-            }
-        }
-    }
-
-    /**
-     * Public seam for tests + the on-screen "modifier armed" hint. Used by
-     * [onKeyBarKey] for the `Ctrl` / `Alt` labels and exposed so the screen
-     * can show a small chip while a modifier is armed.
-     */
-    internal fun toggleModifier(modifier: Modifier) {
-        val current = _modifierStates.value[modifier] ?: KeyModifierState.Off
-        val next = if (current == KeyModifierState.Off) {
-            KeyModifierState.OneShot
-        } else {
-            KeyModifierState.Off
-        }
-        setModifierState(modifier, next)
+        val unmodified: ByteArray = unmodifiedBytesFor(label) ?: return
+        val modified = applyArmedModifiers(unmodified, label)
+        sendTerminalInput(modified)
+        clearOneShotModifiers()
     }
 
     /**

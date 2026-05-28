@@ -15,7 +15,7 @@ public data class UsageHostSnapshot(
 public data class UsageMissingToolHost(
     val hostId: Long,
     val hostName: String,
-    val toolName: String = "quse",
+    val toolName: String = "pocketshell",
 )
 
 public data class UsageScreenState(

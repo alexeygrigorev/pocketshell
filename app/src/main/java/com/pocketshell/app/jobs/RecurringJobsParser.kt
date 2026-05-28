@@ -2,7 +2,13 @@ package com.pocketshell.app.jobs
 
 import javax.inject.Inject
 
-public class TmuxctlJobsParser @Inject constructor() {
+/**
+ * Parses the fixed-width recurring-jobs table produced by
+ * `pocketshell jobs list`. The `pocketshell jobs` CLI forwards verbatim to the
+ * underlying scheduler, so the output shape is byte-identical to the legacy
+ * `tmuxctl jobs list` table this parser was originally written against.
+ */
+public class RecurringJobsParser @Inject constructor() {
 
     public fun parseList(output: String): List<RecurringJob> {
         val lines = output

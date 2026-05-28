@@ -178,11 +178,11 @@ class SettingsViewModelTest {
         assertTrue("seed precondition: empty DB", rows.isEmpty())
         // The flow starts at its initialValue (false) — assert the
         // upstream agrees there's nothing to surface.
-        assertFalse(rows.any { it.quseInstalled == true })
+        assertFalse(rows.any { it.pocketshellInstalled == true })
     }
 
     @Test
-    fun `hasUsageInstalledHost is false when hosts exist but none have quse`() = runTest {
+    fun `hasUsageInstalledHost is false when hosts exist but none have pocketshell`() = runTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),
         )
@@ -192,7 +192,7 @@ class SettingsViewModelTest {
                 hostname = "a.example",
                 username = "u",
                 keyId = keyId,
-                quseInstalled = false,
+                pocketshellInstalled = false,
             ),
         )
         hostDao.insert(
@@ -201,15 +201,15 @@ class SettingsViewModelTest {
                 hostname = "b.example",
                 username = "u",
                 keyId = keyId,
-                quseInstalled = null,
+                pocketshellInstalled = null,
             ),
         )
         val rows = hostDao.getAll().first()
-        assertFalse(rows.any { it.quseInstalled == true })
+        assertFalse(rows.any { it.pocketshellInstalled == true })
     }
 
     @Test
-    fun `hasUsageInstalledHost is true when at least one host has quse`() = runTest {
+    fun `hasUsageInstalledHost is true when at least one host has pocketshell`() = runTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),
         )
@@ -219,7 +219,7 @@ class SettingsViewModelTest {
                 hostname = "a.example",
                 username = "u",
                 keyId = keyId,
-                quseInstalled = false,
+                pocketshellInstalled = false,
             ),
         )
         hostDao.insert(
@@ -228,10 +228,10 @@ class SettingsViewModelTest {
                 hostname = "b.example",
                 username = "u",
                 keyId = keyId,
-                quseInstalled = true,
+                pocketshellInstalled = true,
             ),
         )
         val rows = hostDao.getAll().first()
-        assertTrue(rows.any { it.quseInstalled == true })
+        assertTrue(rows.any { it.pocketshellInstalled == true })
     }
 }

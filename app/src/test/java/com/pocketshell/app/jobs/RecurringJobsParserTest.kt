@@ -3,12 +3,12 @@ package com.pocketshell.app.jobs
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-class TmuxctlJobsParserTest {
+class RecurringJobsParserTest {
 
-    private val parser = TmuxctlJobsParser()
+    private val parser = RecurringJobsParser()
 
     @Test
-    fun parseList_readsTmuxctlTable() {
+    fun parseList_readsJobsTable() {
         val output = """
             ID  ENABLED  SESSION  EVERY  DELAY  SOURCE  NEXT RUN             DETAIL
             1   yes      codex    15m    200    inline  2026-04-03 00:15:00 check status and continue

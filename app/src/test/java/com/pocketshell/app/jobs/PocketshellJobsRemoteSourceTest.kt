@@ -13,44 +13,44 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class TmuxctlJobsRemoteSourceTest {
+class PocketshellJobsRemoteSourceTest {
 
-    private val source = TmuxctlJobsRemoteSource(TmuxctlJobsParser())
+    private val source = PocketshellJobsRemoteSource(RecurringJobsParser())
 
     @Test
-    fun list_runsTmuxctlAndParsesRows() = runTest {
+    fun list_runsPocketshellAndParsesRows() = runTest {
         val output = """
             ID  ENABLED  SESSION  EVERY  DELAY  SOURCE  NEXT RUN             DETAIL
             1   yes      codex    15m    200    inline  2026-04-03 00:15:00 check
         """.trimIndent()
         val session = FakeSshSession(
-            mapOf(pathAware("tmuxctl jobs list --session 'codex'") to ExecResult(output, "", 0)),
+            mapOf(pathAware("pocketshell jobs list --session 'codex'") to ExecResult(output, "", 0)),
         )
 
         val result = source.list(session, sessionName = "codex")
 
         assertTrue(result is RecurringJobsCommandResult.Jobs)
         assertEquals(listOf(1), (result as RecurringJobsCommandResult.Jobs).jobs.map { it.id })
-        assertEquals(listOf(pathAware("tmuxctl jobs list --session 'codex'")), session.recorded)
+        assertEquals(listOf(pathAware("pocketshell jobs list --session 'codex'")), session.recorded)
     }
 
     @Test
     fun list_quotesSessionNamesWithSpaces() = runTest {
         val session = FakeSshSession(
-            mapOf(pathAware("tmuxctl jobs list --session 'agent main'") to ExecResult("", "", 0)),
+            mapOf(pathAware("pocketshell jobs list --session 'agent main'") to ExecResult("", "", 0)),
         )
 
         val result = source.list(session, sessionName = "agent main")
 
         assertTrue(result is RecurringJobsCommandResult.Jobs)
-        assertEquals(listOf(pathAware("tmuxctl jobs list --session 'agent main'")), session.recorded)
+        assertEquals(listOf(pathAware("pocketshell jobs list --session 'agent main'")), session.recorded)
     }
 
     @Test
     fun add_quotesShellArguments() = runTest {
         val session = FakeSshSession(
             mapOf(
-                pathAware("tmuxctl jobs add 'agent main' --every '15m' --message 'it'\"'\"'s ok'") to
+                pathAware("pocketshell jobs add 'agent main' --every '15m' --message 'it'\"'\"'s ok'") to
                     ExecResult("Created job 3\n", "", 0),
             ),
         )
@@ -71,7 +71,7 @@ class TmuxctlJobsRemoteSourceTest {
     fun editBuildsOnlyProvidedOptions() = runTest {
         val session = FakeSshSession(
             mapOf(
-                pathAware("tmuxctl jobs edit 4 --every '30m' --disable") to ExecResult("Updated job 4\n", "", 0),
+                pathAware("pocketshell jobs edit 4 --every '30m' --disable") to ExecResult("Updated job 4\n", "", 0),
             ),
         )
 
@@ -84,7 +84,7 @@ class TmuxctlJobsRemoteSourceTest {
     @Test
     fun removeRunsRemoveCommand() = runTest {
         val session = FakeSshSession(
-            mapOf(pathAware("tmuxctl jobs remove 4") to ExecResult("Removed job 4\n", "", 0)),
+            mapOf(pathAware("pocketshell jobs remove 4") to ExecResult("Removed job 4\n", "", 0)),
         )
 
         assertEquals(RecurringJobsCommandResult.Success, source.remove(session, 4))
@@ -93,7 +93,7 @@ class TmuxctlJobsRemoteSourceTest {
     @Test
     fun exit127IsToolMissing() = runTest {
         val session = FakeSshSession(
-            mapOf(pathAware("tmuxctl jobs list") to ExecResult("", "tmuxctl: not found", 127)),
+            mapOf(pathAware("pocketshell jobs list") to ExecResult("", "pocketshell: not found", 127)),
         )
 
         assertEquals(RecurringJobsCommandResult.ToolMissing, source.list(session))

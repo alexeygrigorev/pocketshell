@@ -1,6 +1,6 @@
 package com.pocketshell.app.projects
 
-import com.pocketshell.app.jobs.TmuxctlJobsRemoteSource
+import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.core.agents.AgentDetector
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.AgentLogCandidate
@@ -413,7 +413,7 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
     }
 
     private fun pathAware(command: String): String =
-        TmuxctlJobsRemoteSource.pathAwareCommand(command)
+        ReposRemoteSource.pathAwareCommand(command)
 
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\\''") + "'"

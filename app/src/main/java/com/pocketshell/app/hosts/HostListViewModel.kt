@@ -96,7 +96,7 @@ class HostListViewModel @Inject constructor(
     // [com.pocketshell.app.usage.UsageDashboardStrip] above its section
     // header, and each card row may render a blocked/near-limit chip.
     // Both surfaces read off [UsageScheduler.snapshots] — the singleton
-    // scheduler from #117 already polls every quse-installed host on the
+    // scheduler from #117 already polls every pocketshell-installed host on the
     // 60s / 5m cadence and caches the result here. Hilt always supplies
     // the real singleton in production because [UsageScheduler] is
     // `@Singleton @Inject`; the Robolectric tests construct one with the
@@ -130,14 +130,14 @@ class HostListViewModel @Inject constructor(
      *
      * Derivation rule (kept intentionally narrow):
      *
-     * - `Ready`        — `tmuxInstalled == true` AND `quseInstalled == true`.
+     * - `Ready`        — `tmuxInstalled == true` AND `pocketshellInstalled == true`.
      *                    Both required tools have been verified by the
      *                    most recent bootstrap probe.
-     * - `NeedsSetup`   — `tmuxInstalled == false`, OR `quseInstalled ==
+     * - `NeedsSetup`   — `tmuxInstalled == false`, OR `pocketshellInstalled ==
      *                    false`. The probe reported at least one tool
      *                    missing.
-     * - `Unknown`      — anything else (no probe yet, or pre-#117 row
-     *                    that never recorded `quseInstalled`).
+     * - `Unknown`      — anything else (no probe yet, or a row that never
+     *                    recorded `pocketshellInstalled`).
      *
      * The map only reflects what's persisted; the in-memory
      * [HostBootstrapReport] from the most recent connect lives in the
@@ -149,19 +149,19 @@ class HostListViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyMap())
 
     /**
-     * `true` when at least one persisted host has `quseInstalled == true`,
+     * `true` when at least one persisted host has `pocketshellInstalled == true`,
      * i.e. there is something for the usage panel to surface. Drives the
      * "render strip / hide strip" gate on [HostListScreen] (issue #116:
-     * "When no host has quse installed, the dashboard strip is not
+     * "When no host has pocketshell installed, the dashboard strip is not
      * rendered — no empty rail.").
      */
     val hasUsageInstalledHost: StateFlow<Boolean> = hostDao.getAll()
-        .map { rows -> rows.any { it.quseInstalled == true } }
+        .map { rows -> rows.any { it.pocketshellInstalled == true } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), false)
 
     /**
      * Rows for the cross-host [com.pocketshell.app.usage.UsageDashboardStrip]
-     * derived from [UsageScheduler.snapshots]. Empty when no quse host has
+     * derived from [UsageScheduler.snapshots]. Empty when no pocketshell host has
      * reported yet — the screen also hides the strip via
      * [hasUsageInstalledHost] until a record exists, so the strip never
      * renders an empty rail.
@@ -221,7 +221,7 @@ class HostListViewModel @Inject constructor(
     /**
      * Records that should drive a dismissible in-app banner above the
      * host list (issue #214). One entry per provider keyed by the
-     * provider string (lower-cased — `quse` emits e.g. `"claude"`),
+     * provider string (lower-cased — `pocketshell usage` emits e.g. `"claude"`),
      * picking the worst-case record across all hosts so a 96 % Claude
      * on host A and a 50 % Claude on host B surface a single banner
      * representing the 96 % state. Empty when no provider warrants a
@@ -547,7 +547,7 @@ class HostListViewModel @Inject constructor(
      *    in place, preserving its `id` (so any sessions / bootstrap
      *    cache rows that reference the id stay valid) but replacing
      *    `name` / `username` / `keyId` with the incoming values.
-     *    `tmuxInstalled` / `quseInstalled` / `lastBootstrapAt` are
+     *    `tmuxInstalled` / `pocketshellInstalled` / `lastBootstrapAt` are
      *    cleared so the next connect re-probes — the inbound host may
      *    point at a freshly-rebuilt remote that no longer has the
      *    cached tooling.
@@ -572,9 +572,9 @@ class HostListViewModel @Inject constructor(
                     // The remote may have changed underneath us; force a
                     // re-probe on next connect.
                     tmuxInstalled = null,
-                    quseInstalled = null,
+                    pocketshellInstalled = null,
                     lastBootstrapAt = null,
-                    quseLastDetectedAt = null,
+                    pocketshellLastDetectedAt = null,
                 )
                 hostDao.update(updated)
                 _shareMessage.value = "Overwrote ${conflict.existing.name}"
@@ -656,7 +656,7 @@ class HostListViewModel @Inject constructor(
      */
     fun bootstrapHost(host: HostEntity, keyPath: String, passphrase: CharArray? = null) {
         // Cache: a fresh tmux result skips the bootstrap SSH probe. The
-        // session picker can discover tmuxctl/tmux on its own and fall back
+        // session picker can discover pocketshell/tmux on its own and fall back
         // cleanly, so blocking every host tap on server-tool checks makes the
         // phone path pay for setup work before the user has even picked a
         // session.
@@ -699,7 +699,7 @@ class HostListViewModel @Inject constructor(
                 TmuxStatus.Installed -> {
                     persistResult(host, installed = true)
                     val report = bootstrapper.checkServerSetup(session, pathOverride)
-                    persistQuseResult(host, report)
+                    persistPocketshellResult(host, report)
                     if (report.isReady) {
                         closeBootstrapSession()
                         _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
@@ -714,7 +714,7 @@ class HostListViewModel @Inject constructor(
                 TmuxStatus.Missing -> {
                     persistResult(host, installed = false)
                     val report = bootstrapper.checkServerSetup(session, pathOverride)
-                    persistQuseResult(host, report)
+                    persistPocketshellResult(host, report)
                     _bootstrapState.value = HostBootstrapSheetState.Prompt(
                         needsTmux = true,
                         report = report,
@@ -753,7 +753,7 @@ class HostListViewModel @Inject constructor(
      *
      * Calls [refreshBootstrap] (and therefore [bootstrapHost]) which
      * already kicks the probe on the IO dispatcher and persists the
-     * result through [persistResult] / [persistQuseResult]. The badge
+     * result through [persistResult] / [persistPocketshellResult]. The badge
      * state is derived from the persisted columns, so it updates
      * automatically once the probe lands — no extra wiring required.
      */
@@ -778,12 +778,12 @@ class HostListViewModel @Inject constructor(
                     TmuxStatus.Installed -> {
                         persistResult(host, installed = true)
                         val report = bootstrapper.checkServerSetup(session, pathOverride)
-                        persistQuseResult(host, report)
+                        persistPocketshellResult(host, report)
                     }
                     TmuxStatus.Missing -> {
                         persistResult(host, installed = false)
                         val report = bootstrapper.checkServerSetup(session, pathOverride)
-                        persistQuseResult(host, report)
+                        persistPocketshellResult(host, report)
                     }
                     is TmuxStatus.Unknown -> {
                         // Cannot prove either way — leave the persisted
@@ -855,11 +855,11 @@ class HostListViewModel @Inject constructor(
                 pathOverride,
             )) {
                 InstallResult.Success -> {
-                    // Re-probe so the persisted quse flag reflects the
+                    // Re-probe so the persisted pocketshell flag reflects the
                     // post-install reality, then flip to the success
                     // state so the sheet can offer the Open Usage CTA.
                     val finalReport = bootstrapper.checkServerSetup(session, pathOverride)
-                    persistQuseResult(host, finalReport)
+                    persistPocketshellResult(host, finalReport)
                     _bootstrapState.value = HostBootstrapSheetState.Success
                 }
 
@@ -894,7 +894,7 @@ class HostListViewModel @Inject constructor(
         val installer = prompt.report.installer
         if (installer == null) {
             _bootstrapState.value = HostBootstrapSheetState.Failed(
-                message = "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install tmuxctl and quse.",
+                message = "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install pocketshell.",
             )
             return
         }
@@ -928,14 +928,14 @@ class HostListViewModel @Inject constructor(
         val pathOverride = bootstrapTargetHost?.pathOverride
         _bootstrapState.value = HostBootstrapSheetState.Installing
         viewModelScope.launch {
-            when (val result = bootstrapper.installTmuxctlDaemon(session, pathOverride)) {
+            when (val result = bootstrapper.installPocketshellDaemon(session, pathOverride)) {
                 InstallResult.Success -> refreshServerSetupPrompt(session, needsTmux = prompt.needsTmux, pathOverride = pathOverride)
                 is InstallResult.Failed -> _bootstrapState.value = HostBootstrapSheetState.Failed(
                     message = result.stderr.ifBlank { "exit ${result.exitCode}" },
                 )
 
                 is InstallResult.UnsupportedOs -> _bootstrapState.value = HostBootstrapSheetState.Failed(
-                    message = "PocketShell couldn't enable the tmuxctl jobs daemon on this host.",
+                    message = "PocketShell couldn't enable the pocketshell jobs daemon on this host.",
                 )
 
                 is InstallResult.Error -> _bootstrapState.value = HostBootstrapSheetState.Failed(message = result.reason)
@@ -961,7 +961,7 @@ class HostListViewModel @Inject constructor(
         pathOverride: String? = bootstrapTargetHost?.pathOverride,
     ) {
         val report = bootstrapper.checkServerSetup(session, pathOverride)
-        bootstrapTargetHost?.let { persistQuseResult(it, report) }
+        bootstrapTargetHost?.let { persistPocketshellResult(it, report) }
         _bootstrapState.value = if (!needsTmux && report.isReady) {
             HostBootstrapSheetState.Success
         } else {
@@ -1007,30 +1007,31 @@ class HostListViewModel @Inject constructor(
     }
 
     /**
-     * Persist the quse-installed flag from a fresh [HostBootstrapReport]
-     * (issue #117, usage-panel Fix C; renamed from heru → quse in #128).
-     * The check is decoupled from [persistResult] because the quse probe
+     * Persist the pocketshell-installed flag from a fresh
+     * [HostBootstrapReport] (issue #117, usage-panel Fix C; unified onto
+     * the single `pocketshell` CLI in #231, D22 hard cut). The check is
+     * decoupled from [persistResult] because the pocketshell probe
      * arrives via the broader `checkServerSetup` call, not the
      * single-tool `checkTmux` probe.
      *
-     * Records `quseLastDetectedAt` whether quse is present or missing so
-     * the periodic usage scheduler can apply the same 24h freshness
-     * heuristic the tmux probe uses — the scheduler only re-detects when
-     * the cache is stale.
+     * Records `pocketshellLastDetectedAt` whether pocketshell is present
+     * or missing so the periodic usage scheduler can apply the same 24h
+     * freshness heuristic the tmux probe uses — the scheduler only
+     * re-detects when the cache is stale.
      */
-    private suspend fun persistQuseResult(host: HostEntity, report: HostBootstrapReport) {
-        val quseInstalled = report.tools[BootstrapTool.Quse] is ToolStatus.Installed
+    private suspend fun persistPocketshellResult(host: HostEntity, report: HostBootstrapReport) {
+        val pocketshellInstalled = report.tools[BootstrapTool.Pocketshell] is ToolStatus.Installed
         val now = System.currentTimeMillis()
         val current = hostDao.getById(host.id) ?: host
         // Only write when the cached value would change; avoids a churn
         // on every connect for a row that has not moved.
-        if (current.quseInstalled == quseInstalled && current.quseLastDetectedAt != null) {
+        if (current.pocketshellInstalled == pocketshellInstalled && current.pocketshellLastDetectedAt != null) {
             return
         }
         hostDao.update(
             current.copy(
-                quseInstalled = quseInstalled,
-                quseLastDetectedAt = now,
+                pocketshellInstalled = pocketshellInstalled,
+                pocketshellLastDetectedAt = now,
             ),
         )
     }
@@ -1145,21 +1146,21 @@ enum class ImportConflictResolution {
  * derivation cannot accidentally close over instance state.
  *
  * - `Unknown`     — `tmuxInstalled == null` (never probed) OR
- *                   `quseInstalled == null` (probed before #117 added
- *                   the usage-tool column).
- * - `NeedsSetup`  — `tmuxInstalled == false`, OR `quseInstalled ==
+ *                   `pocketshellInstalled == null` (no usage-tool probe
+ *                   recorded yet).
+ * - `NeedsSetup`  — `tmuxInstalled == false`, OR `pocketshellInstalled ==
  *                   false`. At least one required tool is missing.
- * - `Ready`       — `tmuxInstalled == true` AND `quseInstalled == true`.
+ * - `Ready`       — `tmuxInstalled == true` AND `pocketshellInstalled == true`.
  */
 internal fun deriveSetupState(host: HostEntity): HostSetupState {
     val tmux = host.tmuxInstalled
-    val quse = host.quseInstalled
+    val pocketshell = host.pocketshellInstalled
     return when {
         tmux == null -> HostSetupState.Unknown
         tmux == false -> HostSetupState.NeedsSetup
         // tmux == true past here.
-        quse == null -> HostSetupState.Unknown
-        quse == false -> HostSetupState.NeedsSetup
+        pocketshell == null -> HostSetupState.Unknown
+        pocketshell == false -> HostSetupState.NeedsSetup
         else -> HostSetupState.Ready
     }
 }
@@ -1208,7 +1209,7 @@ internal fun deriveSetupState(host: HostEntity): HostSetupState {
  *   reports a live client registered for this host id.
  * @param lastConnectError opaque marker for "the most recent SSH
  *   attempt failed". The signal is currently best-expressed as
- *   `tmuxInstalled == false && quseInstalled == false && there was a
+ *   `tmuxInstalled == false && pocketshellInstalled == false && there was a
  *   probe attempt`; for now we keep the parameter explicit so a future
  *   issue (when a richer connect-failure persistence lands) can hook
  *   in without re-shaping the derivation. Defaults to `false`.

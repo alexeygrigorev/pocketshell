@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+# Issue #231 (D22 hard-cut): the bootstrapper now probes/installs the single
+# unified `pocketshell` CLI instead of the legacy `tmuxctl` + `quse` binaries.
+# This bootstrap fixture only needs to prove `pocketshell` is on PATH, runs
+# `--version` cleanly, and that the jobs-daemon ExecStart target
+# (`pocketshell jobs daemon`) resolves.
+if [ "${1:-}" = "--version" ]; then
+  printf 'pocketshell bootstrap fixture 0.0.0\n'
+  exit 0
+fi
+
+if [ "${1:-}" = "jobs" ] && [ "${2:-}" = "daemon" ]; then
+  printf 'pocketshell jobs daemon fixture\n'
+  exit 0
+fi
+
+if [ "${1:-}" = "jobs" ] && [ "${2:-}" = "list" ]; then
+  printf 'ID  ENABLED  SESSION  EVERY  DELAY  SOURCE  NEXT RUN  DETAIL\n'
+  exit 0
+fi
+
+printf 'pocketshell bootstrap fixture supports --version, jobs daemon, and jobs list\n' >&2
+exit 64

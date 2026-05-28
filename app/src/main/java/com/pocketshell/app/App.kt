@@ -25,9 +25,9 @@ import javax.inject.Inject
  *
  * The scheduler is started here unconditionally. While the singleton
  * has no eligible hosts to poll (every saved host has
- * `quseInstalled != true`) `fetchOnce` is essentially a Room read and a
+ * `pocketshellInstalled != true`) `fetchOnce` is essentially a Room read and a
  * no-op snapshot update — cheap. The wire-up therefore costs nothing on
- * a fresh install and means the first time a user bootstraps quse on a
+ * a fresh install and means the first time a user bootstraps pocketshell on a
  * host their usage data starts flowing without an additional
  * screen-mount trigger.
  *

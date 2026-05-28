@@ -10,17 +10,17 @@ class HostTmuxSessionListParserTest {
     private val parser = HostTmuxSessionListParser()
 
     @Test
-    fun parseTmuxctlListSkipsHeaderAndHints() {
+    fun parsePocketshellSessionsListSkipsHeaderAndHints() {
         val output = """
             IDX  SESSION               CREATED
             1    codex                 2026-05-23 10:00:00
             2    claude-main           2026-05-23 09:30:00
-            
-            Join a session: tmuxctl <id> or tmuxctl <session>
-            Create a new one: tmuxctl :<session>
+
+            Join a session: pocketshell sessions <id> or pocketshell sessions <session>
+            Create a new one: pocketshell sessions :<session>
         """.trimIndent()
 
-        val rows = parser.parseTmuxctlList(output)
+        val rows = parser.parsePocketshellSessionsList(output)
 
         assertEquals(listOf("codex", "claude-main"), rows.map { it.name })
         assertFalse(rows.first().attached)
@@ -28,8 +28,8 @@ class HostTmuxSessionListParserTest {
     }
 
     @Test
-    fun parseTmuxctlListKeepsNamesWiderThanPrintedColumn() {
-        val row = parser.parseTmuxctlListRow(
+    fun parsePocketshellSessionsListKeepsNamesWiderThanPrintedColumn() {
+        val row = parser.parsePocketshellSessionsListRow(
             "12   very-long-agent-session-name  2026-05-23 08:00:00",
         )
 
@@ -37,17 +37,18 @@ class HostTmuxSessionListParserTest {
     }
 
     /**
-     * Issue #200 regression: when a session name overflows tmuxctl's
-     * printf padding for the SESSION column, the row separator collapses
-     * to a single space before the trailing CREATED timestamp. The
-     * previous regex required `\s{2,}` between the name and the
+     * Issue #200 regression: when a session name overflows the underlying
+     * `tmuxctl list` printf padding for the SESSION column (proxied
+     * byte-for-byte by `pocketshell sessions list`), the row separator
+     * collapses to a single space before the trailing CREATED timestamp.
+     * The previous regex required `\s{2,}` between the name and the
      * timestamp, so these rows were silently dropped — the maintainer
      * with 11 sessions on the host saw only the short-named subset.
      * This test pins the parser against the verbatim Hetzner output so
      * we don't regress on the same printf-padding edge.
      */
     @Test
-    fun parseTmuxctlListReturnsAllRowsWhenNamesOverflowSessionColumn() {
+    fun parsePocketshellSessionsListReturnsAllRowsWhenNamesOverflowSessionColumn() {
         val output = """
             IDX  SESSION               CREATED
             1    git-pocketshell-c     2026-05-24 11:32:14
@@ -62,13 +63,13 @@ class HostTmuxSessionListParserTest {
             10   git-telegram-writing-assistant 2026-05-12 12:10:03
             11   v2-md                 2026-04-13 14:06:12
 
-            Join a session: tmuxctl <id> or tmuxctl <session>
-            Create a new one: tmuxctl :<session>
-            Use current folder: tmuxctl - or tmuxctl -name
-            Help: tmuxctl --help
+            Join a session: pocketshell sessions <id> or pocketshell sessions <session>
+            Create a new one: pocketshell sessions :<session>
+            Use current folder: pocketshell sessions - or pocketshell sessions -name
+            Help: pocketshell sessions --help
         """.trimIndent()
 
-        val rows = parser.parseTmuxctlList(output)
+        val rows = parser.parsePocketshellSessionsList(output)
 
         assertEquals(11, rows.size)
         assertEquals(
@@ -97,7 +98,7 @@ class HostTmuxSessionListParserTest {
      * comes back as "9 of 10" because of a different column-width quirk.
      */
     @Test
-    fun parseTmuxctlListReturnsAllTenRowsWhenEverySeparatorIsSingleSpace() {
+    fun parsePocketshellSessionsListReturnsAllTenRowsWhenEverySeparatorIsSingleSpace() {
         val sessions = (1..10).map { "session-with-a-fairly-long-name-$it" }
         val output = buildString {
             appendLine("IDX  SESSION               CREATED")
@@ -105,10 +106,10 @@ class HostTmuxSessionListParserTest {
                 appendLine("${index + 1}    $name 2026-05-27 ${"%02d".format(index + 1)}:00:00")
             }
             appendLine()
-            appendLine("Join a session: tmuxctl <id> or tmuxctl <session>")
+            appendLine("Join a session: pocketshell sessions <id> or pocketshell sessions <session>")
         }
 
-        val rows = parser.parseTmuxctlList(output)
+        val rows = parser.parsePocketshellSessionsList(output)
 
         assertEquals(10, rows.size)
         assertEquals(sessions, rows.map { it.name })
@@ -137,8 +138,8 @@ class HostTmuxSessionListParserTest {
 
     @Test
     fun malformedRowsReturnNull() {
-        assertNull(parser.parseTmuxctlListRow("IDX  SESSION               CREATED"))
-        assertNull(parser.parseTmuxctlListRow("not a row"))
+        assertNull(parser.parsePocketshellSessionsListRow("IDX  SESSION               CREATED"))
+        assertNull(parser.parsePocketshellSessionsListRow("not a row"))
         assertNull(parser.parseTmuxListSessionsRow(""))
         assertNull(parser.parseTmuxListSessionsRow("name\tcreated"))
         assertNull(parser.parseTmuxListSessionsRow("\t1\t2\t0"))

@@ -141,7 +141,7 @@ fun HostListScreen(
     onOpenWatchedFolders: (HostEntity, keyPath: String, passphrase: CharArray?) -> Unit = { _, _, _ -> },
     /**
      * Issue #117 (usage Fix C): the bootstrap sheet's Success state can
-     * route the user to the usage panel when `quse` was just installed.
+     * route the user to the usage panel when `pocketshell` was just installed.
      * The callback is optional because Fix A owns the actual
      * `AppDestination.Usage` destination and only wires the route once
      * its branch lands; until then the call site can pass `null` and the
@@ -445,10 +445,10 @@ fun HostListScreen(
 
             // Issue #116 (usage-panel Fix B): cross-host usage strip
             // sits above the Hosts section header so the user sees the
-            // at-a-glance quota state for every quse-installed host
+            // at-a-glance quota state for every pocketshell-installed host
             // before scanning individual rows. The strip is gated on
-            // `hasUsageInstalledHost` so a workspace with no quse hosts
-            // never renders an empty rail (AC: "When no host has quse
+            // `hasUsageInstalledHost` so a workspace with no pocketshell hosts
+            // never renders an empty rail (AC: "When no host has pocketshell
             // installed, the dashboard strip is not rendered"). Tapping
             // routes to `AppDestination.Usage` via `onOpenUsage` — the
             // same destination the kebab in SessionScreen / TmuxSession
@@ -541,7 +541,7 @@ fun HostListScreen(
                                     // connect path. `bootstrapHost` is
                                     // cache-aware: a `needsSetup` row has
                                     // either `tmuxInstalled == false` or
-                                    // `quseInstalled == false`, both of
+                                    // `pocketshellInstalled == false`, both of
                                     // which surface the sheet when the
                                     // probe re-runs.
                                     { tapRequests.tryEmit(host.id) }

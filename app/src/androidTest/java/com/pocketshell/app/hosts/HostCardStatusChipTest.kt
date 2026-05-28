@@ -66,7 +66,7 @@ class HostCardStatusChipTest {
 
     /**
      * AC primary state 1: host that has completed bootstrap (tmux +
-     * quse both installed) but currently has zero tmux sessions. The
+     * pocketshell both installed) but currently has zero tmux sessions. The
      * chip must read "No active sessions" and the screen must not
      * carry the word "idle".
      */
@@ -74,7 +74,7 @@ class HostCardStatusChipTest {
     fun noActiveSessions_chipRendersForReadyHostWithNoSessions() {
         assumeScenariosEnabled()
         scenario(name = "no-active-sessions") {
-            seedHost(tmuxInstalled = true, quseInstalled = true)
+            seedHost(tmuxInstalled = true, pocketshellInstalled = true)
             launchHostList()
             capture("01-no-active-sessions")
 
@@ -109,7 +109,7 @@ class HostCardStatusChipTest {
     fun nSessionsChip_isStubbedForReadyHost() {
         assumeScenariosEnabled()
         scenario(name = "n-sessions") {
-            seedHost(tmuxInstalled = true, quseInstalled = true)
+            seedHost(tmuxInstalled = true, pocketshellInstalled = true)
             launchHostList()
             capture("02-n-sessions")
             compose.onAllNodesWithTag(HOST_STATUS_CHIP_TAG, useUnmergedTree = true)
@@ -129,7 +129,7 @@ class HostCardStatusChipTest {
     fun needsSetupHost_suppressesTrailingStatusChip() {
         assumeScenariosEnabled()
         scenario(name = "needs-setup") {
-            seedHost(tmuxInstalled = true, quseInstalled = false)
+            seedHost(tmuxInstalled = true, pocketshellInstalled = false)
             launchHostList()
             capture("03-needs-setup")
             // The inline setup badge still reads "needs setup".
@@ -177,7 +177,7 @@ class HostCardStatusChipTest {
         // scenarios race onto the same emulator instance.
         private val hostName = "S-$scenarioName-${System.nanoTime() % 100_000L}"
 
-        fun seedHost(tmuxInstalled: Boolean?, quseInstalled: Boolean?) {
+        fun seedHost(tmuxInstalled: Boolean?, pocketshellInstalled: Boolean?) {
             val appContext = InstrumentationRegistry.getInstrumentation().targetContext
             val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
                 .fallbackToDestructiveMigration(dropAllTables = true)
@@ -198,14 +198,14 @@ class HostCardStatusChipTest {
                             username = "testuser",
                             keyId = keyId,
                             tmuxInstalled = tmuxInstalled,
-                            quseInstalled = quseInstalled,
+                            pocketshellInstalled = pocketshellInstalled,
                             // Freshness guard so the cold-launch
                             // reprobe (which would otherwise try to
                             // open an SSH session against an
                             // intentionally-missing key) is a no-op
                             // and does not flip the columns under us.
                             lastBootstrapAt = System.currentTimeMillis(),
-                            quseLastDetectedAt = System.currentTimeMillis(),
+                            pocketshellLastDetectedAt = System.currentTimeMillis(),
                         ),
                     )
                 }

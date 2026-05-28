@@ -27,7 +27,7 @@ import java.io.File
  *
  * Strategy:
  *
- *  1. Seed one host with `quseInstalled = true` so the singleton
+ *  1. Seed one host with `pocketshellInstalled = true` so the singleton
  *     [UsageScheduler] has an eligible host to poll. The fetch lambda
  *     is replaced with a no-op so we don't need a real SSH transport;
  *     what we actually assert on is [UsageScheduler.tickCount], a
@@ -69,7 +69,7 @@ class NoBackgroundWorkE2eTest {
     @Test
     fun usageScheduler_doesNotTickWhileBackgrounded() = runBlocking {
         val key = readFixtureKey()
-        seedHostWithQuse(key)
+        seedHostWithPocketshell(key)
 
         // Stub the fetch lambda on the singleton BEFORE the activity
         // starts the scheduler so the test never reaches for a real
@@ -190,7 +190,7 @@ class NoBackgroundWorkE2eTest {
             .bufferedReader()
             .use { it.readText() }
 
-    private suspend fun seedHostWithQuse(key: String) {
+    private suspend fun seedHostWithPocketshell(key: String) {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
             .fallbackToDestructiveMigration(dropAllTables = true)
@@ -203,7 +203,7 @@ class NoBackgroundWorkE2eTest {
                 name = "no-background-key-${System.currentTimeMillis()}",
                 content = key,
             )
-            // Quse-installed host so the scheduler has something to
+            // Pocketshell-installed host so the scheduler has something to
             // poll. The fetch lambda is stubbed in the test so the
             // SSH path is never exercised.
             db.hostDao().insert(
@@ -215,8 +215,8 @@ class NoBackgroundWorkE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
-                    quseInstalled = true,
-                    quseLastDetectedAt = System.currentTimeMillis(),
+                    pocketshellInstalled = true,
+                    pocketshellLastDetectedAt = System.currentTimeMillis(),
                 ),
             )
         } finally {

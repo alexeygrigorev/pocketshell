@@ -227,7 +227,7 @@ jobs:
             -o StrictHostKeyChecking=no \
             -o UserKnownHostsFile=/dev/null \
             testuser@127.0.0.1 \
-            'for tool in heru agent-log-explorer tmuxctl; do command -v "$tool"; done'
+            'for tool in pocketshell agent-log-explorer tmuxctl quse; do command -v "$tool"; done'
 
       - name: Run connected Android tests
         # `-Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true`

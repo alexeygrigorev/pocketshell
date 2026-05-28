@@ -5,10 +5,10 @@ import org.json.JSONObject
 import java.time.Instant
 
 /**
- * Parser for the normalized JSON produced by `quse --json`.
+ * Parser for the normalized JSON produced by `pocketshell usage --json`.
  *
- * `quse` emits one JSON object per line (newline-delimited JSON, also known
- * as NDJSON). Each record has a fixed shape:
+ * `pocketshell usage --json` emits one JSON object per line (newline-delimited
+ * JSON, also known as NDJSON). Each record has a fixed shape:
  *
  * ```json
  * {
@@ -30,7 +30,7 @@ import java.time.Instant
  * Parsing stays app-credential-free: the app only consumes JSON already
  * fetched by a server-side command.
  */
-public class QuseUsageJsonParser {
+public class PocketshellUsageJsonParser {
 
     @Throws(UsageParseException::class)
     public fun parse(input: String): List<UsageProviderRecord> {
@@ -38,8 +38,8 @@ public class QuseUsageJsonParser {
         if (trimmed.isEmpty()) return emptyList()
 
         val records = mutableListOf<UsageProviderRecord>()
-        // `quse --json` is newline-delimited JSON (NDJSON): one record per
-        // line. We also accept records that span multiple lines by
+        // `pocketshell usage --json` is newline-delimited JSON (NDJSON): one
+        // record per line. We also accept records that span multiple lines by
         // accumulating until braces balance — this keeps the parser
         // tolerant of pretty-printed output from custom wrapper scripts
         // (per-host `usageCommandOverride`) without losing the
@@ -105,8 +105,9 @@ public class QuseUsageJsonParser {
     }
 
     /**
-     * Convert a quse window object into a [UsageWindow]. The quse JSON
-     * reports `percent_remaining`, while the PocketShell model uses
+     * Convert a usage window object into a [UsageWindow]. The
+     * `pocketshell usage --json` payload reports `percent_remaining`,
+     * while the PocketShell model uses
      * `used` / `limit` in `percent` units; convert `percent_remaining = R`
      * to `used = 100 - R, limit = 100, unit = "percent"`.
      *

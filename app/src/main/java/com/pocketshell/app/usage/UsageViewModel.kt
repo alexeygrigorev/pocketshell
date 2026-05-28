@@ -24,10 +24,10 @@ import javax.inject.Inject
 
 /**
  * Per-host usage fetcher. Injected into [UsageViewModel] so tests can
- * stub the SSH/quse path without needing a real transport. The default
- * implementation opens a short-lived SSH session via [SshConnection],
- * runs [UsageRemoteSource.detectQuse], and — when present —
- * [UsageRemoteSource.fetchUsage].
+ * stub the SSH/pocketshell path without needing a real transport. The
+ * default implementation opens a short-lived SSH session via
+ * [SshConnection], runs [UsageRemoteSource.detectPocketshell], and — when
+ * present — [UsageRemoteSource.fetchUsage].
  *
  * The result is one of the four [HostUsageFetch] cases the view model
  * already partitions on (Records / ToolMissing / Skipped). Failures land
@@ -89,7 +89,7 @@ public class SshHostUsageFetcher @Inject constructor(
         }
 
         return try {
-            when (remoteSource.detectQuse(session)) {
+            when (remoteSource.detectPocketshell(session)) {
                 UsageToolStatus.Installed -> {
                     when (val fetch = remoteSource.fetchUsage(session)) {
                         is UsageFetchResult.Success -> HostUsageFetch.Records(
@@ -115,11 +115,12 @@ public class SshHostUsageFetcher @Inject constructor(
  * Backs [UsageScreen] for issue #114 Fix A.
  *
  * Iterates over every saved host and asks [HostUsageFetcher] for its
- * quse/quota state. Results are aggregated into a single
+ * pocketshell/quota state. Results are aggregated into a single
  * [UsageScreenState] that the screen renders. Hosts whose key file is
- * missing, who fail to connect, or whose quse status is unknown are
+ * missing, who fail to connect, or whose pocketshell status is unknown are
  * silently skipped so the panel only shows actionable rows. Hosts where
- * quse is confirmed absent populate the "missing tool" empty-state list.
+ * pocketshell is confirmed absent populate the "missing tool" empty-state
+ * list.
  *
  * The view model is deliberately stateless across visits: every
  * navigation to [com.pocketshell.app.nav.AppDestination.Usage] spins up a

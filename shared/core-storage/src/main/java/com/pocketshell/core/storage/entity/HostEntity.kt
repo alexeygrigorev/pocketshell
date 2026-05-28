@@ -23,36 +23,37 @@ import androidx.room.PrimaryKey
  * and the brief forbids adding new catalog entries.
  *
  * Issue #117 (usage-panel Fix C) added the usage-tool cache columns +
- * the optional per-host command override. Issue #128 renamed those
- * cache columns from `heru*` to `quse*` to match the new
- * `quse` library. The same bootstrap probe that fills [tmuxInstalled]
- * also reports whether [quse](https://github.com/alexeygrigorev/terminal-usage-tracker)
- * is present on the host. The detected result is cached so the periodic
- * usage scheduler can skip hosts that don't have quse without re-probing
- * on every poll. [usageCommandOverride] is an optional per-host override
- * for the usage command (e.g. a corporate wrapper that emits the same
- * JSON shape) — `null` falls back to `quse --json`.
+ * the optional per-host command override. The same bootstrap probe that
+ * fills [tmuxInstalled] also reports whether the unified
+ * [pocketshell](https://github.com/alexeygrigorev/pocketshell) CLI is
+ * present on the host. The detected result is cached in
+ * [pocketshellInstalled] / [pocketshellLastDetectedAt] so the periodic
+ * usage scheduler can skip hosts that don't have pocketshell without
+ * re-probing on every poll. `null` means "never probed", `true` / `false`
+ * mean "verified at [pocketshellLastDetectedAt]". [usageCommandOverride]
+ * is an optional per-host override for the usage command (e.g. a corporate
+ * wrapper that emits the same JSON shape) — `null` falls back to the
+ * default `pocketshell usage --json`.
+ *
+ * Issue #231 (parity swap, #170 follow-up) renamed these detection columns
+ * from the legacy `quse*` naming to `pocketshell*` as the Android side cut
+ * over from the separate `quse` / `tmuxctl` utilities to the unified
+ * `pocketshell` CLI. Per D22 this is a hard cut: there is no legacy column,
+ * no compatibility shim, and no Room migration — the destructive rebuild in
+ * `StorageModule` (`fallbackToDestructiveMigration(dropAllTables = true)`)
+ * is sufficient.
  *
  * Issue #41 added [pathOverride]: an optional colon-separated list of
  * extra PATH directories that the bootstrap probe prepends ahead of the
  * standard `$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin` augmentation
  * before running `command -v <tool>`. Maintainers who install
- * `quse` / `tmuxctl` from cloned repos with venvs (e.g.
- * `~/git/quse/.venv/bin`) keep those paths in `~/.bashrc`, which is
+ * `pocketshell` from a cloned repo with a venv (e.g.
+ * `~/git/pocketshell/.venv/bin`) keep those paths in `~/.bashrc`, which is
  * NOT sourced by the `/bin/sh -lc` wrapper used by the probe (only
  * `~/.profile` is). Surfacing the PATH override here lets the user
  * type the venv directories once on the Add/Edit Host screen and have
  * every probe see them. `null` and the empty string both mean
  * "no override, use the default augmentation only".
- *
- * Issue #170 (first PR) added [pocketshellInstalled]: the bootstrap
- * probe now also looks for the unified `pocketshell` CLI in addition
- * to the existing `quse` / `tmuxctl` probes. `null` means "never
- * probed", `true` / `false` mean "verified at [lastBootstrapAt]". Once
- * `pocketshell` reaches feature parity with `quse` + `tmuxctl` a
- * follow-up issue will remove the legacy probe columns; per D22 this
- * is a hard cut, not a deprecation. For now the three columns coexist
- * because the new utility is parallel-detected, not a replacement.
  */
 @Entity(
     tableName = "hosts",
@@ -81,9 +82,8 @@ data class HostEntity(
     val lastConnectedAt: Long? = null,
     val tmuxInstalled: Boolean? = null,
     val lastBootstrapAt: Long? = null,
-    val quseInstalled: Boolean? = null,
-    val quseLastDetectedAt: Long? = null,
+    val pocketshellInstalled: Boolean? = null,
+    val pocketshellLastDetectedAt: Long? = null,
     val usageCommandOverride: String? = null,
     val pathOverride: String? = null,
-    val pocketshellInstalled: Boolean? = null,
 )

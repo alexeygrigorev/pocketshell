@@ -764,8 +764,8 @@ internal fun formatThresholdLabel(seconds: Float): String {
  * Settings because the panel surfaces cross-host server-side state, not a
  * per-host preference. Tapping the row routes to
  * [com.pocketshell.app.nav.AppDestination.Usage] which renders
- * `UsageScreen` populated from every bootstrapped host that has the quse
- * CLI installed.
+ * `UsageScreen` populated from every bootstrapped host that has the
+ * pocketshell CLI installed.
  *
  * Fix B (compact dashboard strip on the host list) and Fix C
  * (bootstrap-aware periodic fetch + per-host command override) extend the
@@ -801,7 +801,7 @@ private fun UsageSection(
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "Provider quotas reported by quse on bootstrapped hosts.",
+                        text = "Provider quotas reported by pocketshell on bootstrapped hosts.",
                         color = PocketShellColors.TextSecondary,
                         fontSize = 12.sp,
                     )
@@ -832,7 +832,7 @@ private fun UsageSection(
             }
 
             // Issue #214: "Warn me when usage exceeds X%" slider.
-            // Only rendered when at least one quse-installed host
+            // Only rendered when at least one pocketshell-installed host
             // exists — adjusting the threshold for an empty workspace
             // is meaningless (the warning surfaces would have nothing
             // to threshold against).
@@ -886,14 +886,14 @@ private fun UsageSection(
                 )
             }
 
-            // Issue #157 polish item 5: when no host has `quse` installed
+            // Issue #157 polish item 5: when no host has `pocketshell` installed
             // the cross-host Usage dashboard strip (issue #116) is hidden
             // — by design, "no empty rail" — but that also leaves the user
             // with no discoverable way to learn that the panel exists.
             // Render an inline hint inside the same section card so a
             // first-time user opening Settings sees both the existing row
             // (still tappable so they can see the empty state) AND the
-            // nudge to install `quse` on a host.
+            // nudge to install `pocketshell` on a host.
             //
             // The Usage docs link surfaces `docs/usage-panel.md` via the
             // GitHub web view (no in-app docs browser today). The system
@@ -917,20 +917,20 @@ private fun UsageSection(
                         .testTag(USAGE_EMPTY_HINT_TAG),
                 ) {
                     Text(
-                        text = "No quse-installed hosts detected",
+                        text = "No pocketshell-installed hosts detected",
                         color = PocketShellColors.Text,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(modifier = Modifier.height(2.dp))
                     Text(
-                        text = "Install quse on a host to see provider quotas here.",
+                        text = "Install pocketshell on a host to see provider quotas here.",
                         color = PocketShellColors.TextSecondary,
                         fontSize = 12.sp,
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Learn more about quse",
+                        text = "Learn more about pocketshell usage",
                         color = PocketShellColors.Accent,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,

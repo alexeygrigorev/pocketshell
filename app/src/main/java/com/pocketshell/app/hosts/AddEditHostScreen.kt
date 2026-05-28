@@ -73,9 +73,9 @@ const val ADD_HOST_KEY_SEARCH_EMPTY_TAG = "add-host-key-search-empty"
  * literal is duplicated here so the form doesn't depend on the
  * `app.usage` package, keeping the Compose surface package-isolated.
  */
-private const val USAGE_COMMAND_PLACEHOLDER = "quse --json"
+private const val USAGE_COMMAND_PLACEHOLDER = "pocketshell usage --json"
 private const val USAGE_COMMAND_SUPPORTING_TEXT =
-    "Optional override. Leave blank to use quse --json."
+    "Optional override. Leave blank to use pocketshell usage --json."
 
 /**
  * Placeholder for the optional "Extra PATH directories" field (issue
@@ -84,7 +84,7 @@ private const val USAGE_COMMAND_SUPPORTING_TEXT =
  * to the venv-style installers we're trying to surface.
  */
 private const val PATH_OVERRIDE_PLACEHOLDER =
-    "/home/me/git/quse/.venv/bin:/home/me/git/tmuxcli/.venv/bin"
+    "/home/me/git/pocketshell/.venv/bin:/home/me/.local/bin"
 private const val PATH_OVERRIDE_SUPPORTING_TEXT =
     "Optional. Colon-separated PATH entries the bootstrap probe sees " +
         "(prepended ahead of \$HOME/.local/bin / \$HOME/bin / \$HOME/.cargo/bin). " +
@@ -274,8 +274,8 @@ fun AddEditHostScreen(
                 // non-empty string is forwarded verbatim to
                 // [UsageRemoteSource.fetchUsage] as `commandOverride`,
                 // and (b) leaving it blank just falls back to
-                // `quse --json`. The placeholder is the default so
-                // the user can see what the empty state will do.
+                // `pocketshell usage --json`. The placeholder is the default
+                // so the user can see what the empty state will do.
                 FormField(
                     label = "Usage command (optional)",
                     value = state.usageCommand,

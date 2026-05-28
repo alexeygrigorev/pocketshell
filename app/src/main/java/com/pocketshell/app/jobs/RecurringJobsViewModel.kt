@@ -17,7 +17,7 @@ import javax.inject.Inject
 
 @HiltViewModel
 public class RecurringJobsViewModel @Inject constructor(
-    private val remoteSource: TmuxctlJobsRemoteSource,
+    private val remoteSource: PocketshellJobsRemoteSource,
     private val connector: RecurringJobsSshConnector,
 ) : ViewModel() {
 
@@ -71,7 +71,7 @@ public class RecurringJobsViewModel @Inject constructor(
                     _state.value = _state.value.copy(loading = false, error = null)
                 }
                 RecurringJobsCommandResult.ToolMissing -> {
-                    _state.value = _state.value.copy(loading = false, error = "tmuxctl is not installed on this host")
+                    _state.value = _state.value.copy(loading = false, error = "pocketshell is not installed on this host")
                 }
                 is RecurringJobsCommandResult.Failed -> {
                     _state.value = _state.value.copy(loading = false, error = result.reason)
@@ -112,7 +112,7 @@ public class RecurringJobsViewModel @Inject constructor(
                     _state.value = _state.value.copy(jobs = result.jobs, loading = false, error = null)
                 }
                 RecurringJobsCommandResult.ToolMissing -> {
-                    _state.value = _state.value.copy(loading = false, error = "tmuxctl is not installed on this host")
+                    _state.value = _state.value.copy(loading = false, error = "pocketshell is not installed on this host")
                 }
                 is RecurringJobsCommandResult.Failed -> {
                     _state.value = _state.value.copy(loading = false, error = result.reason)

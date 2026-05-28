@@ -90,9 +90,13 @@ class UsageScreenE2eTest {
                 knownHosts = KnownHostsPolicy.AcceptAll,
             ).getOrThrow()
             session.use {
-                val result = it.exec("quse --json")
+                // Issue #231 (D22 hard-cut): the app now drives the unified
+                // `pocketshell usage --json` CLI; the deterministic `agents`
+                // fixture proxies the same provider records the app's parser
+                // was written against.
+                val result = it.exec("pocketshell usage --json")
                 assertTrue(
-                    "expected quse fixture to succeed, got exit=${result.exitCode} stderr=${result.stderr}",
+                    "expected pocketshell usage fixture to succeed, got exit=${result.exitCode} stderr=${result.stderr}",
                     result.exitCode == 0 && result.stdout.contains("provider"),
                 )
             }

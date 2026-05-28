@@ -303,14 +303,14 @@ class AddEditHostViewModelTest {
                 hostname = "h",
                 username = "u",
                 selectedKeyId = keyId,
-                pathOverride = "  /home/u/git/quse/.venv/bin:/home/u/git/tmuxcli/.venv/bin  ",
+                pathOverride = "  /home/u/git/pocketshell/.venv/bin:/home/u/.local/bin  ",
             )
         }
         vm.save()
 
         val hosts = db.hostDao().getAll().first()
         assertEquals(
-            "/home/u/git/quse/.venv/bin:/home/u/git/tmuxcli/.venv/bin",
+            "/home/u/git/pocketshell/.venv/bin:/home/u/.local/bin",
             hosts.single().pathOverride,
         )
 
@@ -337,13 +337,13 @@ class AddEditHostViewModelTest {
                 port = 22,
                 username = "u",
                 keyId = keyId,
-                pathOverride = "/home/u/git/quse/.venv/bin",
+                pathOverride = "/home/u/git/pocketshell/.venv/bin",
             ),
         )
         val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
         vm.loadHost(hostId)
 
-        assertEquals("/home/u/git/quse/.venv/bin", vm.state.value.pathOverride)
+        assertEquals("/home/u/git/pocketshell/.venv/bin", vm.state.value.pathOverride)
         assertFalse(vm.isDirty())
     }
 
@@ -364,14 +364,14 @@ class AddEditHostViewModelTest {
         val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
         vm.loadHost(hostId)
         assertFalse(vm.isDirty())
-        vm.updateState { it.copy(pathOverride = "/home/u/git/quse/.venv/bin") }
+        vm.updateState { it.copy(pathOverride = "/home/u/git/pocketshell/.venv/bin") }
         assertTrue(vm.isDirty())
     }
 
     @Test
     fun save_onEdit_preservesBootstrapCacheColumns() = runTest {
         // Issue #117 regression: save() used to overwrite the entire
-        // HostEntity, clobbering tmuxInstalled / quseInstalled /
+        // HostEntity, clobbering tmuxInstalled / pocketshellInstalled /
         // lastBootstrapAt. Verify the edit path now merges into the
         // existing row.
         val keyId = db.sshKeyDao().insert(
@@ -386,9 +386,9 @@ class AddEditHostViewModelTest {
                 keyId = keyId,
                 tmuxInstalled = true,
                 lastBootstrapAt = 12345L,
-                quseInstalled = true,
-                quseLastDetectedAt = 9999L,
-                pathOverride = "/home/u/git/quse/.venv/bin",
+                pocketshellInstalled = true,
+                pocketshellLastDetectedAt = 9999L,
+                pathOverride = "/home/u/git/pocketshell/.venv/bin",
             ),
         )
         val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
@@ -400,12 +400,12 @@ class AddEditHostViewModelTest {
         assertEquals("renamed", row.name)
         assertEquals(true, row.tmuxInstalled)
         assertEquals(12345L, row.lastBootstrapAt)
-        assertEquals(true, row.quseInstalled)
-        assertEquals(9999L, row.quseLastDetectedAt)
+        assertEquals(true, row.pocketshellInstalled)
+        assertEquals(9999L, row.pocketshellLastDetectedAt)
         // Issue #41: pathOverride is part of the form, so a rename
         // that doesn't touch it must still round-trip the original
         // value.
-        assertEquals("/home/u/git/quse/.venv/bin", row.pathOverride)
+        assertEquals("/home/u/git/pocketshell/.venv/bin", row.pathOverride)
     }
 
     @Test

@@ -35,7 +35,7 @@ class HostTmuxSessionPickerViewModel @Inject constructor(
                 )
                 HostTmuxSessionListResult.ToolUnavailable -> HostTmuxSessionPickerState.Fallback(
                     request = request,
-                    message = "tmuxctl/tmux is not available on this host.",
+                    message = "pocketshell/tmux is not available on this host.",
                 )
                 is HostTmuxSessionListResult.Failed -> HostTmuxSessionPickerState.Fallback(
                     request = request,

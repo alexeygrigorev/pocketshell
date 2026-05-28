@@ -18,22 +18,22 @@ class UsageRemoteSourceTest {
     private val source = UsageRemoteSource()
 
     @Test
-    fun detectQuse_installedWhenCommandExists() = runTest {
+    fun detectPocketshell_installedWhenCommandExists() = runTest {
         val session = FakeSshSession(
-            mapOf(UsageRemoteSource.DETECT_QUSE_COMMAND to ExecResult("/usr/bin/quse\n", "", 0)),
+            mapOf(UsageRemoteSource.DETECT_POCKETSHELL_COMMAND to ExecResult("/usr/bin/pocketshell\n", "", 0)),
         )
 
-        assertEquals(UsageToolStatus.Installed, source.detectQuse(session))
-        assertEquals(listOf(UsageRemoteSource.DETECT_QUSE_COMMAND), session.recorded)
+        assertEquals(UsageToolStatus.Installed, source.detectPocketshell(session))
+        assertEquals(listOf(UsageRemoteSource.DETECT_POCKETSHELL_COMMAND), session.recorded)
     }
 
     @Test
-    fun detectQuse_missingWhenCommandFails() = runTest {
+    fun detectPocketshell_missingWhenCommandFails() = runTest {
         val session = FakeSshSession(
-            mapOf(UsageRemoteSource.DETECT_QUSE_COMMAND to ExecResult("", "", 1)),
+            mapOf(UsageRemoteSource.DETECT_POCKETSHELL_COMMAND to ExecResult("", "", 1)),
         )
 
-        assertEquals(UsageToolStatus.Missing, source.detectQuse(session))
+        assertEquals(UsageToolStatus.Missing, source.detectPocketshell(session))
     }
 
     @Test
@@ -77,18 +77,18 @@ class UsageRemoteSourceTest {
     @Test
     fun fetchUsage_exit127IsToolMissing() = runTest {
         val session = FakeSshSession(
-            mapOf(UsageRemoteSource.defaultUsageCommand to ExecResult("", "quse: not found", 127)),
+            mapOf(UsageRemoteSource.defaultUsageCommand to ExecResult("", "pocketshell: not found", 127)),
         )
 
         assertEquals(UsageFetchResult.ToolMissing, source.fetchUsage(session))
     }
 
     @Test
-    fun detectQuse_propagatesCancellation() = runTest {
+    fun detectPocketshell_propagatesCancellation() = runTest {
         val session = ThrowingSshSession(CancellationException("cancelled"))
 
         assertThrows(CancellationException::class.java) {
-            kotlinx.coroutines.runBlocking { source.detectQuse(session) }
+            kotlinx.coroutines.runBlocking { source.detectPocketshell(session) }
         }
     }
 

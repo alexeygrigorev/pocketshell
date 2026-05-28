@@ -1,0 +1,4 @@
+ID  ENABLED  SESSION       EVERY  DELAY  SOURCE  NEXT RUN             DETAIL
+1   yes      claude-main   15m    200    inline  2026-04-03 00:15:00 continue
+2   yes      codex         5m     200    inline  2026-04-03 00:20:00 check status
+3   no       opencode-lab  30m    200    inline  2026-04-03 00:30:00 summarize

@@ -20,12 +20,12 @@ class RecurringJobsViewModelTest {
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
 
-    private val remoteSource = TmuxctlJobsRemoteSource(TmuxctlJobsParser())
+    private val remoteSource = PocketshellJobsRemoteSource(RecurringJobsParser())
 
     @Test
     fun loadConnectsAndFetchesJobsForSession() = runTest {
         val session = FakeSshSession(
-            pathAware("tmuxctl jobs list --session 'agent main'") to listOutput(id = 7, sessionName = "agent main"),
+            pathAware("pocketshell jobs list --session 'agent main'") to listOutput(id = 7, sessionName = "agent main"),
         )
         val viewModel = newViewModel(session)
 
@@ -45,13 +45,13 @@ class RecurringJobsViewModelTest {
         assertEquals(listOf(7), viewModel.state.value.jobs.map { it.id })
         assertFalse(viewModel.state.value.loading)
         assertEquals(null, viewModel.state.value.error)
-        assertEquals(listOf(pathAware("tmuxctl jobs list --session 'agent main'")), session.recorded)
+        assertEquals(listOf(pathAware("pocketshell jobs list --session 'agent main'")), session.recorded)
     }
 
     @Test
-    fun refreshMapsMissingTmuxctlToErrorState() = runTest {
+    fun refreshMapsMissingPocketshellToErrorState() = runTest {
         val session = FakeSshSession(
-            pathAware("tmuxctl jobs list --session 'codex'") to ExecResult("", "tmuxctl: not found", 127),
+            pathAware("pocketshell jobs list --session 'codex'") to ExecResult("", "pocketshell: not found", 127),
         )
         val viewModel = newViewModel(session)
 
@@ -66,18 +66,18 @@ class RecurringJobsViewModelTest {
         )
         advanceUntilIdle()
 
-        assertEquals("tmuxctl is not installed on this host", viewModel.state.value.error)
+        assertEquals("pocketshell is not installed on this host", viewModel.state.value.error)
         assertFalse(viewModel.state.value.loading)
     }
 
     @Test
     fun addRefreshesTheBoundSessionAfterSuccess() = runTest {
         val session = FakeSshSession(
-            pathAware("tmuxctl jobs list --session 'codex'") to listOf(
+            pathAware("pocketshell jobs list --session 'codex'") to listOf(
                 listOutput(id = 1, sessionName = "codex"),
                 listOutput(id = 2, sessionName = "codex"),
             ),
-            pathAware("tmuxctl jobs add 'codex' --every '5m' --message 'continue'") to ExecResult("Created job 2\n", "", 0),
+            pathAware("pocketshell jobs add 'codex' --every '5m' --message 'continue'") to ExecResult("Created job 2\n", "", 0),
         )
         val viewModel = newViewModel(session)
 
@@ -97,9 +97,9 @@ class RecurringJobsViewModelTest {
         assertEquals(listOf(2), viewModel.state.value.jobs.map { it.id })
         assertEquals(
             listOf(
-                pathAware("tmuxctl jobs list --session 'codex'"),
-                pathAware("tmuxctl jobs add 'codex' --every '5m' --message 'continue'"),
-                pathAware("tmuxctl jobs list --session 'codex'"),
+                pathAware("pocketshell jobs list --session 'codex'"),
+                pathAware("pocketshell jobs add 'codex' --every '5m' --message 'continue'"),
+                pathAware("pocketshell jobs list --session 'codex'"),
             ),
             session.recorded,
         )

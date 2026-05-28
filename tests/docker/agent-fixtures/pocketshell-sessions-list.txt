@@ -1,0 +1,9 @@
+IDX  SESSION               CREATED
+1    claude-main           2026-05-23 10:00:00
+2    codex                 2026-05-23 09:45:00
+3    opencode-lab          2026-05-23 09:15:00
+
+Join a session: pocketshell sessions <id> or pocketshell sessions <session>
+Create a new one: pocketshell sessions :<session>
+Use current folder: pocketshell sessions - or pocketshell sessions -name
+Help: pocketshell sessions --help

@@ -47,15 +47,15 @@ class SettingsViewModel @Inject constructor(
     val state: StateFlow<AppSettings> = repository.settings
 
     /**
-     * Whether at least one persisted host reports `quseInstalled == true`.
+     * Whether at least one persisted host reports `pocketshellInstalled == true`.
      *
-     * Issue #157 polish item 5: when no quse-installed host exists the
+     * Issue #157 polish item 5: when no pocketshell-installed host exists the
      * cross-host Usage dashboard strip on the host list never renders
      * (issue #116 AC: "no empty rail"), so a user has no way to
      * discover that the in-app quota panel even exists. The Settings →
      * Usage row drives the only other entry point, but tapping it
      * lands on a blank `UsageScreen`. Surfacing the boolean here lets
-     * the Settings → Usage section render a "no `quse` hosts detected"
+     * the Settings → Usage section render a "no `pocketshell` hosts detected"
      * hint with a link to the docs in the empty case, without changing
      * the routing behaviour for the populated case.
      *
@@ -63,7 +63,7 @@ class SettingsViewModel @Inject constructor(
      * verbatim so both surfaces agree on whether the panel is useful.
      */
     val hasUsageInstalledHost: StateFlow<Boolean> = hostDao.getAll()
-        .map { rows -> rows.any { it.quseInstalled == true } }
+        .map { rows -> rows.any { it.pocketshellInstalled == true } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), false)
 
     /**

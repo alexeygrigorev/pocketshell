@@ -4,8 +4,18 @@ import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.CancellationException
 import javax.inject.Inject
 
-public class TmuxctlJobsRemoteSource @Inject constructor(
-    private val parser: TmuxctlJobsParser,
+/**
+ * Drives recurring-job management over SSH through the unified
+ * `pocketshell jobs ...` CLI. Replaces the legacy `tmuxctl jobs ...` probes per
+ * the #231 parity swap (D22 hard-cut, no fallback to the old commands).
+ *
+ * `pocketshell jobs` forwards verbatim to the host scheduler, so the emitted
+ * command strings are a direct namespace swap (`tmuxctl jobs <verb>` ->
+ * `pocketshell jobs <verb>`) and the listed output stays byte-identical for
+ * [RecurringJobsParser].
+ */
+public class PocketshellJobsRemoteSource @Inject constructor(
+    private val parser: RecurringJobsParser,
 ) {
 
     public suspend fun list(
@@ -13,7 +23,7 @@ public class TmuxctlJobsRemoteSource @Inject constructor(
         sessionName: String? = null,
     ): RecurringJobsCommandResult {
         val command = buildString {
-            append("tmuxctl jobs list")
+            append("pocketshell jobs list")
             sessionName?.trim()?.takeIf { it.isNotEmpty() }?.let {
                 append(" --session ")
                 append(shellQuote(it))
@@ -32,7 +42,7 @@ public class TmuxctlJobsRemoteSource @Inject constructor(
         val message = draft.message?.takeIf { it.isNotBlank() }
             ?: return RecurringJobsCommandResult.Failed("message is required")
         val command = buildString {
-            append("tmuxctl jobs add ")
+            append("pocketshell jobs add ")
             append(shellQuote(draft.sessionName.trim()))
             append(" --every ")
             append(shellQuote(draft.every.trim()))
@@ -52,7 +62,7 @@ public class TmuxctlJobsRemoteSource @Inject constructor(
         enabled: Boolean? = null,
     ): RecurringJobsCommandResult {
         val command = buildString {
-            append("tmuxctl jobs edit ")
+            append("pocketshell jobs edit ")
             append(jobId)
             sessionName?.trim()?.takeIf { it.isNotEmpty() }?.let {
                 append(" --session ")
@@ -77,7 +87,7 @@ public class TmuxctlJobsRemoteSource @Inject constructor(
         session: SshSession,
         jobId: Int,
     ): RecurringJobsCommandResult =
-        run(session, "tmuxctl jobs remove $jobId") { RecurringJobsCommandResult.Success }
+        run(session, "pocketshell jobs remove $jobId") { RecurringJobsCommandResult.Success }
 
     private suspend fun run(
         session: SshSession,
@@ -89,7 +99,7 @@ public class TmuxctlJobsRemoteSource @Inject constructor(
             result.exitCode == 0 -> onSuccess(result.stdout)
             result.exitCode == 127 -> RecurringJobsCommandResult.ToolMissing
             else -> RecurringJobsCommandResult.Failed(
-                result.stderr.ifBlank { result.stdout }.ifBlank { "tmuxctl exited ${result.exitCode}" },
+                result.stderr.ifBlank { result.stdout }.ifBlank { "pocketshell exited ${result.exitCode}" },
             )
         }
     } catch (e: CancellationException) {

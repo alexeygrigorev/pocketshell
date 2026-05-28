@@ -4,13 +4,13 @@ package com.pocketshell.uikit.model
  * Per-host bootstrap / setup readiness as displayed on `HostCard`.
  *
  * Issue #120: the host list previously had no visible signal for whether
- * a saved host already had the server-side tooling (`tmux`, `tmuxctl`,
- * `quse`, jobs daemon) installed. The card now renders a small badge to
- * the right of the host name with three states:
+ * a saved host already had the server-side tooling (`tmux`, the
+ * `pocketshell` CLI, the jobs daemon) installed. The card now renders a
+ * small badge to the right of the host name with three states:
  *
  * - [Ready] — the most recent bootstrap probe reported every required
- *   tool installed and the tmuxctl jobs daemon active. Tapping the badge
- *   is a no-op (informational).
+ *   tool installed and the pocketshell jobs daemon active. Tapping the
+ *   badge is a no-op (informational).
  * - [NeedsSetup] — the most recent probe reported one or more required
  *   tools missing (or the daemon disabled). Tapping the badge opens the
  *   existing bootstrap sheet so the user can fix it without first

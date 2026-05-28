@@ -29,7 +29,7 @@ import java.time.Instant
  * a Docker fixture to exercise the cadence logic.
  *
  * Covered:
- * - Only hosts with `quseInstalled == true` are polled.
+ * - Only hosts with `pocketshellInstalled == true` are polled.
  * - The per-host `usageCommandOverride` is forwarded to the fetch lambda.
  * - Missing-tool hosts surface as [UsageSnapshot.ToolMissing] (not a
  *   failed fetch) — this is the [UsageScreenState.missingToolHosts]
@@ -60,13 +60,13 @@ class UsageSchedulerTest {
     }
 
     @Test
-    fun refreshNow_emptyWhenNoHostHasQuse() = runTest {
+    fun refreshNow_emptyWhenNoHostHasPocketshell() = runTest {
         val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
         db.hostDao().insert(
-            HostEntity(name = "h1", hostname = "h1", username = "u", keyId = keyId, quseInstalled = false),
+            HostEntity(name = "h1", hostname = "h1", username = "u", keyId = keyId, pocketshellInstalled = false),
         )
         db.hostDao().insert(
-            HostEntity(name = "h2", hostname = "h2", username = "u", keyId = keyId, quseInstalled = null),
+            HostEntity(name = "h2", hostname = "h2", username = "u", keyId = keyId, pocketshellInstalled = null),
         )
         val scheduler = UsageScheduler(db.hostDao(), db.sshKeyDao(), UsageRemoteSource())
         val seen = mutableListOf<HostEntity>()
@@ -74,18 +74,18 @@ class UsageSchedulerTest {
 
         scheduler.refreshNow()
 
-        assertTrue("scheduler should not poll hosts without quseInstalled = true", seen.isEmpty())
+        assertTrue("scheduler should not poll hosts without pocketshellInstalled = true", seen.isEmpty())
         assertTrue(scheduler.snapshots.value.isEmpty())
     }
 
     @Test
-    fun refreshNow_pollsOnlyQuseInstalledHosts_andForwardsCommandOverride() = runTest {
+    fun refreshNow_pollsOnlyPocketshellInstalledHosts_andForwardsCommandOverride() = runTest {
         val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
         val skippedId = db.hostDao().insert(
-            HostEntity(name = "skipped", hostname = "s", username = "u", keyId = keyId, quseInstalled = false),
+            HostEntity(name = "skipped", hostname = "s", username = "u", keyId = keyId, pocketshellInstalled = false),
         )
         val defaultCmdId = db.hostDao().insert(
-            HostEntity(name = "default", hostname = "d", username = "u", keyId = keyId, quseInstalled = true),
+            HostEntity(name = "default", hostname = "d", username = "u", keyId = keyId, pocketshellInstalled = true),
         )
         val customCmdId = db.hostDao().insert(
             HostEntity(
@@ -93,7 +93,7 @@ class UsageSchedulerTest {
                 hostname = "c",
                 username = "u",
                 keyId = keyId,
-                quseInstalled = true,
+                pocketshellInstalled = true,
                 usageCommandOverride = "mycorp-usage --json",
             ),
         )
@@ -130,10 +130,10 @@ class UsageSchedulerTest {
     }
 
     @Test
-    fun refreshNow_emitsToolMissingSnapshot_notFailed_whenQuseGoneAtRuntime() = runTest {
+    fun refreshNow_emitsToolMissingSnapshot_notFailed_whenPocketshellGoneAtRuntime() = runTest {
         val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
         val hostId = db.hostDao().insert(
-            HostEntity(name = "h", hostname = "h", username = "u", keyId = keyId, quseInstalled = true),
+            HostEntity(name = "h", hostname = "h", username = "u", keyId = keyId, pocketshellInstalled = true),
         )
         val scheduler = UsageScheduler(db.hostDao(), db.sshKeyDao(), UsageRemoteSource())
         scheduler.fetchHost = { host ->
@@ -143,14 +143,14 @@ class UsageSchedulerTest {
         scheduler.refreshNow()
 
         val snapshot = scheduler.snapshots.value[hostId]
-        assertTrue("missing quse must surface as ToolMissing, not Failed", snapshot is UsageSnapshot.ToolMissing)
+        assertTrue("missing pocketshell must surface as ToolMissing, not Failed", snapshot is UsageSnapshot.ToolMissing)
     }
 
     @Test
-    fun refreshNow_clearsStaleSnapshots_whenHostLosesQuse() = runTest {
+    fun refreshNow_clearsStaleSnapshots_whenHostLosesPocketshell() = runTest {
         val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
         val hostId = db.hostDao().insert(
-            HostEntity(name = "h", hostname = "h", username = "u", keyId = keyId, quseInstalled = true),
+            HostEntity(name = "h", hostname = "h", username = "u", keyId = keyId, pocketshellInstalled = true),
         )
         val scheduler = UsageScheduler(db.hostDao(), db.sshKeyDao(), UsageRemoteSource())
         scheduler.fetchHost = { host ->
@@ -166,13 +166,13 @@ class UsageSchedulerTest {
         scheduler.refreshNow()
         assertTrue(scheduler.snapshots.value.containsKey(hostId))
 
-        // Simulate the bootstrap flow flipping quseInstalled back to false
-        // (e.g. user removed quse on the host).
+        // Simulate the bootstrap flow flipping pocketshellInstalled back to false
+        // (e.g. user removed pocketshell on the host).
         val current = db.hostDao().getById(hostId)!!
-        db.hostDao().update(current.copy(quseInstalled = false))
+        db.hostDao().update(current.copy(pocketshellInstalled = false))
 
         scheduler.refreshNow()
-        assertTrue("stale snapshot must be dropped when quse is gone", scheduler.snapshots.value.isEmpty())
+        assertTrue("stale snapshot must be dropped when pocketshell is gone", scheduler.snapshots.value.isEmpty())
     }
 
     /**
@@ -205,19 +205,19 @@ class UsageSchedulerTest {
 
         val blockedSnapshot = UsageSnapshot.Records(
             hostId = 1, hostName = "h", records = listOf(near, blocked),
-            fetchedAt = Instant.now(), command = "quse --json",
+            fetchedAt = Instant.now(), command = "pocketshell usage --json",
         )
         assertEquals(blocked, blockedSnapshot.worstBadgeRecord())
 
         val nearSnapshot = UsageSnapshot.Records(
             hostId = 1, hostName = "h", records = listOf(healthy, near),
-            fetchedAt = Instant.now(), command = "quse --json",
+            fetchedAt = Instant.now(), command = "pocketshell usage --json",
         )
         assertEquals(near, nearSnapshot.worstBadgeRecord())
 
         val healthySnapshot = UsageSnapshot.Records(
             hostId = 1, hostName = "h", records = listOf(healthy),
-            fetchedAt = Instant.now(), command = "quse --json",
+            fetchedAt = Instant.now(), command = "pocketshell usage --json",
         )
         assertNull(healthySnapshot.worstBadgeRecord())
 
@@ -242,7 +242,7 @@ class UsageSchedulerTest {
     fun updateSnapshots_mergesAndPreservesExistingEntries() = runTest {
         val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
         db.hostDao().insert(
-            HostEntity(name = "host-a", hostname = "a", username = "u", keyId = keyId, quseInstalled = true),
+            HostEntity(name = "host-a", hostname = "a", username = "u", keyId = keyId, pocketshellInstalled = true),
         )
         val scheduler = UsageScheduler(db.hostDao(), db.sshKeyDao(), UsageRemoteSource())
         assertTrue(scheduler.snapshots.value.isEmpty())
@@ -260,7 +260,7 @@ class UsageSchedulerTest {
                     hostName = "external",
                     records = listOf(externalRecord),
                     fetchedAt = Instant.now(),
-                    command = "quse --json",
+                    command = "pocketshell usage --json",
                 ),
             ),
         )

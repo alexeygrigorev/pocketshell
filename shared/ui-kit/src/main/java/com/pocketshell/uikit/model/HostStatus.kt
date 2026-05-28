@@ -30,7 +30,7 @@ package com.pocketshell.uikit.model
  *   host AND the registered client is registered as the attached
  *   session. Label: `"Attached"`.
  * - [NeedsSetup] — the most recent bootstrap probe reported `tmux` or
- *   `quse` missing. Takes precedence over any session-count display
+ *   `pocketshell` missing. Takes precedence over any session-count display
  *   because installing the tools is the only useful action until they
  *   exist. The trailing chip is hidden in this state — the inline
  *   `HostSetupBadge` already calls out the same condition with the
@@ -69,7 +69,7 @@ sealed interface HostStatus {
     /** App is attached to a tmux session on this host. */
     data object Attached : HostStatus
 
-    /** Bootstrap probe reports `tmux` / `quse` missing. */
+    /** Bootstrap probe reports `tmux` / `pocketshell` missing. */
     data object NeedsSetup : HostStatus
 
     /** Last SSH attempt failed (transport, auth, unreachable). */

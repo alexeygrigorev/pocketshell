@@ -92,7 +92,7 @@ fun HostCard(
     // rendered to the right of the setup-state badge from #120. The
     // host list call site uses this slot for the cross-host
     // [com.pocketshell.app.usage.UsageSessionBlockedBadge] chip when
-    // the most-recent `quse` poll reports the host is blocked or
+    // the most-recent `pocketshell usage` poll reports the host is blocked or
     // near-limit. The slot is intentionally generic so a future
     // surface (e.g. a "session live" pulse from #22) can reuse it
     // without re-shaping the API.

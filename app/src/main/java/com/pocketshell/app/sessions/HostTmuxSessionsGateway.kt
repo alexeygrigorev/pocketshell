@@ -1,6 +1,6 @@
 package com.pocketshell.app.sessions
 
-import com.pocketshell.app.jobs.TmuxctlJobsRemoteSource
+import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -41,9 +41,9 @@ class SshHostTmuxSessionsGateway @Inject constructor(
         }
 
         return try {
-            val tmuxctl = session.exec(pathAware("tmuxctl list --by activity"))
-            if (tmuxctl.exitCode == 0) {
-                return HostTmuxSessionListResult.Sessions(parser.parseTmuxctlList(tmuxctl.stdout))
+            val pocketshell = session.exec(pathAware("pocketshell sessions list --by activity"))
+            if (pocketshell.exitCode == 0) {
+                return HostTmuxSessionListResult.Sessions(parser.parsePocketshellSessionsList(pocketshell.stdout))
             }
 
             val tmux = session.exec(
@@ -60,7 +60,7 @@ class SshHostTmuxSessionsGateway @Inject constructor(
                     HostTmuxSessionListResult.ToolUnavailable
                 tmux.stderr.contains("no server running", ignoreCase = true) ->
                     HostTmuxSessionListResult.Sessions(emptyList())
-                tmuxctl.exitCode == 127 || tmuxctl.stderr.contains("not found", ignoreCase = true) ->
+                pocketshell.exitCode == 127 || pocketshell.stderr.contains("not found", ignoreCase = true) ->
                     HostTmuxSessionListResult.ToolUnavailable
                 else -> HostTmuxSessionListResult.Failed(
                     tmux.stderr.ifBlank { tmux.stdout }.ifBlank { "tmux exited ${tmux.exitCode}" },
@@ -76,5 +76,5 @@ class SshHostTmuxSessionsGateway @Inject constructor(
     }
 
     private fun pathAware(command: String): String =
-        TmuxctlJobsRemoteSource.pathAwareCommand(command)
+        ReposRemoteSource.pathAwareCommand(command)
 }

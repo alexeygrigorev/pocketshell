@@ -7,8 +7,8 @@ import kotlin.math.roundToInt
  * Normalized provider status emitted by server-side usage tools.
  *
  * The parser is intentionally tolerant: unknown status strings become
- * [Unknown] so a newer `quse` can add states without breaking the whole
- * panel. The raw string remains on [UsageProviderRecord.rawStatus].
+ * [Unknown] so a newer `pocketshell usage` can add states without breaking
+ * the whole panel. The raw string remains on [UsageProviderRecord.rawStatus].
  */
 public enum class UsageStatus {
     Ok,
@@ -44,8 +44,8 @@ public data class UsageWindow(
 }
 
 /**
- * One provider record from `quse --json` or another compatible
- * server-side command.
+ * One provider record from `pocketshell usage --json` or another
+ * compatible server-side command.
  */
 public data class UsageProviderRecord(
     val provider: String,

@@ -145,7 +145,7 @@ class TmuxSessionScreenTest {
         val pages = sessionSwitcherPages(
             state = HostTmuxSessionPickerState.Fallback(
                 request = pickerRequest(),
-                message = "tmuxctl/tmux is not available on this host.",
+                message = "pocketshell/tmux is not available on this host.",
             ),
             currentSessionName = "work",
         )
@@ -154,7 +154,7 @@ class TmuxSessionScreenTest {
             listOf(
                 SessionSwitcherPage(
                     name = "work",
-                    statusLabel = "tmuxctl/tmux is not available on this host.",
+                    statusLabel = "pocketshell/tmux is not available on this host.",
                     selectable = false,
                 ),
             ),

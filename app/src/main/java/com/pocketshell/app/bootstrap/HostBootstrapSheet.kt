@@ -201,7 +201,7 @@ private fun SetupActions(
 ) {
     val report = state.report ?: return
     val missingTools = report.missingTools
-    val needsDaemon = report.needsTmuxctlDaemonSetup()
+    val needsDaemon = report.needsPocketshellDaemonSetup()
     if (!report.hasBootstrapSheetRows()) return
 
     Spacer(modifier = Modifier.height(16.dp))
@@ -216,19 +216,19 @@ private fun SetupActions(
         }
         if (needsDaemon) {
             when (val daemon = report.daemon) {
-                is TmuxctlDaemonStatus.Unavailable -> SetupInfoRow(
-                    title = "tmuxctl jobs daemon",
+                is PocketshellDaemonStatus.Unavailable -> SetupInfoRow(
+                    title = "pocketshell jobs daemon",
                     detail = daemon.reason,
                 )
 
-                is TmuxctlDaemonStatus.Unknown -> SetupInfoRow(
-                    title = "tmuxctl jobs daemon",
+                is PocketshellDaemonStatus.Unknown -> SetupInfoRow(
+                    title = "pocketshell jobs daemon",
                     detail = daemon.reason,
                 )
 
                 else -> SetupActionRow(
-                    title = "tmuxctl jobs daemon",
-                    detail = "systemctl --user enable --now tmuxctl-jobs.service",
+                    title = "pocketshell jobs daemon",
+                    detail = "systemctl --user enable --now pocketshell-jobs.service",
                     actionLabel = "Enable",
                     onClick = onSetupDaemon,
                 )
@@ -244,23 +244,23 @@ private fun SetupActions(
 
 internal fun HostBootstrapReport.hasBootstrapSheetRows(): Boolean =
     missingTools.isNotEmpty() ||
-        needsTmuxctlDaemonSetup()
+        needsPocketshellDaemonSetup()
 
 internal fun HostBootstrapSheetState.Prompt.hasActionableSetup(): Boolean =
     needsTmux ||
         report?.missingTools?.isNotEmpty() == true ||
-        report?.needsTmuxctlDaemonAction() == true
+        report?.needsPocketshellDaemonAction() == true
 
-internal fun HostBootstrapReport.needsTmuxctlDaemonSetup(): Boolean {
+internal fun HostBootstrapReport.needsPocketshellDaemonSetup(): Boolean {
     val daemonStatus = daemon
-    return daemonStatus !is TmuxctlDaemonStatus.Running || !daemonStatus.enabled
+    return daemonStatus !is PocketshellDaemonStatus.Running || !daemonStatus.enabled
 }
 
-internal fun HostBootstrapReport.needsTmuxctlDaemonAction(): Boolean {
+internal fun HostBootstrapReport.needsPocketshellDaemonAction(): Boolean {
     val daemonStatus = daemon
-    return daemonStatus is TmuxctlDaemonStatus.Missing ||
-        daemonStatus is TmuxctlDaemonStatus.InstalledStopped ||
-        daemonStatus is TmuxctlDaemonStatus.Running && !daemonStatus.enabled
+    return daemonStatus is PocketshellDaemonStatus.Missing ||
+        daemonStatus is PocketshellDaemonStatus.InstalledStopped ||
+        daemonStatus is PocketshellDaemonStatus.Running && !daemonStatus.enabled
 }
 
 @Composable
@@ -340,10 +340,10 @@ private fun SuccessContent(
 ) {
     SheetColumn {
         SheetTitle(text = "Host ready")
-        SheetSubtitle(text = "$hostName · server tools are installed and the tmuxctl user daemon is enabled.")
+        SheetSubtitle(text = "$hostName · server tools are installed and the pocketshell user daemon is enabled.")
         Spacer(modifier = Modifier.height(20.dp))
-        // Issue #117 (usage Fix C): when quse was just installed by the
-        // bootstrap flow, surface a direct route to the usage panel. The
+        // Issue #117 (usage Fix C): when pocketshell was just installed by
+        // the bootstrap flow, surface a direct route to the usage panel. The
         // callback is supplied by the caller — when it is `null` the sheet
         // falls back to a Continue-only row so older call sites keep
         // working unchanged.
@@ -431,8 +431,8 @@ private fun bootstrapPromptText(state: HostBootstrapSheetState.Prompt): String {
     val report = state.report
     report?.missingTools
         ?.mapTo(parts) { it.binaryName }
-    if (report != null && report.needsTmuxctlDaemonAction()) {
-        parts += "tmuxctl jobs daemon"
+    if (report != null && report.needsPocketshellDaemonAction()) {
+        parts += "pocketshell jobs daemon"
     }
 
     val missing = parts.distinct().joinToString()

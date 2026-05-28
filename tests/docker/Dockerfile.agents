@@ -25,6 +25,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
     && chmod +x /usr/local/bin/claude \
         /usr/local/bin/codex \
         /usr/local/bin/opencode \
+        /usr/local/bin/pocketshell \
         /usr/local/bin/quse \
         /usr/local/bin/agent-log-explorer \
         /usr/local/bin/tmuxctl \

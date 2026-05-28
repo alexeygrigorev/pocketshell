@@ -177,7 +177,7 @@ fun UsageSessionBlockedBadge(
  * provider name on the left, the worst-case percent in monospace on
  * the right, and a threshold-tinted pill underneath. Empty list →
  * nothing is rendered; the calling section composable already shows
- * the "no quse hosts" empty hint in that case.
+ * the "no pocketshell hosts" empty hint in that case.
  */
 @Composable
 fun UsageProviderStateList(
@@ -571,7 +571,8 @@ public const val USAGE_PROVIDER_STATE_LIST_TAG: String =
 
 /**
  * Per-row tag for the provider state list. Lowercased so a probe by
- * provider id stays stable regardless of casing returned by `quse`.
+ * provider id stays stable regardless of casing returned by
+ * `pocketshell usage`.
  */
 public fun usageProviderStateRowTag(provider: String): String =
     "usage:provider-state-row:" + provider.lowercase()

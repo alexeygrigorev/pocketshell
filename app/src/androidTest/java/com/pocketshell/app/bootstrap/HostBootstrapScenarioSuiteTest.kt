@@ -70,7 +70,7 @@ class HostBootstrapScenarioSuiteTest {
 
         waitForBootstrapSheet()
         compose.onNodeWithText("Host setup needed").assertExists()
-        assertSetupRows("tmuxctl", "quse")
+        assertSetupRows("pocketshell")
         capture("02-setup-needed")
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALL_ALL_TAG).assertExists().performClick()
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALLING_TAG).assertExists()
@@ -92,8 +92,8 @@ class HostBootstrapScenarioSuiteTest {
 
         waitForBootstrapSheet()
         compose.onNodeWithText("Host setup needed").assertExists()
-        assertSetupRows("tmuxctl", "quse")
-        compose.onNodeWithText("uv tool install tmuxctl or pipx install tmuxctl").assertExists()
+        assertSetupRows("pocketshell")
+        compose.onNodeWithText("uv tool install pocketshell or pipx install pocketshell").assertExists()
         capture("02-unsupported-manual-setup")
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALL_ALL_TAG).assertExists().performClick()
         compose.waitUntil(timeoutMillis = 20_000) {
@@ -104,8 +104,7 @@ class HostBootstrapScenarioSuiteTest {
         compose.onNodeWithTag(HOST_BOOTSTRAP_CLOSE_TAG).assertExists()
         capture("03-install-failed")
         assertRemote("unsupported profile should still lack automatic installers and tools") {
-            "! command -v tmuxctl >/dev/null 2>&1 && " +
-                "! command -v quse >/dev/null 2>&1 && " +
+            "! command -v pocketshell >/dev/null 2>&1 && " +
                 "! command -v uv >/dev/null 2>&1 && " +
                 "! command -v pipx >/dev/null 2>&1"
         }
@@ -118,7 +117,7 @@ class HostBootstrapScenarioSuiteTest {
 
         waitForBootstrapSheet()
         compose.onNodeWithText("Host setup needed").assertExists()
-        compose.onNodeWithTag(HOST_BOOTSTRAP_ROW_TAG_PREFIX + "tmuxctl jobs daemon").assertExists()
+        compose.onNodeWithTag(HOST_BOOTSTRAP_ROW_TAG_PREFIX + "pocketshell jobs daemon").assertExists()
         capture("02-daemon-disabled")
         compose.onNodeWithText("Enable").assertExists().performClick()
         compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALLING_TAG).assertExists()
@@ -129,7 +128,7 @@ class HostBootstrapScenarioSuiteTest {
         compose.onNodeWithText("Host ready").assertExists()
         capture("04-host-ready")
         assertRemote("daemon-disabled scenario should enable the fixture daemon") {
-            "systemctl --user is-enabled tmuxctl-jobs.service >/dev/null"
+            "systemctl --user is-enabled pocketshell-jobs.service >/dev/null"
         }
     }
 
@@ -301,8 +300,8 @@ class HostBootstrapScenarioSuiteTest {
 
     private fun installedToolsAndEnabledDaemonCommand(): String =
         "/bin/sh -lc 'PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; " +
-            "command -v tmuxctl quse >/dev/null && " +
-            "systemctl --user is-enabled tmuxctl-jobs.service >/dev/null'"
+            "command -v pocketshell >/dev/null && " +
+            "systemctl --user is-enabled pocketshell-jobs.service >/dev/null'"
 
     private fun waitForBootstrapSheet() {
         compose.waitUntil(timeoutMillis = 20_000) {
@@ -361,25 +360,25 @@ class HostBootstrapScenarioSuiteTest {
             "ready" to ScenarioDefinition(
                 label = "ready",
                 port = 2230,
-                resetCommand = "rm -f ~/.local/bin/tmuxctl ~/.local/bin/quse; " +
+                resetCommand = "rm -f ~/.local/bin/pocketshell; " +
                     "printf 'active enabled\\n' > $STATE_FILE",
             ),
             "uv-install" to ScenarioDefinition(
                 label = "uv install",
                 port = 2231,
-                resetCommand = "rm -f ~/.local/bin/tmuxctl ~/.local/bin/quse; " +
+                resetCommand = "rm -f ~/.local/bin/pocketshell; " +
                     "printf 'active enabled\\n' > $STATE_FILE",
             ),
             "unsupported" to ScenarioDefinition(
                 label = "unsupported",
                 port = 2232,
-                resetCommand = "rm -f ~/.local/bin/tmuxctl ~/.local/bin/quse; " +
+                resetCommand = "rm -f ~/.local/bin/pocketshell; " +
                     "printf 'inactive disabled\\n' > $STATE_FILE",
             ),
             "daemon-disabled" to ScenarioDefinition(
                 label = "daemon disabled",
                 port = 2233,
-                resetCommand = "rm -f ~/.local/bin/tmuxctl ~/.local/bin/quse; " +
+                resetCommand = "rm -f ~/.local/bin/pocketshell; " +
                     "printf 'active disabled\\n' > $STATE_FILE",
             ),
             "user-local-path" to ScenarioDefinition(

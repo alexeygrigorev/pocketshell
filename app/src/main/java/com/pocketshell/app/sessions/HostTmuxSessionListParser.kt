@@ -6,9 +6,9 @@ import java.time.format.DateTimeFormatter
 import javax.inject.Inject
 
 class HostTmuxSessionListParser @Inject constructor() {
-    fun parseTmuxctlList(stdout: String): List<HostTmuxSessionRow> =
+    fun parsePocketshellSessionsList(stdout: String): List<HostTmuxSessionRow> =
         stdout.lineSequence()
-            .mapNotNull(::parseTmuxctlListRow)
+            .mapNotNull(::parsePocketshellSessionsListRow)
             .toList()
 
     fun parseTmuxListSessions(stdout: String): List<HostTmuxSessionRow> =
@@ -16,7 +16,7 @@ class HostTmuxSessionListParser @Inject constructor() {
             .mapNotNull(::parseTmuxListSessionsRow)
             .toList()
 
-    internal fun parseTmuxctlListRow(line: String): HostTmuxSessionRow? {
+    internal fun parsePocketshellSessionsListRow(line: String): HostTmuxSessionRow? {
         if (line.isBlank()) return null
         val trimmed = line.trim()
         if (trimmed.startsWith("IDX ") || trimmed.startsWith("Join a session:") ||
@@ -29,8 +29,10 @@ class HostTmuxSessionListParser @Inject constructor() {
         // `YYYY-MM-DD HH:MM:SS` timestamp rather than requiring 2+ spaces
         // between the session-name column and the timestamp column. On
         // hosts with long session names (e.g. `git-ai-shipping-labs-workshops-raw-guard`),
-        // tmuxctl's printf layout overflows the column padding and emits
-        // only a single space before the timestamp. The previous regex
+        // the underlying `tmuxctl list` printf layout (which
+        // `pocketshell sessions list` proxies byte-for-byte) overflows the
+        // column padding and emits only a single space before the
+        // timestamp. The previous regex
         // (`\s{2,}` between name and date) silently dropped those rows,
         // showing the user a partial list instead of the full set of
         // tmux sessions present on the host.
@@ -84,14 +86,18 @@ class HostTmuxSessionListParser @Inject constructor() {
     private companion object {
         /**
          * Matches the trailing `YYYY-MM-DD HH:MM:SS` timestamp printed by
-         * `tmuxctl list --by activity`. Used as a deterministic anchor so
+         * `pocketshell sessions list --by activity` (which proxies
+         * `tmuxctl list` byte-for-byte). Used as a deterministic anchor so
          * the session-name column can absorb arbitrary intermediate
          * whitespace (including the single-space case when long names
-         * overflow tmuxctl's printf padding). See issue #200.
+         * overflow the underlying printf padding). See issue #200.
          */
         val TRAILING_TIMESTAMP: Regex = Regex("""(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})""")
 
-        /** Matches the leading numeric IDX column on a tmuxctl row. */
+        /**
+         * Matches the leading numeric IDX column on a
+         * `pocketshell sessions list` row.
+         */
         val LEADING_IDX: Regex = Regex("""^\s*\d+\s+""")
 
         val DISPLAY_TIMESTAMP: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")

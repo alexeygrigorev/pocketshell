@@ -20,9 +20,11 @@ write_daemon_state() {
   chmod 666 "$state_file"
 }
 
+# Issue #231 (D22 hard-cut): the bootstrapper now probes/installs the single
+# unified `pocketshell` CLI instead of the legacy `tmuxctl` + `quse` pair.
 case "$scenario" in
   ready)
-    for tool in tmuxctl quse systemctl; do
+    for tool in pocketshell systemctl; do
       install_tool "$tool" /usr/local/bin
     done
     write_daemon_state active enabled
@@ -36,15 +38,13 @@ case "$scenario" in
     write_daemon_state inactive disabled
     ;;
   daemon-disabled)
-    for tool in tmuxctl quse systemctl; do
+    for tool in pocketshell systemctl; do
       install_tool "$tool" /usr/local/bin
     done
     write_daemon_state active disabled
     ;;
   user-local-path)
-    for tool in tmuxctl quse; do
-      install_tool "$tool" "$local_bin"
-    done
+    install_tool pocketshell "$local_bin"
     install_tool systemctl /usr/local/bin
     write_daemon_state active enabled
     ;;

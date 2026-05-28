@@ -99,22 +99,28 @@ class EmulatorDockerSshSmokeTest {
                     result.stdout.contains("pocketshell-emulator-docker-smoke"),
                 )
 
+                // Issue #231 (D22 hard-cut): the Android app now drives the
+                // unified `pocketshell` CLI instead of the legacy `quse` /
+                // `tmuxctl` probes, so this smoke test exercises the
+                // `pocketshell` surface. The deterministic `agents` fixture
+                // (tests/docker/agent-bin/pocketshell) is the single
+                // required server-side tool.
                 val toolPaths = session.exec(
-                    "for tool in claude codex opencode quse agent-log-explorer tmuxctl uv; do command -v \"${'$'}tool\"; done",
+                    "for tool in claude codex opencode pocketshell agent-log-explorer uv; do command -v \"${'$'}tool\"; done",
                 )
                 assertTrue(
                     "expected deterministic agent tools on PATH, got stdout='${toolPaths.stdout}' stderr='${toolPaths.stderr}'",
                     toolPaths.exitCode == 0 &&
-                        listOf("claude", "codex", "opencode", "quse", "agent-log-explorer", "tmuxctl", "uv")
+                        listOf("claude", "codex", "opencode", "pocketshell", "agent-log-explorer", "uv")
                             .all { toolPaths.stdout.contains("/$it") },
                 )
 
-                val usage = session.exec("quse --json")
+                val usage = session.exec("pocketshell usage --json")
                 assertTrue(
-                    "expected quse usage fixture to succeed, got stdout='${usage.stdout}' stderr='${usage.stderr}'",
+                    "expected pocketshell usage fixture to succeed, got stdout='${usage.stdout}' stderr='${usage.stderr}'",
                     usage.exitCode == 0,
                 )
-                // quse emits one JSON object per line (NDJSON).
+                // `pocketshell usage --json` emits one JSON object per line (NDJSON).
                 val usageLines = usage.stdout.lineSequence()
                     .filter { it.isNotBlank() }
                     .toList()
@@ -123,9 +129,9 @@ class EmulatorDockerSshSmokeTest {
                     usageLines.size == 3,
                 )
 
-                val jobs = session.exec("tmuxctl jobs list --session codex")
+                val jobs = session.exec("pocketshell jobs list")
                 assertTrue(
-                    "expected tmuxctl jobs list fixture, got stdout='${jobs.stdout}' stderr='${jobs.stderr}'",
+                    "expected pocketshell jobs list fixture, got stdout='${jobs.stdout}' stderr='${jobs.stderr}'",
                     jobs.exitCode == 0 && jobs.stdout.contains("codex") && jobs.stdout.contains("opencode-lab"),
                 )
 

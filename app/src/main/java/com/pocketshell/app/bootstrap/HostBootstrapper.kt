@@ -47,8 +47,11 @@ public enum class BootstrapTool(
     public val binaryName: String,
     public val packageName: String = binaryName,
 ) {
-    Tmuxctl(binaryName = "tmuxctl"),
-    Quse(binaryName = "quse"),
+    // Issue #231 (D22 hard cut): the unified `pocketshell` CLI replaces
+    // the legacy `tmuxctl` + `quse` binaries. There is exactly one
+    // required server-side tool now — its `usage` / `sessions` / `jobs`
+    // subcommands cover everything the two old tools did.
+    Pocketshell(binaryName = "pocketshell"),
 }
 
 public enum class PythonToolInstaller(
@@ -64,12 +67,12 @@ public sealed interface ToolStatus {
     public data class Unknown(val reason: String) : ToolStatus
 }
 
-public sealed interface TmuxctlDaemonStatus {
-    public data class Running(val enabled: Boolean) : TmuxctlDaemonStatus
-    public data class InstalledStopped(val enabled: Boolean) : TmuxctlDaemonStatus
-    public data object Missing : TmuxctlDaemonStatus
-    public data class Unavailable(val reason: String) : TmuxctlDaemonStatus
-    public data class Unknown(val reason: String) : TmuxctlDaemonStatus
+public sealed interface PocketshellDaemonStatus {
+    public data class Running(val enabled: Boolean) : PocketshellDaemonStatus
+    public data class InstalledStopped(val enabled: Boolean) : PocketshellDaemonStatus
+    public data object Missing : PocketshellDaemonStatus
+    public data class Unavailable(val reason: String) : PocketshellDaemonStatus
+    public data class Unknown(val reason: String) : PocketshellDaemonStatus
 }
 
 /**
@@ -96,17 +99,8 @@ public const val MOSH_UNSUPPORTED_REASON: String =
 public data class HostBootstrapReport(
     val tools: Map<BootstrapTool, ToolStatus>,
     val installer: PythonToolInstaller?,
-    val daemon: TmuxctlDaemonStatus,
+    val daemon: PocketshellDaemonStatus,
     val mosh: MoshStatus = MoshStatus.Unsupported(MOSH_UNSUPPORTED_REASON),
-    // Issue #170 (first PR): the parallel `pocketshell` probe result. It
-    // is NOT in [tools] / [BootstrapTool.entries] on purpose — the
-    // unified utility is parallel-detected today, not required. Keeping
-    // it off the required-tools map means a host without `pocketshell`
-    // is still [isReady] as long as the legacy `quse` + `tmuxctl` probes
-    // succeed; only the follow-up "remove legacy probes" issue will
-    // promote `pocketshell` to a required entry (and remove the others
-    // in the same PR per D22).
-    val pocketshell: ToolStatus = ToolStatus.Unknown(POCKETSHELL_NOT_PROBED_REASON),
 ) {
     public val missingTools: List<BootstrapTool>
         get() = BootstrapTool.entries.filter { tools[it] is ToolStatus.Missing }
@@ -117,20 +111,9 @@ public data class HostBootstrapReport(
     public val isReady: Boolean
         get() = missingTools.isEmpty() &&
             unknownTools.isEmpty() &&
-            daemon is TmuxctlDaemonStatus.Running &&
+            daemon is PocketshellDaemonStatus.Running &&
             daemon.enabled
 }
-
-/**
- * Reason string carried on the default [HostBootstrapReport.pocketshell]
- * value when the report was constructed without a real probe (e.g. from
- * test fixtures that pre-date issue #170). Surfacing it as a named
- * constant keeps the placeholder discoverable and lets the UI layer
- * filter it out when deciding whether to render a "pocketshell"
- * bootstrap-sheet row.
- */
-public const val POCKETSHELL_NOT_PROBED_REASON: String =
-    "pocketshell probe not run for this report"
 
 /**
  * Detects whether `tmux` is installed on a remote host and offers a
@@ -171,7 +154,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
      * but still exits 0.
      *
      * Issue #41: [pathOverride] is an optional colon-separated PATH
-     * fragment (e.g. `/home/u/git/quse/.venv/bin`). When non-null and
+     * fragment (e.g. `/home/u/git/pocketshell/.venv/bin`). When non-null and
      * non-blank it is prepended ahead of the standard built-in
      * augmentation, so binaries installed in venv-style locations the
      * user keeps in `~/.bashrc` (which is not sourced by `/bin/sh -lc`)
@@ -205,45 +188,18 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             checkTool(session, tool.binaryName, pathOverride)
         }
         val installer = detectPythonToolInstaller(session, pathOverride)
-        val daemon = if (tools[BootstrapTool.Tmuxctl] is ToolStatus.Installed) {
-            checkTmuxctlDaemon(session, pathOverride)
+        val daemon = if (tools[BootstrapTool.Pocketshell] is ToolStatus.Installed) {
+            checkPocketshellDaemon(session, pathOverride)
         } else {
-            TmuxctlDaemonStatus.Missing
+            PocketshellDaemonStatus.Missing
         }
-        // Issue #170 (first PR): also probe for the unified `pocketshell`
-        // CLI. The result rides on the report next to the existing
-        // `quse` / `tmuxctl` entries — parallel detection, NOT legacy
-        // detection. The legacy probes stay in [BootstrapTool.entries]
-        // until the follow-up "remove legacy probes" issue hard-cuts them
-        // per D22.
-        val pocketshell = checkPocketshell(session, pathOverride)
         return HostBootstrapReport(
             tools = tools,
             installer = installer,
             daemon = daemon,
             mosh = MoshStatus.Unsupported(MOSH_UNSUPPORTED_REASON),
-            pocketshell = pocketshell,
         )
     }
-
-    /**
-     * Probe whether the unified `pocketshell` CLI is on the remote PATH.
-     *
-     * Mirrors [checkTool] semantics — `command -v pocketshell` wrapped in
-     * the standard PATH-augmenting `/bin/sh -lc` shell — so the override
-     * mechanism from issue #41 and the venv-style PATH layout used by
-     * `quse` / `tmuxctl` is automatically inherited.
-     *
-     * The result is independent of [BootstrapTool.entries]: a host
-     * without `pocketshell` is still [HostBootstrapReport.isReady] as
-     * long as the legacy `quse` + `tmuxctl` probes succeed. The
-     * pocketshell-only world begins with the follow-up issue that
-     * removes the legacy probes (per D22, hard cut).
-     */
-    public suspend fun checkPocketshell(
-        session: SshSession,
-        pathOverride: String? = null,
-    ): ToolStatus = checkTool(session, BINARY_POCKETSHELL, pathOverride)
 
     public suspend fun installServerSetup(
         session: SshSession,
@@ -258,7 +214,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         val missingTools = currentReport.missingTools
         if (missingTools.isNotEmpty()) {
             val installer = currentReport.installer ?: return InstallResult.Error(
-                "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install tmuxctl and quse.",
+                "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install pocketshell.",
             )
             for (tool in missingTools) {
                 val result = installServerTool(session, installer, tool, pathOverride)
@@ -268,14 +224,14 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
 
         val afterTools = checkServerSetup(session, pathOverride)
         val daemon = afterTools.daemon
-        if (daemon is TmuxctlDaemonStatus.Unavailable) {
+        if (daemon is PocketshellDaemonStatus.Unavailable) {
             return InstallResult.Error(daemon.reason)
         }
-        if (daemon is TmuxctlDaemonStatus.Unknown) {
+        if (daemon is PocketshellDaemonStatus.Unknown) {
             return InstallResult.Error(daemon.reason)
         }
-        if (daemon !is TmuxctlDaemonStatus.Running || !daemon.enabled) {
-            return installTmuxctlUserDaemon(session, pathOverride)
+        if (daemon !is PocketshellDaemonStatus.Running || !daemon.enabled) {
+            return installPocketshellUserDaemon(session, pathOverride)
         }
         return InstallResult.Success
     }
@@ -320,41 +276,41 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         return null
     }
 
-    internal suspend fun checkTmuxctlDaemon(
+    internal suspend fun checkPocketshellDaemon(
         session: SshSession,
         pathOverride: String? = null,
-    ): TmuxctlDaemonStatus {
+    ): PocketshellDaemonStatus {
         when (val systemctl = checkTool(session, "systemctl", pathOverride)) {
             is ToolStatus.Installed -> Unit
-            ToolStatus.Missing -> return TmuxctlDaemonStatus.Unavailable("systemctl is not installed on this host")
-            is ToolStatus.Unknown -> return TmuxctlDaemonStatus.Unknown("could not locate systemctl: ${systemctl.reason}")
+            ToolStatus.Missing -> return PocketshellDaemonStatus.Unavailable("systemctl is not installed on this host")
+            is ToolStatus.Unknown -> return PocketshellDaemonStatus.Unknown("could not locate systemctl: ${systemctl.reason}")
         }
 
         val active = try {
-            session.exec(systemdUserCommand("systemctl --user is-active tmuxctl-jobs.service"))
+            session.exec(systemdUserCommand("systemctl --user is-active pocketshell-jobs.service"))
         } catch (t: Throwable) {
-            return TmuxctlDaemonStatus.Unknown(
+            return PocketshellDaemonStatus.Unknown(
                 "failed to query systemd user service: ${t.javaClass.simpleName}: ${t.message ?: "unknown error"}",
             )
         }
         if (active.exitCode != 0 && active.looksLikeUnavailableSystemdUser()) {
-            return TmuxctlDaemonStatus.Unavailable(active.combinedOutput().ifBlank { "systemd user services are unavailable on this host" })
+            return PocketshellDaemonStatus.Unavailable(active.combinedOutput().ifBlank { "systemd user services are unavailable on this host" })
         }
         val enabled = try {
-            session.exec(systemdUserCommand("systemctl --user is-enabled tmuxctl-jobs.service"))
+            session.exec(systemdUserCommand("systemctl --user is-enabled pocketshell-jobs.service"))
         } catch (_: Throwable) {
-            return TmuxctlDaemonStatus.Unknown("failed to query whether tmuxctl-jobs.service is enabled")
+            return PocketshellDaemonStatus.Unknown("failed to query whether pocketshell-jobs.service is enabled")
         }
         if (enabled.exitCode != 0 && enabled.looksLikeUnavailableSystemdUser()) {
-            return TmuxctlDaemonStatus.Unavailable(enabled.combinedOutput().ifBlank { "systemd user services are unavailable on this host" })
+            return PocketshellDaemonStatus.Unavailable(enabled.combinedOutput().ifBlank { "systemd user services are unavailable on this host" })
         }
         val isEnabled = enabled.exitCode == 0 && enabled.stdout.trim() == "enabled"
         return when {
-            active.exitCode == 0 && active.stdout.trim() == "active" -> TmuxctlDaemonStatus.Running(isEnabled)
+            active.exitCode == 0 && active.stdout.trim() == "active" -> PocketshellDaemonStatus.Running(isEnabled)
             active.stdout.trim() == "inactive" || active.stdout.trim() == "failed" -> {
-                TmuxctlDaemonStatus.InstalledStopped(isEnabled)
+                PocketshellDaemonStatus.InstalledStopped(isEnabled)
             }
-            else -> TmuxctlDaemonStatus.Missing
+            else -> PocketshellDaemonStatus.Missing
         }
     }
 
@@ -365,10 +321,10 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         pathOverride: String? = null,
     ): InstallResult = runPythonToolInstall(session, installer, tool, pathOverride)
 
-    public suspend fun installTmuxctlDaemon(
+    public suspend fun installPocketshellDaemon(
         session: SshSession,
         pathOverride: String? = null,
-    ): InstallResult = installTmuxctlUserDaemon(session, pathOverride)
+    ): InstallResult = installPocketshellUserDaemon(session, pathOverride)
 
     /**
      * Detect the host's OS family and run the matching package-manager
@@ -492,34 +448,34 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         return runInstall(session, pathAwareCommand(command, pathOverride), needsRoot = false)
     }
 
-    private suspend fun installTmuxctlUserDaemon(
+    private suspend fun installPocketshellUserDaemon(
         session: SshSession,
         pathOverride: String?,
     ): InstallResult {
-        val tmuxctl = when (val status = checkTool(session, "tmuxctl", pathOverride)) {
+        val pocketshell = when (val status = checkTool(session, BINARY_POCKETSHELL, pathOverride)) {
             is ToolStatus.Installed -> status.path
-            ToolStatus.Missing -> return InstallResult.Error("tmuxctl is not installed; install it before enabling the jobs daemon.")
-            is ToolStatus.Unknown -> return InstallResult.Error("could not locate tmuxctl: ${status.reason}")
+            ToolStatus.Missing -> return InstallResult.Error("pocketshell is not installed; install it before enabling the jobs daemon.")
+            is ToolStatus.Unknown -> return InstallResult.Error("could not locate pocketshell: ${status.reason}")
         }
         if (checkTool(session, "systemctl", pathOverride) !is ToolStatus.Installed) {
-            return InstallResult.Error("systemctl is not installed on this host; enable tmuxctl jobs daemon manually.")
+            return InstallResult.Error("systemctl is not installed on this host; enable pocketshell jobs daemon manually.")
         }
         val command = buildString {
             append("mkdir -p ~/.config/systemd/user && ")
-            append("cat > ~/.config/systemd/user/tmuxctl-jobs.service <<'EOF'\n")
+            append("cat > ~/.config/systemd/user/pocketshell-jobs.service <<'EOF'\n")
             append("[Unit]\n")
-            append("Description=tmuxctl jobs daemon\n")
+            append("Description=pocketshell jobs daemon\n")
             append("After=default.target\n\n")
             append("[Service]\n")
             append("Type=simple\n")
-            append("ExecStart=${systemdExecArg(tmuxctl)} jobs daemon\n")
+            append("ExecStart=${systemdExecArg(pocketshell)} jobs daemon\n")
             append("Restart=on-failure\n")
             append("RestartSec=5s\n\n")
             append("[Install]\n")
             append("WantedBy=default.target\n")
             append("EOF\n")
             append("systemctl --user daemon-reload && ")
-            append("systemctl --user enable --now tmuxctl-jobs.service")
+            append("systemctl --user enable --now pocketshell-jobs.service")
         }
         return runInstall(session, systemdUserCommand(command), needsRoot = false)
     }
@@ -613,9 +569,11 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
 
     public companion object {
         /**
-         * Binary name of the unified `pocketshell` CLI probed by
-         * [checkPocketshell]. Centralised so the probe + future install
-         * paths agree on the spelling.
+         * Binary name of the unified `pocketshell` CLI — the single
+         * required server-side tool (issue #231, D22 hard cut). Used by
+         * the tool probe ([checkTool] via [BootstrapTool.Pocketshell])
+         * and the jobs-daemon installer. Centralised so the probe and
+         * install paths agree on the spelling.
          */
         public const val BINARY_POCKETSHELL: String = "pocketshell"
     }

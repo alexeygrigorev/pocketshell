@@ -35,8 +35,9 @@ import javax.inject.Singleton
 
 /**
  * Application-singleton scheduler that periodically polls each
- * `quse`-installed host for its usage payload (issue #117, usage-panel
- * Fix C; renamed from heru → quse in issue #128).
+ * `pocketshell`-installed host for its usage payload (issue #117,
+ * usage-panel Fix C; usage probe migrated to the unified `pocketshell
+ * usage` CLI in issue #231).
  *
  * **No background work** (issue #161, decision D21).
  *
@@ -65,11 +66,11 @@ import javax.inject.Singleton
  * **Inputs & outputs.**
  *
  * - Consumes [HostDao.getAll] to discover the set of saved hosts.
- * - Filters to hosts whose [HostEntity.quseInstalled] cache says quse is
- *   present. The cache is populated by [HostListViewModel.persistQuseResult]
- *   on host bootstrap. Hosts that have never been probed are skipped here
- *   — the scheduler is intentionally passive; the bootstrap flow is the
- *   only entry point that mutates the quse-cache columns.
+ * - Filters to hosts whose [HostEntity.pocketshellInstalled] cache says
+ *   pocketshell is present. The cache is populated by the host bootstrap
+ *   flow. Hosts that have never been probed are skipped here — the
+ *   scheduler is intentionally passive; the bootstrap flow is the only
+ *   entry point that mutates the pocketshell-cache columns.
  * - Forwards [HostEntity.usageCommandOverride] (or `null` for the
  *   default) to [UsageRemoteSource.fetchUsage].
  * - Exposes results via [snapshots] — a map from host id to the latest
@@ -280,10 +281,10 @@ public class UsageScheduler @Inject constructor(
      * per-card / in-session badges pick up the same data without
      * waiting for the next 60 s tick.
      *
-     * Snapshots for hosts that no longer have `quseInstalled = true`
+     * Snapshots for hosts that no longer have `pocketshellInstalled = true`
      * are silently dropped on the next [fetchOnce] tick — this method
      * only adds / overwrites entries, it does not reach into the
-     * `quseInstalled` cache.
+     * `pocketshellInstalled` cache.
      */
     public fun updateSnapshots(updates: Map<Long, UsageSnapshot>) {
         if (updates.isEmpty()) return
@@ -325,16 +326,16 @@ public class UsageScheduler @Inject constructor(
     private suspend fun fetchOnce() {
         _tickCount.incrementAndGet()
         val hosts = hostDao.getAll().first()
-        val quseHosts = hosts.filter { it.quseInstalled == true }
-        if (quseHosts.isEmpty()) {
-            // Drop any stale snapshots for hosts that no longer have quse.
+        val pocketshellHosts = hosts.filter { it.pocketshellInstalled == true }
+        if (pocketshellHosts.isEmpty()) {
+            // Drop any stale snapshots for hosts that no longer have pocketshell.
             if (_snapshots.value.isNotEmpty()) _snapshots.value = emptyMap()
             return
         }
         val next = _snapshots.value.toMutableMap()
-        // Drop snapshots for hosts that have been removed or lost quse.
-        next.keys.retainAll(quseHosts.map { it.id }.toSet())
-        quseHosts.forEach { host ->
+        // Drop snapshots for hosts that have been removed or lost pocketshell.
+        next.keys.retainAll(pocketshellHosts.map { it.id }.toSet())
+        pocketshellHosts.forEach { host ->
             val snapshot = fetchHost(host)
             if (snapshot != null) {
                 next[host.id] = snapshot

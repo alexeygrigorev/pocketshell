@@ -62,7 +62,7 @@ class HostTmuxSessionPickerViewModelTest {
         runCurrent()
 
         val state = vm.state.value as HostTmuxSessionPickerState.Fallback
-        assertEquals("tmuxctl/tmux is not available on this host.", state.message)
+        assertEquals("pocketshell/tmux is not available on this host.", state.message)
     }
 
     @Test

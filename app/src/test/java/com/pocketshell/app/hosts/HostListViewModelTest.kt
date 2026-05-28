@@ -419,14 +419,14 @@ class HostListViewModelTest {
      * the mapping is observable in isolation. Mirrors the doc on
      * [deriveSetupState]:
      *
-     * - tmuxInstalled=null OR quseInstalled=null → Unknown
+     * - tmuxInstalled=null OR pocketshellInstalled=null → Unknown
      * - tmuxInstalled=false → NeedsSetup
-     * - tmuxInstalled=true && quseInstalled=false → NeedsSetup
-     * - tmuxInstalled=true && quseInstalled=true → Ready
+     * - tmuxInstalled=true && pocketshellInstalled=false → NeedsSetup
+     * - tmuxInstalled=true && pocketshellInstalled=true → Ready
      */
     @Test
     fun deriveSetupState_returnsUnknown_whenTmuxInstalledIsNull() {
-        val host = hostFixture().copy(tmuxInstalled = null, quseInstalled = null)
+        val host = hostFixture().copy(tmuxInstalled = null, pocketshellInstalled = null)
         assertEquals(
             com.pocketshell.uikit.model.HostSetupState.Unknown,
             deriveSetupState(host),
@@ -434,8 +434,8 @@ class HostListViewModelTest {
     }
 
     @Test
-    fun deriveSetupState_returnsUnknown_whenQuseInstalledIsNullButTmuxIsTrue() {
-        val host = hostFixture().copy(tmuxInstalled = true, quseInstalled = null)
+    fun deriveSetupState_returnsUnknown_whenPocketshellInstalledIsNullButTmuxIsTrue() {
+        val host = hostFixture().copy(tmuxInstalled = true, pocketshellInstalled = null)
         assertEquals(
             com.pocketshell.uikit.model.HostSetupState.Unknown,
             deriveSetupState(host),
@@ -444,7 +444,7 @@ class HostListViewModelTest {
 
     @Test
     fun deriveSetupState_returnsNeedsSetup_whenTmuxIsFalse() {
-        val host = hostFixture().copy(tmuxInstalled = false, quseInstalled = true)
+        val host = hostFixture().copy(tmuxInstalled = false, pocketshellInstalled = true)
         assertEquals(
             com.pocketshell.uikit.model.HostSetupState.NeedsSetup,
             deriveSetupState(host),
@@ -452,8 +452,8 @@ class HostListViewModelTest {
     }
 
     @Test
-    fun deriveSetupState_returnsNeedsSetup_whenQuseIsFalseButTmuxIsTrue() {
-        val host = hostFixture().copy(tmuxInstalled = true, quseInstalled = false)
+    fun deriveSetupState_returnsNeedsSetup_whenPocketshellIsFalseButTmuxIsTrue() {
+        val host = hostFixture().copy(tmuxInstalled = true, pocketshellInstalled = false)
         assertEquals(
             com.pocketshell.uikit.model.HostSetupState.NeedsSetup,
             deriveSetupState(host),
@@ -462,7 +462,7 @@ class HostListViewModelTest {
 
     @Test
     fun deriveSetupState_returnsReady_whenBothFlagsAreTrue() {
-        val host = hostFixture().copy(tmuxInstalled = true, quseInstalled = true)
+        val host = hostFixture().copy(tmuxInstalled = true, pocketshellInstalled = true)
         assertEquals(
             com.pocketshell.uikit.model.HostSetupState.Ready,
             deriveSetupState(host),
@@ -485,7 +485,7 @@ class HostListViewModelTest {
                 username = "u",
                 keyId = keyId,
                 tmuxInstalled = true,
-                quseInstalled = true,
+                pocketshellInstalled = true,
             ),
         )
         val needsSetupId = db.hostDao().insert(
@@ -495,7 +495,7 @@ class HostListViewModelTest {
                 username = "u",
                 keyId = keyId,
                 tmuxInstalled = true,
-                quseInstalled = false,
+                pocketshellInstalled = false,
             ),
         )
         val unknownId = db.hostDao().insert(
@@ -504,7 +504,7 @@ class HostListViewModelTest {
                 hostname = "h",
                 username = "u",
                 keyId = keyId,
-                // tmuxInstalled, quseInstalled both null by default.
+                // tmuxInstalled, pocketshellInstalled both null by default.
             ),
         )
 
@@ -556,7 +556,7 @@ class HostListViewModelTest {
                 username = "u",
                 keyId = keyId,
                 tmuxInstalled = true,
-                quseInstalled = true,
+                pocketshellInstalled = true,
                 lastBootstrapAt = System.currentTimeMillis() - 60_000L,
             ),
         )
@@ -902,11 +902,11 @@ class HostListViewModelTest {
     /**
      * Issue #116 (usage-panel Fix B): `hasUsageInstalledHost` flips
      * to `true` exactly when at least one persisted host has
-     * `quseInstalled = true`. This is the gate the host list uses to
+     * `pocketshellInstalled = true`. This is the gate the host list uses to
      * decide whether to render the cross-host usage strip.
      */
     @Test
-    fun hasUsageInstalledHost_reflectsPersistedQuseFlag() = runTest {
+    fun hasUsageInstalledHost_reflectsPersistedPocketshellFlag() = runTest {
         val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
         // First: no hosts at all → false.
         val viewModel = HostListViewModel(
@@ -921,25 +921,25 @@ class HostListViewModelTest {
         )
         assertEquals(
             false,
-            db.hostDao().getAll().first().any { it.quseInstalled == true },
+            db.hostDao().getAll().first().any { it.pocketshellInstalled == true },
         )
 
-        // Add a host with quseInstalled = false → still false.
+        // Add a host with pocketshellInstalled = false → still false.
         db.hostDao().insert(
-            HostEntity(name = "no-quse", hostname = "n.example", username = "u", keyId = keyId, quseInstalled = false),
+            HostEntity(name = "no-pocketshell", hostname = "n.example", username = "u", keyId = keyId, pocketshellInstalled = false),
         )
         assertEquals(
             false,
-            db.hostDao().getAll().first().any { it.quseInstalled == true },
+            db.hostDao().getAll().first().any { it.pocketshellInstalled == true },
         )
 
-        // Add a host with quseInstalled = true → flag flips on.
+        // Add a host with pocketshellInstalled = true → flag flips on.
         db.hostDao().insert(
-            HostEntity(name = "with-quse", hostname = "q.example", username = "u", keyId = keyId, quseInstalled = true),
+            HostEntity(name = "with-pocketshell", hostname = "q.example", username = "u", keyId = keyId, pocketshellInstalled = true),
         )
         assertEquals(
             true,
-            db.hostDao().getAll().first().any { it.quseInstalled == true },
+            db.hostDao().getAll().first().any { it.pocketshellInstalled == true },
         )
 
         // The view model exposes the same predicate via the
@@ -957,10 +957,10 @@ class HostListViewModelTest {
     fun usageBadges_mapsHostIdToWorstProvider() = runTest {
         val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
         val blockedHostId = db.hostDao().insert(
-            HostEntity(name = "blocked", hostname = "b", username = "u", keyId = keyId, quseInstalled = true),
+            HostEntity(name = "blocked", hostname = "b", username = "u", keyId = keyId, pocketshellInstalled = true),
         )
         val healthyHostId = db.hostDao().insert(
-            HostEntity(name = "healthy", hostname = "h", username = "u", keyId = keyId, quseInstalled = true),
+            HostEntity(name = "healthy", hostname = "h", username = "u", keyId = keyId, pocketshellInstalled = true),
         )
 
         val scheduler = newUsageScheduler()
@@ -1145,9 +1145,9 @@ class HostListViewModelTest {
                 username = "old-user",
                 keyId = keyId,
                 tmuxInstalled = true,
-                quseInstalled = true,
+                pocketshellInstalled = true,
                 lastBootstrapAt = 1234L,
-                quseLastDetectedAt = 1234L,
+                pocketshellLastDetectedAt = 1234L,
             ),
         )
         val viewModel = HostListViewModel(
@@ -1180,7 +1180,7 @@ class HostListViewModelTest {
         assertEquals("new-user", rows[0].username)
         // Bootstrap cache is invalidated so the next connect re-probes.
         assertNull(rows[0].tmuxInstalled)
-        assertNull(rows[0].quseInstalled)
+        assertNull(rows[0].pocketshellInstalled)
         assertNull(rows[0].lastBootstrapAt)
         // Conflict state is cleared.
         assertNull(viewModel.importConflict.value)

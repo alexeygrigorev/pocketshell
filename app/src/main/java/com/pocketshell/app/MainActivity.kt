@@ -378,7 +378,7 @@ private fun AppNavigator(
 
         // Issue #181: AI Costs screen — client-side OpenAI spend
         // tracker. Sister of the Usage screen but sourced from the
-        // local Room log rather than server-side `quse` output.
+        // local Room log rather than server-side `pocketshell usage` output.
         AppDestination.AiCosts -> CostsScreen(onBack = ::back)
 
         // Issue #114 Fix A: Usage / quota panel. The view model loads

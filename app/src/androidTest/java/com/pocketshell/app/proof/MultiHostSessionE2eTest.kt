@@ -188,10 +188,9 @@ class MultiHostSessionE2eTest {
                     username = DEFAULT_USER,
                     keyId = storedKey.id,
                     tmuxInstalled = true,
-                    quseInstalled = true,
                     pocketshellInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
-                    quseLastDetectedAt = System.currentTimeMillis(),
+                    pocketshellLastDetectedAt = System.currentTimeMillis(),
                 )
 
             val hostAName = "Issue147 Host A"

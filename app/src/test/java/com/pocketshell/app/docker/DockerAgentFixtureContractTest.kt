@@ -1,8 +1,8 @@
 package com.pocketshell.app.docker
 
-import com.pocketshell.app.jobs.TmuxctlJobsParser
+import com.pocketshell.app.jobs.RecurringJobsParser
 import com.pocketshell.app.sessions.HostTmuxSessionListParser
-import com.pocketshell.core.usage.QuseUsageJsonParser
+import com.pocketshell.core.usage.PocketshellUsageJsonParser
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -16,53 +16,43 @@ class DockerAgentFixtureContractTest {
     private val fixtureDir: Path = dockerDir.resolve("agent-fixtures")
 
     @Test
-    fun quseUsageFixtureMatchesCoreUsageParser() {
-        val output = runFixtureCommand("quse", "--json")
-        val records = QuseUsageJsonParser().parse(output)
+    fun pocketshellUsageFixtureMatchesCoreUsageParser() {
+        val output = runFixtureCommand("pocketshell", "usage", "--json")
+        val records = PocketshellUsageJsonParser().parse(output)
 
         assertEquals(listOf("codex", "claude", "copilot"), records.map { it.provider })
         assertEquals("limited", records.first { it.provider == "claude" }.rawStatus)
     }
 
     @Test
-    fun tmuxctlJobsFixtureMatchesAppJobsParser() {
-        val output = runFixtureCommand("tmuxctl", "jobs", "list", "--session", "codex")
-        val jobs = TmuxctlJobsParser().parseList(output)
+    fun pocketshellJobsFixtureMatchesAppJobsParser() {
+        val output = runFixtureCommand("pocketshell", "jobs", "list", "--session", "codex")
+        val jobs = RecurringJobsParser().parseList(output)
 
         assertEquals(listOf("claude-main", "codex", "opencode-lab"), jobs.map { it.sessionName })
         assertTrue(jobs.first { it.sessionName == "codex" }.enabled)
     }
 
     @Test
-    fun tmuxctlListFixtureMatchesHostSessionParser() {
-        val output = runFixtureCommand("tmuxctl", "list", "--by", "activity")
-        val sessions = HostTmuxSessionListParser().parseTmuxctlList(output)
+    fun pocketshellSessionsFixtureMatchesHostSessionParser() {
+        val output = runFixtureCommand("pocketshell", "sessions", "list", "--by", "activity")
+        val sessions = HostTmuxSessionListParser().parsePocketshellSessionsList(output)
 
         assertEquals(listOf("claude-main", "codex", "opencode-lab"), sessions.map { it.name })
         assertTrue(sessions.all { it.createdAt != null })
     }
 
     @Test
-    fun tmuxctlAttachAndCreateFixturesMatchSessionWorkflowCommands() {
-        assertEquals(
-            "Attached to session codex\n",
-            runFixtureCommand("tmuxctl", "codex"),
+    fun pocketshellJobsMutationFixturesReturnStableShapes() {
+        assertTrue(
+            runFixtureCommand("pocketshell", "jobs", "add", "codex", "--every", "5m").contains("Created job 4"),
         )
-        assertEquals(
-            "Attached to session codex\n",
-            runFixtureCommand("tmuxctl", "2"),
+        assertTrue(
+            runFixtureCommand("pocketshell", "jobs", "edit", "4", "--every", "15m").contains("Updated job 4"),
         )
-        assertEquals(
-            "Created and attached to session fresh-work\n",
-            runFixtureCommand("tmuxctl", ":fresh-work"),
+        assertTrue(
+            runFixtureCommand("pocketshell", "jobs", "remove", "4").contains("Removed job 4"),
         )
-    }
-
-    @Test
-    fun tmuxctlMutationFixturesReturnStableShapes() {
-        assertTrue(runFixtureCommand("tmuxctl", "jobs", "add", "codex", "--every", "5m").contains("Created job 4"))
-        assertTrue(runFixtureCommand("tmuxctl", "jobs", "edit", "4", "--every", "15m").contains("Updated job 4"))
-        assertTrue(runFixtureCommand("tmuxctl", "jobs", "remove", "4").contains("Removed job 4"))
     }
 
     @Test
@@ -86,9 +76,11 @@ class DockerAgentFixtureContractTest {
 
     @Test
     fun bootstrapInstallerAndSystemctlFixturesAreDeterministic() {
-        assertTrue(runFixtureCommand("uv", "tool", "install", "quse").contains("installed fixture tool quse"))
-        assertEquals("active\n", runFixtureCommand("systemctl", "--user", "is-active", "tmuxctl-jobs.service"))
-        assertEquals("enabled\n", runFixtureCommand("systemctl", "--user", "is-enabled", "tmuxctl-jobs.service"))
+        assertTrue(
+            runFixtureCommand("uv", "tool", "install", "pocketshell").contains("installed fixture tool pocketshell"),
+        )
+        assertEquals("active\n", runFixtureCommand("systemctl", "--user", "is-active", "pocketshell-jobs.service"))
+        assertEquals("enabled\n", runFixtureCommand("systemctl", "--user", "is-enabled", "pocketshell-jobs.service"))
     }
 
     private fun runFixtureCommand(vararg args: String): String {

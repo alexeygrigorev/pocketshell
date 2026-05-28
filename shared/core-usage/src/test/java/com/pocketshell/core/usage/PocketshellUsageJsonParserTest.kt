@@ -8,9 +8,9 @@ import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-class QuseUsageJsonParserTest {
+class PocketshellUsageJsonParserTest {
 
-    private val parser = QuseUsageJsonParser()
+    private val parser = PocketshellUsageJsonParser()
 
     @Test
     fun parse_codexHappyPath() {

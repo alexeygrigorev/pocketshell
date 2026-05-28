@@ -86,7 +86,7 @@ data class HostFormState(
     /**
      * Issue #117 (usage Fix C): optional override for the per-host usage
      * command. `null` and the empty string both mean "use the default
-     * `quse --json`". Persisted to [HostEntity.usageCommandOverride]
+     * `pocketshell usage --json`". Persisted to [HostEntity.usageCommandOverride]
      * and forwarded to [UsageRemoteSource.fetchUsage] as
      * `commandOverride`. Not validated — any non-empty string is
      * accepted because the value is shell-executed server-side and the
@@ -99,8 +99,8 @@ data class HostFormState(
      * ahead of the standard `$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin`
      * augmentation. Persisted to [HostEntity.pathOverride] as a single
      * `String?` (`null` and the empty string both mean "no override").
-     * Power users that install `quse` / `tmuxctl` from cloned repos with
-     * venvs (e.g. `~/git/quse/.venv/bin`) keep those paths in
+     * Power users that install `pocketshell` from a cloned repo with a
+     * venv (e.g. `~/git/pocketshell/.venv/bin`) keep that path in
      * `~/.bashrc`, which `/bin/sh -lc` does not source — surfacing it
      * here lets the probe see them. Not validated: the value is
      * shell-executed verbatim, mirroring [usageCommand].
@@ -243,8 +243,8 @@ class AddEditHostViewModel @Inject constructor(
             val editingId = editingHostId
             val host = if (editingId != null) {
                 // Merge form fields into the persisted row so bootstrap
-                // cache columns (tmuxInstalled, quseInstalled,
-                // lastBootstrapAt, quseLastDetectedAt, etc.) and the
+                // cache columns (tmuxInstalled, pocketshellInstalled,
+                // lastBootstrapAt, pocketshellLastDetectedAt, etc.) and the
                 // auto-forward defaults survive a form save. The form
                 // only owns the user-editable fields plus the optional
                 // overrides (usageCommandOverride from issue #117,

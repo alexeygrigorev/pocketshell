@@ -2,7 +2,7 @@ package com.pocketshell.app.usage
 
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshSession
-import com.pocketshell.core.usage.QuseUsageJsonParser
+import com.pocketshell.core.usage.PocketshellUsageJsonParser
 import com.pocketshell.core.usage.UsageProviderRecord
 import kotlinx.coroutines.CancellationException
 import javax.inject.Inject
@@ -27,14 +27,15 @@ public sealed interface UsageFetchResult {
  * APIs directly. A host can override [defaultUsageCommand] with any compatible
  * script as long as it emits the normalized JSON parsed by core-usage.
  *
- * Issue #128 switched the default command from the legacy `heru usage --json`
- * to `quse --json` — see [docs/usage-panel.md](../../../../../../../docs/usage-panel.md).
+ * Issue #231 swapped the default command to the unified `pocketshell usage
+ * --json` CLI (which proxies the underlying `quse` provider probe verbatim) —
+ * see [docs/usage-panel.md](../../../../../../../docs/usage-panel.md).
  */
 public class UsageRemoteSource @Inject constructor(
-    private val parser: QuseUsageJsonParser = QuseUsageJsonParser(),
+    private val parser: PocketshellUsageJsonParser = PocketshellUsageJsonParser(),
 ) {
-    public suspend fun detectQuse(session: SshSession): UsageToolStatus = try {
-        val result = session.exec(DETECT_QUSE_COMMAND)
+    public suspend fun detectPocketshell(session: SshSession): UsageToolStatus = try {
+        val result = session.exec(DETECT_POCKETSHELL_COMMAND)
         when {
             result.exitCode == 0 && result.stdout.isNotBlank() -> UsageToolStatus.Installed
             result.exitCode != 0 -> UsageToolStatus.Missing
@@ -69,7 +70,7 @@ public class UsageRemoteSource @Inject constructor(
     }
 
     public companion object {
-        public const val DETECT_QUSE_COMMAND: String = "command -v quse"
-        public const val defaultUsageCommand: String = "quse --json"
+        public const val DETECT_POCKETSHELL_COMMAND: String = "command -v pocketshell"
+        public const val defaultUsageCommand: String = "pocketshell usage --json"
     }
 }

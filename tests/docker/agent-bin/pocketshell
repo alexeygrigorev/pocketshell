@@ -1,0 +1,71 @@
+#!/bin/sh
+set -eu
+
+# Deterministic fixture for the unified `pocketshell` CLI.
+#
+# Issue #231 swapped the Android app from the legacy `quse` / `tmuxctl`
+# probes to the unified `pocketshell usage|sessions|jobs ...` CLI (D22
+# hard-cut). On a real host `pocketshell` is a thin wrapper that proxies
+# its output byte-for-byte from the underlying `quse` / `tmuxctl`
+# binaries (see tools/pocketshell/src/pocketshell/{usage,sessions,jobs}.py),
+# so this fixture reuses the same canned payloads the app's parsers were
+# written against:
+#   - `pocketshell usage --json`            -> PocketshellUsageJsonParser
+#   - `pocketshell sessions list [--by ..]` -> HostTmuxSessionListParser
+#   - `pocketshell jobs list [--session N]` -> RecurringJobsParser
+
+fixture_dir="${POCKETSHELL_AGENT_FIXTURE_DIR:-/opt/pocketshell-agent-fixtures}"
+
+case "${1:-}" in
+  --version)
+    printf 'pocketshell fixture 0.0.0\n'
+    exit 0
+    ;;
+  usage)
+    shift
+    if [ "${1:-}" = "--json" ]; then
+      cat "${fixture_dir}/pocketshell-usage.ndjson"
+      exit 0
+    fi
+    printf 'pocketshell usage fixture supports: --json\n' >&2
+    exit 64
+    ;;
+  sessions)
+    shift
+    if [ "${1:-}" = "list" ]; then
+      # The app emits `pocketshell sessions list --by activity`; the
+      # fixture ignores the sort flag and returns the canonical listing
+      # so the trailing-timestamp parser sees a stable shape.
+      cat "${fixture_dir}/pocketshell-sessions-list.txt"
+      exit 0
+    fi
+    printf 'pocketshell sessions fixture supports: list [--by created|activity]\n' >&2
+    exit 64
+    ;;
+  jobs)
+    shift
+    case "${1:-}" in
+      list)
+        cat "${fixture_dir}/pocketshell-jobs-list.txt"
+        exit 0
+        ;;
+      add)
+        printf 'Created job 4\n'
+        exit 0
+        ;;
+      edit)
+        printf 'Updated job %s\n' "${2:-}"
+        exit 0
+        ;;
+      remove)
+        printf 'Removed job %s\n' "${2:-}"
+        exit 0
+        ;;
+    esac
+    printf 'pocketshell jobs fixture supports: list/add/edit/remove\n' >&2
+    exit 64
+    ;;
+esac
+
+printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove\n' >&2
+exit 64

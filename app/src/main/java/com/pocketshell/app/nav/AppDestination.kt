@@ -55,7 +55,7 @@ sealed interface AppDestination {
     /**
      * Usage/quota panel introduced in issue #114 (Fix A). Renders
      * [com.pocketshell.app.usage.UsageScreen] populated from every
-     * bootstrapped host whose `quse` detection succeeded. Reachable
+     * bootstrapped host whose `pocketshell` detection succeeded. Reachable
      * from the Settings → Diagnostics row and from the in-session
      * kebab menus in [Session] / [TmuxSession]. Fix B and Fix C add
      * a host-list dashboard strip and a bootstrap-driven CTA — out of
@@ -65,7 +65,7 @@ sealed interface AppDestination {
 
     /**
      * Issue #181: client-side AI cost tracker. Sister to [Usage] (which
-     * surfaces server-side `quse` quotas) — shows lifetime / windowed
+     * surfaces server-side `pocketshell usage` quotas) — shows lifetime / windowed
      * spend per OpenAI feature based on rows in `ai_api_call_log`.
      * Reachable from Settings → Voice → "AI Costs".
      */
@@ -197,7 +197,7 @@ sealed interface AppDestination {
         val passphrase: CharArray?,
     ) : AppDestination
 
-    /** Per-session recurring jobs backed by the host's `tmuxctl jobs` CLI. */
+    /** Per-session recurring jobs backed by the host's `pocketshell jobs` CLI. */
     data class RecurringJobs(
         val hostName: String,
         val hostname: String,

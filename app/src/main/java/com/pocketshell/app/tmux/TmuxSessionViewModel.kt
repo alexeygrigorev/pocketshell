@@ -237,6 +237,16 @@ public class TmuxSessionViewModel @Inject constructor(
     private var sessionRef: SshSession? = null
     private var clientRef: TmuxClient? = null
     private var registeredHostId: Long? = null
+    // Issue #235: hostId under which we registered application-scoped
+    // lifecycle hooks in [activeTmuxClients]. This is tracked
+    // SEPARATELY from [registeredHostId] because the client-entry
+    // registration is recreated on every attach/detach cycle (the
+    // lifecycle-driven auto-detach unregisters the client), but the
+    // hook must survive across detach cycles so the `ON_START` fanout
+    // can find a callback that calls back into THIS VM. Cleared
+    // exclusively from [onCleared], which is the only place where the
+    // VM truly goes away and the hook must be removed too.
+    private var lifecycleHookHostId: Long? = null
     private var activeTarget: ConnectionTarget? = null
     private var connectingTarget: ConnectionTarget? = null
     private var connectJob: Job? = null
@@ -519,6 +529,199 @@ public class TmuxSessionViewModel @Inject constructor(
         return true
     }
 
+    // Issue #235: when [onAppBackgrounded] tears the `-CC` client down,
+    // we stash the [activeTarget] so [onAppForegrounded] knows what to
+    // re-attach to. Going through [activeTarget] for the reconnect path
+    // would not work because [closeCurrentConnectionAndJoin] clears it.
+    private var pendingReattachTarget: ConnectionTarget? = null
+    private var backgroundDetachJob: Job? = null
+    private var foregroundReattachForTest: (() -> Unit)? = null
+
+    /**
+     * Issue #235: drop the tmux `-CC` control client cleanly while the
+     * app is in the background.
+     *
+     * Triggered by the application-scoped
+     * [androidx.lifecycle.ProcessLifecycleOwner] `ON_STOP` event the
+     * [com.pocketshell.app.App] installs. The tmux server-side session
+     * stays alive — only this control client disconnects — so a
+     * desktop client attaching to the same session while PocketShell is
+     * in the background sees the window at its own viewport dimensions
+     * rather than `min(phone, desktop)` (the maintainer-reported
+     * symptom in the v0.2.8 dogfood pass).
+     *
+     * Idempotent: if there is no live client, this is a no-op. Bounded
+     * by [TmuxClient.detachCleanly]'s default 1s timeout so a wedged
+     * transport cannot stall the lifecycle transition.
+     *
+     * The [activeTarget] is stashed into [pendingReattachTarget] so
+     * [onAppForegrounded] knows where to reconnect. The full teardown
+     * runs via [closeCurrentConnectionAndJoin], which clears
+     * [activeTarget] as part of releasing the SSH session; without the
+     * stash the foreground hook would have no idea what to reattach
+     * to.
+     */
+    public fun onAppBackgrounded() {
+        val target = activeTarget ?: connectingTarget
+        if (target == null) return
+        if (clientRef == null && sessionRef == null) return
+        pendingReattachTarget = target
+        Log.i(
+            ISSUE_235_LIFECYCLE_TAG,
+            "tmux-detach-on-background host=${target.host} port=${target.port} " +
+                "user=${target.user} session=${target.sessionName}",
+        )
+        if (backgroundDetachJob?.isActive == true) return
+        val detachJob = viewModelScope.launch {
+            // NonCancellable so a fresh lifecycle transition (e.g.
+            // rapid foreground/background) cannot interrupt the detach
+            // mid-write — the screen still needs the clean teardown to
+            // happen even if the foreground hook is already firing
+            // the reattach.
+            withContext(NonCancellable) {
+                closeCurrentConnectionAndJoin()
+            }
+        }
+        backgroundDetachJob = detachJob
+        detachJob.invokeOnCompletion {
+            if (backgroundDetachJob == detachJob) {
+                backgroundDetachJob = null
+            }
+        }
+    }
+
+    /**
+     * Issue #235: re-attach to the tmux session we [detached][onAppBackgrounded]
+     * when the app went to background.
+     *
+     * Triggered by the application-scoped
+     * [androidx.lifecycle.ProcessLifecycleOwner] `ON_START` event. The
+     * tmux session has stayed alive on the remote (we only tore the
+     * `-CC` control client down), so attaching is a fresh
+     * [SshConnection.connect][com.pocketshell.core.ssh.SshConnection.connect]
+     * + `tmux -CC attach-session -t <name>` round-trip — exactly what
+     * the user's first attach did.
+     *
+     * No-op when there is no [pendingReattachTarget] (e.g. the user
+     * left the tmux screen via the back stack, or the manual Detach
+     * button cleared it). Goes through the standard [connect] path so
+     * the existing handshake instrumentation, project-roots binding,
+     * and pane reconcile all fire identically to a cold attach.
+     */
+    public fun onAppForegrounded() {
+        if (pendingReattachTarget == null) return
+        val detachJob = backgroundDetachJob
+        viewModelScope.launch {
+            // If the user backgrounds and immediately foregrounds the
+            // app, the lifecycle detach may still be inside
+            // closeCurrentConnectionAndJoin(). Waiting here prevents a
+            // reattach from being consumed by connect()'s still-connected
+            // early return before teardown clears activeTarget/clientRef.
+            detachJob?.join()
+            val target = pendingReattachTarget ?: return@launch
+            pendingReattachTarget = null
+            Log.i(
+                ISSUE_235_LIFECYCLE_TAG,
+                "tmux-reattach-on-foreground host=${target.host} port=${target.port} " +
+                    "user=${target.user} session=${target.sessionName}",
+            )
+            foregroundReattachForTest?.invoke() ?: connect(
+                hostId = target.hostId,
+                hostName = target.hostName,
+                host = target.host,
+                port = target.port,
+                user = target.user,
+                keyPath = target.keyPath,
+                passphrase = target.passphrase,
+                sessionName = target.sessionName,
+                startDirectory = target.startDirectory,
+            )
+        }
+    }
+
+    /**
+     * Issue #235: user-driven detach.
+     *
+     * Wired to the kebab menu's "Detach" item in [TmuxSessionScreen].
+     * Tears the tmux `-CC` control client down (server-clean — uses
+     * [closeCurrentConnectionAndJoin]'s `detach-client` round-trip)
+     * and clears [pendingReattachTarget] so a subsequent app
+     * background/foreground cycle does NOT reattach to the session
+     * the user just explicitly walked away from. The screen pairs
+     * this call with a navigate-back to the sessions dashboard.
+     *
+     * Sibling of [onAppBackgrounded] structurally — same teardown,
+     * different reattach semantics. The split exists so the lifecycle
+     * observer ("background, then come back") and the user-driven
+     * "I'm done here for now" intent stay legibly distinct.
+     */
+    public fun detachAndExit() {
+        // Clear pending reattach BEFORE the teardown so a racing
+        // background event in the same instant (rare but observed in
+        // QA when the user backgrounds the app during the detach
+        // animation) does not re-seed the reattach.
+        pendingReattachTarget = null
+        Log.i(
+            ISSUE_235_LIFECYCLE_TAG,
+            "tmux-detach-manual host=${activeTarget?.host} session=${activeTarget?.sessionName}",
+        )
+        viewModelScope.launch {
+            withContext(NonCancellable) {
+                closeCurrentConnectionAndJoin()
+            }
+        }
+    }
+
+    /**
+     * Issue #235 test seam: drive the protected [onCleared]
+     * lifecycle event without booting an Android lifecycle owner.
+     * Mirrors the seam other ViewModel tests use for the same
+     * purpose. Production callers do not touch this — the framework
+     * invokes [onCleared] when the VM's owner is destroyed.
+     */
+    internal fun clearForTest() {
+        onCleared()
+    }
+
+    internal fun hasPendingReattachForTest(): Boolean = pendingReattachTarget != null
+
+    internal fun setForegroundReattachForTest(handler: (() -> Unit)?) {
+        foregroundReattachForTest = handler
+    }
+
+    /**
+     * Issue #235 test seam: drive [onAppBackgrounded] and wait for the
+     * detach to fully complete. Production uses the fire-and-forget
+     * variant so the lifecycle observer never blocks the main thread;
+     * tests need to assert against post-detach state so they need a
+     * deterministic join.
+     */
+    internal suspend fun onAppBackgroundedAndAwait() {
+        onAppBackgrounded()
+        backgroundDetachJob?.join()
+    }
+
+    /**
+     * Issue #235: install the application-lifecycle hooks for [hostId]
+     * once the view model has successfully attached a tmux client.
+     *
+     * Called from every [TmuxSessionViewModel.runConnect] /
+     * [runFastSessionSwitch] / test seam right after
+     * [activeTmuxClients.register], so each successful attach plugs
+     * the same view model into the singleton process-lifecycle
+     * observer wired in [com.pocketshell.app.App.onCreate].
+     */
+    private fun installLifecycleHooks(hostId: Long) {
+        activeTmuxClients.registerLifecycleHooks(
+            hostId = hostId,
+            hooks = ActiveTmuxClients.LifecycleHooks(
+                onBackground = { onAppBackgrounded() },
+                onForeground = { onAppForegrounded() },
+            ),
+        )
+        lifecycleHookHostId = hostId
+    }
+
     private suspend fun runConnect(target: ConnectionTarget) {
         try {
             // Issue #178: instrument the actual SSH handshake call so a
@@ -572,6 +775,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 client = client,
             )
             registeredHostId = target.hostId
+            installLifecycleHooks(target.hostId)
             bindProjectRootsForHost(target.hostId)
 
             // Bootstrap the pane list once tmux has had a moment to settle.
@@ -648,6 +852,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 client = client,
             )
             registeredHostId = target.hostId
+            installLifecycleHooks(target.hostId)
             bindProjectRootsForHost(target.hostId)
 
             // Bootstrap the pane list — the new `new-session -A -s`
@@ -806,6 +1011,7 @@ public class TmuxSessionViewModel @Inject constructor(
             client = client,
         )
         registeredHostId = hostId
+        installLifecycleHooks(hostId)
         activeTarget = target
         bindProjectRootsForHost(hostId)
         _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
@@ -871,6 +1077,7 @@ public class TmuxSessionViewModel @Inject constructor(
             client = client,
         )
         registeredHostId = hostId
+        installLifecycleHooks(hostId)
         bindProjectRootsForHost(hostId)
         connectingTarget = null
         refreshReconnectAvailability()
@@ -2214,6 +2421,14 @@ public class TmuxSessionViewModel @Inject constructor(
         commandPlannerJob?.cancel()
         commandPlannerJob = null
         closeCurrentConnection()
+        // Issue #235: remove the application-scoped lifecycle hooks
+        // installed during the first attach. The hooks survive across
+        // [closeCurrentConnection*] teardown cycles (otherwise the
+        // auto-detach on background would unregister the hook before
+        // the foreground hook fires the reattach); the VM going away
+        // is the only signal we use to drop them.
+        lifecycleHookHostId?.let { activeTmuxClients.unregisterLifecycleHooks(it) }
+        lifecycleHookHostId = null
         // bridgeScope is parented to viewModelScope, so its SupervisorJob
         // tears down automatically when viewModelScope cancels post-super
         // call. Explicit cancellation here is redundant — leaving it to
@@ -2695,6 +2910,16 @@ internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
  * thrash.
  */
 internal const val ISSUE_145_RECONNECT_TAG: String = "PsTmuxReconnect"
+
+/**
+ * Issue #235: logcat tag for the auto-detach-on-background +
+ * reattach-on-foreground lifecycle journey, plus the manual Detach
+ * button. Same 23-character `Log.isLoggable` cap as the other
+ * ViewModel tags. The connected `TmuxDetachOnBackgroundE2eTest` greps
+ * for this so the assertion path can correlate the lifecycle event the
+ * test drives with the actual ViewModel detach landing.
+ */
+internal const val ISSUE_235_LIFECYCLE_TAG: String = "PsTmuxLifecycle"
 
 /**
  * Issue #188: logcat tag for kill-window diagnostics. Mirrors the

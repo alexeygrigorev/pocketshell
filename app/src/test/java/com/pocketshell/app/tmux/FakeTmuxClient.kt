@@ -4,6 +4,7 @@ import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.protocol.ControlEvent
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -147,6 +148,8 @@ internal class FakeTmuxClient : TmuxClient {
     var detachCleanlyTimeoutMs: Long = -1L
         private set
 
+    var detachCleanlyGate: CompletableDeferred<Unit>? = null
+
     override suspend fun detachCleanly(timeoutMs: Long) {
         detachCleanlyCalled = true
         detachCleanlyTimeoutMs = timeoutMs
@@ -155,6 +158,7 @@ internal class FakeTmuxClient : TmuxClient {
         // disconnected signal + closed = true) whether the production
         // path runs against the real client or the fake.
         sentCommands += "detach-client"
+        detachCleanlyGate?.await()
         close()
     }
 }

@@ -58,7 +58,11 @@ class HostTmuxSessionListParser @Inject constructor() {
 
     internal fun parseTmuxListSessionsRow(line: String): HostTmuxSessionRow? {
         if (line.isBlank()) return null
-        val parts = line.split('\t')
+        val parts = if (line.contains("::")) {
+            line.split("::")
+        } else {
+            line.split('\t')
+        }
         if (parts.size < 4) return null
         val name = parts[0].trim()
         if (name.isEmpty()) return null

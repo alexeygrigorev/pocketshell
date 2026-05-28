@@ -4,6 +4,7 @@ import com.pocketshell.core.tmux.TmuxClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -75,6 +76,24 @@ class ActiveTmuxClients @Inject constructor() {
     val clients: StateFlow<Map<Long, Entry>> = _clients.asStateFlow()
 
     /**
+     * Issue #235: per-host hooks installed by each
+     * [com.pocketshell.app.tmux.TmuxSessionViewModel] when it brings a
+     * tmux `-CC` client up. The application-scoped
+     * [androidx.lifecycle.ProcessLifecycleOwner] observer (wired in
+     * [com.pocketshell.app.App.onCreate]) drives these hooks on every
+     * process foreground/background transition so the tmux server-side
+     * client list does not pin the window size to the phone's viewport
+     * while the user has switched away from PocketShell.
+     *
+     * Keyed by host id (same key as [_clients]) so a fresh
+     * registration for the same host replaces a stale hook left by the
+     * previous registrant. Held in a [ConcurrentHashMap] so the
+     * lifecycle observer can iterate while a tmux teardown is
+     * concurrently unregistering a hook from another thread.
+     */
+    private val lifecycleHooks: MutableMap<Long, LifecycleHooks> = ConcurrentHashMap()
+
+    /**
      * Add (or replace) the entry for [hostId]. The caller still owns
      * [client]'s lifetime — see the class-level docs.
      *
@@ -115,6 +134,15 @@ class ActiveTmuxClients @Inject constructor() {
      * never registered, or if it was overwritten by a later
      * [register] call for a different host id (the map is keyed on
      * host id so we use that as the unique handle).
+     *
+     * Issue #235: this method DOES NOT clear lifecycle hooks. The
+     * client entry is created/destroyed on every attach/detach cycle
+     * (including the lifecycle-driven background detach this issue
+     * adds), but the lifecycle hooks must survive across cycles —
+     * otherwise the very first auto-detach would unregister the
+     * foreground hook and the app would never reattach on
+     * `ON_START`. Hooks are removed via [unregisterLifecycleHooks]
+     * (called from `TmuxSessionViewModel.onCleared` only).
      */
     fun unregister(hostId: Long) {
         synchronized(this) {
@@ -125,6 +153,51 @@ class ActiveTmuxClients @Inject constructor() {
             _clients.value = next
         }
     }
+
+    /**
+     * Issue #235: install per-host hooks driven by the application
+     * lifecycle observer.
+     *
+     * Each [com.pocketshell.app.tmux.TmuxSessionViewModel] that brings
+     * a tmux `-CC` client up calls this immediately after [register] so
+     * the [App][com.pocketshell.app.App]-installed
+     * [androidx.lifecycle.ProcessLifecycleOwner] observer can drive a
+     * "detach this -CC client on background, reattach on foreground"
+     * journey without each ViewModel having to observe the process
+     * lifecycle itself. Reattach uses the view model's existing
+     * `reconnect()` machinery; detach is bounded by
+     * [TmuxClient.detachCleanly]'s built-in timeout.
+     *
+     * Replacing an existing hook for the same [hostId] is intentional —
+     * the same ViewModel instance re-registers when it swaps SSH
+     * sessions (fast-switch path) and the new hook supersedes the
+     * previous one.
+     */
+    fun registerLifecycleHooks(
+        hostId: Long,
+        hooks: LifecycleHooks,
+    ) {
+        lifecycleHooks[hostId] = hooks
+    }
+
+    /**
+     * Issue #235: explicitly remove the lifecycle hooks installed for
+     * [hostId] by an earlier [registerLifecycleHooks] call. Called
+     * from `TmuxSessionViewModel.onCleared` so a destroyed VM does
+     * not leak a callback into the singleton fanout.
+     */
+    fun unregisterLifecycleHooks(hostId: Long) {
+        lifecycleHooks.remove(hostId)
+    }
+
+    /**
+     * Issue #235: snapshot of all installed lifecycle hooks. Returns a
+     * shallow copy so the caller can iterate without holding the map's
+     * iterator across hook invocations (each hook hops to the view
+     * model's `viewModelScope`, which may itself unregister mid-walk).
+     */
+    fun lifecycleHooksSnapshot(): List<LifecycleHooks> =
+        lifecycleHooks.values.toList()
 
     /**
      * One entry in the registry — a live tmux control channel against a
@@ -139,5 +212,21 @@ class ActiveTmuxClients @Inject constructor() {
         val username: String,
         val keyPath: String,
         val client: TmuxClient,
+    )
+
+    /**
+     * Issue #235: pair of suspend callbacks each registrant supplies
+     * so the application-scoped lifecycle observer can drive the
+     * "detach `-CC` on background, reattach on foreground" journey
+     * without owning a strong reference to the ViewModel.
+     *
+     * Both callbacks are `suspend` so the implementation can perform a
+     * bounded tmux round-trip (`detach-client` + reader-EOF wait) or
+     * re-run the existing connect machinery without blocking the
+     * lifecycle observer's caller thread.
+     */
+    class LifecycleHooks(
+        val onBackground: suspend () -> Unit,
+        val onForeground: suspend () -> Unit,
     )
 }

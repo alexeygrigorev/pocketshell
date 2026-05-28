@@ -619,6 +619,17 @@ public fun TmuxSessionScreen(
                         moreExpanded = false
                         viewModel.requestManualResize()
                     },
+                    onDetach = {
+                        // Issue #235: detach the tmux `-CC` client
+                        // server-clean and pop back to the sessions
+                        // dashboard. The session stays alive on the
+                        // remote; reattach via the normal sessions
+                        // list. We close the menu first so the back
+                        // navigation animates from a clean state.
+                        moreExpanded = false
+                        viewModel.detachAndExit()
+                        onBack()
+                    },
                 )
             }
 
@@ -1410,6 +1421,15 @@ internal const val TMUX_TERMINAL_TAB_TAG = "tmux:chrome:tab-pill:terminal"
  */
 internal const val TMUX_SESSION_ERROR_TAG = "tmux:session:error"
 internal const val TMUX_SESSION_RECONNECT_TAG = "tmux:session:reconnect"
+
+/**
+ * Issue #235: stable test tag for the kebab menu's Detach item. The
+ * connected `TmuxDetachOnBackgroundE2eTest` does NOT click this tag —
+ * it drives the lifecycle path via `UiDevice.pressHome` — but the
+ * symmetric "manual detach + return to dashboard" assertion in the
+ * same suite needs a deterministic handle on the menu item.
+ */
+internal const val TMUX_DETACH_BUTTON_TAG = "tmux:session:detach-button"
 /**
  * Issue #165: stable test tags for the SSH-handshake progress overlay
  * rendered while [TmuxSessionViewModel.ConnectionStatus] is Connecting.
@@ -2854,6 +2874,12 @@ private fun TmuxMoreMenu(
     onNewWindow: () -> Unit,
     onRenameWindow: () -> Unit,
     onKillWindow: () -> Unit,
+    // Issue #235: user-driven detach. Tears the `-CC` control client
+    // down (server-clean — uses the same `detach-client` round-trip
+    // [TmuxSessionViewModel.detachAndExit] runs internally) and pops
+    // back to the sessions dashboard. The session itself stays alive
+    // on the remote; reattach via the normal sessions-list path.
+    onDetach: () -> Unit = {},
     // Issue #189: now that the WindowStrip is hidden in the default
     // chrome, the kebab is one of the discoverable paths into the
     // window switcher. Surfaced only when the session actually has
@@ -2919,6 +2945,18 @@ private fun TmuxMoreMenu(
             )
             DropdownMenuItem(text = { Text("Kill session") }, onClick = onKillSession)
             HorizontalDivider()
+            // Issue #235: explicit "I'm done with this session for now"
+            // affordance — frees the tmux server-side window-size lock
+            // (max(phone, desktop) -> desktop dimensions) without
+            // killing the session. Placed at the top of the cross-host
+            // section so it sits next to the back-to-host-list mental
+            // model (Detach -> sessions dashboard) without crowding the
+            // destructive Kill session item.
+            DropdownMenuItem(
+                text = { Text("Detach") },
+                onClick = onDetach,
+                modifier = Modifier.testTag(TMUX_DETACH_BUTTON_TAG),
+            )
             DropdownMenuItem(text = { Text("Recurring jobs") }, onClick = onOpenJobs)
             // Issue #114 Fix A: jump to the cross-host Usage / quota
             // panel from inside a live tmux session.

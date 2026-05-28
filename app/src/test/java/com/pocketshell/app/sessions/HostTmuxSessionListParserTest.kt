@@ -117,7 +117,7 @@ class HostTmuxSessionListParserTest {
     @Test
     fun parseTmuxListSessionsReadsDeterministicFields() {
         val rows = parser.parseTmuxListSessions(
-            "codex\t1779520800\t1779521400\t1\nidle\t1779510000\t1779510500\t0\n",
+            "codex::1779520800::1779521400::1\nidle::1779510000::1779510500::0\n",
         )
 
         assertEquals(listOf("codex", "idle"), rows.map { it.name })
@@ -125,6 +125,14 @@ class HostTmuxSessionListParserTest {
         assertEquals(1779521400L, rows[0].lastActivity)
         assertTrue(rows[0].attached)
         assertFalse(rows[1].attached)
+    }
+
+    @Test
+    fun parseTmuxListSessionsStillAcceptsLegacyTabDelimitedRows() {
+        val rows = parser.parseTmuxListSessions("codex\t1779520800\t1779521400\t1\n")
+
+        assertEquals(listOf("codex"), rows.map { it.name })
+        assertTrue(rows[0].attached)
     }
 
     @Test

@@ -13,6 +13,7 @@ import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
@@ -2828,6 +2829,261 @@ class TmuxSessionViewModelTest {
         val firedFromConnected = vm.cancelConnect()
         assertFalse("cancelConnect() must no-op when status is Connected", firedFromConnected)
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
+    /**
+     * Issue #235: `onAppBackgrounded` must call `detachCleanly` on the
+     * live tmux client when the process goes to background. We drive
+     * the VM into a connected state via [replaceClientForTest] (which
+     * also stamps an [activeTarget] in place) so the backgrounded hook
+     * has something to tear down.
+     */
+    @Test
+    fun onAppBackgroundedCallsDetachCleanlyOnLiveClient() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertFalse("detach must not have fired before background", client.detachCleanlyCalled)
+
+        vm.onAppBackgrounded()
+        advanceUntilIdle()
+
+        assertTrue(
+            "onAppBackgrounded must invoke detachCleanly via closeCurrentConnectionAndJoin",
+            client.detachCleanlyCalled,
+        )
+        assertTrue("client must be closed after backgrounded detach", client.closed)
+    }
+
+    /**
+     * Issue #235 integration race: foreground can arrive after
+     * `ON_STOP` starts the background detach but before
+     * [closeCurrentConnectionAndJoin] clears the still-connected VM
+     * state. The pending reattach must survive that window; otherwise
+     * connect() sees the old active target, returns as already
+     * connected, and the later detach leaves the screen disconnected
+     * with no pending reattach left.
+     */
+    @Test
+    fun onAppForegroundedWaitsForInFlightBackgroundDetachBeforeConsumingReattach() = runTest {
+        val vm = newVm()
+        val detachGate = CompletableDeferred<Unit>()
+        val client = FakeTmuxClient().apply {
+            detachCleanlyGate = detachGate
+        }
+        var foregroundReattachCount = 0
+        vm.setForegroundReattachForTest {
+            foregroundReattachCount += 1
+        }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        vm.onAppBackgrounded()
+        runCurrent()
+        assertTrue("detach must have started", client.detachCleanlyCalled)
+        assertFalse("detach is intentionally still in flight", client.closed)
+        assertTrue("background detach must seed pending reattach", vm.hasPendingReattachForTest())
+
+        vm.onAppForegrounded()
+        runCurrent()
+
+        assertTrue(
+            "foreground must not consume pending reattach until detach finishes",
+            vm.hasPendingReattachForTest(),
+        )
+        assertEquals(
+            "foreground reattach must wait for background detach",
+            0,
+            foregroundReattachCount,
+        )
+
+        detachGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertFalse(
+            "pending reattach should be consumed after detach completes",
+            vm.hasPendingReattachForTest(),
+        )
+        assertEquals(1, foregroundReattachCount)
+        assertTrue("client must be closed after backgrounded detach", client.closed)
+    }
+
+    /**
+     * Issue #235: with no live client, `onAppBackgrounded` must be a
+     * no-op. The lifecycle observer fires for every process-level
+     * `ON_STOP`, so the hook is invoked even when the user never
+     * opened a tmux session.
+     */
+    @Test
+    fun onAppBackgroundedIsNoOpWhenNoActiveClient() = runTest {
+        val vm = newVm()
+        // Status is Idle, no client attached.
+        vm.onAppBackgrounded()
+        advanceUntilIdle()
+        // No exception and the VM stays Idle.
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Idle)
+    }
+
+    /**
+     * Issue #235: the manual Detach button drives [detachAndExit],
+     * which must run the same detach-cleanly + close path AND clear
+     * any pending reattach so a subsequent background event does not
+     * unexpectedly resurrect the session the user just walked away
+     * from.
+     */
+    @Test
+    fun detachAndExitTearsClientDownAndClearsPendingReattach() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        vm.detachAndExit()
+        advanceUntilIdle()
+
+        assertTrue("detachAndExit must invoke detachCleanly", client.detachCleanlyCalled)
+        assertTrue("client must be closed after manual detach", client.closed)
+
+        // After detachAndExit, a follow-up onAppForegrounded must NOT
+        // resurrect the session — the user explicitly walked away.
+        // The hook should find no pending target and do nothing.
+        val priorStatus = vm.connectionStatus.value
+        vm.onAppForegrounded()
+        advanceUntilIdle()
+        // The status the screen reads stays consistent with "no
+        // connection in flight". (The full-cycle assertion lives in the
+        // connected E2E test; here we just verify the no-op invariant.)
+        assertSame(
+            "onAppForegrounded after detachAndExit must not transition status",
+            priorStatus,
+            vm.connectionStatus.value,
+        )
+    }
+
+    /**
+     * Issue #235: `ActiveTmuxClients.registerLifecycleHooks` is the
+     * seam the [com.pocketshell.app.App] observer reads off. Every
+     * successful attach (slow-path, fast-switch, or
+     * `replaceClientForTest`) must install hooks under the connected
+     * host id so the application-scope fanout can find them.
+     */
+    @Test
+    fun replaceClientInstallsLifecycleHooksIntoRegistry() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+
+        val hooks = registry.lifecycleHooksSnapshot()
+        assertEquals("expected exactly one hook installed", 1, hooks.size)
+    }
+
+    /**
+     * Issue #235: a connection teardown (e.g. lifecycle-driven
+     * auto-detach) must NOT remove the lifecycle hook from the
+     * registry — otherwise the very first auto-detach would drop the
+     * foreground reattach hook and the app would never reattach on
+     * `ON_START`. Hooks are removed only on `onCleared` (separate
+     * test below).
+     */
+    @Test
+    fun connectionTeardownPreservesLifecycleHooks() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        vm.replaceClientForTest(
+            hostId = 9L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        assertEquals(1, registry.lifecycleHooksSnapshot().size)
+
+        // `detachAndExit` drives `closeCurrentConnectionAndJoin`, which
+        // ends in `activeTmuxClients.unregister(hostId)`. The hooks
+        // must survive — they are tied to the VM, not the client.
+        vm.detachAndExit()
+        advanceUntilIdle()
+
+        assertEquals(
+            "lifecycle hook must survive connection teardown",
+            1,
+            registry.lifecycleHooksSnapshot().size,
+        )
+        // Client entry IS gone — that's the per-cycle state.
+        assertTrue(
+            "client entry must be unregistered after detach",
+            registry.clients.value.isEmpty(),
+        )
+    }
+
+    /**
+     * Issue #235: `onCleared` is the only path that drops the
+     * lifecycle hook. Sanity-checks the hook lifetime invariant.
+     */
+    @Test
+    fun onClearedRemovesLifecycleHooksFromRegistry() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        vm.replaceClientForTest(
+            hostId = 11L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+        )
+        assertEquals(1, registry.lifecycleHooksSnapshot().size)
+
+        // `clearForTest` is the reflective seam tests use to drive
+        // `onCleared` outside the Android lifecycle machinery.
+        vm.clearForTest()
+        advanceUntilIdle()
+
+        assertTrue(
+            "lifecycle hook must be removed when VM is cleared",
+            registry.lifecycleHooksSnapshot().isEmpty(),
+        )
     }
 
     /**

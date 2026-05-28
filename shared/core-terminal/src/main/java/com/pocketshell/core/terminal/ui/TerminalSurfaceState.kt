@@ -5,6 +5,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import com.pocketshell.core.terminal.bridge.SshTerminalBridge
+import com.pocketshell.core.terminal.bridge.TerminalQueryResponseSanitizer
 import com.pocketshell.core.terminal.selection.DefaultTerminalMatcher
 import com.pocketshell.core.terminal.selection.TerminalMatch
 import com.pocketshell.core.terminal.selection.TerminalMatcher
@@ -254,8 +255,14 @@ class TerminalSurfaceState internal constructor(
     fun appendRemoteOutput(bytes: ByteArray) {
         if (bytes.isEmpty()) return
         val activeBridge = bridge ?: return
-        activeBridge.feedBytes(bytes)
-        _output.tryEmit(bytes)
+        val clean = if (sanitizeQueryResponses) {
+            TerminalQueryResponseSanitizer.sanitize(bytes)
+        } else {
+            bytes
+        }
+        if (clean.isEmpty()) return
+        activeBridge.feedBytes(clean)
+        _output.tryEmit(clean)
         bufferTick.value = bufferTick.value + 1
     }
 
@@ -378,6 +385,15 @@ class TerminalSurfaceState internal constructor(
     }
 
     /**
+     * Test-only seam: read the text the bridge's emulator has actually
+     * rendered onto its cell grid. Used by the issue #248 regression test to
+     * prove a query-response leak never reaches the visible transcript.
+     * Returns an empty string when no bridge is attached.
+     */
+    internal fun renderedTranscriptForTesting(): String =
+        bridge?.emulator?.screen?.transcriptText.orEmpty()
+
+    /**
      * Bridge currently feeding bytes into the emulator. Created by
      * [attachExternalProducer]; held so subsequent calls to [writeInput]
      * route through the same session, and so [detachExternalProducer]
@@ -385,6 +401,16 @@ class TerminalSurfaceState internal constructor(
      */
     @Volatile
     private var bridge: SshTerminalBridge? = null
+
+    /**
+     * Issue #248: when true, terminal query-*response* sequences are stripped
+     * from inbound bytes before they reach the emulator's cell grid. Set by
+     * [attachExternalProducer] for tmux control-mode bridges (where a
+     * `capture-pane` replay can otherwise seed a window with raw OSC/DA reply
+     * text). Kept false for plain SSH surfaces so they keep full fidelity.
+     */
+    @Volatile
+    private var sanitizeQueryResponses: Boolean = false
 
     /**
      * Job owning the producer-collection coroutine. Cancelled by
@@ -429,9 +455,13 @@ class TerminalSurfaceState internal constructor(
      *   emulator. If `null`, the emulator still renders output but user
      *   keystrokes are dropped at the bridge's input drainer.
      * @param suppressQueryResponses when true, terminal-generated query
-     *   replies are not written back to [remoteStdin]. Keep this false for
-     *   normal SSH surfaces; tmux control-mode bridges enable it because
-     *   replies would otherwise leak through `send-keys`.
+     *   replies are not written back to [remoteStdin], AND inbound query
+     *   *response* sequences (DA/OSC-colour/cursor-position replies) are
+     *   stripped from output before it reaches the emulator's cell grid
+     *   (issue #248). Keep this false for normal SSH surfaces; tmux
+     *   control-mode bridges enable it because replies would otherwise leak
+     *   through `send-keys` (outbound) or paint raw reply text onto the grid
+     *   after a `capture-pane` replay (inbound).
      * @return a [Job] that completes when the producer flow terminates or
      *   the scope is cancelled.
      */
@@ -448,6 +478,12 @@ class TerminalSurfaceState internal constructor(
         val newBridge = SshTerminalBridge(client = sessionClient)
         newBridge.setRemoteStdin(remoteStdin)
         newBridge.emulator.setSuppressQueryResponses(suppressQueryResponses)
+        // Issue #248: tmux control-mode bridges also strip inbound query
+        // *responses* (DA/OSC-colour/cursor-position replies) so a
+        // `capture-pane` replay can't paint raw reply text onto the grid.
+        // Mirror the suppression scope: only bridge mode strips, plain SSH
+        // surfaces stay untouched.
+        sanitizeQueryResponses = suppressQueryResponses
         bridge = newBridge
 
         // Bind the bridge's session to the View via the existing `attach`
@@ -461,12 +497,19 @@ class TerminalSurfaceState internal constructor(
             try {
                 stdout.collect { bytes ->
                     if (bytes.isNotEmpty()) {
-                        newBridge.feedBytes(bytes)
-                        _output.emit(bytes)
-                        // Tick the buffer signal so debounced consumers of
-                        // [flowOfMatches] re-run the detector. Cheap: just a
-                        // counter increment.
-                        bufferTick.value = bufferTick.value + 1
+                        val clean = if (suppressQueryResponses) {
+                            TerminalQueryResponseSanitizer.sanitize(bytes)
+                        } else {
+                            bytes
+                        }
+                        if (clean.isNotEmpty()) {
+                            newBridge.feedBytes(clean)
+                            _output.emit(clean)
+                            // Tick the buffer signal so debounced consumers of
+                            // [flowOfMatches] re-run the detector. Cheap: just a
+                            // counter increment.
+                            bufferTick.value = bufferTick.value + 1
+                        }
                     }
                 }
             } finally {
@@ -497,6 +540,7 @@ class TerminalSurfaceState internal constructor(
         producerJob = null
         bridge?.stop()
         bridge = null
+        sanitizeQueryResponses = false
         detach()
     }
 

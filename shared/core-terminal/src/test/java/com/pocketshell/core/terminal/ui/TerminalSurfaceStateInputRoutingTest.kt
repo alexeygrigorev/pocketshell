@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -145,6 +146,94 @@ class TerminalSurfaceStateInputRoutingTest {
     }
 
     @Test
+    fun bridgeModeCaptureReplayDropsQueryResponseLeak() = runBlocking {
+        // Issue #248: a `capture-pane` replay (appendRemoteOutput) that
+        // contains the printable remnant of an OSC-colour + DA reply must NOT
+        // paint that raw sequence onto the grid in bridge (tmux -CC) mode.
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = RecordingOutputStream(),
+            suppressQueryResponses = true,
+        )
+
+        try {
+            val leak = "real-output ]11;rgb:0101/0404/0909\\[?64;1;2;6;9;15;18;21;22c after\r\n"
+            state.appendRemoteOutput(leak.toByteArray(Charsets.US_ASCII))
+            shadowOf(Looper.getMainLooper()).idle()
+
+            val transcript = state.renderedTranscriptForTesting()
+            assertTrue(
+                "bridge mode must keep real output, got: $transcript",
+                transcript.contains("real-output"),
+            )
+            assertTrue(
+                "bridge mode must keep trailing output, got: $transcript",
+                transcript.contains("after"),
+            )
+            assertFalse(
+                "raw OSC color reply must not reach the grid, got: $transcript",
+                transcript.contains("rgb:0101"),
+            )
+            assertFalse(
+                "raw DA reply must not reach the grid, got: $transcript",
+                transcript.contains("64;1;2;6;9;15;18;21;22c"),
+            )
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun plainSshSurfaceKeepsQueryResponsesInOutput() = runBlocking {
+        // Non-bridge surfaces must NOT sanitize — full fidelity is preserved.
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = RecordingOutputStream(),
+            // suppressQueryResponses defaults to false (plain SSH surface).
+        )
+        val collected = CompletableDeferred<ByteArray>()
+        val outputCollector = launch(Dispatchers.Unconfined) {
+            state.output.collect { if (!collected.isCompleted) collected.complete(it) }
+        }
+
+        try {
+            val wire = "]11;rgb:0101/0404/0909\\".toByteArray(Charsets.US_ASCII)
+            // The no-replay _output SharedFlow drops emissions that arrive
+            // before a collector subscribes, so poll-until-complete instead of
+            // a single-shot await — matching the proven pattern in
+            // externalProducerOutputEmitsRenderRequestWithoutComposeStateTick.
+            withTimeout(2_000) {
+                while (!collected.isCompleted) {
+                    stdout.emit(wire)
+                    shadowOf(Looper.getMainLooper()).idle()
+                    delay(10)
+                }
+            }
+            val emitted = collected.await()
+            assertEquals(
+                "plain SSH surface must forward query responses verbatim",
+                wire.toList(),
+                emitted.toList(),
+            )
+        } finally {
+            outputCollector.cancel()
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    }
+
+    @Test
     fun externalProducerOutputEmitsRenderRequestWithoutComposeStateTick() = runBlocking {
         val state = TerminalSurfaceState()
         val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
@@ -162,10 +251,14 @@ class TerminalSurfaceStateInputRoutingTest {
         }
 
         try {
-            stdout.emit("hello from remote\n".toByteArray(Charsets.UTF_8))
-
+            // renderRequests is a no-replay SharedFlow, so a render request
+            // emitted before renderCollector subscribes is lost. Re-emit the
+            // output on every poll iteration so a fresh onTextChanged ->
+            // tryEmit keeps firing until the collector observes one.
+            val payload = "hello from remote\n".toByteArray(Charsets.UTF_8)
             withTimeout(2_000) {
                 while (!renderRequest.isCompleted) {
+                    stdout.emit(payload)
                     shadowOf(Looper.getMainLooper()).idle()
                     delay(10)
                 }

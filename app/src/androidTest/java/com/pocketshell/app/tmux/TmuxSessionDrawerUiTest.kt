@@ -51,16 +51,23 @@ class TmuxSessionDrawerUiTest {
         }
 
         compose.onNodeWithTag(TMUX_SESSION_SWITCHER_TAG).assertExists()
+        // Issue #156 (4.1): header stacks the title row over a
+        // "<host> / <session>" subtitle row.
+        compose.onNodeWithText("Tmux sessions").assertExists()
         compose.onNodeWithText("Docker Agent / codex").assertExists()
+        // Issue #156 (4.2): the host-scoped actions group into a labelled
+        // "Options" card; the sessions sit under "Available sessions".
+        compose.onNodeWithText("Options").assertExists()
+        compose.onNodeWithText("Available sessions").assertExists()
         compose.onNodeWithText("codex").assertExists()
         compose.onNodeWithText("current").assertExists()
         compose.onNodeWithText("fresh-work").assertExists()
         compose.onNodeWithText("available").assertExists()
 
         compose.onNodeWithText("fresh-work").performClick()
-        compose.onNodeWithText("+ New tmux session (separate workspace)").performClick()
-        compose.onNodeWithText("Refresh").performClick()
-        compose.onNodeWithText("Close").performClick()
+        compose.onNodeWithTag(TMUX_SESSION_DRAWER_CREATE_TAG).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_DRAWER_REFRESH_TAG).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_DRAWER_CLOSE_TAG).performClick()
 
         assertEquals(
             listOf("attach:fresh-work", "create", "refresh", "dismiss"),
@@ -90,7 +97,7 @@ class TmuxSessionDrawerUiTest {
 
         compose.onNodeWithTag(TMUX_SESSION_SWITCHER_TAG).assertExists()
         compose.onNodeWithText("No tmux sessions found.").assertExists()
-        compose.onNodeWithText("+ New tmux session (separate workspace)").performClick()
+        compose.onNodeWithTag(TMUX_SESSION_DRAWER_CREATE_TAG).performClick()
 
         assertTrue(createClicked)
     }

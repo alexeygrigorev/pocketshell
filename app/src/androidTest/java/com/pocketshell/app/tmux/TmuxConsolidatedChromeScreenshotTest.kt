@@ -16,7 +16,6 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellThemeMode
@@ -27,25 +26,28 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Issue #189 screenshot evidence — captures the new consolidated 56dp
- * top chrome ([TmuxImeAwareTopChrome] / [ConsolidatedTopChrome]) in
- * every meaningful permutation so the reviewer and the maintainer can
- * eyeball the chrome reduction without driving a live tmux session.
+ * Issues #189 / #192 screenshot evidence — captures the tmux session
+ * top chrome ([ConsolidatedTopChrome] / [CompactBreadcrumb]) plus
+ * the per-window navigation strip ([WindowStrip]) and per-window
+ * Terminal/Conversation toggle ([WindowTabToggle]) in every meaningful
+ * permutation so the reviewer and maintainer can eyeball the new
+ * information architecture without driving a live tmux session.
  *
  * Three artifacts get written to
  * `<media>/additional_test_output/tmux-consolidated-chrome/`:
  *
  *  - `consolidated-chrome-single-window-no-agent.png` — the minimal
- *    case (no agent, single window). Just back + session name + kebab.
+ *    case (no agent, single window). Just back + session name + kebab;
+ *    no strip (nothing to switch to), no toggle.
  *  - `consolidated-chrome-multi-window-with-agent.png` — the loaded
- *    case (Conversation tab pill + `session › Window 2` crumb).
+ *    case (#192 IA): header row + per-window strip (active pill carries
+ *    the ✕ kill affordance) + per-window Terminal/Conversation toggle.
  *  - `consolidated-chrome-ime-up-compact.png` — IME-up compressed
- *    chrome (the [CompactBreadcrumb] 40dp strip, no tabs).
+ *    chrome (the [CompactBreadcrumb] 40dp strip, no strip, no toggle).
  *
  * Combined with [TmuxSessionScreenImeChromeTest] (which asserts the
  * 56dp height limit and the IME-down/up tag visibility contract), this
- * is the visual gate for the "≤ 56dp single-toolbar chrome" acceptance
- * criterion on issue #189.
+ * is the visual gate for the new chrome IA.
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxConsolidatedChromeScreenshotTest {
@@ -73,21 +75,13 @@ class TmuxConsolidatedChromeScreenshotTest {
                         .padding(top = 24.dp)
                         .testTag(SCREENSHOT_ROOT_TAG),
                 ) {
-                    TmuxImeAwareTopChrome(
-                        chromeCompressed = false,
-                        crumbs = sampleCrumbs(windowLabel = "Window 1"),
+                    // Single window, no agent: just the header row.
+                    // No strip (nothing to switch to), no toggle.
+                    ConsolidatedTopChrome(
+                        hostLabel = "hetzner",
                         sessionName = "scratch",
                         onBack = {},
                         onMore = {},
-                        // Single-tab list -> Conversation pill is not
-                        // rendered; only the Terminal label would be
-                        // selected. The chrome stays minimal.
-                        tabLabels = listOf("Terminal"),
-                        selectedTabIndex = 0,
-                        onTabSelected = {},
-                        windows = sampleWindows(1),
-                        currentWindowId = "@1",
-                        onOpenWindowSwitcher = {},
                     )
                     PaneProxy()
                 }
@@ -119,18 +113,28 @@ class TmuxConsolidatedChromeScreenshotTest {
                         .padding(top = 24.dp)
                         .testTag(SCREENSHOT_ROOT_TAG),
                 ) {
-                    TmuxImeAwareTopChrome(
-                        chromeCompressed = false,
-                        crumbs = sampleCrumbs(windowLabel = "Window 2"),
+                    // Multi-window + agent: the full #192 IA — header
+                    // row, per-window strip (Window 2 active, carrying
+                    // the ✕ kill affordance), per-window toggle.
+                    ConsolidatedTopChrome(
+                        hostLabel = "hetzner",
                         sessionName = "claude-main",
                         onBack = {},
                         onMore = {},
-                        tabLabels = listOf("Terminal", "Conversation"),
-                        selectedTabIndex = 1,
-                        onTabSelected = {},
+                    )
+                    WindowStrip(
                         windows = sampleWindows(3),
                         currentWindowId = "@2",
-                        onOpenWindowSwitcher = {},
+                        onSelectWindow = {},
+                        onOpenWindowMenu = {},
+                        onKillWindow = {},
+                        onNewWindow = {},
+                    )
+                    WindowTabToggle(
+                        labels = listOf("Terminal", "Conversation"),
+                        selectedIndex = 1,
+                        onSelected = {},
+                        pulse = false,
                     )
                     PaneProxy()
                 }
@@ -162,18 +166,13 @@ class TmuxConsolidatedChromeScreenshotTest {
                         .padding(top = 24.dp)
                         .testTag(SCREENSHOT_ROOT_TAG),
                 ) {
-                    TmuxImeAwareTopChrome(
-                        chromeCompressed = true,
-                        crumbs = sampleCrumbs(windowLabel = "Window 2"),
+                    // IME up: chrome collapses to the compact breadcrumb;
+                    // the strip + toggle are suppressed by the screen (so
+                    // they are simply not rendered here).
+                    CompactBreadcrumb(
                         sessionName = "claude-main",
                         onBack = {},
                         onMore = {},
-                        tabLabels = listOf("Terminal", "Conversation"),
-                        selectedTabIndex = 0,
-                        onTabSelected = {},
-                        windows = sampleWindows(3),
-                        currentWindowId = "@2",
-                        onOpenWindowSwitcher = {},
                     )
                     PaneProxy()
                 }
@@ -199,13 +198,6 @@ class TmuxConsolidatedChromeScreenshotTest {
                 .padding(12.dp),
         )
     }
-
-    private fun sampleCrumbs(windowLabel: String): List<Crumb> = listOf(
-        Crumb(label = "hetzner", isCurrent = false, onClick = {}),
-        Crumb(label = "claude-main", isCurrent = false, onClick = {}),
-        Crumb(label = windowLabel, isCurrent = false, onClick = {}),
-        Crumb(label = "Pane 1", isCurrent = true, onClick = {}),
-    )
 
     private fun sampleWindows(count: Int): List<WindowSummary> =
         (1..count).map { idx -> WindowSummary(windowId = "@$idx", title = "Window $idx") }

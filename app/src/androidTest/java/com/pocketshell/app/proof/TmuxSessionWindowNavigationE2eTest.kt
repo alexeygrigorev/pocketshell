@@ -21,6 +21,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTextInput
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
@@ -34,9 +35,8 @@ import com.pocketshell.app.tmux.TMUX_FULL_CHROME_MORE_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_OVERLAY_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_PAGE_TAG_PREFIX
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TMUX_WINDOW_STRIP_PILL_TAG_PREFIX
 import com.pocketshell.app.tmux.TMUX_WINDOW_STRIP_TAG
-import com.pocketshell.app.tmux.TMUX_WINDOW_SWITCHER_OVERLAY_TAG
-import com.pocketshell.app.tmux.TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -46,6 +46,7 @@ import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -146,13 +147,13 @@ class TmuxSessionWindowNavigationE2eTest {
         // any pane shows up.
         waitForTerminalReady()
         SystemClock.sleep(SETTLE_MS)
-        // Issue #189: the WindowStrip is no longer rendered as part of
-        // the default chrome — its assertion is now an unconditional
-        // "must not exist". The previous single-window-only behaviour
-        // from #158 still holds: there is nothing to switch to and the
-        // user sees just the consolidated top chrome's session label.
+        // Issue #192: the WindowStrip is the primary window switcher but
+        // is only rendered when there is more than one window — a
+        // single-window session has nothing to switch to, so the strip
+        // would be pure chrome. claude-main starts with one window, so
+        // the strip must be absent here.
         assertFalse(
-            "WindowStrip should never be rendered as default chrome (#189)",
+            "WindowStrip must be hidden in a single-window session (#192)",
             compose.onAllNodesWithTag(TMUX_WINDOW_STRIP_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty(),
@@ -161,7 +162,8 @@ class TmuxSessionWindowNavigationE2eTest {
 
         // ===== Step 3 — Add a window from the kebab + window menu =====
         // Single source of truth for the "+ New window" affordance — the
-        // strip is gone (#189), so the kebab is the discoverable path.
+        // kebab is the discoverable path (the strip's "+ window" button
+        // is exercised by the chrome-level UI test).
         openMoreMenu()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithText("+ New window", useUnmergedTree = true)
@@ -171,50 +173,34 @@ class TmuxSessionWindowNavigationE2eTest {
         val newWindowAt = SystemClock.elapsedRealtime()
         compose.onNodeWithText("+ New window").performClick()
 
-        // ===== Step 4 — "Switch window" surfaces in the kebab now that windows.size > 1 =====
-        // Post-#189 the WindowStrip is gone; the kebab gains a
-        // "Switch window" item when there are multiple windows, and
-        // the consolidated chrome's window crumb is tappable. We use
-        // the kebab path here so we can assert the entry actually
-        // shows up as expected (the alternative — tap the "Window N"
-        // crumb directly — is exercised implicitly later in this test
-        // via the [TMUX_WINDOW_SWITCHER_OVERLAY_TAG] assertions).
+        // ===== Step 4 — WindowStrip becomes the primary switcher now that windows.size > 1 =====
+        // Issue #192: with a second window the [WindowStrip] is rendered
+        // and carries one pill per window. We assert both pills show up,
+        // then switch by tapping the pill directly (the primary,
+        // most-discoverable path) — not the kebab.
         compose.waitUntil(timeoutMillis = 20_000) {
-            // Open the kebab; close it after the first probe so we
-            // can re-open it freshly for the switcher launch below.
-            // Probe without throwing while the dropdown is animating in.
-            moreButtonVisible()
-        }
-        recordTiming("add_window_ms", SystemClock.elapsedRealtime() - newWindowAt)
-        openMoreMenu()
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
-        compose.onNodeWithText("Switch window").performClick()
-        compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithTag(TMUX_WINDOW_SWITCHER_OVERLAY_TAG, useUnmergedTree = true)
+            compose.onAllNodesWithTag(TMUX_WINDOW_STRIP_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty() &&
                 compose.onAllNodesWithTag(
-                    "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}1",
+                    "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}1",
                     useUnmergedTree = true,
                 ).fetchSemanticsNodes().isNotEmpty() &&
                 compose.onAllNodesWithTag(
-                    "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}2",
+                    "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}2",
                     useUnmergedTree = true,
                 ).fetchSemanticsNodes().isNotEmpty()
         }
-        captureViewport("issue158-03-window-switcher-two-entries")
+        recordTiming("add_window_ms", SystemClock.elapsedRealtime() - newWindowAt)
+        captureViewport("issue158-03-window-strip-two-pills")
 
-        // Tap window 2's page in the overlay to swap the visible pane.
-        performWindowSwitcherPageClick(2)
-        // The WindowSwitcher click starts a local pager scroll. Waiting
-        // only for "terminal is non-empty" races because Window 1 is
-        // already non-empty (`CLAUDE-READY`). Wait until the visible
-        // transcript is no longer Window 1 before sending input, or the
-        // marker can be written into the wrong pane.
+        // Tap window 2's pill in the strip to swap the visible pane.
+        performWindowStripPillClick(2)
+        // The pill tap starts a local pager scroll. Waiting only for
+        // "terminal is non-empty" races because Window 1 is already
+        // non-empty (`CLAUDE-READY`). Wait until the visible transcript
+        // is no longer Window 1 before sending input, or the marker can
+        // be written into the wrong pane.
         waitForVisibleTerminal("switched to window 2 before typing") { transcript ->
             !TerminalTextMatcher.containsWrapTolerant(
                 transcript,
@@ -239,22 +225,15 @@ class TmuxSessionWindowNavigationE2eTest {
         }
         captureViewport("issue158-04-win2-marker-visible")
 
-        // ===== Step 6 — Switch to window 1 via the kebab, marker MUST NOT be visible =====
+        // ===== Step 6 — Switch to window 1 via the strip, marker MUST NOT be visible =====
         val switchToWinOneAt = SystemClock.elapsedRealtime()
-        openMoreMenu()
-        compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
-        compose.onNodeWithText("Switch window").performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(
-                "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}1",
+                "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}1",
                 useUnmergedTree = true,
             ).fetchSemanticsNodes().isNotEmpty()
         }
-        performWindowSwitcherPageClick(1)
+        performWindowStripPillClick(1)
         // The pager animates to the first pane of window 1. Wait for the
         // visible transcript to flip away from the win-2 marker — the
         // terminalState attached to the visible pane is window 1's, which
@@ -279,22 +258,15 @@ class TmuxSessionWindowNavigationE2eTest {
         )
         captureViewport("issue158-05-switched-to-window-1")
 
-        // ===== Step 7 — Switch back to window 2 via the kebab, marker MUST reappear =====
+        // ===== Step 7 — Switch back to window 2 via the strip, marker MUST reappear =====
         val switchBackAt = SystemClock.elapsedRealtime()
-        openMoreMenu()
-        compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
-        compose.onNodeWithText("Switch window").performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(
-                "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}2",
+                "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}2",
                 useUnmergedTree = true,
             ).fetchSemanticsNodes().isNotEmpty()
         }
-        performWindowSwitcherPageClick(2)
+        performWindowStripPillClick(2)
         waitForVisibleTerminal("switched back to window 2 (marker present)") { transcript ->
             val columns = terminalGridSize().columns
             TerminalTextMatcher.containsWrapTolerant(
@@ -376,30 +348,19 @@ class TmuxSessionWindowNavigationE2eTest {
         recordTiming("reattach_claude_main_ms", SystemClock.elapsedRealtime() - reattachAt)
         captureViewport("issue158-08-reattached-claude-main")
 
-        // The reattached session has two windows. The strip is gone
-        // post-#189; the discoverable switcher path is the kebab's
-        // "Switch window" entry, which the kebab only renders when
-        // there are siblings to switch to.
+        // The reattached session has two windows, so the [WindowStrip]
+        // (#192) is rendered again. Wait for window 2's pill, then tap
+        // it to land on window 2 deterministically.
         compose.waitUntil(timeoutMillis = 20_000) {
-            moreButtonVisible()
-        }
-        openMoreMenu()
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText("Switch window", useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
-        compose.onNodeWithText("Switch window").performClick()
-        compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(
-                "${TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX}2",
+                "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}2",
                 useUnmergedTree = true,
             ).fetchSemanticsNodes().isNotEmpty()
         }
         // After reattach, the user could land on either window — what
         // matters is that the win-2 marker is reachable. Tap window 2's
-        // overlay page explicitly to land on it deterministically.
-        performWindowSwitcherPageClick(2)
+        // strip pill explicitly to land on it deterministically.
+        performWindowStripPillClick(2)
         waitForVisibleTerminal("marker preserved across reattach") { transcript ->
             TerminalTextMatcher.containsWrapTolerant(
                 transcript,
@@ -409,13 +370,13 @@ class TmuxSessionWindowNavigationE2eTest {
         }
         captureViewport("issue158-09-marker-preserved-after-reattach")
 
-        // ===== Bonus assertion — strip is *never* rendered post-#189 =====
-        // Sanity: the consolidated chrome carries the same affordances
-        // without the strip. We re-assert the strip is gone after the
-        // reattach so a future regression that flips the chrome back
-        // is caught.
-        assertFalse(
-            "WindowStrip must remain hidden after reattach (#189)",
+        // ===== Bonus assertion — strip IS the multi-window switcher (#192) =====
+        // Sanity: the reattached session has two windows, so the
+        // [WindowStrip] must be present (it is the primary window
+        // switcher). A regression that hides the strip in a multi-window
+        // session would be caught here.
+        assertTrue(
+            "WindowStrip must be rendered for a multi-window session after reattach (#192)",
             compose.onAllNodesWithTag(TMUX_WINDOW_STRIP_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty(),
@@ -423,6 +384,172 @@ class TmuxSessionWindowNavigationE2eTest {
 
         writeTimings()
         Unit
+    }
+
+    /**
+     * Issue #192 regression — the per-pill long-press "Rename" action must
+     * rename the window of the pill that was long-pressed, NOT whatever
+     * window is currently active. (The bug renamed `currentWindowId`.)
+     *
+     * Journey: seed a fresh `claude-main`, add a second window so the
+     * strip renders two pills, switch to window 2 so it is the *active*
+     * window, then long-press window 1's pill and rename it. We then read
+     * the remote tmux window names over SSH and assert window 1 (the
+     * long-pressed, non-active one) carries the new name while window 2
+     * (the active one) is untouched. Pre-fix, window 2 would have been
+     * renamed instead.
+     */
+    @Test
+    fun perPillRenameTargetsLongPressedWindowNotCurrent() = runBlocking {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+        seedTmuxSessions(key)
+        val hostRowTag = seedDockerHost(key, "Issue192 Per-Pill Rename")
+
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+
+        // Attach to claude-main.
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForText(SESSION_CLAUDE, timeoutMs = 20_000)
+        compose.onNodeWithText(SESSION_CLAUDE).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        waitForTerminalReady()
+
+        // Add a second window so the strip renders two pills.
+        openMoreMenu()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText("+ New window", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("+ New window").performClick()
+        compose.waitUntil(timeoutMillis = 20_000) {
+            compose.onAllNodesWithTag(
+                "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}1",
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isNotEmpty() &&
+                compose.onAllNodesWithTag(
+                    "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}2",
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Make window 2 the *active* window — this is the trap: pre-fix
+        // the rename targeted the active window (window 2).
+        performWindowStripPillClick(2)
+        waitForVisibleTerminal("switched to window 2 before rename") { transcript ->
+            !TerminalTextMatcher.containsWrapTolerant(
+                transcript,
+                INITIAL_WINDOW_MARKER,
+                terminalCols = terminalGridSize().columns,
+            )
+        }
+        SystemClock.sleep(SETTLE_MS)
+
+        // Record the remote window names BEFORE the rename so the
+        // assertion compares against ground truth, not assumptions.
+        val namesBefore = remoteWindowNames(key, SESSION_CLAUDE)
+        assertTrue(
+            "expected two windows on $SESSION_CLAUDE before rename, got $namesBefore",
+            namesBefore.size == 2,
+        )
+
+        // Long-press window 1's pill (the NON-active window) and rename it.
+        val renamed = "renamed-w1-$MARKER"
+        compose.onNodeWithTag(
+            "${TMUX_WINDOW_STRIP_PILL_TAG_PREFIX}1",
+            useUnmergedTree = true,
+        ).performSemanticsAction(SemanticsActions.OnLongClick)
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText("Rename Window 1", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("Rename Window 1").performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText("Window name", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        // The dialog prefills with the windowId; clear it then type the
+        // new name so the field holds exactly the rename target.
+        compose.onAllNodes(hasSetTextAction(), useUnmergedTree = true)
+            .onFirst()
+            .performTextClearance()
+        compose.onAllNodes(hasSetTextAction(), useUnmergedTree = true)
+            .onFirst()
+            .performTextInput(renamed)
+        compose.onNodeWithText("Save").performClick()
+
+        // Poll the remote until exactly one window carries the new name.
+        var namesAfter: List<String> = emptyList()
+        val applied = runCatching {
+            compose.waitUntil(timeoutMillis = 15_000) {
+                namesAfter = runBlocking { remoteWindowNames(key, SESSION_CLAUDE) }
+                namesAfter.contains(renamed)
+            }
+            true
+        }.getOrDefault(false)
+
+        assertTrue(
+            "expected the rename to reach the remote tmux server; namesAfter=$namesAfter",
+            applied,
+        )
+        // The long-pressed window is window 1 (index 0 in list-windows
+        // order). It MUST carry the new name.
+        assertEquals(
+            "per-pill rename must target the long-pressed window (window 1), got $namesAfter",
+            renamed,
+            namesAfter.first(),
+        )
+        // The active window (window 2, index 1) MUST be untouched — this
+        // is what the pre-fix mistarget would have renamed.
+        assertEquals(
+            "active window (window 2) must NOT be renamed by a per-pill rename of window 1, got $namesAfter",
+            namesBefore[1],
+            namesAfter[1],
+        )
+
+        Unit
+    }
+
+    /**
+     * Reads the ordered window names of [sessionName] from the remote tmux
+     * server over SSH. `list-windows` reports windows in index order, so
+     * element 0 is window 1, element 1 is window 2, matching the strip
+     * pill ordering.
+     */
+    private suspend fun remoteWindowNames(key: String, sessionName: String): List<String> {
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use {
+                it.exec(
+                    "tmux list-windows -t ${shellQuote(sessionName)} -F '#{window_name}'",
+                )
+            }
+        }
+        val exec = result.getOrNull()
+        assertTrue(
+            "expected tmux list-windows to succeed, got exception=" +
+                "${result.exceptionOrNull()} stderr='${exec?.stderr}'",
+            exec?.exitCode == 0,
+        )
+        return exec?.stdout.orEmpty()
+            .lines()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
     }
 
     // ---------------------------------------------------------------- Helpers
@@ -549,17 +676,9 @@ class TmuxSessionWindowNavigationE2eTest {
             .performClick()
     }
 
-    private fun moreButtonVisible(): Boolean =
-        compose.onAllNodesWithTag(TMUX_COMPACT_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
-            .fetchSemanticsNodes()
-            .isNotEmpty() ||
-            compose.onAllNodesWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-
-    private fun performWindowSwitcherPageClick(page: Int) {
+    private fun performWindowStripPillClick(window: Int) {
         compose.onNodeWithTag(
-            "$TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX$page",
+            "$TMUX_WINDOW_STRIP_PILL_TAG_PREFIX$window",
             useUnmergedTree = true,
         ).performSemanticsAction(SemanticsActions.OnClick)
     }

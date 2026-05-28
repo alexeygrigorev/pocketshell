@@ -64,14 +64,16 @@ import java.io.FileOutputStream
  *    fallback timeout fires) so the surviving window list drops the
  *    killed pill deterministically.
  *
- * ## Post-#189 UX
+ * ## UX note
  *
- * After #189 the inline `WindowStrip` was retired in favour of the
- * kebab `Switch window` entry and the [WindowSwitcherOverlay]. There is
- * no per-window long-press kill any more — `Kill window` in the kebab
- * always targets the CURRENT window. The user-reported bug was "any
- * window kill silently fails"; killing the currently-active window is
- * sufficient to exercise the fixed code path.
+ * Since #192 the per-window kill affordance lives back on the
+ * [WindowStrip] pill (an explicit ✕ on the active pill plus a
+ * long-press menu); the kebab `Kill window` entry remains and always
+ * targets the CURRENT window. This test drives the kebab path because
+ * the user-reported bug was "any window kill silently fails", and
+ * killing the currently-active window is sufficient to exercise the
+ * fixed view-model code path. The new strip ✕ / long-press affordances
+ * are covered at the chrome layer by `WindowStripChromeUiTest`.
  *
  * The app's pane reconcile sorts panes by `pane_index`, and the main
  * pager (driven by `currentPane = panes[pagerState.currentPage]`)

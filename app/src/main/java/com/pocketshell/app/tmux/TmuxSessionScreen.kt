@@ -247,6 +247,7 @@ public fun TmuxSessionScreen(
     var dialogText by remember { mutableStateOf("") }
     var dialogStartDirectory by remember { mutableStateOf(DEFAULT_TMUX_START_DIRECTORY) }
     var showWindowSwitcher by remember { mutableStateOf(false) }
+    var showSessionSwitcher by remember { mutableStateOf(false) }
     var showSessionDrawer by remember { mutableStateOf(false) }
     // Voice/dictation surfaces — mirror SessionScreen so the tmux route
     // gets the prompt composer, the mic FAB, the inline-dictation key bar,
@@ -275,12 +276,13 @@ public fun TmuxSessionScreen(
     // tmux client.
     TmuxSessionBackHandler(
         dialogOpen = dialogMode != null,
-        sessionDrawerOpen = showSessionDrawer,
+        sessionDrawerOpen = showSessionSwitcher || showSessionDrawer,
         windowSwitcherOpen = showWindowSwitcher,
         micSheetOpen = showMicSheet,
         snippetPickerOpen = showSnippetPicker,
         onDismissDialog = { dialogMode = null },
         onDismissSessionDrawer = {
+            showSessionSwitcher = false
             showSessionDrawer = false
             sessionPickerViewModel.dismiss()
         },
@@ -480,7 +482,7 @@ public fun TmuxSessionScreen(
                     .verticalSwipeInput(
                         thresholdPx = verticalSwipeThresholdPx,
                         onBoundary = { haptics.performHapticFeedback(HapticFeedbackType.LongPress) },
-                        onSwipeDown = { showSessionDrawer = true },
+                        onSwipeDown = { showSessionSwitcher = true },
                     ),
             ) {
                 // Issue #189: the IME-down chrome is now a single 56dp
@@ -584,7 +586,7 @@ public fun TmuxSessionScreen(
                     },
                     onSwitchSession = {
                         moreExpanded = false
-                        showSessionDrawer = true
+                        showSessionSwitcher = true
                     },
                     onOpenJobs = {
                         moreExpanded = false
@@ -984,6 +986,30 @@ public fun TmuxSessionScreen(
             )
         }
 
+        SessionSwitcherOverlay(
+            visible = showSessionSwitcher,
+            state = sessionPickerState,
+            hostName = hostName.ifBlank { host },
+            currentSessionName = sessionName,
+            onRefresh = { sessionPickerViewModel.load(sessionPickerRequest) },
+            onDismiss = {
+                showSessionSwitcher = false
+                sessionPickerViewModel.dismiss()
+            },
+            onSelectSession = { selectedSessionName ->
+                showSessionSwitcher = false
+                sessionPickerViewModel.dismiss()
+                if (selectedSessionName != sessionName) {
+                    onReplaceTmuxSession(selectedSessionName)
+                }
+            },
+            onCreate = {
+                showSessionSwitcher = false
+                sessionPickerViewModel.dismiss()
+                openTextDialog(TmuxDialogMode.CreateSession)
+            },
+        )
+
         TmuxSessionDrawer(
             visible = showSessionDrawer,
             state = sessionPickerState,
@@ -1009,8 +1035,8 @@ public fun TmuxSessionScreen(
         )
     }
 
-    LaunchedEffect(showSessionDrawer, sessionPickerRequest) {
-        if (showSessionDrawer) {
+    LaunchedEffect(showSessionSwitcher, showSessionDrawer, sessionPickerRequest) {
+        if (showSessionSwitcher || showSessionDrawer) {
             sessionPickerViewModel.load(sessionPickerRequest)
         }
     }
@@ -1059,6 +1085,158 @@ public fun TmuxSessionScreen(
                 showSnippetPicker = false
             },
         )
+    }
+}
+
+@Composable
+private fun SessionSwitcherOverlay(
+    visible: Boolean,
+    state: HostTmuxSessionPickerState,
+    hostName: String,
+    currentSessionName: String,
+    onRefresh: () -> Unit,
+    onDismiss: () -> Unit,
+    onSelectSession: (String) -> Unit,
+    onCreate: () -> Unit,
+) {
+    val pages = remember(state, currentSessionName) {
+        sessionSwitcherPages(state, currentSessionName)
+    }
+    val initialPage = pages.indexOfFirst { it.name == currentSessionName }.coerceAtLeast(0)
+    val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { pages.size })
+
+    LaunchedEffect(visible, currentSessionName, pages) {
+        if (visible) {
+            val page = pages.indexOfFirst { it.name == currentSessionName }
+            if (page >= 0) pagerState.scrollToPage(page)
+        }
+    }
+
+    LaunchedEffect(visible, pagerState, pages, currentSessionName) {
+        if (!visible) return@LaunchedEffect
+        snapshotFlow { pagerState.settledPage }.collect { page ->
+            val session = pages.getOrNull(page) ?: return@collect
+            if (session.name != currentSessionName && session.selectable) {
+                onSelectSession(session.name)
+            }
+        }
+    }
+
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(animationSpec = tween(durationMillis = MotionDurationMs)) +
+            slideInVertically(
+                animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                initialOffsetY = { it / 2 },
+            ),
+        exit = fadeOut(animationSpec = tween(durationMillis = MotionDurationMs)) +
+            slideOutVertically(
+                animationSpec = tween(durationMillis = MotionDurationMs, easing = MotionEasing),
+                targetOffsetY = { it / 2 },
+            ),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(PocketShellColors.Background.copy(alpha = 0.92f))
+                .clickable(onClick = onDismiss)
+                .padding(16.dp)
+                .testTag(TMUX_SESSION_PAGER_OVERLAY_TAG),
+        ) {
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .clickable(onClick = {})
+                    .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
+                    .border(
+                        width = 1.dp,
+                        color = PocketShellColors.BorderSoft,
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    .padding(14.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Sessions",
+                            color = PocketShellColors.Text,
+                            fontSize = 15.sp,
+                        )
+                        Text(
+                            text = hostName,
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 12.sp,
+                        )
+                    }
+                    TextButton(onClick = onCreate) {
+                        Text("New")
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("Close")
+                    }
+                }
+
+                HorizontalPager(
+                    state = pagerState,
+                    beyondViewportPageCount = Int.MAX_VALUE,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(118.dp)
+                        .padding(top = 8.dp),
+                ) { page ->
+                    val session = pages[page]
+                    val selected = session.name == currentSessionName
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 4.dp)
+                            .background(
+                                color = if (selected) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
+                                shape = RoundedCornerShape(8.dp),
+                            )
+                            .clickable(
+                                enabled = session.selectable,
+                                role = androidx.compose.ui.semantics.Role.Tab,
+                                onClick = { onSelectSession(session.name) },
+                            )
+                            .padding(16.dp)
+                            .testTag("$TMUX_SESSION_PAGER_PAGE_TAG_PREFIX${page + 1}"),
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        Text(
+                            text = session.name,
+                            color = if (selected) PocketShellColors.Background else PocketShellColors.Text,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Medium,
+                        )
+                        Text(
+                            text = session.statusLabel,
+                            color = if (selected) PocketShellColors.Background else PocketShellColors.TextSecondary,
+                            fontSize = 12.sp,
+                        )
+                        Text(
+                            text = "${page + 1} / ${pages.size}",
+                            color = if (selected) PocketShellColors.Background else PocketShellColors.TextSecondary,
+                            fontSize = 12.sp,
+                            modifier = Modifier.testTag(TMUX_SESSION_PAGER_INDICATOR_TAG),
+                        )
+                    }
+                }
+
+                if (state !is HostTmuxSessionPickerState.Ready) {
+                    TextButton(
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = onRefresh,
+                    ) {
+                        Text("Refresh")
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1263,6 +1441,54 @@ private fun TmuxSessionDrawerRow(
             color = if (selected) PocketShellColors.Background else PocketShellColors.Accent,
             fontSize = 13.sp,
         )
+    }
+}
+
+internal data class SessionSwitcherPage(
+    val name: String,
+    val statusLabel: String,
+    val selectable: Boolean,
+)
+
+internal fun sessionSwitcherPages(
+    state: HostTmuxSessionPickerState,
+    currentSessionName: String,
+): List<SessionSwitcherPage> {
+    val current = SessionSwitcherPage(
+        name = currentSessionName,
+        statusLabel = "current",
+        selectable = true,
+    )
+    return when (state) {
+        HostTmuxSessionPickerState.Idle,
+        is HostTmuxSessionPickerState.Loading,
+        -> listOf(current.copy(statusLabel = "loading same-host sessions"))
+        is HostTmuxSessionPickerState.Ready -> {
+            val rows = state.rows.map { row ->
+                SessionSwitcherPage(
+                    name = row.name,
+                    statusLabel = when {
+                        row.name == currentSessionName -> "current"
+                        row.attached -> "attached"
+                        else -> "available"
+                    },
+                    selectable = true,
+                )
+            }
+            if (rows.any { it.name == currentSessionName }) rows else listOf(current) + rows
+        }
+        is HostTmuxSessionPickerState.Fallback -> listOf(
+            current.copy(statusLabel = state.message, selectable = false),
+        )
+        is HostTmuxSessionPickerState.ConnectError -> {
+            val host = state.request.host
+            listOf(
+                current.copy(
+                    statusLabel = "Couldn't reach ${host.username}@${host.hostname}:${host.port}.",
+                    selectable = false,
+                ),
+            )
+        }
     }
 }
 
@@ -1498,6 +1724,9 @@ internal const val TMUX_NEW_WINDOW_BUTTON_TAG = "tmux:new-window-button"
  */
 internal const val TMUX_WINDOW_SWITCHER_OVERLAY_TAG = "tmux:window-switcher"
 internal const val TMUX_WINDOW_SWITCHER_PAGE_TAG_PREFIX = "tmux:window-switcher-page:"
+internal const val TMUX_SESSION_PAGER_OVERLAY_TAG = "tmux:session-pager"
+internal const val TMUX_SESSION_PAGER_PAGE_TAG_PREFIX = "tmux:session-pager-page:"
+internal const val TMUX_SESSION_PAGER_INDICATOR_TAG = "tmux:session-pager-indicator"
 
 private fun Modifier.verticalSwipeInput(
     thresholdPx: Float,

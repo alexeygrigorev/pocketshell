@@ -1,5 +1,9 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
+import com.pocketshell.app.sessions.HostTmuxSessionPickerState
+import com.pocketshell.app.sessions.HostTmuxSessionRow
+import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import org.junit.Assert.assertEquals
 import org.junit.Test
@@ -71,6 +75,83 @@ class TmuxSessionScreenTest {
         // %2 is the first pane of @1.
         assertEquals("Pane 1", agentPaneLabelFor(panes[2], panes))
     }
+
+    @Test
+    fun sessionSwitcherPagesMirrorReadySessionRowsAndMarkCurrent() {
+        val pages = sessionSwitcherPages(
+            state = HostTmuxSessionPickerState.Ready(
+                request = pickerRequest(),
+                rows = listOf(
+                    HostTmuxSessionRow(name = "work"),
+                    HostTmuxSessionRow(name = "logs", attached = true),
+                ),
+            ),
+            currentSessionName = "work",
+        )
+
+        assertEquals(
+            listOf(
+                SessionSwitcherPage(name = "work", statusLabel = "current", selectable = true),
+                SessionSwitcherPage(name = "logs", statusLabel = "attached", selectable = true),
+            ),
+            pages,
+        )
+    }
+
+    @Test
+    fun sessionSwitcherPagesKeepCurrentSessionWhenListIsTemporarilyStale() {
+        val pages = sessionSwitcherPages(
+            state = HostTmuxSessionPickerState.Ready(
+                request = pickerRequest(),
+                rows = listOf(HostTmuxSessionRow(name = "logs")),
+            ),
+            currentSessionName = "work",
+        )
+
+        assertEquals(
+            listOf(
+                SessionSwitcherPage(name = "work", statusLabel = "current", selectable = true),
+                SessionSwitcherPage(name = "logs", statusLabel = "available", selectable = true),
+            ),
+            pages,
+        )
+    }
+
+    @Test
+    fun sessionSwitcherPagesFallbackIsNotSelectable() {
+        val pages = sessionSwitcherPages(
+            state = HostTmuxSessionPickerState.Fallback(
+                request = pickerRequest(),
+                message = "tmuxctl/tmux is not available on this host.",
+            ),
+            currentSessionName = "work",
+        )
+
+        assertEquals(
+            listOf(
+                SessionSwitcherPage(
+                    name = "work",
+                    statusLabel = "tmuxctl/tmux is not available on this host.",
+                    selectable = false,
+                ),
+            ),
+            pages,
+        )
+    }
+
+    private fun pickerRequest(): HostTmuxSessionPickerRequest =
+        HostTmuxSessionPickerRequest(
+            host = HostEntity(
+                id = 1L,
+                name = "alpha",
+                hostname = "alpha.example",
+                port = 22,
+                username = "alex",
+                keyId = 1L,
+            ),
+            keyPath = "/keys/alpha",
+            passphrase = null,
+        )
 
     private fun pane(
         paneId: String,

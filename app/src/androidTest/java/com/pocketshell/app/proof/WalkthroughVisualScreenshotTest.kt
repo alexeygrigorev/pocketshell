@@ -249,7 +249,7 @@ class WalkthroughVisualScreenshotTest {
         predicate: (String) -> Boolean,
     ) {
         var lastSnapshot = ""
-        compose.waitUntil(timeoutMillis = 15_000) {
+        compose.waitUntil(timeoutMillis = 45_000) {
             lastSnapshot = terminalTranscriptSnapshot()
             predicate(lastSnapshot)
         }

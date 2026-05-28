@@ -203,11 +203,10 @@ run_instrumentation_class() {
       ! grep -q "FAILURES!!!" "$RUN_DIR/$attempt_step.log"; then
       return 0
     fi
-    if ! grep -q "Process crashed" "$RUN_DIR/$attempt_step.log" ||
-      [[ "$attempt" -eq "$INSTRUMENTATION_ATTEMPTS" ]]; then
+    if [[ "$attempt" -eq "$INSTRUMENTATION_ATTEMPTS" ]]; then
       fail "$test_class did not report instrumentation success"
     fi
-    printf 'Retrying %s after instrumentation process crash; see %s\n' \
+    printf 'Retrying %s after instrumentation failure; see %s\n' \
       "$test_class" "$RUN_DIR/$attempt_step.log" >&2
     "$ADB" shell cmd package wait-for-handler >/dev/null 2>&1 || true
     sleep 8

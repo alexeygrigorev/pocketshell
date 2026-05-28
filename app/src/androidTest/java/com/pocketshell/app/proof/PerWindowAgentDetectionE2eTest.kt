@@ -81,9 +81,11 @@ class PerWindowAgentDetectionE2eTest {
 
         val started = System.currentTimeMillis()
         val sessionName = "issue186-perwin-${System.currentTimeMillis().toString().takeLast(8)}"
+        val processDir = "/tmp/$CLAUDE_PROCESS_TAG-${System.nanoTime()}"
+        val wrapperPath = "$processDir/claude"
         cleanupCommands += "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true"
-        cleanupCommands += "pkill -f $CLAUDE_PROCESS_TAG 2>/dev/null || true"
-        cleanupCommands += "rm -f /tmp/$CLAUDE_PROCESS_TAG 2>/dev/null || true"
+        cleanupCommands += "pkill -f ${shellQuote(wrapperPath)} 2>/dev/null || true"
+        cleanupCommands += "rm -rf ${shellQuote(processDir)} 2>/dev/null || true"
 
         withSshSession { session ->
             // Refresh the seeded JSONL mtime so it sits within the
@@ -100,8 +102,8 @@ class PerWindowAgentDetectionE2eTest {
             // processes are deliberately shaped so per-pane detection
             // has a discriminating signal:
             //
-            // Window 0: a tiny shell wrapper named like the agent CLI
-            //   (`claude-issue186-perwin`) runs `sleep 600` as a child.
+            // Window 0: a tiny shell wrapper with the exact agent CLI
+            //   basename (`claude`) runs `sleep 600` as a child.
             //   `ps -t <tty> -o comm,args` on this pane's TTY reports
             //   a row whose `comm`/`args` contain "claude" — which is
             //   the substring the detector's `namesAgent` grep keys
@@ -131,10 +133,11 @@ class PerWindowAgentDetectionE2eTest {
             // seeded Claude JSONL was indexed under. Without that
             // alignment, the JSONL find would not even pick up the
             // candidate and we'd be testing the wrong gate.
-            val wrapperPath = "/tmp/$CLAUDE_PROCESS_TAG"
             val setup = buildString {
                 append("set -eu; ")
                 append("tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true; ")
+                append("rm -rf ${shellQuote(processDir)} 2>/dev/null || true; ")
+                append("mkdir -p ${shellQuote(processDir)}; ")
                 // Build the claude-named wrapper script. The script
                 // body intentionally does NOT `exec sleep` — that
                 // would replace the script's process image with
@@ -396,13 +399,10 @@ class PerWindowAgentDetectionE2eTest {
         const val CLAUDE_PATH: String =
             "/home/testuser/.claude/projects/-workspace-pocketshell/pocketshell-claude.jsonl"
         const val REMOTE_CWD: String = "/workspace/pocketshell"
-        // argv[0] used by the seeded "claude on this TTY" process. Must
-        // start with `claude` so the detector's
-        // [com.pocketshell.core.agents.AgentDetector] `namesAgent`
-        // case-insensitive substring grep promotes the per-pane scan to
-        // a ProcessConfirmed detection. The `-issue186-perwin` suffix
-        // makes the marker unique enough for the @After pkill cleanup
-        // to avoid touching any other fixture processes.
+        // Unique directory prefix used by the seeded "claude on this
+        // TTY" wrapper. The executable basename remains exactly
+        // `claude`, matching the same command-token shape as the real
+        // CLI while keeping cleanup scoped to this test's temp path.
         const val CLAUDE_PROCESS_TAG: String = "claude-issue186-perwin"
     }
 }

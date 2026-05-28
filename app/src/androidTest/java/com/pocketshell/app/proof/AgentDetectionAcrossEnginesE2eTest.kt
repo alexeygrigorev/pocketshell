@@ -43,7 +43,7 @@ import java.io.FileOutputStream
  *
  * - Claude Code → `~/.claude/projects/-workspace-pocketshell/pocketshell-claude.jsonl`
  * - Codex      → `~/.codex/sessions/2026/05/22/pocketshell-codex.jsonl`
- * - OpenCode   → `~/.local/share/opencode/pocketshell-rows.jsonl`
+ * - OpenCode   → `~/.local/share/opencode/opencode.db#opencode-fixture`
  *
  * For each engine the test:
  *
@@ -107,7 +107,7 @@ class AgentDetectionAcrossEnginesE2eTest {
             processCommand = "opencode",
             sessionLabel = "opencode-lab",
             seededJsonlPath = OPENCODE_PATH,
-            expectedPathSubstring = ".local/share/opencode/",
+            expectedPathSubstring = ".local/share/opencode/opencode.db",
         )
     }
 
@@ -162,34 +162,23 @@ class AgentDetectionAcrossEnginesE2eTest {
         // step in the Docker image dates the file to image build time,
         // which is far in the past on a long-lived test host.
         withSshSession(sshKey) { session ->
-            val touch = session.exec("touch ${shellQuote(seededJsonlPath)}")
+            val seededFilePath = candidateFilePath(seededJsonlPath)
+            val touch = session.exec("touch ${shellQuote(seededFilePath)}")
             assertEquals(
-                "expected to refresh seeded JSONL mtime for $agent at $seededJsonlPath, stderr='${touch.stderr}'",
+                "expected to refresh seeded log mtime for $agent at $seededFilePath, stderr='${touch.stderr}'",
                 0,
                 touch.exitCode,
             )
             // Confirm the JSONL is present (catches a regressed fixture
             // before the detection assertion gives a more cryptic error).
-            val lsCheck = session.exec("ls ${shellQuote(seededJsonlPath)}")
+            val lsCheck = session.exec("ls ${shellQuote(seededFilePath)}")
             assertEquals(
-                "seeded JSONL missing for $agent at $seededJsonlPath: stdout='${lsCheck.stdout}' stderr='${lsCheck.stderr}'",
+                "seeded log missing for $agent at $seededFilePath: stdout='${lsCheck.stdout}' stderr='${lsCheck.stderr}'",
                 0,
                 lsCheck.exitCode,
             )
         }
 
-        // Spawn a tiny background process whose `comm` matches the
-        // engine's CLI name. The detector's `processLines.any
-        // { it.namesAgent(agent) }` promotes the detection from
-        // `RecentFile` to `ProcessConfirmed` when the agent CLI is
-        // currently running — which is the attach-to-existing scenario
-        // this issue is about.
-        //
-        // We do this via `exec sh -c 'exec -a <name> sleep 30'` so the
-        // /proc entry's `comm` is the engine name even though it's a
-        // sleep underneath. The bare `sleep 30` would leak only for
-        // ~30s — far longer than the detection round-trip but cleaned
-        // up automatically when the container is torn down.
         val processSshKey = sshKey
         val processSession = SshConnection.connect(
             host = DEFAULT_HOST,
@@ -199,12 +188,9 @@ class AgentDetectionAcrossEnginesE2eTest {
             knownHosts = KnownHostsPolicy.AcceptAll,
             timeoutMs = 15_000,
         ).getOrThrow()
+        val processFixture = ProcessFixture(processCommand)
         try {
-            val spawn = processSession.exec(
-                "(setsid sh -c \"exec -a ${shellQuote(processCommand)} " +
-                    "sleep 30\" >/dev/null 2>&1 &); sleep 0.2; " +
-                    "ps -eo comm,args | grep -F ${shellQuote(processCommand)} | grep -v grep || true",
-            )
+            val spawn = processSession.exec(processFixture.spawnCommand())
             assertTrue(
                 "expected fake process named '$processCommand' to be running for $agent detection; " +
                     "ps stdout='${spawn.stdout}' stderr='${spawn.stderr}'",
@@ -255,9 +241,7 @@ class AgentDetectionAcrossEnginesE2eTest {
         } finally {
             // Clean up the spawned sleep so the next run starts clean.
             runCatching {
-                processSession.exec(
-                    "pkill -f ${shellQuote(processCommand)} 2>/dev/null || true",
-                )
+                processSession.exec(processFixture.cleanupCommand())
             }
             runCatching { processSession.close() }
         }
@@ -291,9 +275,10 @@ class AgentDetectionAcrossEnginesE2eTest {
             // First ensure the JSONL still exists (the fixture seeds it
             // at container build time; if the fixture regressed we want
             // a clearer error than the detection assertion would give).
-            val lsCheck = session.exec("ls ${shellQuote(seededJsonlPath)}")
+            val seededFilePath = candidateFilePath(seededJsonlPath)
+            val lsCheck = session.exec("ls ${shellQuote(seededFilePath)}")
             assertEquals(
-                "seeded JSONL missing for $agent at $seededJsonlPath: stdout='${lsCheck.stdout}' stderr='${lsCheck.stderr}'",
+                "seeded log missing for $agent at $seededFilePath: stdout='${lsCheck.stdout}' stderr='${lsCheck.stderr}'",
                 0,
                 lsCheck.exitCode,
             )
@@ -307,9 +292,10 @@ class AgentDetectionAcrossEnginesE2eTest {
             val competingPaths = listOf(CLAUDE_PATH, CODEX_PATH, OPENCODE_PATH)
                 .filterNot { it == seededJsonlPath }
             for (competing in competingPaths) {
+                val competingFilePath = candidateFilePath(competing)
                 val staleOut = session.exec(
                     "ancient=$(( $(date +%s) - 10800 )); " +
-                        "touch -d \"@${'$'}ancient\" ${shellQuote(competing)} 2>/dev/null || true",
+                        "touch -d \"@${'$'}ancient\" ${shellQuote(competingFilePath)} 2>/dev/null || true",
                 )
                 // Best-effort — if the file is missing on the fixture,
                 // the `|| true` swallows the error.
@@ -325,11 +311,11 @@ class AgentDetectionAcrossEnginesE2eTest {
             val backdateSeconds = stalenessMinutes * 60
             val touch = session.exec(
                 "past=$(( $(date +%s) - $backdateSeconds )); " +
-                    "touch -d \"@${'$'}past\" ${shellQuote(seededJsonlPath)}",
+                    "touch -d \"@${'$'}past\" ${shellQuote(seededFilePath)}",
             )
             assertEquals(
                 "expected to backdate seeded JSONL mtime by $stalenessMinutes minutes " +
-                    "for $agent at $seededJsonlPath, stderr='${touch.stderr}'",
+                    "for $agent at $seededFilePath, stderr='${touch.stderr}'",
                 0,
                 touch.exitCode,
             )
@@ -338,10 +324,10 @@ class AgentDetectionAcrossEnginesE2eTest {
             // (stalenessMinutes * 60) - 120 seconds in the past, with a
             // little slack for shell + SSH round-trip jitter.
             val stat = session.exec(
-                "stat -c '%Y' ${shellQuote(seededJsonlPath)}",
+                "stat -c '%Y' ${shellQuote(seededFilePath)}",
             )
             assertEquals(
-                "expected stat to return mtime for $seededJsonlPath, stderr='${stat.stderr}'",
+                "expected stat to return mtime for $seededFilePath, stderr='${stat.stderr}'",
                 0,
                 stat.exitCode,
             )
@@ -367,12 +353,9 @@ class AgentDetectionAcrossEnginesE2eTest {
             knownHosts = KnownHostsPolicy.AcceptAll,
             timeoutMs = 15_000,
         ).getOrThrow()
+        val processFixture = ProcessFixture(processCommand)
         try {
-            val spawn = processSession.exec(
-                "(setsid sh -c \"exec -a ${shellQuote(processCommand)} " +
-                    "sleep 30\" >/dev/null 2>&1 &); sleep 0.2; " +
-                    "ps -eo comm,args | grep -F ${shellQuote(processCommand)} | grep -v grep || true",
-            )
+            val spawn = processSession.exec(processFixture.spawnCommand())
             assertTrue(
                 "expected fake process named '$processCommand' to be running for $agent detection; " +
                     "ps stdout='${spawn.stdout}' stderr='${spawn.stderr}'",
@@ -423,9 +406,7 @@ class AgentDetectionAcrossEnginesE2eTest {
             recordTiming("${agent.name}_stale_total_ms", System.currentTimeMillis() - started)
         } finally {
             runCatching {
-                processSession.exec(
-                    "pkill -f ${shellQuote(processCommand)} 2>/dev/null || true",
-                )
+                processSession.exec(processFixture.cleanupCommand())
             }
             runCatching { processSession.close() }
         }
@@ -461,6 +442,30 @@ class AgentDetectionAcrossEnginesE2eTest {
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\\''") + "'"
 
+    private fun candidateFilePath(path: String): String =
+        path.substringBefore('#')
+
+    private inner class ProcessFixture(private val commandName: String) {
+        private val dir = "/tmp/pocketshell-agent-${commandName}-${System.nanoTime()}"
+        private val wrapperPath = "$dir/$commandName"
+
+        fun spawnCommand(): String =
+            "set -eu; " +
+                "mkdir -p ${shellQuote(dir)}; " +
+                "cat > ${shellQuote(wrapperPath)} <<'WRAPPER_EOF'\n" +
+                "#!/bin/sh\n" +
+                "sleep 30\n" +
+                "WRAPPER_EOF\n" +
+                "chmod +x ${shellQuote(wrapperPath)}; " +
+                "(setsid ${shellQuote(wrapperPath)} >/dev/null 2>&1 &); " +
+                "sleep 0.2; " +
+                "ps -eo comm,args | grep -F ${shellQuote(wrapperPath)} | grep -v grep || true"
+
+        fun cleanupCommand(): String =
+            "pkill -f ${shellQuote(wrapperPath)} 2>/dev/null || true; " +
+                "rm -rf ${shellQuote(dir)} 2>/dev/null || true"
+    }
+
     private fun recordTiming(label: String, value: Long) {
         val line = "AGENT_DETECTION_ACROSS_ENGINES_TIMING $label=$value"
         timings += line
@@ -492,7 +497,7 @@ class AgentDetectionAcrossEnginesE2eTest {
         const val CODEX_PATH: String =
             "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl"
         const val OPENCODE_PATH: String =
-            "/home/testuser/.local/share/opencode/pocketshell-rows.jsonl"
+            "/home/testuser/.local/share/opencode/opencode.db#opencode-fixture"
 
         // The seeded JSONL directories encode this cwd
         // (`-workspace-pocketshell` for Claude). The pane's

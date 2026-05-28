@@ -5,7 +5,7 @@
 # credentials. Use it for local emulator + Docker smoke tests only.
 FROM alpine:latest
 
-RUN apk add --no-cache openssh-server openssh-client tmux procps bash \
+RUN apk add --no-cache openssh-server openssh-client tmux procps bash sqlite \
     && ssh-keygen -A \
     && adduser -D -s /bin/sh testuser \
     && passwd -u testuser \

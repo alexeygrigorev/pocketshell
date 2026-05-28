@@ -290,6 +290,72 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun newPaneReconcileQueriesCursorPositionForTheSeed() = runTest {
+        // Issue #259: after the capture-pane snapshot the seed path must ask
+        // tmux for the pane's true cursor so the emulator's cursor can be
+        // restored — otherwise the agent's next in-place spinner rewrite paints
+        // on the wrong row and fragments of different frames coexist.
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tshell\t0"),
+                isError = false,
+            ),
+        )
+        client.capturePaneResponses.addLast(
+            CommandResponse(
+                number = 2L,
+                output = listOf("> committed", "Beboppin'... (thinking)"),
+                isError = false,
+            ),
+        )
+        client.cursorQueryResponses.addLast(
+            CommandResponse(number = 3L, output = listOf("0,1"), isError = false),
+        )
+        vm.attachClientForTest(client)
+
+        client.emittedEvents.emit(
+            ControlEvent.WindowAdd(sessionId = "", windowId = "@0", name = ""),
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "expected a cursor-position query for the new pane, got ${client.sentCommands}",
+            client.sentCommands.contains(
+                "display-message -p -t %0 '#{cursor_x},#{cursor_y}'",
+            ),
+        )
+        // The cursor query must come AFTER the capture for the same pane so the
+        // builder can append the restore to the replayed snapshot.
+        val captureIdx = client.sentCommands.indexOf("capture-pane -p -e -S -200 -t %0")
+        val cursorIdx = client.sentCommands.indexOf(
+            "display-message -p -t %0 '#{cursor_x},#{cursor_y}'",
+        )
+        assertTrue("capture must precede cursor query", captureIdx in 0 until cursorIdx)
+    }
+
+    @Test
+    fun parseTmuxPaneCursorReadsWellFormedReply() {
+        // Issue #259: the cursor reply is `cursor_x,cursor_y` (0-based).
+        assertEquals(TmuxPaneCursor(column = 0, row = 2), parseTmuxPaneCursor("0,2"))
+        assertEquals(TmuxPaneCursor(column = 12, row = 5), parseTmuxPaneCursor(" 12 , 5 "))
+    }
+
+    @Test
+    fun parseTmuxPaneCursorRejectsMalformedReplies() {
+        // Issue #259: a missing/old/malformed reply degrades to no restore.
+        assertNull(parseTmuxPaneCursor(null))
+        assertNull(parseTmuxPaneCursor(""))
+        assertNull(parseTmuxPaneCursor("3"))
+        assertNull(parseTmuxPaneCursor("a,b"))
+        assertNull(parseTmuxPaneCursor("1,2,3"))
+        assertNull(parseTmuxPaneCursor("-1,2"))
+        assertNull(parseTmuxPaneCursor("1,-2"))
+    }
+
+    @Test
     fun existingPaneReconcileDoesNotRecaptureContent() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()

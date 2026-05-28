@@ -35,6 +35,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -274,7 +275,318 @@ class TmuxAttachPrefillDockerTest {
         Unit
     }
 
+    /**
+     * Issue #259 — the reattach seed must restore tmux's true cursor so the
+     * agent's first in-place status/spinner rewrite (a bare `\r` + new frame)
+     * lands on the spinner row instead of stranding the seeded frame above a
+     * second live frame (the reported garble).
+     *
+     * Drives the EXACT production seed path on-device:
+     *
+     * 1. Seeds a Docker tmux session whose pane runs an echo-suppressed read
+     *    loop. The pane prints two committed lines, then a LONG spinner frame
+     *    followed by a bare `\r` so the captured snapshot parks the cursor at
+     *    column 0 of the spinner row (tmux reports `cursor_x=0,cursor_y=N`).
+     * 2. Attaches via the normal app flow — `TmuxSessionViewModel` runs
+     *    `capture-pane -p -e` + the new cursor query and seeds the pane's
+     *    emulator with the cursor restored to the spinner row.
+     * 3. From a SECOND SSH connection sends one token into the pane's read
+     *    loop, which emits a SHORTER in-place rewrite (`\r` + erase-line +
+     *    short frame) as live `%output`.
+     * 4. Asserts the visible terminal shows ONLY the final (short) frame: no
+     *    coexisting longer frame, no stale `thinking` tail, no two spinner
+     *    rows. Captures `*-viewport.png` + `*-visible-terminal.txt` before and
+     *    after the live rewrite.
+     */
+    @Test
+    fun reattachSeedRestoresCursorSoLiveSpinnerRewriteDoesNotGarble() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val appContext = instrumentation.targetContext
+        val key = instrumentation.context.assets
+            .open("test_key")
+            .bufferedReader()
+            .use { it.readText() }
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        val sessionName = "issue259-spinner-${System.currentTimeMillis()}"
+        val longFrame = "Beboppin... (30.6k tokens thinking)"
+        val shortFrameToken = "44 tokens"
+        val shortFrame = "Beboppin... ($shortFrameToken)"
+        val staleTail = "thinking"
+
+        val hostRowTag = persistDockerHost(appContext, key)
+        try {
+            seedSpinnerSession(key = key, sessionName = sessionName, longFrame = longFrame)
+
+            // Verify the fixture parked the cursor on the spinner row before we
+            // attach, so a later assertion is unambiguous about whether the
+            // app's seed lost the cursor versus the fixture never had it there.
+            val (cursorX, cursorY) = readRemoteCursor(key, sessionName)
+            assertTrue(
+                "expected the spinner's bare CR to park the cursor at column 0, got $cursorX",
+                cursorX == 0,
+            )
+            assertTrue("expected cursor on a spinner row >= 1, got $cursorY", cursorY >= 1)
+            val remoteCapture = readRemoteCapture(key = key, sessionName = sessionName)
+            assertTrue(
+                "expected seeded session to show the long spinner frame, got:\n$remoteCapture",
+                longFrame in remoteCapture,
+            )
+
+            launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+            compose.waitUntil(timeoutMillis = 10_000) {
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+            compose.waitUntil(timeoutMillis = 20_000) {
+                compose.onAllNodesWithText(sessionName).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText(sessionName).performClick()
+            compose.waitUntil(timeoutMillis = 20_000) {
+                compose.onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            waitForTerminalSessionAttached()
+
+            // The seeded long frame must reach the emulator (proves the seed
+            // path ran and the capture replayed onto the grid).
+            waitForVisibleTerminalToContain(longFrame)
+            captureViewportArtifact("issue259-01-after-seed")
+            captureVisibleTerminalSidecar("issue259-01-after-seed")
+
+            // ---- Drive ONE live in-place spinner rewrite as %output. ----
+            val rewriteSentAt = SystemClock.elapsedRealtime()
+            sendSpinnerToken(key = key, sessionName = sessionName, token = shortFrameToken)
+
+            // The live rewrite must replace the seeded frame in place: the SHORT
+            // frame becomes visible and the stale longer-frame tail disappears.
+            val shortVisibleAt = waitForVisibleTerminalToContain(shortFrame)
+            recordTiming("live_rewrite_to_short_frame_visible_ms", shortVisibleAt - rewriteSentAt)
+            waitForVisibleTerminalToNotContain(staleTail)
+
+            captureViewportArtifact("issue259-02-after-live-rewrite")
+            captureVisibleTerminalSidecar("issue259-02-after-live-rewrite")
+
+            val finalVisible = visibleTerminalText()
+            // 1. The final short frame is present.
+            assertTrue(
+                "expected the live rewrite to render the short frame, got:\n$finalVisible",
+                shortFrame in finalVisible,
+            )
+            // 2. The stale longer-frame tail (`thinking`) is gone — no two
+            //    coexisting frames, the #259 garble signature.
+            assertFalse(
+                "stale spinner-frame tail leaked alongside the live frame (the #259 garble), got:\n$finalVisible",
+                staleTail in finalVisible,
+            )
+            // 3. Exactly one `Beboppin...` row survives — the seeded frame did
+            //    not get stranded above the live one on a separate row.
+            val beboppinRows = finalVisible.lineSequence().count { "Beboppin..." in it }
+            assertTrue(
+                "expected exactly one spinner row after the in-place rewrite, found $beboppinRows in:\n$finalVisible",
+                beboppinRows == 1,
+            )
+
+            val grid = terminalGridSize()
+            recordTiming("send_to_output_issue259_pty_size_ms", shortVisibleAt - rewriteSentAt)
+            recordTiming("terminal_grid_columns", grid.columns.toLong())
+            recordTiming("terminal_grid_rows", grid.rows.toLong())
+            writeTimings()
+            writeSpinnerSummary(
+                sessionName = sessionName,
+                longFrame = longFrame,
+                shortFrame = shortFrame,
+                staleTail = staleTail,
+                beboppinRows = beboppinRows,
+                cursorX = cursorX,
+                cursorY = cursorY,
+            )
+        } finally {
+            cleanupRemoteTmuxSession(key, sessionName)
+        }
+        Unit
+    }
+
     // ---------------------------------------------------------------- Helpers
+
+    /**
+     * Issue #259 seed: a pane that prints two committed lines, then a LONG
+     * spinner frame ending in a bare carriage return (so the cursor parks on
+     * the spinner row at column 0), then reads tokens from stdin and emits a
+     * fresh in-place spinner rewrite per token. `stty -echo` suppresses input
+     * echo so the post-attach `send-keys` cannot itself paint the row.
+     */
+    private suspend fun seedSpinnerSession(
+        key: String,
+        sessionName: String,
+        longFrame: String,
+    ) {
+        val paneCommand =
+            "bash -c '" +
+                "stty -echo 2>/dev/null; " +
+                "printf \"issue259-line-1\\n\"; " +
+                "printf \"issue259-line-2\\n\"; " +
+                "printf \"$longFrame\\r\"; " +
+                "while read -r tok; do printf \"\\r\\033[KBeboppin... (%s)\" \"\$tok\"; done" +
+                "'"
+        val script = buildString {
+            appendLine("set -eu")
+            appendLine("tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true")
+            appendLine(
+                "tmux new-session -d -x $PANE_COLUMNS -y $PANE_ROWS " +
+                    "-s ${shellQuote(sessionName)} ${shellQuote(paneCommand)}",
+            )
+            appendLine("sleep 1")
+            appendLine("tmux list-sessions")
+        }
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session -> session.use { it.exec(script) } }
+        val exec = result.getOrNull()
+        assertTrue(
+            "expected spinner seeding to succeed, got ${result.exceptionOrNull()} stderr='${exec?.stderr}'",
+            exec?.exitCode == 0,
+        )
+    }
+
+    private suspend fun readRemoteCursor(key: String, sessionName: String): Pair<Int, Int> {
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use {
+                it.exec(
+                    "tmux display-message -p -t ${shellQuote(sessionName)} " +
+                        "'#{cursor_x},#{cursor_y}'",
+                )
+            }
+        }
+        val reply = result.getOrNull()?.stdout?.trim().orEmpty()
+        val parts = reply.split(',')
+        val x = parts.getOrNull(0)?.trim()?.toIntOrNull() ?: -1
+        val y = parts.getOrNull(1)?.trim()?.toIntOrNull() ?: -1
+        return x to y
+    }
+
+    /**
+     * Push one token into the seeded pane's read loop from a SECOND SSH
+     * connection. The loop emits a fresh in-place spinner rewrite to stdout,
+     * which tmux forwards to the attached app as live `%output`.
+     */
+    private suspend fun sendSpinnerToken(key: String, sessionName: String, token: String) {
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use {
+                it.exec(
+                    "tmux send-keys -t ${shellQuote(sessionName)} ${shellQuote(token)} Enter",
+                )
+            }
+        }
+        val exec = result.getOrNull()
+        assertTrue(
+            "expected send-keys to succeed, got ${result.exceptionOrNull()} stderr='${exec?.stderr}'",
+            exec?.exitCode == 0,
+        )
+    }
+
+    private fun waitForVisibleTerminalToNotContain(needle: String) {
+        val deadline = SystemClock.elapsedRealtime() + 20_000
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (needle !in visibleTerminalText()) return
+            SystemClock.sleep(10)
+        }
+        val snapshot = visibleTerminalText()
+        assertTrue(
+            "expected stale fragment `$needle` to disappear within 20s, got:\n$snapshot",
+            needle !in snapshot,
+        )
+    }
+
+    private fun writeSpinnerSummary(
+        sessionName: String,
+        longFrame: String,
+        shortFrame: String,
+        staleTail: String,
+        beboppinRows: Int,
+        cursorX: Int,
+        cursorY: Int,
+    ): File {
+        val visible = visibleTerminalText()
+        val bounds = terminalViewBounds()
+        val grid = terminalGridSize()
+        val viewportFiles = listOf(
+            "issue259-01-after-seed-viewport.png",
+            "issue259-02-after-live-rewrite-viewport.png",
+        )
+        val body = StringBuilder().apply {
+            appendLine("scenario=tmux-reattach-seed-spinner-rewrite")
+            appendLine("session_name=$sessionName")
+            appendLine("seeded_long_frame=$longFrame")
+            appendLine("live_short_frame=$shortFrame")
+            appendLine("stale_tail_must_be_absent=$staleTail")
+            appendLine("seed_cursor_x=$cursorX")
+            appendLine("seed_cursor_y=$cursorY")
+            appendLine("spinner_rows_after_rewrite=$beboppinRows")
+            appendLine("stale_tail_present_after_rewrite=${staleTail in visible}")
+            appendLine("terminal_grid_columns=${grid.columns}")
+            appendLine("terminal_grid_rows=${grid.rows}")
+            appendLine("terminal_bounds=$bounds")
+            appendLine("visible_terminal_chars=${visible.length}")
+            appendLine()
+            appendLine("capture_policy:")
+            appendLine(
+                "authoritative=direct TerminalView viewport render plus terminal emulator visible text",
+            )
+            appendLine(
+                "advisory=full-device/window screenshots; saved for diagnosis but not used for terminal ink assertions",
+            )
+            appendLine(
+                "advisory_device_strategy=this scenario does not emit advisory device screenshots; the authoritative viewport render and visible-terminal sidecar are the proofs of the clean in-place rewrite",
+            )
+            appendLine()
+            appendLine("authoritative_captures:")
+            for (viewportName in viewportFiles) {
+                val viewportFile = artifactFile(viewportName)
+                if (!viewportFile.exists() || viewportFile.length() == 0L) continue
+                val sidecarName = viewportName.removeSuffix("-viewport.png") + "-visible-terminal.txt"
+                val sidecarFile = artifactFile(sidecarName)
+                val sha = sha256(viewportFile)
+                val brightPixels = countBrightPixels(viewportFile)
+                val sidecarChars = if (sidecarFile.exists()) sidecarFile.readText().length else 0
+                appendLine(
+                    "$viewportName " +
+                        "name=$viewportName " +
+                        "grid=${grid.columns}x${grid.rows} " +
+                        "bounds=$bounds " +
+                        "viewport_bright_pixels=$brightPixels " +
+                        "viewport_sha256=$sha " +
+                        "visible_terminal_chars=$sidecarChars",
+                )
+            }
+            appendLine()
+            appendLine("visible_terminal:")
+            appendLine(visible)
+        }
+        return writeText("issue259-summary.txt", body.toString())
+    }
 
     private suspend fun persistDockerHost(
         appContext: android.content.Context,

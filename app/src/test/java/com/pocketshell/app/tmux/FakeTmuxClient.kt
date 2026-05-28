@@ -66,6 +66,15 @@ internal class FakeTmuxClient : TmuxClient {
 
     val capturePaneResponses: ArrayDeque<CommandResponse> = ArrayDeque()
 
+    /**
+     * Issue #259: replies to the `display-message -p ... '#{cursor_x},#{cursor_y}'`
+     * cursor query the seed path issues after a `capture-pane`. Defaults to a
+     * single `0,0` reply (cursor home) so tests that do not care about the seed
+     * cursor are unaffected; the seed-path regression test queues a specific
+     * cursor (e.g. `0,2`) to drive the in-place rewrite alignment.
+     */
+    val cursorQueryResponses: ArrayDeque<CommandResponse> = ArrayDeque()
+
     var closeAndThrowOnCommandPrefix: String? = null
 
     var closeAndThrowException: Throwable = TmuxClientException("tmux command timed out")
@@ -92,6 +101,16 @@ internal class FakeTmuxClient : TmuxClient {
             return capturePaneResponses.removeFirstOrNull() ?: CommandResponse(
                 number = 0L,
                 output = emptyList(),
+                isError = false,
+            )
+        }
+        // Issue #259: the seed path issues `display-message -p ... cursor_x,cursor_y`
+        // right after `capture-pane`. Serve it from a dedicated queue so it
+        // never consumes a `list-panes` response queued in [responses].
+        if (cmd.startsWith("display-message") && cmd.contains("cursor")) {
+            return cursorQueryResponses.removeFirstOrNull() ?: CommandResponse(
+                number = 0L,
+                output = listOf("0,0"),
                 isError = false,
             )
         }

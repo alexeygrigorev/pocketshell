@@ -103,6 +103,30 @@ public final class TerminalRenderer {
         mTextPaint.setLinearText(true);
         mTextPaint.setTextSize(textSize);
 
+        // PocketShell #259 — disable font ligatures / contextual alternates.
+        //
+        // A terminal is a fixed monospace cell grid: each column holds exactly
+        // one code point and the emulator positions cells independently. Many
+        // programming fonts (JetBrainsMono among them) ship `liga`, `clig`,
+        // `dlig`, and `calt` features, so when a whole style run is handed to a
+        // single `Canvas#drawTextRun`, the font can shape adjacent glyphs into
+        // ligatures (e.g. `->`, `!=`, repeated letters) — drawing two cells'
+        // glyphs as one merged glyph even when their advances stay uniform.
+        // For a terminal that is always wrong: it visually collapses
+        // independent cells, the same class of "rows run together / text mixed"
+        // symptom #259 reports (e.g. words appearing mashed as
+        // `gthinkingwithout`).
+        //
+        // Turning ligature/contextual shaping off pins one glyph per cell so
+        // every `drawTextRun` draws exactly the code point at each column. On
+        // the bundled face the per-glyph advances are already uniform, so this
+        // does not change cell layout (verified — `allRegularCellsRemainAligned`
+        // and the #172 tests still pass); it removes the visual cell-merging a
+        // face's shaper could apply. The grid/emulator itself handles in-place
+        // CR / cursor / erase rewrites correctly regardless of the font (proven
+        // by StatusSpinnerRewriteGridTest); this is purely a draw-path harden.
+        mTextPaint.setFontFeatureSettings("'liga' 0, 'clig' 0, 'dlig' 0, 'calt' 0");
+
         // Issue #241 — derive the row pitch from the glyph bounding box
         // (descent - ascent) rather than Paint#getFontSpacing(), which adds
         // the font's recommended leading on top and produced a visibly

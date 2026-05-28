@@ -5,7 +5,7 @@ import kotlinx.coroutines.CancellationException
 import javax.inject.Inject
 
 public class ReposRemoteSource @Inject constructor(
-    private val parser: ReposJsonParser = ReposJsonParser(),
+    private val parser: ReposJsonParser,
 ) {
     public suspend fun listRemote(
         session: SshSession,
@@ -18,18 +18,40 @@ public class ReposRemoteSource @Inject constructor(
                 append(it.coerceAtLeast(1))
             }
         }
-        return try {
-            val result = session.exec(pathAwareCommand(command))
-            when {
-                result.exitCode == 0 -> ReposListResult.Success(parser.parseList(result.stdout))
-                result.exitCode == 127 -> ReposListResult.ToolMissing
-                else -> ReposListResult.Failed(result.failureReason("pocketshell repos exited ${result.exitCode}"))
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            ReposListResult.Failed("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
+        return runList(session, command)
+    }
+
+    /**
+     * Enumerate repositories already cloned on the host's disk via
+     * `pocketshell repos list --local --json`. The unified schema rows
+     * carry a populated `local` block (path + head) and a null `remote`
+     * block — the inverse of [listRemote], which always reports
+     * `local = null`.
+     *
+     * The repos browse screen joins both calls by `full_name` (falling
+     * back to `name`) so a GitHub repo that is already cloned renders as
+     * an "Open" row instead of a "Clone" row. The daemon's `--remote`
+     * path deliberately does NOT join cloned state server-side, so the
+     * merge lives on the client.
+     */
+    public suspend fun listLocal(
+        session: SshSession,
+    ): ReposListResult = runList(session, "pocketshell repos list --local --json")
+
+    private suspend fun runList(
+        session: SshSession,
+        command: String,
+    ): ReposListResult = try {
+        val result = session.exec(pathAwareCommand(command))
+        when {
+            result.exitCode == 0 -> ReposListResult.Success(parser.parseList(result.stdout))
+            result.exitCode == 127 -> ReposListResult.ToolMissing
+            else -> ReposListResult.Failed(result.failureReason("pocketshell repos exited ${result.exitCode}"))
         }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (t: Throwable) {
+        ReposListResult.Failed("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
     }
 
     public suspend fun open(

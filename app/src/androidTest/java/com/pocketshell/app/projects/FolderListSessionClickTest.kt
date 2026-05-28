@@ -107,6 +107,7 @@ class FolderListSessionClickTest {
                         clickedStart = start
                     },
                     onSessionCreated = { _, _ -> },
+                    onBrowseRepos = {},
                     modifier = Modifier.fillMaxSize(),
                     viewModel = viewModel,
                 )

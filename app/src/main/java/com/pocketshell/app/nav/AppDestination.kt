@@ -197,6 +197,30 @@ sealed interface AppDestination {
         val passphrase: CharArray?,
     ) : AppDestination
 
+    /**
+     * GitHub repos browser — issue #230 (app-side slice of #205).
+     *
+     * Lists the user's GitHub repositories (via `pocketshell repos list
+     * --remote`) joined with the host's cloned repos (`--local`). Tapping
+     * a not-yet-cloned repo clones it on the remote and opens a session in
+     * the fresh clone; tapping an already-cloned repo opens a session in
+     * its existing clone path. Reachable from [FolderList] via the
+     * "Browse GitHub repos" affordance.
+     *
+     * SSH connection parameters are required because the screen issues
+     * `pocketshell repos list / clone / open` exec calls via
+     * `SshConnection`.
+     */
+    data class RepoBrowser(
+        val hostId: Long,
+        val hostName: String,
+        val hostname: String,
+        val port: Int,
+        val username: String,
+        val keyPath: String,
+        val passphrase: CharArray?,
+    ) : AppDestination
+
     /** Per-session recurring jobs backed by the host's `pocketshell jobs` CLI. */
     data class RecurringJobs(
         val hostName: String,

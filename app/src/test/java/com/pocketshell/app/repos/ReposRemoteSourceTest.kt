@@ -14,7 +14,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ReposRemoteSourceTest {
-    private val source = ReposRemoteSource()
+    private val source = ReposRemoteSource(ReposJsonParser())
 
     @Test
     fun listRemote_runsPocketshellCommandAndParsesRepos() = runTest {
@@ -49,6 +49,53 @@ class ReposRemoteSourceTest {
         assertTrue(result is ReposListResult.Success)
         assertEquals("alexeygrigorev/pocketshell", (result as ReposListResult.Success).repos.single().fullName)
         assertEquals(listOf(command), session.recorded)
+    }
+
+    @Test
+    fun listLocal_runsLocalCommandAndParsesClonedRepos() = runTest {
+        val command = pathAware("pocketshell repos list --local --json")
+        val session = FakeSshSession(
+            mapOf(
+                command to ExecResult(
+                    """
+                    [
+                      {
+                        "owner": "alexeygrigorev",
+                        "name": "pocketshell",
+                        "full_name": "alexeygrigorev/pocketshell",
+                        "local": {
+                          "path": "/home/alexey/git/pocketshell",
+                          "head": "main"
+                        },
+                        "remote": null
+                      }
+                    ]
+                    """.trimIndent(),
+                    "",
+                    0,
+                ),
+            ),
+        )
+
+        val result = source.listLocal(session)
+
+        assertTrue(result is ReposListResult.Success)
+        val repo = (result as ReposListResult.Success).repos.single()
+        assertEquals("alexeygrigorev/pocketshell", repo.fullName)
+        assertEquals("/home/alexey/git/pocketshell", repo.local?.path)
+        assertEquals(listOf(command), session.recorded)
+    }
+
+    @Test
+    fun listLocal_exit127MapsToToolMissing() = runTest {
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("pocketshell repos list --local --json") to
+                    ExecResult("", "pocketshell: not found", 127),
+            ),
+        )
+
+        assertEquals(ReposListResult.ToolMissing, source.listLocal(session))
     }
 
     @Test

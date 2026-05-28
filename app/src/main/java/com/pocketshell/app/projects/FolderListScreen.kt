@@ -93,6 +93,12 @@ fun FolderListScreen(
      * only needs to attach.
      */
     onSessionCreated: (sessionName: String, cwd: String) -> Unit,
+    /**
+     * Issue #230: open the GitHub repos browser for this host. The
+     * caller (MainActivity) routes to `AppDestination.RepoBrowser` with
+     * the same SSH credentials this screen already holds.
+     */
+    onBrowseRepos: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: FolderListViewModel = hiltViewModel(),
 ) {
@@ -129,6 +135,7 @@ fun FolderListScreen(
             FolderListAppBar(
                 hostName = hostName,
                 onBack = onBack,
+                onBrowseRepos = onBrowseRepos,
             )
             when (val s = state) {
                 FolderListUiState.Loading -> LoadingPanel()
@@ -224,6 +231,7 @@ internal fun derivedSessionName(choice: SessionTypeChoice): String {
 private fun FolderListAppBar(
     hostName: String,
     onBack: () -> Unit,
+    onBrowseRepos: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -248,7 +256,7 @@ private fun FolderListAppBar(
                 fontWeight = FontWeight.Bold,
             )
         }
-        Column(modifier = Modifier.padding(start = 4.dp)) {
+        Column(modifier = Modifier.padding(start = 4.dp).weight(1f)) {
             Text(
                 text = "Folders",
                 color = PocketShellColors.Text,
@@ -260,6 +268,17 @@ private fun FolderListAppBar(
                 text = hostName,
                 color = PocketShellColors.TextSecondary,
                 fontSize = 12.sp,
+            )
+        }
+        TextButton(
+            onClick = onBrowseRepos,
+            modifier = Modifier.testTag(FOLDER_LIST_BROWSE_REPOS_TAG),
+        ) {
+            Text(
+                text = "Repos",
+                color = PocketShellColors.Accent,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
             )
         }
     }
@@ -579,6 +598,7 @@ const val FOLDER_LIST_EMPTY_TAG: String = "folder-list:empty"
 const val FOLDER_LIST_SHOW_ALL_TAG: String = "folder-list:show-all"
 const val FOLDER_LIST_FLAT_EMPTY_TAG: String = "folder-list:flat:empty"
 const val FOLDER_LIST_NEW_SESSION_FAB_TAG: String = "folder-list:new-session-fab"
+const val FOLDER_LIST_BROWSE_REPOS_TAG: String = "folder-list:browse-repos"
 
 fun folderRowTestTag(path: String): String = "folder-list:row:$path"
 fun folderHeaderLabelTag(path: String): String = "folder-list:header:$path"

@@ -34,6 +34,7 @@ import com.pocketshell.app.jobs.RecurringJobsViewModel
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.portfwd.PortForwardPanelScreen
 import com.pocketshell.app.projects.FolderListScreen
+import com.pocketshell.app.projects.RepoBrowserScreen
 import com.pocketshell.app.projects.WatchedFoldersScreen
 import com.pocketshell.app.projects.WatchedFoldersViewModel
 import com.pocketshell.app.session.LastSessionStore
@@ -679,6 +680,50 @@ private fun AppNavigator(
                     ),
                 )
             },
+            // Issue #230: route to the GitHub repos browser, reusing the
+            // SSH credentials this folder screen already holds.
+            onBrowseRepos = {
+                navigate(
+                    AppDestination.RepoBrowser(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                    ),
+                )
+            },
+        )
+
+        // Issue #230: GitHub repos browser. Lists the user's GitHub
+        // repos joined with the host's cloned repos; tapping a repo
+        // clones it (if needed) and opens a tmux session in the clone
+        // folder. Reached from the FolderList "Repos" action.
+        is AppDestination.RepoBrowser -> RepoBrowserScreen(
+            hostName = dest.hostName,
+            hostname = dest.hostname,
+            port = dest.port,
+            username = dest.username,
+            keyPath = dest.keyPath,
+            passphrase = dest.passphrase,
+            onBack = ::back,
+            onOpenRepo = { path ->
+                navigate(
+                    AppDestination.TmuxSession(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        sessionName = RepoSessionName(path),
+                        startDirectory = path,
+                    ),
+                )
+            },
         )
 
         is AppDestination.RecurringJobs -> {
@@ -830,3 +875,16 @@ internal fun importPayloadFromIntent(intent: Intent?): String? {
 }
 
 private const val DefaultTmuxSessionName = "pocketshell"
+
+/**
+ * Issue #230: derive a tmux session name for a repo opened from the
+ * GitHub repos browser. tmux session names must not contain colons (the
+ * folder-list field separator) and stay short, so we take the trailing
+ * path segment, sanitise it to `[A-Za-z0-9_-]`, and fall back to the
+ * default when nothing usable remains.
+ */
+internal fun RepoSessionName(path: String): String {
+    val tail = path.trim().trimEnd('/').substringAfterLast('/')
+    val safe = tail.replace(Regex("[^A-Za-z0-9_-]"), "-").trim('-').take(24)
+    return safe.ifBlank { DefaultTmuxSessionName }
+}

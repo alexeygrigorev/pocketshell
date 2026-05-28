@@ -146,6 +146,7 @@ class FolderListScreenE2eTest {
                     onBack = {},
                     onOpenSession = { _, _ -> },
                     onSessionCreated = { _, _ -> },
+                    onBrowseRepos = {},
                     modifier = Modifier.fillMaxSize(),
                     viewModel = viewModel,
                 )

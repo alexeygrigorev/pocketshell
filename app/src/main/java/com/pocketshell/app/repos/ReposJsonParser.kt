@@ -2,8 +2,9 @@ package com.pocketshell.app.repos
 
 import org.json.JSONArray
 import org.json.JSONObject
+import javax.inject.Inject
 
-public class ReposJsonParser {
+public class ReposJsonParser @Inject constructor() {
     public fun parseList(raw: String): List<RepoEntry> {
         val array = try {
             JSONArray(raw)

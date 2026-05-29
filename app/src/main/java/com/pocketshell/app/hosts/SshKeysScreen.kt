@@ -39,6 +39,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -76,6 +77,8 @@ fun SshKeysScreen(
     var pendingDelete: SshKeyEntity? by remember { mutableStateOf(null) }
     var unlocked by remember { mutableStateOf(!isKeyUnlockRequired(context)) }
     var unlockError: String? by remember { mutableStateOf(null) }
+    var unlockInFlight by remember { mutableStateOf(false) }
+    val unlockGate = remember { SshKeyUnlockInFlightGate() }
 
     // Issue #38 item 3: intercept system-back. SshKeysScreen has no
     // form-style unsaved state — every add / delete commits immediately
@@ -114,14 +117,29 @@ fun SshKeysScreen(
             if (!unlocked) {
                 KeyUnlockPanel(
                     error = unlockError,
+                    inFlight = unlockInFlight,
                     onUnlock = {
+                        if (!unlockGate.tryMarkInFlight()) return@KeyUnlockPanel
+                        unlockInFlight = true
+                        unlockError = null
+
+                        fun finishUnlockRequest() {
+                            unlockGate.clear()
+                            unlockInFlight = false
+                        }
+
                         launchSshKeyUnlock(
                             activity = context as? FragmentActivity,
                             onSuccess = {
+                                finishUnlockRequest()
                                 unlockError = null
                                 unlocked = true
                             },
-                            onError = { unlockError = it },
+                            onFailure = { unlockError = it },
+                            onError = {
+                                finishUnlockRequest()
+                                unlockError = it
+                            },
                         )
                     },
                 )
@@ -274,7 +292,7 @@ private fun KeysAppBar(onBack: () -> Unit) {
 }
 
 @Composable
-private fun KeyUnlockPanel(error: String?, onUnlock: () -> Unit) {
+private fun KeyUnlockPanel(error: String?, inFlight: Boolean, onUnlock: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -296,12 +314,14 @@ private fun KeyUnlockPanel(error: String?, onUnlock: () -> Unit) {
         Spacer(modifier = Modifier.height(16.dp))
         Button(
             onClick = onUnlock,
+            enabled = !inFlight,
+            modifier = Modifier.testTag(SSH_KEYS_UNLOCK_BUTTON_TAG),
             colors = ButtonDefaults.buttonColors(
                 containerColor = PocketShellColors.Accent,
                 contentColor = PocketShellColors.OnAccent,
             ),
         ) {
-            Text("Unlock")
+            Text(if (inFlight) "Unlocking..." else "Unlock")
         }
         error?.let {
             Spacer(modifier = Modifier.height(12.dp))
@@ -319,12 +339,54 @@ private fun isKeyUnlockRequired(context: android.content.Context): Boolean {
 
 internal fun isSshKeyUnlockRequired(context: android.content.Context): Boolean = isKeyUnlockRequired(context)
 
+internal const val SSH_KEYS_UNLOCK_BUTTON_TAG = "ssh-keys-unlock-button"
+
+internal class SshKeyUnlockInFlightGate {
+    var isInFlight: Boolean = false
+        private set
+
+    fun tryMarkInFlight(): Boolean {
+        if (isInFlight) return false
+        isInFlight = true
+        return true
+    }
+
+    fun clear() {
+        isInFlight = false
+    }
+}
+
+internal interface SshKeyUnlockPromptLauncher {
+    fun launch(
+        activity: FragmentActivity,
+        promptInfo: BiometricPrompt.PromptInfo,
+        callback: BiometricPrompt.AuthenticationCallback,
+    )
+}
+
+private object AndroidSshKeyUnlockPromptLauncher : SshKeyUnlockPromptLauncher {
+    override fun launch(
+        activity: FragmentActivity,
+        promptInfo: BiometricPrompt.PromptInfo,
+        callback: BiometricPrompt.AuthenticationCallback,
+    ) {
+        val prompt = BiometricPrompt(
+            activity,
+            ContextCompat.getMainExecutor(activity),
+            callback,
+        )
+        prompt.authenticate(promptInfo)
+    }
+}
+
 internal fun launchSshKeyUnlock(
     activity: FragmentActivity?,
     title: String = "Unlock SSH key management",
     subtitle: String = "Confirm it is you before managing local private keys",
+    promptLauncher: SshKeyUnlockPromptLauncher = AndroidSshKeyUnlockPromptLauncher,
     onSuccess: () -> Unit,
     onError: (String) -> Unit,
+    onFailure: (String) -> Unit = onError,
 ) {
     if (activity == null) {
         onError("Device unlock is unavailable from this screen")
@@ -332,30 +394,38 @@ internal fun launchSshKeyUnlock(
     }
     val authenticators = BiometricManager.Authenticators.BIOMETRIC_STRONG or
         BiometricManager.Authenticators.DEVICE_CREDENTIAL
-    val prompt = BiometricPrompt(
-        activity,
-        ContextCompat.getMainExecutor(activity),
-        object : BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                onSuccess()
-            }
-
-            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                onError(errString.toString())
-            }
-
-            override fun onAuthenticationFailed() {
-                onError("Unlock failed")
-            }
-        },
-    )
-    prompt.authenticate(
-        BiometricPrompt.PromptInfo.Builder()
+    runCatching {
+        val promptInfo = BiometricPrompt.PromptInfo.Builder()
             .setTitle(title)
             .setSubtitle(subtitle)
             .setAllowedAuthenticators(authenticators)
-            .build(),
-    )
+            .build()
+        promptLauncher.launch(
+            activity = activity,
+            promptInfo = promptInfo,
+            callback = object : BiometricPrompt.AuthenticationCallback() {
+                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                    onSuccess()
+                }
+
+                override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                    onError(errString.toString())
+                }
+
+                override fun onAuthenticationFailed() {
+                    onFailure("Unlock failed")
+                }
+            },
+        )
+    }.onFailure { throwable ->
+        onError(formatSshKeyUnlockLaunchError(throwable))
+    }
+}
+
+internal fun formatSshKeyUnlockLaunchError(throwable: Throwable): String {
+    val detail = throwable.message?.takeIf { it.isNotBlank() }
+        ?: throwable::class.java.simpleName
+    return "Could not start device unlock: $detail"
 }
 
 /**

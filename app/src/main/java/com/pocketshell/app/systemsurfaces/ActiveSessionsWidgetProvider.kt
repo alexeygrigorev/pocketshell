@@ -6,6 +6,7 @@ import android.appwidget.AppWidgetProvider
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import android.widget.RemoteViews
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.R
@@ -33,9 +34,17 @@ class ActiveSessionsWidgetProvider : AppWidgetProvider() {
             appWidgetIds: IntArray,
         ) {
             if (appWidgetIds.isEmpty()) return
-            val state = SystemSurfaceStateStore(context).readSessionWidgetState()
+            val state = runCatching { SystemSurfaceStateStore(context).readSessionWidgetState() }
+                .getOrElse {
+                    Log.w(SYSTEM_SURFACES_TAG, "widget state read failed", it)
+                    SessionWidgetState(activeSessionCount = 0)
+                }
             for (widgetId in appWidgetIds) {
-                appWidgetManager.updateAppWidget(widgetId, buildRemoteViews(context, state))
+                runCatching {
+                    appWidgetManager.updateAppWidget(widgetId, buildRemoteViews(context, state))
+                }.onFailure {
+                    Log.w(SYSTEM_SURFACES_TAG, "widget update failed for id=$widgetId", it)
+                }
             }
         }
 

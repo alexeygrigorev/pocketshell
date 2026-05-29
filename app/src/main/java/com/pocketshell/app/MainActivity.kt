@@ -350,11 +350,12 @@ private fun AppNavigator(
     // destination, so this is always one composition away), then call
     // `onImportPayloadConsumed` so the activity clears the state and
     // a future re-launch with a fresh payload is processed correctly.
-    val hostListViewModelForImport: HostListViewModel = hiltViewModel()
-    LaunchedEffect(pendingImportPayload) {
-        val payload = pendingImportPayload ?: return@LaunchedEffect
-        hostListViewModelForImport.importSharedHostPayload(payload)
-        onImportPayloadConsumed()
+    if (pendingImportPayload != null) {
+        val hostListViewModelForImport: HostListViewModel = hiltViewModel()
+        LaunchedEffect(pendingImportPayload) {
+            hostListViewModelForImport.importSharedHostPayload(pendingImportPayload)
+            onImportPayloadConsumed()
+        }
     }
 
     // Volatile in-memory back-stack state. The initial destination comes

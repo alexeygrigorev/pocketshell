@@ -111,30 +111,51 @@ class LastSessionStore @Inject constructor(
         nowMillis: Long = System.currentTimeMillis(),
         maxAgeMillis: Long = DEFAULT_MAX_AGE_MILLIS,
     ): LastSession? {
-        val savedAt = prefs.getLong(KEY_SAVED_AT, 0L)
+        val savedAt = prefs.safeLong(KEY_SAVED_AT, 0L) ?: return null
         if (savedAt <= 0L) return null
         if (nowMillis - savedAt > maxAgeMillis) return null
-        val hostId = prefs.getLong(KEY_HOST_ID, 0L)
-        val hostname = prefs.getString(KEY_HOSTNAME, null) ?: return null
-        val username = prefs.getString(KEY_USERNAME, null) ?: return null
-        val keyPath = prefs.getString(KEY_KEY_PATH, null) ?: return null
-        val sessionName = prefs.getString(KEY_SESSION_NAME, null) ?: return null
+        val hostId = prefs.safeLong(KEY_HOST_ID, 0L) ?: return null
+        val hostname = prefs.safeString(KEY_HOSTNAME, null) ?: return null
+        val username = prefs.safeString(KEY_USERNAME, null) ?: return null
+        val keyPath = prefs.safeString(KEY_KEY_PATH, null) ?: return null
+        val sessionName = prefs.safeString(KEY_SESSION_NAME, null) ?: return null
         if (hostId <= 0L || hostname.isBlank() || keyPath.isBlank() || sessionName.isBlank()) {
             return null
         }
         return LastSession(
             hostId = hostId,
-            hostName = prefs.getString(KEY_HOST_NAME, hostname) ?: hostname,
+            hostName = prefs.safeString(KEY_HOST_NAME, hostname) ?: hostname,
             hostname = hostname,
-            port = prefs.getInt(KEY_PORT, DEFAULT_SSH_PORT),
+            port = prefs.safeInt(KEY_PORT, DEFAULT_SSH_PORT) ?: DEFAULT_SSH_PORT,
             username = username,
             keyPath = keyPath,
             sessionName = sessionName,
-            startDirectory = prefs.getString(KEY_START_DIR, null),
-            composerDraft = prefs.getString(KEY_COMPOSER_DRAFT, "") ?: "",
+            startDirectory = prefs.safeString(KEY_START_DIR, null),
+            composerDraft = prefs.safeString(KEY_COMPOSER_DRAFT, "") ?: "",
             savedAtMillis = savedAt,
         )
     }
+
+    private fun SharedPreferences.safeString(key: String, default: String?): String? =
+        runCatching { getString(key, default) }
+            .getOrElse {
+                edit().remove(key).apply()
+                default
+            }
+
+    private fun SharedPreferences.safeLong(key: String, default: Long): Long? =
+        runCatching { getLong(key, default) }
+            .getOrElse {
+                edit().remove(key).apply()
+                null
+            }
+
+    private fun SharedPreferences.safeInt(key: String, default: Int): Int? =
+        runCatching { getInt(key, default) }
+            .getOrElse {
+                edit().remove(key).apply()
+                null
+            }
 
     /**
      * Clear the persisted snapshot. Called when the user explicitly walks

@@ -79,15 +79,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
-    # OIDC trusted publishing — no PYPI_API_TOKEN secret to rotate.
-    # See https://docs.pypi.org/trusted-publishers/ and the README's
-    # "PyPI trusted publishing setup" section for the one-time pypi.org
-    # configuration the maintainer must complete.
     environment:
       name: pypi
       url: https://pypi.org/p/pocketshell
-    permissions:
-      id-token: write
 
     steps:
       - name: Checkout
@@ -119,10 +113,8 @@ jobs:
           path: tools/pocketshell/dist/*
           if-no-files-found: error
 
-      - name: Publish to PyPI via trusted publishing
+      - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: tools/pocketshell/dist
-          # Default is `https://upload.pypi.org/legacy/`; leave as-is for
-          # production PyPI. The action picks up the OIDC token from the
-          # `id-token: write` permission above.
+          password: ${{ secrets.PYPI_API_TOKEN }}

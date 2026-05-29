@@ -1,6 +1,8 @@
 package com.pocketshell.app.portfwd
 
+import android.content.ComponentName
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.portfwd.service.ForwardingService
@@ -132,6 +134,14 @@ class ForwardingControllerTest {
     }
 
     @Test
+    fun `foreground service start and stop rejections do not crash callers`() {
+        val rejectingContext = RejectingServiceContext(context)
+
+        ForwardingService.start(rejectingContext)
+        ForwardingService.stop(rejectingContext)
+    }
+
+    @Test
     fun `updateTunnelCount surfaces sum across registered hosts`() {
         val controller = ForwardingController(context)
 
@@ -194,6 +204,16 @@ class ForwardingControllerTest {
     private fun drainStartedServices() {
         while (shadow.nextStartedService != null) {
             // Iterate to clear the queue.
+        }
+    }
+
+    private class RejectingServiceContext(base: Context) : ContextWrapper(base) {
+        override fun startForegroundService(service: Intent?): ComponentName {
+            throw IllegalStateException("foreground services are not allowed now")
+        }
+
+        override fun startService(service: Intent?): ComponentName {
+            throw IllegalStateException("services are not allowed now")
         }
     }
 

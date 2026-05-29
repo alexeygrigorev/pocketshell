@@ -3,6 +3,7 @@ package com.pocketshell.app.systemsurfaces
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import com.pocketshell.core.storage.dao.HostDao
 import dagger.hilt.EntryPoint
 import dagger.hilt.InstallIn
@@ -25,16 +26,20 @@ class BootCompletedReceiver : BroadcastReceiver() {
                 val appContext = context.applicationContext
                 CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
                     try {
-                        val enabledHostCount = EntryPointAccessors
-                            .fromApplication(appContext, BootCompletedReceiverEntryPoint::class.java)
-                            .hostDao()
-                            .getEnabled()
-                            .first()
-                            .size
-                        val message = bootForwardingMessage(enabledHostCount)
-                        SystemSurfaceStateStore(appContext).recordBootForwardingRequest(message)
-                        PendingBootForwardingNotification.show(appContext, message)
-                        ActiveSessionsWidgetProvider.updateAll(appContext)
+                        runCatching {
+                            val enabledHostCount = EntryPointAccessors
+                                .fromApplication(appContext, BootCompletedReceiverEntryPoint::class.java)
+                                .hostDao()
+                                .getEnabled()
+                                .first()
+                                .size
+                            val message = bootForwardingMessage(enabledHostCount)
+                            SystemSurfaceStateStore(appContext).recordBootForwardingRequest(message)
+                            PendingBootForwardingNotification.show(appContext, message)
+                            ActiveSessionsWidgetProvider.updateAll(appContext)
+                        }.onFailure {
+                            Log.w(SYSTEM_SURFACES_TAG, "boot/package restore surface update failed", it)
+                        }
                     } finally {
                         pendingResult.finish()
                     }

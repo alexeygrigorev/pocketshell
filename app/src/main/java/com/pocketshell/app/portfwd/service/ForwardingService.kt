@@ -12,6 +12,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.pocketshell.app.MainActivity
@@ -77,6 +78,7 @@ class ForwardingService : Service() {
     private var hasStartedForeground = false
 
     companion object {
+        private const val TAG = "PsForwardingService"
         private const val CHANNEL_ID = "pocketshell_forwarding"
         private const val NOTIFICATION_ID = 0x70_46_53_56 // "pFSV" — unique within app
 
@@ -99,7 +101,11 @@ class ForwardingService : Service() {
             val intent = Intent(context, ForwardingService::class.java).apply {
                 action = ACTION_START
             }
-            ContextCompat.startForegroundService(context, intent)
+            runCatching {
+                ContextCompat.startForegroundService(context, intent)
+            }.onFailure {
+                Log.w(TAG, "foreground service start was rejected", it)
+            }
         }
 
         /**
@@ -112,7 +118,11 @@ class ForwardingService : Service() {
             val intent = Intent(context, ForwardingService::class.java).apply {
                 action = ACTION_STOP
             }
-            context.startService(intent)
+            runCatching {
+                context.startService(intent)
+            }.onFailure {
+                Log.w(TAG, "foreground service stop request was rejected", it)
+            }
         }
     }
 

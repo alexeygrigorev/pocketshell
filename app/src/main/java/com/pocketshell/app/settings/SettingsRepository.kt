@@ -132,31 +132,31 @@ class SettingsRepository @Inject constructor(
     }
 
     private fun readSnapshot(): AppSettings {
-        val themeName = prefs.getString(KEY_THEME, ThemePreference.System.name)
+        val themeName = prefs.safeString(KEY_THEME, ThemePreference.System.name)
             ?: ThemePreference.System.name
         val theme = runCatching { ThemePreference.valueOf(themeName) }
             .getOrDefault(ThemePreference.System)
-        val font = prefs.getFloat(KEY_TERMINAL_FONT_SP, AppSettings.DEFAULT_TERMINAL_FONT_SP)
+        val font = prefs.safeFloat(KEY_TERMINAL_FONT_SP, AppSettings.DEFAULT_TERMINAL_FONT_SP)
             .coerceIn(AppSettings.MIN_TERMINAL_FONT_SP, AppSettings.MAX_TERMINAL_FONT_SP)
-        val tmux = prefs.getBoolean(KEY_TMUX_ON_ATTACH, true)
-        val language = prefs.getString(KEY_VOICE_LANGUAGE, AppSettings.VOICE_LANGUAGE_AUTO)
+        val tmux = prefs.safeBoolean(KEY_TMUX_ON_ATTACH, true)
+        val language = prefs.safeString(KEY_VOICE_LANGUAGE, AppSettings.VOICE_LANGUAGE_AUTO)
             ?.trim()
             ?.lowercase()
             ?.ifEmpty { AppSettings.VOICE_LANGUAGE_AUTO }
             ?: AppSettings.VOICE_LANGUAGE_AUTO
-        val silence = prefs.getFloat(
+        val silence = prefs.safeFloat(
             KEY_VOICE_SILENCE_SECONDS,
             AppSettings.DEFAULT_VOICE_SILENCE_SECONDS,
         ).coerceIn(
             AppSettings.MIN_VOICE_SILENCE_SECONDS,
             AppSettings.MAX_VOICE_SILENCE_SECONDS,
         )
-        val showSystemNotes = prefs.getBoolean(
+        val showSystemNotes = prefs.safeBoolean(
             KEY_SHOW_SYSTEM_NOTES,
             AppSettings.DEFAULT_SHOW_SYSTEM_NOTES,
         )
         val usageWarnPercent = snapUsageWarnThreshold(
-            prefs.getInt(
+            prefs.safeInt(
                 KEY_USAGE_WARN_THRESHOLD,
                 AppSettings.DEFAULT_USAGE_WARN_PERCENT,
             ),
@@ -192,6 +192,34 @@ class SettingsRepository @Inject constructor(
             AppSettings.MAX_USAGE_WARN_PERCENT,
         )
     }
+
+    private fun SharedPreferences.safeString(key: String, default: String?): String? =
+        runCatching { getString(key, default) }
+            .getOrElse {
+                edit().remove(key).apply()
+                default
+            }
+
+    private fun SharedPreferences.safeFloat(key: String, default: Float): Float =
+        runCatching { getFloat(key, default) }
+            .getOrElse {
+                edit().remove(key).apply()
+                default
+            }
+
+    private fun SharedPreferences.safeBoolean(key: String, default: Boolean): Boolean =
+        runCatching { getBoolean(key, default) }
+            .getOrElse {
+                edit().remove(key).apply()
+                default
+            }
+
+    private fun SharedPreferences.safeInt(key: String, default: Int): Int =
+        runCatching { getInt(key, default) }
+            .getOrElse {
+                edit().remove(key).apply()
+                default
+            }
 
     private companion object {
         const val PREFS_NAME = "app_settings"

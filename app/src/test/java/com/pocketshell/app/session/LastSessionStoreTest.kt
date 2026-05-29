@@ -137,6 +137,24 @@ class LastSessionStoreTest {
     }
 
     @Test
+    fun `wrong typed restored blob returns null`() {
+        context.getSharedPreferences("last_session", Context.MODE_PRIVATE)
+            .edit()
+            .putString("saved_at", "yesterday")
+            .putString("host_id", "seven")
+            .putString("port", "ssh")
+            .putString("hostname", "10.0.0.5")
+            .putString("username", "me")
+            .putString("key_path", "/k")
+            .putString("session_name", "s")
+            .commit()
+
+        val store = LastSessionStore(context)
+
+        assertNull(store.read(nowMillis = 1_500L))
+    }
+
+    @Test
     fun `non-positive host id returns null`() {
         context.getSharedPreferences("last_session", Context.MODE_PRIVATE)
             .edit()

@@ -107,6 +107,27 @@ class SettingsRepositoryTest {
         assertEquals(ThemePreference.System, repo.settings.value.theme)
     }
 
+    @Test
+    fun `wrong typed restored prefs fall back to defaults`() {
+        context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+            .edit()
+            .putString("terminal_font_sp", "huge")
+            .putString("tmux_on_attach_default", "yes")
+            .putString("voice_silence_seconds", "soon")
+            .putString("show_system_notes", "maybe")
+            .putString("usage_warn_threshold_percent", "eighty")
+            .commit()
+
+        val repo = SettingsRepository(context)
+        val snap = repo.settings.value
+
+        assertEquals(AppSettings.DEFAULT_TERMINAL_FONT_SP, snap.terminalFontSizeSp, 0f)
+        assertTrue(snap.tmuxOnAttachByDefault)
+        assertEquals(AppSettings.DEFAULT_VOICE_SILENCE_SECONDS, snap.voiceSilenceThresholdSeconds, 0f)
+        assertEquals(AppSettings.DEFAULT_SHOW_SYSTEM_NOTES, snap.showSystemNotes)
+        assertEquals(AppSettings.DEFAULT_USAGE_WARN_PERCENT, snap.usageWarnThresholdPercent)
+    }
+
     // -- Issue #125: voice preferences -------------------------------------
 
     @Test

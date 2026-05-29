@@ -6,8 +6,10 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.pocketshell.app.MainActivity
@@ -29,13 +31,13 @@ class SystemSurfaceStateStore(
 
     fun readSessionWidgetState(): SessionWidgetState =
         SessionWidgetState(
-            activeSessionCount = prefs.getInt(KEY_ACTIVE_SESSION_COUNT, 0).coerceAtLeast(0),
+            activeSessionCount = prefs.safeInt(KEY_ACTIVE_SESSION_COUNT, 0).coerceAtLeast(0),
         )
 
     fun readBootForwardingStatus(): BootForwardingStatus =
         BootForwardingStatus(
-            requested = prefs.getBoolean(KEY_BOOT_FORWARDING_REQUESTED, false),
-            lastMessage = prefs.getString(KEY_BOOT_FORWARDING_MESSAGE, null),
+            requested = prefs.safeBoolean(KEY_BOOT_FORWARDING_REQUESTED, false),
+            lastMessage = prefs.safeString(KEY_BOOT_FORWARDING_MESSAGE, null),
         )
 
     fun setActiveSessionCount(count: Int) {
@@ -43,6 +45,27 @@ class SystemSurfaceStateStore(
             .putInt(KEY_ACTIVE_SESSION_COUNT, count.coerceAtLeast(0))
             .apply()
     }
+
+    private fun SharedPreferences.safeString(key: String, default: String?): String? =
+        runCatching { getString(key, default) }
+            .getOrElse {
+                edit().remove(key).apply()
+                default
+            }
+
+    private fun SharedPreferences.safeBoolean(key: String, default: Boolean): Boolean =
+        runCatching { getBoolean(key, default) }
+            .getOrElse {
+                edit().remove(key).apply()
+                default
+            }
+
+    private fun SharedPreferences.safeInt(key: String, default: Int): Int =
+        runCatching { getInt(key, default) }
+            .getOrElse {
+                edit().remove(key).apply()
+                default
+            }
 
     fun recordBootForwardingRequest(message: String) {
         prefs.edit()
@@ -98,8 +121,10 @@ object PendingBootForwardingNotification {
             )
             .build()
 
-        appContext.getSystemService(NotificationManager::class.java)
-            .notify(NOTIFICATION_ID, notification)
+        runCatching {
+            appContext.getSystemService(NotificationManager::class.java)
+                .notify(NOTIFICATION_ID, notification)
+        }.onFailure { Log.w(SYSTEM_SURFACES_TAG, "boot forwarding notification failed", it) }
     }
 
     private fun canPostNotifications(context: Context): Boolean =
@@ -109,13 +134,17 @@ object PendingBootForwardingNotification {
 
     private fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
-        context.getSystemService(NotificationManager::class.java)
-            .createNotificationChannel(
-                NotificationChannel(
-                    CHANNEL_ID,
-                    "Port forwarding restore",
-                    NotificationManager.IMPORTANCE_DEFAULT,
-                ),
-            )
+        runCatching {
+            context.getSystemService(NotificationManager::class.java)
+                .createNotificationChannel(
+                    NotificationChannel(
+                        CHANNEL_ID,
+                        "Port forwarding restore",
+                        NotificationManager.IMPORTANCE_DEFAULT,
+                    ),
+                )
+        }.onFailure { Log.w(SYSTEM_SURFACES_TAG, "notification channel creation failed", it) }
     }
 }
+
+internal const val SYSTEM_SURFACES_TAG: String = "PsSystemSurfaces"

@@ -466,8 +466,15 @@ private fun FolderListContent(
     onEditEnv: (FolderRow) -> Unit,
 ) {
     LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag(FOLDER_LIST_CONTENT_TAG),
+        contentPadding = PaddingValues(
+            start = 12.dp,
+            top = 12.dp,
+            end = 12.dp,
+            bottom = FolderListFabContentClearance,
+        ),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         if (actionStatus !is FolderActionStatus.Idle) {
@@ -509,7 +516,13 @@ private fun FolderListContent(
                 )
             }
         }
-        item { Spacer(modifier = Modifier.height(8.dp)) }
+        item {
+            Spacer(
+                modifier = Modifier
+                    .height(8.dp)
+                    .testTag(FOLDER_LIST_BOTTOM_SPACER_TAG),
+            )
+        }
     }
 }
 
@@ -918,8 +931,12 @@ private fun SessionAgentKind.isAgent(): Boolean = when (this) {
     SessionAgentKind.Shell -> false
 }
 
+private val FolderListFabContentClearance = 112.dp
+
 // Test tags exposed for the unit / connected E2E suite.
 const val FOLDER_LIST_SCREEN_TAG: String = "folder-list:screen"
+const val FOLDER_LIST_CONTENT_TAG: String = "folder-list:content"
+const val FOLDER_LIST_BOTTOM_SPACER_TAG: String = "folder-list:bottom-spacer"
 const val FOLDER_LIST_BACK_TAG: String = "folder-list:back"
 const val FOLDER_LIST_TITLE_TAG: String = "folder-list:title"
 const val FOLDER_LIST_LOADING_TAG: String = "folder-list:loading"

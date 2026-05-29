@@ -350,8 +350,12 @@ fun HostListScreen(
             LazyColumn(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxWidth(),
-                contentPadding = PaddingValues(vertical = 4.dp),
+                    .fillMaxWidth()
+                    .testTag(HOST_LIST_CONTENT_TAG),
+                contentPadding = PaddingValues(
+                    top = 4.dp,
+                    bottom = HostListFabContentClearance,
+                ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 // Issue #40: surface the upgrade prompt at the top so the
@@ -676,6 +680,9 @@ private data class PendingPassphraseRequest(
     val action: PendingPassphraseAction,
 )
 
+private val HostListFabContentClearance = 104.dp
+
+internal const val HOST_LIST_CONTENT_TAG = "host-list:content"
 internal const val HOST_ROW_TAG_PREFIX = "host:row:"
 
 /**
@@ -693,6 +700,9 @@ internal const val HOST_LIST_ADD_FAB_TAG = "host-list:add-fab"
  * (no hosts in the DB) before tapping the FAB.
  */
 internal const val HOST_LIST_EMPTY_STATE_TAG = "host-list:empty-state"
+
+/** Issue #274: stable marker for verifying the list can scroll past bottom chrome. */
+internal const val HOST_LIST_VERSION_FOOTER_TAG = "host-list:version-footer"
 
 /** Issue #116: stable test tag for the cross-host usage dashboard strip. */
 internal const val USAGE_DASHBOARD_STRIP_TAG = "usage:dashboard-strip"
@@ -799,7 +809,8 @@ private fun VersionFooter(versionName: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 22.dp, vertical = 10.dp),
+            .padding(horizontal = 22.dp, vertical = 10.dp)
+            .testTag(HOST_LIST_VERSION_FOOTER_TAG),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(

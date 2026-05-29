@@ -146,7 +146,7 @@ class FolderListScreenE2eTest {
                     onBack = {},
                     onOpenSession = { _, _ -> },
                     onSessionCreated = { _, _ -> },
-                    onBrowseRepos = {},
+                    onBrowseRepos = { _ -> },
                     onEditEnv = { _, _, _ -> },
                     modifier = Modifier.fillMaxSize(),
                     viewModel = viewModel,
@@ -304,4 +304,20 @@ private class FakeFolderListGateway(
         cwd: String,
         startCommand: String?,
     ): Result<String> = Result.success(sessionName)
+
+    override suspend fun createEmptyProject(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        parentPath: String,
+        folderName: String,
+    ): Result<String> = Result.success("$parentPath/$folderName")
+
+    override suspend fun importFile(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        folderPath: String,
+        payload: FolderImportPayload,
+    ): Result<String> = Result.success("$folderPath/${payload.remoteName}")
 }

@@ -218,7 +218,7 @@ class RepoBrowserViewModel @Inject constructor(
             if (row.cloned) {
                 reposRemoteSource.open(session, row.fullName)
             } else {
-                reposRemoteSource.clone(session, row.fullName)
+                reposRemoteSource.clone(session, row.fullName, root = creds.cloneRoot)
             }
         } catch (e: CancellationException) {
             throw e
@@ -251,6 +251,7 @@ class RepoBrowserViewModel @Inject constructor(
         val username: String,
         val keyPath: String,
         val passphrase: CharArray?,
+        val cloneRoot: String = "~/git",
     ) {
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
@@ -259,6 +260,7 @@ class RepoBrowserViewModel @Inject constructor(
             if (port != other.port) return false
             if (username != other.username) return false
             if (keyPath != other.keyPath) return false
+            if (cloneRoot != other.cloneRoot) return false
             if (passphrase != null) {
                 if (other.passphrase == null) return false
                 if (!passphrase.contentEquals(other.passphrase)) return false
@@ -271,6 +273,7 @@ class RepoBrowserViewModel @Inject constructor(
             result = 31 * result + port
             result = 31 * result + username.hashCode()
             result = 31 * result + keyPath.hashCode()
+            result = 31 * result + cloneRoot.hashCode()
             result = 31 * result + (passphrase?.contentHashCode() ?: 0)
             return result
         }

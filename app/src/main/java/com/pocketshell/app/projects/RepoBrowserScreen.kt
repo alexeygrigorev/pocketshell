@@ -60,6 +60,7 @@ fun RepoBrowserScreen(
     username: String,
     keyPath: String,
     passphrase: CharArray?,
+    cloneRoot: String = "~/git",
     onBack: () -> Unit,
     /**
      * Fired when a repo is ready to open — the path is the local clone
@@ -78,6 +79,7 @@ fun RepoBrowserScreen(
                 username = username,
                 keyPath = keyPath,
                 passphrase = passphrase,
+                cloneRoot = cloneRoot,
             ),
         )
     }
@@ -85,6 +87,7 @@ fun RepoBrowserScreen(
 
     RepoBrowserScaffold(
         hostName = hostName,
+        cloneRoot = cloneRoot,
         state = state,
         onBack = onBack,
         onRetry = viewModel::refresh,
@@ -104,6 +107,7 @@ fun RepoBrowserScreen(
 @Composable
 internal fun RepoBrowserScaffold(
     hostName: String,
+    cloneRoot: String = "~/git",
     state: RepoBrowserUiState,
     onBack: () -> Unit,
     onRetry: () -> Unit,
@@ -118,7 +122,7 @@ internal fun RepoBrowserScaffold(
             .testTag(REPO_BROWSER_SCREEN_TAG),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            RepoBrowserAppBar(hostName = hostName, onBack = onBack)
+            RepoBrowserAppBar(hostName = hostName, cloneRoot = cloneRoot, onBack = onBack)
             when (val s = state) {
                 RepoBrowserUiState.Loading -> LoadingPanel()
                 is RepoBrowserUiState.Failed -> RepoErrorPanel(
@@ -142,6 +146,7 @@ internal fun RepoBrowserScaffold(
 @Composable
 private fun RepoBrowserAppBar(
     hostName: String,
+    cloneRoot: String,
     onBack: () -> Unit,
 ) {
     Row(
@@ -167,7 +172,7 @@ private fun RepoBrowserAppBar(
                 fontWeight = FontWeight.Bold,
             )
         }
-        Column(modifier = Modifier.padding(start = 4.dp)) {
+        Column(modifier = Modifier.padding(start = 4.dp).weight(1f)) {
             Text(
                 text = "GitHub repos",
                 color = PocketShellColors.Text,
@@ -176,7 +181,7 @@ private fun RepoBrowserAppBar(
                 modifier = Modifier.testTag(REPO_BROWSER_TITLE_TAG),
             )
             Text(
-                text = hostName,
+                text = if (cloneRoot == "~/git") hostName else "$hostName · $cloneRoot",
                 color = PocketShellColors.TextSecondary,
                 fontSize = 12.sp,
             )

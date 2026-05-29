@@ -12,6 +12,7 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import kotlinx.coroutines.CancellationException
 import java.io.File
+import java.io.InputStream
 import javax.inject.Inject
 
 /**
@@ -122,7 +123,29 @@ interface FolderListGateway {
         cwd: String,
         startCommand: String?,
     ): Result<String>
+
+    suspend fun createEmptyProject(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        parentPath: String,
+        folderName: String,
+    ): Result<String>
+
+    suspend fun importFile(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        folderPath: String,
+        payload: FolderImportPayload,
+    ): Result<String>
 }
+
+data class FolderImportPayload(
+    val remoteName: String,
+    val length: Long?,
+    val openStream: () -> InputStream?,
+)
 
 class SshFolderListGateway @Inject constructor() : FolderListGateway {
 
@@ -285,6 +308,85 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
         }
     }
 
+    override suspend fun createEmptyProject(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        parentPath: String,
+        folderName: String,
+    ): Result<String> {
+        val safeName = normaliseProjectFolderName(folderName)
+            ?: return Result.failure(IllegalArgumentException("Enter a project folder name."))
+        val child = childPath(parentPath, safeName)
+        val session = SshConnection.connect(
+            host = host.hostname,
+            port = host.port,
+            user = host.username,
+            key = SshKey.Path(File(keyPath)),
+            passphrase = passphrase?.copyOf(),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrElse { return Result.failure(it) }
+
+        return try {
+            val result = session.exec(pathAware("mkdir -p -- ${shellQuoteRemotePath(child)}"))
+            if (result.exitCode == 0) {
+                Result.success(resolveRemoteDirectory(session, child).getOrDefault(child))
+            } else {
+                Result.failure(RuntimeException(result.stderr.ifBlank { result.stdout }.trim()))
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            Result.failure(t)
+        } finally {
+            session.close()
+        }
+    }
+
+    override suspend fun importFile(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        folderPath: String,
+        payload: FolderImportPayload,
+    ): Result<String> {
+        val session = SshConnection.connect(
+            host = host.hostname,
+            port = host.port,
+            user = host.username,
+            key = SshKey.Path(File(keyPath)),
+            passphrase = passphrase?.copyOf(),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrElse { return Result.failure(it) }
+
+        return try {
+            val mkdir = session.exec(pathAware("mkdir -p -- ${shellQuoteRemotePath(folderPath)}"))
+            if (mkdir.exitCode != 0) {
+                return Result.failure(RuntimeException(mkdir.stderr.ifBlank { mkdir.stdout }.trim()))
+            }
+            val resolvedFolderPath = resolveRemoteDirectory(session, folderPath)
+                .getOrElse { return Result.failure(it) }
+            val remotePath = childPath(resolvedFolderPath, payload.remoteName)
+            val input = payload.openStream()
+                ?: return Result.failure(RuntimeException("Couldn't read selected file."))
+            input.use { stream ->
+                session.uploadStream(
+                    input = stream,
+                    length = payload.length ?: -1L,
+                    name = payload.remoteName,
+                    remotePath = remotePath,
+                )
+            }
+            Result.success(remotePath)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            Result.failure(t)
+        } finally {
+            session.close()
+        }
+    }
+
     /**
      * Classify every session's active pane by delegating to the SAME
      * detector the Conversation view uses
@@ -353,6 +455,21 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
 
     private fun shellQuote(value: String): String = shellQuoteValue(value)
 
+    private fun shellQuoteRemotePath(value: String): String =
+        shellQuoteRemotePathValue(value)
+
+    private suspend fun resolveRemoteDirectory(
+        session: com.pocketshell.core.ssh.SshSession,
+        path: String,
+    ): Result<String> {
+        val result = session.exec(pathAware("cd -- ${shellQuoteRemotePath(path)} && pwd -P"))
+        return if (result.exitCode == 0) {
+            Result.success(result.stdout.lineSequence().firstOrNull { it.isNotBlank() }?.trim().orEmpty())
+        } else {
+            Result.failure(RuntimeException(result.stderr.ifBlank { result.stdout }.trim()))
+        }
+    }
+
     /** Active-pane row carrying the per-session signals we use beyond cwd. */
     internal data class ActivePaneRow(
         val sessionName: String,
@@ -372,6 +489,29 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
          */
         internal fun shellQuoteValue(value: String): String =
             "'" + value.replace("'", "'\\''") + "'"
+
+        internal fun shellQuoteRemotePathValue(value: String): String {
+            val trimmed = value.trim().ifBlank { "~" }
+            return when {
+                trimmed == "~" || trimmed == "\$HOME" -> "\$HOME"
+                trimmed.startsWith("~/") -> "\$HOME/" + shellQuoteValue(trimmed.removePrefix("~/"))
+                trimmed.startsWith("\$HOME/") -> "\$HOME/" + shellQuoteValue(trimmed.removePrefix("\$HOME/"))
+                else -> shellQuoteValue(trimmed)
+            }
+        }
+
+        internal fun normaliseProjectFolderName(value: String): String? {
+            val trimmed = value.trim().trim('/')
+            if (trimmed.isBlank()) return null
+            if (trimmed == "." || trimmed == "..") return null
+            if ('/' in trimmed || '\\' in trimmed) return null
+            return trimmed
+        }
+
+        internal fun childPath(parentPath: String, childName: String): String {
+            val parent = parentPath.trim().trimEnd('/')
+            return if (parent.isEmpty() || parent == "/") "/$childName" else "$parent/$childName"
+        }
 
         /**
          * Issue #263: compose the literal command typed into a freshly

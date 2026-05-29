@@ -215,6 +215,7 @@ sealed interface AppDestination {
         val username: String,
         val keyPath: String,
         val passphrase: CharArray?,
+        val cloneRoot: String = "~/git",
     ) : AppDestination
 
     /**

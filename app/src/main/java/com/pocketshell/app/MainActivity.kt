@@ -663,7 +663,7 @@ private fun AppNavigator(
             },
             // Issue #230: route to the GitHub repos browser, reusing the
             // SSH credentials this folder screen already holds.
-            onBrowseRepos = {
+            onBrowseRepos = { cloneRoot ->
                 navigate(
                     AppDestination.RepoBrowser(
                         hostId = dest.hostId,
@@ -673,6 +673,7 @@ private fun AppNavigator(
                         username = dest.username,
                         keyPath = dest.keyPath,
                         passphrase = dest.passphrase,
+                        cloneRoot = cloneRoot ?: "~/git",
                     ),
                 )
             },
@@ -723,6 +724,7 @@ private fun AppNavigator(
             username = dest.username,
             keyPath = dest.keyPath,
             passphrase = dest.passphrase,
+            cloneRoot = dest.cloneRoot,
             onBack = ::back,
             onOpenRepo = { path ->
                 navigate(

@@ -2,10 +2,13 @@ package com.pocketshell.app.projects
 
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -107,7 +110,7 @@ class FolderListSessionClickTest {
                         clickedStart = start
                     },
                     onSessionCreated = { _, _ -> },
-                    onBrowseRepos = {},
+                    onBrowseRepos = { _ -> },
                     onEditEnv = { _, _, _ -> },
                     modifier = Modifier.fillMaxSize(),
                     viewModel = viewModel,
@@ -125,9 +128,92 @@ class FolderListSessionClickTest {
         assertEquals("claude-main", clickedSession)
         assertEquals("/root", clickedStart)
     }
+
+    @Test
+    fun folderActionsExposeScopedCloneAndEmptyProjectCreation() {
+        var cloneRoot: String? = null
+        val fakeGateway = StaticGateway(
+            rows = listOf(
+                FolderSessionRow(
+                    sessionName = "shell-main",
+                    lastActivity = 1_700_000_000L,
+                    attached = false,
+                    cwd = "/root/projects",
+                    agentKind = SessionAgentKind.Shell,
+                ),
+            ),
+        )
+        val viewModel = FolderListViewModel(
+            gateway = fakeGateway,
+            hostDao = db.hostDao(),
+            projectRootDao = db.projectRootDao(),
+        )
+
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "h",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue171",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { root -> cloneRoot = root },
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("shell-main").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        compose.onNodeWithTag(folderDetailActionsTestTag("/root/projects")).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText("Clone git project").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(FOLDER_CONTEXT_NEW_SESSION_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FOLDER_CONTEXT_IMPORT_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FOLDER_CONTEXT_NEW_SESSION_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText("New session").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("in projects").assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_TYPE_PICKER_CANCEL_TAG).performClick()
+
+        compose.onNodeWithTag(folderDetailActionsTestTag("/root/projects")).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText("Clone git project").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(FOLDER_CONTEXT_CLONE_TAG).performClick()
+        assertEquals("/root/projects", cloneRoot)
+
+        compose.onNodeWithTag(folderDetailActionsTestTag("/root/projects")).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText("Empty project").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(FOLDER_CONTEXT_EMPTY_PROJECT_TAG).performClick()
+        compose.onNodeWithTag(EMPTY_PROJECT_NAME_TAG).performTextInput("scratch")
+        compose.onNodeWithTag(EMPTY_PROJECT_CREATE_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText("scratch").fetchSemanticsNodes().isNotEmpty()
+        }
+        assertEquals("/root/projects", fakeGateway.lastEmptyParent)
+        assertEquals("scratch", fakeGateway.lastEmptyName)
+        compose.onNodeWithTag(folderHeaderLabelTag("/root/projects/scratch")).assertIsDisplayed()
+    }
 }
 
 private class StaticGateway(private val rows: List<FolderSessionRow>) : FolderListGateway {
+    var lastEmptyParent: String? = null
+    var lastEmptyName: String? = null
+
     override suspend fun listSessionsWithFolder(
         host: HostEntity,
         keyPath: String,
@@ -142,6 +228,26 @@ private class StaticGateway(private val rows: List<FolderSessionRow>) : FolderLi
         cwd: String,
         startCommand: String?,
     ): Result<String> = Result.success(sessionName)
+
+    override suspend fun createEmptyProject(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        parentPath: String,
+        folderName: String,
+    ): Result<String> {
+        lastEmptyParent = parentPath
+        lastEmptyName = folderName
+        return Result.success("$parentPath/$folderName")
+    }
+
+    override suspend fun importFile(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        folderPath: String,
+        payload: FolderImportPayload,
+    ): Result<String> = Result.success("$folderPath/${payload.remoteName}")
 }
 
 @Suppress("unused")

@@ -82,6 +82,13 @@ sealed interface FolderListUiState {
     data object ToolUnavailable : FolderListUiState
 }
 
+sealed interface FolderActionStatus {
+    data object Idle : FolderActionStatus
+    data class Running(val label: String) : FolderActionStatus
+    data class Succeeded(val message: String) : FolderActionStatus
+    data class Failed(val message: String) : FolderActionStatus
+}
+
 /**
  * Backs [FolderListScreen] — issue #171.
  *
@@ -113,12 +120,17 @@ class FolderListViewModel @Inject constructor(
         MutableStateFlow(FolderListUiState.Loading)
     val state: StateFlow<FolderListUiState> = _state.asStateFlow()
 
+    private val _actionStatus: MutableStateFlow<FolderActionStatus> =
+        MutableStateFlow(FolderActionStatus.Idle)
+    val actionStatus: StateFlow<FolderActionStatus> = _actionStatus.asStateFlow()
+
     private var bound: BoundParams? = null
     private var watchedFoldersJob: Job? = null
     private var pollingJob: Job? = null
     private var lastSessions: List<FolderSessionEntry> = emptyList()
     private var lastSessionFolderPaths: Map<String, String> = emptyMap()
     private var lastWatchedFolders: List<ProjectRootEntity> = emptyList()
+    private var lastCreatedFolders: Map<String, String> = emptyMap()
 
     /**
      * Bind to a host and kick a one-shot probe. Re-calling with the same
@@ -218,6 +230,72 @@ class FolderListViewModel @Inject constructor(
         }
     }
 
+    fun createEmptyProject(parentPath: String, folderName: String) {
+        val params = bound ?: return
+        viewModelScope.launch {
+            _actionStatus.value = FolderActionStatus.Running("Creating $folderName")
+            val host = withContext(Dispatchers.IO) { hostDao.getById(params.hostId) } ?: run {
+                _actionStatus.value = FolderActionStatus.Failed("Host not found.")
+                return@launch
+            }
+            val result = gateway.createEmptyProject(
+                host = host,
+                keyPath = params.keyPath,
+                passphrase = params.passphrase,
+                parentPath = parentPath,
+                folderName = folderName,
+            )
+            result.fold(
+                onSuccess = { path ->
+                    lastCreatedFolders = lastCreatedFolders + (canonicalisePath(path) to defaultLabelForPath(path))
+                    emitReady()
+                    _actionStatus.value = FolderActionStatus.Succeeded("Created $path")
+                    refresh()
+                },
+                onFailure = { error ->
+                    _actionStatus.value = FolderActionStatus.Failed(
+                        "Couldn't create project: ${error.message ?: error.javaClass.simpleName}",
+                    )
+                },
+            )
+        }
+    }
+
+    fun importFileIntoFolder(folderPath: String, payload: FolderImportPayload) {
+        val params = bound ?: return
+        viewModelScope.launch {
+            _actionStatus.value = FolderActionStatus.Running("Importing ${payload.remoteName}")
+            val host = withContext(Dispatchers.IO) { hostDao.getById(params.hostId) } ?: run {
+                _actionStatus.value = FolderActionStatus.Failed("Host not found.")
+                return@launch
+            }
+            val result = gateway.importFile(
+                host = host,
+                keyPath = params.keyPath,
+                passphrase = params.passphrase,
+                folderPath = folderPath,
+                payload = payload,
+            )
+            result.fold(
+                onSuccess = { remotePath ->
+                    lastCreatedFolders = lastCreatedFolders +
+                        (canonicalisePath(folderPath) to defaultLabelForPath(folderPath))
+                    emitReady()
+                    _actionStatus.value = FolderActionStatus.Succeeded("Imported $remotePath")
+                },
+                onFailure = { error ->
+                    _actionStatus.value = FolderActionStatus.Failed(
+                        "Couldn't import file: ${error.message ?: error.javaClass.simpleName}",
+                    )
+                },
+            )
+        }
+    }
+
+    fun clearActionStatus() {
+        _actionStatus.value = FolderActionStatus.Idle
+    }
+
     private fun startPolling() {
         val params = bound ?: return
         pollingJob?.cancel()
@@ -299,6 +377,7 @@ class FolderListViewModel @Inject constructor(
             sessions = lastSessions,
             sessionFolderPaths = lastSessionFolderPaths,
             watchedFolders = lastWatchedFolders,
+            extraFolders = lastCreatedFolders,
         )
         _state.value = FolderListUiState.Ready(
             folders = folders,
@@ -437,9 +516,12 @@ class FolderListViewModel @Inject constructor(
             sessions: List<FolderSessionEntry>,
             sessionFolderPaths: Map<String, String>,
             watchedFolders: List<ProjectRootEntity>,
+            extraFolders: Map<String, String> = emptyMap(),
         ): List<FolderRow> {
             val watchedByPath = watchedFolders
                 .associate { canonicalisePath(it.path) to it }
+            val extraByPath = extraFolders
+                .mapKeys { (path, _) -> canonicalisePath(path) }
             val groupedSessions: Map<String, List<FolderSessionEntry>> = sessions
                 .groupBy { sessionFolderPaths[it.sessionName] ?: UNTRACKED_PATH }
                 .mapValues { (_, list) ->
@@ -449,7 +531,7 @@ class FolderListViewModel @Inject constructor(
                     )
                 }
 
-            val allPaths = groupedSessions.keys + watchedByPath.keys
+            val allPaths = groupedSessions.keys + watchedByPath.keys + extraByPath.keys
             val rows = allPaths.map { path ->
                 val matching = groupedSessions[path].orEmpty()
                 val watched = watchedByPath[path]
@@ -458,6 +540,7 @@ class FolderListViewModel @Inject constructor(
                         com.pocketshell.app.projects.WatchedFoldersViewModel
                             .stripOrderPrefix(watched.label)
                             .ifBlank { defaultLabelForPath(path) }
+                    extraByPath[path] != null -> extraByPath.getValue(path)
                     else -> defaultLabelForPath(path)
                 }
                 FolderRow(

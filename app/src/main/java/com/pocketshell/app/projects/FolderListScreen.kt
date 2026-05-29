@@ -1,5 +1,10 @@
 package com.pocketshell.app.projects
 
+import android.content.ContentResolver
+import android.net.Uri
+import android.provider.OpenableColumns
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -32,12 +37,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.app.share.FilenameSanitiser
+import com.pocketshell.app.share.ShareUploader
 import com.pocketshell.uikit.components.SessionRow
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.Tag
@@ -98,7 +106,7 @@ fun FolderListScreen(
      * caller (MainActivity) routes to `AppDestination.RepoBrowser` with
      * the same SSH credentials this screen already holds.
      */
-    onBrowseRepos: () -> Unit,
+    onBrowseRepos: (cloneRoot: String?) -> Unit,
     /**
      * Issue #264: open the per-folder `.env` / `.envrc` key manager.
      * Fired with the tapped folder's canonical path + label so the
@@ -131,8 +139,28 @@ fun FolderListScreen(
         onDispose { viewModel.stopPolling() }
     }
     val state by viewModel.state.collectAsState()
+    val actionStatus by viewModel.actionStatus.collectAsState()
+    val context = LocalContext.current
     var showAllFlatList by remember { mutableStateOf(false) }
     var pickerFolder by remember { mutableStateOf<PickerTarget?>(null) }
+    var actionFolder by remember { mutableStateOf<PickerTarget?>(null) }
+    var emptyProjectFolder by remember { mutableStateOf<PickerTarget?>(null) }
+    var importFolder by remember { mutableStateOf<PickerTarget?>(null) }
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri ->
+        val target = importFolder
+        importFolder = null
+        if (uri != null && target != null) {
+            viewModel.importFileIntoFolder(
+                folderPath = target.path,
+                payload = folderImportPayload(
+                    resolver = context.contentResolver,
+                    uri = uri,
+                ),
+            )
+        }
+    }
 
     Box(
         modifier = modifier
@@ -144,7 +172,7 @@ fun FolderListScreen(
             FolderListAppBar(
                 hostName = hostName,
                 onBack = onBack,
-                onBrowseRepos = onBrowseRepos,
+                onBrowseRepos = { onBrowseRepos(null) },
             )
             when (val s = state) {
                 FolderListUiState.Loading -> LoadingPanel()
@@ -161,7 +189,9 @@ fun FolderListScreen(
                     folders = s.folders,
                     flatSessions = s.flatSessions,
                     showAllFlatList = showAllFlatList,
+                    actionStatus = actionStatus,
                     onToggleShowAll = { showAllFlatList = !showAllFlatList },
+                    onDismissActionStatus = viewModel::clearActionStatus,
                     onSessionClick = { folderPath, sessionName ->
                         onOpenSession(
                             sessionName,
@@ -170,6 +200,9 @@ fun FolderListScreen(
                     },
                     onCreateInFolder = { row ->
                         pickerFolder = PickerTarget(path = row.path, label = row.label)
+                    },
+                    onFolderActions = { row ->
+                        actionFolder = PickerTarget(path = row.path, label = row.label)
                     },
                     onEditEnv = { row ->
                         // Copy-source set = every real (non-untracked)
@@ -223,9 +256,72 @@ fun FolderListScreen(
             },
         )
     }
+
+    actionFolder?.let { target ->
+        FolderContextActionSheet(
+            folderLabel = target.label,
+            folderPath = target.path,
+            onDismiss = { actionFolder = null },
+            onNewSession = {
+                actionFolder = null
+                pickerFolder = target
+            },
+            onImport = {
+                actionFolder = null
+                importFolder = target
+                importLauncher.launch("*/*")
+            },
+            onCloneGitProject = {
+                actionFolder = null
+                onBrowseRepos(target.path)
+            },
+            onEmptyProject = {
+                actionFolder = null
+                emptyProjectFolder = target
+            },
+        )
+    }
+
+    emptyProjectFolder?.let { target ->
+        EmptyProjectDialog(
+            folderLabel = target.label,
+            onDismiss = { emptyProjectFolder = null },
+            onCreate = { name ->
+                emptyProjectFolder = null
+                viewModel.createEmptyProject(parentPath = target.path, folderName = name)
+            },
+        )
+    }
 }
 
 private data class PickerTarget(val path: String, val label: String)
+
+private fun folderImportPayload(resolver: ContentResolver, uri: Uri): FolderImportPayload {
+    val displayName = ShareUploader.queryUriDisplayName(resolver, uri)
+        ?: uri.lastPathSegment
+        ?: "imported"
+    val mime = resolver.getType(uri)
+    val sanitised = FilenameSanitiser.sanitise(
+        input = displayName,
+        defaultExtension = ShareUploader.extensionForMimeType(mime),
+    )
+    return FolderImportPayload(
+        remoteName = sanitised.render(),
+        length = queryUriSize(resolver, uri),
+        openStream = { resolver.openInputStream(uri) },
+    )
+}
+
+private fun queryUriSize(resolver: ContentResolver, uri: Uri): Long? = try {
+    resolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+        if (!cursor.moveToFirst()) return@use null
+        val index = cursor.getColumnIndex(OpenableColumns.SIZE)
+        if (index < 0) return@use null
+        cursor.getLong(index).takeIf { it > 0L }
+    }
+} catch (_: Throwable) {
+    null
+}
 
 /**
  * Derive a tmux session name from the user's picker choice. The name
@@ -339,9 +435,12 @@ private fun FolderListContent(
     folders: List<FolderRow>,
     flatSessions: List<FolderSessionEntry>,
     showAllFlatList: Boolean,
+    actionStatus: FolderActionStatus,
     onToggleShowAll: () -> Unit,
+    onDismissActionStatus: () -> Unit,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
     onCreateInFolder: (FolderRow) -> Unit,
+    onFolderActions: (FolderRow) -> Unit,
     onEditEnv: (FolderRow) -> Unit,
 ) {
     LazyColumn(
@@ -349,6 +448,14 @@ private fun FolderListContent(
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        if (actionStatus !is FolderActionStatus.Idle) {
+            item {
+                FolderActionStatusBanner(
+                    status = actionStatus,
+                    onDismiss = onDismissActionStatus,
+                )
+            }
+        }
         if (folders.isEmpty()) {
             item {
                 EmptyState()
@@ -359,6 +466,7 @@ private fun FolderListContent(
                     folder = folder,
                     onSessionClick = onSessionClick,
                     onCreateInFolder = onCreateInFolder,
+                    onFolderActions = onFolderActions,
                     onEditEnv = onEditEnv,
                 )
             }
@@ -407,6 +515,47 @@ private fun FolderListContent(
 }
 
 @Composable
+private fun FolderActionStatusBanner(
+    status: FolderActionStatus,
+    onDismiss: () -> Unit,
+) {
+    val message = when (status) {
+        FolderActionStatus.Idle -> return
+        is FolderActionStatus.Running -> status.label
+        is FolderActionStatus.Succeeded -> status.message
+        is FolderActionStatus.Failed -> status.message
+    }
+    val color = when (status) {
+        is FolderActionStatus.Failed -> PocketShellColors.Red
+        else -> PocketShellColors.Accent
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color.copy(alpha = 0.12f), RoundedCornerShape(10.dp))
+            .border(1.dp, color.copy(alpha = 0.4f), RoundedCornerShape(10.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .testTag(FOLDER_LIST_ACTION_STATUS_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = message,
+            color = PocketShellColors.Text,
+            fontSize = 13.sp,
+            modifier = Modifier.weight(1f),
+        )
+        if (status !is FolderActionStatus.Running) {
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag(FOLDER_LIST_ACTION_STATUS_DISMISS_TAG),
+            ) {
+                Text("Dismiss", color = color, fontSize = 12.sp)
+            }
+        }
+    }
+}
+
+@Composable
 private fun EmptyState() {
     Column(
         modifier = Modifier
@@ -446,6 +595,7 @@ private fun FolderGroup(
     folder: FolderRow,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
     onCreateInFolder: (FolderRow) -> Unit,
+    onFolderActions: (FolderRow) -> Unit,
     onEditEnv: (FolderRow) -> Unit,
 ) {
     Column(
@@ -457,6 +607,7 @@ private fun FolderGroup(
         FolderHeader(
             folder = folder,
             onCreateInFolder = { onCreateInFolder(folder) },
+            onFolderActions = { onFolderActions(folder) },
             onEditEnv = { onEditEnv(folder) },
         )
         if (folder.sessions.isEmpty()) {
@@ -485,6 +636,7 @@ private fun FolderGroup(
 private fun FolderHeader(
     folder: FolderRow,
     onCreateInFolder: () -> Unit,
+    onFolderActions: () -> Unit,
     onEditEnv: () -> Unit,
 ) {
     Row(
@@ -527,6 +679,17 @@ private fun FolderHeader(
         // Issue #264: "Env" entry point — only on real folders (the
         // synthetic Untracked group has no filesystem path to manage).
         if (folder.path != FolderListViewModel.UNTRACKED_PATH) {
+            TextButton(
+                onClick = onFolderActions,
+                modifier = Modifier.testTag(folderDetailActionsTestTag(folder.path)),
+            ) {
+                Text(
+                    text = "Actions",
+                    color = PocketShellColors.Accent,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
             TextButton(
                 onClick = onEditEnv,
                 modifier = Modifier.testTag(folderDetailEnvTestTag(folder.path)),
@@ -643,6 +806,8 @@ const val FOLDER_LIST_SHOW_ALL_TAG: String = "folder-list:show-all"
 const val FOLDER_LIST_FLAT_EMPTY_TAG: String = "folder-list:flat:empty"
 const val FOLDER_LIST_NEW_SESSION_FAB_TAG: String = "folder-list:new-session-fab"
 const val FOLDER_LIST_BROWSE_REPOS_TAG: String = "folder-list:browse-repos"
+const val FOLDER_LIST_ACTION_STATUS_TAG: String = "folder-list:action-status"
+const val FOLDER_LIST_ACTION_STATUS_DISMISS_TAG: String = "folder-list:action-status:dismiss"
 
 fun folderRowTestTag(path: String): String = "folder-list:row:$path"
 fun folderHeaderLabelTag(path: String): String = "folder-list:header:$path"
@@ -651,5 +816,7 @@ fun folderDetailRowTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName"
 fun folderDetailCreateTestTag(folderPath: String): String =
     "folder-list:detail:$folderPath:create"
+fun folderDetailActionsTestTag(folderPath: String): String =
+    "folder-list:detail:$folderPath:actions"
 fun folderDetailEnvTestTag(folderPath: String): String =
     "folder-list:detail:$folderPath:env"

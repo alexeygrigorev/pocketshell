@@ -1,6 +1,7 @@
 package com.pocketshell.app.assistant
 
 import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.app.projects.FolderImportPayload
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.FolderListResult
 import com.pocketshell.app.repos.ReposJsonParser
@@ -97,6 +98,22 @@ class AppAssistantActionsTest {
                 cwd: String,
                 startCommand: String?,
             ): Result<String> = Result.success(sessionName)
+
+            override suspend fun createEmptyProject(
+                host: HostEntity,
+                keyPath: String,
+                passphrase: CharArray?,
+                parentPath: String,
+                folderName: String,
+            ): Result<String> = Result.success("$parentPath/$folderName")
+
+            override suspend fun importFile(
+                host: HostEntity,
+                keyPath: String,
+                passphrase: CharArray?,
+                folderPath: String,
+                payload: FolderImportPayload,
+            ): Result<String> = Result.success("$folderPath/${payload.remoteName}")
         },
     ): AppAssistantActions {
         val executor = object : AssistantSshExecutor {

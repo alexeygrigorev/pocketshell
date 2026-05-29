@@ -107,7 +107,6 @@ import kotlin.math.sin
 fun HostListScreen(
     onAddHost: () -> Unit,
     @Suppress("UNUSED_PARAMETER") onEditHost: (Long) -> Unit,
-    onManageKeys: () -> Unit,
     // Issue #112: Crashes affordance was moved off the top bar and now
     // lives under Settings → Diagnostics. The activity-level wiring still
     // passes this callback so the navigator can re-introduce a direct
@@ -344,7 +343,6 @@ fun HostListScreen(
             // chrome and host-list actions that must remain reachable
             // while the content below scrolls.
             HostsAppBar(
-                onKeysClick = onManageKeys,
                 onImportHostClick = { hostSharePicker.launch("*/*") },
                 onScanClick = onOpenScan,
                 onSettingsClick = onOpenSettings,
@@ -824,12 +822,11 @@ private fun VersionFooter(versionName: String) {
  * "PocketShell" wordmark stays on the left, Settings is the rightmost
  * gear button, and secondary host-list actions live under a compact
  * overflow menu. Issue #299 removes the previous pseudo-tab row because
- * only "Hosts" was a real selected destination; Settings, Import, Scan,
- * and Keys were actions.
+ * only "Hosts" was a real selected destination; Settings, Import, and
+ * Scan were actions.
  */
 @Composable
 private fun HostsAppBar(
-    onKeysClick: () -> Unit,
     onImportHostClick: () -> Unit,
     onScanClick: () -> Unit,
     onSettingsClick: () -> Unit = {},
@@ -853,7 +850,6 @@ private fun HostsAppBar(
         HostListActionsMenu(
             onImportClick = onImportHostClick,
             onScanClick = onScanClick,
-            onKeysClick = onKeysClick,
         )
         Spacer(modifier = Modifier.width(8.dp))
         TopBarIconButton(
@@ -873,14 +869,13 @@ internal const val SETTINGS_BUTTON_TAG = "hosts:tab:settings"
 
 /**
  * Overflow for host-list actions that used to sit in the pseudo-tab row.
- * Import, Scan, and Keys stay reachable here until the fuller add-host
- * QR/key IA work lands in #290/#293.
+ * Import and Scan stay reachable here until the fuller add-host QR IA
+ * work lands in #290. Key management lives inside Add/Edit host.
  */
 @Composable
 private fun HostListActionsMenu(
     onImportClick: () -> Unit,
     onScanClick: () -> Unit,
-    onKeysClick: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
@@ -910,14 +905,6 @@ private fun HostListActionsMenu(
                     onScanClick()
                 },
                 modifier = Modifier.testTag(HOST_SCAN_ACTION_TAG),
-            )
-            DropdownMenuItem(
-                text = { Text("Keys") },
-                onClick = {
-                    expanded = false
-                    onKeysClick()
-                },
-                modifier = Modifier.testTag(HOST_KEYS_ACTION_TAG),
             )
         }
     }
@@ -980,7 +967,6 @@ private fun SettingsGearIcon() {
 internal const val HOST_ACTIONS_BUTTON_TAG: String = "hosts:actions:button"
 internal const val HOST_IMPORT_ACTION_TAG: String = "hosts:actions:import"
 internal const val HOST_SCAN_ACTION_TAG: String = "hosts:actions:scan"
-internal const val HOST_KEYS_ACTION_TAG: String = "hosts:actions:keys"
 
 /**
  * Trailing kebab (vertical three-dot) button + the [DropdownMenu] it

@@ -25,6 +25,8 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Tab
+import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -64,6 +66,8 @@ const val ADD_HOST_CTA_TAG = "add-host-cta"
 const val ADD_HOST_KEY_DROPDOWN_TAG = "add-host-key-dropdown"
 const val ADD_HOST_KEY_SEARCH_TAG = "add-host-key-search"
 const val ADD_HOST_KEY_SEARCH_EMPTY_TAG = "add-host-key-search-empty"
+const val ADD_HOST_DETAILS_TAB_TAG = "add-host-tab-details"
+const val ADD_HOST_MANAGE_KEYS_TAB_TAG = "add-host-tab-manage-keys"
 
 /**
  * Default placeholder shown in the optional "Usage command" field
@@ -97,9 +101,9 @@ private const val PORT_SUPPORTING_TEXT = "Default: 22"
  *
  * The key selector dropdown reads from [AddEditHostViewModel.sshKeys];
  * if the user has not registered any keys yet, the dropdown shows a
- * single disabled "no keys — go to Keys" hint and Save fails with an
- * inline error. Key creation happens on the dedicated [SshKeysScreen],
- * not here — keeps each screen's responsibility narrow.
+ * "no keys — tap Manage keys" row and Save fails with an inline error.
+ * Key creation happens in this flow's Manage keys tab so selecting and
+ * managing a key stay in one place.
  *
  * Save success → [AddEditHostViewModel.state.saved] flips to `true` →
  * [onDone] is invoked to pop the screen.
@@ -108,12 +112,14 @@ private const val PORT_SUPPORTING_TEXT = "Default: 22"
 fun AddEditHostScreen(
     hostId: Long?,
     onDone: () -> Unit,
-    onManageKeys: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: AddEditHostViewModel = hiltViewModel(),
+    keyManagementViewModel: SshKeysViewModel = hiltViewModel(),
+    keyManagementRequiresUnlock: (android.content.Context) -> Boolean = ::isSshKeyUnlockRequired,
 ) {
     val state by viewModel.state.collectAsState()
     val sshKeys by viewModel.sshKeys.collectAsState()
+    var selectedTab by remember { mutableStateOf(AddEditHostTab.Details) }
 
     LaunchedEffect(hostId) {
         if (hostId != null) viewModel.loadHost(hostId)
@@ -161,7 +167,9 @@ fun AddEditHostScreen(
     // dialog visibility — `DiscardChangesDialog` confirms or cancels.
     var pendingDiscard by remember { mutableStateOf(false) }
     BackHandler {
-        if (viewModel.isDirty()) {
+        if (selectedTab == AddEditHostTab.ManageKeys) {
+            selectedTab = AddEditHostTab.Details
+        } else if (viewModel.isDirty()) {
             pendingDiscard = true
         } else {
             onDone()
@@ -186,7 +194,9 @@ fun AddEditHostScreen(
             FormAppBar(
                 title = if (hostId == null) "Add host" else "Edit host",
                 onBack = {
-                    if (viewModel.isDirty()) {
+                    if (selectedTab == AddEditHostTab.ManageKeys) {
+                        selectedTab = AddEditHostTab.Details
+                    } else if (viewModel.isDirty()) {
                         pendingDiscard = true
                     } else {
                         onDone()
@@ -194,117 +204,164 @@ fun AddEditHostScreen(
                 },
             )
 
-            Column(
-                modifier = Modifier
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                FormField(
-                    label = "Name",
-                    value = state.name,
-                    onValueChange = { v -> viewModel.updateState { it.copy(name = v) } },
-                    errorText = state.fieldErrors.name,
-                    focusRequester = nameFocus,
-                    testTag = ADD_HOST_NAME_FIELD_TAG,
-                )
+            AddEditHostTabs(
+                selectedTab = selectedTab,
+                onSelect = { selectedTab = it },
+            )
 
-                FormField(
-                    label = "Hostname / IP",
-                    value = state.hostname,
-                    onValueChange = { v -> viewModel.updateState { it.copy(hostname = v) } },
-                    errorText = state.fieldErrors.hostname,
-                    focusRequester = hostnameFocus,
-                    testTag = ADD_HOST_HOSTNAME_FIELD_TAG,
-                )
+            when (selectedTab) {
+                AddEditHostTab.Details -> {
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        FormField(
+                            label = "Name",
+                            value = state.name,
+                            onValueChange = { v -> viewModel.updateState { it.copy(name = v) } },
+                            errorText = state.fieldErrors.name,
+                            focusRequester = nameFocus,
+                            testTag = ADD_HOST_NAME_FIELD_TAG,
+                        )
 
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    FormField(
-                        label = "Port",
-                        value = state.port,
-                        onValueChange = { v -> viewModel.updateState { it.copy(port = v) } },
-                        // Show the default-22 hint at rest; an error
-                        // message replaces it when validation fails.
-                        supportingText = PORT_SUPPORTING_TEXT,
-                        errorText = state.fieldErrors.port,
-                        focusRequester = portFocus,
+                        FormField(
+                            label = "Hostname / IP",
+                            value = state.hostname,
+                            onValueChange = { v -> viewModel.updateState { it.copy(hostname = v) } },
+                            errorText = state.fieldErrors.hostname,
+                            focusRequester = hostnameFocus,
+                            testTag = ADD_HOST_HOSTNAME_FIELD_TAG,
+                        )
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            FormField(
+                                label = "Port",
+                                value = state.port,
+                                onValueChange = { v -> viewModel.updateState { it.copy(port = v) } },
+                                // Show the default-22 hint at rest; an error
+                                // message replaces it when validation fails.
+                                supportingText = PORT_SUPPORTING_TEXT,
+                                errorText = state.fieldErrors.port,
+                                focusRequester = portFocus,
+                                modifier = Modifier.weight(1f),
+                                testTag = ADD_HOST_PORT_FIELD_TAG,
+                                keyboardType = KeyboardType.Number,
+                            )
+                            FormField(
+                                label = "Username",
+                                value = state.username,
+                                onValueChange = { v -> viewModel.updateState { it.copy(username = v) } },
+                                errorText = state.fieldErrors.username,
+                                focusRequester = usernameFocus,
+                                modifier = Modifier.weight(2f),
+                                testTag = ADD_HOST_USERNAME_FIELD_TAG,
+                            )
+                        }
+
+                        KeySelector(
+                            selectedKeyId = state.selectedKeyId,
+                            keys = sshKeys.map { it.id to it.name },
+                            onSelect = { id -> viewModel.updateState { it.copy(selectedKeyId = id) } },
+                            onManageKeys = { selectedTab = AddEditHostTab.ManageKeys },
+                            errorText = state.fieldErrors.selectedKey,
+                            focusRequester = keyFocus,
+                        )
+
+                        // Issue #117 (usage Fix C): optional per-host override
+                        // for the usage command. The field is plain — no
+                        // validation, no required-marker — because (a) any
+                        // non-empty string is forwarded verbatim to
+                        // [UsageRemoteSource.fetchUsage] as `commandOverride`,
+                        // and (b) leaving it blank just falls back to
+                        // `pocketshell usage --json`. The placeholder is the default
+                        // so the user can see what the empty state will do.
+                        FormField(
+                            label = "Usage command (optional)",
+                            value = state.usageCommand,
+                            onValueChange = { v -> viewModel.updateState { it.copy(usageCommand = v) } },
+                            supportingText = USAGE_COMMAND_SUPPORTING_TEXT,
+                            placeholder = USAGE_COMMAND_PLACEHOLDER,
+                            testTag = ADD_HOST_USAGE_COMMAND_FIELD_TAG,
+                        )
+
+                        // The legacy global prose error survives only for the
+                        // "no SSH keys exist on the device at all" hint — that's
+                        // a global precondition, not a per-field problem. The
+                        // per-field rejection messages live under each field via
+                        // `state.fieldErrors`.
+                        state.error?.let { err ->
+                            Text(
+                                text = err,
+                                color = PocketShellColors.Red,
+                                fontSize = 13.sp,
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Button(
+                            onClick = viewModel::save,
+                            enabled = canSubmit,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag(ADD_HOST_CTA_TAG),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = PocketShellColors.Accent,
+                                contentColor = PocketShellColors.OnAccent,
+                                disabledContainerColor = PocketShellColors.Border,
+                                disabledContentColor = PocketShellColors.TextMuted,
+                            ),
+                        ) {
+                            Text(
+                                text = if (hostId == null) "Add host" else "Save changes",
+                                fontWeight = FontWeight.SemiBold,
+                            )
+                        }
+                    }
+                }
+
+                AddEditHostTab.ManageKeys -> {
+                    SshKeysManagementPane(
                         modifier = Modifier.weight(1f),
-                        testTag = ADD_HOST_PORT_FIELD_TAG,
-                        keyboardType = KeyboardType.Number,
-                    )
-                    FormField(
-                        label = "Username",
-                        value = state.username,
-                        onValueChange = { v -> viewModel.updateState { it.copy(username = v) } },
-                        errorText = state.fieldErrors.username,
-                        focusRequester = usernameFocus,
-                        modifier = Modifier.weight(2f),
-                        testTag = ADD_HOST_USERNAME_FIELD_TAG,
-                    )
-                }
-
-                KeySelector(
-                    selectedKeyId = state.selectedKeyId,
-                    keys = sshKeys.map { it.id to it.name },
-                    onSelect = { id -> viewModel.updateState { it.copy(selectedKeyId = id) } },
-                    onManageKeys = onManageKeys,
-                    errorText = state.fieldErrors.selectedKey,
-                    focusRequester = keyFocus,
-                )
-
-                // Issue #117 (usage Fix C): optional per-host override
-                // for the usage command. The field is plain — no
-                // validation, no required-marker — because (a) any
-                // non-empty string is forwarded verbatim to
-                // [UsageRemoteSource.fetchUsage] as `commandOverride`,
-                // and (b) leaving it blank just falls back to
-                // `pocketshell usage --json`. The placeholder is the default
-                // so the user can see what the empty state will do.
-                FormField(
-                    label = "Usage command (optional)",
-                    value = state.usageCommand,
-                    onValueChange = { v -> viewModel.updateState { it.copy(usageCommand = v) } },
-                    supportingText = USAGE_COMMAND_SUPPORTING_TEXT,
-                    placeholder = USAGE_COMMAND_PLACEHOLDER,
-                    testTag = ADD_HOST_USAGE_COMMAND_FIELD_TAG,
-                )
-
-                // The legacy global prose error survives only for the
-                // "no SSH keys exist on the device at all" hint — that's
-                // a global precondition, not a per-field problem. The
-                // per-field rejection messages live under each field via
-                // `state.fieldErrors`.
-                state.error?.let { err ->
-                    Text(
-                        text = err,
-                        color = PocketShellColors.Red,
-                        fontSize = 13.sp,
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Button(
-                    onClick = viewModel::save,
-                    enabled = canSubmit,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag(ADD_HOST_CTA_TAG),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = PocketShellColors.Accent,
-                        contentColor = PocketShellColors.OnAccent,
-                        disabledContainerColor = PocketShellColors.Border,
-                        disabledContentColor = PocketShellColors.TextMuted,
-                    ),
-                ) {
-                    Text(
-                        text = if (hostId == null) "Add host" else "Save changes",
-                        fontWeight = FontWeight.SemiBold,
+                        viewModel = keyManagementViewModel,
+                        requiresUnlock = keyManagementRequiresUnlock,
                     )
                 }
             }
         }
+    }
+}
+
+private enum class AddEditHostTab {
+    Details,
+    ManageKeys,
+}
+
+@Composable
+private fun AddEditHostTabs(
+    selectedTab: AddEditHostTab,
+    onSelect: (AddEditHostTab) -> Unit,
+) {
+    TabRow(
+        selectedTabIndex = selectedTab.ordinal,
+        containerColor = PocketShellColors.Background,
+        contentColor = PocketShellColors.Accent,
+    ) {
+        Tab(
+            selected = selectedTab == AddEditHostTab.Details,
+            onClick = { onSelect(AddEditHostTab.Details) },
+            text = { Text("Host details") },
+            modifier = Modifier.testTag(ADD_HOST_DETAILS_TAB_TAG),
+        )
+        Tab(
+            selected = selectedTab == AddEditHostTab.ManageKeys,
+            onClick = { onSelect(AddEditHostTab.ManageKeys) },
+            text = { Text("Manage keys") },
+            modifier = Modifier.testTag(ADD_HOST_MANAGE_KEYS_TAB_TAG),
+        )
     }
 }
 

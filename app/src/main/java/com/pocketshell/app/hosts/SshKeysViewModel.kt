@@ -19,7 +19,7 @@ import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 /**
- * Backs [SshKeysScreen]. Owns the live list of registered keys + the
+ * Backs [SshKeysManagementPane]. Owns the live list of registered keys + the
  * "add key" flow.
  *
  * Two add paths in scope for #18:
@@ -137,7 +137,7 @@ class SshKeysViewModel @Inject constructor(
     /**
      * Delete the given key. Hosts that reference it cascade-delete via the
      * FK constraint declared on [com.pocketshell.core.storage.entity.HostEntity];
-     * the user is warned in [SshKeysScreen]'s confirmation dialog.
+     * the user is warned in [SshKeysManagementPane]'s confirmation dialog.
      *
      * Order matters (issue #38 item 5): the on-disk file is removed FIRST,
      * then the DB row. If the file delete fails the row stays so the user

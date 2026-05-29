@@ -28,9 +28,6 @@ sealed interface AppDestination {
     /** Edit the host identified by [hostId]. */
     data class EditHost(val hostId: Long) : AppDestination
 
-    /** Manage SSH keys (add / list / delete). */
-    data object SshKeys : AppDestination
-
     /**
      * Live camera QR scanner (issue #129). Reachable from the Host list
      * top-bar actions menu. Hosted by

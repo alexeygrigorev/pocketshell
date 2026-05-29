@@ -28,7 +28,6 @@ import com.pocketshell.app.hosts.AddEditHostScreen
 import com.pocketshell.app.hosts.HostListScreen
 import com.pocketshell.app.hosts.HostListViewModel
 import com.pocketshell.app.hosts.QrScannerScreen
-import com.pocketshell.app.hosts.SshKeysScreen
 import com.pocketshell.app.env.EnvCopySourceFolder
 import com.pocketshell.app.env.EnvScreen
 import com.pocketshell.app.jobs.RecurringJobsScreen
@@ -72,7 +71,6 @@ import javax.inject.Inject
  *
  * - [AppDestination.HostList] (landing) — list of saved SSH hosts.
  * - [AppDestination.AddHost] / [AppDestination.EditHost] — host form.
- * - [AppDestination.SshKeys] — SSH key list / add / delete.
  * - [AppDestination.Session] — live SSH session for a selected host.
  *
  * The Phase 0 `ProofOfLifeScreen` is kept on disk (the
@@ -403,7 +401,6 @@ private fun AppNavigator(
         AppDestination.HostList -> HostListScreen(
             onAddHost = { navigate(AppDestination.AddHost) },
             onEditHost = { id -> navigate(AppDestination.EditHost(id)) },
-            onManageKeys = { navigate(AppDestination.SshKeys) },
             onOpenCrashReports = { navigate(AppDestination.CrashReports) },
             onOpenSettings = { navigate(AppDestination.Settings) },
             onOpenScan = { navigate(AppDestination.Scan) },
@@ -459,16 +456,12 @@ private fun AppNavigator(
         AppDestination.AddHost -> AddEditHostScreen(
             hostId = null,
             onDone = ::back,
-            onManageKeys = { navigate(AppDestination.SshKeys) },
         )
 
         is AppDestination.EditHost -> AddEditHostScreen(
             hostId = dest.hostId,
             onDone = ::back,
-            onManageKeys = { navigate(AppDestination.SshKeys) },
         )
-
-        AppDestination.SshKeys -> SshKeysScreen(onBack = ::back)
 
         // Issue #129: live camera QR scanner. Dispatches the decoded
         // envelope payload through the existing host-list import path.

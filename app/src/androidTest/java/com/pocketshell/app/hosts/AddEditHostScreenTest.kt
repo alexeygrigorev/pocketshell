@@ -5,6 +5,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -87,16 +88,17 @@ class AddEditHostScreenTest {
      */
     private fun renderScreen(
         onDone: () -> Unit = {},
-        onManageKeys: () -> Unit = {},
     ): AddEditHostViewModel {
         val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
+        val keysVm = SshKeysViewModel(db.sshKeyDao())
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 AddEditHostScreen(
                     hostId = null,
                     onDone = onDone,
-                    onManageKeys = onManageKeys,
                     viewModel = vm,
+                    keyManagementViewModel = keysVm,
+                    keyManagementRequiresUnlock = { false },
                 )
             }
         }
@@ -232,5 +234,25 @@ class AddEditHostScreenTest {
             assertEquals("deploy", hosts[0].username)
             assertEquals(keyId, hosts[0].keyId)
         }
+    }
+
+    @Test
+    fun keyDropdownManageKeysRow_opensEmbeddedManageKeysTab() {
+        renderScreen()
+
+        compose.onNodeWithTag(ADD_HOST_KEY_FIELD_TAG, useUnmergedTree = true)
+            .performClick()
+        compose.onNodeWithText("No keys yet — tap Manage keys").performClick()
+        compose.waitForIdle()
+
+        compose.onNodeWithTag(ADD_HOST_MANAGE_KEYS_TAB_TAG, useUnmergedTree = true)
+            .assertIsSelected()
+        compose.onNodeWithText("Import key").assertExists()
+        compose.onNodeWithText("Generate").assertExists()
+        compose.onNodeWithText("No keys yet").assertExists()
+        compose.onNodeWithTag(ADD_HOST_DETAILS_TAB_TAG, useUnmergedTree = true)
+            .performClick()
+        compose.onNodeWithTag(ADD_HOST_KEY_FIELD_TAG, useUnmergedTree = true)
+            .assertExists()
     }
 }

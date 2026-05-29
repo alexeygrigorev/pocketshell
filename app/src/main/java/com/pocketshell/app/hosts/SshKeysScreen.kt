@@ -1,13 +1,11 @@
 package com.pocketshell.app.hosts
 
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -54,48 +52,30 @@ import com.pocketshell.uikit.theme.PocketShellColors
 /**
  * Manage SSH keys: list, add (import or generate), delete.
  *
- * Visually consistent with the dashboard: same app bar shape, same
- * surface/border treatment for rows. The "Add" affordance is two buttons
- * (Import / Generate) rather than a FAB — the action set is larger than
- * a single primary, and the mockup's FAB is reserved for the host-add
- * flow.
+ * Embedded under Add/Edit host's "Manage keys" tab. The "Add" affordance
+ * is two buttons (Import / Generate) rather than a FAB because the action
+ * set is larger than a single primary, and the host-add FAB remains the
+ * only top-level create affordance.
  *
  * Delete shows a confirmation dialog because the FK CASCADE on
  * `hosts.keyId` means deleting an in-use key also wipes the dependent
  * host rows. The dialog body surfaces this fact.
  */
 @Composable
-fun SshKeysScreen(
-    onBack: () -> Unit,
+fun SshKeysManagementPane(
     modifier: Modifier = Modifier,
     viewModel: SshKeysViewModel = hiltViewModel(),
+    requiresUnlock: (android.content.Context) -> Boolean = ::isSshKeyUnlockRequired,
 ) {
     val keys by viewModel.keys.collectAsState()
     val error by viewModel.error.collectAsState()
     val context = LocalContext.current
 
     var pendingDelete: SshKeyEntity? by remember { mutableStateOf(null) }
-    var unlocked by remember { mutableStateOf(!isKeyUnlockRequired(context)) }
+    var unlocked by remember(context) { mutableStateOf(!requiresUnlock(context)) }
     var unlockError: String? by remember { mutableStateOf(null) }
     var unlockInFlight by remember { mutableStateOf(false) }
     val unlockGate = remember { SshKeyUnlockInFlightGate() }
-
-    // Issue #38 item 3: intercept system-back. SshKeysScreen has no
-    // form-style unsaved state — every add / delete commits immediately
-    // through the DAO — so the handler unconditionally delegates to
-    // `onBack`. The interception itself matters: without a BackHandler
-    // the system back bypasses any per-screen logic (e.g. dismissing
-    // the pending-delete dialog) the screen might layer on later. If a
-    // delete-confirmation is showing we close it first instead of
-    // popping the whole screen, mirroring how the dialog's Cancel
-    // button behaves.
-    BackHandler {
-        if (pendingDelete != null) {
-            pendingDelete = null
-        } else {
-            onBack()
-        }
-    }
 
     // SAF launcher for "Import key". Uses GetContent rather than
     // OpenDocument because the user often picks from Downloads / Drive
@@ -112,8 +92,6 @@ fun SshKeysScreen(
             .background(PocketShellColors.Background),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            KeysAppBar(onBack = onBack)
-
             if (!unlocked) {
                 KeyUnlockPanel(
                     error = unlockError,
@@ -253,40 +231,6 @@ fun SshKeysScreen(
                 }
             },
             containerColor = PocketShellColors.Surface,
-        )
-    }
-}
-
-@Composable
-private fun KeysAppBar(onBack: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(60.dp)
-            .background(PocketShellColors.Background)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clickable(onClick = onBack),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "‹",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        Text(
-            text = "SSH keys",
-            color = PocketShellColors.Text,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(start = 4.dp),
         )
     }
 }

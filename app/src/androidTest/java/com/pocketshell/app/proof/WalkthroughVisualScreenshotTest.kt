@@ -22,7 +22,6 @@ import com.pocketshell.app.composer.COMPOSER_DRAFT_TAG
 import com.pocketshell.app.composer.COMPOSER_SEND_ENTER_TAG
 import com.pocketshell.app.hosts.HOST_ACTIONS_BUTTON_TAG
 import com.pocketshell.app.hosts.HOST_IMPORT_ACTION_TAG
-import com.pocketshell.app.hosts.HOST_KEYS_ACTION_TAG
 import com.pocketshell.app.hosts.HOST_LIST_ADD_FAB_TAG
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.HOST_SCAN_ACTION_TAG
@@ -117,7 +116,12 @@ class WalkthroughVisualScreenshotTest {
             compose.onNodeWithTag(HOST_ACTIONS_BUTTON_TAG, useUnmergedTree = true).performClick()
             compose.onNodeWithTag(HOST_IMPORT_ACTION_TAG, useUnmergedTree = true).assertExists()
             compose.onNodeWithTag(HOST_SCAN_ACTION_TAG, useUnmergedTree = true).assertExists()
-            compose.onNodeWithTag(HOST_KEYS_ACTION_TAG, useUnmergedTree = true).assertExists()
+            assertTrue(
+                "host actions menu must not expose key management as a top-level action",
+                compose.onAllNodesWithText("Keys", useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isEmpty(),
+            )
             instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_BACK").close()
             compose.waitForIdle()
             assertTextsClearOfStatusBar(

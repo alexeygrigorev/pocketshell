@@ -12,14 +12,11 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTextReplacement
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
-import com.pocketshell.app.composer.COMPOSER_DRAFT_TAG
-import com.pocketshell.app.composer.COMPOSER_SEND_ENTER_TAG
 import com.pocketshell.app.hosts.HOST_ACTIONS_BUTTON_TAG
 import com.pocketshell.app.hosts.HOST_IMPORT_ACTION_TAG
 import com.pocketshell.app.hosts.HOST_LIST_ADD_FAB_TAG
@@ -29,7 +26,8 @@ import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_NEW_SESSION_FAB_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
-import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
+import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
+import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -184,15 +182,15 @@ class WalkthroughVisualScreenshotTest {
             waitForSessionConnectUiToSettle()
             waitForTmuxPaneReady()
 
-            sendCommandViaComposer("echo $marker")
+            sendCommandViaTerminalSession("echo $marker")
             waitForTerminalTranscript("walkthrough marker") { transcript ->
                 transcript.lineSequence().map { it.trim() }.any { it == marker }
             }
-            waitForComposerAndKeyboardToClear()
+            waitForKeyboardToClear()
             assertTerminalViewportUncovered()
             WalkthroughScreenshotArtifacts.capture("03-terminal-session-input-controls")
 
-            compose.onNodeWithText("+ snippet").performClick()
+            compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG, useUnmergedTree = true).performClick()
             compose.waitUntil(timeoutMillis = 10_000) {
                 compose.onAllNodesWithText("Snippets").fetchSemanticsNodes().isNotEmpty()
             }
@@ -285,32 +283,19 @@ class WalkthroughVisualScreenshotTest {
         }
     }
 
-    private fun sendCommandViaComposer(command: String) {
-        // Issue #221: the redundant `dictate` chip was removed; the
-        // right-edge mic FAB is the single dictate entry point. Use its
-        // stable test tag rather than the chip caption.
-        //
-        // Issue #171 (round 3 rebase): with the folders-first flow
-        // arriving on TmuxSessionScreen the AVD intermittently reports
-        // `WindowInsets.ime` as visible right after route arrival,
-        // which routes the bottom band to `KeyBarWithMic` rather than
-        // `BottomChipControls` (the only host of SESSION_MIC_FAB_TAG).
-        // Force the IME closed and wait for the mic FAB to enter the
-        // semantics tree before tapping — same robustness pattern
-        // round 2 applied to `TmuxAttachPrefillDockerTest`'s
-        // route-arrival assertion.
+    private fun sendCommandViaTerminalSession(command: String) {
+        // The non-agent tmux shell route intentionally omits the prompt
+        // composer mic FAB (#283). Assert the current bottom-controls model
+        // is present, then write through the attached TerminalSession. That
+        // is the same live input bridge the terminal keyboard uses, without
+        // depending on ADB text injection quirks.
         hideSoftKeyboard()
         compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithTag(SESSION_MIC_FAB_TAG, useUnmergedTree = true)
+            compose.onAllNodesWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        compose.onNodeWithTag(SESSION_MIC_FAB_TAG, useUnmergedTree = true).performClick()
-        compose.onNodeWithText("Prompt Composer").assertExists()
-        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextReplacement(command)
-        compose.onNodeWithText(command, useUnmergedTree = true).assertExists()
-        WalkthroughScreenshotArtifacts.capture("05-composer-draft")
-        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).performClick()
+        writeToCurrentTerminal("$command\r")
         hideSoftKeyboard()
     }
 
@@ -343,12 +328,17 @@ class WalkthroughVisualScreenshotTest {
         return snapshot
     }
 
-    private fun waitForComposerAndKeyboardToClear() {
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText("Prompt Composer", useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isEmpty()
+    private fun writeToCurrentTerminal(text: String) {
+        launchedActivity?.onActivity { activity ->
+            val terminalView = activity.window.decorView.findTerminalView()
+            checkNotNull(terminalView?.currentSession) {
+                "expected a live TerminalSession before writing walkthrough command"
+            }.write(text)
         }
+        InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+    }
+
+    private fun waitForKeyboardToClear() {
         compose.waitUntil(timeoutMillis = 10_000) {
             terminalVisibleHeight() >= 1_200
         }

@@ -59,13 +59,13 @@ On failure, inspect the run directory named in the script's `FAIL:` output.
 The connected screenshot pass captures:
 
 - `01-host-list.png` - saved host list with system bars.
-- `02-host-setup-session-picker.png` - host tap setup/session choice state,
-  including the raw SSH skip path.
+- `02-host-setup-folder-list.png` - host folder list with the seeded tmux
+  session visible inline.
 - `03-terminal-session-input-controls.png` - live terminal with bottom chips
   and key controls after a Docker-backed command.
 - `04-snippets.png` - snippet picker over the live session.
-- `05-composer-draft.png` - prompt composer opened from the session with a
-  typed draft before send.
+- `05b-composer-idle-draft.png` - lab-rendered prompt composer with a typed
+  draft before send.
 - `06-composer-recording.png` - composer recording state with waveform.
 - `07-composer-transcribing.png` - composer processing state.
 
@@ -75,11 +75,11 @@ controls are visible in the artifact.
 The main walkthrough screenshot test also asserts system-bar guards after the
 evidence screenshots are written:
 
-- `01-host-list.png`: the `PocketShell`, `Crashes`, `Import`, and `Keys` app-bar
-  labels must start below the status-bar inset. Failure messages include the
-  text bounds, status-bar bottom, and screenshot artifact path.
-- `02-host-setup-session-picker.png`: the `Tmux sessions`, `+ New session`, and
-  `Continue with SSH` sheet controls must end above the navigation-bar inset.
+- `01-host-list.png`: the `PocketShell` title must start below the status-bar
+  inset. Failure messages include the text bounds, status-bar bottom, and
+  screenshot artifact path.
+- `02-host-setup-folder-list.png`: the `Folders` title and seeded tmux session
+  row must end above the navigation-bar inset.
   Failure messages include the text bounds, navigation-bar top, and screenshot
   artifact path.
 

@@ -21,9 +21,9 @@ MAIN_SCREENSHOTS=(
   "02-host-setup-folder-list.png"
   "03-terminal-session-input-controls.png"
   "04-snippets.png"
-  "05-composer-draft.png"
 )
 COMPOSER_SCREENSHOTS=(
+  "05b-composer-idle-draft.png"
   "06-composer-recording.png"
   "07-composer-transcribing.png"
 )

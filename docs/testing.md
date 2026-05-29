@@ -314,9 +314,9 @@ scripts/phone-walkthrough.sh visual-audit
 This runs the Docker-backed visual screenshot instrumentation and the composer
 state renderer, then writes reviewer-facing PNGs under
 `build/phone-walkthrough/<run-id>/screenshots/visual-audit/`. The normalized set is
-`01-host-list.png`, `02-host-setup-session-picker.png`,
+`01-host-list.png`, `02-host-setup-folder-list.png`,
 `03-terminal-session-input-controls.png`, `04-snippets.png`,
-`05-composer-draft.png`, `06-composer-recording.png`, and
+`05b-composer-idle-draft.png`, `06-composer-recording.png`, and
 `07-composer-transcribing.png`; raw pulled device output remains under
 `build/phone-walkthrough/<run-id>/device-artifacts/walkthrough-visual-pass/`.
 

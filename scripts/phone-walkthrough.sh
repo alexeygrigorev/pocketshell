@@ -63,10 +63,10 @@ VISUAL_AUDIT_COMPOSER_TEST_CLASS="com.pocketshell.app.composer.PromptComposerVis
 VISUAL_AUDIT_DEVICE_DIR="$DEVICE_OUTPUT_DIR/walkthrough-visual-pass"
 VISUAL_AUDIT_SCREENSHOTS=(
   "01-host-list.png"
-  "02-host-setup-session-picker.png"
+  "02-host-setup-folder-list.png"
   "03-terminal-session-input-controls.png"
   "04-snippets.png"
-  "05-composer-draft.png"
+  "05b-composer-idle-draft.png"
   "06-composer-recording.png"
   "07-composer-transcribing.png"
 )

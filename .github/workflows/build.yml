@@ -113,20 +113,7 @@ jobs:
           path: tools/pocketshell/dist/*
           if-no-files-found: error
 
-      - name: Check PyPI token
-        id: pypi-token
-        env:
-          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          if [[ -n "${PYPI_API_TOKEN}" ]]; then
-            echo "available=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::PYPI_API_TOKEN is not configured; skipping PyPI publish."
-          fi
-
       - name: Publish to PyPI
-        if: steps.pypi-token.outputs.available == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: tools/pocketshell/dist

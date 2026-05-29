@@ -448,6 +448,76 @@ public fun TmuxSessionScreen(
         }
     }
 
+    @Composable
+    fun AnchoredTmuxMoreMenu() {
+        TmuxMoreMenu(
+            expanded = moreExpanded,
+            currentWindowId = currentWindowId,
+            multipleWindows = windows.size > 1,
+            onDismiss = { moreExpanded = false },
+            onCreateSession = {
+                moreExpanded = false
+                openTextDialog(TmuxDialogMode.CreateSession)
+            },
+            onRenameSession = {
+                moreExpanded = false
+                openTextDialog(TmuxDialogMode.RenameSession, sessionName)
+            },
+            onKillSession = {
+                moreExpanded = false
+                dialogMode = TmuxDialogMode.KillSession
+            },
+            onSwitchSession = {
+                moreExpanded = false
+                showSessionSwitcher = true
+            },
+            onOpenJobs = {
+                moreExpanded = false
+                onOpenJobs()
+            },
+            onOpenUsage = {
+                moreExpanded = false
+                onOpenUsage()
+            },
+            onNewWindow = {
+                moreExpanded = false
+                viewModel.newWindow()
+            },
+            onRenameWindow = {
+                moreExpanded = false
+                openTextDialog(TmuxDialogMode.RenameWindow, currentWindowId.orEmpty())
+            },
+            onKillWindow = {
+                moreExpanded = false
+                dialogMode = TmuxDialogMode.KillWindow
+            },
+            onSwitchWindow = {
+                moreExpanded = false
+                showWindowSwitcher = true
+            },
+            // Issue #238: maintainer-asked "Resize session" — snap
+            // tmux session window dims to the phone cols × rows
+            // cached from Compose by [TmuxSessionViewModel.resizeRemotePty].
+            // The handler posts a [TmuxSessionViewModel.userMessages]
+            // string the LaunchedEffect below surfaces as a Toast.
+            onResizeSession = {
+                moreExpanded = false
+                viewModel.requestManualResize()
+            },
+            onDetach = {
+                // Issue #235: detach the tmux `-CC` client
+                // server-clean and pop back to the sessions
+                // dashboard. The session stays alive on the
+                // remote; reattach via the normal sessions
+                // list. We close the menu first so the back
+                // navigation animates from a clean state.
+                moreExpanded = false
+                viewModel.detachAndExit()
+                onBack()
+            },
+        )
+    }
+
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -573,6 +643,7 @@ public fun TmuxSessionScreen(
                                 pulseConversationTab = showConversationTab,
                                 onBack = onBack,
                                 onMore = { moreExpanded = true },
+                                moreMenu = { AnchoredTmuxMoreMenu() },
                                 connectionStatus = status.toUiStatus(),
                                 modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
                             )
@@ -614,77 +685,12 @@ public fun TmuxSessionScreen(
                             sessionName = sessionName,
                             onBack = onBack,
                             onMore = { moreExpanded = true },
+                            moreMenu = { AnchoredTmuxMoreMenu() },
                             connectionStatus = status.toUiStatus(),
                             modifier = Modifier.testTag(TMUX_COMPACT_BREADCRUMB_TAG),
                         )
                     }
                 }
-                TmuxMoreMenu(
-                    expanded = moreExpanded,
-                    currentWindowId = currentWindowId,
-                    multipleWindows = windows.size > 1,
-                    onDismiss = { moreExpanded = false },
-                    onCreateSession = {
-                        moreExpanded = false
-                        openTextDialog(TmuxDialogMode.CreateSession)
-                    },
-                    onRenameSession = {
-                        moreExpanded = false
-                        openTextDialog(TmuxDialogMode.RenameSession, sessionName)
-                    },
-                    onKillSession = {
-                        moreExpanded = false
-                        dialogMode = TmuxDialogMode.KillSession
-                    },
-                    onSwitchSession = {
-                        moreExpanded = false
-                        showSessionSwitcher = true
-                    },
-                    onOpenJobs = {
-                        moreExpanded = false
-                        onOpenJobs()
-                    },
-                    onOpenUsage = {
-                        moreExpanded = false
-                        onOpenUsage()
-                    },
-                    onNewWindow = {
-                        moreExpanded = false
-                        viewModel.newWindow()
-                    },
-                    onRenameWindow = {
-                        moreExpanded = false
-                        openTextDialog(TmuxDialogMode.RenameWindow, currentWindowId.orEmpty())
-                    },
-                    onKillWindow = {
-                        moreExpanded = false
-                        dialogMode = TmuxDialogMode.KillWindow
-                    },
-                    onSwitchWindow = {
-                        moreExpanded = false
-                        showWindowSwitcher = true
-                    },
-                    // Issue #238: maintainer-asked "Resize session" — snap
-                    // tmux session window dims to the phone cols × rows
-                    // cached from Compose by [TmuxSessionViewModel.resizeRemotePty].
-                    // The handler posts a [TmuxSessionViewModel.userMessages]
-                    // string the LaunchedEffect below surfaces as a Toast.
-                    onResizeSession = {
-                        moreExpanded = false
-                        viewModel.requestManualResize()
-                    },
-                    onDetach = {
-                        // Issue #235: detach the tmux `-CC` client
-                        // server-clean and pop back to the sessions
-                        // dashboard. The session stays alive on the
-                        // remote; reattach via the normal sessions
-                        // list. We close the menu first so the back
-                        // navigation animates from a clean state.
-                        moreExpanded = false
-                        viewModel.detachAndExit()
-                        onBack()
-                    },
-                )
             }
 
             // Issue #165: replace the bare one-line "connecting" status
@@ -1857,7 +1863,8 @@ internal const val TMUX_TERMINAL_TAB_TAG = "tmux:chrome:tab-pill:terminal"
 internal const val TMUX_FULL_CHROME_BACK_BUTTON_TAG = "tmux:chrome:full:back"
 internal const val TMUX_FULL_CHROME_MORE_BUTTON_TAG = "tmux:chrome:full:more"
 internal const val TMUX_COMPACT_CHROME_BACK_BUTTON_TAG = "tmux:chrome:compact:back"
-internal const val TMUX_COMPACT_CHROME_MORE_BUTTON_TAG = "tmux:chrome:compact:more"
+internal const val TMUX_COMPACT_CHROME_MORE_BUTTON_TAG =
+    "tmux:chrome:compact:more"
 
 /**
  * Issues #177 / #249: the "Reconnecting" / "Disconnected" breadcrumb pill
@@ -3341,7 +3348,7 @@ private fun ToolCallSection(label: String, body: String) {
 }
 
 @Composable
-private fun TmuxMoreMenu(
+internal fun TmuxMoreMenu(
     expanded: Boolean,
     currentWindowId: String?,
     onDismiss: () -> Unit,
@@ -3374,74 +3381,69 @@ private fun TmuxMoreMenu(
     // as a whole — same scope as Rename/Kill session.
     onResizeSession: () -> Unit = {},
 ) {
-    Box(
-        modifier = Modifier.fillMaxWidth(),
-        contentAlignment = Alignment.TopEnd,
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
     ) {
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = onDismiss,
-        ) {
-            // Per #158: visually group the destructive / scope-confusing
-            // affordances so "session" and "window" aren't a flat
-            // alphabet soup. Header rows are not clickable; the dividers
-            // separate the three families: in-this-session window ops,
-            // on-this-host session ops, and cross-host shortcuts.
-            DropdownMenuSectionHeader(text = "In this session")
-            DropdownMenuItem(text = { Text("+ New window") }, onClick = onNewWindow)
-            if (multipleWindows) {
-                // Issue #189: WindowStrip is gone, so the kebab is one
-                // of the three paths into the switcher. Only shown when
-                // there is actually somewhere to switch to.
-                DropdownMenuItem(
-                    text = { Text("Switch window") },
-                    onClick = onSwitchWindow,
-                )
-            }
+        // Per #158: visually group the destructive / scope-confusing
+        // affordances so "session" and "window" aren't a flat
+        // alphabet soup. Header rows are not clickable; the dividers
+        // separate the three families: in-this-session window ops,
+        // on-this-host session ops, and cross-host shortcuts.
+        DropdownMenuSectionHeader(text = "In this session")
+        DropdownMenuItem(text = { Text("+ New window") }, onClick = onNewWindow)
+        if (multipleWindows) {
+            // Issue #189: WindowStrip is gone, so the kebab is one
+            // of the three paths into the switcher. Only shown when
+            // there is actually somewhere to switch to.
             DropdownMenuItem(
-                text = { Text("Rename window") },
-                onClick = onRenameWindow,
-                enabled = currentWindowId != null,
+                text = { Text("Switch window") },
+                onClick = onSwitchWindow,
             )
-            DropdownMenuItem(
-                text = { Text("Kill window") },
-                onClick = onKillWindow,
-                enabled = currentWindowId != null,
-            )
-            HorizontalDivider()
-            DropdownMenuSectionHeader(text = "On this host")
-            DropdownMenuItem(text = { Text("+ New session") }, onClick = onCreateSession)
-            DropdownMenuItem(text = { Text("Switch session") }, onClick = onSwitchSession)
-            DropdownMenuItem(text = { Text("Rename session") }, onClick = onRenameSession)
-            // Issue #238: manual "Resize session" — issues `tmux resize-window`
-            // against the active session with the phone's current Compose
-            // grid (cols × rows) so a session previously sized by a desktop
-            // terminal snaps to the phone's viewport. Explicitly NOT
-            // automatic on attach per maintainer ask.
-            DropdownMenuItem(
-                text = { Text("Resize session") },
-                onClick = onResizeSession,
-                modifier = Modifier.testTag(TMUX_RESIZE_BUTTON_TAG),
-            )
-            DropdownMenuItem(text = { Text("Kill session") }, onClick = onKillSession)
-            HorizontalDivider()
-            // Issue #235: explicit "I'm done with this session for now"
-            // affordance — frees the tmux server-side window-size lock
-            // (max(phone, desktop) -> desktop dimensions) without
-            // killing the session. Placed at the top of the cross-host
-            // section so it sits next to the back-to-host-list mental
-            // model (Detach -> sessions dashboard) without crowding the
-            // destructive Kill session item.
-            DropdownMenuItem(
-                text = { Text("Detach") },
-                onClick = onDetach,
-                modifier = Modifier.testTag(TMUX_DETACH_BUTTON_TAG),
-            )
-            DropdownMenuItem(text = { Text("Recurring jobs") }, onClick = onOpenJobs)
-            // Issue #114 Fix A: jump to the cross-host Usage / quota
-            // panel from inside a live tmux session.
-            DropdownMenuItem(text = { Text("Usage") }, onClick = onOpenUsage)
         }
+        DropdownMenuItem(
+            text = { Text("Rename window") },
+            onClick = onRenameWindow,
+            enabled = currentWindowId != null,
+        )
+        DropdownMenuItem(
+            text = { Text("Kill window") },
+            onClick = onKillWindow,
+            enabled = currentWindowId != null,
+        )
+        HorizontalDivider()
+        DropdownMenuSectionHeader(text = "On this host")
+        DropdownMenuItem(text = { Text("+ New session") }, onClick = onCreateSession)
+        DropdownMenuItem(text = { Text("Switch session") }, onClick = onSwitchSession)
+        DropdownMenuItem(text = { Text("Rename session") }, onClick = onRenameSession)
+        // Issue #238: manual "Resize session" — issues `tmux resize-window`
+        // against the active session with the phone's current Compose
+        // grid (cols × rows) so a session previously sized by a desktop
+        // terminal snaps to the phone's viewport. Explicitly NOT
+        // automatic on attach per maintainer ask.
+        DropdownMenuItem(
+            text = { Text("Resize session") },
+            onClick = onResizeSession,
+            modifier = Modifier.testTag(TMUX_RESIZE_BUTTON_TAG),
+        )
+        DropdownMenuItem(text = { Text("Kill session") }, onClick = onKillSession)
+        HorizontalDivider()
+        // Issue #235: explicit "I'm done with this session for now"
+        // affordance — frees the tmux server-side window-size lock
+        // (max(phone, desktop) -> desktop dimensions) without
+        // killing the session. Placed at the top of the cross-host
+        // section so it sits next to the back-to-host-list mental
+        // model (Detach -> sessions dashboard) without crowding the
+        // destructive Kill session item.
+        DropdownMenuItem(
+            text = { Text("Detach") },
+            onClick = onDetach,
+            modifier = Modifier.testTag(TMUX_DETACH_BUTTON_TAG),
+        )
+        DropdownMenuItem(text = { Text("Recurring jobs") }, onClick = onOpenJobs)
+        // Issue #114 Fix A: jump to the cross-host Usage / quota
+        // panel from inside a live tmux session.
+        DropdownMenuItem(text = { Text("Usage") }, onClick = onOpenUsage)
     }
 }
 
@@ -3467,13 +3469,13 @@ private fun DropdownMenuSectionHeader(text: String) {
  * #303 renders it inline here so it does not cost a separate row.
  *
  * Layout (left → right inside one 56dp [Row]):
- * - 36dp circular back affordance (chevron).
+ * - 48dp back affordance (chevron).
  * - connection status dot + compact "Reconnecting"/"Disconnected" pill.
  * - `session` crumb (current destination; non-interactive) taking the
  *   remaining width.
  * - optional inline Terminal/Conversation pill when an agent or locked
  *   conversation is available.
- * - 36dp circular more affordance (kebab).
+ * - 48dp more affordance (kebab), which owns the dropdown anchor.
  *
  * The host segment is intentionally not surfaced — the host name is
  * already visible on the host list, the pre-session status line, and on
@@ -3486,6 +3488,7 @@ internal fun ConsolidatedTopChrome(
     onBack: () -> Unit,
     onMore: () -> Unit,
     modifier: Modifier = Modifier,
+    moreMenu: @Composable () -> Unit = {},
     tabLabels: List<String> = emptyList(),
     selectedTabIndex: Int = 0,
     onTabSelected: (Int) -> Unit = {},
@@ -3508,13 +3511,12 @@ internal fun ConsolidatedTopChrome(
             .padding(start = 4.dp, end = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Back chevron — 36dp circular tap target, matching the
-        // [Breadcrumb] leading slot recipe (`docs/design-system.md`
-        // §6.1) so the tap zone stays put across the IME transition.
+        // Back chevron — 48dp touch target so edge taps land on the
+        // visible affordance consistently across the IME transition.
         Box(
             modifier = Modifier
-                .size(36.dp)
-                .clickable(onClick = onBack)
+                .size(48.dp)
+                .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onBack)
                 .testTag(TMUX_FULL_CHROME_BACK_BUTTON_TAG),
             contentAlignment = Alignment.Center,
         ) {
@@ -3559,18 +3561,21 @@ internal fun ConsolidatedTopChrome(
             Spacer(modifier = Modifier.width(4.dp))
         }
 
-        Box(
-            modifier = Modifier
-                .size(36.dp)
-                .clickable(onClick = onMore)
-                .testTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "⋮",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 20.sp,
-            )
+        Box(modifier = Modifier.size(48.dp)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onMore)
+                    .testTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "⋮",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 20.sp,
+                )
+            }
+            moreMenu()
         }
         // Reference [hostLabel] so the parameter does not show as
         // unused — kept on the API for forward compatibility (and so
@@ -3725,6 +3730,7 @@ internal fun CompactBreadcrumb(
     onBack: () -> Unit,
     onMore: () -> Unit,
     modifier: Modifier = Modifier,
+    moreMenu: @Composable () -> Unit = {},
     // Issues #177 / #249: even in the IME-up compact chrome the user must
     // be able to tell the session is not live before they dictate into it.
     connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
@@ -3740,8 +3746,9 @@ internal fun CompactBreadcrumb(
     ) {
         Box(
             modifier = Modifier
-                .size(36.dp)
-                .clickable(onClick = onBack)
+                .width(48.dp)
+                .fillMaxHeight()
+                .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onBack)
                 .testTag(TMUX_COMPACT_CHROME_BACK_BUTTON_TAG),
             contentAlignment = Alignment.Center,
         ) {
@@ -3767,16 +3774,23 @@ internal fun CompactBreadcrumb(
         Spacer(modifier = Modifier.width(4.dp))
         Box(
             modifier = Modifier
-                .size(36.dp)
-                .clickable(onClick = onMore)
-                .testTag(TMUX_COMPACT_CHROME_MORE_BUTTON_TAG),
-            contentAlignment = Alignment.Center,
+                .width(48.dp)
+                .fillMaxHeight(),
         ) {
-            Text(
-                text = "⋮",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 20.sp,
-            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onMore)
+                    .testTag(TMUX_COMPACT_CHROME_MORE_BUTTON_TAG),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "⋮",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 20.sp,
+                )
+            }
+            moreMenu()
         }
     }
 }

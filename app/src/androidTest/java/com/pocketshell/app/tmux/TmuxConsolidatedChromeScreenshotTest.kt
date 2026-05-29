@@ -9,10 +9,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -179,6 +183,57 @@ class TmuxConsolidatedChromeScreenshotTest {
         compose.waitForIdle()
         SystemClock.sleep(200)
         captureFullDevice(File(artifactDir(), "consolidated-chrome-ime-up-compact.png"))
+    }
+
+    @Test
+    fun captureRightAnchoredMoreMenu() {
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                val expanded = remember { mutableStateOf(false) }
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(PocketShellColors.Background)
+                        .padding(top = 24.dp)
+                        .testTag(SCREENSHOT_ROOT_TAG),
+                ) {
+                    ConsolidatedTopChrome(
+                        hostLabel = "hetzner",
+                        sessionName = "claude-main",
+                        onBack = {},
+                        onMore = { expanded.value = true },
+                        moreMenu = {
+                            TmuxMoreMenu(
+                                expanded = expanded.value,
+                                currentWindowId = "@1",
+                                multipleWindows = true,
+                                onDismiss = { expanded.value = false },
+                                onCreateSession = {},
+                                onRenameSession = {},
+                                onKillSession = {},
+                                onSwitchSession = {},
+                                onOpenJobs = {},
+                                onOpenUsage = {},
+                                onNewWindow = {},
+                                onRenameWindow = {},
+                                onKillWindow = {},
+                                onDetach = {},
+                            )
+                        },
+                    )
+                    PaneProxy()
+                }
+            }
+        }
+        compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
+            .performTouchInput {
+                val tap = Offset(right - 1f, centerY)
+                down(tap)
+                up()
+            }
+        compose.waitForIdle()
+        SystemClock.sleep(200)
+        captureFullDevice(File(artifactDir(), "right-anchored-more-menu.png"))
     }
 
     @androidx.compose.runtime.Composable

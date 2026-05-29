@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
@@ -22,6 +24,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -233,6 +236,82 @@ class TmuxSessionScreenImeChromeTest {
         )
     }
 
+    @Test
+    fun fullChromeRightEdgeTapOpensMoreMenu() {
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                ChromeWithAnchoredMenuUnderTest(compact = false)
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
+            .performTouchInput {
+                val tap = Offset(right - 1f, centerY)
+                down(tap)
+                up()
+            }
+        compose.waitForIdle()
+
+        compose.onNodeWithText("In this session").assertIsDisplayed()
+    }
+
+    @Test
+    fun compactChromeRightEdgeTapOpensMoreMenu() {
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                ChromeWithAnchoredMenuUnderTest(compact = true)
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_COMPACT_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
+            .performTouchInput {
+                val tap = Offset(right - 1f, centerY)
+                down(tap)
+                up()
+            }
+        compose.waitForIdle()
+
+        compose.onNodeWithText("On this host").assertIsDisplayed()
+    }
+
+    @Test
+    fun topChromeButtonsExposeWideHitTargets() {
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                Column {
+                    ConsolidatedTopChrome(
+                        hostLabel = "host.example",
+                        sessionName = "claude-main",
+                        onBack = {},
+                        onMore = {},
+                    )
+                    CompactBreadcrumb(
+                        sessionName = "claude-main",
+                        onBack = {},
+                        onMore = {},
+                    )
+                }
+            }
+        }
+
+        val minTargetWidthPx = with(compose.density) { 48.dp.toPx() - 0.5f }
+        listOf(
+            TMUX_FULL_CHROME_BACK_BUTTON_TAG,
+            TMUX_FULL_CHROME_MORE_BUTTON_TAG,
+            TMUX_COMPACT_CHROME_BACK_BUTTON_TAG,
+            TMUX_COMPACT_CHROME_MORE_BUTTON_TAG,
+        ).forEach { tag ->
+            val bounds = compose
+                .onNodeWithTag(tag, useUnmergedTree = true)
+                .fetchSemanticsNode()
+                .boundsInRoot
+            assertTrue(
+                "$tag should provide a 48dp-wide hit target; bounds=$bounds",
+                bounds.width >= minTargetWidthPx,
+            )
+        }
+    }
+
     /**
      * Reproduces the IME-aware top-chrome region exactly as
      * [TmuxSessionScreen] renders it inline today (Issues #189 / #192 /
@@ -279,6 +358,47 @@ class TmuxSessionScreenImeChromeTest {
                     modifier = Modifier.testTag(TMUX_COMPACT_BREADCRUMB_TAG),
                 )
             }
+        }
+    }
+
+    @Composable
+    private fun ChromeWithAnchoredMenuUnderTest(compact: Boolean) {
+        val expanded = remember { mutableStateOf(false) }
+        val menu: @Composable () -> Unit = {
+            TmuxMoreMenu(
+                expanded = expanded.value,
+                currentWindowId = "@1",
+                multipleWindows = true,
+                onDismiss = { expanded.value = false },
+                onCreateSession = {},
+                onRenameSession = {},
+                onKillSession = {},
+                onSwitchSession = {},
+                onOpenJobs = {},
+                onOpenUsage = {},
+                onNewWindow = {},
+                onRenameWindow = {},
+                onKillWindow = {},
+                onDetach = {},
+            )
+        }
+        if (compact) {
+            CompactBreadcrumb(
+                sessionName = "claude-main",
+                onBack = {},
+                onMore = { expanded.value = true },
+                moreMenu = menu,
+                modifier = Modifier.testTag(TMUX_COMPACT_BREADCRUMB_TAG),
+            )
+        } else {
+            ConsolidatedTopChrome(
+                hostLabel = "host.example",
+                sessionName = "claude-main",
+                onBack = {},
+                onMore = { expanded.value = true },
+                moreMenu = menu,
+                modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
+            )
         }
     }
 

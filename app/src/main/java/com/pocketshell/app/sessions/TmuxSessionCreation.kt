@@ -1,5 +1,6 @@
 package com.pocketshell.app.sessions
 
+import com.pocketshell.core.ssh.SshSession
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -26,6 +27,33 @@ internal fun resolveTmuxSessionCreation(
         sessionName = sessionName,
         startDirectory = startDirectory,
     )
+}
+
+internal suspend fun remoteStartDirectoryExists(
+    session: SshSession,
+    startDirectory: String,
+): Boolean =
+    session.exec(remoteStartDirectoryExistsCommand(startDirectory)).exitCode == 0
+
+internal fun startDirectoryMissingMessage(
+    sessionName: String,
+    startDirectory: String,
+): String =
+    "Couldn't create $sessionName: start folder does not exist: " +
+        startDirectory.trim().ifBlank { DEFAULT_TMUX_START_DIRECTORY }
+
+internal fun remoteStartDirectoryExistsCommand(startDirectory: String): String {
+    val resolved = startDirectory.trim().ifBlank { DEFAULT_TMUX_START_DIRECTORY }
+    return """
+        pocketshell_start_dir=${shellQuote(resolved)}
+        case "${'$'}pocketshell_start_dir" in
+          '~') pocketshell_start_dir=${'$'}HOME ;;
+          '~/'*) pocketshell_start_dir=${'$'}HOME/${'$'}{pocketshell_start_dir#~/} ;;
+          '${'$'}HOME') pocketshell_start_dir=${'$'}HOME ;;
+          '${'$'}HOME/'*) pocketshell_start_dir=${'$'}HOME/${'$'}{pocketshell_start_dir#${'$'}HOME/} ;;
+        esac
+        test -d "${'$'}pocketshell_start_dir"
+    """.trimIndent()
 }
 
 private fun derivedTmuxSessionName(startDirectory: String): String? {
@@ -75,3 +103,6 @@ private fun sanitizeDerivedTmuxSessionName(input: String): String? {
     }.trim('-', '.')
     return cleaned.takeIf { it.isNotBlank() }
 }
+
+private fun shellQuote(value: String): String =
+    "'" + value.replace("'", "'\\''") + "'"

@@ -2,6 +2,8 @@ package com.pocketshell.app.projects
 
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.session.AgentConversationRepository
+import com.pocketshell.app.sessions.remoteStartDirectoryExists
+import com.pocketshell.app.sessions.startDirectoryMissingMessage
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -229,6 +231,16 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
         ).getOrElse { return Result.failure(it) }
 
         return try {
+            if (!remoteStartDirectoryExists(session, cwd)) {
+                return Result.failure(
+                    RuntimeException(
+                        startDirectoryMissingMessage(
+                            sessionName = sessionName,
+                            startDirectory = cwd,
+                        ),
+                    ),
+                )
+            }
             val quotedName = shellQuote(sessionName)
             val quotedCwd = shellQuote(cwd)
             // -A so an existing session with the same name attaches

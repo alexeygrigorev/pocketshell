@@ -81,6 +81,7 @@ class SessionsDashboardViewModelTest {
         host: HostEntity,
         keyPath: String,
         client: FakeTmuxClient,
+        startDirectoryExists: (suspend (String) -> Boolean)? = null,
     ) {
         registry.register(
             hostId = host.id,
@@ -90,6 +91,7 @@ class SessionsDashboardViewModelTest {
             username = host.username,
             keyPath = keyPath,
             client = client,
+            startDirectoryExists = startDirectoryExists,
         )
     }
 
@@ -967,6 +969,55 @@ class SessionsDashboardViewModelTest {
         assertNull(
             "successful create should not produce a createError banner",
             vm.createError.value,
+        )
+    }
+
+    /**
+     * Issue #296 — the dashboard must reject a missing start folder
+     * before sending `new-session -c <dir>`. tmux can otherwise create
+     * the session in `$HOME`, making the requested folder silently lie.
+     */
+    @Test
+    fun createSessionRejectsMissingStartDirectoryBeforeNewSession() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        val h = host(24L, "twentyfour")
+        val checkedDirectories = mutableListOf<String>()
+        val entry = ActiveTmuxClients.Entry(
+            hostId = h.id,
+            hostName = h.name,
+            hostname = h.hostname,
+            port = h.port,
+            username = h.username,
+            keyPath = "/k",
+            client = client,
+            startDirectoryExists = { directory ->
+                checkedDirectories += directory
+                false
+            },
+        )
+
+        vm.createSession(entry, "", startDirectory = "/srv/missing")
+        advanceUntilIdle()
+
+        assertEquals(listOf("/srv/missing"), checkedDirectories)
+        assertFalse(
+            "missing start folder must not reach tmux new-session; got ${client.sentCommands}",
+            client.sentCommands.any { it.startsWith("new-session") },
+        )
+        assertFalse(
+            "missing start folder must skip refresh; got ${client.sentCommands}",
+            client.sentCommands.any { it.startsWith("list-sessions") },
+        )
+        val msg = vm.createError.value
+        assertNotNull("expected createError for missing start folder", msg)
+        assertTrue(
+            "createError should name the requested folder; got '$msg'",
+            msg!!.contains("/srv/missing"),
+        )
+        assertTrue(
+            "blank name should derive the session name from the requested folder; got '$msg'",
+            msg.contains("missing"),
         )
     }
 

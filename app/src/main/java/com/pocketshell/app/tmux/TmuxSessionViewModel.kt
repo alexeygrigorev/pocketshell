@@ -27,6 +27,7 @@ import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
+import com.pocketshell.app.sessions.remoteStartDirectoryExists
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
@@ -841,6 +842,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 username = target.user,
                 keyPath = target.keyPath,
                 client = client,
+                startDirectoryExists = { directory ->
+                    remoteStartDirectoryExists(session, directory)
+                },
             )
             registeredHostId = target.hostId
             installLifecycleHooks(target.hostId)
@@ -919,6 +923,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 username = target.user,
                 keyPath = target.keyPath,
                 client = client,
+                startDirectoryExists = { directory ->
+                    remoteStartDirectoryExists(session, directory)
+                },
             )
             registeredHostId = target.hostId
             installLifecycleHooks(target.hostId)

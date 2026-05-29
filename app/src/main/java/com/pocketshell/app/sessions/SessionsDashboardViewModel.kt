@@ -327,6 +327,31 @@ class SessionsDashboardViewModel @Inject constructor(
         )
         viewModelScope.launch {
             val client = entry.client
+            val validator = entry.startDirectoryExists
+            if (validator != null) {
+                // Issue #296: choose clear-error behavior over auto
+                // `mkdir -p`. Creating remote folders is a distinct
+                // user intent, and validating before `new-session -c`
+                // prevents tmux from silently landing in $HOME.
+                val validationResult = runCatching {
+                    validator(creation.startDirectory)
+                }
+                val exists = validationResult.getOrNull()
+                if (validationResult.isFailure) {
+                    val failure = validationResult.exceptionOrNull()
+                    _createError.value = "Couldn't create ${creation.sessionName}: " +
+                        "couldn't validate start folder ${creation.startDirectory}: " +
+                        (failure?.message ?: failure?.javaClass?.simpleName ?: "unknown error")
+                    return@launch
+                }
+                if (exists != true) {
+                    _createError.value = startDirectoryMissingMessage(
+                        sessionName = creation.sessionName,
+                        startDirectory = creation.startDirectory,
+                    )
+                    return@launch
+                }
+            }
             val sendResult = runCatching {
                 client.sendCommand(
                     "new-session -d -s '${escapeSingleQuoted(creation.sessionName)}' " +

@@ -113,6 +113,7 @@ class ActiveTmuxClients @Inject constructor() {
         username: String,
         keyPath: String,
         client: TmuxClient,
+        startDirectoryExists: (suspend (String) -> Boolean)? = null,
     ) {
         synchronized(this) {
             val next = _clients.value.toMutableMap()
@@ -124,6 +125,7 @@ class ActiveTmuxClients @Inject constructor() {
                 username = username,
                 keyPath = keyPath,
                 client = client,
+                startDirectoryExists = startDirectoryExists,
             )
             _clients.value = next
         }
@@ -212,6 +214,7 @@ class ActiveTmuxClients @Inject constructor() {
         val username: String,
         val keyPath: String,
         val client: TmuxClient,
+        val startDirectoryExists: (suspend (String) -> Boolean)? = null,
     )
 
     /**

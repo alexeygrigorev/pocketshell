@@ -12,6 +12,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextReplacement
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -36,6 +37,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -80,6 +82,7 @@ import java.io.FileOutputStream
  *  - `01-before-create-viewport.png`
  *  - `02-after-create-viewport.png`
  *  - `03-duplicate-error-viewport.png`
+ *  - `04-missing-folder-error-viewport.png`
  *  - `timings.txt`
  *  - `summary.txt`
  */
@@ -260,6 +263,47 @@ class SessionCreateDashboardE2eTest {
             afterDuplicate.size,
         )
 
+        // --- (6) Issue #296: a non-existent start folder must show a
+        // clear error and must NOT allow tmux to silently create the
+        // session in $HOME.
+        removeMissingStartFolder(key)
+        compose.onNodeWithTag(DASHBOARD_NEW_SESSION_TAG, useUnmergedTree = true)
+            .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(DASHBOARD_SESSION_NAME_FIELD_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(DASHBOARD_SESSION_NAME_FIELD_TAG, useUnmergedTree = true)
+            .performTextInput(SESSION_MISSING_FOLDER)
+        compose.onNodeWithTag(DASHBOARD_START_FOLDER_FIELD_TAG, useUnmergedTree = true)
+            .performTextReplacement(MISSING_START_FOLDER)
+        compose.onAllNodesWithText("Save", useUnmergedTree = true)
+            .onLast()
+            .performClick()
+
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText(
+                MISSING_START_FOLDER,
+                substring = true,
+                useUnmergedTree = true,
+            )
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        captureFullDevice("04-missing-folder-error")
+
+        val afterMissingFolder = listRemoteSessions(key)
+        assertFalse(
+            "missing-start-folder attempt must not create $SESSION_MISSING_FOLDER; " +
+                "got $afterMissingFolder",
+            afterMissingFolder.contains(SESSION_MISSING_FOLDER),
+        )
+        assertFalse(
+            "clear-error behavior must not mkdir $MISSING_START_FOLDER",
+            remoteDirectoryExists(key, MISSING_START_FOLDER),
+        )
+
         writeTimings()
         writeSummary(createLatencyMs)
         Unit
@@ -352,6 +396,38 @@ class SessionCreateDashboardE2eTest {
             .filter { it.isNotEmpty() }
     }
 
+    private suspend fun remoteDirectoryExists(key: String, path: String): Boolean {
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use { it.exec("test -d ${shellQuote(path)}") }
+        }
+        return result.getOrNull()?.exitCode == 0
+    }
+
+    private suspend fun removeMissingStartFolder(key: String) {
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use { it.exec("rm -rf ${shellQuote(MISSING_START_FOLDER)}") }
+        }
+        assertTrue(
+            "expected cleanup of $MISSING_START_FOLDER to succeed; got " +
+                "exception=${result.exceptionOrNull()} exit=${result.getOrNull()?.exitCode}",
+            result.getOrNull()?.exitCode == 0,
+        )
+    }
+
     private suspend fun cleanupSessions(key: String) {
         runCatching {
             withTimeout(20_000) {
@@ -366,7 +442,9 @@ class SessionCreateDashboardE2eTest {
                     session.use {
                         it.exec(
                             "tmux kill-session -t ${shellQuote(SESSION_PRE_CREATE)} 2>/dev/null || true; " +
-                                "tmux kill-session -t ${shellQuote(SESSION_CREATED)} 2>/dev/null || true",
+                                "tmux kill-session -t ${shellQuote(SESSION_CREATED)} 2>/dev/null || true; " +
+                                "tmux kill-session -t ${shellQuote(SESSION_MISSING_FOLDER)} 2>/dev/null || true; " +
+                                "rm -rf ${shellQuote(MISSING_START_FOLDER)}",
                         )
                     }
                 }
@@ -478,6 +556,7 @@ class SessionCreateDashboardE2eTest {
                 appendLine("  01-before-create-viewport.png")
                 appendLine("  02-after-create-viewport.png")
                 appendLine("  03-duplicate-error-viewport.png")
+                appendLine("  04-missing-folder-error-viewport.png")
                 appendLine("  timings.txt")
             },
         )
@@ -493,5 +572,7 @@ class SessionCreateDashboardE2eTest {
         const val DEVICE_DIR_NAME: String = "issue204-create-dashboard"
         const val SESSION_PRE_CREATE: String = "seed-pre-create"
         const val SESSION_CREATED: String = "created-by-plus-button"
+        const val SESSION_MISSING_FOLDER: String = "missing-start-folder"
+        const val MISSING_START_FOLDER: String = "/tmp/pocketshell-issue296-missing-start-folder"
     }
 }

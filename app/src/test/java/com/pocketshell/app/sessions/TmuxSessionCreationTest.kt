@@ -61,4 +61,23 @@ class TmuxSessionCreationTest {
 
         assertEquals("test-api", creation.sessionName)
     }
+
+    @Test
+    fun remoteStartDirectoryExistsCommandQuotesRequestedFolder() {
+        val command = remoteStartDirectoryExistsCommand("/tmp/it's missing; rm -rf \$HOME")
+
+        assertEquals(
+            """
+                pocketshell_start_dir='/tmp/it'\''s missing; rm -rf ${'$'}HOME'
+                case "${'$'}pocketshell_start_dir" in
+                  '~') pocketshell_start_dir=${'$'}HOME ;;
+                  '~/'*) pocketshell_start_dir=${'$'}HOME/${'$'}{pocketshell_start_dir#~/} ;;
+                  '${'$'}HOME') pocketshell_start_dir=${'$'}HOME ;;
+                  '${'$'}HOME/'*) pocketshell_start_dir=${'$'}HOME/${'$'}{pocketshell_start_dir#${'$'}HOME/} ;;
+                esac
+                test -d "${'$'}pocketshell_start_dir"
+            """.trimIndent(),
+            command,
+        )
+    }
 }

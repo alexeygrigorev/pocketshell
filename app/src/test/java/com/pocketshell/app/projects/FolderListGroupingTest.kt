@@ -183,6 +183,115 @@ class FolderListGroupingTest {
         assertEquals(SessionAgentKind.Codex, rows[1].sessions[0].agentKind)
     }
 
+    @Test
+    fun buildFolderTreeGroupsSessionsUnderWatchedRootProjectFolder() {
+        val sessions = listOf(
+            entry("codex-api", 3_000L, kind = SessionAgentKind.Codex),
+            entry("shell-api", 2_000L),
+            entry("claude-docs", 1_000L, kind = SessionAgentKind.Claude),
+        )
+        val cwds = mapOf(
+            "codex-api" to FolderListViewModel.canonicalisePath("/home/alexey/git/pocketshell/app"),
+            "shell-api" to FolderListViewModel.canonicalisePath("/home/alexey/git/pocketshell"),
+            "claude-docs" to FolderListViewModel.canonicalisePath("/home/alexey/git/docs/site"),
+        )
+        val watched = listOf(
+            ProjectRootEntity(id = 1L, hostId = 7L, label = "[00] git", path = "/home/alexey/git"),
+        )
+
+        val roots = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = cwds,
+            watchedFolders = watched,
+            scannedProjectFoldersByRoot = mapOf(
+                "/home/alexey/git" to listOf(
+                    "/home/alexey/git/pocketshell",
+                    "/home/alexey/git/docs",
+                    "/home/alexey/git/empty-project",
+                ),
+            ),
+        )
+
+        assertEquals(1, roots.size)
+        assertEquals("/home/alexey/git", roots[0].path)
+        assertEquals("git", roots[0].label)
+        assertTrue(roots[0].isWatched)
+        assertEquals(
+            listOf("pocketshell", "docs", "empty-project"),
+            roots[0].folders.map { it.label },
+        )
+        assertEquals(listOf("codex-api", "shell-api"), roots[0].folders[0].sessions.map { it.sessionName })
+        assertEquals(listOf("claude-docs"), roots[0].folders[1].sessions.map { it.sessionName })
+        assertTrue(roots[0].folders[2].isEmpty)
+    }
+
+    @Test
+    fun buildFolderTreeMatchesTildeWatchedRootToAbsoluteProjectsAndSessions() {
+        val sessions = listOf(
+            entry("codex-pocketshell", 3_000L, kind = SessionAgentKind.Codex),
+            entry("shell-docs", 2_000L),
+        )
+        val cwds = mapOf(
+            "codex-pocketshell" to FolderListViewModel.canonicalisePath("/home/alexey/git/pocketshell/app"),
+            "shell-docs" to FolderListViewModel.canonicalisePath("/home/alexey/git/docs"),
+        )
+        val watched = listOf(
+            ProjectRootEntity(id = 1L, hostId = 7L, label = "[00] git", path = "~/git"),
+        )
+
+        val roots = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = cwds,
+            watchedFolders = watched,
+            scannedProjectFoldersByRoot = mapOf(
+                "~/git" to listOf(
+                    "/home/alexey/git/pocketshell",
+                    "/home/alexey/git/docs",
+                    "/home/alexey/git/empty-project",
+                ),
+            ),
+            resolvedWatchedRootPaths = mapOf("~/git" to "/home/alexey/git"),
+        )
+
+        assertEquals(1, roots.size)
+        assertEquals("~/git", roots[0].path)
+        assertEquals("git", roots[0].label)
+        assertEquals(
+            listOf("pocketshell", "docs", "empty-project"),
+            roots[0].folders.map { it.label },
+        )
+        assertEquals(listOf("codex-pocketshell"), roots[0].folders[0].sessions.map { it.sessionName })
+        assertEquals(listOf("shell-docs"), roots[0].folders[1].sessions.map { it.sessionName })
+        assertTrue(roots[0].folders[2].isEmpty)
+    }
+
+    @Test
+    fun buildFolderTreeKeepsSessionsOutsideWatchedRootsReachable() {
+        val sessions = listOf(
+            entry("inside", 2_000L),
+            entry("outside", 3_000L),
+        )
+        val cwds = mapOf(
+            "inside" to FolderListViewModel.canonicalisePath("/home/alexey/git/pocketshell"),
+            "outside" to FolderListViewModel.canonicalisePath("/tmp/scratch"),
+        )
+        val watched = listOf(
+            ProjectRootEntity(id = 1L, hostId = 7L, label = "git", path = "/home/alexey/git"),
+        )
+
+        val roots = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = cwds,
+            watchedFolders = watched,
+            scannedProjectFoldersByRoot = emptyMap(),
+        )
+
+        assertEquals(listOf("git", FolderListViewModel.OTHER_ROOT_LABEL), roots.map { it.label })
+        assertEquals("pocketshell", roots[0].folders.single().label)
+        assertEquals("scratch", roots[1].folders.single().label)
+        assertFalse(roots[1].isWatched)
+    }
+
     private fun entry(
         name: String,
         activity: Long,

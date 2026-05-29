@@ -12,6 +12,7 @@ import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.ProjectRootEntity
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
@@ -88,7 +89,12 @@ class AppAssistantActionsTest {
         bridge: SessionActionBridge = RecordingBridge(),
         responder: (String) -> ExecResult,
         gateway: FolderListGateway = object : FolderListGateway {
-            override suspend fun listSessionsWithFolder(host: HostEntity, keyPath: String, passphrase: CharArray?) =
+            override suspend fun listSessionsWithFolder(
+                host: HostEntity,
+                keyPath: String,
+                passphrase: CharArray?,
+                watchedRoots: List<ProjectRootEntity>,
+            ) =
                 FolderListResult.Sessions(emptyList())
             override suspend fun createSession(
                 host: HostEntity,

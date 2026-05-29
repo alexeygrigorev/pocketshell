@@ -56,6 +56,21 @@ data class FolderRow(
 }
 
 /**
+ * One watched parent root in the host-detail tree. Each root owns the
+ * project folders discovered under it by `pocketshell repos list --local
+ * --root <path>` plus any live session folders that fall under that root.
+ */
+data class FolderTreeRoot(
+    val path: String,
+    val label: String,
+    val folders: List<FolderRow>,
+    val isWatched: Boolean,
+) {
+    val isEmpty: Boolean get() = folders.isEmpty()
+    val mostRecentActivity: Long get() = folders.maxOfOrNull { it.mostRecentActivity } ?: 0L
+}
+
+/**
  * One session inside a [FolderRow]. Carries the minimum fields the
  * folder detail screen needs to render a `SessionRow` and route the
  * tap to `AppDestination.TmuxSession`.
@@ -72,6 +87,7 @@ sealed interface FolderListUiState {
 
     data class Ready(
         val folders: List<FolderRow>,
+        val treeRoots: List<FolderTreeRoot>,
         val flatSessions: List<FolderSessionEntry>,
     ) : FolderListUiState
 
@@ -130,6 +146,8 @@ class FolderListViewModel @Inject constructor(
     private var lastSessions: List<FolderSessionEntry> = emptyList()
     private var lastSessionFolderPaths: Map<String, String> = emptyMap()
     private var lastWatchedFolders: List<ProjectRootEntity> = emptyList()
+    private var lastScannedProjectFoldersByRoot: Map<String, List<String>> = emptyMap()
+    private var lastResolvedWatchedRootPaths: Map<String, String> = emptyMap()
     private var lastCreatedFolders: Map<String, String> = emptyMap()
 
     /**
@@ -335,6 +353,7 @@ class FolderListViewModel @Inject constructor(
             host = host,
             keyPath = params.keyPath,
             passphrase = params.passphrase,
+            watchedRoots = lastWatchedFolders,
         )
         when (result) {
             is FolderListResult.Sessions -> {
@@ -349,6 +368,8 @@ class FolderListViewModel @Inject constructor(
                 lastSessionFolderPaths = result.rows.associate { row ->
                     row.sessionName to (row.cwd?.let(::canonicalisePath) ?: UNTRACKED_PATH)
                 }
+                lastScannedProjectFoldersByRoot = result.projectFoldersByRoot
+                lastResolvedWatchedRootPaths = result.resolvedWatchedRootPaths
                 emitReady()
             }
             is FolderListResult.Failed -> {
@@ -379,8 +400,17 @@ class FolderListViewModel @Inject constructor(
             watchedFolders = lastWatchedFolders,
             extraFolders = lastCreatedFolders,
         )
+        val treeRoots = buildFolderTree(
+            sessions = lastSessions,
+            sessionFolderPaths = lastSessionFolderPaths,
+            watchedFolders = lastWatchedFolders,
+            scannedProjectFoldersByRoot = lastScannedProjectFoldersByRoot,
+            resolvedWatchedRootPaths = lastResolvedWatchedRootPaths,
+            extraFolders = lastCreatedFolders,
+        )
         _state.value = FolderListUiState.Ready(
             folders = folders,
+            treeRoots = treeRoots,
             flatSessions = lastSessions.sortedWith(
                 compareByDescending<FolderSessionEntry> { it.lastActivity ?: 0L }
                     .thenBy { it.sessionName },
@@ -439,6 +469,8 @@ class FolderListViewModel @Inject constructor(
          */
         const val UNTRACKED_PATH: String = "::untracked::"
         const val UNTRACKED_LABEL: String = "Untracked"
+        const val OTHER_ROOT_PATH: String = "::other-folders::"
+        const val OTHER_ROOT_LABEL: String = "Other folders"
 
         /**
          * Polling cadence for the gateway probe. The folder list is a
@@ -562,6 +594,176 @@ class FolderListViewModel @Inject constructor(
                 .sortedBy { it.label.lowercase() }
             val untracked = rows.filter { it.path == UNTRACKED_PATH }
             return active + watchedEmpty + untracked
+        }
+
+        fun buildFolderTree(
+            sessions: List<FolderSessionEntry>,
+            sessionFolderPaths: Map<String, String>,
+            watchedFolders: List<ProjectRootEntity>,
+            scannedProjectFoldersByRoot: Map<String, List<String>>,
+            resolvedWatchedRootPaths: Map<String, String> = emptyMap(),
+            extraFolders: Map<String, String> = emptyMap(),
+        ): List<FolderTreeRoot> {
+            val resolvedByWatchedPath = resolvedWatchedRootPaths
+                .mapKeys { (path, _) -> canonicalisePath(path) }
+                .mapValues { (_, path) -> canonicalisePath(path) }
+            val watchedRoots = watchedFolders
+                .map { root ->
+                    val path = canonicalisePath(root.path)
+                    val matchPath = resolvedByWatchedPath[path]
+                        ?.takeIf { it != UNTRACKED_PATH }
+                        ?: path
+                    val label = WatchedFoldersViewModel
+                        .stripOrderPrefix(root.label)
+                        .ifBlank { defaultLabelForPath(path) }
+                    WatchedRoot(path = path, matchPath = matchPath, label = label)
+                }
+                .distinctBy { it.path }
+
+            val sessionProjectPaths = mutableMapOf<String, MutableList<FolderSessionEntry>>()
+            val otherSessionPaths = mutableMapOf<String, MutableList<FolderSessionEntry>>()
+            for (session in sessions) {
+                val cwd = sessionFolderPaths[session.sessionName] ?: UNTRACKED_PATH
+                val root = bestRootForPath(cwd, watchedRoots)
+                val projectPath = root?.let { projectPathUnderRoot(cwd, it.matchPath) }
+                val target = if (projectPath != null) sessionProjectPaths else otherSessionPaths
+                val key = projectPath ?: cwd
+                target.getOrPut(key) { mutableListOf() }.add(session)
+            }
+
+            val extraByPath = extraFolders
+                .mapKeys { (path, _) -> canonicalisePath(path) }
+            val treeRoots = watchedRoots.map { root ->
+                val scanned = scannedProjectFoldersByRoot[root.path].orEmpty() +
+                    scannedProjectFoldersByRoot[root.matchPath].orEmpty() +
+                    scannedProjectFoldersByRoot.entries
+                        .firstOrNull {
+                            val key = canonicalisePath(it.key)
+                            key == root.path || key == root.matchPath
+                        }
+                        ?.value
+                        .orEmpty()
+                val scannedPaths = scanned
+                    .map(::canonicalisePath)
+                    .filter { pathWithinRoot(it, root.matchPath) }
+                val extraPaths = extraByPath.keys.filter { pathWithinRoot(it, root.matchPath) }
+                val sessionPaths = sessionProjectPaths.keys.filter { pathWithinRoot(it, root.matchPath) }
+                val projectPaths = (scannedPaths + extraPaths + sessionPaths)
+                    .distinct()
+                    .filter { it != UNTRACKED_PATH }
+
+                FolderTreeRoot(
+                    path = root.path,
+                    label = root.label,
+                    isWatched = true,
+                    folders = projectPaths
+                        .map { path ->
+                            folderRowForTreePath(
+                                path = path,
+                                sessions = sessionProjectPaths[path].orEmpty(),
+                                watchedFolders = watchedFolders,
+                                extraByPath = extraByPath,
+                            )
+                        }
+                        .sortedForTree(),
+                )
+            }
+
+            val otherRows = otherSessionPaths
+                .map { (path, entries) ->
+                    FolderRow(
+                        path = path,
+                        label = defaultLabelForPath(path),
+                        sessions = entries.sortedWith(sessionEntrySort()),
+                        isWatched = false,
+                    )
+                }
+                .sortedForTree()
+            val flatFallbackRows = if (watchedRoots.isEmpty()) {
+                groupSessionsIntoFolders(
+                    sessions = sessions,
+                    sessionFolderPaths = sessionFolderPaths,
+                    watchedFolders = watchedFolders,
+                    extraFolders = extraFolders,
+                )
+            } else {
+                emptyList()
+            }
+            val otherRoot = if (otherRows.isNotEmpty() || flatFallbackRows.isNotEmpty()) {
+                listOf(
+                    FolderTreeRoot(
+                        path = OTHER_ROOT_PATH,
+                        label = OTHER_ROOT_LABEL,
+                        folders = flatFallbackRows.ifEmpty { otherRows },
+                        isWatched = false,
+                    ),
+                )
+            } else {
+                emptyList()
+            }
+
+            return treeRoots + otherRoot
+        }
+
+        private data class WatchedRoot(
+            val path: String,
+            val matchPath: String,
+            val label: String,
+        )
+
+        private fun folderRowForTreePath(
+            path: String,
+            sessions: List<FolderSessionEntry>,
+            watchedFolders: List<ProjectRootEntity>,
+            extraByPath: Map<String, String>,
+        ): FolderRow {
+            val watched = watchedFolders.firstOrNull { canonicalisePath(it.path) == path }
+            val label = when {
+                watched != null -> WatchedFoldersViewModel
+                    .stripOrderPrefix(watched.label)
+                    .ifBlank { defaultLabelForPath(path) }
+                extraByPath[path] != null -> extraByPath.getValue(path)
+                else -> defaultLabelForPath(path)
+            }
+            return FolderRow(
+                path = path,
+                label = label,
+                sessions = sessions.sortedWith(sessionEntrySort()),
+                isWatched = watched != null,
+            )
+        }
+
+        private fun bestRootForPath(path: String, roots: List<WatchedRoot>): WatchedRoot? {
+            if (path == UNTRACKED_PATH) return null
+            return roots
+                .filter { pathWithinRoot(path, it.matchPath) }
+                .maxByOrNull { it.matchPath.length }
+        }
+
+        private fun pathWithinRoot(path: String, root: String): Boolean =
+            path == root || path.startsWith(root.trimEnd('/') + "/")
+
+        private fun projectPathUnderRoot(path: String, root: String): String {
+            if (path == root) return root
+            val prefix = root.trimEnd('/') + "/"
+            val child = path.removePrefix(prefix).substringBefore('/').ifBlank { return root }
+            return prefix + child
+        }
+
+        private fun sessionEntrySort(): Comparator<FolderSessionEntry> =
+            compareByDescending<FolderSessionEntry> { it.lastActivity ?: 0L }
+                .thenBy { it.sessionName }
+
+        private fun List<FolderRow>.sortedForTree(): List<FolderRow> {
+            val active = filter { it.sessions.isNotEmpty() && it.path != UNTRACKED_PATH }
+                .sortedWith(
+                    compareByDescending<FolderRow> { it.mostRecentActivity }
+                        .thenBy { it.label.lowercase() },
+                )
+            val empty = filter { it.sessions.isEmpty() && it.path != UNTRACKED_PATH }
+                .sortedBy { it.label.lowercase() }
+            val untracked = filter { it.path == UNTRACKED_PATH }
+            return active + empty + untracked
         }
     }
 }

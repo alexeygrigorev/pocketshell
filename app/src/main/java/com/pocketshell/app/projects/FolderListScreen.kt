@@ -76,9 +76,8 @@ import com.pocketshell.uikit.theme.PocketShellColors
  *    [SessionTypePickerSheet] without a pre-filled folder (the user
  *    types one). Per the refinement-comment AC: "+ New session"
  *    prompts for type (agent / shell) with an agent CLI sub-picker.
- *  - Tap "Show all sessions on this host" → expands an inline flat
- *    list. Low-cost affordance for the "I know the session name, not
- *    the folder" path.
+ *  - Tap the app-bar Tree/Flat toggle → switches between the watched
+ *    root → project folder tree and the previous flat folder-group list.
  */
 @Composable
 fun FolderListScreen(
@@ -141,7 +140,7 @@ fun FolderListScreen(
     val state by viewModel.state.collectAsState()
     val actionStatus by viewModel.actionStatus.collectAsState()
     val context = LocalContext.current
-    var showAllFlatList by remember { mutableStateOf(false) }
+    var showFlatFolderList by remember { mutableStateOf(false) }
     var pickerFolder by remember { mutableStateOf<PickerTarget?>(null) }
     var actionFolder by remember { mutableStateOf<PickerTarget?>(null) }
     var emptyProjectFolder by remember { mutableStateOf<PickerTarget?>(null) }
@@ -171,8 +170,10 @@ fun FolderListScreen(
         Column(modifier = Modifier.fillMaxSize()) {
             FolderListAppBar(
                 hostName = hostName,
+                showFlatFolderList = showFlatFolderList,
                 onBack = onBack,
                 onBrowseRepos = { onBrowseRepos(null) },
+                onToggleMode = { showFlatFolderList = !showFlatFolderList },
             )
             when (val s = state) {
                 FolderListUiState.Loading -> LoadingPanel()
@@ -187,10 +188,9 @@ fun FolderListScreen(
                 )
                 is FolderListUiState.Ready -> FolderListContent(
                     folders = s.folders,
-                    flatSessions = s.flatSessions,
-                    showAllFlatList = showAllFlatList,
+                    treeRoots = s.treeRoots,
+                    showFlatFolderList = showFlatFolderList,
                     actionStatus = actionStatus,
-                    onToggleShowAll = { showAllFlatList = !showAllFlatList },
                     onDismissActionStatus = viewModel::clearActionStatus,
                     onSessionClick = { folderPath, sessionName ->
                         onOpenSession(
@@ -203,6 +203,12 @@ fun FolderListScreen(
                     },
                     onFolderActions = { row ->
                         actionFolder = PickerTarget(path = row.path, label = row.label)
+                    },
+                    onCreateInRoot = { root ->
+                        pickerFolder = PickerTarget(path = root.path, label = root.label)
+                    },
+                    onRootActions = { root ->
+                        actionFolder = PickerTarget(path = root.path, label = root.label)
                     },
                     onEditEnv = { row ->
                         // Copy-source set = every real (non-untracked)
@@ -344,8 +350,10 @@ internal fun derivedSessionName(choice: SessionTypeChoice): String {
 @Composable
 private fun FolderListAppBar(
     hostName: String,
+    showFlatFolderList: Boolean,
     onBack: () -> Unit,
     onBrowseRepos: () -> Unit,
+    onToggleMode: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -382,6 +390,17 @@ private fun FolderListAppBar(
                 text = hostName,
                 color = PocketShellColors.TextSecondary,
                 fontSize = 12.sp,
+            )
+        }
+        TextButton(
+            onClick = onToggleMode,
+            modifier = Modifier.testTag(FOLDER_LIST_VIEW_TOGGLE_TAG),
+        ) {
+            Text(
+                text = if (showFlatFolderList) "Tree" else "Flat",
+                color = PocketShellColors.Accent,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
             )
         }
         TextButton(
@@ -433,14 +452,15 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
 @Composable
 private fun FolderListContent(
     folders: List<FolderRow>,
-    flatSessions: List<FolderSessionEntry>,
-    showAllFlatList: Boolean,
+    treeRoots: List<FolderTreeRoot>,
+    showFlatFolderList: Boolean,
     actionStatus: FolderActionStatus,
-    onToggleShowAll: () -> Unit,
     onDismissActionStatus: () -> Unit,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
     onCreateInFolder: (FolderRow) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
+    onCreateInRoot: (FolderTreeRoot) -> Unit,
+    onRootActions: (FolderTreeRoot) -> Unit,
     onEditEnv: (FolderRow) -> Unit,
 ) {
     LazyColumn(
@@ -456,7 +476,23 @@ private fun FolderListContent(
                 )
             }
         }
-        if (folders.isEmpty()) {
+        if (!showFlatFolderList && treeRoots.isEmpty()) {
+            item {
+                EmptyState()
+            }
+        } else if (!showFlatFolderList) {
+            items(treeRoots) { root ->
+                FolderTreeRootGroup(
+                    root = root,
+                    onSessionClick = onSessionClick,
+                    onCreateInFolder = onCreateInFolder,
+                    onFolderActions = onFolderActions,
+                    onCreateInRoot = onCreateInRoot,
+                    onRootActions = onRootActions,
+                    onEditEnv = onEditEnv,
+                )
+            }
+        } else if (folders.isEmpty()) {
             item {
                 EmptyState()
             }
@@ -472,45 +508,6 @@ private fun FolderListContent(
             }
         }
         item { Spacer(modifier = Modifier.height(8.dp)) }
-        item {
-            TextButton(
-                onClick = onToggleShowAll,
-                modifier = Modifier.testTag(FOLDER_LIST_SHOW_ALL_TAG),
-            ) {
-                Text(
-                    text = if (showAllFlatList) "Hide flat session list" else "Show all sessions on this host",
-                    color = PocketShellColors.Accent,
-                )
-            }
-        }
-        if (showAllFlatList) {
-            if (flatSessions.isEmpty()) {
-                item {
-                    Text(
-                        text = "No tmux sessions found.",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
-                        modifier = Modifier
-                            .padding(horizontal = 4.dp)
-                            .testTag(FOLDER_LIST_FLAT_EMPTY_TAG),
-                    )
-                }
-            } else {
-                items(flatSessions) { session ->
-                    SessionRow(
-                        modifier = Modifier.testTag(folderListFlatRowTestTag(session.sessionName)),
-                        badge = session.sessionName.firstOrNull()?.uppercaseChar()?.toString().orEmpty(),
-                        name = session.sessionName,
-                        host = "",
-                        preview = sessionPreviewFor(session),
-                        time = "",
-                        tags = sessionTagsFor(session),
-                        agentKind = session.agentKind,
-                        onClick = { onSessionClick(FolderListViewModel.UNTRACKED_PATH, session.sessionName) },
-                    )
-                }
-            }
-        }
     }
 }
 
@@ -577,6 +574,131 @@ private fun EmptyState() {
             color = PocketShellColors.TextSecondary,
             fontSize = 12.sp,
         )
+    }
+}
+
+@Composable
+private fun FolderTreeRootGroup(
+    root: FolderTreeRoot,
+    onSessionClick: (folderPath: String, sessionName: String) -> Unit,
+    onCreateInFolder: (FolderRow) -> Unit,
+    onFolderActions: (FolderRow) -> Unit,
+    onCreateInRoot: (FolderTreeRoot) -> Unit,
+    onRootActions: (FolderTreeRoot) -> Unit,
+    onEditEnv: (FolderRow) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(folderTreeRootTestTag(root.path)),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        FolderTreeRootHeader(
+            root = root,
+            onCreateInRoot = { onCreateInRoot(root) },
+            onRootActions = { onRootActions(root) },
+        )
+        if (root.folders.isEmpty()) {
+            EmptyRootHint(onCreate = { onCreateInRoot(root) })
+        } else {
+            Column(
+                modifier = Modifier.padding(start = 14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                root.folders.forEach { folder ->
+                    FolderGroup(
+                        folder = folder,
+                        onSessionClick = onSessionClick,
+                        onCreateInFolder = onCreateInFolder,
+                        onFolderActions = onFolderActions,
+                        onEditEnv = onEditEnv,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FolderTreeRootHeader(
+    root: FolderTreeRoot,
+    onCreateInRoot: () -> Unit,
+    onRootActions: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
+            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = root.label,
+                    color = PocketShellColors.Text,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.testTag(folderTreeRootLabelTag(root.path)),
+                )
+                if (root.isWatched) {
+                    Spacer(modifier = Modifier.size(8.dp))
+                    WatchedPin()
+                }
+            }
+            Text(
+                text = root.path,
+                color = PocketShellColors.TextSecondary,
+                fontSize = 11.sp,
+            )
+        }
+        if (root.path != FolderListViewModel.OTHER_ROOT_PATH) {
+            TextButton(
+                onClick = onRootActions,
+                modifier = Modifier.testTag(folderTreeRootActionsTestTag(root.path)),
+            ) {
+                Text(
+                    text = "Actions",
+                    color = PocketShellColors.Accent,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            TextButton(
+                onClick = onCreateInRoot,
+                modifier = Modifier.testTag(folderTreeRootCreateTestTag(root.path)),
+            ) {
+                Text(
+                    text = "+ New",
+                    color = PocketShellColors.Accent,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun EmptyRootHint(onCreate: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 14.dp)
+            .background(PocketShellColors.Surface, RoundedCornerShape(12.dp))
+            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+    ) {
+        Text(
+            text = "No project folders found under this watched root.",
+            color = PocketShellColors.Text,
+            fontSize = 13.sp,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        TextButton(onClick = onCreate) {
+            Text("+ New project", color = PocketShellColors.Accent)
+        }
     }
 }
 
@@ -806,6 +928,7 @@ const val FOLDER_LIST_SHOW_ALL_TAG: String = "folder-list:show-all"
 const val FOLDER_LIST_FLAT_EMPTY_TAG: String = "folder-list:flat:empty"
 const val FOLDER_LIST_NEW_SESSION_FAB_TAG: String = "folder-list:new-session-fab"
 const val FOLDER_LIST_BROWSE_REPOS_TAG: String = "folder-list:browse-repos"
+const val FOLDER_LIST_VIEW_TOGGLE_TAG: String = "folder-list:view-toggle"
 const val FOLDER_LIST_ACTION_STATUS_TAG: String = "folder-list:action-status"
 const val FOLDER_LIST_ACTION_STATUS_DISMISS_TAG: String = "folder-list:action-status:dismiss"
 
@@ -820,3 +943,7 @@ fun folderDetailActionsTestTag(folderPath: String): String =
     "folder-list:detail:$folderPath:actions"
 fun folderDetailEnvTestTag(folderPath: String): String =
     "folder-list:detail:$folderPath:env"
+fun folderTreeRootTestTag(path: String): String = "folder-list:tree-root:$path"
+fun folderTreeRootLabelTag(path: String): String = "folder-list:tree-root:$path:label"
+fun folderTreeRootCreateTestTag(path: String): String = "folder-list:tree-root:$path:create"
+fun folderTreeRootActionsTestTag(path: String): String = "folder-list:tree-root:$path:actions"

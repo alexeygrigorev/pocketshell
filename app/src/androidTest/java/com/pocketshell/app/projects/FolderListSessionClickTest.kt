@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -14,6 +15,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -21,6 +23,7 @@ import com.pocketshell.uikit.theme.PocketShellThemeMode
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -208,9 +211,83 @@ class FolderListSessionClickTest {
         assertEquals("scratch", fakeGateway.lastEmptyName)
         compose.onNodeWithTag(folderHeaderLabelTag("/root/projects/scratch")).assertIsDisplayed()
     }
+
+    @Test
+    fun appBarToggleSwitchesBetweenTreeAndFlatFolderList() {
+        runBlocking {
+            db.projectRootDao().insert(
+                ProjectRootEntity(
+                    hostId = hostId,
+                    label = "work",
+                    path = "/root/work",
+                ),
+            )
+        }
+        val fakeGateway = StaticGateway(
+            rows = listOf(
+                FolderSessionRow(
+                    sessionName = "codex-app",
+                    lastActivity = 1_700_000_000L,
+                    attached = false,
+                    cwd = "/root/work/app/service",
+                    agentKind = SessionAgentKind.Codex,
+                ),
+            ),
+            projectFoldersByRoot = mapOf(
+                "/root/work" to listOf(
+                    "/root/work/app",
+                    "/root/work/empty",
+                ),
+            ),
+        )
+        val viewModel = FolderListViewModel(
+            gateway = fakeGateway,
+            hostDao = db.hostDao(),
+            projectRootDao = db.projectRootDao(),
+        )
+
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "h",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue171",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("codex-app").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(folderTreeRootLabelTag("/root/work")).assertIsDisplayed()
+        compose.onNodeWithTag(folderHeaderLabelTag("/root/work/app")).assertIsDisplayed()
+        compose.onNodeWithTag(folderHeaderLabelTag("/root/work/empty")).assertIsDisplayed()
+
+        compose.onNodeWithTag(FOLDER_LIST_VIEW_TOGGLE_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText("service").fetchSemanticsNodes().isNotEmpty()
+        }
+        assertTrue(compose.onAllNodesWithTag(folderTreeRootTestTag("/root/work")).fetchSemanticsNodes().isEmpty())
+        assertTrue(compose.onAllNodesWithTag(folderHeaderLabelTag("/root/work/app")).fetchSemanticsNodes().isEmpty())
+        compose.onNodeWithTag(folderHeaderLabelTag("/root/work/app/service")).assertIsDisplayed()
+    }
 }
 
-private class StaticGateway(private val rows: List<FolderSessionRow>) : FolderListGateway {
+private class StaticGateway(
+    private val rows: List<FolderSessionRow>,
+    private val projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
+) : FolderListGateway {
     var lastEmptyParent: String? = null
     var lastEmptyName: String? = null
 
@@ -218,7 +295,11 @@ private class StaticGateway(private val rows: List<FolderSessionRow>) : FolderLi
         host: HostEntity,
         keyPath: String,
         passphrase: CharArray?,
-    ): FolderListResult = FolderListResult.Sessions(rows)
+        watchedRoots: List<ProjectRootEntity>,
+    ): FolderListResult = FolderListResult.Sessions(
+        rows = rows,
+        projectFoldersByRoot = projectFoldersByRoot,
+    )
 
     override suspend fun createSession(
         host: HostEntity,

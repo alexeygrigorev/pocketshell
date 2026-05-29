@@ -51,7 +51,7 @@ import java.util.concurrent.atomic.AtomicInteger
  *  5. The SessionTypePickerSheet opens on the FAB tap and the agent /
  *     shell segments + agent CLI radio buttons are present.
  *
- * The screen surface is captured to `dogfood/folder-list/` as a
+ * The screen surface is captured to `additional_test_output/issue300-folder-tree/` as a
  * viewport bitmap (artifact-pattern matching `*-viewport.png`) so a
  * reviewer can verify the rendered output against the spike's locked
  * design tokens.
@@ -84,13 +84,14 @@ class FolderListScreenE2eTest {
                 keyId = keyId,
             ),
         )
-        // Seed one watched folder that has NO matching live session so
-        // the screen's overlay path is exercised in the same test.
+        // Seed one watched parent root. The fake gateway expands it
+        // into project folders, including an empty one, so the tree
+        // renders watched root -> project folder -> sessions.
         db.projectRootDao().insert(
             ProjectRootEntity(
                 hostId = hostId,
-                label = "empty-pinned",
-                path = "/home/u/code/empty-pinned",
+                label = "code",
+                path = "/home/u/code",
             ),
         )
     }
@@ -126,6 +127,13 @@ class FolderListScreenE2eTest {
                     agentKind = SessionAgentKind.Codex,
                 ),
             ),
+            projectFoldersByRoot = mapOf(
+                "/home/u/code" to listOf(
+                    "/home/u/code/pocketshell",
+                    "/home/u/code/llm-zoomcamp",
+                    "/home/u/code/empty-pinned",
+                ),
+            ),
         )
         val viewModel = FolderListViewModel(
             gateway = fakeGateway,
@@ -157,7 +165,7 @@ class FolderListScreenE2eTest {
         // Wait for the bind() + initial probe to complete.
         compose.waitUntil(timeoutMillis = 10_000) {
             fakeGateway.callCount.get() >= 1 &&
-                compose.onAllNodesWithTag(folderRowTestTag("/home/u/code/pocketshell"))
+                compose.onAllNodesWithTag(folderTreeRootTestTag("/home/u/code"))
                     .fetchSemanticsNodes().isNotEmpty()
         }
 
@@ -166,6 +174,7 @@ class FolderListScreenE2eTest {
         compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_TITLE_TAG).assertExists()
         compose.onNodeWithText("issue171-host").assertExists()
+        compose.onNodeWithTag(folderTreeRootLabelTag("/home/u/code")).assertExists()
 
         // --- Assertion 2: three folder rows — pocketshell, llm-zoomcamp,
         //    empty-pinned. The pocketshell row groups two sessions
@@ -200,7 +209,7 @@ class FolderListScreenE2eTest {
         // --- Capture viewport before opening the picker (artifact path
         //    matches the project's `*-viewport.png` convention so the
         //    reviewer's artifact-driven check picks it up).
-        captureViewport("issue171-folder-list-rendered-viewport.png")
+        captureViewport("issue300-folder-tree-rendered-viewport.png")
 
         // --- Assertion 5: SessionTypePickerSheet opens on FAB tap and
         //    shows the agent / shell segments + agent CLI radio rows.
@@ -222,7 +231,7 @@ class FolderListScreenE2eTest {
         // visible by the assertExists() chain above, so the
         // screenshot taken right after is guaranteed to include it.
         android.os.SystemClock.sleep(250)
-        captureFullDevice("issue171-session-type-picker-viewport.png")
+        captureFullDevice("issue300-session-type-picker-viewport.png")
     }
 
     private fun captureFullDevice(name: String) {
@@ -232,7 +241,7 @@ class FolderListScreenE2eTest {
         val mediaRoot = instrumentation.targetContext.externalMediaDirs
             .firstOrNull { it != null }
             ?: instrumentation.targetContext.getExternalFilesDir(null)
-        val outDir = File(mediaRoot, "additional_test_output/issue171-folder-list").apply {
+        val outDir = File(mediaRoot, "additional_test_output/issue300-folder-tree").apply {
             if (!exists()) mkdirs()
         }
         val file = File(outDir, name)
@@ -264,7 +273,7 @@ class FolderListScreenE2eTest {
         val mediaRoot = instrumentation.targetContext.externalMediaDirs
             .firstOrNull { it != null }
             ?: instrumentation.targetContext.getExternalFilesDir(null)
-        val outDir = File(mediaRoot, "additional_test_output/issue171-folder-list").apply {
+        val outDir = File(mediaRoot, "additional_test_output/issue300-folder-tree").apply {
             if (!exists()) mkdirs()
         }
         val file = File(outDir, name)
@@ -283,6 +292,7 @@ class FolderListScreenE2eTest {
  */
 private class FakeFolderListGateway(
     private val rows: List<FolderSessionRow>,
+    private val projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
 ) : FolderListGateway {
 
     val callCount: AtomicInteger = AtomicInteger(0)
@@ -291,9 +301,13 @@ private class FakeFolderListGateway(
         host: HostEntity,
         keyPath: String,
         passphrase: CharArray?,
+        watchedRoots: List<ProjectRootEntity>,
     ): FolderListResult {
         callCount.incrementAndGet()
-        return FolderListResult.Sessions(rows)
+        return FolderListResult.Sessions(
+            rows = rows,
+            projectFoldersByRoot = projectFoldersByRoot,
+        )
     }
 
     override suspend fun createSession(

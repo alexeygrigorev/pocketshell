@@ -1,14 +1,18 @@
 package com.pocketshell.app.projects
 
 import com.pocketshell.app.repos.ReposRemoteSource
+import com.pocketshell.app.repos.ReposListResult
+import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.sessions.remoteStartDirectoryExists
 import com.pocketshell.app.sessions.startDirectoryMissingMessage
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import kotlinx.coroutines.CancellationException
 import java.io.File
@@ -57,7 +61,11 @@ data class FolderSessionRow(
  * `cwd`-bearing rows.
  */
 sealed interface FolderListResult {
-    data class Sessions(val rows: List<FolderSessionRow>) : FolderListResult
+    data class Sessions(
+        val rows: List<FolderSessionRow>,
+        val projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
+        val resolvedWatchedRootPaths: Map<String, String> = emptyMap(),
+    ) : FolderListResult
     data object ToolUnavailable : FolderListResult
     data class Failed(val message: String) : FolderListResult
     data class ConnectFailed(val cause: Throwable) : FolderListResult
@@ -104,6 +112,7 @@ interface FolderListGateway {
         host: HostEntity,
         keyPath: String,
         passphrase: CharArray?,
+        watchedRoots: List<ProjectRootEntity> = emptyList(),
     ): FolderListResult
 
     /**
@@ -147,7 +156,11 @@ data class FolderImportPayload(
     val openStream: () -> InputStream?,
 )
 
-class SshFolderListGateway @Inject constructor() : FolderListGateway {
+class SshFolderListGateway @Inject constructor(
+    private val reposRemoteSource: ReposRemoteSource,
+) : FolderListGateway {
+
+    constructor() : this(ReposRemoteSource(ReposJsonParser()))
 
     // Issue #252: reuse the SAME detection logic the Conversation view
     // uses instead of maintaining a forked candidate-enumeration +
@@ -167,6 +180,7 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
         host: HostEntity,
         keyPath: String,
         passphrase: CharArray?,
+        watchedRoots: List<ProjectRootEntity>,
     ): FolderListResult {
         val session = SshConnection.connect(
             host = host.hostname,
@@ -186,7 +200,17 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
                     listSessions.stderr.contains("not found", ignoreCase = true) ->
                     FolderListResult.ToolUnavailable
                 listSessions.stderr.contains("no server running", ignoreCase = true) ->
-                    FolderListResult.Sessions(emptyList())
+                    expandWatchedRootProjects(
+                        session = session,
+                        host = host,
+                        watchedRoots = watchedRoots,
+                    ).let { expansion ->
+                        FolderListResult.Sessions(
+                            rows = emptyList(),
+                            projectFoldersByRoot = expansion.projectFoldersByRoot,
+                            resolvedWatchedRootPaths = expansion.resolvedWatchedRootPaths,
+                        )
+                    }
                 listSessions.exitCode != 0 ->
                     FolderListResult.Failed(
                         listSessions.stderr.ifBlank { listSessions.stdout }
@@ -224,7 +248,16 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
                     val annotated = merged.map { row ->
                         row.copy(agentKind = agentKinds[row.sessionName] ?: SessionAgentKind.Shell)
                     }
-                    FolderListResult.Sessions(annotated)
+                    val expansion = expandWatchedRootProjects(
+                        session = session,
+                        host = host,
+                        watchedRoots = watchedRoots,
+                    )
+                    FolderListResult.Sessions(
+                        rows = annotated,
+                        projectFoldersByRoot = expansion.projectFoldersByRoot,
+                        resolvedWatchedRootPaths = expansion.resolvedWatchedRootPaths,
+                    )
                 }
             }
         } catch (e: CancellationException) {
@@ -233,6 +266,69 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
             FolderListResult.Failed("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
         } finally {
             session.close()
+        }
+    }
+
+    private suspend fun expandWatchedRootProjects(
+        session: SshSession,
+        host: HostEntity,
+        watchedRoots: List<ProjectRootEntity>,
+    ): WatchedRootProjectExpansion {
+        if (watchedRoots.isEmpty()) return WatchedRootProjectExpansion()
+        val namespace = "${host.id}:${host.username}@${host.hostname}:${host.port}"
+        val rootPaths = watchedRoots
+            .mapNotNull { it.path.trim().takeIf { path -> path.isNotEmpty() } }
+            .distinct()
+        val remoteHome = if (rootPaths.any(::usesHomeShortcut)) remoteHomeDirectory(session) else null
+
+        val projectFoldersByRoot = mutableMapOf<String, List<String>>()
+        val resolvedWatchedRootPaths = mutableMapOf<String, String>()
+        for (rootPath in rootPaths) {
+            val resolvedRootPath = expandRemoteHomeShortcut(rootPath, remoteHome)
+            resolvedWatchedRootPaths[rootPath] = resolvedRootPath
+            val paths = when (
+                val result = reposRemoteSource.listLocalRoot(
+                    session = session,
+                    root = resolvedRootPath,
+                    cacheNamespace = namespace,
+                )
+            ) {
+                is ReposListResult.Success -> result.repos.mapNotNull { repo ->
+                    repo.local?.path?.trim()?.takeIf { it.isNotEmpty() }
+                }
+                ReposListResult.ToolMissing,
+                is ReposListResult.Failed,
+                -> emptyList()
+            }
+            projectFoldersByRoot[rootPath] = paths.distinct()
+        }
+        return WatchedRootProjectExpansion(
+            projectFoldersByRoot = projectFoldersByRoot,
+            resolvedWatchedRootPaths = resolvedWatchedRootPaths,
+        )
+    }
+
+    private suspend fun remoteHomeDirectory(session: SshSession): String? {
+        val result = session.exec(pathAware("printf '%s\\n' \"\$HOME\""))
+        if (result.exitCode != 0) return null
+        return result.stdout.lineSequence()
+            .firstOrNull { it.isNotBlank() }
+            ?.trim()
+            ?.trimEnd('/')
+            ?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun usesHomeShortcut(path: String): Boolean =
+        path == "~" || path.startsWith("~/")
+
+    private fun expandRemoteHomeShortcut(path: String, remoteHome: String?): String {
+        val clean = path.trim().trimEnd('/').ifBlank { path.trim() }
+        val home = remoteHome?.trimEnd('/')?.takeIf { it.isNotEmpty() }
+        return when {
+            home == null -> clean
+            clean == "~" -> home
+            clean.startsWith("~/") -> home + "/" + clean.removePrefix("~/")
+            else -> clean
         }
     }
 
@@ -476,6 +572,11 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
         val cwd: String?,
         val tty: String?,
         val command: String?,
+    )
+
+    private data class WatchedRootProjectExpansion(
+        val projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
+        val resolvedWatchedRootPaths: Map<String, String> = emptyMap(),
     )
 
     internal companion object {

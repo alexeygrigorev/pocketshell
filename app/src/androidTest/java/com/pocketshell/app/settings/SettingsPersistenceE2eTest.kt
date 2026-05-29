@@ -157,7 +157,7 @@ class SettingsPersistenceE2eTest {
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
 
         // The host-list screen mounts first; navigate into Settings via
-        // its top-bar Settings tab.
+        // its top-bar Settings gear.
         compose.waitUntil(timeoutMillis = WAIT_TIMEOUT_MS) {
             compose.onAllNodesWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes().isNotEmpty()

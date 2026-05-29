@@ -112,7 +112,7 @@ class UsageScreenE2eTest {
         val artifactsDir = ensureArtifactDir()
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
 
-        // Tap the Settings tab on the host-list top bar.
+        // Tap the Settings gear on the host-list top bar.
         compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
             compose.onAllNodesWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
@@ -156,7 +156,7 @@ class UsageScreenE2eTest {
                 appendLine("docker_target=agents")
                 appendLine("docker_port=$DEFAULT_PORT")
                 appendLine("expected_records=3 (claude, codex, opencode)")
-                appendLine("route=HostList → Settings tab → Usage row → UsageScreen")
+                appendLine("route=HostList → Settings gear → Usage row → UsageScreen")
             },
         )
     }
@@ -221,7 +221,7 @@ class UsageScreenE2eTest {
                 appendLine("docker_target=agents")
                 appendLine("docker_port=2299 (intentionally unbound)")
                 appendLine("expected_records=0 (host unreachable → Skipped)")
-                appendLine("route=HostList → Settings tab → Usage row → UsageScreen")
+                appendLine("route=HostList → Settings gear → Usage row → UsageScreen")
             },
         )
     }

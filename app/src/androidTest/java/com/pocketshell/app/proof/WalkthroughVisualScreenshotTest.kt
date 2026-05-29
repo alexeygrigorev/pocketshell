@@ -20,7 +20,12 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.composer.COMPOSER_DRAFT_TAG
 import com.pocketshell.app.composer.COMPOSER_SEND_ENTER_TAG
+import com.pocketshell.app.hosts.HOST_ACTIONS_BUTTON_TAG
+import com.pocketshell.app.hosts.HOST_IMPORT_ACTION_TAG
+import com.pocketshell.app.hosts.HOST_KEYS_ACTION_TAG
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
+import com.pocketshell.app.hosts.HOST_SCAN_ACTION_TAG
+import com.pocketshell.app.hosts.SETTINGS_BUTTON_TAG
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
@@ -77,12 +82,27 @@ class WalkthroughVisualScreenshotTest {
             }
             compose.onNodeWithText("Walkthrough Docker", useUnmergedTree = true).assertExists()
             val hostListScreenshot = WalkthroughScreenshotArtifacts.capture("01-host-list")
-            // Issue #112 swapped the "Crashes" top-bar tab for "Settings"
-            // (crash reports were relocated under Settings → Diagnostics).
-            // Keep this assertion in sync with the current TabRow layout
-            // in HostListScreen.kt (Hosts / Settings / Import / Keys).
+            // Issue #299 collapsed the old Hosts / Settings / Import /
+            // Scan / Keys pseudo-tab row into a title row with a
+            // Settings gear and an actions overflow.
+            compose.onNodeWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true).assertExists()
+            compose.onNodeWithTag(HOST_ACTIONS_BUTTON_TAG, useUnmergedTree = true).assertExists()
+            listOf("Settings", "Import", "Scan", "Keys").forEach { oldTabLabel ->
+                assertTrue(
+                    "old $oldTabLabel pseudo-tab text should not be visible on the host list",
+                    compose.onAllNodesWithText(oldTabLabel, useUnmergedTree = true)
+                        .fetchSemanticsNodes()
+                        .isEmpty(),
+                )
+            }
+            compose.onNodeWithTag(HOST_ACTIONS_BUTTON_TAG, useUnmergedTree = true).performClick()
+            compose.onNodeWithTag(HOST_IMPORT_ACTION_TAG, useUnmergedTree = true).assertExists()
+            compose.onNodeWithTag(HOST_SCAN_ACTION_TAG, useUnmergedTree = true).assertExists()
+            compose.onNodeWithTag(HOST_KEYS_ACTION_TAG, useUnmergedTree = true).assertExists()
+            instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_BACK").close()
+            compose.waitForIdle()
             assertTextsClearOfStatusBar(
-                texts = listOf("PocketShell", "Settings", "Import", "Keys"),
+                texts = listOf("PocketShell"),
                 screenshotName = "01-host-list.png",
                 artifact = hostListScreenshot,
             )

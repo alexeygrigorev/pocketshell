@@ -62,8 +62,8 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * and popping back to the host list.
  *
  * The fallback file-picker affordance (visible on permission-denied)
- * fires the same `GetContent` intent the existing Import tab uses and
- * routes the resulting URI back through [onPickFile].
+ * fires the same `GetContent` intent the host-list Import action uses
+ * and routes the resulting URI back through [onPickFile].
  */
 @Composable
 fun QrScannerScreen(

@@ -331,7 +331,7 @@ class ColdInstallE2eTest {
         // — there's no BackHandler in that screen, so a system back press
         // would finish the activity anyway) and launch a fresh activity
         // back into the host list, then navigate to Settings via the
-        // top-bar tab.
+        // top-bar gear.
         // ---------------------------------------------------------------
         launchedActivity?.close()
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
@@ -341,7 +341,7 @@ class ColdInstallE2eTest {
             compose.onAllNodesWithText(hostName, useUnmergedTree = true)
                 .fetchSemanticsNodes().isNotEmpty()
         }
-        // Open Settings via the top-bar Settings tab.
+        // Open Settings via the top-bar Settings gear.
         compose.onNodeWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(SETTINGS_TITLE_TAG, useUnmergedTree = true)

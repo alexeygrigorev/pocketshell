@@ -33,7 +33,7 @@ sealed interface AppDestination {
 
     /**
      * Live camera QR scanner (issue #129). Reachable from the Host list
-     * top bar (a new "Scan" tab next to "Import"). Hosted by
+     * top-bar actions menu. Hosted by
      * [com.pocketshell.app.hosts.QrScannerScreen]; on success the
      * payload is dispatched through the existing
      * [com.pocketshell.app.hosts.HostListViewModel.importSharedHostPayload]

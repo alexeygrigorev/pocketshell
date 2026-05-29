@@ -33,10 +33,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
-import androidx.compose.material3.TabRowDefaults
-import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -50,9 +46,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -74,6 +73,10 @@ import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.model.HostSetupState
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.min
+import kotlin.math.sin
 
 /**
  * Landing screen — the list of saved hosts. Visual target is
@@ -83,7 +86,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
  *
  * Layout (top-to-bottom, matching the mockup):
  *
- * - **App bar** — title "PocketShell" + a "Keys" affordance.
+ * - **App bar** — title "PocketShell" + settings/actions affordances.
  * - **Section label** — uppercase "Hosts <count>" with a small chip.
  * - **Host cards** — each a `ui-kit` [HostCard]. Tapping invokes the
  *   `onOpenSession` callback with the resolved key path.
@@ -359,8 +362,8 @@ fun HostListScreen(
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
             // App bar stays pinned at the top — it carries navigation
-            // chrome (title + tab row) that must remain reachable while
-            // the content below scrolls.
+            // chrome and host-list actions that must remain reachable
+            // while the content below scrolls.
             HostsAppBar(
                 onKeysClick = onManageKeys,
                 onImportHostClick = { hostSharePicker.launch("*/*") },
@@ -913,31 +916,12 @@ private fun VersionFooter(versionName: String) {
 }
 
 /**
- * Top app bar matching `.appbar` in `docs/mockups/styles.css`. The
- * original mockup pictured a 60dp single-row bar with the "PocketShell"
- * title on the left and three text affordances on the right ("Crashes",
- * "Import", "Keys"). UI audit #108 / issue #110 found that those three
- * items read as static labels rather than tappable destinations because
- * they had no separator, underline, or active-state indicator.
- *
- * The bar is now stacked vertically:
- *
- * 1. A title row carrying the bold "PocketShell" wordmark (visual parity
- *    with the mockup).
- * 2. A Material 3 [TabRow] underneath, with "Hosts" as the always-active
- *    landing tab plus "Settings" / "Import" / "Keys" as navigation tabs.
- *    Per issue #112 the "Crashes" tab is replaced with a "Settings" tab
- *    (gear-style entry point) and the actual crash-reports surface is
- *    relocated under Settings → Diagnostics. The selected tab is rendered
- *    with the [PocketShellColors.Accent] indicator. Tapping a non-Hosts
- *    tab invokes the relevant navigation callback; the indicator does not
- *    move because the user leaves this screen entirely (and returns with
- *    "Hosts" selected again).
- *
- * `Tab` from Material 3 wraps its content in
- * `Modifier.selectable(role = Role.Tab)`, so each tab is announced to
- * TalkBack as "tab" with its selected state — no extra semantics
- * wiring needed.
+ * Top app bar matching the original 60dp dashboard chrome: the
+ * "PocketShell" wordmark stays on the left, Settings is the rightmost
+ * gear button, and secondary host-list actions live under a compact
+ * overflow menu. Issue #299 removes the previous pseudo-tab row because
+ * only "Hosts" was a real selected destination; Settings, Import, Scan,
+ * and Keys were actions.
  */
 @Composable
 private fun HostsAppBar(
@@ -946,130 +930,153 @@ private fun HostsAppBar(
     onScanClick: () -> Unit,
     onSettingsClick: () -> Unit = {},
 ) {
-    Column(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
+            .height(60.dp)
             .background(PocketShellColors.Background)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft),
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(60.dp)
-                .padding(horizontal = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = "PocketShell",
-                color = PocketShellColors.Text,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = (-0.4).sp,
-                modifier = Modifier.weight(1f),
-            )
-        }
-
-        HostsTabRow(
-            selectedIndex = HOSTS_TAB_INDEX,
-            onHostsClick = { /* already on Hosts; no-op */ },
-            onSettingsClick = onSettingsClick,
+        Text(
+            text = "PocketShell",
+            color = PocketShellColors.Text,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            modifier = Modifier.weight(1f),
+        )
+        HostListActionsMenu(
             onImportClick = onImportHostClick,
             onScanClick = onScanClick,
             onKeysClick = onKeysClick,
         )
+        Spacer(modifier = Modifier.width(8.dp))
+        TopBarIconButton(
+            contentDescription = "Settings",
+            testTag = SETTINGS_BUTTON_TAG,
+            onClick = onSettingsClick,
+        ) {
+            SettingsGearIcon()
+        }
     }
 }
 
-// Issue #112: convenience alias so tests can target the Settings entry
-// without depending on [HostsTabRow]'s tag-construction. Must stay
-// equal to `HOSTS_TAB_TAG_PREFIX + "settings"` (see [HostsTabRow]).
+// Stable tag for the host-list Settings affordance. The value is kept
+// from the old pseudo-tab so existing connected tests can keep targeting
+// Settings without churn.
 internal const val SETTINGS_BUTTON_TAG = "hosts:tab:settings"
 
 /**
- * Material 3 [TabRow] for the top-bar navigation. "Hosts" is the
- * landing tab and is selected whenever the host list is on screen;
- * tapping any other tab routes to the matching screen (Settings,
- * Import, Keys) without flipping the indicator first — the indicator
- * follows the actual visible surface.
- *
- * Issue #112 swaps the previous "Crashes" tab for a "Settings" tab
- * that opens the app-level settings surface. Crash reports are now
- * reachable under Settings → Diagnostics, matching the AC: "gear icon
- * replacing the 'Crashes' text label, with Crashes moved INSIDE
- * Settings". The text label "Settings" is intentional — the app does
- * not yet have a vector icon set; a true gear glyph follows once the
- * icon set lands.
- *
- * Custom indicator and divider colors keep the row on-brand
- * ([PocketShellColors.Accent] underline; muted divider) while the
- * [Tab] composable handles `Role.Tab` semantics and TalkBack's
- * "selected" announcement out of the box.
+ * Overflow for host-list actions that used to sit in the pseudo-tab row.
+ * Import, Scan, and Keys stay reachable here until the fuller add-host
+ * QR/key IA work lands in #290/#293.
  */
 @Composable
-private fun HostsTabRow(
-    selectedIndex: Int,
-    onHostsClick: () -> Unit,
-    onSettingsClick: () -> Unit,
+private fun HostListActionsMenu(
     onImportClick: () -> Unit,
     onScanClick: () -> Unit,
     onKeysClick: () -> Unit,
 ) {
-    // Issue #129: a dedicated "Scan" tab sits next to "Import" so the
-    // user can pick between camera-scan and pick-a-file flows from the
-    // same row. The two tabs do related work but the user surfaces are
-    // different enough — file picker vs camera permission prompt — that
-    // bundling them under a single entry point would hide the camera
-    // affordance.
-    val tabs = listOf(
-        "Hosts" to onHostsClick,
-        "Settings" to onSettingsClick,
-        "Import" to onImportClick,
-        "Scan" to onScanClick,
-        "Keys" to onKeysClick,
-    )
-    TabRow(
-        selectedTabIndex = selectedIndex,
-        containerColor = PocketShellColors.Background,
-        contentColor = PocketShellColors.TextSecondary,
-        indicator = { tabPositions ->
-            if (selectedIndex < tabPositions.size) {
-                TabRowDefaults.SecondaryIndicator(
-                    modifier = Modifier.tabIndicatorOffset(tabPositions[selectedIndex]),
-                    height = 2.dp,
-                    color = PocketShellColors.Accent,
-                )
-            }
-        },
-        divider = {
-            // Suppress the default Material 3 divider — the parent
-            // already draws a 1dp border around the whole app bar.
-        },
-        modifier = Modifier.testTag(HOSTS_TAB_ROW_TAG),
-    ) {
-        tabs.forEachIndexed { index, (label, onClick) ->
-            val selected = index == selectedIndex
-            Tab(
-                selected = selected,
-                onClick = onClick,
-                selectedContentColor = PocketShellColors.Accent,
-                unselectedContentColor = PocketShellColors.TextSecondary,
-                modifier = Modifier.testTag(HOSTS_TAB_TAG_PREFIX + label.lowercase()),
-                text = {
-                    Text(
-                        text = label,
-                        fontSize = 13.sp,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                        letterSpacing = 0.2.sp,
-                    )
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        TopBarIconButton(
+            contentDescription = "Host actions",
+            testTag = HOST_ACTIONS_BUTTON_TAG,
+            onClick = { expanded = true },
+        ) {
+            KebabIcon()
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            DropdownMenuItem(
+                text = { Text("Import") },
+                onClick = {
+                    expanded = false
+                    onImportClick()
                 },
+                modifier = Modifier.testTag(HOST_IMPORT_ACTION_TAG),
+            )
+            DropdownMenuItem(
+                text = { Text("Scan") },
+                onClick = {
+                    expanded = false
+                    onScanClick()
+                },
+                modifier = Modifier.testTag(HOST_SCAN_ACTION_TAG),
+            )
+            DropdownMenuItem(
+                text = { Text("Keys") },
+                onClick = {
+                    expanded = false
+                    onKeysClick()
+                },
+                modifier = Modifier.testTag(HOST_KEYS_ACTION_TAG),
             )
         }
     }
 }
 
-internal const val HOSTS_TAB_ROW_TAG = "hosts:tabrow"
-internal const val HOSTS_TAB_TAG_PREFIX = "hosts:tab:"
-private const val HOSTS_TAB_INDEX = 0
+@Composable
+private fun TopBarIconButton(
+    contentDescription: String,
+    testTag: String,
+    onClick: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .background(color = PocketShellColors.SurfaceElev, shape = CircleShape)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = CircleShape)
+            .semantics { this.contentDescription = contentDescription }
+            .clickable(role = Role.Button, onClick = onClick)
+            .testTag(testTag),
+        contentAlignment = Alignment.Center,
+    ) {
+        content()
+    }
+}
+
+@Composable
+private fun SettingsGearIcon() {
+    val color = PocketShellColors.TextSecondary
+    Canvas(modifier = Modifier.size(20.dp)) {
+        val center = androidx.compose.ui.geometry.Offset(size.width / 2f, size.height / 2f)
+        val minSide = min(size.width, size.height)
+        val toothRadius = minSide * 0.055f
+        val toothDistance = minSide * 0.37f
+        repeat(8) { index ->
+            val angle = index * PI.toFloat() / 4f
+            drawCircle(
+                color = color,
+                radius = toothRadius,
+                center = androidx.compose.ui.geometry.Offset(
+                    x = center.x + cos(angle) * toothDistance,
+                    y = center.y + sin(angle) * toothDistance,
+                ),
+            )
+        }
+        drawCircle(
+            color = color,
+            radius = minSide * 0.28f,
+            center = center,
+            style = Stroke(width = minSide * 0.12f),
+        )
+        drawCircle(
+            color = color,
+            radius = minSide * 0.075f,
+            center = center,
+        )
+    }
+}
+
+internal const val HOST_ACTIONS_BUTTON_TAG: String = "hosts:actions:button"
+internal const val HOST_IMPORT_ACTION_TAG: String = "hosts:actions:import"
+internal const val HOST_SCAN_ACTION_TAG: String = "hosts:actions:scan"
+internal const val HOST_KEYS_ACTION_TAG: String = "hosts:actions:keys"
 
 /**
  * Trailing kebab (vertical three-dot) button + the [DropdownMenu] it

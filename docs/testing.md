@@ -63,6 +63,60 @@ involvement when relevant, and observed result in the issue.
 5. Post the command, screenshot or artifact path, and observed result in the
    reviewer issue comment
 
+### Device tap capture and replay
+
+For physical-phone debugging sessions that need to be handed off for replay,
+record the screen, raw touchscreen trace, and logcat together:
+
+```bash
+ANDROID_SERIAL=<phone-or-emulator-serial> scripts/capture-device-session.sh <run-id>
+```
+
+The capture writes `screen.mp4`, `getevent-touchscreen.txt`,
+`logcat.txt`, `logcat-final-dump.txt`, `getevent-lp.txt`, `getprop.txt`,
+and `metadata.env` under `build/device-sessions/<run-id>/`. The script
+auto-detects the touchscreen from `adb shell getevent -lp` by looking for a
+multitouch input device with X/Y absolute axes, preferring direct devices when
+Android reports that input property. It records only that device's
+`getevent -lt` stream, so other keys and sensors are ignored.
+
+Stop the capture with Enter, or use `CAPTURE_SECONDS=<seconds>` for a bounded
+smoke run:
+
+```bash
+ANDROID_SERIAL=<serial> CAPTURE_SECONDS=5 scripts/capture-device-session.sh tap-smoke
+```
+
+Replay the same raw touch events with their original inter-event timing:
+
+```bash
+ANDROID_SERIAL=<serial> scripts/replay-device-session.sh <run-id>
+```
+
+Replay regenerates `build/device-sessions/<run-id>/replay-sendevent.sh`,
+pushes it to `/data/local/tmp/`, runs it with `adb shell sh`, and writes
+`replay.log` plus `replay-summary.txt`. The replay script substitutes the
+currently auto-detected touchscreen path for the captured `/dev/input/eventN`,
+so changed event numbering does not break the run.
+
+Assumptions for deterministic replay:
+
+- Use the same phone or emulator profile, orientation, and display size as the
+  capture. The Pixel 7a debug target is portrait `1080x2400`; the scripts store
+  `wm size`, `wm density`, and the touchscreen ABS X/Y min/max in metadata and
+  warn if the current `wm size` differs at replay time.
+- Raw touchscreen units are replayed unchanged through `sendevent`; no
+  coordinate scaling is attempted. This is deliberate for Pixel 7a sessions,
+  where the goal is "record this exact phone session, replay it later."
+- If multiple adb devices are connected, set `ANDROID_SERIAL` or `ADB_SERIAL`.
+- During connected validation, acquire the shared local AVD lock around the
+  full adb sequence, for example:
+
+```bash
+flock /home/alexey/git/pocketshell/build/.avd-lock -c \
+  'cd /home/alexey/git/pocketshell/.worktrees/issue-275 && ANDROID_SERIAL=<serial> CAPTURE_SECONDS=5 scripts/capture-device-session.sh tap-smoke && ANDROID_SERIAL=<serial> scripts/replay-device-session.sh tap-smoke'
+```
+
 ---
 
 ## Docker remote server

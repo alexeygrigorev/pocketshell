@@ -5,11 +5,13 @@ import com.pocketshell.app.repos.ReposListResult
 import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.sessions.HostTmuxSessionListParser
 import com.pocketshell.app.sessions.SSH_SOURCE_FOLDER_LIST_PROBE
 import com.pocketshell.app.sessions.SshOpenTelemetry
 import com.pocketshell.app.sessions.remoteStartDirectoryExists
 import com.pocketshell.app.sessions.startDirectoryMissingMessage
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -162,9 +164,10 @@ data class FolderImportPayload(
 class SshFolderListGateway @Inject constructor(
     private val reposRemoteSource: ReposRemoteSource,
     private val activeTmuxClients: ActiveTmuxClients,
+    private val sessionListParser: HostTmuxSessionListParser = HostTmuxSessionListParser(),
 ) : FolderListGateway {
 
-    constructor() : this(ReposRemoteSource(ReposJsonParser()), ActiveTmuxClients())
+    constructor() : this(ReposRemoteSource(ReposJsonParser()), ActiveTmuxClients(), HostTmuxSessionListParser())
 
     // Issue #252: reuse the SAME detection logic the Conversation view
     // uses instead of maintaining a forked candidate-enumeration +
@@ -207,71 +210,7 @@ class SshFolderListGateway @Inject constructor(
 
         return try {
             val listSessions = session.exec(pathAware(LIST_SESSIONS_COMMAND))
-            when {
-                listSessions.exitCode == 127 ||
-                    listSessions.stderr.contains("not found", ignoreCase = true) ->
-                    FolderListResult.ToolUnavailable
-                listSessions.stderr.contains("no server running", ignoreCase = true) ->
-                    expandWatchedRootProjects(
-                        session = session,
-                        host = host,
-                        watchedRoots = watchedRoots,
-                    ).let { expansion ->
-                        FolderListResult.Sessions(
-                            rows = emptyList(),
-                            projectFoldersByRoot = expansion.projectFoldersByRoot,
-                            resolvedWatchedRootPaths = expansion.resolvedWatchedRootPaths,
-                        )
-                    }
-                listSessions.exitCode != 0 ->
-                    FolderListResult.Failed(
-                        listSessions.stderr.ifBlank { listSessions.stdout }
-                            .ifBlank { "tmux exited ${listSessions.exitCode}" },
-                    )
-                else -> {
-                    val baseRows = parseListSessionsRows(listSessions.stdout)
-                    val paneRows = runCatching {
-                        val listPanes = session.exec(pathAware(LIST_PANES_COMMAND))
-                        if (listPanes.exitCode == 0) parseActivePaneRows(listPanes.stdout) else emptyMap()
-                    }.getOrDefault(emptyMap())
-
-                    // Merge active-pane data into each session row first.
-                    val merged = baseRows.map { row ->
-                        val pane = paneRows[row.sessionName]
-                        val cwd = pane?.cwd ?: row.cwd
-                        row.copy(cwd = cwd)
-                    }
-
-                    // Issue #252: per-session agent detection delegated to
-                    // the Conversation view's detector
-                    // (AgentConversationRepository.detectForPane) so the
-                    // list chip and the Conversation tab agree. Each
-                    // session is probed with its active pane's cwd, TTY,
-                    // and foreground command. Sessions without a live
-                    // agent stay on SessionAgentKind.Shell (the default).
-                    val agentKinds = runCatching {
-                        detectAgentKinds(
-                            session = session,
-                            rows = merged,
-                            paneRows = paneRows,
-                        )
-                    }.getOrDefault(emptyMap())
-
-                    val annotated = merged.map { row ->
-                        row.copy(agentKind = agentKinds[row.sessionName] ?: SessionAgentKind.Shell)
-                    }
-                    val expansion = expandWatchedRootProjects(
-                        session = session,
-                        host = host,
-                        watchedRoots = watchedRoots,
-                    )
-                    FolderListResult.Sessions(
-                        rows = annotated,
-                        projectFoldersByRoot = expansion.projectFoldersByRoot,
-                        resolvedWatchedRootPaths = expansion.resolvedWatchedRootPaths,
-                    )
-                }
-            }
+            listSessionsFromNativeOrPocketshell(session, host, watchedRoots, listSessions)
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
@@ -279,6 +218,106 @@ class SshFolderListGateway @Inject constructor(
         } finally {
             session.close()
         }
+    }
+
+    internal suspend fun listSessionsFromNativeOrPocketshell(
+        session: SshSession,
+        host: HostEntity,
+        watchedRoots: List<ProjectRootEntity>,
+        listSessions: ExecResult,
+    ): FolderListResult {
+        return when {
+            listSessions.exitCode == 127 ||
+                listSessions.stderr.contains("not found", ignoreCase = true) ->
+                listSessionsWithFolderFromPocketshell(session, host, watchedRoots)
+                    ?: FolderListResult.ToolUnavailable
+            listSessions.stderr.contains("no server running", ignoreCase = true) ->
+                listSessionsWithFolderFromPocketshell(session, host, watchedRoots)
+                    ?: sessionsWithWatchedRootExpansion(
+                        session = session,
+                        host = host,
+                        watchedRoots = watchedRoots,
+                        rows = emptyList(),
+                    )
+            listSessions.exitCode != 0 ->
+                listSessionsWithFolderFromPocketshell(session, host, watchedRoots)
+                    ?: FolderListResult.Failed(
+                        listSessions.stderr.ifBlank { listSessions.stdout }
+                            .ifBlank { "tmux exited ${listSessions.exitCode}" },
+                    )
+            else -> {
+                val baseRows = parseListSessionsRows(listSessions.stdout)
+                val paneRows = runCatching {
+                    val listPanes = session.exec(pathAware(LIST_PANES_COMMAND))
+                    if (listPanes.exitCode == 0) parseActivePaneRows(listPanes.stdout) else emptyMap()
+                }.getOrDefault(emptyMap())
+
+                // Merge active-pane data into each session row first.
+                val merged = baseRows.map { row ->
+                    val pane = paneRows[row.sessionName]
+                    val cwd = pane?.cwd ?: row.cwd
+                    row.copy(cwd = cwd)
+                }
+
+                // Issue #252: per-session agent detection delegated to
+                // the Conversation view's detector
+                // (AgentConversationRepository.detectForPane) so the
+                // list chip and the Conversation tab agree. Each
+                // session is probed with its active pane's cwd, TTY,
+                // and foreground command. Sessions without a live
+                // agent stay on SessionAgentKind.Shell (the default).
+                val agentKinds = runCatching {
+                    detectAgentKinds(
+                        session = session,
+                        rows = merged,
+                        paneRows = paneRows,
+                    )
+                }.getOrDefault(emptyMap())
+
+                val annotated = merged.map { row ->
+                    row.copy(agentKind = agentKinds[row.sessionName] ?: SessionAgentKind.Shell)
+                }
+                sessionsWithWatchedRootExpansion(
+                    session = session,
+                    host = host,
+                    watchedRoots = watchedRoots,
+                    rows = annotated,
+                )
+            }
+        }
+    }
+
+    private suspend fun listSessionsWithFolderFromPocketshell(
+        session: SshSession,
+        host: HostEntity,
+        watchedRoots: List<ProjectRootEntity>,
+    ): FolderListResult.Sessions? {
+        val pocketshell = session.exec(pathAware(POCKETSHELL_SESSIONS_COMMAND))
+        if (pocketshell.exitCode != 0) return null
+        return sessionsWithWatchedRootExpansion(
+            session = session,
+            host = host,
+            watchedRoots = watchedRoots,
+            rows = parsePocketshellSessionsRows(pocketshell.stdout, sessionListParser),
+        )
+    }
+
+    private suspend fun sessionsWithWatchedRootExpansion(
+        session: SshSession,
+        host: HostEntity,
+        watchedRoots: List<ProjectRootEntity>,
+        rows: List<FolderSessionRow>,
+    ): FolderListResult.Sessions {
+        val expansion = expandWatchedRootProjects(
+            session = session,
+            host = host,
+            watchedRoots = watchedRoots,
+        )
+        return FolderListResult.Sessions(
+            rows = rows,
+            projectFoldersByRoot = expansion.projectFoldersByRoot,
+            resolvedWatchedRootPaths = expansion.resolvedWatchedRootPaths,
+        )
     }
 
     private suspend fun expandWatchedRootProjects(
@@ -721,6 +760,8 @@ class SshFolderListGateway @Inject constructor(
                 "'#{session_name}$FIELD_SEP#{pane_active}$FIELD_SEP" +
                 "#{pane_current_path}$FIELD_SEP#{pane_tty}$FIELD_SEP#{pane_current_command}'"
 
+        const val POCKETSHELL_SESSIONS_COMMAND: String = "pocketshell sessions list --by activity"
+
         const val CONTROL_LIST_SESSIONS_COMMAND: String =
             "list-sessions -F " +
                 "'#{session_name}$FIELD_SEP#{session_created}$FIELD_SEP" +
@@ -743,6 +784,20 @@ class SshFolderListGateway @Inject constructor(
             stdout.lineSequence()
                 .mapNotNull(::parseRow)
                 .toList()
+
+        internal fun parsePocketshellSessionsRows(
+            stdout: String,
+            parser: HostTmuxSessionListParser = HostTmuxSessionListParser(),
+        ): List<FolderSessionRow> =
+            parser.parsePocketshellSessionsList(stdout).map { row ->
+                FolderSessionRow(
+                    sessionName = row.name,
+                    lastActivity = row.lastActivity,
+                    attached = row.attached,
+                    cwd = null,
+                    agentKind = SessionAgentKind.Shell,
+                )
+            }
 
         private fun parseRow(line: String): FolderSessionRow? {
             if (line.isBlank()) return null

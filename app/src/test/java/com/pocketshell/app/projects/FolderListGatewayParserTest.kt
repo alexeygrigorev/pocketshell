@@ -57,6 +57,23 @@ class FolderListGatewayParserTest {
     }
 
     @Test
+    fun parsePocketshellSessionsRowsKeepsDaemonSessionsReachableWithoutCwd() {
+        val stdout = """
+            IDX  SESSION               CREATED
+              1  claude-main           2026-05-30 00:20:01
+              2  codex                 2026-05-30 00:19:58
+            Create a new one: pocketshell sessions new
+        """.trimIndent()
+
+        val rows = SshFolderListGateway.parsePocketshellSessionsRows(stdout)
+
+        assertEquals(listOf("claude-main", "codex"), rows.map { it.sessionName })
+        assertEquals(listOf(null, null), rows.map { it.cwd })
+        assertEquals(listOf(false, false), rows.map { it.attached })
+        assertEquals(listOf(true, true), rows.map { it.lastActivity != null })
+    }
+
+    @Test
     fun parseActivePaneRowsReturnsOnlyActivePaneForEachSession() {
         // Two panes for `claude-main`, only the active one (pane_active=1)
         // wins. A second session `solo` has a single active pane.

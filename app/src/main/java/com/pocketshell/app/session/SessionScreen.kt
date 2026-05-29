@@ -57,7 +57,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
-import com.pocketshell.app.composer.MarkdownText
+import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
 import com.pocketshell.app.snippets.SnippetKind
@@ -67,7 +67,6 @@ import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.core.agents.ConversationEvent
-import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.agents.ToolCallSummary
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
@@ -695,8 +694,8 @@ internal fun ConversationPane(
             LazyColumn(
                 state = listState,
                 modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
+                contentPadding = PaddingValues(vertical = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 if (filteredEvents.isEmpty()) {
                     item {
@@ -869,27 +868,7 @@ private fun ConversationEventRow(
 
 @Composable
 private fun ConversationMessageRow(event: ConversationEvent.Message) {
-    val isUser = event.role == ConversationRole.User
-    val title = when (event.role) {
-        ConversationRole.User -> "USER"
-        ConversationRole.Assistant -> if (event.streaming) "ASSISTANT - streaming" else "ASSISTANT"
-    }
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color = if (isUser) PocketShellColors.SurfaceElev else PocketShellColors.Surface)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Text(
-            text = title,
-            color = if (isUser) PocketShellColors.Accent else PocketShellColors.TextSecondary,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-        )
-        MarkdownText(text = event.text)
-    }
+    ConversationMessageTurn(event = event)
 }
 
 @Composable

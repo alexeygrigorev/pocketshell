@@ -391,7 +391,11 @@ class TmuxSessionOpencodeInputDockerTest {
             compose.onNodeWithText("Conversation", useUnmergedTree = true).performClick()
             compose.waitUntil(timeoutMillis = VISIBLE_TIMEOUT_MS) {
                 findTerminalView() == null &&
-                    compose.onAllNodesWithText("ASSISTANT", substring = true, useUnmergedTree = true)
+                    compose.onAllNodesWithText(
+                        "issue303 live Conversation pane proof",
+                        substring = true,
+                        useUnmergedTree = true,
+                    )
                         .fetchSemanticsNodes()
                         .isNotEmpty()
             }

@@ -85,6 +85,7 @@ public fun MarkdownText(
     modifier: Modifier = Modifier,
     color: Color = PocketShellColors.Text,
     fontSize: TextUnit = 13.sp,
+    fontFamily: FontFamily? = null,
 ) {
     val blocks = remember(text) { parseMarkdownBlocks(text) }
     SelectionContainer(modifier = modifier) {
@@ -100,17 +101,20 @@ public fun MarkdownText(
                         color = color,
                         fontSize = headingSize(block.level),
                         fontWeight = FontWeight.SemiBold,
+                        fontFamily = fontFamily,
                     )
                     is MarkdownBlock.Bullet -> BulletRow(
                         marker = block.marker,
                         text = renderInline(block.text),
                         color = color,
                         fontSize = fontSize,
+                        fontFamily = fontFamily,
                     )
                     is MarkdownBlock.Paragraph -> Text(
                         text = renderInline(block.text),
                         color = color,
                         fontSize = fontSize,
+                        fontFamily = fontFamily,
                     )
                 }
             }
@@ -151,15 +155,17 @@ private fun BulletRow(
     text: AnnotatedString,
     color: Color,
     fontSize: TextUnit,
+    fontFamily: FontFamily?,
 ) {
     Row(modifier = Modifier.fillMaxWidth()) {
         Text(
             text = marker,
             color = color,
             fontSize = fontSize,
+            fontFamily = fontFamily,
             modifier = Modifier.padding(end = 6.dp),
         )
-        Text(text = text, color = color, fontSize = fontSize)
+        Text(text = text, color = color, fontSize = fontSize, fontFamily = fontFamily)
     }
 }
 

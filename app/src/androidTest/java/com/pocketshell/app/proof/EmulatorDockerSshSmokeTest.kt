@@ -172,6 +172,48 @@ class EmulatorDockerSshSmokeTest {
                     "expected seeded Claude JSONL to parse into conversation events, got $events",
                     events.any { it is ConversationEvent.Message && it.text.contains("relevant checks") },
                 )
+
+                val refreshCodexFixture = session.exec(
+                    "touch /home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                )
+                assertTrue(
+                    "expected to refresh seeded Codex JSONL mtime, got stderr='${refreshCodexFixture.stderr}'",
+                    refreshCodexFixture.exitCode == 0,
+                )
+                val codexCandidates = session.exec(repository.detectionCommand("/workspace/pocketshell"))
+                assertTrue(
+                    "expected PocketShell Codex detection command to find seeded payload JSONL, got '${codexCandidates.stdout}'",
+                    codexCandidates.exitCode == 0 && codexCandidates.stdout.contains("codex|"),
+                )
+                val codexPath = codexCandidates.stdout
+                    .lineSequence()
+                    .first { it.startsWith("codex|") }
+                    .split("|", limit = 4)[3]
+                val codexAgentLog = session.exec(
+                    "pocketshell agent-log --engine codex --session pocketshell-codex --json --tail 20",
+                )
+                assertTrue(
+                    "expected agent-log reader to return Codex envelope, got stdout='${codexAgentLog.stdout}' stderr='${codexAgentLog.stderr}'",
+                    codexAgentLog.exitCode == 0 &&
+                        codexAgentLog.stdout.contains("\"path\"") &&
+                        codexAgentLog.stdout.contains("\"lines\""),
+                )
+                val codexEvents = repository.readInitialEvents(
+                    session = session,
+                    detection = AgentDetection(
+                        agent = AgentKind.Codex,
+                        sourcePath = codexPath,
+                        sessionId = "pocketshell-codex",
+                        confidence = AgentDetection.Confidence.ProcessConfirmed,
+                    ),
+                )
+                assertTrue(
+                    "expected seeded payload-wrapped Codex JSONL to parse into non-empty conversation events, got $codexEvents",
+                    codexEvents.any {
+                        it is ConversationEvent.Message &&
+                            it.text.contains("deterministic Codex fixture")
+                    },
+                )
             }
         }
     }

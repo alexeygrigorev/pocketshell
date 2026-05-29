@@ -1,3 +1,5 @@
-{"id":"codex-user-1","timestamp":"2026-05-22T10:01:00Z","item":{"type":"user_message","message":"add a smoke test"}}
-{"id":"codex-call-1","timestamp":"2026-05-22T10:01:01Z","item":{"type":"function_call","name":"shell","arguments":"{\"cmd\":\"./gradlew test\"}"}}
-{"id":"codex-result-1","timestamp":"2026-05-22T10:01:02Z","item":{"type":"function_call_output","call_id":"codex-call-1","output":"BUILD SUCCESSFUL"}}
+{"type":"session_meta","timestamp":"2026-05-22T10:00:59Z","payload":{"id":"pocketshell-codex","cwd":"/workspace/pocketshell"}}
+{"type":"event_msg","timestamp":"2026-05-22T10:01:00Z","payload":{"type":"user_message","message":"add a smoke test"}}
+{"type":"response_item","timestamp":"2026-05-22T10:01:01Z","payload":{"type":"function_call","call_id":"codex-call-1","name":"shell","arguments":"./gradlew test"}}
+{"type":"response_item","timestamp":"2026-05-22T10:01:02Z","payload":{"type":"function_call_output","call_id":"codex-call-1","output":"BUILD SUCCESSFUL"}}
+{"type":"response_item","timestamp":"2026-05-22T10:01:03Z","payload":{"type":"message","id":"codex-message-1","role":"assistant","content":[{"type":"output_text","text":"The deterministic Codex fixture is ready."}]}}

@@ -20,6 +20,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.io.IOException
 
 /**
@@ -411,6 +412,9 @@ internal class AgentConversationRepository(
             val output = exportOpenCodeSqliteRows(session, detection, maxMessages = maxLines)
             return OpenCodeReader().parseSqliteJsonRows(output)
         }
+        if (detection.agent == AgentKind.Codex) {
+            return readCodexInitialEvents(session, detection, maxLines)
+        }
         val parser = parserFor(detection.agent) ?: return emptyList()
         val result = session.exec("tail -n $maxLines ${shellQuote(detection.sourcePath)} 2>/dev/null || true")
         return result.stdout.lineSequence().flatMap { parser.parseLine(it) }.toList()
@@ -539,6 +543,37 @@ internal class AgentConversationRepository(
             .stdout
     }
 
+    private suspend fun readCodexInitialEvents(
+        session: SshSession,
+        detection: AgentDetection,
+        maxLines: Int,
+    ): List<ConversationEvent> {
+        val sessionId = detection.sessionId?.takeIf { it.isNotBlank() }
+            ?: detection.sourcePath.substringAfterLast('/').substringBeforeLast('.')
+        if (sessionId.isBlank()) return emptyList()
+        val boundedMaxLines = maxLines.coerceAtLeast(1)
+        val output = session.exec(
+            "pocketshell agent-log --engine codex --session ${shellQuote(sessionId)} " +
+                "--json --tail $boundedMaxLines 2>/dev/null || true",
+        ).stdout
+        val lines = parseAgentLogEnvelopeLines(output)
+        val parser = CodexParser()
+        return lines.asSequence().flatMap { parser.parseLine(it) }.toList()
+    }
+
+    private fun parseAgentLogEnvelopeLines(output: String): List<String> {
+        val envelope = output.lineSequence()
+            .firstOrNull { it.isNotBlank() }
+            ?.let { runCatching { JSONObject(it) }.getOrNull() }
+            ?: return emptyList()
+        val lines = envelope.optJSONArray("lines") ?: return emptyList()
+        return buildList {
+            for (index in 0 until lines.length()) {
+                lines.optString(index).takeIf { it.isNotBlank() }?.let(::add)
+            }
+        }
+    }
+
     private fun parserFor(agent: AgentKind): ConversationParser? = when (agent) {
         AgentKind.ClaudeCode -> ClaudeCodeParser()
         AgentKind.Codex -> CodexParser()
@@ -599,6 +634,12 @@ internal class AgentConversationRepository(
               printf 'claude|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
             done
             find "${'$'}codex_dir" -type f -name '*.jsonl' -mmin -120 -print 2>/dev/null | while IFS= read -r f; do
+              codex_cwd=${'$'}(
+                grep -m 1 '"type"[[:space:]]*:[[:space:]]*"session_meta"' "${'$'}f" 2>/dev/null |
+                  sed -n 's/.*"payload"[[:space:]]*:[[:space:]]*{[^}]*"cwd"[[:space:]]*:[[:space:]]*"\([^"\\]*\)".*/\1/p' |
+                  head -n 1
+              )
+              [ "${'$'}codex_cwd" = "${'$'}cwd" ] || continue
               mtime=${'$'}(stat -c '%Y' "${'$'}f" 2>/dev/null) || continue
               printf 'codex|%s|%s|%s\n' "${'$'}mtime" "${'$'}cwd" "${'$'}f"
             done

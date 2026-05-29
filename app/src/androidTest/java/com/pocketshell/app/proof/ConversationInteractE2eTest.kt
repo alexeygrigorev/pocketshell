@@ -106,7 +106,7 @@ class ConversationInteractE2eTest {
             remoteLogPath = CODEX_PATH,
             engineLabel = "codex",
             jsonlForUserPrompt = { marker, prompt ->
-                """{"id":"e2e-codex-$marker","timestamp":"2026-05-27T10:00:00Z","item":{"type":"user_message","message":${prompt.jsonString()}}}"""
+                """{"id":"e2e-codex-$marker","type":"event_msg","timestamp":"2026-05-27T10:00:00Z","payload":{"type":"user_message","message":${prompt.jsonString()}}}"""
             },
         )
 

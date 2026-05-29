@@ -13,8 +13,28 @@ set -eu
 #   - `pocketshell usage --json`            -> PocketshellUsageJsonParser
 #   - `pocketshell sessions list [--by ..]` -> HostTmuxSessionListParser
 #   - `pocketshell jobs list [--session N]` -> RecurringJobsParser
+#   - `pocketshell agent-log --json ...`    -> AgentConversationRepository
 
 fixture_dir="${POCKETSHELL_AGENT_FIXTURE_DIR:-/opt/pocketshell-agent-fixtures}"
+
+json_escape_awk='
+function esc(s) {
+  gsub(/\\/, "\\\\", s)
+  gsub(/"/, "\\\"", s)
+  return s
+}
+{
+  lines[++count] = $0
+}
+END {
+  printf "{\"count\":%d,\"engine\":\"%s\",\"lines\":[", count, engine
+  for (i = 1; i <= count; i++) {
+    if (i > 1) printf ","
+    printf "\"%s\"", esc(lines[i])
+  }
+  printf "],\"path\":\"%s\",\"session\":\"%s\"}\n", esc(path), esc(session)
+}
+'
 
 case "${1:-}" in
   --version)
@@ -65,7 +85,79 @@ case "${1:-}" in
     printf 'pocketshell jobs fixture supports: list/add/edit/remove\n' >&2
     exit 64
     ;;
+  agent-log)
+    shift
+    engine=""
+    session=""
+    tail_count=""
+    json_output=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --engine|-e)
+          engine="${2:-}"
+          shift 2
+          ;;
+        --session|-s)
+          session="${2:-}"
+          shift 2
+          ;;
+        --tail|-n)
+          tail_count="${2:-}"
+          shift 2
+          ;;
+        --json)
+          json_output=1
+          shift
+          ;;
+        --cwd)
+          shift 2
+          ;;
+        *)
+          printf 'unknown agent-log argument: %s\n' "$1" >&2
+          exit 64
+          ;;
+      esac
+    done
+    [ -n "$engine" ] && [ -n "$session" ] || {
+      printf 'pocketshell agent-log fixture requires --engine and --session\n' >&2
+      exit 64
+    }
+    filename="${session%.jsonl}.jsonl"
+    case "$engine" in
+      codex)
+        path="$(find "$HOME/.codex/sessions" -type f -name "$filename" -print 2>/dev/null | head -n 1)"
+        ;;
+      claude)
+        path="$(find "$HOME/.claude/projects" -type f -name "$filename" -print 2>/dev/null | head -n 1)"
+        ;;
+      opencode)
+        path="$HOME/.local/share/opencode/$filename"
+        [ -f "$path" ] || path=""
+        ;;
+      *)
+        printf 'unsupported fixture agent-log engine: %s\n' "$engine" >&2
+        exit 64
+        ;;
+    esac
+    [ -n "$path" ] && [ -f "$path" ] || {
+      printf 'no %s session log found for %s\n' "$engine" "$session" >&2
+      exit 66
+    }
+    if [ -n "$tail_count" ]; then
+      reader="tail -n $tail_count"
+    else
+      reader="cat"
+    fi
+    if [ "$json_output" -eq 1 ]; then
+      # shellcheck disable=SC2086
+      $reader "$path" | awk -v engine="$engine" -v session="${session%.jsonl}" -v path="$path" "$json_escape_awk"
+    else
+      # shellcheck disable=SC2086
+      $reader "$path"
+    fi
+    exit 0
+    ;;
 esac
 
-printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove\n' >&2
+printf 'pocketshell fixture supports: usage --json, sessions list, jobs list/add/edit/remove, agent-log\n' >&2
 exit 64

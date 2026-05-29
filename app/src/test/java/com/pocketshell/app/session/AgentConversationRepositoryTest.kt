@@ -13,6 +13,8 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
+import org.json.JSONArray
+import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -22,6 +24,44 @@ import java.io.InputStream
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AgentConversationRepositoryTest {
+    @Test
+    fun codexReadInitialEventsUsesAgentLogJsonEnvelope() = runTest {
+        val codexLines = listOf(
+            """{"type":"session_meta","payload":{"id":"pocketshell-codex","cwd":"/workspace/pocketshell"}}""",
+            """{"type":"event_msg","payload":{"type":"user_message","message":"add a smoke test"}}""",
+            """{"type":"response_item","payload":{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"Done"}]}}""",
+        )
+        val session = FakeSshSession(
+            agentLogOutput = JSONObject(
+                mapOf(
+                    "count" to codexLines.size,
+                    "engine" to "codex",
+                    "lines" to JSONArray(codexLines),
+                    "path" to "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                    "session" to "pocketshell-codex",
+                ),
+            ).toString(),
+        )
+
+        val events = AgentConversationRepository().readInitialEvents(
+            session = session,
+            detection = AgentDetection(
+                agent = AgentKind.Codex,
+                sourcePath = "/home/testuser/.codex/sessions/2026/05/22/pocketshell-codex.jsonl",
+                sessionId = "pocketshell-codex",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+            maxLines = 20,
+        )
+
+        assertEquals(listOf("add a smoke test", "Done"), events.map { (it as ConversationEvent.Message).text })
+        assertEquals(1, session.execCommands.size)
+        assertTrue(session.execCommands.single().contains("pocketshell agent-log --engine codex"))
+        assertTrue(session.execCommands.single().contains("--session 'pocketshell-codex'"))
+        assertTrue(session.execCommands.single().contains("--json --tail 20"))
+        assertFalse(session.execCommands.single().contains("tail -n"))
+    }
+
     @Test
     fun openCodeReadInitialEventsExportsSqliteRowsForDetectedSession() = runTest {
         val session = FakeSshSession(
@@ -504,6 +544,16 @@ class AgentConversationRepositoryTest {
     }
 
     @Test
+    fun detectionCommandFiltersCodexCandidatesBySessionMetaPayloadCwd() {
+        val command = AgentConversationRepository().detectionCommand("/home/alexey/git/pocketshell")
+
+        assertTrue(command.contains("\"session_meta\""))
+        assertTrue(command.contains("\"payload\""))
+        assertTrue(command.contains("\"cwd\""))
+        assertTrue(command.contains("[ \"${'$'}codex_cwd\" = \"${'$'}cwd\" ] || continue"))
+    }
+
+    @Test
     fun detectionCommandUsesLiteralOpenCodeCwdPrefixChecks() {
         val query = openCodeSqliteQuery(
             AgentConversationRepository().detectionCommand("/home/alexey/git/pocket_shell%"),
@@ -592,6 +642,7 @@ class AgentConversationRepositoryTest {
         private val hostWideProcessOutput: String = "",
         private val wcOutput: String = "0\n",
         private val tailLines: List<String> = emptyList(),
+        private val agentLogOutput: String = "",
     ) : SshSession {
         val execCommands = mutableListOf<String>()
         val tailFromLineCalls = mutableListOf<Pair<String, Long>>()
@@ -607,6 +658,7 @@ class AgentConversationRepositoryTest {
                 command.contains("ps -t ") -> paneProcessOutput
                 command.contains("stat -c '%Y' ") -> statOutputs.removeFirstOrNull() ?: statOutputs.lastOrNull() ?: "0\n"
                 command.contains("wc -l < ") -> wcOutput
+                command.contains("pocketshell agent-log") -> agentLogOutput
                 command.contains("sqlite3 -readonly") -> {
                     sqliteFailure?.let { throw it }
                     sqliteOutputs.removeFirstOrNull() ?: sqliteOutput

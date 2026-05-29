@@ -24,20 +24,22 @@ import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 /**
- * Backs the dashboard's "Sessions" section above the host list — the
- * issue #46 implementation per `docs/mockups/dashboard.html`.
+ * Maintains the cross-host tmux session aggregate.
  *
  * ## Aggregation
  *
  * Observes [ActiveTmuxClients.clients]: whenever a host registers a
- * live `tmux -CC` client, the dashboard spawns a per-host coroutine
+ * live `tmux -CC` client, the view model spawns a per-host coroutine
  * that periodically issues
  * `list-sessions -F "#{session_name}::#{session_activity}::#{session_attached}"`
  * (the `::` separator chosen because session names can contain `\t`
  * and ` ` but cannot contain `:` — see `man tmux`'s NAMES, WINDOWS, AND
  * PANES section). The parsed rows are folded into [sessions], a
- * flat list across every host, sorted by [SessionSummary.lastActivity]
- * descending so the freshest activity floats to the top of the screen.
+ * flat list across every host, sorted by [SessionSummary.lastActivity].
+ *
+ * Issue #298 removed the old flat all-host Sessions dashboard from the
+ * landing screen. The aggregate still feeds host-card status derivation
+ * and active-session system surfaces.
  *
  * ## Polling vs `%session-changed` subscription
  *
@@ -63,11 +65,11 @@ import javax.inject.Inject
  *
  * ## Lifecycle
  *
- * The view model is `@HiltViewModel` so its lifetime tracks the
- * dashboard host screen. The registry it observes is a singleton so it
- * survives navigation away and back. Per-host poller [Job]s are
- * cancelled and restarted as the registry's snapshot changes, and all
- * of them tear down when [onCleared] cancels `viewModelScope`.
+ * The view model is `@HiltViewModel` so its lifetime tracks the host
+ * landing screen. The registry it observes is a singleton so it survives
+ * navigation away and back. Per-host poller [Job]s are cancelled and
+ * restarted as the registry's snapshot changes, and all of them tear
+ * down when [onCleared] cancels `viewModelScope`.
  *
  * ## Testability
  *
@@ -92,13 +94,9 @@ class SessionsDashboardViewModel @Inject constructor(
 
     /**
      * Flat, sorted-by-recency-descending list of every tmux session
-     * discovered across every registered host. The screen renders one
-     * row per entry via [com.pocketshell.uikit.components.SessionRow].
-     *
-     * Empty when no live clients are registered or when none of the
-     * registered hosts reports any sessions. The screen hides the
-     * Sessions section entirely in that case — see
-     * [com.pocketshell.app.hosts.HostListScreen] for the gate.
+     * discovered across every registered host. Empty when no live
+     * clients are registered or when none of the registered hosts
+     * reports any sessions.
      */
     val sessions: StateFlow<List<SessionSummary>> = _sessions.asStateFlow()
 

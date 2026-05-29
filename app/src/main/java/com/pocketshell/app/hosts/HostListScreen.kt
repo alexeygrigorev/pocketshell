@@ -61,12 +61,7 @@ import androidx.fragment.app.FragmentActivity
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.bootstrap.HostBootstrapSheet
 import com.pocketshell.app.release.ReleaseInfo
-import com.pocketshell.app.sessions.ActiveTmuxClients
-import com.pocketshell.app.sessions.DASHBOARD_KILL_ERROR_BANNER_TAG
-import com.pocketshell.app.sessions.SessionsDashboardDialog
 import com.pocketshell.app.sessions.SessionsDashboardViewModel
-import com.pocketshell.app.sessions.rememberSessionsDashboardSectionState
-import com.pocketshell.app.sessions.sessionsDashboardItems
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.components.HostCard
@@ -151,8 +146,6 @@ fun HostListScreen(
     modifier: Modifier = Modifier,
     viewModel: HostListViewModel = hiltViewModel(),
     sessionsViewModel: SessionsDashboardViewModel = hiltViewModel(),
-    onOpenTmuxSession: (ActiveTmuxClients.Entry, sessionName: String, startDirectory: String?) -> Unit =
-        { _, _, _ -> },
 ) {
     val hosts by viewModel.hosts.collectAsState()
     val sessions by sessionsViewModel.sessions.collectAsState()
@@ -174,10 +167,6 @@ fun HostListScreen(
     // write until the user picks Overwrite / Skip / Add as new.
     val importConflict by viewModel.importConflict.collectAsState()
     val recheckMessage by viewModel.recheckMessage.collectAsState()
-    // Issue #168: surface dashboard kill failures here so the banner sits
-    // alongside the share/recheck banners (the dashboard ViewModel owns the
-    // kill but HostListScreen owns the only Scaffold-shaped column).
-    val killError by sessionsViewModel.killError.collectAsState()
     val setupStates by viewModel.setupStates.collectAsState()
     // Issue #116 (usage-panel Fix B): per-card chip + cross-host strip.
     val usageBadges by viewModel.usageBadges.collectAsState()
@@ -345,16 +334,6 @@ fun HostListScreen(
         }
     }
 
-    // Issues #268 / #269: hoist the Sessions-section UI state out of the
-    // (now removed) self-contained section composable so it survives across
-    // the single screen-level LazyColumn's items and the dialog overlay.
-    val sessionsSectionState = rememberSessionsDashboardSectionState()
-    val createError by sessionsViewModel.createError.collectAsState()
-    // System-clock-derived "now" for relative-time formatting. Recomputed
-    // on each recomposition; the dashboard already recomposes on every
-    // poll so this stays fresh enough for the `2m / 8m` cadence.
-    val nowSec = System.currentTimeMillis() / 1000L
-
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -371,15 +350,10 @@ fun HostListScreen(
                 onSettingsClick = onOpenSettings,
             )
 
-            // Issues #268 / #269: fold the banners, Sessions section, usage
-            // strip, and Hosts list into ONE scrolling LazyColumn so the
-            // whole dashboard scrolls as a single surface. Previously the
-            // Sessions section was an unbounded non-scrolling Column that,
-            // at high session counts, clipped its own overflow and starved
-            // the Hosts LazyColumn (`weight(1f)`) to ~0 height. With a
-            // single list every session row AND every host row is always
-            // reachable regardless of session count, and the section-scoped
-            // `+` FAB that used to overlap the screen FAB is gone.
+            // The landing body is one scrolling hosts-first list. Live
+            // tmux sessions are still observed for host-card status chips,
+            // but the old flat all-host Sessions dashboard is no longer a
+            // landing surface; per-host sessions live under FolderList.
             LazyColumn(
                 modifier = Modifier
                     .weight(1f)
@@ -420,51 +394,6 @@ fun HostListScreen(
                         ShareMessageBanner(message = msg, onDismiss = viewModel::clearRecheckMessage)
                     }
                 }
-
-                // Issue #168: surface dashboard kill failures inline so the
-                // user can tell a silent failure apart from "kill worked but
-                // the row didn't refresh yet". Reuses [ShareMessageBanner]
-                // for visual consistency with the other one-shot banners.
-                killError?.let { msg ->
-                    item(key = "banner:kill-error") {
-                        Box(modifier = Modifier.testTag(DASHBOARD_KILL_ERROR_BANNER_TAG)) {
-                            ShareMessageBanner(
-                                message = msg,
-                                onDismiss = sessionsViewModel::clearKillError,
-                            )
-                        }
-                    }
-                }
-
-                // Issue #46: cross-host session dashboard. Render the
-                // Sessions section ABOVE the Hosts section per the mockup
-                // at `docs/mockups/dashboard.html`, but only when there is
-                // at least one live tmux session on at least one connected
-                // host. Empty → the chrome (label + rows) collapses
-                // entirely so the host list keeps the visual hierarchy of
-                // an "empty workspace" landing.
-                if (sessions.isNotEmpty()) {
-                    item(key = "label:sessions") {
-                        SectionLabel(
-                            label = "Sessions",
-                            count = sessionsCountLabel(sessions.size),
-                        )
-                    }
-                }
-                // Issues #268 / #269: emit the Sessions section as LazyColumn
-                // items (header + legend + create-error banner + rows). The
-                // helper itself returns early when there are no sessions and
-                // no pending create error, so the label above and these items
-                // collapse together.
-                sessionsDashboardItems(
-                    state = sessionsSectionState,
-                    sessions = sessions,
-                    createError = createError,
-                    nowSec = nowSec,
-                    entryFor = sessionsViewModel::entryFor,
-                    onClearCreateError = sessionsViewModel::clearCreateError,
-                    onOpenTmuxSession = onOpenTmuxSession,
-                )
 
                 // Issue #214: dismissible in-app usage warnings, one per
                 // provider that crossed the approaching / critical /
@@ -628,31 +557,6 @@ fun HostListScreen(
                 }
             }
         }
-
-        // Issues #268 / #269: the Sessions section's lifecycle dialog
-        // (create / rename / kill) renders here, outside the LazyColumn, so
-        // it floats above the whole screen rather than scrolling with a row.
-        SessionsDashboardDialog(
-            state = sessionsSectionState,
-            entryFor = sessionsViewModel::entryFor,
-            onCreateSession = { entry, name, startDirectory ->
-                sessionsViewModel.createSession(
-                    entry = entry,
-                    name = name,
-                    startDirectory = startDirectory,
-                )
-            },
-            onRenameSession = { entry, oldName, newName ->
-                sessionsViewModel.renameSession(
-                    entry = entry,
-                    oldName = oldName,
-                    newName = newName,
-                )
-            },
-            onKillSession = { entry, name ->
-                sessionsViewModel.killSession(entry, name)
-            },
-        )
 
         FloatingActionButton(
             onClick = onAddHost,
@@ -1453,15 +1357,6 @@ private fun SectionLabel(label: String, count: String) {
         }
     }
 }
-
-/**
- * Pluralised count chip for the Sessions section label — matches the
- * mockup's "4 active" / "1 active" wording. Singular vs plural is the
- * only variation; zero is unreachable here because the section is
- * gated on `sessions.isNotEmpty()` upstream.
- */
-private fun sessionsCountLabel(count: Int): String =
-    if (count == 1) "1 active" else "$count active"
 
 /**
  * Empty-state when no hosts are saved. Single line + a hint to use the FAB.

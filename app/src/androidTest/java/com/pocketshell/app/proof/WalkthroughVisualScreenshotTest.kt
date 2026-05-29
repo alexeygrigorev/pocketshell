@@ -23,10 +23,13 @@ import com.pocketshell.app.composer.COMPOSER_SEND_ENTER_TAG
 import com.pocketshell.app.hosts.HOST_ACTIONS_BUTTON_TAG
 import com.pocketshell.app.hosts.HOST_IMPORT_ACTION_TAG
 import com.pocketshell.app.hosts.HOST_KEYS_ACTION_TAG
+import com.pocketshell.app.hosts.HOST_LIST_ADD_FAB_TAG
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.HOST_SCAN_ACTION_TAG
 import com.pocketshell.app.hosts.SETTINGS_BUTTON_TAG
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.projects.FOLDER_LIST_NEW_SESSION_FAB_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
@@ -82,6 +85,22 @@ class WalkthroughVisualScreenshotTest {
             }
             compose.onNodeWithText("Walkthrough Docker", useUnmergedTree = true).assertExists()
             val hostListScreenshot = WalkthroughScreenshotArtifacts.capture("01-host-list")
+            compose.onNodeWithTag(HOST_LIST_ADD_FAB_TAG, useUnmergedTree = true).assertExists()
+            assertTrue(
+                "host landing must not render the retired all-host Sessions section",
+                compose.onAllNodesWithTag(DASHBOARD_SESSIONS_SECTION_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isEmpty(),
+            )
+            assertTrue(
+                "host landing must not render all-host dashboard session rows",
+                compose.onAllNodesWithTag(
+                    DASHBOARD_SESSION_ROW_TAG_PREFIX + tmuxSessionName,
+                    useUnmergedTree = true,
+                )
+                    .fetchSemanticsNodes()
+                    .isEmpty(),
+            )
             // Issue #299 collapsed the old Hosts / Settings / Import /
             // Scan / Keys pseudo-tab row into a title row with a
             // Settings gear and an actions overflow.
@@ -106,6 +125,18 @@ class WalkthroughVisualScreenshotTest {
                 screenshotName = "01-host-list.png",
                 artifact = hostListScreenshot,
             )
+            compose.onNodeWithTag(HOST_LIST_ADD_FAB_TAG, useUnmergedTree = true).performClick()
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithText("Add host", useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_BACK").close()
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
 
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
             // Issue #171: post-tap surface is the FolderListScreen
@@ -117,6 +148,8 @@ class WalkthroughVisualScreenshotTest {
                 compose.onAllNodesWithText("Folders").fetchSemanticsNodes().isNotEmpty() &&
                     compose.onAllNodesWithText(tmuxSessionName).fetchSemanticsNodes().isNotEmpty()
             }
+            compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true).assertExists()
+            compose.onNodeWithTag(FOLDER_LIST_NEW_SESSION_FAB_TAG, useUnmergedTree = true).assertExists()
             val sessionPickerScreenshot = WalkthroughScreenshotArtifacts.capture("02-host-setup-folder-list")
             assertTextsClearOfNavigationBar(
                 texts = listOf("Folders", tmuxSessionName),
@@ -425,6 +458,8 @@ class WalkthroughVisualScreenshotTest {
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
+        const val DASHBOARD_SESSIONS_SECTION_TAG: String = "dashboard:sessions"
+        const val DASHBOARD_SESSION_ROW_TAG_PREFIX: String = "dashboard:sessions:row:"
     }
 
     private data class SystemBarInsets(

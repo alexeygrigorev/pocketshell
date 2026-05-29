@@ -58,8 +58,8 @@ import org.junit.runner.RunWith
  * `TmuxSessionViewModel` is cleared and its `onCleared()` runs
  * `closeCurrentConnection()` (cancels coroutines, closes the SSH
  * transport, unregisters from `ActiveTmuxClients`). That teardown path
- * is already covered by `SessionKillDashboardE2eTest` and the
- * #151 teardown regression coverage; testing it again here would
+ * is already covered by the #151 teardown regression coverage; testing
+ * it again here would
  * require Docker + a live tmux client without exercising any new
  * behaviour. The reviewer's emulator + Docker journey is the
  * authoritative artifact for the "session detached" half of the

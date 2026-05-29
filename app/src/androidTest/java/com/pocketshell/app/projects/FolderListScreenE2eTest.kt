@@ -256,8 +256,8 @@ class FolderListScreenE2eTest {
         bitmap.setPixels(pixels, 0, image.width, 0, 0, image.width, image.height)
 
         // Use the standard `additional_test_output/<bucket>` convention
-        // used elsewhere (SessionRowIndicatorScreenshotTest,
-        // HostConnectErrorE2eTest) so the artifact pipeline picks it
+        // used elsewhere (HostConnectErrorE2eTest, walkthrough captures)
+        // so the artifact pipeline picks it
         // up via the normal externalMediaDirs / getExternalFilesDir
         // fallback chain.
         val instrumentation = InstrumentationRegistry.getInstrumentation()

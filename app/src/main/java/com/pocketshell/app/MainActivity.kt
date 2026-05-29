@@ -454,21 +454,6 @@ private fun AppNavigator(
                     ),
                 )
             },
-            onOpenTmuxSession = { entry, sessionName, startDirectory ->
-                navigate(
-                    AppDestination.TmuxSession(
-                        hostId = entry.hostId,
-                        hostName = entry.hostName,
-                        hostname = entry.hostname,
-                        port = entry.port,
-                        username = entry.username,
-                        keyPath = entry.keyPath,
-                        passphrase = null,
-                        sessionName = sessionName,
-                        startDirectory = startDirectory,
-                    ),
-                )
-            },
         )
 
         AppDestination.AddHost -> AddEditHostScreen(

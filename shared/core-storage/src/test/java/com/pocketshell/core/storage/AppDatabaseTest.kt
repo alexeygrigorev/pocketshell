@@ -1,6 +1,7 @@
 package com.pocketshell.core.storage
 
 import androidx.room.Room
+import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.storage.entity.AgentSessionEntity
@@ -15,6 +16,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Before
@@ -40,11 +43,12 @@ import org.robolectric.annotation.Config
 class AppDatabaseTest {
 
     private lateinit var db: AppDatabase
+    private val context = ApplicationProvider.getApplicationContext<android.content.Context>()
 
     @Before
     fun setUp() {
         db = Room.inMemoryDatabaseBuilder(
-            ApplicationProvider.getApplicationContext(),
+            context,
             AppDatabase::class.java,
         )
             .allowMainThreadQueries()
@@ -233,5 +237,87 @@ class AppDatabaseTest {
         val updated = db.agentSessionDao().getByPaneRef(paneRef)
         assertEquals("codex", updated!!.agent)
         assertNull(updated.jsonlPath)
+    }
+
+    @Test
+    fun staleIdentityHashAtSameVersion_reproducesRoomLaunchCrash() {
+        val databaseName = "stale-same-version-${System.nanoTime()}.db"
+        seedStaleIdentityDatabase(databaseName, version = currentRoomSchemaVersion())
+
+        val thrown = assertThrows(IllegalStateException::class.java) {
+            val staleDb = openOnDiskDatabase(databaseName, destructiveFallback = true)
+            try {
+                staleDb.openHelper.writableDatabase.query("SELECT 1").close()
+            } finally {
+                staleDb.close()
+            }
+        }
+
+        assertTrue(thrown.message.orEmpty().contains("Room cannot verify the data integrity"))
+        assertTrue(thrown.message.orEmpty().contains(LEGACY_CRASH_IDENTITY_HASH))
+        context.deleteDatabase(databaseName)
+    }
+
+    @Test
+    fun legacyVersionOneStaleIdentity_isDestroyedOnOpen() {
+        val databaseName = "stale-v1-${System.nanoTime()}.db"
+        seedStaleIdentityDatabase(databaseName, version = LEGACY_CRASH_SCHEMA_VERSION)
+
+        val migratedDb = openOnDiskDatabase(databaseName, destructiveFallback = true)
+        try {
+            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
+        } finally {
+            migratedDb.close()
+        }
+
+        val sqlite = SQLiteDatabase.openDatabase(
+            context.getDatabasePath(databaseName).path,
+            null,
+            SQLiteDatabase.OPEN_READONLY,
+        )
+        sqlite.use {
+            it.rawQuery("PRAGMA user_version", null).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(currentRoomSchemaVersion(), cursor.getInt(0))
+            }
+        }
+        context.deleteDatabase(databaseName)
+    }
+
+    private fun openOnDiskDatabase(
+        databaseName: String,
+        destructiveFallback: Boolean,
+    ): AppDatabase {
+        val builder = Room.databaseBuilder(context, AppDatabase::class.java, databaseName)
+            .allowMainThreadQueries()
+        if (destructiveFallback) {
+            builder.fallbackToDestructiveMigration(dropAllTables = true)
+        }
+        return builder.build()
+    }
+
+    private fun seedStaleIdentityDatabase(databaseName: String, version: Int) {
+        context.deleteDatabase(databaseName)
+        val databaseFile = context.getDatabasePath(databaseName)
+        databaseFile.parentFile?.mkdirs()
+
+        val sqlite = SQLiteDatabase.openOrCreateDatabase(databaseFile, null)
+        sqlite.use {
+            it.execSQL("CREATE TABLE room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)")
+            it.execSQL(
+                "INSERT INTO room_master_table (id, identity_hash) VALUES(42, ?)",
+                arrayOf(LEGACY_CRASH_IDENTITY_HASH),
+            )
+            it.execSQL("CREATE TABLE stale_issue_261_marker (id INTEGER PRIMARY KEY)")
+            it.execSQL("PRAGMA user_version = $version")
+        }
+    }
+
+    private fun currentRoomSchemaVersion(): Int =
+        APP_DATABASE_SCHEMA_VERSION
+
+    private companion object {
+        const val LEGACY_CRASH_SCHEMA_VERSION = 1
+        const val LEGACY_CRASH_IDENTITY_HASH = "4a479a15dfcab2d576e00c7ce10ac581"
     }
 }

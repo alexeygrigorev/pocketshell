@@ -23,6 +23,8 @@ import com.pocketshell.core.storage.entity.SessionEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
+const val APP_DATABASE_SCHEMA_VERSION = 2
+
 /**
  * The PocketShell Room database.
  *
@@ -51,7 +53,7 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
         AiApiCallEntry::class,
         PendingTranscriptionEntity::class,
     ],
-    version = 2,
+    version = APP_DATABASE_SCHEMA_VERSION,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {

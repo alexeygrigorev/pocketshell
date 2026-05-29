@@ -120,11 +120,7 @@ fun ComponentsPreview() {
                     // activity-state slot (Attached / Detached) so the
                     // preview reflects what users will see in v0.2.9+.
                     SessionRow(
-                        badge = "A",
                         name = "agent-main",
-                        host = "hetzner",
-                        preview = "I'll check the deploy logs and find what...",
-                        time = "2m",
                         tags = listOf(
                             Tag("Claude", TagKind.Agent),
                             Tag("Attached", TagKind.Attached),
@@ -132,11 +128,7 @@ fun ComponentsPreview() {
                         onClick = {},
                     )
                     SessionRow(
-                        badge = "T",
                         name = "training",
-                        host = "gpu-box",
-                        preview = "epoch 14/50  loss=0.232  val=0.847",
-                        time = "8m",
                         tags = listOf(
                             Tag("ML", TagKind.Ml),
                             Tag("Detached", TagKind.Detached),
@@ -144,11 +136,7 @@ fun ComponentsPreview() {
                         onClick = {},
                     )
                     SessionRow(
-                        badge = "D",
                         name = "deploy-watch",
-                        host = "hetzner",
-                        preview = "waiting for CI to finish build #2031...",
-                        time = "14m",
                         tags = listOf(
                             Tag("Deploy", TagKind.Deploy),
                             Tag("Detached", TagKind.Detached),
@@ -312,11 +300,7 @@ fun SessionRowPreview() {
     PocketShellTheme(mode = PocketShellThemeMode.Dark) {
         PreviewSurface {
             SessionRow(
-                badge = "A",
                 name = "agent-main",
-                host = "hetzner",
-                preview = "I'll check the deploy logs and find what...",
-                time = "2m",
                 tags = listOf(
                     Tag("Claude", TagKind.Agent),
                     Tag("Attached", TagKind.Attached),
@@ -525,4 +509,3 @@ private fun PreviewSurface(
         }
     }
 }
-

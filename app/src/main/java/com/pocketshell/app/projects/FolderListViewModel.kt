@@ -111,11 +111,8 @@ sealed interface FolderActionStatus {
  * The view model owns:
  *
  *  - One `tmux list-sessions` + `list-panes -a` probe per [bind] call.
- *    Continuous polling kicks off on bind so the badge transitions
- *    LIVE as an agent starts inside a shell session — per the
- *    refinement-comment AC "Badge transitions live as the underlying
- *    state changes (agent starts → badge updates within the existing
- *    detection latency)".
+ *    Continuous polling kicks off on bind so the agent classifier chip
+ *    transitions LIVE as an agent starts inside a shell session.
  *  - The Flow over [ProjectRootDao.getByHostId] — watched folders the
  *    user pinned in #206 overlay onto the auto-discovered set so a
  *    folder with zero active sessions still appears as a row.
@@ -320,8 +317,8 @@ class FolderListViewModel @Inject constructor(
         pollingJob = viewModelScope.launch {
             // Surface loading state on the very first cycle when we have
             // nothing to show yet; subsequent cycles keep the previous
-            // snapshot visible (so the badge update is a single Compose
-            // recomposition, not a loading flash).
+            // snapshot visible (so classifier-chip updates are a single
+            // Compose recomposition, not a loading flash).
             if (_state.value !is FolderListUiState.Ready) {
                 _state.value = FolderListUiState.Loading
             }
@@ -479,7 +476,7 @@ class FolderListViewModel @Inject constructor(
          * promotion (shell → claude) registers before the user moves
          * on, and long enough to not hammer the SSH server. Matches
          * the spike Section 6 detection-latency note ("~500 ms SSH
-         * exec; user sees the badge update shortly after agent
+         * exec; user sees the classifier chip update shortly after agent
          * startup").
          */
         const val POLL_INTERVAL_MS: Long = 5_000L

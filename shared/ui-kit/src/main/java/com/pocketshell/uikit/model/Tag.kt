@@ -48,9 +48,7 @@ data class Tag(
  * in" without conflating colour-only encoding.
  *
  * Adding a new kind: pair it with a matching colour rule in
- * `SessionRow.TagChip` and a legend entry in
- * `SessionsDashboardScreen.SessionsLegend` so the new chip is still
- * self-explanatory.
+ * `SessionRow.TagChip`.
  */
 enum class TagKind {
     Default,

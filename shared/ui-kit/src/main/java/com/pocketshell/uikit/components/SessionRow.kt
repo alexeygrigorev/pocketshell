@@ -27,28 +27,17 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.Tag
 import com.pocketshell.uikit.model.TagKind
-import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
 
 /**
- * Row item for the "Sessions" section of the dashboard. Matches
- * `.session-row` in `docs/mockups/styles.css` and the rows under
- * "Sessions" in `docs/mockups/dashboard.html`.
+ * Compact row for a session inside the per-host folder list.
  *
- * Layout (per the CSS, `align-items: flex-start` because the row is
- * taller than `HostCard`):
- * - 38dp accent badge with a mono letter (the session's initial)
- * - 12dp gap
- * - Body column:
- *   - Top row: name + ` · host` muted mono suffix, timestamp at trailing edge
- *   - Preview line: mono, secondary colour, ellipsis if too long
- *   - Tags row: 6dp-spaced [Tag] pills via [TagChip]
- *
- * The card chrome (surface, border-soft, 14dp radius, 16dp h / 14dp v
- * padding) matches `.session-row` directly.
+ * The host and folder context already scopes the list, so the row
+ * deliberately renders only the session name plus chips. The retired
+ * all-host dashboard badge, host suffix, timestamp, preview/status
+ * prose, and legend are not part of this component.
  *
  * ### Tag vocabulary — issue #202
  *
@@ -64,7 +53,7 @@ import com.pocketshell.uikit.theme.PocketShellColors
  *    from *what state it is in* (attached / detached). Activity-state
  *    chips ([TagKind.Attached] / [TagKind.Detached]) lead with a small
  *    coloured dot so they read visually different from classifier chips
- *    and cannot be confused with the accent-soft agent badge.
+ *    and do not need a second prose status line.
  *  - Carry a content-description on each chip so TalkBack reads
  *    "<label> tag" instead of just "<label>" (which on uppercase
  *    "ATTACHED" rendered as letter-by-letter noise).
@@ -72,26 +61,11 @@ import com.pocketshell.uikit.theme.PocketShellColors
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SessionRow(
-    badge: String,
     name: String,
-    host: String,
-    preview: String,
-    time: String,
     tags: List<Tag>,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     onLongClick: (() -> Unit)? = null,
-    /**
-     * Issue #171: agent classifier that tints the leading badge. `null`
-     * selects the neutral `AccentSoft` / `Accent` cyan badge the
-     * dashboard (#202) uses by design — there the badge is a plain
-     * visual anchor and does not encode agent kind. The folder-list
-     * surface maps its `AgentKind` -> [SessionAgentKind] so plain-shell
-     * sessions read as neutral, Claude reads as cyan, Codex / OpenCode
-     * read as purple, and edge states (probing / exited) read as
-     * amber / muted per the spike's locked tokens.
-     */
-    agentKind: SessionAgentKind? = null,
 ) {
     Row(
         modifier = modifier
@@ -107,86 +81,15 @@ fun SessionRow(
                 onClick = onClick,
                 onLongClick = onLongClick,
             )
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        // `flex-start` in the CSS: the badge sits at the top, not the
-        // middle of the multi-line body.
-        verticalAlignment = Alignment.Top,
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        // Accent badge — 38dp, accent-soft fill, accent foreground,
-        // mono. The badge carries the first letter of the session name
-        // and is a purely visual anchor (it does NOT encode agent kind
-        // or activity state — those live in the tag row below). Per
-        // issue #202, the legend at the top of the dashboard spells
-        // this out so a first-time user does not assume the cyan badge
-        // means "Claude" — agent-kind has its own labelled chip.
-        //
-        // Issue #171: when [agentKind] is supplied (folder-list call
-        // path), the badge tint switches to the kind's semantic colour
-        // so a glance at the folder detail screen surfaces
-        // shell-vs-agent at the row's most prominent visual anchor.
-        // `null` selects the neutral cyan badge the dashboard uses by
-        // design (the dashboard badge does not encode agent kind).
-        val badgeTint = agentBadgeColors(agentKind)
-        Box(
-            modifier = Modifier
-                .size(38.dp)
-                .background(
-                    color = badgeTint.background,
-                    shape = RoundedCornerShape(10.dp),
-                )
-                .semantics { contentDescription = "Session initial $badge" },
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = badge.take(1).uppercase(),
-                color = badgeTint.foreground,
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-
-        Spacer(modifier = Modifier.width(12.dp))
-
         Column(modifier = Modifier.weight(1f)) {
-            // Top row: name+host on the left, time on the right.
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = name,
-                        color = PocketShellColors.Text,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.Medium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = " · $host",
-                        color = PocketShellColors.TextMuted,
-                        fontFamily = JetBrainsMonoFamily,
-                        fontSize = 12.sp,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                Text(
-                    text = time,
-                    color = PocketShellColors.TextMuted,
-                    fontSize = 11.sp,
-                )
-            }
-
-            Spacer(modifier = Modifier.size(6.dp))
-
-            // Preview — single-line monospace truncation.
             Text(
-                text = preview,
-                color = PocketShellColors.TextSecondary,
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 13.sp,
+                text = name,
+                color = PocketShellColors.Text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -222,57 +125,6 @@ fun SessionRow(
  * If a downstream caller needs standalone tag rendering later, promote
  * this.
  */
-/**
- * Two-tone palette for the leading badge — issue #171.
- *
- * Returned for the resolved [SessionAgentKind]: the [background] is the
- * 38dp tile fill; [foreground] is the mono initial drawn on top. The
- * mapping mirrors the spike's locked tokens (`Accent` for Claude,
- * `Purple` for Codex/OpenCode, `TextSecondary` for plain shell,
- * `Amber` for probing, `TextMuted` for exited) and uses the neutral
- * `AccentSoft` translucent-cyan badge when [kind] is null — the
- * dashboard's by-design plain anchor.
- */
-internal data class SessionBadgeColors(
-    val background: androidx.compose.ui.graphics.Color,
-    val foreground: androidx.compose.ui.graphics.Color,
-)
-
-internal fun agentBadgeColors(kind: SessionAgentKind?): SessionBadgeColors =
-    when (kind) {
-        null -> SessionBadgeColors(
-            background = PocketShellColors.AccentSoft,
-            foreground = PocketShellColors.Accent,
-        )
-        SessionAgentKind.Claude -> SessionBadgeColors(
-            background = PocketShellColors.AccentSoft,
-            foreground = PocketShellColors.Accent,
-        )
-        SessionAgentKind.Codex,
-        SessionAgentKind.OpenCode,
-        -> SessionBadgeColors(
-            // 12% purple — same alpha as AccentSoft's 0.12 cyan so the
-            // visual weight matches across agent kinds.
-            background = PocketShellColors.Purple.copy(alpha = 0.12f),
-            foreground = PocketShellColors.Purple,
-        )
-        SessionAgentKind.Shell -> SessionBadgeColors(
-            // Neutral surface-elev background with a secondary-text
-            // initial — plain tmux pane reads as "not an agent" without
-            // shouting for attention.
-            background = PocketShellColors.SurfaceElev,
-            foreground = PocketShellColors.TextSecondary,
-        )
-        SessionAgentKind.Probing -> SessionBadgeColors(
-            background = PocketShellColors.Amber.copy(alpha = 0.12f),
-            foreground = PocketShellColors.Amber,
-        )
-        SessionAgentKind.Exited -> SessionBadgeColors(
-            background = PocketShellColors.SurfaceElev,
-            foreground = PocketShellColors.TextMuted,
-        )
-    }
-
 @Composable
 private fun TagChip(tag: Tag) {
     val (textColor: Color, bgColor: Color) = when (tag.kind) {

@@ -755,13 +755,8 @@ private fun FolderGroup(
                     modifier = Modifier.testTag(
                         folderDetailRowTestTag(folder.path, session.sessionName),
                     ),
-                    badge = session.sessionName.firstOrNull()?.uppercaseChar()?.toString().orEmpty(),
                     name = session.sessionName,
-                    host = "",
-                    preview = sessionPreviewFor(session),
-                    time = "",
                     tags = sessionTagsFor(session),
-                    agentKind = session.agentKind,
                     onClick = { onSessionClick(folder.path, session.sessionName) },
                 )
             }
@@ -891,19 +886,6 @@ private fun EmptyFolderHint(onCreate: () -> Unit) {
             Text("+ New session", color = PocketShellColors.Accent)
         }
     }
-}
-
-private fun sessionPreviewFor(session: FolderSessionEntry): String = when (session.agentKind) {
-    SessionAgentKind.Claude ->
-        if (session.attached) "claude conversation active" else "claude workspace ready"
-    SessionAgentKind.Codex ->
-        if (session.attached) "codex conversation active" else "codex workspace ready"
-    SessionAgentKind.OpenCode ->
-        if (session.attached) "opencode conversation active" else "opencode workspace ready"
-    SessionAgentKind.Probing -> "detecting agent..."
-    SessionAgentKind.Exited -> "agent exited, shell still alive"
-    SessionAgentKind.Shell ->
-        if (session.attached) "attached tmux client" else "tmux session detached"
 }
 
 private fun sessionTagsFor(session: FolderSessionEntry): List<Tag> = buildList {

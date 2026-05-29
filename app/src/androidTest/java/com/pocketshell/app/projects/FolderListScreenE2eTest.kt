@@ -6,6 +6,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -192,6 +193,16 @@ class FolderListScreenE2eTest {
         compose.onNodeWithText("claude-main").assertExists()
         compose.onNodeWithText("build-shell").assertExists()
         compose.onNodeWithText("codex-llm").assertExists()
+
+        // Issue #276: per-host session rows stay compact. The retired
+        // dashboard badge, empty host separator, and prose status line
+        // must not render on the folder/session surface.
+        compose.onNodeWithContentDescription("Session initial C").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Session initial B").assertDoesNotExist()
+        compose.onNodeWithText(" · ").assertDoesNotExist()
+        compose.onNodeWithText("claude conversation active").assertDoesNotExist()
+        compose.onNodeWithText("codex conversation active").assertDoesNotExist()
+        compose.onNodeWithText("tmux session detached").assertDoesNotExist()
 
         // Agent / shell rollup chips visible on the pocketshell folder.
         compose.onNodeWithText("Claude").assertExists()

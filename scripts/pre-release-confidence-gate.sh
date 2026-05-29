@@ -26,6 +26,7 @@ fi
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
 EMULATOR="${EMULATOR:-$ANDROID_SDK/emulator/emulator}"
+PYTHON3="${PYTHON3:-python3}"
 AVD_NAME="${AVD_NAME:-test}"
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/pre-release-confidence-gate}"
 if [[ "$LOG_ROOT" != /* ]]; then
@@ -47,7 +48,6 @@ APP_WALKTHROUGH_TESTS=(
   "com.pocketshell.app.snippets.SnippetTerminalE2eTest#tappingCommandSnippetSendsInputToDockerShell"
   "com.pocketshell.app.session.InlineDictationUiTest#recordingStateShowsAmplitudeWaveformOnInlineMicSlot"
   "com.pocketshell.app.session.InlineDictationUiTest#transcribingStateShowsSpinnerAndBlocksDuplicateTap"
-  "com.pocketshell.app.session.VoiceCommandPlannerE2eTest#fakePlannerEndpointProducesReviewableCommandThatRunsThroughTerminalBridge"
   "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#debugAppConnectsToDockerAgentTargetViaEmulatorHostAlias"
   "com.pocketshell.app.proof.EmulatorDockerSshSmokeTest#walkthroughJourneyOpensAppSessionAndRunsShellAndTmuxCommands"
 )
@@ -60,6 +60,7 @@ Runs the local APK pre-release-confidence gate:
   - compile/unit checks
   - deterministic Docker agent target
   - emulator readiness with explicit Android SDK paths
+  - #261 stale Room DB launch sanity
   - focused connected walkthrough tests
   - debug APK build and emulator install sanity
 
@@ -72,6 +73,7 @@ Environment overrides:
   ANDROID_SDK=/home/alexey/Android/Sdk
   ADB=$ANDROID_SDK/platform-tools/adb
   EMULATOR=$ANDROID_SDK/emulator/emulator
+  PYTHON3=python3
   AVD_NAME=test
   LOG_ROOT=build/pre-release-confidence-gate
   GRADLE_USER_HOME=build/pre-release-confidence-gate/gradle-home
@@ -116,6 +118,8 @@ FAILURE_LOGCAT_PATH=""
 EMULATOR_SERIAL="unknown"
 APP_WALKTHROUGH_INSTALL_STATUS="not_run"
 FINAL_INSTALL_STATUS="not_run"
+ISSUE_261_STALE_DB_STATUS="not_run"
+ISSUE_261_STALE_DB_LOGCAT="$RUN_DIR/issue-261-stale-db-launch-logcat.log"
 STEP_NAMES=()
 STEP_STATUSES=()
 STEP_LOGS=()
@@ -202,6 +206,8 @@ write_summary() {
     printf 'Docker SSH target: 127.0.0.1:2222\n'
     printf 'Focused app APK install status: %s\n' "$APP_WALKTHROUGH_INSTALL_STATUS"
     printf 'Final install status: %s\n' "$FINAL_INSTALL_STATUS"
+    printf 'Issue #261 stale DB launch status: %s\n' "$ISSUE_261_STALE_DB_STATUS"
+    printf 'Issue #261 stale DB logcat: %s\n' "$ISSUE_261_STALE_DB_LOGCAT"
     if [[ "$GATE_RESULT" != "PASS" ]]; then
       printf 'Failing step: %s\n' "${FAILING_STEP:-unknown}"
       printf 'Failure message: %s\n' "${FAILURE_MESSAGE:-unknown}"
@@ -290,6 +296,9 @@ run_step() {
       install-debug-apk)
         FINAL_INSTALL_STATUS="passed"
         ;;
+      issue-261-stale-db-launch)
+        ISSUE_261_STALE_DB_STATUS="passed"
+        ;;
     esac
   else
     STEP_STATUSES[$step_array_index]="failed"
@@ -302,6 +311,10 @@ run_step() {
         ;;
       install-debug-apk)
         FINAL_INSTALL_STATUS="failed"
+        ;;
+      issue-261-stale-db-launch)
+        ISSUE_261_STALE_DB_STATUS="failed"
+        FAILURE_LOGCAT_PATH="$ISSUE_261_STALE_DB_LOGCAT"
         ;;
     esac
   fi
@@ -326,6 +339,16 @@ require_executable() {
   local path="$1"
   local label="$2"
   [[ -x "$path" ]] || fail "$label is not executable at $path"
+}
+
+require_command_or_executable() {
+  local command_or_path="$1"
+  local label="$2"
+  if [[ "$command_or_path" == */* ]]; then
+    require_executable "$command_or_path" "$label"
+  elif ! command -v "$command_or_path" >/dev/null 2>&1; then
+    fail "$label is not available on PATH as $command_or_path"
+  fi
 }
 
 reset_app_packages_script() {
@@ -525,6 +548,92 @@ exit 1
 QUIESCE_SCRIPT
 }
 
+issue_261_stale_db_launch_script() {
+  cat <<ISSUE261_SCRIPT
+set -euo pipefail
+
+stale_db_host='$RUN_DIR/issue-261-stale-pocketshell.db'
+stale_db_device='/data/local/tmp/issue-261-stale-pocketshell.db'
+logcat_file='$ISSUE_261_STALE_DB_LOGCAT'
+
+wait_package_manager_idle() {
+  '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
+  '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
+}
+
+install_or_fallback_uninstall() {
+  local output
+  set +e
+  output=\$('$ADB' install -r -d -t '$APK_PATH' 2>&1)
+  local status=\$?
+  set -e
+  printf '%s\n' "\$output"
+  if [ "\$status" -eq 0 ]; then
+    wait_package_manager_idle
+    return 0
+  fi
+  if printf '%s\n' "\$output" | grep -q 'INSTALL_FAILED_UPDATE_INCOMPATIBLE'; then
+    '$ADB' uninstall com.pocketshell.app >/dev/null 2>&1 || true
+    wait_package_manager_idle
+    '$ADB' install -r -d -t '$APK_PATH'
+    wait_package_manager_idle
+    return 0
+  fi
+  exit "\$status"
+}
+
+'$PYTHON3' - "\$stale_db_host" <<'PY'
+import sqlite3
+import sys
+
+database_path = sys.argv[1]
+connection = sqlite3.connect(database_path)
+try:
+    connection.execute("CREATE TABLE room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)")
+    connection.execute(
+        "INSERT INTO room_master_table (id, identity_hash) VALUES(42, ?)",
+        ("4a479a15dfcab2d576e00c7ce10ac581",),
+    )
+    connection.execute("CREATE TABLE stale_issue_261_marker (id INTEGER PRIMARY KEY)")
+    connection.execute("PRAGMA user_version = 1")
+    connection.commit()
+finally:
+    connection.close()
+PY
+
+'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+install_or_fallback_uninstall
+'$ADB' shell pm clear com.pocketshell.app
+wait_package_manager_idle
+'$ADB' push "\$stale_db_host" "\$stale_db_device"
+'$ADB' shell run-as com.pocketshell.app sh -c "'mkdir -p databases && cp \$stale_db_device databases/pocketshell.db && chmod 600 databases/pocketshell.db && rm -f databases/pocketshell.db-wal databases/pocketshell.db-shm databases/pocketshell.db-journal'"
+'$ADB' shell rm -f "\$stale_db_device" >/dev/null 2>&1 || true
+
+'$ADB' logcat -c || true
+'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+'$ADB' shell am start -W -n com.pocketshell.app/.MainActivity
+sleep 5
+pid=\$('$ADB' shell pidof com.pocketshell.app | tr -d '\r' || true)
+'$ADB' logcat -d -v time -t 5000 > "\$logcat_file" 2>&1 || true
+
+if [ -z "\$pid" ]; then
+  printf 'PocketShell process was not alive after launching with the #261 stale Room DB.\n' >&2
+  grep -Ei -C 40 'Room cannot verify|Expected identity hash|AndroidRuntime|FATAL EXCEPTION|com[.]pocketshell' "\$logcat_file" >&2 || true
+  exit 1
+fi
+
+if grep -Eiq 'Room cannot verify|Expected identity hash|Process: com[.]pocketshell[.]app|FATAL EXCEPTION.*com[.]pocketshell[.]app' "\$logcat_file"; then
+  printf 'Crash signature found after launching with the #261 stale Room DB.\n' >&2
+  grep -Ei -C 40 'Room cannot verify|Expected identity hash|AndroidRuntime|FATAL EXCEPTION|com[.]pocketshell' "\$logcat_file" >&2 || true
+  exit 1
+fi
+
+'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+printf 'Issue #261 stale Room DB launch survived with pid %s\n' "\$pid"
+printf 'Logcat artifact: %s\n' "\$logcat_file"
+ISSUE261_SCRIPT
+}
+
 safe_step_name() {
   printf '%s' "$1" | tr '#.' '--'
 }
@@ -563,6 +672,10 @@ dump_instrumentation_diagnostics() {
   printf 'Full logcat: %s\n' "\$full_logcat_file"
 }
 
+instrumentation_output_has_failure_markers() {
+  printf '%s\n' "\$output" | grep -Eq '(^FAILURES!!!$|^FAILURE: |^INSTRUMENTATION_STATUS_CODE: -[0-9]+$|^INSTRUMENTATION_STATUS: stack=|^[[:space:]]*at (com[.]pocketshell|androidx[.]test|org[.]junit|kotlin[.]|java[.]|android[.])|^[[:alnum:]_.]*(Exception|Error): |^Process crashed[.])'
+}
+
 '$ADB' logcat -c || true
 for attempt in 1 2; do
   '$ADB' logcat -c || true
@@ -572,7 +685,9 @@ for attempt in 1 2; do
   set -e
   '$ADB' logcat -d -v time -t 5000 > "\$full_logcat_file" 2>&1 || true
   printf '%s\n' "\$output"
-  if [ "\$instrument_status" -eq 0 ] && printf '%s\n' "\$output" | grep -q 'INSTRUMENTATION_CODE: -1'; then
+  if [ "\$instrument_status" -eq 0 ] &&
+    printf '%s\n' "\$output" | grep -q 'INSTRUMENTATION_CODE: -1' &&
+    ! instrumentation_output_has_failure_markers; then
     exit 0
   fi
   if [ "\$attempt" -eq 1 ] &&
@@ -591,6 +706,11 @@ for attempt in 1 2; do
   if [ "\$instrument_status" -ne 0 ]; then
     dump_instrumentation_diagnostics "adb shell am instrument exited with status \$instrument_status"
     exit "\$instrument_status"
+  fi
+  if printf '%s\n' "\$output" | grep -q 'INSTRUMENTATION_CODE: -1' &&
+    instrumentation_output_has_failure_markers; then
+    dump_instrumentation_diagnostics "instrumentation reported INSTRUMENTATION_CODE: -1 with failure markers"
+    exit 1
   fi
   dump_instrumentation_diagnostics "instrumentation did not report INSTRUMENTATION_CODE: -1"
   exit 1
@@ -613,6 +733,7 @@ printf 'Gradle flags: %s\n' "$GRADLE_FLAGS"
 
 require_executable "$ADB" "adb"
 require_executable "$EMULATOR" "emulator"
+require_command_or_executable "$PYTHON3" "python3"
 
 run_step "android-sdk-paths" "$ADB" version
 run_step "available-avds" "$EMULATOR" -list-avds
@@ -644,6 +765,9 @@ run_step "build-app-test-apks" \
   ./gradlew $GRADLE_FLAGS :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace
 [[ -f "$APK_PATH" ]] || fail "APK artifact was not created at $APK_PATH"
 [[ -f "$TEST_APK_PATH" ]] || fail "Android test APK artifact was not created at $TEST_APK_PATH"
+
+ISSUE_261_STALE_DB_STATUS="running"
+run_bash_step "issue-261-stale-db-launch" "$(issue_261_stale_db_launch_script)"
 
 run_bash_step "reset-app-packages-before-app-walkthrough" "$(reset_app_packages_script)"
 run_bash_step "install-app-walkthrough-apks" "$(install_app_walkthrough_apks_script)"

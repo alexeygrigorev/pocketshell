@@ -44,6 +44,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.core.assistant.AssistantProvider
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlin.math.roundToInt
 
@@ -92,6 +93,7 @@ fun SettingsScreen(
 ) {
     val settings by viewModel.state.collectAsState()
     val keyStatus by viewModel.keyStatus.collectAsState()
+    val assistantState by viewModel.assistantState.collectAsState()
     val hasUsageInstalledHost by viewModel.hasUsageInstalledHost.collectAsState()
     val hosts by viewModel.hosts.collectAsState()
     val usageProviderRecords by viewModel.usageProviderRecords.collectAsState()
@@ -149,6 +151,15 @@ fun SettingsScreen(
                     onLanguageSelected = viewModel::setVoiceLanguage,
                     onSilenceThresholdChange = viewModel::setVoiceSilenceThresholdSeconds,
                     onOpenAiCosts = onOpenAiCosts,
+                )
+            }
+            item {
+                AssistantSection(
+                    assistantState = assistantState,
+                    onProviderSelected = viewModel::setAssistantProvider,
+                    onEndpointChange = viewModel::setAssistantEndpoint,
+                    onSaveKey = viewModel::saveAssistantKey,
+                    onClearKey = viewModel::clearAssistantKey,
                 )
             }
             item {
@@ -760,6 +771,254 @@ internal fun formatThresholdLabel(seconds: Float): String {
 }
 
 /**
+ * Assistant section — issue #265. Configures the in-app action assistant's
+ * LLM provider, independent of voice transcription (which stays on
+ * Whisper/OpenAI).
+ *
+ *  - **Provider** — radio group over [AssistantProvider]. Default OpenAI.
+ *    The Anthropic-compatible slot covers both Anthropic and ZAI/GLM via
+ *    its base URL.
+ *  - **Base URL / model** — editable per provider; only the active
+ *    provider's fields are shown.
+ *  - **API key** — masked single-field dialog (`sk-…1234`), KeyStore-backed,
+ *    same UX as the Whisper key. Stored in a separate encrypted file so it
+ *    never disturbs the voice key.
+ */
+@Composable
+private fun AssistantSection(
+    assistantState: AssistantSettingsUiState,
+    onProviderSelected: (AssistantProvider) -> Unit,
+    onEndpointChange: (AssistantProvider, String, String) -> Unit,
+    onSaveKey: (AssistantProvider, CharArray) -> Unit,
+    onClearKey: (AssistantProvider) -> Unit,
+) {
+    var showKeyDialog by remember { mutableStateOf(false) }
+    val provider = assistantState.provider
+
+    Column {
+        SectionLabel("Assistant")
+        SectionCard {
+            Text(
+                text = "Provider",
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "LLM backing the in-app action assistant. Separate from voice transcription.",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            AssistantProviderRow(
+                label = "OpenAI",
+                selected = provider == AssistantProvider.OpenAi,
+                onClick = { onProviderSelected(AssistantProvider.OpenAi) },
+                testTag = ASSISTANT_PROVIDER_OPENAI_TAG,
+            )
+            AssistantProviderRow(
+                label = "Anthropic / ZAI-GLM",
+                selected = provider == AssistantProvider.Anthropic,
+                onClick = { onProviderSelected(AssistantProvider.Anthropic) },
+                testTag = ASSISTANT_PROVIDER_ANTHROPIC_TAG,
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // -- Base URL -----------------------------------------------
+            val baseUrl = assistantState.baseUrlFor(provider)
+            val model = assistantState.modelFor(provider)
+            Text(
+                text = "Base URL",
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedTextField(
+                value = baseUrl,
+                onValueChange = { onEndpointChange(provider, it, model) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(ASSISTANT_BASE_URL_FIELD_TAG),
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // -- Model --------------------------------------------------
+            Text(
+                text = "Model",
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            OutlinedTextField(
+                value = model,
+                onValueChange = { onEndpointChange(provider, baseUrl, it) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(ASSISTANT_MODEL_FIELD_TAG),
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // -- API key ------------------------------------------------
+            Text(
+                text = "API key",
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Stored encrypted on this device, per provider.",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            val keyStatus = assistantState.keyStatusFor(provider)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val statusLabel = when (keyStatus) {
+                    WhisperKeyStatus.Unset -> "Set API key"
+                    is WhisperKeyStatus.Set -> "Key set: …${keyStatus.maskedTail}"
+                }
+                Text(
+                    text = statusLabel,
+                    color = when (keyStatus) {
+                        WhisperKeyStatus.Unset -> PocketShellColors.TextSecondary
+                        is WhisperKeyStatus.Set -> PocketShellColors.Text
+                    },
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(role = Role.Button) { showKeyDialog = true }
+                        .testTag(ASSISTANT_API_KEY_ROW_TAG)
+                        .padding(vertical = 8.dp),
+                )
+                if (keyStatus is WhisperKeyStatus.Set) {
+                    Text(
+                        text = "Clear",
+                        color = PocketShellColors.Accent,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier
+                            .clickable(role = Role.Button) { onClearKey(provider) }
+                            .testTag(ASSISTANT_API_KEY_CLEAR_TAG)
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
+            }
+        }
+    }
+
+    if (showKeyDialog) {
+        AssistantApiKeyEntryDialog(
+            onDismiss = { showKeyDialog = false },
+            onSave = { key ->
+                onSaveKey(provider, key)
+                java.util.Arrays.fill(key, ' ')
+                showKeyDialog = false
+            },
+        )
+    }
+}
+
+@Composable
+private fun AssistantProviderRow(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    testTag: String,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.RadioButton, onClick = onClick)
+            .padding(vertical = 8.dp)
+            .testTag(testTag),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioMark(selected = selected)
+        Spacer(modifier = Modifier.width(12.dp))
+        Text(
+            text = label,
+            color = PocketShellColors.Text,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+/**
+ * One-field masked dialog for entering the assistant provider's API key.
+ * Mirrors [VoiceApiKeyEntryDialog] so the entry UX is consistent across
+ * the two key surfaces.
+ */
+@Composable
+internal fun AssistantApiKeyEntryDialog(
+    onDismiss: () -> Unit,
+    onSave: (CharArray) -> Unit,
+) {
+    var keyText by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Assistant API key", color = PocketShellColors.Text) },
+        text = {
+            Column {
+                Text(
+                    text = "Paste the API key for the selected provider. It's stored " +
+                        "encrypted on this device and only sent in the request header.",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 12.sp,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                OutlinedTextField(
+                    value = keyText,
+                    onValueChange = { keyText = it },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag(ASSISTANT_API_KEY_FIELD_TAG),
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    val chars = keyText.toCharArray()
+                    onSave(chars)
+                    keyText = ""
+                },
+                enabled = keyText.isNotBlank(),
+                modifier = Modifier.testTag(ASSISTANT_API_KEY_SAVE_TAG),
+            ) {
+                Text("Save", color = PocketShellColors.Accent)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel", color = PocketShellColors.TextSecondary)
+            }
+        },
+        containerColor = PocketShellColors.Surface,
+        titleContentColor = PocketShellColors.Text,
+        textContentColor = PocketShellColors.TextSecondary,
+    )
+}
+
+/**
  * Issue #114 Fix A: entry point to the Usage / quota panel. Lives under
  * Settings because the panel surfaces cross-host server-side state, not a
  * per-host preference. Tapping the row routes to
@@ -1136,6 +1395,14 @@ internal const val VOICE_API_KEY_SAVE_TAG = "settings:voice:api-key-save"
 internal const val VOICE_SILENCE_SLIDER_TAG = "settings:voice:silence-slider"
 internal const val VOICE_SILENCE_VALUE_TAG = "settings:voice:silence-value"
 internal const val VOICE_AI_COSTS_ROW_TAG = "settings:voice:ai-costs-row"
+internal const val ASSISTANT_PROVIDER_OPENAI_TAG = "settings:assistant:provider-openai"
+internal const val ASSISTANT_PROVIDER_ANTHROPIC_TAG = "settings:assistant:provider-anthropic"
+internal const val ASSISTANT_BASE_URL_FIELD_TAG = "settings:assistant:base-url-field"
+internal const val ASSISTANT_MODEL_FIELD_TAG = "settings:assistant:model-field"
+internal const val ASSISTANT_API_KEY_ROW_TAG = "settings:assistant:api-key-row"
+internal const val ASSISTANT_API_KEY_CLEAR_TAG = "settings:assistant:api-key-clear"
+internal const val ASSISTANT_API_KEY_FIELD_TAG = "settings:assistant:api-key-field"
+internal const val ASSISTANT_API_KEY_SAVE_TAG = "settings:assistant:api-key-save"
 
 // Issue #206: stable tags for the per-host watched-folders picker in
 // Settings. The empty-state tag fires when the user has no hosts

@@ -5,6 +5,9 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
+import com.pocketshell.core.assistant.AssistantProvider
+import com.pocketshell.core.assistant.AssistantSettings
+import com.pocketshell.core.assistant.store.AssistantConfigStore
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.usage.UsageProviderRecord
@@ -40,6 +43,7 @@ import javax.inject.Inject
 class SettingsViewModel @Inject constructor(
     private val repository: SettingsRepository,
     private val apiKeyStorage: PromptComposerViewModel.ApiKeyVault,
+    private val assistantConfigStore: AssistantConfigStore,
     hostDao: HostDao,
     usageScheduler: UsageScheduler,
 ) : ViewModel() {
@@ -119,6 +123,20 @@ class SettingsViewModel @Inject constructor(
      */
     val keyStatus: StateFlow<WhisperKeyStatus> = _keyStatus.asStateFlow()
 
+    private val _assistantState: MutableStateFlow<AssistantSettingsUiState> =
+        MutableStateFlow(readAssistantState())
+
+    /**
+     * Issue #265: the in-app action assistant's provider config surface.
+     * Carries the active provider, per-provider base URL / model, and a
+     * masked indicator of whether each provider's key is set. The plaintext
+     * key never enters this StateFlow — only the last-four tail, mirroring
+     * [keyStatus] / the Whisper key UX. This config is wholly separate from
+     * the Whisper key: a different KeyStore-backed store, so editing it
+     * never disturbs voice transcription.
+     */
+    val assistantState: StateFlow<AssistantSettingsUiState> = _assistantState.asStateFlow()
+
     fun setTheme(theme: ThemePreference) = repository.setTheme(theme)
 
     fun setTerminalFontSizeSp(sizeSp: Float) = repository.setTerminalFontSizeSp(sizeSp)
@@ -185,6 +203,60 @@ class SettingsViewModel @Inject constructor(
         _keyStatus.value = WhisperKeyStatus.Unset
     }
 
+    /**
+     * Issue #265: switch the active assistant provider. Default is OpenAI;
+     * switching changes which client [com.pocketshell.core.assistant.AssistantLlmClientFactory]
+     * returns on the next `create()`.
+     */
+    fun setAssistantProvider(provider: AssistantProvider) {
+        assistantConfigStore.setProvider(provider)
+        _assistantState.value = readAssistantState()
+    }
+
+    /** Persist the base URL + model for [provider]. */
+    fun setAssistantEndpoint(provider: AssistantProvider, baseUrl: String, model: String) {
+        assistantConfigStore.setEndpoint(provider, baseUrl, model)
+        _assistantState.value = readAssistantState()
+    }
+
+    /**
+     * Persist [key] for [provider] through the KeyStore-backed store. The
+     * caller still owns the [CharArray] and zeroes it after the call (same
+     * contract as [saveApiKey]).
+     */
+    fun saveAssistantKey(provider: AssistantProvider, key: CharArray) {
+        assistantConfigStore.saveKey(provider, key)
+        viewModelScope.launch {
+            _assistantState.value = readAssistantState()
+        }
+    }
+
+    /** Clear the stored assistant key for [provider]. */
+    fun clearAssistantKey(provider: AssistantProvider) {
+        assistantConfigStore.clearKey(provider)
+        _assistantState.value = readAssistantState()
+    }
+
+    private fun readAssistantState(): AssistantSettingsUiState {
+        val settings = assistantConfigStore.loadSettings()
+        return AssistantSettingsUiState(
+            provider = settings.provider,
+            openAiBaseUrl = settings.openAiBaseUrl,
+            openAiModel = settings.openAiModel,
+            anthropicBaseUrl = settings.anthropicBaseUrl,
+            anthropicModel = settings.anthropicModel,
+            openAiKey = readAssistantKeyStatus(AssistantProvider.OpenAi),
+            anthropicKey = readAssistantKeyStatus(AssistantProvider.Anthropic),
+        )
+    }
+
+    private fun readAssistantKeyStatus(provider: AssistantProvider): WhisperKeyStatus {
+        val loaded = assistantConfigStore.loadKey(provider) ?: return WhisperKeyStatus.Unset
+        val tail = loaded.takeLast(MASKED_TAIL_LENGTH).joinToString("")
+        java.util.Arrays.fill(loaded, ' ')
+        return WhisperKeyStatus.Set(maskedTail = tail)
+    }
+
     private fun readKeyStatus(): WhisperKeyStatus {
         val loaded = apiKeyStorage.load() ?: return WhisperKeyStatus.Unset
         // Zero the peek copy — we never surface the plaintext, only the
@@ -214,4 +286,39 @@ class SettingsViewModel @Inject constructor(
 sealed interface WhisperKeyStatus {
     object Unset : WhisperKeyStatus
     data class Set(val maskedTail: String) : WhisperKeyStatus
+}
+
+/**
+ * Issue #265: display state for the Settings → Assistant section. Carries
+ * the active provider, the per-provider base URL / model, and a masked
+ * key indicator per provider ([WhisperKeyStatus] is reused — the shape is
+ * "Unset" vs "Set(maskedTail)", which is exactly what the Assistant key
+ * rows need too). The plaintext key never lands here.
+ */
+data class AssistantSettingsUiState(
+    val provider: AssistantProvider,
+    val openAiBaseUrl: String,
+    val openAiModel: String,
+    val anthropicBaseUrl: String,
+    val anthropicModel: String,
+    val openAiKey: WhisperKeyStatus,
+    val anthropicKey: WhisperKeyStatus,
+) {
+    /** Masked key status for whichever provider is currently active. */
+    fun keyStatusFor(provider: AssistantProvider): WhisperKeyStatus = when (provider) {
+        AssistantProvider.OpenAi -> openAiKey
+        AssistantProvider.Anthropic -> anthropicKey
+    }
+
+    /** Base URL for [provider]. */
+    fun baseUrlFor(provider: AssistantProvider): String = when (provider) {
+        AssistantProvider.OpenAi -> openAiBaseUrl
+        AssistantProvider.Anthropic -> anthropicBaseUrl
+    }
+
+    /** Model for [provider]. */
+    fun modelFor(provider: AssistantProvider): String = when (provider) {
+        AssistantProvider.OpenAi -> openAiModel
+        AssistantProvider.Anthropic -> anthropicModel
+    }
 }

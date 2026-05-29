@@ -187,6 +187,12 @@ dependencies {
     // so no extra catalog wiring is needed here.
     implementation(project(":shared:core-voice"))
 
+    // Issue #265: provider-agnostic LLM client layer for the in-app action
+    // assistant (#266). Exposes AssistantLlmClient + AnthropicLlmClient /
+    // OpenAiLlmClient, the factory, and the KeyStore-backed config store.
+    // OkHttp + coroutines come transitively via the module's `api` config.
+    implementation(project(":shared:core-assistant"))
+
     // Issue #45: tmux control-mode client (TmuxClient + TmuxClientFactory)
     // for the per-pane Compose surface introduced under
     // `com.pocketshell.app.tmux`. core-tmux declares its core-ssh dep as

@@ -53,7 +53,7 @@ import com.pocketshell.uikit.theme.PocketShellColors
  *
  * Before #196 these surfaces drew their own controls — the terminal sheet
  * had a styled draft box with an accent cursor and tier-differentiated
- * Send / Send + ↵ buttons, while the agent pane used a bare Material
+ * Insert / Send buttons, while the agent pane used a bare Material
  * `OutlinedTextField` + a plain `TextButton("Send")`. They looked and
  * behaved differently, which is exactly the parity gap the maintainer
  * reported.
@@ -67,12 +67,12 @@ import com.pocketshell.uikit.theme.PocketShellColors
  *    the terminal sheet.
  *  - [ComposerSendButton] (outline secondary) and
  *    [ComposerSendEnterButton] (filled primary) — the tier-differentiated
- *    Send buttons, with the long-press tooltip behaviour from #153.
+ *    terminal action buttons, with the long-press tooltip behaviour from #153.
  *
  * Per-target adjustments are intentional and minimal:
  *
- *  - The terminal shell exposes both **Send** (write bytes, no Enter) and
- *    **Send + ↵** (write bytes + Enter) because typing a partial command
+ *  - The terminal shell exposes both **Insert** (write bytes, no Enter) and
+ *    **Send** (write bytes + Enter) because typing a partial command
  *    fragment is a first-class use case there.
  *  - The agent pane only exposes a single primary **Send** because sending
  *    a message to an agent always submits it (`sendToAgent` always uses
@@ -345,7 +345,7 @@ internal object ComposerAboveAnchorPopupPositionProvider : PopupPositionProvider
  * [ComposerSendEnterButton] so the agent composer mirrors the terminal
  * composer's draft-box-then-action-row rhythm. The agent target uses one
  * Send button (sending a message to an agent always submits — see
- * [ComposerTarget]) rather than the terminal's two-button Send / Send + ↵
+ * [ComposerTarget]) rather than the terminal's two-button Insert / Send
  * pair.
  *
  * @param value current draft text.

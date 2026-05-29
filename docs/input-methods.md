@@ -51,7 +51,7 @@ Configuration: API key stored in Android Keystore. Future: support self-hosted `
 │   │ MIC │  ▁▂▃▅▃▂▁   Listening...      │
 │   └─────┘                               │
 │                                         │
-│  [ Snippets ]  [ Send ]  [ Send + ↵ ]   │
+│  [ Snippets ]  [ Insert ]  [ Send ]     │
 └─────────────────────────────────────────┘
 ```
 
@@ -60,7 +60,7 @@ Behaviours:
 - Big mic button: tap to start, tap again to stop; auto-stop after 5s silence
 - Live partial transcription streams into the text area as you speak
 - Text area is editable — tap any word to fix before sending
-- `Send` writes to PTY without newline; `Send + ↵` sends with Enter; `Snippets` opens the saved-prompt library
+- `Insert` writes to PTY without submitting; `Send` submits with Enter; `Snippets` opens the saved-prompt library
 - Sheet dismissed = transcript preserved as draft per session
 - Recording state: mic fills with accent colour, inline waveform shows audio level, breadcrumb status dot pulses, haptic on start/stop
 

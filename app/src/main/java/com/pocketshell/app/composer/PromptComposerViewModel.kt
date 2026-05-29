@@ -159,7 +159,7 @@ public class PromptComposerViewModel @Inject constructor(
      * SharedFlow's buffer while the previous sheet's collector had just
      * been cancelled — and the next sheet's collector had not yet
      * subscribed — was silently dropped. That is the exact #254
-     * "Send + ↵ works once after dictation, then not on subsequent
+     * "Send works once after dictation, then not on subsequent
      * sends" bug: the dictated transcript fired `dispatchSendNow` from
      * the `viewModelScope` transcribe coroutine in that subscriber gap.
      *
@@ -186,8 +186,8 @@ public class PromptComposerViewModel @Inject constructor(
      *    pipeline but the round-trip did not succeed).
      *
      * Lives outside [UiState] because the sheet does not need to render
-     * a separate visual cue beyond the "Send after transcribe" hint that
-     * is already driven by `state.recording` + `state.draft`.
+     * a separate visual cue beyond the after-transcribe button labels
+     * already driven by `state.recording` + `state.draft`.
      */
     private var pendingSendOnTranscribeSuccess: Boolean = false
     private var pendingSendWithEnter: Boolean = false
@@ -1029,11 +1029,11 @@ public class PromptComposerViewModel @Inject constructor(
      *   For sends queued mid-recording / mid-transcribe this is the
      *   combined (existing-draft + just-transcribed) text — the Whisper
      *   round-trip completed before this request was emitted.
-     * @property withEnter true when the user tapped the `Send + ↵`
+     * @property withEnter true when the user tapped the `Send`
      *   button; the session-bridge interprets this as "submit the
      *   prompt with a trailing newline so the agent processes it
-     *   immediately". False for the plain Send button (text reaches the
-     *   prompt but the user is still composing).
+     *   immediately". False for the `Insert` button (text reaches the
+     *   prompt without submitting so the user is still composing).
      */
     public data class SendRequest(
         val text: String,

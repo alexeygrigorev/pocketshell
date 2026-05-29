@@ -66,6 +66,7 @@ Encoded-cwd format for Claude Code: `/home/alexey/git/pocketshell` → `-home-al
 │  ASSISTANT · streaming...               │
 │  Here's the migration: _                │  tails live
 ├─────────────────────────────────────────┤
+│  [ Message Claude Code...        ][Send]│
 │  [ Search in conversation ]   [ Top ]   │
 └─────────────────────────────────────────┘
 ```
@@ -74,6 +75,7 @@ Behaviours:
 - Markdown rendering — no ANSI noise
 - Tool calls collapsible (default collapsed); tap to expand command + output + diff
 - Auto-tails the file/db as the agent writes new messages
+- Reply-in-place composer sends to the current agent pane
 - Search bar = full-text within this session
 - Long-press any message → copy / quote-reply into prompt composer
 
@@ -111,7 +113,6 @@ core-agents/
 ## What's explicitly out of v1
 
 - Cross-session / cross-project search (that's agent-log-explorer's job)
-- Sending messages *from* the conversation view (use the prompt composer; conversation view is read-only)
 - Editing / replaying past tool calls
 - Agent-specific UI (e.g. Claude Code's todo list as a structured widget) — generic message rendering for now
 - Auto-installing or managing agent-log-explorer on the host

@@ -88,7 +88,7 @@ import com.pocketshell.uikit.theme.PocketShellThemeMode
  *  4. Mic row: the [MicButton] from `:shared:ui-kit`, an animated
  *     amplitude waveform, and the "Listening" label that fades in while
  *     recording.
- *  5. Action row: `Snippets` (ghost), `Send`, `Send + ↵` (primary).
+ *  5. Action row: `Snippets` (ghost), `Insert`, `Send` (primary).
  *
  * The composable is a pure renderer; everything stateful lives in
  * [PromptComposerViewModel]. The screen wires the viewmodel via
@@ -304,7 +304,7 @@ public fun PromptComposerSheet(
         // composer ("compose, then send").
         //
         // The `withEnter` signal from the picker chips is intentionally
-        // ignored: the composer's own `Send + ↵` button is the surface
+        // ignored: the composer's own `Send` button is the surface
         // that submits with Enter, so the snippet's chip becomes "paste
         // this template into the draft" in this context. The chip labels
         // still read "Send" / "Send + ↵" because they reflect what
@@ -638,7 +638,7 @@ internal fun SheetContent(
         val isRecording = state.recording == PromptComposerViewModel.RecordingState.Recording
         val hasQueuedAffordance = isRecording || isTranscribing
         val sendEnabled = hasQueuedAffordance || state.draft.isNotEmpty()
-        // Action row: Snippets (ghost) / Send / Send + Enter (primary).
+        // Action row: Snippets (ghost) / Insert / Send (primary).
         // Matches `.composer-actions` in the mockup. Snippets stays
         // disabled while a Whisper round-trip is in flight (browsing
         // snippets during transcription is at best a UX paper-cut and
@@ -661,13 +661,13 @@ internal fun SheetContent(
                 modifier = Modifier.weight(1f),
                 enabled = !isTranscribing,
             )
-            // Issue #196: the Send / Send + ↵ buttons are shared with the
+            // Issue #196: the Insert / Send buttons are shared with the
             // agent-pane composer via [ComposerSendButton] /
             // [ComposerSendEnterButton] in `UnifiedComposer.kt` so both
             // surfaces use the identical tier-differentiated treatment:
-            //  - Plain "Send" → outline-only (transparent fill, accent
-            //    border + accent text) — clearly the secondary action.
-            //  - "Send + ↵" → solid accent fill + on-accent text — stays
+            //  - "Insert" → outline-only (transparent fill, accent
+            //    border + accent text) and writes the draft without Enter.
+            //  - "Send" → solid accent fill + on-accent text — stays
             //    the primary action (matches the same colour token the
             //    mic FAB uses, so the user sees one "do the thing"
             //    coloured affordance per row).
@@ -682,7 +682,7 @@ internal fun SheetContent(
             // is in flight so the user knows the tap was registered but
             // the bytes are not yet flying.
             ComposerSendButton(
-                label = if (hasQueuedAffordance) "Send after transcribe" else "Send",
+                label = if (hasQueuedAffordance) "Insert after transcribe" else "Insert",
                 tooltipLabel = SEND_TOOLTIP_LABEL,
                 onClick = { onSend(false) },
                 modifier = Modifier
@@ -691,7 +691,7 @@ internal fun SheetContent(
                 enabled = sendEnabled,
             )
             ComposerSendEnterButton(
-                label = if (hasQueuedAffordance) "Send + ↵ after" else "Send + ↵",
+                label = if (hasQueuedAffordance) "Send after transcribe" else "Send",
                 tooltipLabel = SEND_ENTER_TOOLTIP_LABEL,
                 onClick = { onSend(true) },
                 modifier = Modifier
@@ -1344,7 +1344,7 @@ internal const val COMPOSER_TRANSCRIBING_SPINNER_TAG = "prompt-composer-transcri
  * tweaks live in one obvious place.
  */
 internal const val SEND_TOOLTIP_LABEL: String =
-    "Send the draft into the prompt without submitting"
+    "Insert the draft into the prompt without submitting"
 internal const val SEND_ENTER_TOOLTIP_LABEL: String =
     "Send the draft and submit it with Enter"
 

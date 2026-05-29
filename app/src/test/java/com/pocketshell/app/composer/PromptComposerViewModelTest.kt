@@ -1400,7 +1400,7 @@ class PromptComposerViewModelTest {
         // `sendRequests` collector lives in the sheet's composition: it is
         // torn down when the sheet is dismissed and re-created when the
         // sheet is re-opened. A Send dispatched into that subscriber gap —
-        // which is exactly what happens on a *subsequent* "Send + ↵ after
+        // which is exactly what happens on a *subsequent* "Send after
         // dictation" (the first send dismisses the sheet, the next send's
         // `dispatchSendNow` fires from the `viewModelScope` transcribe
         // coroutine while the new collector has not yet re-subscribed) —

@@ -37,7 +37,7 @@ import org.junit.runner.RunWith
  * Renders [SheetContent] backed by a real [PromptComposerViewModel] with
  * in-memory fakes for the microphone, Whisper client, and pending-
  * transcription queue. The test exercises the public surface a real
- * user touches: tapping the mic, tapping cancel, tapping Send. The
+ * user touches: tapping the mic, tapping cancel, tapping Insert/Send. The
  * `sendRequests` SharedFlow is collected so the test can assert what
  * the sheet would have routed into the host's `onSend` callback.
  *
@@ -155,14 +155,15 @@ class PromptComposerSendWhileRecordingTest {
             vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Recording
         }
 
-        // The Send button is enabled while recording — even though the
+        // The Insert button is enabled while recording — even though the
         // draft is "Tell me " (would-be-empty case for the original
-        // pre-#211 gate, still non-empty here for safety). The label
-        // flips to "Send after transcribe" so the user knows the tap
-        // will land after Whisper.
+        // pre-#211 gate, still non-empty here for safety). The queued
+        // labels spell out whether the post-Whisper action inserts into
+        // the prompt or submits with Enter.
+        compose.onNodeWithText("Insert after transcribe").assertIsDisplayed()
         compose.onNodeWithText("Send after transcribe").assertIsDisplayed()
 
-        // 3. Tap Send while still recording.
+        // 3. Tap Insert while still recording.
         compose.onNodeWithTag(COMPOSER_SEND_TAG).performClick()
         compose.waitForIdle()
         compose.waitUntil(timeoutMillis = 10_000) { sent.isNotEmpty() }
@@ -216,6 +217,7 @@ class PromptComposerSendWhileRecordingTest {
             vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Transcribing
         }
 
+        compose.onNodeWithText("Send after transcribe").assertIsDisplayed()
         // User taps Send mid-Whisper. The send must NOT fire yet.
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).performClick()
         compose.waitForIdle()
@@ -234,7 +236,7 @@ class PromptComposerSendWhileRecordingTest {
 
         assertEquals(1, sent.size)
         assertEquals("queued result", sent[0].text)
-        // Send + ↵ → withEnter = true.
+        // Send → withEnter = true.
         assertEquals(true, sent[0].withEnter)
     }
 
@@ -288,7 +290,7 @@ class PromptComposerSendWhileRecordingTest {
         compose.waitUntil(timeoutMillis = 5_000) {
             vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Recording
         }
-        // 5. Send while still recording. The Send + ↵ button is fine
+        // 5. Send while still recording. The Send button is fine
         //    here — the test pins the text content, not the enter flag.
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).performClick()
         compose.waitForIdle()
@@ -367,7 +369,9 @@ class PromptComposerSendWhileRecordingTest {
         val sent = setupContent(vm)
 
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput("hello shell")
-        // Send (no enter).
+        compose.onNodeWithText("Insert").assertIsDisplayed()
+        compose.onNodeWithText("Send").assertIsDisplayed()
+        // Insert (no enter).
         compose.onNodeWithTag(COMPOSER_SEND_TAG).performClick()
         compose.waitForIdle()
         compose.waitUntil(timeoutMillis = 5_000) { sent.isNotEmpty() }

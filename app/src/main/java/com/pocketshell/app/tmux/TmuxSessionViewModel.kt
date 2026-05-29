@@ -28,6 +28,8 @@ import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
+import com.pocketshell.app.sessions.SSH_SOURCE_TMUX_CONNECT
+import com.pocketshell.app.sessions.SshOpenTelemetry
 import com.pocketshell.app.sessions.remoteStartDirectoryExists
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.core.agents.AgentDetection
@@ -788,6 +790,12 @@ public class TmuxSessionViewModel @Inject constructor(
                 "tmux-ssh-handshake count=$handshakeNumber host=${target.host} " +
                     "port=${target.port} user=${target.user} session=${target.sessionName} " +
                     "attempt=$attempt",
+            )
+            SshOpenTelemetry.record(
+                source = SSH_SOURCE_TMUX_CONNECT,
+                host = target.host,
+                port = target.port,
+                user = target.user,
             )
             val key: SshKey = SshKey.Path(File(target.keyPath))
             val sessionResult = SshConnection.connect(

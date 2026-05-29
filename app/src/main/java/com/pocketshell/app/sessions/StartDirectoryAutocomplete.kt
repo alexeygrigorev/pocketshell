@@ -58,6 +58,12 @@ class StartDirectoryAutocompleteRemoteSource @Inject constructor() {
         limit: Int = DEFAULT_START_DIRECTORY_AUTOCOMPLETE_LIMIT,
     ): List<String> {
         val request = StartDirectoryAutocompleteRequest.from(typedPrefix, limit) ?: return emptyList()
+        SshOpenTelemetry.record(
+            source = SSH_SOURCE_START_DIRECTORY_AUTOCOMPLETE,
+            host = target.hostname,
+            port = target.port,
+            user = target.username,
+        )
         val session = SshConnection.connect(
             host = target.hostname,
             port = target.port,

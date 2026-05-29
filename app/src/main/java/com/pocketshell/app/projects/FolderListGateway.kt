@@ -4,6 +4,9 @@ import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.repos.ReposListResult
 import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.session.AgentConversationRepository
+import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.sessions.SSH_SOURCE_FOLDER_LIST_PROBE
+import com.pocketshell.app.sessions.SshOpenTelemetry
 import com.pocketshell.app.sessions.remoteStartDirectoryExists
 import com.pocketshell.app.sessions.startDirectoryMissingMessage
 import com.pocketshell.core.agents.AgentKind
@@ -158,9 +161,10 @@ data class FolderImportPayload(
 
 class SshFolderListGateway @Inject constructor(
     private val reposRemoteSource: ReposRemoteSource,
+    private val activeTmuxClients: ActiveTmuxClients,
 ) : FolderListGateway {
 
-    constructor() : this(ReposRemoteSource(ReposJsonParser()))
+    constructor() : this(ReposRemoteSource(ReposJsonParser()), ActiveTmuxClients())
 
     // Issue #252: reuse the SAME detection logic the Conversation view
     // uses instead of maintaining a forked candidate-enumeration +
@@ -182,6 +186,14 @@ class SshFolderListGateway @Inject constructor(
         passphrase: CharArray?,
         watchedRoots: List<ProjectRootEntity>,
     ): FolderListResult {
+        listSessionsWithFolderFromLiveClient(host, keyPath)?.let { return it }
+
+        SshOpenTelemetry.record(
+            source = SSH_SOURCE_FOLDER_LIST_PROBE,
+            host = host.hostname,
+            port = host.port,
+            user = host.username,
+        )
         val session = SshConnection.connect(
             host = host.hostname,
             port = host.port,
@@ -551,6 +563,51 @@ class SshFolderListGateway @Inject constructor(
 
     private fun shellQuote(value: String): String = shellQuoteValue(value)
 
+    private suspend fun listSessionsWithFolderFromLiveClient(
+        host: HostEntity,
+        keyPath: String,
+    ): FolderListResult? {
+        val entry = activeTmuxClients.clients.value[host.id]
+            ?.takeIf { it.matches(host, keyPath) }
+            ?.takeUnless { it.client.disconnected.value }
+            ?: return null
+        return try {
+            val listSessions = entry.client.sendCommand(CONTROL_LIST_SESSIONS_COMMAND)
+            when {
+                listSessions.isError &&
+                    listSessions.output.joinToString("\n").contains("no server running", ignoreCase = true) ->
+                    FolderListResult.Sessions(rows = emptyList())
+                listSessions.isError -> null
+                else -> {
+                    val baseRows = parseListSessionsRows(listSessions.output.joinToString(separator = "\n"))
+                    val paneRows = runCatching {
+                        val listPanes = entry.client.sendCommand(CONTROL_LIST_PANES_COMMAND)
+                        if (!listPanes.isError) parseActivePaneRows(listPanes.output.joinToString("\n")) else emptyMap()
+                    }.getOrDefault(emptyMap())
+
+                    val rows = baseRows.map { row ->
+                        val pane = paneRows[row.sessionName]
+                        row.copy(
+                            cwd = pane?.cwd ?: row.cwd,
+                            agentKind = SessionAgentKind.Shell,
+                        )
+                    }
+                    FolderListResult.Sessions(rows = rows)
+                }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun ActiveTmuxClients.Entry.matches(host: HostEntity, keyPath: String): Boolean =
+        hostname == host.hostname &&
+            port == host.port &&
+            username == host.username &&
+            this.keyPath == keyPath
+
     private fun shellQuoteRemotePath(value: String): String =
         shellQuoteRemotePathValue(value)
 
@@ -661,6 +718,16 @@ class SshFolderListGateway @Inject constructor(
 
         const val LIST_PANES_COMMAND: String =
             "tmux list-panes -a -F " +
+                "'#{session_name}$FIELD_SEP#{pane_active}$FIELD_SEP" +
+                "#{pane_current_path}$FIELD_SEP#{pane_tty}$FIELD_SEP#{pane_current_command}'"
+
+        const val CONTROL_LIST_SESSIONS_COMMAND: String =
+            "list-sessions -F " +
+                "'#{session_name}$FIELD_SEP#{session_created}$FIELD_SEP" +
+                "#{session_activity}$FIELD_SEP#{session_attached}$FIELD_SEP#{session_path}'"
+
+        const val CONTROL_LIST_PANES_COMMAND: String =
+            "list-panes -a -F " +
                 "'#{session_name}$FIELD_SEP#{pane_active}$FIELD_SEP" +
                 "#{pane_current_path}$FIELD_SEP#{pane_tty}$FIELD_SEP#{pane_current_command}'"
 

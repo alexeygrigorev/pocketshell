@@ -20,7 +20,15 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
+import com.pocketshell.app.sessions.SSH_SOURCE_FOLDER_LIST_PROBE
+import com.pocketshell.app.sessions.SSH_SOURCE_SESSION_PICKER_LIST
+import com.pocketshell.app.sessions.SSH_SOURCE_START_DIRECTORY_AUTOCOMPLETE
+import com.pocketshell.app.sessions.SSH_SOURCE_TMUX_CONNECT
+import com.pocketshell.app.sessions.SshOpenTelemetry
+import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_MORE_BUTTON_TAG
+import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_FULL_CHROME_MORE_BUTTON_TAG
 import com.pocketshell.app.tmux.SSH_HANDSHAKE_ATTEMPTS
 import com.pocketshell.app.tmux.TMUX_CONNECT_ATTEMPTS
@@ -58,10 +66,11 @@ import java.io.FileOutputStream
  * counter the ViewModel increments each time it actually calls
  * [SshConnection.connect]. A same-host switch must not increment it.
  *
- * Timing assertion: end-to-end switch latency below 500ms. The full
+ * Timing assertion: end-to-end switch latency below 1s. The full
  * teardown path used to be 2-5s in real use; the new path skips both
  * the SSH handshake AND the previous SSH `disconnect()` thread hop,
- * so 500ms is a comfortable ceiling even on a slow emulator.
+ * so a sub-second ceiling is a comfortable local guard while the
+ * structural no-new-SSH assertion remains the release gate.
  *
  * Companion to [TmuxSessionSwitchE2eTest] (#151) — that test pins the
  * crash-safety contract of the same UX gesture; this one pins the
@@ -115,6 +124,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         val hostRowTag = seedDockerHost(key, "Issue178 Same Host")
 
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        SshOpenTelemetry.resetForTest()
 
         // ---- (1) Attach to SESSION_A.
         compose.waitUntil(timeoutMillis = 10_000) {
@@ -137,6 +147,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         // must NOT.
         val handshakeBefore = SSH_HANDSHAKE_ATTEMPTS.get()
         val tmuxConnectBefore = TMUX_CONNECT_ATTEMPTS.get()
+        val sshOpenBefore = SshOpenTelemetry.snapshot()
         Log.i(LOG_TAG, "snapshot-before handshake=$handshakeBefore tmuxConnect=$tmuxConnectBefore")
 
         // ---- (3) Tap the More menu, open the switcher, and switch to a
@@ -158,7 +169,9 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         // the exact production path under test.
         openMoreMenu()
         compose.onNodeWithText("Switch session").performClick()
+        val pickerOpenAt = SystemClock.elapsedRealtime()
         waitForSessionPagerReady(timeoutMs = pickerWaitMs)
+        recordTiming("switcher_open_to_ready_ms", SystemClock.elapsedRealtime() - pickerOpenAt)
         // [switchAt] is stamped the instant the switch is DISPATCHED (the
         // pager settles and the tmux logical connect counter advances), so
         // the latency we measure is the same-host switch itself — not the
@@ -191,6 +204,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
 
         waitForTerminalViewAttached()
         waitForTmuxConnectCountAbove(tmuxConnectBefore)
+        waitForTerminalText(SESSION_B_MARKER)
         val switchMs = SystemClock.elapsedRealtime() - switchAt
         recordTiming("same_host_switch_ms", switchMs)
         captureViewport("issue257-02-switched-to-other-session")
@@ -198,13 +212,17 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         // ---- (4) Verify the structural invariants.
         val handshakeAfter = SSH_HANDSHAKE_ATTEMPTS.get()
         val tmuxConnectAfter = TMUX_CONNECT_ATTEMPTS.get()
+        val sshOpenDeltas = sshOpenDeltasSince(sshOpenBefore)
         Log.i(
             LOG_TAG,
             "snapshot-after handshake=$handshakeAfter tmuxConnect=$tmuxConnectAfter " +
-                "switchMs=$switchMs",
+                "switchMs=$switchMs sshOpenDeltas=$sshOpenDeltas",
         )
         recordTiming("ssh_handshakes_during_switch", (handshakeAfter - handshakeBefore).toLong())
         recordTiming("tmux_connects_during_switch", (tmuxConnectAfter - tmuxConnectBefore).toLong())
+        SSH_SWITCH_SOURCES.forEach { source ->
+            recordTiming("ssh_opens_${source}_during_switch", (sshOpenDeltas[source] ?: 0).toLong())
+        }
 
         assertEquals(
             "same-host switch must NOT increment the SSH handshake counter " +
@@ -217,6 +235,12 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
             "tmux logical connect counter must advance on a session switch " +
                 "(tmuxConnectBefore=$tmuxConnectBefore tmuxConnectAfter=$tmuxConnectAfter)",
             tmuxConnectAfter > tmuxConnectBefore,
+        )
+        assertEquals(
+            "same-host switch must not open fresh SSH from any session-switch source; " +
+                "deltas=$sshOpenDeltas",
+            emptyMap<String, Int>(),
+            sshOpenDeltas.filterValues { it != 0 },
         )
 
         // Acceptance criterion: the structural no-new-SSH assertion above is
@@ -231,6 +255,85 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
             "same-host session switch must complete in under ${switchBudgetMs}ms, " +
                 "took ${switchMs}ms",
             switchMs < switchBudgetMs,
+        )
+
+        writeTimings()
+        Unit
+    }
+
+    @Test
+    fun dashboardSameHostSessionTapReusesSshTransport() = runBlocking {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        seedTmuxSessions(key)
+        val hostRowTag = seedDockerHost(key, "Issue278 Dashboard Same Host")
+
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForFolderListReady()
+        compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        waitForTerminalText(SESSION_A_MARKER)
+        captureViewport("issue278-01-dashboard-attached-session-a")
+
+        val handshakeBefore = SSH_HANDSHAKE_ATTEMPTS.get()
+        val tmuxConnectBefore = TMUX_CONNECT_ATTEMPTS.get()
+        SshOpenTelemetry.resetForTest()
+        val switchWindowStart = SystemClock.elapsedRealtime()
+
+        clickTmuxBack()
+        waitForFolderListReady()
+        recordTiming("folder_back_to_rows_ready_ms", SystemClock.elapsedRealtime() - switchWindowStart)
+        val rowTapAt = SystemClock.elapsedRealtime()
+        compose.onNodeWithText(SESSION_B, useUnmergedTree = true).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+        waitForTerminalViewAttached()
+        waitForTmuxConnectCountAbove(tmuxConnectBefore)
+        waitForTerminalText(SESSION_B_MARKER)
+        val rowTapToReadyMs = SystemClock.elapsedRealtime() - rowTapAt
+        recordTiming("folder_row_tap_to_terminal_ready_ms", rowTapToReadyMs)
+        captureViewport("issue278-02-dashboard-switched-to-session-b")
+
+        val handshakeAfter = SSH_HANDSHAKE_ATTEMPTS.get()
+        val tmuxConnectAfter = TMUX_CONNECT_ATTEMPTS.get()
+        val sshOpenDeltas = sshOpenDeltasSince(emptyMap())
+        recordTiming("dashboard_ssh_handshakes_during_switch", (handshakeAfter - handshakeBefore).toLong())
+        recordTiming("dashboard_tmux_connects_during_switch", (tmuxConnectAfter - tmuxConnectBefore).toLong())
+        SSH_SWITCH_SOURCES.forEach { source ->
+            recordTiming("dashboard_ssh_opens_${source}_during_switch", (sshOpenDeltas[source] ?: 0).toLong())
+        }
+
+        assertEquals(
+            "dashboard same-host switch must not perform a ViewModel SSH handshake",
+            handshakeBefore,
+            handshakeAfter,
+        )
+        assertTrue(
+            "dashboard same-host switch must still advance tmux logical connect count",
+            tmuxConnectAfter > tmuxConnectBefore,
+        )
+        assertEquals(
+            "dashboard same-host switch must not open fresh SSH from picker/folder/tmux sources; " +
+                "deltas=$sshOpenDeltas",
+            emptyMap<String, Int>(),
+            sshOpenDeltas.filterValues { it != 0 },
+        )
+        val budgetMs = if (TerminalTestTimeouts.isRunningOnCi()) {
+            CI_SWITCH_BUDGET_MS
+        } else {
+            LOCAL_DASHBOARD_SWITCH_BUDGET_MS
+        }
+        assertTrue(
+            "dashboard same-host row tap should be under ${budgetMs}ms; took ${rowTapToReadyMs}ms",
+            rowTapToReadyMs < budgetMs,
         )
 
         writeTimings()
@@ -395,6 +498,17 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         }
     }
 
+    private fun waitForFolderListReady() {
+        compose.waitUntil(timeoutMillis = pickerWaitMs) {
+            compose.onAllNodesWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty() &&
+                compose.onAllNodesWithText(SESSION_B, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+        }
+    }
+
     /**
      * Scroll the session pager to the page bearing [name] and click it.
      * The pager only mounts a few pages around the current one, so we
@@ -462,6 +576,29 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         compose.onNodeWithTag(TMUX_FULL_CHROME_MORE_BUTTON_TAG, useUnmergedTree = true)
             .performClick()
     }
+
+    private fun clickTmuxBack() {
+        val tags = listOf(
+            TMUX_COMPACT_CHROME_BACK_BUTTON_TAG,
+            TMUX_FULL_CHROME_BACK_BUTTON_TAG,
+        )
+        for (tag in tags) {
+            if (compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            ) {
+                compose.onNodeWithTag(tag, useUnmergedTree = true).performClick()
+                return
+            }
+        }
+        compose.onNodeWithTag(TMUX_FULL_CHROME_BACK_BUTTON_TAG, useUnmergedTree = true)
+            .performClick()
+    }
+
+    private fun sshOpenDeltasSince(before: Map<String, Int>): Map<String, Int> =
+        SSH_SWITCH_SOURCES.associateWith { source ->
+            SshOpenTelemetry.count(source) - (before[source] ?: 0)
+        }
 
     private fun waitForTerminalViewAttached() {
         compose.waitUntil(timeoutMillis = 30_000) {
@@ -608,10 +745,17 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         // disappears before SESSION_B's appears during a switch.
         const val SESSION_A_MARKER: String = "A-READY"
         const val SESSION_B_MARKER: String = "B-READY"
-        const val LOCAL_SWITCH_BUDGET_MS: Long = 500L
+        const val LOCAL_SWITCH_BUDGET_MS: Long = 1_000L
+        const val LOCAL_DASHBOARD_SWITCH_BUDGET_MS: Long = 1_000L
         const val CI_SWITCH_BUDGET_MS: Long = 5_000L
         // Upper bound on session-pager page tags we probe when matching a
         // session by name (the pager is index-tagged from 1).
         const val MAX_PAGER_PAGES: Int = 12
+        val SSH_SWITCH_SOURCES: List<String> = listOf(
+            SSH_SOURCE_TMUX_CONNECT,
+            SSH_SOURCE_SESSION_PICKER_LIST,
+            SSH_SOURCE_FOLDER_LIST_PROBE,
+            SSH_SOURCE_START_DIRECTORY_AUTOCOMPLETE,
+        )
     }
 }

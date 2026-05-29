@@ -29,6 +29,8 @@ import com.pocketshell.app.hosts.HostListScreen
 import com.pocketshell.app.hosts.HostListViewModel
 import com.pocketshell.app.hosts.QrScannerScreen
 import com.pocketshell.app.hosts.SshKeysScreen
+import com.pocketshell.app.env.EnvCopySourceFolder
+import com.pocketshell.app.env.EnvScreen
 import com.pocketshell.app.jobs.RecurringJobsScreen
 import com.pocketshell.app.jobs.RecurringJobsViewModel
 import com.pocketshell.app.nav.AppDestination
@@ -695,6 +697,40 @@ private fun AppNavigator(
                     ),
                 )
             },
+            // Issue #264: route to the per-folder env-file manager. The
+            // discovered folder set is forwarded so the env screen's
+            // copy picker stays inside the known folders (D24).
+            onEditEnv = { path, label, allFolders ->
+                navigate(
+                    AppDestination.EnvFiles(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        directory = path,
+                        folderLabel = label,
+                        copySources = allFolders,
+                    ),
+                )
+            },
+        )
+
+        // Issue #264: per-folder `.env` / `.envrc` key manager backed by
+        // the host's `pocketshell env ...` CLI over SSH.
+        is AppDestination.EnvFiles -> EnvScreen(
+            hostId = dest.hostId,
+            hostName = dest.hostName,
+            keyPath = dest.keyPath,
+            passphrase = dest.passphrase,
+            directory = dest.directory,
+            folderLabel = dest.folderLabel,
+            copySources = dest.copySources.map { (path, label) ->
+                EnvCopySourceFolder(path = path, label = label)
+            },
+            onBack = ::back,
         )
 
         // Issue #230: GitHub repos browser. Lists the user's GitHub

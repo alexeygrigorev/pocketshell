@@ -99,6 +99,15 @@ fun FolderListScreen(
      * the same SSH credentials this screen already holds.
      */
     onBrowseRepos: () -> Unit,
+    /**
+     * Issue #264: open the per-folder `.env` / `.envrc` key manager.
+     * Fired with the tapped folder's canonical path + label so the
+     * caller (MainActivity) can route to `AppDestination.EnvFiles`. The
+     * second argument is the full discovered folder set (path → label)
+     * so the env screen's "Copy from another folder" picker is sourced
+     * from the same data the user saw here (D24).
+     */
+    onEditEnv: (path: String, label: String, allFolders: List<Pair<String, String>>) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: FolderListViewModel = hiltViewModel(),
 ) {
@@ -161,6 +170,15 @@ fun FolderListScreen(
                     },
                     onCreateInFolder = { row ->
                         pickerFolder = PickerTarget(path = row.path, label = row.label)
+                    },
+                    onEditEnv = { row ->
+                        // Copy-source set = every real (non-untracked)
+                        // discovered folder the user can see, so the env
+                        // screen's picker stays inside the known set (D24).
+                        val sources = s.folders
+                            .filter { it.path != FolderListViewModel.UNTRACKED_PATH }
+                            .map { it.path to it.label }
+                        onEditEnv(row.path, row.label, sources)
                     },
                 )
             }
@@ -324,6 +342,7 @@ private fun FolderListContent(
     onToggleShowAll: () -> Unit,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
     onCreateInFolder: (FolderRow) -> Unit,
+    onEditEnv: (FolderRow) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -340,6 +359,7 @@ private fun FolderListContent(
                     folder = folder,
                     onSessionClick = onSessionClick,
                     onCreateInFolder = onCreateInFolder,
+                    onEditEnv = onEditEnv,
                 )
             }
         }
@@ -426,6 +446,7 @@ private fun FolderGroup(
     folder: FolderRow,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
     onCreateInFolder: (FolderRow) -> Unit,
+    onEditEnv: (FolderRow) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -433,7 +454,11 @@ private fun FolderGroup(
             .testTag(folderRowTestTag(folder.path)),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        FolderHeader(folder = folder, onCreateInFolder = { onCreateInFolder(folder) })
+        FolderHeader(
+            folder = folder,
+            onCreateInFolder = { onCreateInFolder(folder) },
+            onEditEnv = { onEditEnv(folder) },
+        )
         if (folder.sessions.isEmpty()) {
             EmptyFolderHint(onCreate = { onCreateInFolder(folder) })
         } else {
@@ -457,7 +482,11 @@ private fun FolderGroup(
 }
 
 @Composable
-private fun FolderHeader(folder: FolderRow, onCreateInFolder: () -> Unit) {
+private fun FolderHeader(
+    folder: FolderRow,
+    onCreateInFolder: () -> Unit,
+    onEditEnv: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -494,6 +523,21 @@ private fun FolderHeader(folder: FolderRow, onCreateInFolder: () -> Unit) {
                 color = PocketShellColors.TextSecondary,
                 fontSize = 11.sp,
             )
+        }
+        // Issue #264: "Env" entry point — only on real folders (the
+        // synthetic Untracked group has no filesystem path to manage).
+        if (folder.path != FolderListViewModel.UNTRACKED_PATH) {
+            TextButton(
+                onClick = onEditEnv,
+                modifier = Modifier.testTag(folderDetailEnvTestTag(folder.path)),
+            ) {
+                Text(
+                    text = "Env",
+                    color = PocketShellColors.Accent,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
         }
         TextButton(
             onClick = onCreateInFolder,
@@ -607,3 +651,5 @@ fun folderDetailRowTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName"
 fun folderDetailCreateTestTag(folderPath: String): String =
     "folder-list:detail:$folderPath:create"
+fun folderDetailEnvTestTag(folderPath: String): String =
+    "folder-list:detail:$folderPath:env"

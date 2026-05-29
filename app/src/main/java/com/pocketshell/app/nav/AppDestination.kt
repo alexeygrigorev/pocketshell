@@ -220,6 +220,40 @@ sealed interface AppDestination {
         val passphrase: CharArray?,
     ) : AppDestination
 
+    /**
+     * Per-folder `.env` / `.envrc` key management — issue #264.
+     *
+     * Reached from the "Env" action on a folder row in [FolderList].
+     * Backed entirely by the host's `pocketshell env ...` CLI over SSH
+     * (no biometric reveal, write-only by default — D24).
+     *
+     * @property hostId persistent host identifier the screen scopes to.
+     * @property hostName user-facing saved-host label shown in the header.
+     * @property hostname / [port] / [username] / [keyPath] / [passphrase]
+     *   resolved SSH connection parameters — required because the screen
+     *   shells out to `pocketshell env list/get/set/copy` via
+     *   `SshConnection`.
+     * @property directory absolute remote folder path whose env files are
+     *   managed.
+     * @property folderLabel user-visible label for [directory].
+     * @property copySources the already-discovered folder set (path +
+     *   label) the copy flow can read from — sourced from the same data
+     *   the folder list shows so the user never types an arbitrary path
+     *   (D24). The current folder is filtered out client-side.
+     */
+    data class EnvFiles(
+        val hostId: Long,
+        val hostName: String,
+        val hostname: String,
+        val port: Int,
+        val username: String,
+        val keyPath: String,
+        val passphrase: CharArray?,
+        val directory: String,
+        val folderLabel: String,
+        val copySources: List<Pair<String, String>>,
+    ) : AppDestination
+
     /** Per-session recurring jobs backed by the host's `pocketshell jobs` CLI. */
     data class RecurringJobs(
         val hostName: String,

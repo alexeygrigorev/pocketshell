@@ -1,0 +1,239 @@
+package com.pocketshell.app.env
+
+import com.pocketshell.app.hosts.MainDispatcherRule
+import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.entity.HostEntity
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Rule
+import org.junit.Test
+
+@OptIn(ExperimentalCoroutinesApi::class)
+class EnvViewModelTest {
+
+    @get:Rule
+    val mainDispatcherRule = MainDispatcherRule()
+
+    private val host = HostEntity(
+        id = 1L,
+        name = "Lab",
+        hostname = "lab.local",
+        port = 22,
+        username = "alexey",
+        keyId = 9L,
+    )
+
+    @Test
+    fun bindLoadsMaskedKeyList() = runTest {
+        val gateway = FakeEnvGateway(
+            listResult = EnvListResult.Keys(
+                listOf(
+                    EnvKeyRow("API_KEY", ".env", true),
+                    EnvKeyRow("EMPTY", ".env", false),
+                ),
+            ),
+        )
+        val vm = EnvViewModel(gateway, FakeHostDao(host))
+
+        vm.bind(1L, "/tmp/key", null, "/home/alexey/proj", "proj", emptyList())
+        advanceUntilIdle()
+
+        val list = vm.state.value.list as EnvListState.Ready
+        assertEquals(listOf("API_KEY", "EMPTY"), list.keys.map { it.key })
+        // No values are present until the user explicitly reveals.
+        assertTrue(list.keys.all { it.revealedValue == null })
+    }
+
+    @Test
+    fun setKeyPassesValueToGatewayAndRefreshes() = runTest {
+        val gateway = FakeEnvGateway(listResult = EnvListResult.Keys(emptyList()))
+        val vm = EnvViewModel(gateway, FakeHostDao(host))
+        vm.bind(1L, "/tmp/key", null, "/home/alexey/proj", "proj", emptyList())
+        advanceUntilIdle()
+
+        vm.setKey("API_KEY", "sk-secret", EnvFileTarget.Env)
+        advanceUntilIdle()
+
+        // The value reached the gateway via the structured updates map
+        // (the gateway is responsible for the stdin transport — D24).
+        assertEquals(mapOf("API_KEY" to "sk-secret"), gateway.lastSetUpdates)
+        assertEquals(EnvFileTarget.Env, gateway.lastSetFile)
+        // A refresh (list) ran after the successful set.
+        assertTrue(gateway.listCalls >= 2)
+    }
+
+    @Test
+    fun setKeyRejectsInvalidIdentifierWithoutCallingGateway() = runTest {
+        val gateway = FakeEnvGateway(listResult = EnvListResult.Keys(emptyList()))
+        val vm = EnvViewModel(gateway, FakeHostDao(host))
+        vm.bind(1L, "/tmp/key", null, "/home/alexey/proj", "proj", emptyList())
+        advanceUntilIdle()
+
+        vm.setKey("bad-key", "v", EnvFileTarget.Env)
+        advanceUntilIdle()
+
+        assertNull(gateway.lastSetUpdates)
+        assertTrue(vm.state.value.transientMessage!!.contains("shell identifier"))
+    }
+
+    @Test
+    fun revealKeyFetchesPlainValue() = runTest {
+        val gateway = FakeEnvGateway(
+            listResult = EnvListResult.Keys(listOf(EnvKeyRow("API_KEY", ".env", true))),
+            getResult = EnvOpResult.Values(mapOf("API_KEY" to "sk-secret-123")),
+        )
+        val vm = EnvViewModel(gateway, FakeHostDao(host))
+        vm.bind(1L, "/tmp/key", null, "/home/alexey/proj", "proj", emptyList())
+        advanceUntilIdle()
+
+        vm.revealKey("API_KEY")
+        advanceUntilIdle()
+
+        val row = (vm.state.value.list as EnvListState.Ready).keys.first { it.key == "API_KEY" }
+        assertEquals("sk-secret-123", row.revealedValue)
+    }
+
+    @Test
+    fun hideKeyClearsRevealedValue() = runTest {
+        val gateway = FakeEnvGateway(
+            listResult = EnvListResult.Keys(listOf(EnvKeyRow("API_KEY", ".env", true))),
+            getResult = EnvOpResult.Values(mapOf("API_KEY" to "sk-secret-123")),
+        )
+        val vm = EnvViewModel(gateway, FakeHostDao(host))
+        vm.bind(1L, "/tmp/key", null, "/home/alexey/proj", "proj", emptyList())
+        advanceUntilIdle()
+        vm.revealKey("API_KEY")
+        advanceUntilIdle()
+
+        vm.hideKey("API_KEY")
+
+        val row = (vm.state.value.list as EnvListState.Ready).keys.first { it.key == "API_KEY" }
+        assertNull(row.revealedValue)
+    }
+
+    @Test
+    fun copyKeysCallsGatewayAndRefreshes() = runTest {
+        val gateway = FakeEnvGateway(listResult = EnvListResult.Keys(emptyList()))
+        val vm = EnvViewModel(gateway, FakeHostDao(host))
+        vm.bind(
+            1L, "/tmp/key", null, "/home/alexey/proj", "proj",
+            listOf(EnvCopySourceFolder("/home/alexey/other", "other")),
+        )
+        advanceUntilIdle()
+
+        vm.copyKeys("/home/alexey/other", listOf("API_KEY", "URL"), EnvFileTarget.Envrc)
+        advanceUntilIdle()
+
+        assertEquals("/home/alexey/other", gateway.lastCopySource)
+        assertEquals("/home/alexey/proj", gateway.lastCopyDest)
+        assertEquals(listOf("API_KEY", "URL"), gateway.lastCopyKeys)
+        assertEquals(EnvFileTarget.Envrc, gateway.lastCopyFile)
+    }
+
+    @Test
+    fun copySourcesExcludeCurrentFolder() = runTest {
+        val gateway = FakeEnvGateway(listResult = EnvListResult.Keys(emptyList()))
+        val vm = EnvViewModel(gateway, FakeHostDao(host))
+        vm.bind(
+            1L, "/tmp/key", null, "/home/alexey/proj", "proj",
+            listOf(
+                EnvCopySourceFolder("/home/alexey/proj", "proj"),
+                EnvCopySourceFolder("/home/alexey/other", "other"),
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf("/home/alexey/other"),
+            vm.state.value.copySources.map { it.path },
+        )
+    }
+
+    @Test
+    fun toolMissingSurfacesUnavailableState() = runTest {
+        val gateway = FakeEnvGateway(listResult = EnvListResult.ToolUnavailable)
+        val vm = EnvViewModel(gateway, FakeHostDao(host))
+        vm.bind(1L, "/tmp/key", null, "/home/alexey/proj", "proj", emptyList())
+        advanceUntilIdle()
+
+        assertTrue(vm.state.value.list is EnvListState.ToolUnavailable)
+    }
+
+    private class FakeEnvGateway(
+        private val listResult: EnvListResult,
+        private val getResult: EnvOpResult = EnvOpResult.Values(emptyMap()),
+        private val setResult: EnvOpResult = EnvOpResult.Success,
+        private val copyResult: EnvOpResult = EnvOpResult.Success,
+    ) : EnvGateway {
+        var listCalls = 0
+        var lastSetUpdates: Map<String, String>? = null
+        var lastSetFile: EnvFileTarget? = null
+        var lastCopySource: String? = null
+        var lastCopyDest: String? = null
+        var lastCopyKeys: List<String>? = null
+        var lastCopyFile: EnvFileTarget? = null
+
+        override suspend fun listKeys(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            directory: String,
+        ): EnvListResult {
+            listCalls++
+            return listResult
+        }
+
+        override suspend fun getValue(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            directory: String,
+            key: String,
+        ): EnvOpResult = getResult
+
+        override suspend fun setKeys(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            directory: String,
+            file: EnvFileTarget,
+            updates: Map<String, String>,
+        ): EnvOpResult {
+            lastSetUpdates = updates
+            lastSetFile = file
+            return setResult
+        }
+
+        override suspend fun copyKeys(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            sourceDirectory: String,
+            destinationDirectory: String,
+            file: EnvFileTarget,
+            keys: List<String>,
+        ): EnvOpResult {
+            lastCopySource = sourceDirectory
+            lastCopyDest = destinationDirectory
+            lastCopyKeys = keys
+            lastCopyFile = file
+            return copyResult
+        }
+    }
+
+    private class FakeHostDao(private val host: HostEntity?) : HostDao {
+        override fun getAll(): Flow<List<HostEntity>> = flowOf(listOfNotNull(host))
+        override suspend fun getById(id: Long): HostEntity? = host?.takeIf { it.id == id }
+        override fun getEnabled(): Flow<List<HostEntity>> = flowOf(emptyList())
+        override suspend fun insert(host: HostEntity): Long = host.id
+        override suspend fun update(host: HostEntity) {}
+        override suspend fun delete(host: HostEntity) {}
+        override suspend fun deleteById(id: Long) {}
+    }
+}

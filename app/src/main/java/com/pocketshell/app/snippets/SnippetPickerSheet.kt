@@ -81,6 +81,10 @@ import com.pocketshell.uikit.theme.PocketShellThemeMode
  * Search is a client-side substring match on label + body, case-
  * insensitive. The list is small (typically <50 entries) so a full scan
  * per keystroke is fast enough that we don't need a debounce.
+ *
+ * [kindFilter] lets session surfaces open the picker in the category
+ * that matches the active context: prompts for agent panes, commands
+ * for plain shells.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -89,6 +93,7 @@ public fun SnippetPickerSheet(
     onDismiss: () -> Unit,
     onSnippetSend: (SnippetEntity, withEnter: Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    kindFilter: SnippetKind? = null,
     viewModel: SnippetsViewModel = hiltViewModel(),
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
 ) {
@@ -100,18 +105,15 @@ public fun SnippetPickerSheet(
     var query by remember { mutableStateOf("") }
     var showManage by remember { mutableStateOf(false) }
 
-    val filtered = remember(query, snippets) {
-        if (query.isBlank()) {
-            snippets
-        } else {
-            val needle = query.trim().lowercase()
-            snippets.filter { snippet ->
-                // Match against the *displayed* label so derived-label
-                // rows (issue #190) are still findable via the search.
-                snippet.displayLabel().lowercase().contains(needle) ||
-                    snippet.body.lowercase().contains(needle)
-            }
-        }
+    val kindFiltered = remember(snippets, kindFilter) {
+        filterSnippetsForPicker(snippets = snippets, query = "", kindFilter = kindFilter)
+    }
+    val filtered = remember(query, snippets, kindFilter) {
+        filterSnippetsForPicker(
+            snippets = snippets,
+            query = query,
+            kindFilter = kindFilter,
+        )
     }
 
     ModalBottomSheet(
@@ -123,7 +125,8 @@ public fun SnippetPickerSheet(
     ) {
         SnippetPickerContent(
             snippets = filtered,
-            totalCount = snippets.size,
+            totalCount = kindFiltered.size,
+            kindFilter = kindFilter,
             query = query,
             onQueryChange = { query = it },
             onSnippetSend = { snippet, withEnter ->
@@ -163,6 +166,7 @@ public fun SnippetPickerSheet(
 internal fun SnippetPickerContent(
     snippets: List<SnippetEntity>,
     totalCount: Int,
+    kindFilter: SnippetKind? = null,
     query: String,
     onQueryChange: (String) -> Unit,
     onSnippetSend: (SnippetEntity, withEnter: Boolean) -> Unit,
@@ -270,7 +274,7 @@ internal fun SnippetPickerContent(
             // Cold-start empty state. The "Manage" affordance in the
             // header is the way out — pointing at it explicitly so the
             // user doesn't think the sheet is broken.
-            EmptyPickerState(onManageTap = onManageTap)
+            EmptyPickerState(kindFilter = kindFilter, onManageTap = onManageTap)
         } else if (snippets.isEmpty()) {
             // Non-empty library, empty filtered result.
             Box(
@@ -301,6 +305,25 @@ internal fun SnippetPickerContent(
                 }
             }
         }
+    }
+}
+
+internal fun filterSnippetsForPicker(
+    snippets: List<SnippetEntity>,
+    query: String,
+    kindFilter: SnippetKind?,
+): List<SnippetEntity> {
+    val byKind = kindFilter?.let { filter ->
+        snippetsForKind(snippets, filter)
+    } ?: snippets
+    if (query.isBlank()) return byKind
+
+    val needle = query.trim().lowercase()
+    return byKind.filter { snippet ->
+        // Match against the *displayed* label so derived-label rows
+        // (issue #190) are still findable via the search.
+        snippet.displayLabel().lowercase().contains(needle) ||
+            snippet.body.lowercase().contains(needle)
     }
 }
 
@@ -548,7 +571,7 @@ internal fun KindTag(kind: SnippetKind) {
 }
 
 @Composable
-private fun EmptyPickerState(onManageTap: () -> Unit) {
+private fun EmptyPickerState(kindFilter: SnippetKind?, onManageTap: () -> Unit) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -558,13 +581,21 @@ private fun EmptyPickerState(onManageTap: () -> Unit) {
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
-                text = "No snippets yet",
+                text = if (kindFilter == null) {
+                    "No snippets yet"
+                } else {
+                    "No ${kindFilter.label.lowercase()} snippets yet"
+                },
                 color = PocketShellColors.Text,
                 style = MaterialTheme.typography.titleMedium,
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "Tap Manage to add commands or prompt templates",
+                text = if (kindFilter == null) {
+                    "Tap Manage to add commands or prompt templates"
+                } else {
+                    "Tap Manage to add a ${kindFilter.label.lowercase()} template"
+                },
                 color = PocketShellColors.TextSecondary,
                 fontSize = 12.sp,
             )

@@ -103,6 +103,7 @@ import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.sessions.HostTmuxSessionRow
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
+import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.app.voice.BottomChipControls
@@ -1169,6 +1170,11 @@ public fun TmuxSessionScreen(
         SnippetPickerSheet(
             hostId = hostId,
             onDismiss = { showSnippetPicker = false },
+            kindFilter = if (currentAgentConversation?.detection != null) {
+                SnippetKind.Prompt
+            } else {
+                SnippetKind.Command
+            },
             onSnippetSend = { snippet, withEnter ->
                 // Issue #249: same liveness guard as the prompt composer —
                 // never write a snippet into a dead pane and lose the tap.

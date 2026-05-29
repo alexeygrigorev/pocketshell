@@ -65,6 +65,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.voice.PendingTranscriptionItem
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
@@ -322,6 +323,7 @@ public fun PromptComposerSheet(
         SnippetPickerSheet(
             hostId = hostId,
             onDismiss = { showSnippetPicker = false },
+            kindFilter = SnippetKind.Prompt,
             onSnippetSend = { snippet, _ -> appendToDraft(snippet) },
         )
     }

@@ -60,6 +60,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.composer.MarkdownText
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
+import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
@@ -502,6 +503,7 @@ public fun SessionScreen(
         SnippetPickerSheet(
             hostId = hostId,
             onDismiss = { showSnippetPicker = false },
+            kindFilter = SnippetKind.Command,
             onSnippetSend = { snippet, withEnter ->
                 // Issue #249: same liveness guard as the prompt composer.
                 if (sessionLive) {

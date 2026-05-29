@@ -38,6 +38,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextOverflow
@@ -58,11 +59,11 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * Layout, top-to-bottom:
  *
  *  - **App bar** — back `‹` + title "Snippets".
+ *  - **Kind tabs** — top-level Prompts / Commands toggle that filters
+ *    the manager list.
  *  - **Add button** — accent pill that opens the [SnippetEditorDialog].
  *  - **Inline error banner** — surfaces DAO failures from the ViewModel.
- *  - **Two grouped sections** — "Commands" and "Prompts". Empty groups
- *    are collapsed so a brand-new library shows nothing but the empty
- *    state.
+ *  - **Filtered list** — shows one snippet kind at a time.
  *
  * Each row carries `Edit` and `Delete` text buttons. Delete shows a
  * confirmation dialog because the action is destructive and not undoable
@@ -92,6 +93,7 @@ public fun SnippetsScreen(
     var editorTarget: SnippetEntity? by remember { mutableStateOf(null) }
     var showAddDialog by remember { mutableStateOf(false) }
     var pendingDelete: SnippetEntity? by remember { mutableStateOf(null) }
+    var selectedKind by remember { mutableStateOf(SnippetKind.Prompt) }
     // Issue #190: long-press surface for renaming a snippet without
     // editing the body. Reuses the rename text field shape so the user
     // can clear an override (returning to derived-label behaviour) or
@@ -108,12 +110,9 @@ public fun SnippetsScreen(
         }
     }
 
-    val commands = snippets.filter {
-        SnippetKind.fromStorage(it.kind) == SnippetKind.Command
-    }
-    val prompts = snippets.filter {
-        SnippetKind.fromStorage(it.kind) == SnippetKind.Prompt
-    }
+    val commands = remember(snippets) { snippetsForKind(snippets, SnippetKind.Command) }
+    val prompts = remember(snippets) { snippetsForKind(snippets, SnippetKind.Prompt) }
+    val visibleSnippets = if (selectedKind == SnippetKind.Prompt) prompts else commands
 
     Box(
         modifier = modifier
@@ -123,12 +122,21 @@ public fun SnippetsScreen(
         Column(modifier = Modifier.fillMaxSize()) {
             SnippetsAppBar(onBack = onBack)
 
+            SnippetKindTabs(
+                selectedKind = selectedKind,
+                onSelect = { selectedKind = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+            )
+
             // Add affordance — accent pill stretched wide enough to read
             // as the primary action of the screen.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                    .padding(horizontal = 16.dp)
+                    .padding(bottom = 12.dp),
             ) {
                 Button(
                     onClick = { showAddDialog = true },
@@ -138,7 +146,10 @@ public fun SnippetsScreen(
                         contentColor = PocketShellColors.OnAccent,
                     ),
                 ) {
-                    Text("Add snippet", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        text = "Add ${selectedKind.label.lowercase()}",
+                        fontWeight = FontWeight.SemiBold,
+                    )
                 }
             }
 
@@ -162,7 +173,7 @@ public fun SnippetsScreen(
                 }
             }
 
-            if (snippets.isEmpty()) {
+            if (visibleSnippets.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -171,14 +182,14 @@ public fun SnippetsScreen(
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            text = "No snippets yet",
+                            text = emptyTitleForKind(selectedKind),
                             color = PocketShellColors.Text,
                             fontSize = 16.sp,
                             fontWeight = FontWeight.SemiBold,
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "Tap Add to create a command or prompt template.",
+                            text = emptyMessageForKind(selectedKind, snippets.isEmpty()),
                             color = PocketShellColors.TextSecondary,
                             fontSize = 13.sp,
                         )
@@ -190,37 +201,13 @@ public fun SnippetsScreen(
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    if (commands.isNotEmpty()) {
-                        item(key = "section-commands") {
-                            SectionHeader(
-                                label = "Commands",
-                                count = commands.size,
-                            )
-                        }
-                        items(commands, key = { "cmd-${it.id}" }) { snippet ->
-                            SnippetRow(
-                                snippet = snippet,
-                                onEdit = { editorTarget = snippet },
-                                onDelete = { pendingDelete = snippet },
-                                onRename = { renameTarget = snippet },
-                            )
-                        }
-                    }
-                    if (prompts.isNotEmpty()) {
-                        item(key = "section-prompts") {
-                            SectionHeader(
-                                label = "Prompts",
-                                count = prompts.size,
-                            )
-                        }
-                        items(prompts, key = { "prm-${it.id}" }) { snippet ->
-                            SnippetRow(
-                                snippet = snippet,
-                                onEdit = { editorTarget = snippet },
-                                onDelete = { pendingDelete = snippet },
-                                onRename = { renameTarget = snippet },
-                            )
-                        }
+                    items(visibleSnippets, key = { "${selectedKind.storageValue}-${it.id}" }) { snippet ->
+                        SnippetRow(
+                            snippet = snippet,
+                            onEdit = { editorTarget = snippet },
+                            onDelete = { pendingDelete = snippet },
+                            onRename = { renameTarget = snippet },
+                        )
                     }
                 }
             }
@@ -232,6 +219,7 @@ public fun SnippetsScreen(
         // null at insert time so the read-side renderer derives it from
         // the body's first line.
         SnippetAddDialog(
+            initialKind = selectedKind,
             onDismiss = { showAddDialog = false },
             onSave = { body, kind ->
                 viewModel.addSnippet(label = null, body = body, kind = kind)
@@ -302,6 +290,22 @@ public fun SnippetsScreen(
     }
 }
 
+internal fun snippetsForKind(
+    snippets: List<SnippetEntity>,
+    kind: SnippetKind,
+): List<SnippetEntity> =
+    snippets.filter { SnippetKind.fromStorage(it.kind) == kind }
+
+private fun emptyTitleForKind(kind: SnippetKind): String =
+    "No ${kind.label.lowercase()} snippets"
+
+private fun emptyMessageForKind(kind: SnippetKind, libraryIsEmpty: Boolean): String =
+    if (libraryIsEmpty) {
+        "Tap Add to create a command or prompt template."
+    } else {
+        "Switch tabs or add a ${kind.label.lowercase()} snippet."
+    }
+
 @Composable
 private fun SnippetsAppBar(onBack: () -> Unit) {
     Row(
@@ -337,39 +341,78 @@ private fun SnippetsAppBar(onBack: () -> Unit) {
 }
 
 /**
- * Section header matching the dashboard's `.section-label` style:
- * uppercase + letter-spaced + a small pill carrying the count.
+ * Top-level category tabs for the snippet manager. Prompts are listed
+ * first because agent prompt snippets are the motivating workflow for
+ * this split; Commands remain one tap away for plain shell sessions.
  */
 @Composable
-private fun SectionHeader(label: String, count: Int) {
+private fun SnippetKindTabs(
+    selectedKind: SnippetKind,
+    onSelect: (SnippetKind) -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 10.dp, end = 10.dp, top = 12.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = label.uppercase(),
-            color = PocketShellColors.TextMuted,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.8.sp,
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Box(
-            modifier = Modifier
-                .background(PocketShellColors.Surface, RoundedCornerShape(10.dp))
-                .padding(horizontal = 8.dp, vertical = 2.dp),
-        ) {
-            Text(
-                text = count.toString(),
-                color = PocketShellColors.TextSecondary,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Medium,
+        modifier = modifier
+            .background(PocketShellColors.Surface, RoundedCornerShape(10.dp))
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = RoundedCornerShape(10.dp),
             )
-        }
+            .padding(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        SnippetKindTab(
+            kind = SnippetKind.Prompt,
+            selected = selectedKind == SnippetKind.Prompt,
+            onClick = { onSelect(SnippetKind.Prompt) },
+            modifier = Modifier.weight(1f),
+        )
+        SnippetKindTab(
+            kind = SnippetKind.Command,
+            selected = selectedKind == SnippetKind.Command,
+            onClick = { onSelect(SnippetKind.Command) },
+            modifier = Modifier.weight(1f),
+        )
     }
 }
+
+@Composable
+private fun SnippetKindTab(
+    kind: SnippetKind,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .background(
+                color = if (selected) PocketShellColors.AccentSoft else PocketShellColors.Surface,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = if (selected) PocketShellColors.AccentDim else PocketShellColors.BorderSoft,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .clickable(onClick = onClick)
+            .testTag(snippetKindTabTag(kind))
+            .padding(horizontal = 10.dp, vertical = 9.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "${kind.label}s",
+            color = if (selected) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+internal fun snippetKindTabTag(kind: SnippetKind): String =
+    "snippets-kind-tab-${kind.storageValue}"
 
 /**
  * Single snippet row — mirrors the host-card visual treatment. Two
@@ -455,11 +498,12 @@ private fun SnippetRow(
  */
 @Composable
 internal fun SnippetAddDialog(
+    initialKind: SnippetKind,
     onDismiss: () -> Unit,
     onSave: (body: String, kind: SnippetKind) -> Unit,
 ) {
     var body by remember { mutableStateOf("") }
-    var kind by remember { mutableStateOf(SnippetKind.Command) }
+    var kind by remember(initialKind) { mutableStateOf(initialKind) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -494,12 +538,12 @@ internal fun SnippetAddDialog(
                 Spacer(modifier = Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     KindToggle(
-                        target = SnippetKind.Command,
+                        target = SnippetKind.Prompt,
                         current = kind,
                         onSelect = { kind = it },
                     )
                     KindToggle(
-                        target = SnippetKind.Prompt,
+                        target = SnippetKind.Command,
                         current = kind,
                         onSelect = { kind = it },
                     )
@@ -592,12 +636,12 @@ internal fun SnippetEditorDialog(
                 Spacer(modifier = Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     KindToggle(
-                        target = SnippetKind.Command,
+                        target = SnippetKind.Prompt,
                         current = kind,
                         onSelect = { kind = it },
                     )
                     KindToggle(
-                        target = SnippetKind.Prompt,
+                        target = SnippetKind.Command,
                         current = kind,
                         onSelect = { kind = it },
                     )

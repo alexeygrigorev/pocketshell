@@ -117,6 +117,7 @@ fun FolderListScreen(
     onEditEnv: (path: String, label: String, allFolders: List<Pair<String, String>>) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: FolderListViewModel = hiltViewModel(),
+    suggestStartDirectories: (suspend (String) -> List<String>)? = null,
 ) {
     LaunchedEffect(hostId, hostname, port, username, keyPath) {
         viewModel.bind(
@@ -248,6 +249,7 @@ fun FolderListScreen(
             folderPath = target.path,
             folderLabel = target.label,
             onDismiss = { pickerFolder = null },
+            suggestStartDirectories = suggestStartDirectories,
             onCreate = { choice ->
                 pickerFolder = null
                 val newName = derivedSessionName(choice)

@@ -41,6 +41,8 @@ import com.pocketshell.app.projects.WatchedFoldersViewModel
 import com.pocketshell.app.session.LastSessionStore
 import com.pocketshell.app.session.SessionScreen
 import com.pocketshell.app.session.SessionViewModel
+import com.pocketshell.app.sessions.StartDirectoryAutocompleteRemoteSource
+import com.pocketshell.app.sessions.StartDirectoryAutocompleteTarget
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.settings.SettingsScreen
 import com.pocketshell.app.settings.ThemePreference
@@ -118,6 +120,9 @@ class MainActivity : FragmentActivity() {
      */
     @Inject
     lateinit var lastSessionStore: LastSessionStore
+
+    @Inject
+    lateinit var startDirectoryAutocomplete: StartDirectoryAutocompleteRemoteSource
 
     /**
      * Issue #177: the navigator's current top destination, reported up by
@@ -233,6 +238,7 @@ class MainActivity : FragmentActivity() {
                     AppNavigator(
                         sessionViewModel = sessionViewModel,
                         usageScheduler = usageScheduler,
+                        startDirectoryAutocomplete = startDirectoryAutocomplete,
                         usageWarnPercent = settings.usageWarnThresholdPercent.toDouble(),
                         requestedDestination = requestedDestination,
                         pendingImportPayload = pendingImportPayload,
@@ -312,6 +318,7 @@ private fun ThemePreference.toThemeMode(): PocketShellThemeMode = when (this) {
 private fun AppNavigator(
     sessionViewModel: SessionViewModel,
     usageScheduler: UsageScheduler,
+    startDirectoryAutocomplete: StartDirectoryAutocompleteRemoteSource,
     usageWarnPercent: Double,
     requestedDestination: AppDestination,
     pendingImportPayload: String? = null,
@@ -700,6 +707,18 @@ private fun AppNavigator(
                     ),
                 )
             },
+            suggestStartDirectories = { prefix ->
+                startDirectoryAutocomplete.suggestions(
+                    target = StartDirectoryAutocompleteTarget(
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                    ),
+                    typedPrefix = prefix,
+                )
+            },
         )
 
         // Issue #264: per-folder `.env` / `.envrc` key manager backed by
@@ -824,6 +843,18 @@ private fun AppNavigator(
             initialComposerDraft = initialComposerDraft,
             onInitialComposerDraftConsumed = onInitialComposerDraftConsumed,
             onComposerDraftChanged = onComposerDraftChanged,
+            suggestStartDirectories = { prefix ->
+                startDirectoryAutocomplete.suggestions(
+                    target = StartDirectoryAutocompleteTarget(
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                    ),
+                    typedPrefix = prefix,
+                )
+            },
         )
     }
 }

@@ -16,7 +16,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -32,6 +31,9 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.app.sessions.StartDirectoryAutocompleteController
+import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
+import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
 import com.pocketshell.uikit.theme.PocketShellColors
 
 /**
@@ -58,8 +60,10 @@ fun SessionTypePickerSheet(
     folderLabel: String,
     onDismiss: () -> Unit,
     onCreate: (choice: SessionTypeChoice) -> Unit,
+    suggestStartDirectories: (suspend (String) -> List<String>)? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val autocompleteController = rememberStartDirectoryAutocompleteController(suggestStartDirectories)
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -71,6 +75,7 @@ fun SessionTypePickerSheet(
             folderLabel = folderLabel,
             onCancel = onDismiss,
             onCreate = onCreate,
+            autocompleteController = autocompleteController,
         )
     }
 }
@@ -86,6 +91,7 @@ internal fun SessionTypePickerContent(
     folderLabel: String,
     onCancel: () -> Unit,
     onCreate: (choice: SessionTypeChoice) -> Unit,
+    autocompleteController: StartDirectoryAutocompleteController? = null,
 ) {
     var sessionType by remember { mutableStateOf(SessionType.Agent) }
     var agentKind by remember { mutableStateOf(AgentCli.Claude) }
@@ -180,13 +186,13 @@ internal fun SessionTypePickerContent(
         // Start folder — pre-filled, editable.
         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
             SectionTitle("Start folder")
-            OutlinedTextField(
+            StartDirectoryAutocompleteField(
                 value = startDirectory,
                 onValueChange = { startDirectory = it },
-                singleLine = true,
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag(SESSION_TYPE_PICKER_CWD_TAG),
+                    .fillMaxWidth(),
+                textFieldTestTag = SESSION_TYPE_PICKER_CWD_TAG,
+                autocompleteController = autocompleteController,
             )
         }
 

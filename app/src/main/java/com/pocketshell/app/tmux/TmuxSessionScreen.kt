@@ -102,6 +102,9 @@ import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.app.sessions.HostTmuxSessionPickerViewModel
 import com.pocketshell.app.sessions.HostTmuxSessionRow
+import com.pocketshell.app.sessions.StartDirectoryAutocompleteController
+import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
+import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
@@ -194,6 +197,7 @@ public fun TmuxSessionScreen(
     initialComposerDraft: String = "",
     onInitialComposerDraftConsumed: () -> Unit = {},
     onComposerDraftChanged: (String) -> Unit = {},
+    suggestStartDirectories: (suspend (String) -> List<String>)? = null,
 ) {
     LaunchedEffect(hostId, hostName, host, port, user, keyPath, passphrase, sessionName, startDirectory) {
         viewModel.connect(
@@ -235,6 +239,8 @@ public fun TmuxSessionScreen(
         }
         draft
     }
+    val startDirectoryAutocompleteController =
+        rememberStartDirectoryAutocompleteController(suggestStartDirectories)
     val sizeMismatchPrompt by viewModel.sizeMismatchPrompt.collectAsState()
     val agentConversations by viewModel.agentConversations.collectAsState()
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
@@ -1017,6 +1023,7 @@ public fun TmuxSessionScreen(
                 onTextChange = { dialogText = it },
                 startDirectory = dialogStartDirectory,
                 onStartDirectoryChange = { dialogStartDirectory = it },
+                startDirectoryAutocompleteController = startDirectoryAutocompleteController,
                 onDismiss = { dialogMode = null },
                 onConfirm = {
                     when (val currentMode = mode) {
@@ -4007,6 +4014,7 @@ private fun TmuxLifecycleDialog(
     onTextChange: (String) -> Unit,
     startDirectory: String,
     onStartDirectoryChange: (String) -> Unit,
+    startDirectoryAutocompleteController: StartDirectoryAutocompleteController? = null,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,
 ) {
@@ -4044,11 +4052,11 @@ private fun TmuxLifecycleDialog(
                         singleLine = true,
                         label = { Text("Session name") },
                     )
-                    OutlinedTextField(
+                    StartDirectoryAutocompleteField(
                         value = startDirectory,
                         onValueChange = onStartDirectoryChange,
-                        singleLine = true,
                         label = { Text("Start folder") },
+                        autocompleteController = startDirectoryAutocompleteController,
                     )
                 }
             } else if (isTextMode) {

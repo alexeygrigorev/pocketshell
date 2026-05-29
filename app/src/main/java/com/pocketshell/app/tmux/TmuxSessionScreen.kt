@@ -1,10 +1,6 @@
 package com.pocketshell.app.tmux
 
-import android.Manifest
-import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
@@ -80,7 +76,6 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
@@ -88,12 +83,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
-import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.settings.SettingsViewModel
-import com.pocketshell.app.session.KeyBarWithMic
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
@@ -108,6 +101,8 @@ import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
+import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
+import com.pocketshell.app.voice.ADD_PROMPT_CHIP_LABEL
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.InlineDictationErrorStrip
@@ -122,6 +117,7 @@ import androidx.compose.foundation.layout.width
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
+import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
@@ -345,7 +341,6 @@ public fun TmuxSessionScreen(
         onBack = onBack,
     )
 
-    val context = LocalContext.current
     // Issue #131: same root-view handle as `SessionScreen`. The pager
     // renders one pane at a time, so the helper's recursive search lands
     // on the visible pane's `TerminalView`.
@@ -391,19 +386,6 @@ public fun TmuxSessionScreen(
                 }
                 InlineDictationViewModel.DictationMode.Command -> viewModel.dictateToAssistant(text, paneId)
             }
-        }
-    }
-
-    // Runtime RECORD_AUDIO gate for the inline-dictation path. Mirrors the
-    // raw-SSH SessionScreen permission launcher; the OS only ever shows one
-    // prompt because the grant is per-package.
-    val inlinePermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) {
-            inlineDictationViewModel.onMicTap()
-        } else {
-            inlineDictationViewModel.surfacePermissionDenied()
         }
     }
 
@@ -843,47 +825,18 @@ public fun TmuxSessionScreen(
             )
 
             if (isImeVisible && currentPane != null) {
-                KeyBarWithMic(
+                KeyBar(
                     keys = TmuxKeyBarLayout,
-                    onKey = { binding ->
-                        viewModel.onKeyBarKey(currentPane.paneId, binding.label)
+                    onKey = if (sessionLive) {
+                        { binding -> viewModel.onKeyBarKey(currentPane.paneId, binding.label) }
+                    } else {
+                        { _ -> }
                     },
-                    micState = dictationState.recording,
-                    micAmplitude = dictationState.amplitude,
-                    dictationMode = dictationState.mode,
-                    onDictationModeSelected = inlineDictationViewModel::selectMode,
-                    onMicTap = {
-                        // Three-step gate identical to SessionScreen: runtime
-                        // permission → stored API key → recorder. Without an
-                        // API key we open the prompt composer (which hosts
-                        // the key-entry dialog) rather than dead-ending in a
-                        // silent banner.
-                        val granted = ContextCompat.checkSelfPermission(
-                            context,
-                            Manifest.permission.RECORD_AUDIO,
-                        ) == PackageManager.PERMISSION_GRANTED
-                        if (!granted) {
-                            inlinePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                            return@KeyBarWithMic
-                        }
-                        if (!inlineDictationViewModel.hasApiKey()) {
-                            showMicSheet = true
-                            return@KeyBarWithMic
-                        }
-                        inlineDictationViewModel.onMicTap()
-                    },
-                    // Issue #249: gate the key bar + mic on liveness so a
-                    // key press / dictation can't be dropped silently.
-                    inputEnabled = sessionLive,
                 )
             } else if (!isImeVisible && currentPane != null) {
-                val bottomChips = if (currentAgentConversation?.detection != null) {
-                    AgentExitChips + DefaultSessionChips
-                } else {
-                    DefaultSessionChips
-                }
+                val isAgentPane = currentAgentConversation?.detection != null
                 BottomChipControls(
-                    chips = bottomChips,
+                    chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
                     onChipTap = { chip ->
                         currentPane?.let { pane ->
                             when (chip) {
@@ -912,7 +865,7 @@ public fun TmuxSessionScreen(
                             }
                         }
                     },
-                    onDictateTap = { showMicSheet = true },
+                    onDictateTap = null,
                     // Issue #131: surface the show-keyboard chip on the
                     // tmux route too. The helper looks up the
                     // `TerminalView` of the currently visible pane (the
@@ -923,12 +876,15 @@ public fun TmuxSessionScreen(
                     onAddSnippetTap = if (hostId != 0L) {
                         { showSnippetPicker = true }
                     } else null,
+                    addSnippetLabel = if (isAgentPane) ADD_PROMPT_CHIP_LABEL else ADD_COMMAND_CHIP_LABEL,
+                    addSnippetIcon = null,
                     // Project navigation on tmux panes is a separate
                     // follow-up — see #123 notes on per-pane cwd /
                     // project-root wiring.
                     onProjectNavigationTap = null,
-                    // Issue #249: gate chips + dictate mic on liveness.
+                    // Issue #249: gate chips on liveness.
                     inputEnabled = sessionLive,
+                    modifier = Modifier.navigationBarsPadding(),
                 )
             }
 

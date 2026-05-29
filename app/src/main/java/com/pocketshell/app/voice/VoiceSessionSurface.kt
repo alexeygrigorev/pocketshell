@@ -252,20 +252,18 @@ private fun ScrollableChipStrip(
 }
 
 /**
- * Non-scrolling sticky cluster of primary chips, rendered between the
- * scrollable [ScrollableChipStrip] and the mic FAB in [BottomChipControls].
+ * Non-scrolling sticky cluster of primary chips, rendered after the
+ * scrollable [ScrollableChipStrip] in [BottomChipControls].
  *
- * The cluster pins `show keyboard` (#131) and `+ snippet` to the right edge of
+ * The cluster pins `show keyboard` (#131) and the picker chip to the right edge of
  * the bottom toolbar regardless of how many static command chips
  * [ScrollableChipStrip] is asked to render. The right-thumb ergonomics
  * goal of design-system §9 only holds if these primary affordances are
- * actually visible next to the FAB without horizontal-scrolling — see the
+ * actually visible without horizontal-scrolling — see the
  * KDoc on [ScrollableChipStrip] for the round-1 regression that motivated
  * splitting them out.
  *
- * Order inside the cluster (left → right): `show keyboard` → `+ snippet`, so
- * `+ snippet` is closest to the mic FAB (matches the §9 worked example
- * `[⌨ show keyboard] [+ snippet]    [🎤 mic FAB]`). Both chips are optional;
+ * Order inside the cluster (left → right): `show keyboard` → picker. Both chips are optional;
  * the cluster collapses to zero width when both callbacks are null
  * (currently the cluster is always non-empty on the tmux + raw-SSH
  * routes, but the optional API keeps the helper composable for callers
@@ -275,6 +273,8 @@ private fun ScrollableChipStrip(
 private fun PrimaryChipCluster(
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
+    addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
+    addSnippetIcon: ImageVector? = DictateDotIcon,
     modifier: Modifier = Modifier,
 ) {
     if (onShowKeyboardTap == null && onAddSnippetTap == null) return
@@ -294,9 +294,9 @@ private fun PrimaryChipCluster(
         }
         if (onAddSnippetTap != null) {
             CommandChip(
-                label = "+ snippet",
+                label = addSnippetLabel,
                 onClick = onAddSnippetTap,
-                icon = DictateDotIcon,
+                icon = addSnippetIcon,
                 modifier = Modifier.testTag(SESSION_ADD_SNIPPET_CHIP_TAG),
             )
         }
@@ -304,7 +304,7 @@ private fun PrimaryChipCluster(
 }
 
 /**
- * Bottom chip + mic FAB strip surfaced when the IME is hidden. Both
+ * Bottom chip strip surfaced when the IME is hidden. Both
  * [SessionScreen][com.pocketshell.app.session.SessionScreen] and
  * [TmuxSessionScreen][com.pocketshell.app.tmux.TmuxSessionScreen] mount
  * this as the bottom band of the per-session input controls.
@@ -314,18 +314,18 @@ private fun PrimaryChipCluster(
  * 1. [ScrollableChipStrip] (`weight(1f)`) — scrollable, holds the
  *    low-frequency static command chips plus optional `dirs`.
  * 2. [PrimaryChipCluster] (sticky, non-scrolling) — `show keyboard` and
- *    `+ snippet` pinned to the right side of the chip area so they sit
+ *    the picker chip pinned to the right side of the chip area so they sit
  *    inside the right-thumb arc on a Pixel-class viewport regardless of
  *    how many static chips precede them.
- * 3. Mic FAB (sticky, non-scrolling) — single dictate affordance, fixed
- *    width slot on the right edge.
+ * 3. Optional mic FAB (sticky, non-scrolling) — raw SSH still keeps the
+ *    dictate affordance; tmux terminal chrome omits it per #283.
  *
  * The redundant `dictate` chip that used to lead the row was removed
  * per design-system §9 and the right-thumb ergonomics audit
  * (#208 → #221): with the FAB already anchored to the right-thumb arc,
  * the chip row need not duplicate it. Splitting the primary cluster out
  * of the scrolling region fixes the round-1 regression where the four
- * wide leading static chips pushed `show keyboard` / `+ snippet` off-screen
+ * wide leading static chips pushed `show keyboard` / picker off-screen
  * (AC2 of #221).
  *
  * `onProjectNavigationTap` is optional because the tmux route does not
@@ -337,21 +337,23 @@ private fun PrimaryChipCluster(
 internal fun BottomChipControls(
     chips: List<String>,
     onChipTap: (String) -> Unit,
-    onDictateTap: () -> Unit,
+    onDictateTap: (() -> Unit)?,
     onShowKeyboardTap: (() -> Unit)? = null,
     onAddSnippetTap: (() -> Unit)? = null,
+    addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
+    addSnippetIcon: ImageVector? = DictateDotIcon,
     onProjectNavigationTap: (() -> Unit)? = null,
-    // Issue #249: gate the command chips and the dictate mic on whether
+    // Issue #249: gate the command chips and optional dictate mic on whether
     // the SSH/tmux session is live. While disconnected or reconnecting a
     // chip tap would `writeInputToPane` into a dead bridge — the bytes
-    // would be silently dropped. We disable the chips and render the mic
-    // in its [MicButtonState.Disabled] (muted, non-clickable) state — the
-    // existing prompt-composer pattern for "mic unavailable" — so the user
+    // would be silently dropped. We disable the chips, and when a mic is
+    // present render it in its [MicButtonState.Disabled] state so the user
     // sees that input is unavailable rather than losing a tap.
     inputEnabled: Boolean = true,
+    modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .background(color = PocketShellColors.Surface)
             .border(width = 1.dp, color = PocketShellColors.Border),
@@ -366,18 +368,22 @@ internal fun BottomChipControls(
         PrimaryChipCluster(
             onShowKeyboardTap = onShowKeyboardTap,
             onAddSnippetTap = onAddSnippetTap,
+            addSnippetLabel = addSnippetLabel,
+            addSnippetIcon = addSnippetIcon,
         )
-        Box(
-            modifier = Modifier
-                .width(80.dp)
-                .padding(end = 12.dp)
-                .testTag(SESSION_MIC_FAB_TAG),
-            contentAlignment = Alignment.CenterEnd,
-        ) {
-            MicButton(
-                state = if (inputEnabled) MicButtonState.Idle else MicButtonState.Disabled,
-                onClick = onDictateTap,
-            )
+        if (onDictateTap != null) {
+            Box(
+                modifier = Modifier
+                    .width(80.dp)
+                    .padding(end = 12.dp)
+                    .testTag(SESSION_MIC_FAB_TAG),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
+                MicButton(
+                    state = if (inputEnabled) MicButtonState.Idle else MicButtonState.Disabled,
+                    onClick = onDictateTap,
+                )
+            }
         }
     }
 }
@@ -395,6 +401,9 @@ internal val DefaultSessionChips: List<String> = listOf(
 )
 
 internal const val SHOW_KEYBOARD_CHIP_LABEL: String = "show keyboard"
+internal const val ADD_SNIPPET_CHIP_LABEL: String = "+ snippet"
+internal const val ADD_PROMPT_CHIP_LABEL: String = "+ prompt"
+internal const val ADD_COMMAND_CHIP_LABEL: String = "+ command"
 
 /**
  * A 24x24 microphone glyph used by accent chips and as the

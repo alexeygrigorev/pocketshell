@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import android.content.Context
+import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -55,6 +56,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -201,6 +203,9 @@ public class TmuxSessionViewModel @Inject constructor(
     /** Coarse-grained status the screen surfaces above the terminal. */
     public val connectionStatus: StateFlow<ConnectionStatus> =
         _connectionStatus.asStateFlow()
+
+    private var attachPanesReadyTimeoutMs: Long = ATTACH_PANES_READY_TIMEOUT_MS
+    private var activeAttachMilestone: AttachMilestone? = null
 
     /**
      * Issue #188: one-shot user-facing message for a failed `kill-window`
@@ -478,13 +483,13 @@ public class TmuxSessionViewModel @Inject constructor(
                     // Fast path: keep the SSH session, swap the tmux
                     // client. No new handshake fires.
                     closeCurrentClientKeepSession()
-                    runFastSessionSwitch(target, previousSession)
+                    runFastSessionSwitch(target, previousSession, attempt)
                 } else {
                     // Slow path: full teardown of both the tmux client
                     // and the SSH session before the fresh
                     // [SshConnection.connect] handshake.
                     closeCurrentConnectionAndJoin()
-                    runConnect(target)
+                    runConnect(target, attempt)
                 }
             }
         }
@@ -791,7 +796,8 @@ public class TmuxSessionViewModel @Inject constructor(
         lifecycleHookHostId = hostId
     }
 
-    private suspend fun runConnect(target: ConnectionTarget) {
+    private suspend fun runConnect(target: ConnectionTarget, attempt: Int) {
+        val startedAtMs = SystemClock.elapsedRealtime()
         try {
             // Issue #178: instrument the actual SSH handshake call so a
             // connected test (and humans reading logcat) can see whether
@@ -805,7 +811,8 @@ public class TmuxSessionViewModel @Inject constructor(
             Log.i(
                 ISSUE_145_RECONNECT_TAG,
                 "tmux-ssh-handshake count=$handshakeNumber host=${target.host} " +
-                    "port=${target.port} user=${target.user} session=${target.sessionName}",
+                    "port=${target.port} user=${target.user} session=${target.sessionName} " +
+                    "attempt=$attempt",
             )
             val key: SshKey = SshKey.Path(File(target.keyPath))
             val sessionResult = SshConnection.connect(
@@ -817,12 +824,22 @@ public class TmuxSessionViewModel @Inject constructor(
                 knownHosts = KnownHostsPolicy.AcceptAll,
             )
             val session = sessionResult.getOrElse { e ->
-                connectingTarget = null
-                refreshReconnectAvailability()
-                _connectionStatus.value =
-                    ConnectionStatus.Failed("connect failed: ${e.message}")
+                failConnectAttempt(
+                    target = target,
+                    attempt = attempt,
+                    startedAtMs = startedAtMs,
+                    message = "connect failed: ${e.message}",
+                    cause = e,
+                    preserveReconnectTarget = false,
+                )
                 return
             }
+            logAttachMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                event = "ssh-connected",
+            )
             sessionRef = session
 
             val client = tmuxClientFactory.create(
@@ -834,6 +851,17 @@ public class TmuxSessionViewModel @Inject constructor(
             refreshReconnectAvailability()
             attachClient(client)
             client.connect()
+            activeAttachMilestone = AttachMilestone(
+                attempt = attempt,
+                sessionName = target.sessionName,
+                startedAtMs = startedAtMs,
+            )
+            logAttachMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                event = "tmux-control-command-started",
+            )
             activeTmuxClients.register(
                 hostId = target.hostId,
                 hostName = target.hostName,
@@ -850,12 +878,11 @@ public class TmuxSessionViewModel @Inject constructor(
             installLifecycleHooks(target.hostId)
             bindProjectRootsForHost(target.hostId)
 
-            // Bootstrap the pane list once tmux has had a moment to settle.
-            // We don't strictly need this — the opening %window-add event
-            // already fires a reconcile — but it covers the case of
-            // reattaching to a session with pre-existing windows that we
-            // missed the original %window-add for.
-            reconcilePanes()
+            awaitPanesReadyForAttach(
+                target = target,
+                attempt = attempt,
+                startedAtMs = startedAtMs,
+            )
 
             connectingTarget = null
             refreshReconnectAvailability()
@@ -864,13 +891,22 @@ public class TmuxSessionViewModel @Inject constructor(
                 target.port,
                 target.user,
             )
+            logAttachMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                event = "tmux-connect-ready",
+            )
             maybeCheckSizeMismatch()
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
-            connectingTarget = null
-            refreshReconnectAvailability()
-            _connectionStatus.value = ConnectionStatus.Failed(
-                "error: ${t.javaClass.simpleName}: ${t.message}",
+            failConnectAttempt(
+                target = target,
+                attempt = attempt,
+                startedAtMs = startedAtMs,
+                message = connectFailureMessage(t, target),
+                cause = t,
+                preserveReconnectTarget = t is TmuxAttachPanesReadyException,
             )
         }
     }
@@ -894,7 +930,9 @@ public class TmuxSessionViewModel @Inject constructor(
     private suspend fun runFastSessionSwitch(
         target: ConnectionTarget,
         session: SshSession,
+        attempt: Int,
     ) {
+        val startedAtMs = SystemClock.elapsedRealtime()
         try {
             if (!session.isConnected) {
                 // The previously-live session died between the
@@ -902,7 +940,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // teardown + reconnect path so the user still ends up on
                 // the requested session instead of a Failed state.
                 sessionRef = null
-                runConnect(target)
+                runConnect(target, attempt)
                 return
             }
             sessionRef = session
@@ -915,6 +953,17 @@ public class TmuxSessionViewModel @Inject constructor(
             refreshReconnectAvailability()
             attachClient(client)
             client.connect()
+            activeAttachMilestone = AttachMilestone(
+                attempt = attempt,
+                sessionName = target.sessionName,
+                startedAtMs = startedAtMs,
+            )
+            logAttachMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                event = "tmux-control-command-started",
+            )
             activeTmuxClients.register(
                 hostId = target.hostId,
                 hostName = target.hostName,
@@ -931,12 +980,11 @@ public class TmuxSessionViewModel @Inject constructor(
             installLifecycleHooks(target.hostId)
             bindProjectRootsForHost(target.hostId)
 
-            // Bootstrap the pane list — the new `new-session -A -s`
-            // attach may not fire `%window-add` for windows that already
-            // existed on the remote session, so an explicit list-panes
-            // round-trip is needed to populate the UI on attach. Same
-            // shape as [runConnect].
-            reconcilePanes()
+            awaitPanesReadyForAttach(
+                target = target,
+                attempt = attempt,
+                startedAtMs = startedAtMs,
+            )
 
             connectingTarget = null
             refreshReconnectAvailability()
@@ -944,6 +992,12 @@ public class TmuxSessionViewModel @Inject constructor(
                 target.host,
                 target.port,
                 target.user,
+            )
+            logAttachMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                event = "tmux-connect-ready",
             )
             maybeCheckSizeMismatch()
             Log.i(
@@ -953,12 +1007,165 @@ public class TmuxSessionViewModel @Inject constructor(
             )
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
-            connectingTarget = null
-            refreshReconnectAvailability()
-            _connectionStatus.value = ConnectionStatus.Failed(
-                "error: ${t.javaClass.simpleName}: ${t.message}",
+            failConnectAttempt(
+                target = target,
+                attempt = attempt,
+                startedAtMs = startedAtMs,
+                message = connectFailureMessage(t, target),
+                cause = t,
+                preserveReconnectTarget = t is TmuxAttachPanesReadyException,
             )
         }
+    }
+
+    private suspend fun awaitPanesReadyForAttach(
+        target: ConnectionTarget,
+        attempt: Int,
+        startedAtMs: Long,
+    ) {
+        logAttachMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = startedAtMs,
+            event = "tmux-list-panes-start",
+        )
+        val result = withTimeoutOrNull<PaneReconcileResult.Ready>(attachPanesReadyTimeoutMs) {
+            var ready: PaneReconcileResult.Ready? = null
+            while (ready == null) {
+                when (val reconcile = reconcilePanes()) {
+                    is PaneReconcileResult.Ready -> {
+                        if (reconcile.paneCount > 0) {
+                            ready = reconcile
+                        }
+                    }
+                    is PaneReconcileResult.Failed -> throw TmuxAttachPanesReadyException(
+                        "Failed waiting for tmux panes from ${target.sessionName}: " +
+                            (reconcile.cause.message ?: reconcile.cause.javaClass.simpleName) +
+                            ". Tap Reconnect to retry.",
+                        reconcile.cause,
+                    )
+                    PaneReconcileResult.NoClient -> throw TmuxAttachPanesReadyException(
+                        "tmux client closed before panes were ready",
+                    )
+                }
+                if (ready == null) {
+                    delay(ATTACH_PANES_READY_RETRY_MS)
+                }
+            }
+            ready
+        } ?: throw TmuxAttachPanesReadyException(
+            "Timed out waiting for tmux panes from ${target.sessionName}. " +
+                "Tap Reconnect to retry.",
+        )
+        logAttachMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = startedAtMs,
+            event = "tmux-control-mode-ready",
+            detail = "paneCount=${result.paneCount}",
+        )
+        logAttachMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = startedAtMs,
+            event = "tmux-panes-ready",
+            detail = "paneCount=${result.paneCount}",
+        )
+    }
+
+    private suspend fun failConnectAttempt(
+        target: ConnectionTarget,
+        attempt: Int,
+        startedAtMs: Long,
+        message: String,
+        cause: Throwable,
+        preserveReconnectTarget: Boolean,
+    ) {
+        Log.w(
+            ISSUE_145_RECONNECT_TAG,
+            attachMilestoneMessage(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                event = "tmux-connect-failed",
+                detail = "cause=${cause.javaClass.simpleName}: ${cause.message}",
+            ),
+            cause,
+        )
+        withContext(NonCancellable) {
+            closeCurrentConnectionAndJoin()
+        }
+        activeAttachMilestone = null
+        activeTarget = null
+        connectingTarget = if (preserveReconnectTarget) target else null
+        refreshReconnectAvailability()
+        _connectionStatus.value = ConnectionStatus.Failed(message)
+    }
+
+    private fun connectFailureMessage(t: Throwable, target: ConnectionTarget): String =
+        if (t is TmuxAttachPanesReadyException) {
+            val message = t.message ?: "Timed out waiting for tmux panes from ${target.sessionName}."
+            if ("Tap Reconnect" in message) message else "$message Tap Reconnect to retry."
+        } else {
+            "error: ${t.javaClass.simpleName}: ${t.message}"
+        }
+
+    private fun logAttachMilestone(
+        attempt: Int,
+        target: ConnectionTarget,
+        startedAtMs: Long,
+        event: String,
+        detail: String = "",
+    ) {
+        Log.i(
+            ISSUE_145_RECONNECT_TAG,
+            attachMilestoneMessage(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                event = event,
+                detail = detail,
+            ),
+        )
+    }
+
+    private fun attachMilestoneMessage(
+        attempt: Int,
+        target: ConnectionTarget,
+        startedAtMs: Long,
+        event: String,
+        detail: String = "",
+    ): String = buildString {
+        append(event)
+        append(" attempt=")
+        append(attempt)
+        append(" host=")
+        append(target.host)
+        append(" port=")
+        append(target.port)
+        append(" user=")
+        append(target.user)
+        append(" session=")
+        append(target.sessionName)
+        append(" elapsedMs=")
+        append(SystemClock.elapsedRealtime() - startedAtMs)
+        if (detail.isNotBlank()) {
+            append(' ')
+            append(detail)
+        }
+    }
+
+    private fun logFirstPaneOutput(event: ControlEvent.Output) {
+        val milestone = activeAttachMilestone ?: return
+        if (milestone.firstPaneOutputLogged) return
+        milestone.firstPaneOutputLogged = true
+        Log.i(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-first-pane-output attempt=${milestone.attempt} " +
+                "session=${milestone.sessionName} pane=${event.paneId} " +
+                "bytes=${event.data.size} " +
+                "elapsedMs=${SystemClock.elapsedRealtime() - milestone.startedAtMs}",
+        )
     }
 
     /**
@@ -1164,6 +1371,62 @@ public class TmuxSessionViewModel @Inject constructor(
         maybeCheckSizeMismatch()
     }
 
+    internal fun setAttachPanesReadyTimeoutForTest(timeoutMs: Long) {
+        attachPanesReadyTimeoutMs = timeoutMs
+    }
+
+    internal suspend fun attachClientWithReadinessForTest(
+        hostId: Long,
+        hostName: String,
+        host: String,
+        port: Int,
+        user: String,
+        keyPath: String,
+        sessionName: String,
+        client: TmuxClient,
+    ) {
+        val target = ConnectionTarget(
+            hostId = hostId,
+            hostName = hostName,
+            host = host,
+            port = port,
+            user = user,
+            keyPath = keyPath,
+            passphrase = null,
+            sessionName = sessionName,
+            startDirectory = null,
+        )
+        val attempt = TMUX_CONNECT_ATTEMPTS.incrementAndGet()
+        val startedAtMs = SystemClock.elapsedRealtime()
+        connectingTarget = target
+        activeTarget = target
+        refreshReconnectAvailability()
+        _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+        attachClient(client)
+        client.connect()
+        activeAttachMilestone = AttachMilestone(
+            attempt = attempt,
+            sessionName = sessionName,
+            startedAtMs = startedAtMs,
+        )
+        try {
+            awaitPanesReadyForAttach(target, attempt, startedAtMs)
+            connectingTarget = null
+            refreshReconnectAvailability()
+            _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            failConnectAttempt(
+                target = target,
+                attempt = attempt,
+                startedAtMs = startedAtMs,
+                message = connectFailureMessage(t, target),
+                cause = t,
+                preserveReconnectTarget = t is TmuxAttachPanesReadyException,
+            )
+        }
+    }
+
     /**
      * Issue #165 test seam: stamp the ViewModel into [ConnectionStatus.Connecting]
      * with [connectJob] pointing at a caller-supplied [job] so unit tests can
@@ -1264,6 +1527,7 @@ public class TmuxSessionViewModel @Inject constructor(
             is ControlEvent.WindowClose,
             is ControlEvent.LayoutChange,
             -> reconcilePanes()
+            is ControlEvent.Output -> logFirstPaneOutput(event)
             else -> Unit
         }
     }
@@ -1280,49 +1544,47 @@ public class TmuxSessionViewModel @Inject constructor(
      * leave the existing pane list intact rather than wiping it — a
      * transient failure should not blank the UI.
      */
-    private suspend fun reconcilePanes() {
-        val client = clientRef ?: return
+    private suspend fun reconcilePanes(): PaneReconcileResult {
+        val client = clientRef ?: return PaneReconcileResult.NoClient
         val target = activeTarget
-        val response = runCatching {
+        val response = try {
             client.sendCommand(
-                // pane_index is appended last so we can sort within a
-                // window. tmux can change index order on layout-rotate
-                // commands, so we re-read it on every reconcile.
-                //
-                // Per #158: include `-s` so we list panes across every
-                // window in the session, not only the current window.
-                // Without `-s`, `list-panes -t <session>` returns only
-                // the panes of the session's current window — meaning
-                // `new-window` reconciles wipe the prior window's pane
-                // rows from the UI, the WindowStrip never sees more
-                // than one entry, and tap-to-switch has nothing to
-                // switch between. The existing unit test
-                // `reconcileScopesPanesAndWindowSummariesToActiveSession`
-                // already expects a multi-window response shape — that
-                // was a latent inconsistency between the unit fake and
-                // the real tmux command, surfaced by the #158 E2E.
-                buildString {
-                    append("list-panes ")
-                    if (target != null) {
-                        append("-s -t '${escapeSingleQuoted(target.sessionName)}' ")
-                    }
-                    append("-F ")
-                    // Issue #186: append `#{pane_tty}` so per-pane agent
-                    // detection can scope its process scan to the pane's
-                    // TTY (e.g. `/dev/pts/3`). Without this, the
-                    // per-window detection fix has no way to ask
-                    // "is the agent process actually running ON this
-                    // pane?" and falls back to host-wide grep — which is
-                    // exactly the bug #186 is fixing.
-                    append("'#{pane_id}\t#{window_id}\t#{session_id}\t#{session_name}\t#{pane_title}\t#{pane_index}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_tty}'")
-                },
+                buildListPanesCommand(target),
             )
-        }.getOrNull() ?: return
-        if (response.isError) return
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            return PaneReconcileResult.Failed(t)
+        }
+        if (response.isError) {
+            return PaneReconcileResult.Failed(
+                TmuxAttachPanesReadyException(
+                    "tmux list-panes failed: " +
+                        response.output.joinToString(separator = " ").ifBlank { "unknown error" },
+                ),
+            )
+        }
 
         val parsed: List<ParsedPane> = response.output.mapNotNull { parsePaneRow(it) }
         val newPanes = applyParsedPanes(parsed)
         preloadVisibleContentForNewPanes(newPanes)
+        return PaneReconcileResult.Ready(_panes.value.size)
+    }
+
+    private fun buildListPanesCommand(target: ConnectionTarget?): String = buildString {
+        // pane_index is appended last so we can sort within a window.
+        // tmux can change index order on layout-rotate commands, so we
+        // re-read it on every reconcile.
+        //
+        // Per #158: include `-s` so we list panes across every window
+        // in the session, not only the current window.
+        append("list-panes ")
+        if (target != null) {
+            append("-s -t '${escapeSingleQuoted(target.sessionName)}' ")
+        }
+        append("-F ")
+        // Issue #186: append `#{pane_tty}` so per-pane agent detection
+        // can scope its process scan to the pane's TTY.
+        append("'#{pane_id}\t#{window_id}\t#{session_id}\t#{session_name}\t#{pane_title}\t#{pane_index}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_tty}'")
     }
 
     /**
@@ -2623,6 +2885,7 @@ public class TmuxSessionViewModel @Inject constructor(
         sessionRef = null
         activeTarget = null
         connectingTarget = null
+        activeAttachMilestone = null
         // A fresh attach must capture a fresh phone grid and re-run the
         // size-mismatch check.
         remoteColumns = 0
@@ -2727,6 +2990,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // contract of this method. The caller will pass the same
         // session to the next tmux client.
         activeTarget = null
+        activeAttachMilestone = null
         // Keep [connectingTarget] — connect() set it to the new
         // target before invoking us; clearing it here would lose the
         // intent.
@@ -2775,6 +3039,7 @@ public class TmuxSessionViewModel @Inject constructor(
         projectRootsJob?.cancel()
         projectRootsJob = null
         _projectRoots.value = emptyList()
+        activeAttachMilestone = null
         for ((_, job) in paneProducerJobs) {
             job.cancel()
         }
@@ -2909,6 +3174,24 @@ public class TmuxSessionViewModel @Inject constructor(
         val sessionName: String,
         val startDirectory: String?,
     )
+
+    private data class AttachMilestone(
+        val attempt: Int,
+        val sessionName: String,
+        val startedAtMs: Long,
+        var firstPaneOutputLogged: Boolean = false,
+    )
+
+    private sealed interface PaneReconcileResult {
+        data class Ready(val paneCount: Int) : PaneReconcileResult
+        data class Failed(val cause: Throwable) : PaneReconcileResult
+        data object NoClient : PaneReconcileResult
+    }
+
+    private class TmuxAttachPanesReadyException(
+        message: String,
+        cause: Throwable? = null,
+    ) : RuntimeException(message, cause)
 
     private sealed interface TmuxInputToken {
         data class Literal(val text: String) : TmuxInputToken
@@ -3292,6 +3575,8 @@ internal const val CtrlDByte: Int = 0x04
  * teardown pause rather than an apparent app freeze.
  */
 internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
+internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 12_000L
+internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
 
 /**
  * Issue #145: logcat tag used by the disconnect observer + connect-attempt

@@ -22,6 +22,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -112,6 +113,89 @@ class TmuxSessionViewModelTest {
         assertEquals(
             "Disconnected from test@test:0. Tap Reconnect to retry.",
             (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+        )
+    }
+
+    @Test
+    fun attachReadinessTimeoutFailsWithRetryableMessageAndClosesClient() = runTest {
+        val vm = newVm()
+        vm.setAttachPanesReadyTimeoutForTest(500L)
+        val client = FakeTmuxClient().apply {
+            suspendForeverOnCommandPrefix = "list-panes"
+        }
+
+        val attach = async {
+            vm.attachClientWithReadinessForTest(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = client,
+            )
+        }
+        runCurrent()
+
+        assertTrue(
+            "precondition: attach must be visibly connecting",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connecting,
+        )
+
+        advanceTimeBy(501L)
+        advanceUntilIdle()
+        attach.await()
+
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "stalled list-panes must fail the connect, got $status",
+            status is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertEquals(
+            "Timed out waiting for tmux panes from work. Tap Reconnect to retry.",
+            (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+        )
+        assertTrue("Reconnect must remain available after attach timeout", vm.canReconnect.value)
+        assertTrue("timed-out attach must close the tmux client", client.closed)
+    }
+
+    @Test
+    fun attachReadinessRetriesEmptyPaneListUntilPanesArrive() = runTest {
+        val vm = newVm()
+        vm.setAttachPanesReadyTimeoutForTest(1_000L)
+        val client = FakeTmuxClient().apply {
+            responses += CommandResponse(number = 1L, output = emptyList(), isError = false)
+            responses += CommandResponse(
+                number = 2L,
+                output = listOf("%0\t@0\t\$0\twork\tshell\t0"),
+                isError = false,
+            )
+        }
+
+        val attach = async {
+            vm.attachClientWithReadinessForTest(
+                hostId = 1L,
+                hostName = "alpha",
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                keyPath = "/keys/a",
+                sessionName = "work",
+                client = client,
+            )
+        }
+        runCurrent()
+        advanceTimeBy(ATTACH_PANES_READY_RETRY_MS + 1L)
+        advanceUntilIdle()
+        attach.await()
+
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(listOf("%0"), vm.panes.value.map { it.paneId })
+        assertEquals(
+            "attach readiness should retry list-panes after an empty response",
+            2,
+            client.sentCommands.count { it.startsWith("list-panes") },
         )
     }
 

@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = "-CC" ] && [ -f "$HOME/.pocketshell-hang-tmux-control" ]; then
+  echo "pocketshell-tmux-hang-shim: withholding tmux -CC response for $USER" >&2
+  while true; do
+    sleep 3600
+  done
+fi
+
+exec /usr/bin/tmux "$@"

@@ -28,6 +28,7 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/pocketshell \
         /usr/local/bin/quse \
         /usr/local/bin/agent-log-explorer \
+        /usr/local/bin/tmux \
         /usr/local/bin/tmuxctl \
         /usr/local/bin/uv \
         /usr/local/bin/systemctl \

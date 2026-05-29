@@ -79,6 +79,8 @@ internal class FakeTmuxClient : TmuxClient {
 
     var closeAndThrowException: Throwable = TmuxClientException("tmux command timed out")
 
+    var suspendForeverOnCommandPrefix: String? = null
+
     @Volatile
     var closed: Boolean = false
 
@@ -91,6 +93,11 @@ internal class FakeTmuxClient : TmuxClient {
 
     override suspend fun sendCommand(cmd: String): CommandResponse {
         sentCommands += cmd
+        suspendForeverOnCommandPrefix?.let { prefix ->
+            if (cmd.startsWith(prefix)) {
+                CompletableDeferred<Unit>().await()
+            }
+        }
         closeAndThrowOnCommandPrefix?.let { prefix ->
             if (cmd.startsWith(prefix)) {
                 close()

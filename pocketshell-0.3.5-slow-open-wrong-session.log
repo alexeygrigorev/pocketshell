@@ -1,0 +1,36 @@
+==== PocketShell 0.3.5 (versionCode 17) — live debug session 2026-05-29 ====
+Device: Pixel 7a (44011JEHN09327). App process pid 5697 (alive entire session).
+
+==== CONSOLIDATED LIFECYCLE / CONNECT TIMELINE ====
+05-29 17:16:07.587 I/ActivityManager( 1397): Killing 4371:com.pocketshell.app/u0a395 (adj 905): remove task
+05-29 17:16:08.072 I/ActivityManager( 1397): Start proc 5697:com.pocketshell.app/u0a395 for next-top-activity {com.pocketshell.app/com.pocketshell.app.MainActivity}
+05-29 17:20:12.506 I/PsTmuxReconnect( 5697): tmux-connect-attempt count=2 host=135.181.114.209 port=22 user=alexey session=git-datamailer
+05-29 17:20:30.941 I/PsTmuxReconnect( 5697): tmux-fast-switch host=135.181.114.209 port=22 user=alexey session=git-datamailer
+05-29 17:22:13.810 I/PsTmuxLifecycle( 5697): tmux-detach-on-background host=135.181.114.209 port=22 user=alexey session=git-datamailer
+05-29 17:22:24.091 I/PsTmuxReconnect( 5697): tmux-connect-attempt count=3 host=135.181.114.209 port=22 user=alexey session=git-llm-zoomcamp-lesson
+05-29 17:22:49.620 I/.apps.turbo:aab( 6526): Using CollectorTypeCMC GC.
+05-29 17:22:51.709 W/.apps.turbo:aab( 6526): userfaultfd: MOVE ioctl seems unsupported: Try again
+05-29 17:24:15.114 W/ocessService0:0( 5906): userfaultfd: MOVE ioctl seems unsupported: Connection timed out
+
+==== COLD-START STARTUP DETAIL (pid 5697, noise removed) ====
+--------- beginning of system
+05-29 17:16:08.573 I/DisplayManager( 5697): Choreographer implicitly registered for the refresh rate.
+05-29 17:16:08.727 E/VibratorInfo( 5697): Invalid frequency profile received from HAL. resonantFrequencyHz=171.44006, frequenciesHz=null, outputAccelerationsGs=null
+05-29 17:16:11.515 D/InsetsController( 5697): hide(ime())
+05-29 17:16:21.227 D/InsetsController( 5697): hide(ime())
+--------- beginning of main
+05-29 17:20:12.457 W/WindowOnBackDispatcher( 5697): OnBackInvokedCallback is not enabled for the application.
+05-29 17:20:12.457 W/WindowOnBackDispatcher( 5697): Set 'android:enableOnBackInvokedCallback="true"' in the application manifest.
+05-29 17:20:12.506 I/PsTmuxReconnect( 5697): tmux-connect-attempt count=2 host=135.181.114.209 port=22 user=alexey session=git-datamailer
+05-29 17:20:30.941 I/PsTmuxReconnect( 5697): tmux-fast-switch host=135.181.114.209 port=22 user=alexey session=git-datamailer
+05-29 17:22:13.123 D/VRI[MainActivity]( 5697): visibilityChanged oldVisibility=true newVisibility=false
+05-29 17:22:13.810 I/PsAppTmuxLifecycle( 5697): tmux-on-stop fanout count=1
+05-29 17:22:13.810 I/PsTmuxLifecycle( 5697): tmux-detach-on-background host=135.181.114.209 port=22 user=alexey session=git-datamailer
+05-29 17:22:15.875 I/PsAppTmuxLifecycle( 5697): tmux-on-start fanout count=1
+05-29 17:22:15.892 W/WindowOnBackDispatcher( 5697): OnBackInvokedCallback is not enabled for the application.
+05-29 17:22:15.892 W/WindowOnBackDispatcher( 5697): Set 'android:enableOnBackInvokedCallback="true"' in the application manifest.
+05-29 17:22:16.061 D/InsetsController( 5697): hide(ime())
+05-29 17:22:16.061 I/ImeTracker( 5697): com.pocketshell.app:f2b7816a: onCancelled at PHASE_CLIENT_ALREADY_HIDDEN
+05-29 17:22:24.022 W/WindowOnBackDispatcher( 5697): OnBackInvokedCallback is not enabled for the application.
+05-29 17:22:24.022 W/WindowOnBackDispatcher( 5697): Set 'android:enableOnBackInvokedCallback="true"' in the application manifest.
+05-29 17:22:24.091 I/PsTmuxReconnect( 5697): tmux-connect-attempt count=3 host=135.181.114.209 port=22 user=alexey session=git-llm-zoomcamp-lesson

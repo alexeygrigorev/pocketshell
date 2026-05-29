@@ -60,8 +60,6 @@ const val ADD_HOST_PORT_FIELD_TAG = "add-host-field-port"
 const val ADD_HOST_USERNAME_FIELD_TAG = "add-host-field-username"
 const val ADD_HOST_KEY_FIELD_TAG = "add-host-field-key"
 const val ADD_HOST_USAGE_COMMAND_FIELD_TAG = "add-host-field-usage-command"
-const val ADD_HOST_PATH_OVERRIDE_FIELD_TAG = "add-host-field-path-override"
-const val ADD_HOST_ADVANCED_HEADER_TAG = "add-host-advanced-header"
 const val ADD_HOST_CTA_TAG = "add-host-cta"
 const val ADD_HOST_KEY_DROPDOWN_TAG = "add-host-key-dropdown"
 const val ADD_HOST_KEY_SEARCH_TAG = "add-host-key-search"
@@ -76,19 +74,6 @@ const val ADD_HOST_KEY_SEARCH_EMPTY_TAG = "add-host-key-search-empty"
 private const val USAGE_COMMAND_PLACEHOLDER = "pocketshell usage --json"
 private const val USAGE_COMMAND_SUPPORTING_TEXT =
     "Optional override. Leave blank to use pocketshell usage --json."
-
-/**
- * Placeholder for the optional "Extra PATH directories" field (issue
- * #41). The colon-separated example mirrors the user's own homedir
- * convention (`~/git/<tool>/.venv/bin`) so the example is recognisable
- * to the venv-style installers we're trying to surface.
- */
-private const val PATH_OVERRIDE_PLACEHOLDER =
-    "/home/me/git/pocketshell/.venv/bin:/home/me/.local/bin"
-private const val PATH_OVERRIDE_SUPPORTING_TEXT =
-    "Optional. Colon-separated PATH entries the bootstrap probe sees " +
-        "(prepended ahead of \$HOME/.local/bin / \$HOME/bin / \$HOME/.cargo/bin). " +
-        "Use this if your tools live in venvs that only your .bashrc knows about."
 
 /**
  * Default supporting text shown under the Port field when there is no
@@ -284,27 +269,6 @@ fun AddEditHostScreen(
                     placeholder = USAGE_COMMAND_PLACEHOLDER,
                     testTag = ADD_HOST_USAGE_COMMAND_FIELD_TAG,
                 )
-
-                // Issue #41: an Advanced section that, when expanded,
-                // reveals the optional "Extra PATH directories" field.
-                // The collapse-by-default keeps the form short for the
-                // 95% of users who never need it, while staying
-                // one-tap-away for the venv-install case. Defaulting
-                // to expanded when the user already has a value lets
-                // an Edit pass surface the override they previously
-                // saved without making them hunt for it.
-                AdvancedSection(
-                    initiallyExpanded = state.pathOverride.isNotBlank(),
-                ) {
-                    FormField(
-                        label = "Extra PATH directories (optional)",
-                        value = state.pathOverride,
-                        onValueChange = { v -> viewModel.updateState { it.copy(pathOverride = v) } },
-                        supportingText = PATH_OVERRIDE_SUPPORTING_TEXT,
-                        placeholder = PATH_OVERRIDE_PLACEHOLDER,
-                        testTag = ADD_HOST_PATH_OVERRIDE_FIELD_TAG,
-                    )
-                }
 
                 // The legacy global prose error survives only for the
                 // "no SSH keys exist on the device at all" hint — that's
@@ -653,59 +617,6 @@ private fun KeySelector(
  * stops being practical on a Pixel-7-sized viewport.
  */
 internal const val KEY_SEARCH_THRESHOLD: Int = 5
-
-/**
- * Collapsible "Advanced" section header + body for the Add/Edit Host
- * form (issue #41). A horizontal Row with a label and a chevron
- * indicator drives the toggle; the body — which the issue scope keeps
- * narrow to one field ("Extra PATH directories") — renders only when
- * expanded. The header is intentionally borderless and indented to the
- * same gutter as the form fields so it reads as part of the same
- * column rather than a fenced sub-form.
- *
- * `initiallyExpanded` lets the screen open the section automatically
- * on Edit when the loaded row already has a non-empty value, so the
- * user doesn't have to hunt for the override they previously saved.
- * After the first composition the toggle is owned by the local
- * `expanded` state and survives recompositions; it intentionally does
- * NOT survive process death (i.e. the user re-opens the form fresh
- * after a kill) because re-evaluating `initiallyExpanded` from the
- * current form value matches the user's expectation.
- */
-@Composable
-private fun AdvancedSection(
-    initiallyExpanded: Boolean,
-    content: @Composable () -> Unit,
-) {
-    var expanded by remember { mutableStateOf(initiallyExpanded) }
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable { expanded = !expanded }
-                .testTag(ADD_HOST_ADVANCED_HEADER_TAG)
-                .padding(vertical = 8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Text(
-                text = if (expanded) "▾" else "▸",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 14.sp,
-                modifier = Modifier.padding(end = 8.dp),
-            )
-            Text(
-                text = "Advanced",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-        if (expanded) {
-            Spacer(modifier = Modifier.height(4.dp))
-            content()
-        }
-    }
-}
 
 /**
  * Confirmation dialog shown when the user attempts to back out of the

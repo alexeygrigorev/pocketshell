@@ -93,19 +93,6 @@ data class HostFormState(
      * app deliberately doesn't second-guess the user's wrapper script.
      */
     val usageCommand: String = "",
-    /**
-     * Issue #41: optional colon-separated PATH fragment that the host
-     * bootstrap probe (and the install commands it triggers) prepends
-     * ahead of the standard `$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin`
-     * augmentation. Persisted to [HostEntity.pathOverride] as a single
-     * `String?` (`null` and the empty string both mean "no override").
-     * Power users that install `pocketshell` from a cloned repo with a
-     * venv (e.g. `~/git/pocketshell/.venv/bin`) keep that path in
-     * `~/.bashrc`, which `/bin/sh -lc` does not source — surfacing it
-     * here lets the probe see them. Not validated: the value is
-     * shell-executed verbatim, mirroring [usageCommand].
-     */
-    val pathOverride: String = "",
     val fieldErrors: HostFormErrors = HostFormErrors(),
     val firstInvalidField: HostFormField? = null,
     val error: String? = null,
@@ -158,8 +145,7 @@ class AddEditHostViewModel @Inject constructor(
             s.port != baseline.port ||
             s.username != baseline.username ||
             s.selectedKeyId != baseline.selectedKeyId ||
-            s.usageCommand != baseline.usageCommand ||
-            s.pathOverride != baseline.pathOverride
+            s.usageCommand != baseline.usageCommand
     }
 
     /**
@@ -178,7 +164,6 @@ class AddEditHostViewModel @Inject constructor(
                 username = host.username,
                 selectedKeyId = host.keyId,
                 usageCommand = host.usageCommandOverride.orEmpty(),
-                pathOverride = host.pathOverride.orEmpty(),
                 fieldErrors = HostFormErrors(),
                 firstInvalidField = null,
                 error = null,
@@ -239,7 +224,6 @@ class AddEditHostViewModel @Inject constructor(
 
         viewModelScope.launch {
             val usageOverride = s.usageCommand.trim().takeIf { it.isNotEmpty() }
-            val pathOverride = s.pathOverride.trim().takeIf { it.isNotEmpty() }
             val editingId = editingHostId
             val host = if (editingId != null) {
                 // Merge form fields into the persisted row so bootstrap
@@ -247,8 +231,7 @@ class AddEditHostViewModel @Inject constructor(
                 // lastBootstrapAt, pocketshellLastDetectedAt, etc.) and the
                 // auto-forward defaults survive a form save. The form
                 // only owns the user-editable fields plus the optional
-                // overrides (usageCommandOverride from issue #117,
-                // pathOverride from issue #41).
+                // override (usageCommandOverride from issue #117).
                 val existing = hostDao.getById(editingId) ?: HostEntity(
                     id = editingId,
                     name = s.name.trim(),
@@ -264,7 +247,6 @@ class AddEditHostViewModel @Inject constructor(
                     username = s.username.trim(),
                     keyId = checkNotNull(s.selectedKeyId),
                     usageCommandOverride = usageOverride,
-                    pathOverride = pathOverride,
                 )
             } else {
                 HostEntity(
@@ -275,7 +257,6 @@ class AddEditHostViewModel @Inject constructor(
                     username = s.username.trim(),
                     keyId = checkNotNull(s.selectedKeyId),
                     usageCommandOverride = usageOverride,
-                    pathOverride = pathOverride,
                 )
             }
             if (editingId != null) {

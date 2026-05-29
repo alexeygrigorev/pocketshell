@@ -202,54 +202,6 @@ class AddEditHostScreenTest {
     }
 
     @Test
-    fun pathOverride_typingIntoAdvancedSection_roundTripsToDatabase() {
-        // Issue #41: the user types a colon-separated PATH into the
-        // Advanced → Extra PATH directories field, saves, and the
-        // value lands on HostEntity.pathOverride verbatim (trimmed of
-        // surrounding whitespace, no other normalisation).
-        val keyId = runBlocking {
-            db.sshKeyDao().insert(SshKeyEntity(name = "lab", privateKeyPath = "/tmp/lab"))
-        }
-        renderScreen()
-
-        compose.onNodeWithTag(ADD_HOST_NAME_FIELD_TAG, useUnmergedTree = true)
-            .performTextInput("homelab")
-        compose.onNodeWithTag(ADD_HOST_HOSTNAME_FIELD_TAG, useUnmergedTree = true)
-            .performTextInput("h.example")
-        compose.onNodeWithTag(ADD_HOST_USERNAME_FIELD_TAG, useUnmergedTree = true)
-            .performTextInput("deploy")
-        compose.onNodeWithTag(ADD_HOST_KEY_FIELD_TAG, useUnmergedTree = true)
-            .performClick()
-        compose.onNodeWithText("lab").performClick()
-
-        // Expand the Advanced section. The field is collapsed-by-default
-        // when the form starts empty, so the testTag for the path
-        // field only resolves after the user taps the header.
-        compose.onNodeWithTag(ADD_HOST_ADVANCED_HEADER_TAG, useUnmergedTree = true)
-            .performClick()
-        compose.waitForIdle()
-
-        compose.onNodeWithTag(ADD_HOST_PATH_OVERRIDE_FIELD_TAG, useUnmergedTree = true)
-            .performTextInput("/home/u/git/quse/.venv/bin:/home/u/git/tmuxcli/.venv/bin")
-
-        compose.onNodeWithTag(ADD_HOST_CTA_TAG, useUnmergedTree = true)
-            .assertIsEnabled()
-        compose.onNodeWithTag(ADD_HOST_CTA_TAG, useUnmergedTree = true)
-            .performClick()
-        compose.waitForIdle()
-
-        runBlocking {
-            val hosts = db.hostDao().getAll().first()
-            assertEquals(1, hosts.size)
-            assertEquals(keyId, hosts[0].keyId)
-            assertEquals(
-                "/home/u/git/quse/.venv/bin:/home/u/git/tmuxcli/.venv/bin",
-                hosts[0].pathOverride,
-            )
-        }
-    }
-
-    @Test
     fun validForm_pressingCta_savesRow() {
         val keyId = runBlocking {
             db.sshKeyDao().insert(SshKeyEntity(name = "lab", privateKeyPath = "/tmp/lab"))

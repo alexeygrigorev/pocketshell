@@ -43,17 +43,10 @@ import androidx.room.PrimaryKey
  * `StorageModule` (`fallbackToDestructiveMigration(dropAllTables = true)`)
  * is sufficient.
  *
- * Issue #41 added [pathOverride]: an optional colon-separated list of
- * extra PATH directories that the bootstrap probe prepends ahead of the
- * standard `$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin` augmentation
- * before running `command -v <tool>`. Maintainers who install
- * `pocketshell` from a cloned repo with a venv (e.g.
- * `~/git/pocketshell/.venv/bin`) keep those paths in `~/.bashrc`, which is
- * NOT sourced by the `/bin/sh -lc` wrapper used by the probe (only
- * `~/.profile` is). Surfacing the PATH override here lets the user
- * type the venv directories once on the Add/Edit Host screen and have
- * every probe see them. `null` and the empty string both mean
- * "no override, use the default augmentation only".
+ * Issue #294 removed the manual PATH override column. Bootstrap probes now
+ * derive PATH from the remote user's shell rc and prepend PocketShell's
+ * default user-bin locations automatically. Per D22 this is a hard cut;
+ * the destructive rebuild handles the schema change.
  */
 @Entity(
     tableName = "hosts",
@@ -85,5 +78,4 @@ data class HostEntity(
     val pocketshellInstalled: Boolean? = null,
     val pocketshellLastDetectedAt: Long? = null,
     val usageCommandOverride: String? = null,
-    val pathOverride: String? = null,
 )

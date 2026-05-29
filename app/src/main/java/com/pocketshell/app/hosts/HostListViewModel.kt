@@ -689,16 +689,13 @@ class HostListViewModel @Inject constructor(
             }
             bootstrapSession = session
 
-            // Issue #41: the bootstrap probe runs `/bin/sh -lc`, which
-            // sources `~/.profile` but not `~/.bashrc`. Users whose tool
-            // PATH lives in `.bashrc` (e.g. cloned-repo venv installs)
-            // surface that fact via the Add/Edit Host "Extra PATH
-            // directories" field, which we forward to every probe call.
-            val pathOverride = host.pathOverride
-            when (val status = bootstrapper.checkTmux(session, pathOverride)) {
+            // Issue #294: bootstrap probes derive PATH from the remote
+            // user's interactive shell rc, then prepend PocketShell's
+            // default user-bin dirs. No per-host PATH override is needed.
+            when (val status = bootstrapper.checkTmux(session)) {
                 TmuxStatus.Installed -> {
                     persistResult(host, installed = true)
-                    val report = bootstrapper.checkServerSetup(session, pathOverride)
+                    val report = bootstrapper.checkServerSetup(session)
                     persistPocketshellResult(host, report)
                     if (report.isReady) {
                         closeBootstrapSession()
@@ -713,7 +710,7 @@ class HostListViewModel @Inject constructor(
 
                 TmuxStatus.Missing -> {
                     persistResult(host, installed = false)
-                    val report = bootstrapper.checkServerSetup(session, pathOverride)
+                    val report = bootstrapper.checkServerSetup(session)
                     persistPocketshellResult(host, report)
                     _bootstrapState.value = HostBootstrapSheetState.Prompt(
                         needsTmux = true,
@@ -772,17 +769,16 @@ class HostListViewModel @Inject constructor(
     private fun recheckHostSilently(host: HostEntity, keyPath: String) {
         viewModelScope.launch {
             val session = openSession(host, keyPath, passphrase = null) ?: return@launch
-            val pathOverride = host.pathOverride
             try {
-                when (bootstrapper.checkTmux(session, pathOverride)) {
+                when (bootstrapper.checkTmux(session)) {
                     TmuxStatus.Installed -> {
                         persistResult(host, installed = true)
-                        val report = bootstrapper.checkServerSetup(session, pathOverride)
+                        val report = bootstrapper.checkServerSetup(session)
                         persistPocketshellResult(host, report)
                     }
                     TmuxStatus.Missing -> {
                         persistResult(host, installed = false)
-                        val report = bootstrapper.checkServerSetup(session, pathOverride)
+                        val report = bootstrapper.checkServerSetup(session)
                         persistPocketshellResult(host, report)
                     }
                     is TmuxStatus.Unknown -> {
@@ -848,17 +844,15 @@ class HostListViewModel @Inject constructor(
             }
 
             persistResult(host, installed = true)
-            val pathOverride = host.pathOverride
             when (val result = bootstrapper.installServerSetup(
                 session,
-                prompt?.report ?: bootstrapper.checkServerSetup(session, pathOverride),
-                pathOverride,
+                prompt?.report ?: bootstrapper.checkServerSetup(session),
             )) {
                 InstallResult.Success -> {
                     // Re-probe so the persisted pocketshell flag reflects the
                     // post-install reality, then flip to the success
                     // state so the sheet can offer the Open Usage CTA.
-                    val finalReport = bootstrapper.checkServerSetup(session, pathOverride)
+                    val finalReport = bootstrapper.checkServerSetup(session)
                     persistPocketshellResult(host, finalReport)
                     _bootstrapState.value = HostBootstrapSheetState.Success
                 }
@@ -898,11 +892,10 @@ class HostListViewModel @Inject constructor(
             )
             return
         }
-        val pathOverride = bootstrapTargetHost?.pathOverride
         _bootstrapState.value = HostBootstrapSheetState.Installing
         viewModelScope.launch {
-            when (val result = bootstrapper.installServerTool(session, installer, tool, pathOverride)) {
-                InstallResult.Success -> refreshServerSetupPrompt(session, needsTmux = prompt.needsTmux, pathOverride = pathOverride)
+            when (val result = bootstrapper.installServerTool(session, installer, tool)) {
+                InstallResult.Success -> refreshServerSetupPrompt(session, needsTmux = prompt.needsTmux)
                 is InstallResult.Failed -> _bootstrapState.value = HostBootstrapSheetState.Failed(
                     message = result.stderr.ifBlank { "exit ${result.exitCode}" },
                 )
@@ -925,11 +918,10 @@ class HostListViewModel @Inject constructor(
             )
             return
         }
-        val pathOverride = bootstrapTargetHost?.pathOverride
         _bootstrapState.value = HostBootstrapSheetState.Installing
         viewModelScope.launch {
-            when (val result = bootstrapper.installPocketshellDaemon(session, pathOverride)) {
-                InstallResult.Success -> refreshServerSetupPrompt(session, needsTmux = prompt.needsTmux, pathOverride = pathOverride)
+            when (val result = bootstrapper.installPocketshellDaemon(session)) {
+                InstallResult.Success -> refreshServerSetupPrompt(session, needsTmux = prompt.needsTmux)
                 is InstallResult.Failed -> _bootstrapState.value = HostBootstrapSheetState.Failed(
                     message = result.stderr.ifBlank { "exit ${result.exitCode}" },
                 )
@@ -958,9 +950,8 @@ class HostListViewModel @Inject constructor(
     private suspend fun refreshServerSetupPrompt(
         session: SshSession,
         needsTmux: Boolean,
-        pathOverride: String? = bootstrapTargetHost?.pathOverride,
     ) {
-        val report = bootstrapper.checkServerSetup(session, pathOverride)
+        val report = bootstrapper.checkServerSetup(session)
         bootstrapTargetHost?.let { persistPocketshellResult(it, report) }
         _bootstrapState.value = if (!needsTmux && report.isReady) {
             HostBootstrapSheetState.Success

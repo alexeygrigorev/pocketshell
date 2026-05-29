@@ -19,10 +19,10 @@ Why subprocess instead of `import tmuxctl`:
   `tmuxctl`'s internal module layout (`tmuxctl.cli` / `tmuxctl.storage`
   / `tmuxctl.scheduler`), so updates to `tmuxctl` do not break the
   wrapper.
-- The PATH-discovery story for `tmuxctl` is already solved on the app
-  side (the same `pathOverride` hatch as `quse`). Wrapping `tmuxctl`
-  here means the app's PATH override mechanism keeps working without
-  re-implementation.
+- The PATH-discovery story for `tmuxctl` is solved by the Android
+  bootstrap wrapper, which derives PATH from the user's shell rc before
+  probing tools. Delegating to whatever `tmuxctl` is on PATH keeps this
+  wrapper decoupled from that bootstrap plumbing.
 
 Subcommand coverage:
 

@@ -517,6 +517,15 @@ The first suite is host setup/bootstrap. It should cover at least:
 - `user-local-path`: tools are installed under user-local directories that are
   absent from a default non-login SSH `PATH`; detection still succeeds.
 
+Bootstrap PATH precedence: the probe first asks the remote user's configured
+interactive shell for its rc-derived PATH (`.bashrc` for bash, `.zshrc` for
+zsh, fish config for fish, `.profile` for POSIX fallback). It then prepends
+PocketShell's default user-bin locations (`$HOME/.local/bin`, `$HOME/bin`,
+`$HOME/.cargo/bin`) before running `command -v` and install commands. Those
+defaults win over rc-derived entries, and rc additions win over the remote
+SSH daemon's bare non-login PATH. There is no manual Extra PATH directories
+field in the app.
+
 The false-positive setup bug is tracked in #70. The reusable opt-in scenario
 suite is tracked in #71.
 

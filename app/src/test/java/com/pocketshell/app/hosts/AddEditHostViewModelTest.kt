@@ -292,83 +292,6 @@ class AddEditHostViewModelTest {
     }
 
     @Test
-    fun save_persistsPathOverride_andTrimsBlankToNull() = runTest {
-        val keyId = db.sshKeyDao().insert(
-            SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),
-        )
-        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
-        vm.updateState {
-            it.copy(
-                name = "x",
-                hostname = "h",
-                username = "u",
-                selectedKeyId = keyId,
-                pathOverride = "  /home/u/git/pocketshell/.venv/bin:/home/u/.local/bin  ",
-            )
-        }
-        vm.save()
-
-        val hosts = db.hostDao().getAll().first()
-        assertEquals(
-            "/home/u/git/pocketshell/.venv/bin:/home/u/.local/bin",
-            hosts.single().pathOverride,
-        )
-
-        // A second save with a blank override clears it back to null
-        // (so the probe falls back to its built-in PATH augmentation).
-        val vm2 = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
-        vm2.loadHost(hosts.single().id)
-        vm2.updateState { it.copy(pathOverride = "   ") }
-        vm2.save()
-        assertNull(db.hostDao().getAll().first().single().pathOverride)
-    }
-
-    @Test
-    fun loadHost_prefillsPathOverride_fromPersistedRow() = runTest {
-        // Edit path: a row with a previously-saved override should
-        // hydrate `pathOverride` in the form state so the user sees it.
-        val keyId = db.sshKeyDao().insert(
-            SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),
-        )
-        val hostId = db.hostDao().insert(
-            com.pocketshell.core.storage.entity.HostEntity(
-                name = "h",
-                hostname = "h.example",
-                port = 22,
-                username = "u",
-                keyId = keyId,
-                pathOverride = "/home/u/git/pocketshell/.venv/bin",
-            ),
-        )
-        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
-        vm.loadHost(hostId)
-
-        assertEquals("/home/u/git/pocketshell/.venv/bin", vm.state.value.pathOverride)
-        assertFalse(vm.isDirty())
-    }
-
-    @Test
-    fun isDirty_flagsEditsToPathOverride() = runTest {
-        val keyId = db.sshKeyDao().insert(
-            SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"),
-        )
-        val hostId = db.hostDao().insert(
-            com.pocketshell.core.storage.entity.HostEntity(
-                name = "h",
-                hostname = "h.example",
-                port = 22,
-                username = "u",
-                keyId = keyId,
-            ),
-        )
-        val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
-        vm.loadHost(hostId)
-        assertFalse(vm.isDirty())
-        vm.updateState { it.copy(pathOverride = "/home/u/git/pocketshell/.venv/bin") }
-        assertTrue(vm.isDirty())
-    }
-
-    @Test
     fun save_onEdit_preservesBootstrapCacheColumns() = runTest {
         // Issue #117 regression: save() used to overwrite the entire
         // HostEntity, clobbering tmuxInstalled / pocketshellInstalled /
@@ -388,7 +311,6 @@ class AddEditHostViewModelTest {
                 lastBootstrapAt = 12345L,
                 pocketshellInstalled = true,
                 pocketshellLastDetectedAt = 9999L,
-                pathOverride = "/home/u/git/pocketshell/.venv/bin",
             ),
         )
         val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
@@ -402,10 +324,6 @@ class AddEditHostViewModelTest {
         assertEquals(12345L, row.lastBootstrapAt)
         assertEquals(true, row.pocketshellInstalled)
         assertEquals(9999L, row.pocketshellLastDetectedAt)
-        // Issue #41: pathOverride is part of the form, so a rename
-        // that doesn't touch it must still round-trip the original
-        // value.
-        assertEquals("/home/u/git/pocketshell/.venv/bin", row.pathOverride)
     }
 
     @Test

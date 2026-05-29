@@ -338,10 +338,13 @@ as a permanent fallback.
 
 The PocketShell app previously probed for two binaries (`quse`,
 `tmuxctl`) on every host. That meant two installs to keep up to date,
-two probes to surface failures from, and two PATH-discovery edge cases
-(see [issue #41](https://github.com/alexeygrigorev/pocketshell/issues/41)).
+two probes to surface failures from, and two PATH-discovery edge cases.
 A single `pocketshell` binary collapses those into one install, one
-probe, one bootstrap row. The app keeps detecting `quse` and `tmuxctl`
-as a parallel path while `pocketshell` ramps up to feature parity; once
-parity is reached, the legacy probes are removed in a hard-cut follow-up
-(no compat shim — see decision D22 in `docs/decisions.md`).
+probe, one bootstrap row. The Android bootstrap probe now derives PATH
+from the user's shell rc and prepends `$HOME/.local/bin`, `$HOME/bin`,
+and `$HOME/.cargo/bin` before probing, so cloned-repo or venv installs
+can be discovered without a manual app-side PATH field. The app keeps
+detecting `quse` and `tmuxctl` as a parallel path while `pocketshell`
+ramps up to feature parity; once parity is reached, the legacy probes
+are removed in a hard-cut follow-up (no compat shim — see decision D22
+in `docs/decisions.md`).

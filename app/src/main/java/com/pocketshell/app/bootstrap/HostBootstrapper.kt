@@ -153,18 +153,16 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
      * defensive backstop in case some shell surfaces a non-fatal warning
      * but still exits 0.
      *
-     * Issue #41: [pathOverride] is an optional colon-separated PATH
-     * fragment (e.g. `/home/u/git/pocketshell/.venv/bin`). When non-null and
-     * non-blank it is prepended ahead of the standard built-in
-     * augmentation, so binaries installed in venv-style locations the
-     * user keeps in `~/.bashrc` (which is not sourced by `/bin/sh -lc`)
-     * become visible to the probe.
+     * Issue #294: before the probe runs, PocketShell asks the remote
+     * user's configured shell for its interactive rc-derived PATH. The
+     * wrapper then prepends PocketShell's default user-bin locations to
+     * that effective PATH, so `~/.local/bin` / `~/bin` / `~/.cargo/bin`
+     * keep winning while `.bashrc` / `.zshrc` / fish config additions are
+     * still visible without a manual app setting.
      */
-    public suspend fun checkTmux(
-        session: SshSession,
-        pathOverride: String? = null,
-    ): TmuxStatus = try {
-        val result = session.exec(pathAwareCommand("command -v tmux", pathOverride))
+    public suspend fun checkTmux(session: SshSession): TmuxStatus = try {
+        val bootstrapPath = detectBootstrapPath(session)
+        val result = session.exec(pathAwareCommand("command -v tmux", bootstrapPath))
         when {
             result.exitCode == 0 && result.stdout.isNotBlank() -> TmuxStatus.Installed
             // Non-zero exit is the POSIX "command not found" signal.
@@ -180,16 +178,14 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         TmuxStatus.Unknown("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
     }
 
-    public suspend fun checkServerSetup(
-        session: SshSession,
-        pathOverride: String? = null,
-    ): HostBootstrapReport {
+    public suspend fun checkServerSetup(session: SshSession): HostBootstrapReport {
+        val bootstrapPath = detectBootstrapPath(session)
         val tools = BootstrapTool.entries.associateWith { tool ->
-            checkTool(session, tool.binaryName, pathOverride)
+            checkToolWithPath(session, tool.binaryName, bootstrapPath)
         }
-        val installer = detectPythonToolInstaller(session, pathOverride)
+        val installer = detectPythonToolInstaller(session, bootstrapPath)
         val daemon = if (tools[BootstrapTool.Pocketshell] is ToolStatus.Installed) {
-            checkPocketshellDaemon(session, pathOverride)
+            checkPocketshellDaemon(session, bootstrapPath)
         } else {
             PocketshellDaemonStatus.Missing
         }
@@ -204,9 +200,9 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     public suspend fun installServerSetup(
         session: SshSession,
         report: HostBootstrapReport? = null,
-        pathOverride: String? = null,
     ): InstallResult {
-        val currentReport = freshenReport(session, report, pathOverride)
+        val bootstrapPath = detectBootstrapPath(session)
+        val currentReport = freshenReport(session, report, bootstrapPath)
         if (currentReport.unknownTools.isNotEmpty()) {
             val unknown = currentReport.unknownTools.joinToString { it.binaryName }
             return InstallResult.Error("Could not detect required host tools: $unknown. Reconnect and try again.")
@@ -217,12 +213,12 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
                 "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install pocketshell.",
             )
             for (tool in missingTools) {
-                val result = installServerTool(session, installer, tool, pathOverride)
+                val result = installServerTool(session, installer, tool, bootstrapPath)
                 if (result !is InstallResult.Success) return result
             }
         }
 
-        val afterTools = checkServerSetup(session, pathOverride)
+        val afterTools = checkServerSetup(session)
         val daemon = afterTools.daemon
         if (daemon is PocketshellDaemonStatus.Unavailable) {
             return InstallResult.Error(daemon.reason)
@@ -231,7 +227,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             return InstallResult.Error(daemon.reason)
         }
         if (daemon !is PocketshellDaemonStatus.Running || !daemon.enabled) {
-            return installPocketshellUserDaemon(session, pathOverride)
+            return installPocketshellUserDaemon(session, bootstrapPath)
         }
         return InstallResult.Success
     }
@@ -239,10 +235,24 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     private suspend fun freshenReport(
         session: SshSession,
         report: HostBootstrapReport?,
-        pathOverride: String?,
+        bootstrapPath: String?,
     ): HostBootstrapReport {
         if (report == null || report.missingTools.isNotEmpty() || report.unknownTools.isNotEmpty()) {
-            return checkServerSetup(session, pathOverride)
+            val tools = BootstrapTool.entries.associateWith { tool ->
+                checkToolWithPath(session, tool.binaryName, bootstrapPath)
+            }
+            val installer = detectPythonToolInstaller(session, bootstrapPath)
+            val daemon = if (tools[BootstrapTool.Pocketshell] is ToolStatus.Installed) {
+                checkPocketshellDaemon(session, bootstrapPath)
+            } else {
+                PocketshellDaemonStatus.Missing
+            }
+            return HostBootstrapReport(
+                tools = tools,
+                installer = installer,
+                daemon = daemon,
+                mosh = MoshStatus.Unsupported(MOSH_UNSUPPORTED_REASON),
+            )
         }
         return report
     }
@@ -250,9 +260,14 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     internal suspend fun checkTool(
         session: SshSession,
         binaryName: String,
-        pathOverride: String? = null,
+    ): ToolStatus = checkToolWithPath(session, binaryName, detectBootstrapPath(session))
+
+    private suspend fun checkToolWithPath(
+        session: SshSession,
+        binaryName: String,
+        bootstrapPath: String?,
     ): ToolStatus = try {
-        val result = session.exec(pathAwareCommand("command -v ${shellQuote(binaryName)}", pathOverride))
+        val result = session.exec(pathAwareCommand("command -v ${shellQuote(binaryName)}", bootstrapPath))
         when {
             result.exitCode == 0 && result.stdout.isNotBlank() -> ToolStatus.Installed(result.stdout.trim())
             result.exitCode != 0 -> ToolStatus.Missing
@@ -266,10 +281,14 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
 
     internal suspend fun detectPythonToolInstaller(
         session: SshSession,
-        pathOverride: String? = null,
+    ): PythonToolInstaller? = detectPythonToolInstaller(session, detectBootstrapPath(session))
+
+    private suspend fun detectPythonToolInstaller(
+        session: SshSession,
+        bootstrapPath: String?,
     ): PythonToolInstaller? {
         PythonToolInstaller.entries.forEach { installer ->
-            if (checkTool(session, installer.binaryName, pathOverride) is ToolStatus.Installed) {
+            if (checkToolWithPath(session, installer.binaryName, bootstrapPath) is ToolStatus.Installed) {
                 return installer
             }
         }
@@ -278,16 +297,20 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
 
     internal suspend fun checkPocketshellDaemon(
         session: SshSession,
-        pathOverride: String? = null,
+    ): PocketshellDaemonStatus = checkPocketshellDaemon(session, detectBootstrapPath(session))
+
+    private suspend fun checkPocketshellDaemon(
+        session: SshSession,
+        bootstrapPath: String?,
     ): PocketshellDaemonStatus {
-        when (val systemctl = checkTool(session, "systemctl", pathOverride)) {
+        when (val systemctl = checkToolWithPath(session, "systemctl", bootstrapPath)) {
             is ToolStatus.Installed -> Unit
             ToolStatus.Missing -> return PocketshellDaemonStatus.Unavailable("systemctl is not installed on this host")
             is ToolStatus.Unknown -> return PocketshellDaemonStatus.Unknown("could not locate systemctl: ${systemctl.reason}")
         }
 
         val active = try {
-            session.exec(systemdUserCommand("systemctl --user is-active pocketshell-jobs.service"))
+            session.exec(systemdUserCommand("systemctl --user is-active pocketshell-jobs.service", bootstrapPath))
         } catch (t: Throwable) {
             return PocketshellDaemonStatus.Unknown(
                 "failed to query systemd user service: ${t.javaClass.simpleName}: ${t.message ?: "unknown error"}",
@@ -297,7 +320,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             return PocketshellDaemonStatus.Unavailable(active.combinedOutput().ifBlank { "systemd user services are unavailable on this host" })
         }
         val enabled = try {
-            session.exec(systemdUserCommand("systemctl --user is-enabled pocketshell-jobs.service"))
+            session.exec(systemdUserCommand("systemctl --user is-enabled pocketshell-jobs.service", bootstrapPath))
         } catch (_: Throwable) {
             return PocketshellDaemonStatus.Unknown("failed to query whether pocketshell-jobs.service is enabled")
         }
@@ -318,13 +341,17 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         session: SshSession,
         installer: PythonToolInstaller,
         tool: BootstrapTool,
-        pathOverride: String? = null,
-    ): InstallResult = runPythonToolInstall(session, installer, tool, pathOverride)
+    ): InstallResult = runPythonToolInstall(session, installer, tool, detectBootstrapPath(session))
 
-    public suspend fun installPocketshellDaemon(
+    private suspend fun installServerTool(
         session: SshSession,
-        pathOverride: String? = null,
-    ): InstallResult = installPocketshellUserDaemon(session, pathOverride)
+        installer: PythonToolInstaller,
+        tool: BootstrapTool,
+        bootstrapPath: String?,
+    ): InstallResult = runPythonToolInstall(session, installer, tool, bootstrapPath)
+
+    public suspend fun installPocketshellDaemon(session: SshSession): InstallResult =
+        installPocketshellUserDaemon(session, detectBootstrapPath(session))
 
     /**
      * Detect the host's OS family and run the matching package-manager
@@ -439,25 +466,25 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         session: SshSession,
         installer: PythonToolInstaller,
         tool: BootstrapTool,
-        pathOverride: String?,
+        bootstrapPath: String?,
     ): InstallResult {
         val command = when (installer) {
             PythonToolInstaller.Uv -> "uv tool install ${tool.packageName}"
             PythonToolInstaller.Pipx -> "pipx install ${tool.packageName}"
         }
-        return runInstall(session, pathAwareCommand(command, pathOverride), needsRoot = false)
+        return runInstall(session, pathAwareCommand(command, bootstrapPath), needsRoot = false)
     }
 
     private suspend fun installPocketshellUserDaemon(
         session: SshSession,
-        pathOverride: String?,
+        bootstrapPath: String?,
     ): InstallResult {
-        val pocketshell = when (val status = checkTool(session, BINARY_POCKETSHELL, pathOverride)) {
+        val pocketshell = when (val status = checkToolWithPath(session, BINARY_POCKETSHELL, bootstrapPath)) {
             is ToolStatus.Installed -> status.path
             ToolStatus.Missing -> return InstallResult.Error("pocketshell is not installed; install it before enabling the jobs daemon.")
             is ToolStatus.Unknown -> return InstallResult.Error("could not locate pocketshell: ${status.reason}")
         }
-        if (checkTool(session, "systemctl", pathOverride) !is ToolStatus.Installed) {
+        if (checkToolWithPath(session, "systemctl", bootstrapPath) !is ToolStatus.Installed) {
             return InstallResult.Error("systemctl is not installed on this host; enable pocketshell jobs daemon manually.")
         }
         val command = buildString {
@@ -477,7 +504,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             append("systemctl --user daemon-reload && ")
             append("systemctl --user enable --now pocketshell-jobs.service")
         }
-        return runInstall(session, systemdUserCommand(command), needsRoot = false)
+        return runInstall(session, systemdUserCommand(command, bootstrapPath), needsRoot = false)
     }
 
     private suspend fun runningAsRoot(session: SshSession): Boolean = try {
@@ -502,46 +529,92 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
      * Build the `/bin/sh -lc '…'` wrapper that augments PATH before
      * running [command].
      *
-     * The base augmentation is the historical
-     * `$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin` prefix, which covers
-     * the canonical tool-install locations the probe needs to see. Issue
-     * #41 adds an optional per-host override that is prepended *ahead*
-     * of that base so it wins in PATH search order:
-     *
-     * ```
-     * PATH="<override>:$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:$PATH"
-     * ```
-     *
-     * The override is taken verbatim from the user's Add/Edit Host
-     * "Extra PATH directories" field. A `null` or all-whitespace value
-     * disables the prepend (and produces a probe command that is
-     * byte-identical to the v0 wrapper for backwards compatibility with
-     * the existing HostBootstrapperTest fixtures).
-     *
-     * The override is not shell-escaped: the user is intentionally
-     * choosing PATH entries that already contain forward slashes and
-     * possibly `~`, and we want it to behave exactly the way the user
-     * would type it into a shell — i.e. tilde expansion and `$VAR`
-     * substitution happen if the user wrote them. The whole wrapper is
-     * single-quoted as one big argument to `sh -lc`, so the override is
-     * subject to the same expansion rules as the inline literals around
-     * it. We re-quote the wrapper itself via [shellQuote] which escapes
-     * any single-quote the user might paste in.
+     * When [bootstrapPath] is present it is the already-expanded PATH
+     * detected from the user's interactive shell rc plus PocketShell's
+     * default user-bin prefix. We install it as a single quoted value so
+     * rc-derived directories are data, not shell code. When PATH
+     * detection fails, the wrapper falls back to the historical default
+     * `$HOME/.local/bin:$HOME/bin:$HOME/.cargo/bin:$PATH` augmentation.
      */
-    internal fun pathAwareCommand(command: String, pathOverride: String? = null): String {
-        val trimmed = pathOverride?.trim().orEmpty()
-        val prefix = if (trimmed.isNotEmpty()) "$trimmed:" else ""
+    internal fun pathAwareCommand(command: String, bootstrapPath: String? = null): String {
+        val detected = bootstrapPath?.trim().orEmpty()
+        val pathAssignment = if (detected.isNotEmpty()) {
+            "PATH=${shellQuote(detected)}"
+        } else {
+            "PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\""
+        }
+        return posixShellCommand("$pathAssignment; export PATH; $command")
+    }
+
+    internal suspend fun detectBootstrapPath(session: SshSession): String? = try {
+        val result = session.exec(detectBootstrapPathCommand())
+        parseDetectedBootstrapPath(result.stdout)
+    } catch (_: Throwable) {
+        null
+    }
+
+    internal fun detectBootstrapPathCommand(): String {
+        val posixBody = """
+            if [ -r "${'$'}HOME/.profile" ]; then . "${'$'}HOME/.profile"; fi
+            PATH="${'$'}HOME/.local/bin:${'$'}HOME/bin:${'$'}HOME/.cargo/bin:${'$'}PATH"; export PATH
+            printf '${PATH_BEGIN}\n%s\n${PATH_END}\n' "${'$'}PATH"
+        """.trimIndent()
+        val bashBody = """
+            [ -r "${'$'}HOME/.profile" ] && . "${'$'}HOME/.profile"
+            [ -r "${'$'}HOME/.bashrc" ] && . "${'$'}HOME/.bashrc"
+            PATH="${'$'}HOME/.local/bin:${'$'}HOME/bin:${'$'}HOME/.cargo/bin:${'$'}PATH"; export PATH
+            printf '${PATH_BEGIN}\n%s\n${PATH_END}\n' "${'$'}PATH"
+        """.trimIndent()
+        val zshBody = """
+            [ -r "${'$'}HOME/.zprofile" ] && . "${'$'}HOME/.zprofile"
+            [ -r "${'$'}HOME/.profile" ] && . "${'$'}HOME/.profile"
+            [ -r "${'$'}HOME/.zshrc" ] && . "${'$'}HOME/.zshrc"
+            PATH="${'$'}HOME/.local/bin:${'$'}HOME/bin:${'$'}HOME/.cargo/bin:${'$'}PATH"; export PATH
+            printf '${PATH_BEGIN}\n%s\n${PATH_END}\n' "${'$'}PATH"
+        """.trimIndent()
+        val fishBody = """
+            set -gx PATH ${'$'}HOME/.local/bin ${'$'}HOME/bin ${'$'}HOME/.cargo/bin ${'$'}PATH
+            printf '${PATH_BEGIN}\n%s\n${PATH_END}\n' (string join : ${'$'}PATH)
+        """.trimIndent()
         return posixShellCommand(
-            "PATH=\"${prefix}\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; export PATH; $command",
+            """
+            __pocketshell_shell="${'$'}{SHELL:-}"
+            __pocketshell_base="${'$'}{__pocketshell_shell##*/}"
+            case "${'$'}__pocketshell_base" in
+                bash) if [ -x "${'$'}__pocketshell_shell" ]; then exec "${'$'}__pocketshell_shell" -ic ${shellQuote(bashBody)}; fi ;;
+                zsh) if [ -x "${'$'}__pocketshell_shell" ]; then exec "${'$'}__pocketshell_shell" -ic ${shellQuote(zshBody)}; fi ;;
+                fish) if [ -x "${'$'}__pocketshell_shell" ]; then exec "${'$'}__pocketshell_shell" -ic ${shellQuote(fishBody)}; fi ;;
+            esac
+            $posixBody
+            """.trimIndent(),
         )
     }
 
-    private fun systemdUserCommand(command: String): String =
-        posixShellCommand(
-            "XDG_RUNTIME_DIR=\"\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}\"; export XDG_RUNTIME_DIR; " +
+    internal fun parseDetectedBootstrapPath(output: String): String? {
+        val begin = output.indexOf(PATH_BEGIN)
+        if (begin < 0) return null
+        val pathStart = begin + PATH_BEGIN.length
+        val end = output.indexOf(PATH_END, startIndex = pathStart)
+        if (end < 0) return null
+        return output.substring(pathStart, end)
+            .trim('\r', '\n')
+            .takeIf { it.isNotBlank() }
+    }
+
+    private fun systemdUserCommand(command: String, bootstrapPath: String?): String {
+        val detected = bootstrapPath?.trim().orEmpty()
+        val pathPrefix = if (detected.isNotEmpty()) {
+            "PATH=${shellQuote(detected)}; export PATH; "
+        } else {
+            ""
+        }
+        return posixShellCommand(
+            pathPrefix +
+                "XDG_RUNTIME_DIR=\"\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}\"; export XDG_RUNTIME_DIR; " +
                 "DBUS_SESSION_BUS_ADDRESS=\"\${DBUS_SESSION_BUS_ADDRESS:-unix:path=\$XDG_RUNTIME_DIR/bus}\"; " +
                 "export DBUS_SESSION_BUS_ADDRESS; $command",
         )
+    }
 
     private fun posixShellCommand(command: String): String =
         "/bin/sh -lc ${shellQuote(command)}"
@@ -576,5 +649,8 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
          * install paths agree on the spelling.
          */
         public const val BINARY_POCKETSHELL: String = "pocketshell"
+
+        private const val PATH_BEGIN: String = "__POCKETSHELL_PATH_BEGIN__"
+        private const val PATH_END: String = "__POCKETSHELL_PATH_END__"
     }
 }

@@ -44,7 +44,7 @@ class HostBootstrapperTest {
         )
         val status = bootstrapper.checkTmux(session)
         assertEquals(TmuxStatus.Installed, status)
-        assertEquals(listOf(pathAware("command -v tmux")), session.recorded)
+        assertEquals(listOf(detectPathCommand(), pathAware("command -v tmux")), session.recorded)
     }
 
     @Test
@@ -281,7 +281,7 @@ class HostBootstrapperTest {
         assertTrue(session.recorded.all { command ->
             !command.contains("command -v '") ||
                 command.startsWith("/bin/sh -lc ") &&
-                command.contains("PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"")
+                command.contains(DEFAULT_BOOTSTRAP_PATH)
         })
     }
 
@@ -301,7 +301,8 @@ class HostBootstrapperTest {
 
         assertTrue(report.isReady)
         assertTrue(session.recorded.all { it.startsWith("/bin/sh -lc ") })
-        assertTrue(session.recorded.any { it.contains("PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"") })
+        assertTrue(session.recorded.any { it.contains("__POCKETSHELL_PATH_BEGIN__") })
+        assertTrue(session.recorded.any { it.contains(DEFAULT_BOOTSTRAP_PATH) })
         assertTrue(session.recorded.any { it.contains("XDG_RUNTIME_DIR=\"\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}\"") })
         assertTrue(session.recorded.none { it.startsWith("PATH=") })
         assertTrue(session.recorded.none { it.startsWith("systemctl --user") })
@@ -404,7 +405,7 @@ class HostBootstrapperTest {
         val result = bootstrapper.installServerTool(session, PythonToolInstaller.Pipx, BootstrapTool.Pocketshell)
 
         assertEquals(InstallResult.Success, result)
-        assertEquals(listOf(pathAware("pipx install pocketshell")), session.recorded)
+        assertEquals(listOf(detectPathCommand(), pathAware("pipx install pocketshell")), session.recorded)
     }
 
     @Test
@@ -523,91 +524,87 @@ class HostBootstrapperTest {
     }
 
     @Test
-    fun pathAwareCommand_omitsOverride_whenNullOrBlank() {
-        // Backwards compatibility: a null / empty / whitespace override
-        // must produce the same wrapper string as the v0 codepath, so
-        // existing fixtures and emulator artifacts keep matching.
-        val expected = pathAware("command -v 'pocketshell'")
-        assertEquals(expected, bootstrapper.pathAwareCommand("command -v 'pocketshell'", pathOverride = null))
-        assertEquals(expected, bootstrapper.pathAwareCommand("command -v 'pocketshell'", pathOverride = ""))
-        assertEquals(expected, bootstrapper.pathAwareCommand("command -v 'pocketshell'", pathOverride = "   "))
+    fun pathAwareCommand_usesDefaultUserBins_whenDetectedPathIsMissing() {
+        val expected = shell(
+            "PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; export PATH; command -v 'pocketshell'",
+        )
+        assertEquals(expected, bootstrapper.pathAwareCommand("command -v 'pocketshell'", bootstrapPath = null))
+        assertEquals(expected, bootstrapper.pathAwareCommand("command -v 'pocketshell'", bootstrapPath = ""))
+        assertEquals(expected, bootstrapper.pathAwareCommand("command -v 'pocketshell'", bootstrapPath = "   "))
     }
 
     @Test
-    fun pathAwareCommand_prependsOverride_aheadOfBuiltInPath() {
-        // Issue #41: the override has to land BEFORE the
-        // $HOME/.local/bin segment so a venv install (which would
-        // otherwise be invisible to the probe) wins PATH search order.
-        val override = "/home/u/git/pocketshell/.venv/bin:/home/u/.local/bin"
-        val expected = pathAwareWithOverride("command -v 'pocketshell'", override)
-        assertEquals(expected, bootstrapper.pathAwareCommand("command -v 'pocketshell'", pathOverride = override))
-        // The override is trimmed of surrounding whitespace before being
-        // prepended (a stray newline from a paste shouldn't break the
-        // wrapper).
+    fun detectBootstrapPathCommand_sourcesRemoteShellRcAndPrependsDefaultUserBins() {
+        val command = bootstrapper.detectBootstrapPathCommand()
+        assertTrue(command.startsWith("/bin/sh -lc "))
+        assertTrue(command.contains("__pocketshell_shell="))
+        assertTrue(command.contains("bash)"))
+        assertTrue(command.contains("zsh)"))
+        assertTrue(command.contains("fish)"))
+        assertTrue(command.contains("__POCKETSHELL_PATH_BEGIN__"))
+        assertTrue(command.contains(".local/bin"))
+        assertTrue(command.contains(".cargo/bin"))
+    }
+
+    @Test
+    fun parseDetectedBootstrapPath_ignoresRcNoiseAroundSentinels() {
         assertEquals(
-            expected,
-            bootstrapper.pathAwareCommand("command -v 'pocketshell'", pathOverride = "  $override  "),
+            "/home/u/.local/bin:/home/u/git/pocketshell/.venv/bin:/usr/bin",
+            bootstrapper.parseDetectedBootstrapPath(
+                "hello from rc\n__POCKETSHELL_PATH_BEGIN__\n" +
+                    "/home/u/.local/bin:/home/u/git/pocketshell/.venv/bin:/usr/bin\n" +
+                    "__POCKETSHELL_PATH_END__\n",
+            ),
         )
     }
 
     @Test
-    fun checkTool_returnsInstalled_whenOverrideResolvesTheBinary() = runTest {
-        // The probe without the override returns Missing; with the
-        // override pointing at the venv directory, the same probe must
-        // observe `command -v` succeed and return `Installed`.
-        val override = "/home/u/git/pocketshell/.venv/bin"
+    fun checkTool_returnsInstalled_whenRcDerivedPathResolvesTheBinary() = runTest {
+        val rcPath = "/home/u/.local/bin:/home/u/git/pocketshell/.venv/bin:/usr/bin:/bin"
         val session = FakeSshSession(
             mapOf(
-                pathAware("command -v 'pocketshell'") to ExecResult("", "", 1),
-                pathAwareWithOverride("command -v 'pocketshell'", override) to
+                detectPathCommand() to detectedPathResult(rcPath),
+                pathAwareWithDetectedPath("command -v 'pocketshell'", rcPath) to
                     ExecResult("/home/u/git/pocketshell/.venv/bin/pocketshell\n", "", 0),
             ),
         )
 
-        val missing = bootstrapper.checkTool(session, "pocketshell", pathOverride = null)
-        assertEquals(ToolStatus.Missing, missing)
-
-        val installed = bootstrapper.checkTool(session, "pocketshell", pathOverride = override)
+        val installed = bootstrapper.checkTool(session, "pocketshell")
         assertTrue(installed is ToolStatus.Installed)
         assertEquals("/home/u/git/pocketshell/.venv/bin/pocketshell", (installed as ToolStatus.Installed).path)
     }
 
     @Test
-    fun checkServerSetup_forwardsOverride_toEveryToolProbe() = runTest {
-        // End-to-end: a full checkServerSetup pass with a non-null
-        // override should route every command -v / systemctl probe
-        // through the override-prepended wrapper. The Hetzner repro
-        // case the issue describes: pocketshell lives in a venv the
-        // .bashrc PATH knows about, but /bin/sh -lc does not. With the
-        // override the report flips from "Missing" to "Installed" and
-        // the host becomes "ready" without changing anything else.
-        val override = "/home/u/git/pocketshell/.venv/bin:/home/u/.local/bin"
+    fun checkServerSetup_forwardsRcDerivedPath_toEveryToolProbe() = runTest {
+        val rcPath = "/home/u/.local/bin:/home/u/bin:/home/u/.cargo/bin:/home/u/git/pocketshell/.venv/bin:/usr/bin:/bin"
         val session = FakeSshSession(
             mapOf(
-                pathAwareWithOverride("command -v 'pocketshell'", override) to
+                detectPathCommand() to detectedPathResult(rcPath),
+                pathAwareWithDetectedPath("command -v 'pocketshell'", rcPath) to
                     ExecResult("/home/u/git/pocketshell/.venv/bin/pocketshell\n", "", 0),
-                pathAwareWithOverride("command -v 'uv'", override) to
+                pathAwareWithDetectedPath("command -v 'uv'", rcPath) to
                     ExecResult("/home/u/.local/bin/uv\n", "", 0),
-                pathAwareWithOverride("command -v 'systemctl'", override) to
+                pathAwareWithDetectedPath("command -v 'systemctl'", rcPath) to
                     ExecResult("/usr/bin/systemctl\n", "", 0),
-                systemdAware("systemctl --user is-active pocketshell-jobs.service") to
+                systemdAwareWithDetectedPath("systemctl --user is-active pocketshell-jobs.service", rcPath) to
                     ExecResult("active\n", "", 0),
-                systemdAware("systemctl --user is-enabled pocketshell-jobs.service") to
+                systemdAwareWithDetectedPath("systemctl --user is-enabled pocketshell-jobs.service", rcPath) to
                     ExecResult("enabled\n", "", 0),
             ),
         )
 
-        val report = bootstrapper.checkServerSetup(session, pathOverride = override)
+        val report = bootstrapper.checkServerSetup(session)
 
         assertTrue(report.isReady)
         assertEquals(
             ToolStatus.Installed("/home/u/git/pocketshell/.venv/bin/pocketshell"),
             report.tools[BootstrapTool.Pocketshell],
         )
-        // Every command -v invocation actually saw the override segment.
         assertTrue(
-            "expected every command -v wrapper to carry the override",
-            session.recorded.filter { it.contains("command -v '") }.all { it.contains(override) },
+            "expected every probe wrapper to carry the rc-derived PATH",
+            session.recorded
+                .filter { it.contains("command -v '") || it.contains("systemctl --user") }
+                .all { it.contains(rcPath) },
         )
     }
 
@@ -683,6 +680,15 @@ class HostBootstrapperTest {
             throwOnExec?.let { throw it }
             return dynamic?.invoke(command)
                 ?: canned[command]
+                ?: if (command == HostBootstrapper().detectBootstrapPathCommand()) {
+                    ExecResult(
+                        "__POCKETSHELL_PATH_BEGIN__\n$DEFAULT_BOOTSTRAP_PATH\n__POCKETSHELL_PATH_END__\n",
+                        "",
+                        0,
+                    )
+                } else {
+                    null
+                }
                 ?: ExecResult("", "command not stubbed: $command", 127)
         }
 
@@ -710,15 +716,25 @@ class HostBootstrapperTest {
         override fun close() = Unit
     }
 
-    private fun pathAware(command: String): String =
-        shell("PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; export PATH; $command")
+    private fun detectPathCommand(): String =
+        HostBootstrapper().detectBootstrapPathCommand()
 
-    private fun pathAwareWithOverride(command: String, override: String): String =
-        shell("PATH=\"$override:\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; export PATH; $command")
+    private fun detectedPathResult(path: String = DEFAULT_BOOTSTRAP_PATH): ExecResult =
+        ExecResult("__POCKETSHELL_PATH_BEGIN__\n$path\n__POCKETSHELL_PATH_END__\n", "", 0)
+
+    private fun pathAware(command: String): String =
+        pathAwareWithDetectedPath(command, DEFAULT_BOOTSTRAP_PATH)
+
+    private fun pathAwareWithDetectedPath(command: String, detectedPath: String): String =
+        shell("PATH=${shellQuote(detectedPath)}; export PATH; $command")
 
     private fun systemdAware(command: String): String =
+        systemdAwareWithDetectedPath(command, DEFAULT_BOOTSTRAP_PATH)
+
+    private fun systemdAwareWithDetectedPath(command: String, detectedPath: String): String =
         shell(
-            "XDG_RUNTIME_DIR=\"\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}\"; export XDG_RUNTIME_DIR; " +
+            "PATH=${shellQuote(detectedPath)}; export PATH; " +
+                "XDG_RUNTIME_DIR=\"\${XDG_RUNTIME_DIR:-/run/user/\$(id -u)}\"; export XDG_RUNTIME_DIR; " +
                 "DBUS_SESSION_BUS_ADDRESS=\"\${DBUS_SESSION_BUS_ADDRESS:-unix:path=\$XDG_RUNTIME_DIR/bus}\"; " +
                 "export DBUS_SESSION_BUS_ADDRESS; $command",
         )
@@ -735,4 +751,9 @@ class HostBootstrapperTest {
         } else {
             ExecResult("", "", 1)
         }
+
+    private companion object {
+        const val DEFAULT_BOOTSTRAP_PATH: String =
+            "/home/u/.local/bin:/home/u/bin:/home/u/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+    }
 }

@@ -36,10 +36,10 @@ Why subprocess instead of `import quse`:
   pocketshell` for any user (including the maintainer's dev box).
 - Subprocess delegation keeps `pocketshell` decoupled from `quse`'s
   internal module layout, so updates to `quse` don't break the wrapper.
-- The PATH-discovery story for `quse` is already solved on the app side
-  (see issue #41 + the `pathOverride` column on `HostEntity`). Wrapping
-  `quse` here means the app's existing PATH override mechanism keeps
-  working without re-implementation.
+- The PATH-discovery story for `quse` is solved by the Android bootstrap
+  wrapper, which derives PATH from the user's shell rc before probing
+  tools. Delegating to whatever `quse` is on PATH keeps this wrapper
+  decoupled from that bootstrap plumbing.
 
 Later PRs will fold the provider-detection logic in directly so
 `pocketshell` is the canonical implementation and the subprocess

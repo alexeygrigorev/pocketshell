@@ -247,7 +247,18 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
             // command followed by a carriage return — same shape used
             // by the existing voice + planner paths.
             if (startCommand != null) {
-                val quotedCommand = shellQuote(startCommand)
+                // Issue #263: auto-export the folder's .env / .envrc vars
+                // into the new pane's shell BEFORE the agent CLI starts, so
+                // the agent inherits them. The values are pulled via command
+                // substitution (`eval "$(...)"`) so only the literal
+                // `eval "$(pocketshell env export ...)"` text is echoed into
+                // the pane — secret values never appear in the visible
+                // terminal. Degrades gracefully: if `pocketshell` is missing
+                // the substitution errors to a no-op (command-not-found is
+                // swallowed inside `$()`), and if no env files exist the
+                // export prints nothing — either way the agent still starts.
+                val payload = composeStartCommand(cwd, startCommand)
+                val quotedCommand = shellQuote(payload)
                 session.exec(
                     pathAware("tmux send-keys -t $quotedName $quotedCommand Enter"),
                 )
@@ -328,8 +339,7 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
     private fun pathAware(command: String): String =
         ReposRemoteSource.pathAwareCommand(command)
 
-    private fun shellQuote(value: String): String =
-        "'" + value.replace("'", "'\\''") + "'"
+    private fun shellQuote(value: String): String = shellQuoteValue(value)
 
     /** Active-pane row carrying the per-session signals we use beyond cwd. */
     internal data class ActivePaneRow(
@@ -340,6 +350,41 @@ class SshFolderListGateway @Inject constructor() : FolderListGateway {
     )
 
     internal companion object {
+        /**
+         * Single-quote a value for safe interpolation into a POSIX shell
+         * command (`'...'` with embedded single quotes escaped as
+         * `'\''`). Used both for the `tmux send-keys` argument and the
+         * `--dir` path inside the env-export prelude (issue #263), so a
+         * folder path containing spaces, quotes, `;`, `$()`, etc. cannot
+         * break out of its argument.
+         */
+        internal fun shellQuoteValue(value: String): String =
+            "'" + value.replace("'", "'\\''") + "'"
+
+        /**
+         * Issue #263: compose the literal command typed into a freshly
+         * created pane. When [startCommand] is present, prepend an
+         * env-export prelude so the folder's `.env` / `.envrc` variables
+         * are live before the agent CLI runs:
+         *
+         * ```
+         * eval "$(pocketshell env export --dir '<cwd>')"; <startCommand>
+         * ```
+         *
+         * `<cwd>` is shell-quoted so a hostile or unusual folder path
+         * cannot inject shell. The values are merged in via command
+         * substitution, so only this literal text is echoed into the
+         * visible terminal — the secret values are not. The prelude
+         * degrades to a no-op when `pocketshell` is absent (the inner
+         * command-not-found error is swallowed inside `$()`) or when the
+         * folder has no env files (export prints nothing), so the agent
+         * always launches.
+         */
+        internal fun composeStartCommand(cwd: String, startCommand: String): String {
+            val quotedDir = shellQuoteValue(cwd)
+            return "eval \"\$(pocketshell env export --dir $quotedDir)\"; $startCommand"
+        }
+
         // tmux's `-F` format spec replaces tab bytes (0x09) in the
         // rendered output with `_` so a multi-field row delimited by
         // real tabs is mangled into a single column. The existing

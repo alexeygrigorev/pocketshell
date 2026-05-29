@@ -194,8 +194,6 @@ public class SessionViewModel @Inject constructor(
     public val projectNavigation: StateFlow<ProjectNavigationUiState> =
         _projectNavigation.asStateFlow()
 
-    private val dismissedAgentHints: MutableSet<String> = mutableSetOf()
-
     private var sessionRef: SshSession? = null
     private var shellRef: SshShellHandle? = null
     private var remoteColumns: Int = 0
@@ -391,7 +389,6 @@ public class SessionViewModel @Inject constructor(
             detection = detection,
             events = boundedDistinctEvents(initialEvents),
             selectedTab = SessionTab.Terminal,
-            hintVisible = true,
         )
     }
 
@@ -429,22 +426,20 @@ public class SessionViewModel @Inject constructor(
         session: SshSession,
         detection: AgentDetection,
     ) {
-            val hintKey = detection.sessionId ?: detection.sourcePath
-            val lineCount = runCatching { agentRepository.lineCount(session, detection) }.getOrDefault(0L)
-            val initialEvents = runCatching {
-                agentRepository.readInitialEvents(session, detection)
-            }.getOrDefault(emptyList())
-            _agentConversation.value = AgentConversationUiState(
-                detection = detection,
-                events = boundedDistinctEvents(initialEvents),
-                selectedTab = SessionTab.Terminal,
-                hintVisible = hintKey !in dismissedAgentHints,
-            )
-            // Issue #160: OpenCode now uses the same `session.tail` route
-            // Claude + Codex already use — no special polling branch.
-            agentTailJob = agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
-                appendAgentEvents(listOf(event))
-            }
+        val lineCount = runCatching { agentRepository.lineCount(session, detection) }.getOrDefault(0L)
+        val initialEvents = runCatching {
+            agentRepository.readInitialEvents(session, detection)
+        }.getOrDefault(emptyList())
+        _agentConversation.value = AgentConversationUiState(
+            detection = detection,
+            events = boundedDistinctEvents(initialEvents),
+            selectedTab = SessionTab.Terminal,
+        )
+        // Issue #160: OpenCode now uses the same `session.tail` route
+        // Claude + Codex already use — no special polling branch.
+        agentTailJob = agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
+            appendAgentEvents(listOf(event))
+        }
     }
 
     private fun appendAgentEvents(events: List<ConversationEvent>) {
@@ -459,23 +454,7 @@ public class SessionViewModel @Inject constructor(
     public fun selectSessionTab(tab: SessionTab) {
         val current = _agentConversation.value
         if (tab == SessionTab.Conversation && current.detection == null) return
-        // Issue #179: tapping the Conversation tab is treated as the
-        // user visiting the hint's destination. Record the dismissal
-        // key so a later JSONL event re-detecting the same agent
-        // cannot resurrect the hint chip on the terminal tab.
-        if (tab == SessionTab.Conversation) {
-            current.detection?.let { detection ->
-                dismissedAgentHints += detection.sessionId ?: detection.sourcePath
-            }
-        }
-        _agentConversation.value = current.copy(selectedTab = tab, hintVisible = false)
-    }
-
-    public fun dismissAgentHint() {
-        val current = _agentConversation.value
-        val detection = current.detection ?: return
-        dismissedAgentHints += detection.sessionId ?: detection.sourcePath
-        _agentConversation.value = current.copy(hintVisible = false)
+        _agentConversation.value = current.copy(selectedTab = tab)
     }
 
     /**
@@ -489,13 +468,6 @@ public class SessionViewModel @Inject constructor(
         if (current.searchQuery == query) return
         _agentConversation.value = current.copy(searchQuery = query)
     }
-
-    /**
-     * Issue #179: snapshot of the dismissed-hint keys for unit tests.
-     * The set is private — tests need a read-only seam to prove the
-     * explicit-dismiss and visit-to-dismiss paths both populate it.
-     */
-    internal fun dismissedHintKeysForTest(): Set<String> = dismissedAgentHints.toSet()
 
     /**
      * Handle a tap on a non-modifier key bar key (`Esc`, `Tab`, arrows).
@@ -992,7 +964,6 @@ public data class AgentConversationUiState(
     val detection: AgentDetection? = null,
     val events: List<ConversationEvent> = emptyList(),
     val selectedTab: SessionTab = SessionTab.Terminal,
-    val hintVisible: Boolean = false,
     /**
      * Issue #154: persisted search query for the conversation pane. The
      * value lives on the ViewModel state (not as a local `remember` in

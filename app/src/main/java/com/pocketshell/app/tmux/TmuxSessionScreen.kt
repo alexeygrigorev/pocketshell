@@ -91,7 +91,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.composer.PromptComposerSheet
-import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.settings.SettingsViewModel
 import com.pocketshell.app.session.KeyBarWithMic
@@ -251,10 +250,6 @@ public fun TmuxSessionScreen(
     // window). Cleared when the user explicitly returns to the Terminal
     // tab.
     val lockedConversationPaneId by viewModel.lockedConversationPaneId.collectAsState()
-    // Issue #197: per-pane record of "user already acknowledged the
-    // first-send confirmation banner". Drives whether the conversation
-    // composer renders the one-time banner above the input field.
-    val firstSendConfirmedPanes by viewModel.firstSendConfirmedPanes.collectAsState()
     // Issue #176: collected once at the screen root so the conversation
     // pane recomposes when the toggle flips in Settings.
     val appSettings by settingsViewModel.state.collectAsState()
@@ -761,10 +756,8 @@ public fun TmuxSessionScreen(
                     val agentWindowLabel = remember(lockedPane, panes, agentWindows) {
                         agentWindowLabelFor(lockedPane, panes, agentWindows)
                     }
-                    val agentDisplayName = lockedConversation!!.detection?.agent?.displayName.orEmpty()
                     val currentWindowMatchesAgent =
                         currentPane?.windowId == lockedPane.windowId
-                    val firstSendConfirmed = paneIdForSend in firstSendConfirmedPanes
                     TmuxConversationPane(
                         events = lockedConversation.events,
                         onSendToAgent = { text ->
@@ -775,10 +768,7 @@ public fun TmuxSessionScreen(
                             .testTag(TMUX_CONVERSATION_PANE_TAG),
                         showSystemNotes = appSettings.showSystemNotes,
                         agentWindowLabel = agentWindowLabel,
-                        agentDisplayName = agentDisplayName,
                         currentWindowMatchesAgent = currentWindowMatchesAgent,
-                        firstSendConfirmed = firstSendConfirmed,
-                        onConfirmFirstSend = { viewModel.confirmFirstSendForPane(paneIdForSend) },
                         // Issue #154 (acceptance criterion #5): hoist
                         // the search query into the ViewModel state so
                         // toggling to the Terminal tab and back does
@@ -820,15 +810,6 @@ public fun TmuxSessionScreen(
                         )
                     }
                 }
-                TmuxAgentHintBanner(
-                    pane = currentPane,
-                    conversation = currentAgentConversation,
-                    onOpen = { paneId ->
-                        viewModel.selectSessionTab(paneId, SessionTab.Conversation)
-                    },
-                    onDismiss = viewModel::dismissAgentHint,
-                    modifier = Modifier.align(Alignment.BottomCenter),
-                )
             }
 
             // Voice-related strips sit above the input band so they remain
@@ -1728,28 +1709,17 @@ internal const val TMUX_CONVERSATION_COMPOSER_SEND_TAG = "tmux:conversation:comp
 internal const val TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX = "tmux:conversation:tool:"
 /** Issue #176: stable test tag prefix for a `SystemNote` row in the tmux conversation pane. */
 internal const val TMUX_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX = "tmux:conversation:system-note:"
-internal const val TMUX_AGENT_HINT_TAG = "tmux:agent-hint"
 /**
- * Issue #197 / #255: stable test tags for the conversation pane's two
- * banners that disambiguate "where is the agent?" when the user has
+ * Issue #197 / #255: stable test tag for the conversation pane's remaining
+ * banner that disambiguates "where is the agent?" when the user has
  * multiple tmux windows. Issue #255 removed the always-visible
  * "Sending to: Window N · Pane N" target-indicator strip (and its tag)
  * because naming the underlying terminal pane as the send target was
- * meaningless in the agent conversation — the user is talking to the
- * agent, not the shell.
- *
- * - [TMUX_CONVERSATION_FIRST_SEND_BANNER_TAG] is on the one-time
- *   confirmation banner shown until the user acknowledges with "Got
- *   it" (the button tag is [TMUX_CONVERSATION_FIRST_SEND_CONFIRM_TAG]).
- * - [TMUX_CONVERSATION_WINDOW_MISMATCH_BANNER_TAG] is on the subtle
- *   "Agent is on Window N, not the current window." banner shown only
- *   when the user has navigated to a sibling window while the
- *   conversation pane is locked to the agent pane.
+ * meaningless in the agent conversation. Issue #282 removed the one-time
+ * first-send confirmation, leaving only the subtle "Agent is on Window N,
+ * not the current window." banner shown when the user has navigated to a
+ * sibling window while the conversation pane is locked to the agent pane.
  */
-internal const val TMUX_CONVERSATION_FIRST_SEND_BANNER_TAG =
-    "tmux:conversation:first-send-banner"
-internal const val TMUX_CONVERSATION_FIRST_SEND_CONFIRM_TAG =
-    "tmux:conversation:first-send-confirm"
 internal const val TMUX_CONVERSATION_WINDOW_MISMATCH_BANNER_TAG =
     "tmux:conversation:window-mismatch-banner"
 /**
@@ -2362,109 +2332,6 @@ private fun WindowSwitcherOverlay(
     }
 }
 
-/**
- * Issue #179: chip-display block extracted out of [TmuxSessionScreen]'s
- * main column so the dismiss state machine is unit-testable in
- * isolation. The composable owns the auto-dismiss [LaunchedEffect] keyed
- * on (paneId, detectionKey) — when [conversation]'s `hintVisible` flips
- * to false (explicit dismiss, visit-to-dismiss, or auto-dismiss), the
- * effect is torn down with the chip.
- *
- * Public visibility is [internal] so an instrumentation test in the
- * same module can mount the chip against a real [TmuxSessionViewModel]
- * and the production dismissed-set wiring without standing up the full
- * tmux-CC connection.
- */
-@Composable
-internal fun TmuxAgentHintBanner(
-    pane: TmuxPaneState?,
-    conversation: AgentConversationUiState?,
-    onOpen: (paneId: String) -> Unit,
-    onDismiss: (paneId: String) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val detection = conversation?.detection
-    val visible = pane != null &&
-        conversation?.hintVisible == true &&
-        detection != null &&
-        conversation.selectedTab == SessionTab.Terminal
-    if (!visible) return
-    val hintPaneId = pane!!.paneId
-    val hintDetectionKey = detection!!.sessionId ?: detection.sourcePath
-    // Auto-dismiss after [AGENT_HINT_AUTO_DISMISS_MS] of continuous
-    // visibility for the same (pane, detection) pair. The keyed
-    // LaunchedEffect restarts only when the user navigates to a
-    // different pane or the detection changes — within a single
-    // sighting the timer runs once and either fires (auto-dismiss) or
-    // is cancelled by the user explicitly dismissing / visiting the
-    // Conversation tab (both clear `hintVisible`, which makes
-    // `visible` false above and removes the composable + its
-    // LaunchedEffect).
-    LaunchedEffect(hintPaneId, hintDetectionKey) {
-        kotlinx.coroutines.delay(AGENT_HINT_AUTO_DISMISS_MS)
-        onDismiss(hintPaneId)
-    }
-    TmuxAgentHintChip(
-        label = "${detection.agent.displayName} session detected",
-        onOpen = { onOpen(hintPaneId) },
-        onDismiss = { onDismiss(hintPaneId) },
-        modifier = modifier
-            .padding(horizontal = 12.dp, vertical = 12.dp)
-            .testTag(TMUX_AGENT_HINT_TAG),
-    )
-}
-
-@Composable
-private fun TmuxAgentHintChip(
-    label: String,
-    onOpen: () -> Unit,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    // Issue #179: muted bottom banner per docs/design-system.md §6.3.
-    // Replaces the previous opaque top-center overlay. AccentSoft fill +
-    // 1 dp AccentDim border + 10 dp corner radius keeps the chip visible
-    // without dominating the terminal viewport.
-    val shape = RoundedCornerShape(10.dp)
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.AccentSoft, shape = shape)
-            .border(width = 1.dp, color = PocketShellColors.AccentDim, shape = shape)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .clickable(onClick = onOpen),
-        ) {
-            Text(
-                text = label,
-                color = PocketShellColors.Text,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium,
-            )
-            Text(
-                text = "Tap to see full conversation >",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
-            )
-        }
-        TextButton(onClick = onDismiss) {
-            Text("X")
-        }
-    }
-}
-
-/**
- * Issue #179: auto-dismiss delay for the agent hint banner. 8 seconds
- * matches the UX audit (#154 finding 9.1) and the design-system spec
- * (`docs/design-system.md` §6.3).
- */
-internal const val AGENT_HINT_AUTO_DISMISS_MS: Long = 8_000L
-
 @Composable
 internal fun TmuxConversationPane(
     events: List<ConversationEvent>,
@@ -2475,23 +2342,18 @@ internal fun TmuxConversationPane(
     // behaviour (notes visible but muted) so direct callers that did
     // not opt into the setting wire-up still see system notes.
     showSystemNotes: Boolean = true,
-    // Issue #197 / #255: the conversation composer surfaces "where is the
-    // agent?" above the input field for the multi-window disambiguation
-    // case — the one-time first-send confirmation banner and the
-    // cross-window mismatch banner. Both are keyed off the agent pane the
-    // composer is bound to (not the currently-visible pane in the pager).
+    // Issue #197 / #255 / #282: the conversation composer surfaces the
+    // remaining "where is the agent?" banner only for the multi-window
+    // disambiguation case. It is keyed off the agent pane the composer is
+    // bound to (not the currently-visible pane in the pager).
     // Issue #255 removed the always-visible "Sending to: Window N · Pane N"
     // target-indicator strip these labels also fed — naming the underlying
     // terminal pane as the send target was meaningless in the agent
-    // conversation. Direct callers (unit tests, the connected
-    // ConversationInteractE2eTest) that don't care about the banners pass
-    // empty strings / `true` to opt out — those defaults render the pane
-    // with no banners.
+    // conversation. Issue #282 removed the first-send confirmation prompt.
+    // Direct callers that don't care about the mismatch banner pass empty
+    // strings; that default renders the pane with no banners.
     agentWindowLabel: String = "",
-    agentDisplayName: String = "",
     currentWindowMatchesAgent: Boolean = true,
-    firstSendConfirmed: Boolean = true,
-    onConfirmFirstSend: () -> Unit = {},
     // Issue #154 (acceptance criterion #5): hoist the search query so
     // it survives Terminal ↔ Conversation tab switches. The screen
     // wires these to the per-pane `AgentConversationUiState.searchQuery`
@@ -2626,7 +2488,7 @@ internal fun TmuxConversationPane(
                     .padding(end = 12.dp, bottom = 12.dp),
             )
         }
-        // Issue #197 / #255: the conversation composer used to stack an
+        // Issue #197 / #255 / #282: the conversation composer used to stack an
         // always-visible "Sending to: Window N · Pane N" target-indicator
         // strip above the input field. Issue #255 (v0.3.0 UI audit, finding
         // A) removed it: in the Conversation pane the user is talking to the
@@ -2634,23 +2496,13 @@ internal fun TmuxConversationPane(
         // window/pane as the "send target" was meaningless noise. Per D22
         // (hard-cut, no compat shim) the indicator is deleted outright.
         //
-        // The remaining two banners are NOT terminal send-target
-        // indicators — they answer "where is the agent?" for the multi-
-        // window disambiguation case (#197):
-        // 1. Window-mismatch banner — only when the user has navigated
-        //    away from the agent window while the composer is still
-        //    locked to the agent pane.
-        // 2. First-send confirmation banner — one-time per pane.
+        // Issue #282 also removed the first-send confirmation prompt. The
+        // only remaining disambiguation surface is the window-mismatch
+        // banner, shown when the user has navigated away from the agent
+        // window while the composer is still locked to the agent pane.
         if (!currentWindowMatchesAgent && agentWindowLabel.isNotEmpty()) {
             TmuxConversationWindowMismatchBanner(
                 agentWindowLabel = agentWindowLabel,
-            )
-        }
-        if (!firstSendConfirmed && agentWindowLabel.isNotEmpty()) {
-            TmuxConversationFirstSendBanner(
-                agentWindowLabel = agentWindowLabel,
-                agentDisplayName = agentDisplayName,
-                onConfirm = onConfirmFirstSend,
             )
         }
         AgentComposerRow(
@@ -2842,52 +2694,6 @@ private fun TabsRowWithPulse(
                     )
                     .testTag(TMUX_CONVERSATION_TAB_PULSE_TAG),
             )
-        }
-    }
-}
-
-/**
- * Issue #197: one-time confirmation banner shown above the composer
- * until the user taps "Got it." Uses the `AccentSoft` fill + 1 dp
- * `AccentDim` border + 10 dp radius pattern (`docs/design-system.md`
- * §6.3) so it reads as an actionable hint rather than an error. The
- * dismissal is recorded in [TmuxSessionViewModel.firstSendConfirmedPanes]
- * so reopening the conversation pane later in the same session does
- * not re-show it.
- */
-@Composable
-private fun TmuxConversationFirstSendBanner(
-    agentWindowLabel: String,
-    agentDisplayName: String,
-    onConfirm: () -> Unit,
-) {
-    val shape = RoundedCornerShape(10.dp)
-    val agentSubject = agentDisplayName
-        .takeIf { it.isNotBlank() }
-        ?.let { "$it pane" }
-        ?: "agent pane"
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 6.dp)
-            .background(color = PocketShellColors.AccentSoft, shape = shape)
-            .border(width = 1.dp, color = PocketShellColors.AccentDim, shape = shape)
-            .padding(horizontal = 12.dp, vertical = 10.dp)
-            .testTag(TMUX_CONVERSATION_FIRST_SEND_BANNER_TAG),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text(
-            text = "Sending to $agentWindowLabel's $agentSubject — got it?",
-            color = PocketShellColors.Text,
-            fontSize = 12.sp,
-            modifier = Modifier.weight(1f),
-        )
-        TextButton(
-            onClick = onConfirm,
-            modifier = Modifier.testTag(TMUX_CONVERSATION_FIRST_SEND_CONFIRM_TAG),
-        ) {
-            Text("Got it")
         }
     }
 }

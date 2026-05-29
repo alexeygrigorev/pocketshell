@@ -20,7 +20,6 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.text.font.FontWeight
@@ -81,9 +80,7 @@ class TmuxConversationTurnDensityScreenshotTest {
                         .background(PocketShellColors.Background)
                         .testTag(TMUX_CONVERSATION_PANE_TAG),
                     agentWindowLabel = "Window 1",
-                    agentDisplayName = "Claude Code",
                     currentWindowMatchesAgent = true,
-                    firstSendConfirmed = true,
                 )
             }
         }
@@ -91,13 +88,9 @@ class TmuxConversationTurnDensityScreenshotTest {
 
         compose.onNodeWithTag(TMUX_CONVERSATION_PANE_TAG)
             .assertIsDisplayed()
-        compose.onNodeWithText("USER", useUnmergedTree = true)
-            .assertDoesNotExist()
-        compose.onNodeWithText("ASSISTANT", substring = true, useUnmergedTree = true)
-            .assertDoesNotExist()
-        compose.onAllNodesWithText("›", useUnmergedTree = true)
+        compose.onAllNodesWithText("USER", substring = true, useUnmergedTree = true)
             .assertCountEquals(2)
-        compose.onAllNodesWithText("A", useUnmergedTree = true)
+        compose.onAllNodesWithText("ASSISTANT", substring = true, useUnmergedTree = true)
             .assertCountEquals(2)
 
         captureFullDevice(File(artifactDir(), "after-dense-terminal-turns.png"))

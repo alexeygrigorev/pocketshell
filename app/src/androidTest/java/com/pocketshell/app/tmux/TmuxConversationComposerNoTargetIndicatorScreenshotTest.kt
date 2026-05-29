@@ -28,9 +28,9 @@ import org.junit.runner.RunWith
  * Issue #255 screenshot evidence: the Conversation pane composer must
  * show NO terminal send-target indicator ("Sending to: Window N · Pane
  * N"). Renders [TmuxConversationPane] in the worst case for the removed
- * strip — full agent window/pane labels present, first-send confirmed,
- * same window as the agent — which is exactly the state where the
- * always-visible "Sending to:" strip used to render before #255.
+ * strip — agent window label present, same window as the agent — which
+ * is exactly the state where the always-visible "Sending to:" strip
+ * used to render before #255.
  *
  * Writes `conversation-composer-no-target-indicator.png` to
  * `<media>/additional_test_output/tmux-conversation-composer/` so the
@@ -66,13 +66,11 @@ class TmuxConversationComposerNoTargetIndicatorScreenshotTest {
                     modifier = Modifier
                         .fillMaxSize()
                         .background(PocketShellColors.Background),
-                    // Worst case for the removed strip: full agent labels,
-                    // confirmed, same window — used to always show the
+                    // Worst case for the removed strip: agent window label,
+                    // same window — used to always show the
                     // "Sending to: Window 1 · Pane 1" indicator.
                     agentWindowLabel = "Window 1",
-                    agentDisplayName = "Claude Code",
                     currentWindowMatchesAgent = true,
-                    firstSendConfirmed = true,
                 )
             }
         }

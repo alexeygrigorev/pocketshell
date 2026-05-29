@@ -91,7 +91,6 @@ internal const val SESSION_CONVERSATION_COMPOSER_SEND_TAG = "session:conversatio
 internal const val SESSION_CONVERSATION_TOOL_ROW_TAG_PREFIX = "session:conversation:tool:"
 /** Issue #176: stable test tag prefix for a `SystemNote` row in the SessionScreen conversation pane. */
 internal const val SESSION_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX = "session:conversation:system-note:"
-internal const val SESSION_AGENT_HINT_TAG = "session:agent-hint"
 /**
  * Issue #154: stable test tags for the conversation navigation polish on
  * the raw-SSH pane. Mirror the tmux equivalents.
@@ -348,28 +347,6 @@ public fun SessionScreen(
                             .padding(horizontal = 2.dp, vertical = 4.dp),
                         onTerminalSizeChanged = viewModel::resizeRemotePty,
                     )
-                    val detection = agentConversation.detection
-                    if (agentConversation.hintVisible && detection != null) {
-                        // Issue #179: auto-dismiss the chip after a fixed
-                        // delay so a JSONL append that retriggered
-                        // hintVisible cannot keep it on-screen
-                        // indefinitely. Keyed on the detection identity
-                        // so a fresh agent detection re-arms the timer.
-                        val detectionKey = detection.sessionId ?: detection.sourcePath
-                        LaunchedEffect(detectionKey) {
-                            kotlinx.coroutines.delay(AGENT_HINT_AUTO_DISMISS_MS)
-                            viewModel.dismissAgentHint()
-                        }
-                        AgentHintChip(
-                            label = "${detection.agent.displayName} session detected",
-                            onOpen = { viewModel.selectSessionTab(SessionTab.Conversation) },
-                            onDismiss = viewModel::dismissAgentHint,
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(horizontal = 12.dp, vertical = 12.dp)
-                                .testTag(SESSION_AGENT_HINT_TAG),
-                        )
-                    }
                 }
             }
 
@@ -564,56 +541,6 @@ private fun breadcrumbCrumbs(host: String, user: String): List<Crumb> = listOf(
     Crumb(label = "$user@$host", isCurrent = true, onClick = { /* current — no-op */ }),
     Crumb(label = "pane 1", isCurrent = false, onClick = { /* pane switcher — Phase 2 */ }),
 )
-
-@Composable
-private fun AgentHintChip(
-    label: String,
-    onOpen: () -> Unit,
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    // Issue #179: muted bottom banner per docs/design-system.md §6.3.
-    // Replaces the previous opaque top-center overlay so the hint does
-    // not dominate the terminal viewport on every JSONL event.
-    val shape = RoundedCornerShape(10.dp)
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.AccentSoft, shape = shape)
-            .border(width = 1.dp, color = PocketShellColors.AccentDim, shape = shape)
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .clickable(onClick = onOpen),
-        ) {
-            Text(
-                text = label,
-                color = PocketShellColors.Text,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Medium,
-            )
-            Text(
-                text = "Tap to see full conversation >",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
-            )
-        }
-        TextButton(onClick = onDismiss) {
-            Text("X")
-        }
-    }
-}
-
-/**
- * Issue #179: auto-dismiss delay for the agent hint banner. 8 seconds
- * matches the UX audit (#154 finding 9.1) and the design-system spec
- * (`docs/design-system.md` §6.3).
- */
-internal const val AGENT_HINT_AUTO_DISMISS_MS: Long = 8_000L
 
 // Issue #160 round 2: `internal` visibility (was `private`) so the
 // connected `ConversationInteractE2eTest` can drive the composer

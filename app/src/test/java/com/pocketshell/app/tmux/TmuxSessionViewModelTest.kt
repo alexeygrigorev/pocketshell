@@ -1491,29 +1491,7 @@ class TmuxSessionViewModelTest {
         assertEquals("/keys/b", entry?.keyPath)
     }
 
-    // ─── Issue #179: hint dismiss state machine ─────────────────────
-    //
-    // The Compose chip in [TmuxSessionScreen] derives visibility from
-    // `currentAgentConversation.hintVisible`. Before #179 a JSONL event
-    // landing through [appendAgentEvents] preserved hintVisible but a
-    // re-detection cycle ([startAgentConversationForPane] running again
-    // for the same pane after a reconcile) reset it to true and
-    // resurrected the chip on every JSONL append. The dismissed-set is
-    // the seal. The tests below pin three contracts on the production
-    // code path:
-    //
-    //  1. Explicit dismiss + replay of a re-detection (which is what
-    //     happens when the reconcile + tail produces a fresh
-    //     `startAgentConversationForPane` for the same pane) leaves
-    //     `hintVisible = false`.
-    //  2. Tapping the Conversation tab counts as a dismiss for the
-    //     pane/session, so a follow-up JSONL re-detection cannot
-    //     resurrect the hint on the terminal tab when the user comes
-    //     back.
-    //  3. A JSONL event append on its own (no re-detection) does NOT
-    //     resurrect the hint after dismiss — this is the original bug
-    //     report ("It keeps telling me that the code session is
-    //     detected, I'm not sure we need that that often").
+    // ─── Issue #282: detected agents no longer seed a popup hint ────
 
     private fun newClaudeDetection(): AgentDetection = AgentDetection(
         agent = AgentKind.ClaudeCode,
@@ -1523,7 +1501,7 @@ class TmuxSessionViewModelTest {
     )
 
     @Test
-    fun startAgentConversationForTestSetsHintVisibleOnFirstDetection() = runTest {
+    fun detectedAgentConversationStartsWithoutHintPopupState() = runTest {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         vm.applyParsedPanesForTest(
@@ -1534,75 +1512,16 @@ class TmuxSessionViewModelTest {
 
         val state = vm.agentConversations.value["%0"]
         assertNotNull(state)
-        assertTrue("hint should be visible on first detection", state!!.hintVisible)
-        assertEquals(SessionTab.Terminal, state.selectedTab)
+        assertEquals(SessionTab.Terminal, state!!.selectedTab)
+        assertEquals(AgentKind.ClaudeCode, state.detection?.agent)
     }
 
     @Test
-    fun dismissAgentHintRecordsDismissalKey() = runTest {
+    fun agentConversationStillReceivesEventsAfterPopupRemoval() = runTest {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         vm.startAgentConversationForTest("%0", newClaudeDetection())
 
-        vm.dismissAgentHint("%0")
-
-        val state = vm.agentConversations.value["%0"]!!
-        assertFalse("hint should be hidden after explicit dismiss", state.hintVisible)
-        assertTrue(
-            "dismissed set must include the pane/session key",
-            vm.dismissedHintKeysForTest().any { it.contains("abc") || it.contains("%0") },
-        )
-    }
-
-    @Test
-    fun dismissedHintDoesNotReappearOnReDetection() = runTest {
-        // The core regression: the production path re-enters
-        // [startAgentConversationForPane] whenever [reconcilePanes]
-        // re-fires with the same pane (which happens on layout-change
-        // events that follow JSONL writes). Before #179 that call
-        // unconditionally reset `hintVisible = true`. Replaying the
-        // test seam reproduces that re-entry; the dismissed-set must
-        // suppress the resurrection.
-        val vm = newVm()
-        vm.attachClientForTest(FakeTmuxClient())
-        val detection = newClaudeDetection()
-        vm.startAgentConversationForTest("%0", detection)
-        assertTrue(vm.agentConversations.value["%0"]!!.hintVisible)
-
-        vm.dismissAgentHint("%0")
-        assertFalse(vm.agentConversations.value["%0"]!!.hintVisible)
-
-        // Simulate a re-detection for the SAME pane + session: the
-        // production code re-enters this path whenever a reconcile
-        // re-runs `startAgentDetectionForPane` for an already-detected
-        // pane (e.g. after a transient (cwd, command) change).
-        vm.startAgentConversationForTest("%0", detection)
-
-        val after = vm.agentConversations.value["%0"]!!
-        assertFalse(
-            "re-detection must not resurrect a dismissed hint chip",
-            after.hintVisible,
-        )
-    }
-
-    @Test
-    fun jsonlAppendDoesNotResurrectDismissedHint() = runTest {
-        // The Claude/Codex/OpenCode tail loop calls into
-        // [appendAgentEvents] for every parsed JSONL row. That path
-        // intentionally preserves the existing `hintVisible` flag.
-        // This test pins that contract: dismiss the hint, then push
-        // synthetic JSONL events through the same internal entrypoint
-        // the tail loop uses, and assert the chip stays hidden.
-        val vm = newVm()
-        vm.attachClientForTest(FakeTmuxClient())
-        val detection = newClaudeDetection()
-        vm.startAgentConversationForTest("%0", detection)
-
-        vm.dismissAgentHint("%0")
-        assertFalse(vm.agentConversations.value["%0"]!!.hintVisible)
-
-        // Pretend the agent wrote a new assistant message to its JSONL
-        // log; the production tail surfaces it via [appendAgentEvents].
         vm.appendAgentEventsForTest(
             "%0",
             listOf(
@@ -1617,102 +1536,20 @@ class TmuxSessionViewModelTest {
         )
 
         val after = vm.agentConversations.value["%0"]!!
-        assertFalse(
-            "JSONL append must not resurrect a dismissed hint chip",
-            after.hintVisible,
-        )
         assertEquals(
-            "the new event should reach the events list even though the chip is suppressed",
+            "the new event should reach the conversation feed",
             "assistant-1",
             after.events.last().id,
         )
+        assertEquals(AgentKind.ClaudeCode, after.detection?.agent)
     }
 
-    @Test
-    fun visitingConversationTabDismissesHintForThatPaneSession() = runTest {
-        // Per the acceptance: visiting the Conversation tab counts as
-        // "the user saw the detection" — a subsequent re-detection
-        // must NOT show the chip again on the terminal tab.
-        val vm = newVm()
-        vm.attachClientForTest(FakeTmuxClient())
-        val detection = newClaudeDetection()
-        vm.startAgentConversationForTest("%0", detection)
-
-        vm.selectSessionTab("%0", SessionTab.Conversation)
-
-        val afterVisit = vm.agentConversations.value["%0"]!!
-        assertEquals(SessionTab.Conversation, afterVisit.selectedTab)
-        assertFalse("hint must be hidden on visit", afterVisit.hintVisible)
-
-        // Bounce back to Terminal — should remain hidden because the
-        // pane/session was already dismissed via the visit.
-        vm.selectSessionTab("%0", SessionTab.Terminal)
-        // Simulate a re-detection (tail-driven reconcile re-entry).
-        vm.startAgentConversationForTest("%0", detection)
-
-        val afterReDetect = vm.agentConversations.value["%0"]!!
-        assertFalse(
-            "visit-to-dismiss must survive a follow-up re-detection",
-            afterReDetect.hintVisible,
-        )
-    }
-
-    @Test
-    fun differentPanesEachGetTheirOwnFirstHint() = runTest {
-        // The dismissed-set is keyed by (paneId, sessionKey) so a
-        // second pane independently detecting the same agent does
-        // not inherit the first pane's dismissal. Otherwise
-        // attaching to a second pane in the same project would
-        // silently swallow that pane's first-detection hint.
-        val vm = newVm()
-        vm.attachClientForTest(FakeTmuxClient())
-        val detection = newClaudeDetection()
-
-        vm.startAgentConversationForTest("%0", detection)
-        vm.dismissAgentHint("%0")
-        assertFalse(vm.agentConversations.value["%0"]!!.hintVisible)
-
-        vm.startAgentConversationForTest("%1", detection)
-
-        assertTrue(
-            "second pane must get its own first-detection hint",
-            vm.agentConversations.value["%1"]!!.hintVisible,
-        )
-    }
-
-    @Test
-    fun differentDetectionsOnSamePaneEachGetOwnHint() = runTest {
-        // If the user starts a new agent session (different
-        // sourcePath / sessionId) in the same pane after a dismiss,
-        // the new session is a separate hint key and must show.
-        val vm = newVm()
-        vm.attachClientForTest(FakeTmuxClient())
-        vm.startAgentConversationForTest("%0", newClaudeDetection())
-        vm.dismissAgentHint("%0")
-        assertFalse(vm.agentConversations.value["%0"]!!.hintVisible)
-
-        val freshDetection = AgentDetection(
-            agent = AgentKind.ClaudeCode,
-            sourcePath = "/home/u/.claude/sessions/xyz.jsonl",
-            sessionId = "xyz",
-            confidence = AgentDetection.Confidence.ProcessConfirmed,
-        )
-        vm.startAgentConversationForTest("%0", freshDetection)
-
-        assertTrue(
-            "new agent session in the same pane must show its hint",
-            vm.agentConversations.value["%0"]!!.hintVisible,
-        )
-    }
-
-    // ─── Issue #197: conversation send-target lock + first-send confirmation ───
+    // ─── Issue #197: conversation send-target lock ───────────────────
     //
     // The lock keeps the conversation composer bound to the agent pane
     // even after the user navigates to a sibling window via the
     // WindowStrip — so a `send-keys` from the composer cannot silently
-    // land on a non-agent pane in another window. The first-send
-    // confirmation banner is per-pane and persists for the lifetime of
-    // the VM.
+    // land on a non-agent pane in another window.
 
     @Test
     fun selectingConversationTabLocksTargetToThatPane() = runTest {
@@ -1821,72 +1658,6 @@ class TmuxSessionViewModelTest {
         assertEquals(before, vm.agentConversations.value["%0"])
     }
 
-    @Test
-    fun confirmFirstSendForPaneTracksAcknowledgement() = runTest {
-        val vm = newVm()
-        vm.attachClientForTest(FakeTmuxClient())
-        vm.applyParsedPanesForTest(
-            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "shell", paneIndex = 0)),
-        )
-        vm.startAgentConversationForTest("%0", newClaudeDetection())
-        assertFalse(
-            "first-send acknowledgement must start unset",
-            "%0" in vm.firstSendConfirmedPanes.value,
-        )
-
-        vm.confirmFirstSendForPane("%0")
-
-        assertTrue(
-            "first-send acknowledgement must record the pane",
-            "%0" in vm.firstSendConfirmedPanes.value,
-        )
-
-        // Idempotent — calling again must not blow up or duplicate.
-        vm.confirmFirstSendForPane("%0")
-        assertEquals(
-            "first-send acknowledgement must be idempotent",
-            1,
-            vm.firstSendConfirmedPanes.value.size,
-        )
-    }
-
-    @Test
-    fun confirmFirstSendIgnoresBlankPaneId() = runTest {
-        val vm = newVm()
-        vm.attachClientForTest(FakeTmuxClient())
-
-        vm.confirmFirstSendForPane("")
-
-        assertTrue(
-            "blank pane id must not pollute the confirmed set",
-            vm.firstSendConfirmedPanes.value.isEmpty(),
-        )
-    }
-
-    @Test
-    fun firstSendConfirmationSurvivesAcrossPanes() = runTest {
-        // Two agent panes get their own one-time banner; confirming
-        // one must not silently confirm the other.
-        val vm = newVm()
-        vm.attachClientForTest(FakeTmuxClient())
-        vm.applyParsedPanesForTest(
-            listOf(
-                TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "a", paneIndex = 0),
-                TmuxSessionViewModel.ParsedPane("%1", "@1", "$0", "b", paneIndex = 0),
-            ),
-        )
-        vm.startAgentConversationForTest("%0", newClaudeDetection())
-        vm.startAgentConversationForTest("%1", newClaudeDetection())
-
-        vm.confirmFirstSendForPane("%0")
-
-        assertTrue("%0 in vm.firstSendConfirmedPanes.value", "%0" in vm.firstSendConfirmedPanes.value)
-        assertFalse(
-            "second pane must NOT inherit the first pane's first-send acknowledgement",
-            "%1" in vm.firstSendConfirmedPanes.value,
-        )
-    }
-
     // ─── Issue #154: conversation search query persistence ─────────────
 
     @Test
@@ -1945,9 +1716,8 @@ class TmuxSessionViewModelTest {
     // case of one pane per window). The view-model surface that the
     // screen drives off is [agentForWindow] — it must return the
     // current window's agent kind regardless of which window's pane the
-    // user is currently viewing, so the Conversation tab + hint banner
-    // can hide on plain-shell windows even when a sibling window has a
-    // live agent.
+    // user is currently viewing, so the Conversation tab can hide on
+    // plain-shell windows even when a sibling window has a live agent.
 
     @Test
     fun agentForWindowReturnsNullForUnknownWindowId() = runTest {
@@ -2940,29 +2710,21 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun closedPaneDropsFirstSendAcknowledgementAndClearsLock() = runTest {
-        // A pane that tmux removes between reconciles takes its first-send
-        // acknowledgement with it — a later `%N` reuse must get a fresh
-        // banner. Same for the conversation lock: a gone pane cannot be
-        // the lock target.
+    fun closedPaneClearsConversationLock() = runTest {
+        // A pane that tmux removes between reconciles cannot remain the
+        // conversation lock target.
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         vm.applyParsedPanesForTest(
             listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "a", paneIndex = 0)),
         )
         vm.startAgentConversationForTest("%0", newClaudeDetection())
-        vm.confirmFirstSendForPane("%0")
         vm.selectSessionTab("%0", SessionTab.Conversation)
-        assertTrue("%0" in vm.firstSendConfirmedPanes.value)
         assertEquals("%0", vm.lockedConversationPaneId.value)
 
         // Reconcile with the pane gone.
         vm.applyParsedPanesForTest(emptyList())
 
-        assertFalse(
-            "first-send acknowledgement must be dropped when the pane closes",
-            "%0" in vm.firstSendConfirmedPanes.value,
-        )
         assertNull(
             "lock must be cleared when the locked pane disappears",
             vm.lockedConversationPaneId.value,

@@ -28,12 +28,11 @@ import org.junit.runner.RunWith
  * Issue #255 removed the always-visible "Sending to: Window N · Pane N"
  * target-indicator strip — naming the underlying terminal pane as the
  * send target was meaningless in the agent conversation. This test now
- * asserts that strip never renders, while the multi-window
- * disambiguation banners are preserved:
+ * asserts that strip never renders, while the remaining multi-window
+ * disambiguation banner is preserved:
  *
  * 1. The conversation composer shows NO terminal send-target indicator.
- * 2. The one-time first-send banner appears until the user taps
- *    "Got it" and is hidden afterwards (acceptance criterion #2).
+ * 2. The first-send confirmation removed by #282 never renders.
  * 3. The cross-window mismatch banner shows only when the user is
  *    viewing a sibling window while the composer is locked to the
  *    agent pane (acceptance criterion #3).
@@ -57,9 +56,7 @@ class TmuxConversationSendTargetUiTest {
                     events = emptyList(),
                     onSendToAgent = {},
                     agentWindowLabel = "Window 1",
-                    agentDisplayName = "Claude Code",
                     currentWindowMatchesAgent = true,
-                    firstSendConfirmed = true,
                 )
             }
         }
@@ -72,54 +69,22 @@ class TmuxConversationSendTargetUiTest {
     }
 
     @Test
-    fun firstSendBannerShowsUntilUserConfirms() {
-        var confirmCount = 0
+    fun firstSendConfirmationDoesNotRender() {
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = {},
                     agentWindowLabel = "Window 1",
-                    agentDisplayName = "Claude Code",
                     currentWindowMatchesAgent = true,
-                    firstSendConfirmed = false,
-                    onConfirmFirstSend = { confirmCount += 1 },
                 )
             }
         }
 
-        compose.onNodeWithTag(TMUX_CONVERSATION_FIRST_SEND_BANNER_TAG)
-            .assertIsDisplayed()
-        compose.onNodeWithText(
-            "Sending to Window 1's Claude Code pane — got it?",
-        ).assertIsDisplayed()
-
-        compose.onNodeWithTag(TMUX_CONVERSATION_FIRST_SEND_CONFIRM_TAG)
-            .performClick()
-
-        assertEquals(
-            "tapping Got it must fire the onConfirmFirstSend callback exactly once",
-            1,
-            confirmCount,
-        )
-    }
-
-    @Test
-    fun firstSendBannerHiddenWhenAlreadyConfirmed() {
-        compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
-                TmuxConversationPane(
-                    events = emptyList(),
-                    onSendToAgent = {},
-                    agentWindowLabel = "Window 1",
-                    agentDisplayName = "Claude Code",
-                    currentWindowMatchesAgent = true,
-                    firstSendConfirmed = true,
-                )
-            }
-        }
-
-        compose.onNodeWithTag(TMUX_CONVERSATION_FIRST_SEND_BANNER_TAG)
+        val removedConfirmationPrefix = "Sending to " + "Window 1's Claude Code pane"
+        compose.onNodeWithText(removedConfirmationPrefix, substring = true)
+            .assertDoesNotExist()
+        compose.onNodeWithText("Got" + " it")
             .assertDoesNotExist()
     }
 
@@ -131,9 +96,7 @@ class TmuxConversationSendTargetUiTest {
                     events = emptyList(),
                     onSendToAgent = {},
                     agentWindowLabel = "Window 1",
-                    agentDisplayName = "Claude Code",
                     currentWindowMatchesAgent = false,
-                    firstSendConfirmed = true,
                 )
             }
         }
@@ -153,9 +116,7 @@ class TmuxConversationSendTargetUiTest {
                     events = emptyList(),
                     onSendToAgent = {},
                     agentWindowLabel = "Window 1",
-                    agentDisplayName = "Claude Code",
                     currentWindowMatchesAgent = true,
-                    firstSendConfirmed = true,
                 )
             }
         }
@@ -165,54 +126,48 @@ class TmuxConversationSendTargetUiTest {
     }
 
     @Test
-    fun bothDisambiguationBannersCoexistWhenAppropriate() {
-        // Worst-case clarity: user has navigated to a sibling window
-        // AND hasn't yet acknowledged the first-send banner. Both
-        // disambiguation banners must be visible — but the removed
-        // terminal send-target indicator (#255) must NOT be.
+    fun mismatchBannerCanShowWithoutFirstSendConfirmation() {
+        // Worst-case remaining clarity: user has navigated to a sibling
+        // window. The mismatch banner stays visible, but the removed
+        // terminal send-target indicator (#255) and first-send
+        // confirmation (#282) must NOT be.
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = {},
                     agentWindowLabel = "Window 1",
-                    agentDisplayName = "Claude Code",
                     currentWindowMatchesAgent = false,
-                    firstSendConfirmed = false,
                 )
             }
         }
 
         compose.onNodeWithTag(TMUX_CONVERSATION_WINDOW_MISMATCH_BANNER_TAG)
             .assertIsDisplayed()
-        compose.onNodeWithTag(TMUX_CONVERSATION_FIRST_SEND_BANNER_TAG)
-            .assertIsDisplayed()
         // Issue #255: no "Sending to: ..." terminal send-target strip,
         // even with full agent labels present.
         compose.onNodeWithText("Sending to: Window 1 · Pane 1")
             .assertDoesNotExist()
+        compose.onNodeWithText("Got" + " it")
+            .assertDoesNotExist()
     }
 
     @Test
-    fun emptyAgentLabelsSuppressBothBanners() {
+    fun emptyAgentLabelsSuppressMismatchBanner() {
         // Defensive: callers that don't have window labels (older call
-        // sites, unit tests) pass empty strings — neither disambiguation
-        // banner renders in that case.
+        // sites, unit tests) pass empty strings — the mismatch banner
+        // does not render in that case.
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = {},
                     agentWindowLabel = "",
-                    agentDisplayName = "",
                     currentWindowMatchesAgent = true,
-                    firstSendConfirmed = false,
                 )
             }
         }
 
-        compose.onNodeWithTag(TMUX_CONVERSATION_FIRST_SEND_BANNER_TAG)
-            .assertDoesNotExist()
         compose.onNodeWithTag(TMUX_CONVERSATION_WINDOW_MISMATCH_BANNER_TAG)
             .assertDoesNotExist()
     }

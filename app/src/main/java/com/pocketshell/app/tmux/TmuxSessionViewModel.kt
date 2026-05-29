@@ -28,8 +28,6 @@ import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
-import com.pocketshell.app.sessions.SSH_SOURCE_TMUX_CONNECT
-import com.pocketshell.app.sessions.SshOpenTelemetry
 import com.pocketshell.app.sessions.remoteStartDirectoryExists
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.core.agents.AgentDetection
@@ -185,19 +183,6 @@ public class TmuxSessionViewModel @Inject constructor(
     public val lockedConversationPaneId: StateFlow<String?> =
         _lockedConversationPaneId.asStateFlow()
 
-    // Issue #197: set of (paneId) keys for which the user has already
-    // acknowledged the first-send confirmation banner. We track at
-    // pane granularity rather than session-name granularity so a second
-    // Claude pane in the same tmux session also gets its own one-time
-    // confirmation — different panes are different conceptual targets.
-    // Survives the ViewModel lifetime (process lifetime of the
-    // foreground tmux session); cleared on connection teardown.
-    private val _firstSendConfirmedPanes: MutableStateFlow<Set<String>> =
-        MutableStateFlow(emptySet())
-
-    public val firstSendConfirmedPanes: StateFlow<Set<String>> =
-        _firstSendConfirmedPanes.asStateFlow()
-
     private val _connectionStatus: MutableStateFlow<ConnectionStatus> =
         MutableStateFlow(ConnectionStatus.Idle)
 
@@ -293,22 +278,6 @@ public class TmuxSessionViewModel @Inject constructor(
     private val paneAgentInputs: MutableMap<String, Triple<String, String, String>> = ConcurrentHashMap()
     private val paneInputChannels: MutableMap<String, Channel<ByteArray>> = ConcurrentHashMap()
     private val paneInputJobs: MutableMap<String, Job> = ConcurrentHashMap()
-
-    // Issue #179: per-(pane, hint-key) record of "the user has already
-    // dismissed this hint for this detected agent session, do not show it
-    // again". Without this set, the production hint composable in
-    // [TmuxSessionScreen] kept re-mounting because [appendAgentEvents]
-    // (called on every parsed JSONL event from
-    // [agentRepository.tailEventsFromLine]) does not clear `hintVisible`
-    // and [startAgentConversationForPane] re-runs whenever
-    // [reconcilePanes] sees the same pane with the same `(cwd, command)`
-    // tuple after a tmux reconcile. The set is keyed on the agent
-    // detection's `sessionId ?: sourcePath` so re-detecting the same
-    // file/session never resurrects a hint the user explicitly dismissed
-    // or auto-dismissed. Survives ViewModel lifetime (process lifetime
-    // for the foreground tmux screen). The companion field on
-    // [SessionViewModel] is the raw-SSH mirror of this same idea.
-    private val dismissedAgentHints: MutableSet<String> = mutableSetOf()
 
     // Bridge scope: a child of viewModelScope (parented via the
     // viewModelScope's Job) but with its own SupervisorJob so that a
@@ -790,12 +759,6 @@ public class TmuxSessionViewModel @Inject constructor(
                 "tmux-ssh-handshake count=$handshakeNumber host=${target.host} " +
                     "port=${target.port} user=${target.user} session=${target.sessionName} " +
                     "attempt=$attempt",
-            )
-            SshOpenTelemetry.record(
-                source = SSH_SOURCE_TMUX_CONNECT,
-                host = target.host,
-                port = target.port,
-                user = target.user,
             )
             val key: SshKey = SshKey.Path(File(target.keyPath))
             val sessionResult = SshConnection.connect(
@@ -1653,12 +1616,8 @@ public class TmuxSessionViewModel @Inject constructor(
             paneRows.remove(paneId)
         }
         _agentConversations.value = _agentConversations.value.filterKeys { it in nextById.keys }
-        // Issue #197: drop any first-send acknowledgement for panes that
-        // tmux just removed — a fresh pane reusing the same `%N` id later
-        // (rare but possible after a kill+re-create cycle within the same
-        // session) should get its own confirmation banner. Also clear
-        // the conversation lock if it was pointing at a gone pane.
-        _firstSendConfirmedPanes.value = _firstSendConfirmedPanes.value.intersect(nextById.keys)
+        // Issue #197: clear the conversation lock if it was pointing at a
+        // pane that tmux just removed.
         _lockedConversationPaneId.value?.let { locked ->
             if (locked !in nextById.keys) {
                 _lockedConversationPaneId.value = null
@@ -1703,7 +1662,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * Issue #186: resolve the agent kind for [windowId] from the
      * per-pane detection state, or null when no pane in that window has
      * an agent. The screen consumes this to gate the Conversation tab
-     * + hint banner on the **currently-visible** window's detection
+     * on the **currently-visible** window's detection
      * state instead of the session-wide one — which is what made
      * v0.2.8 light up "Claude detected" on plain-shell windows that
      * just shared a cwd with the agent window.
@@ -1772,7 +1731,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // detection no longer does (the user exited Claude /
                 // Codex / OpenCode, or the agent process died), clear
                 // the per-pane conversation state so the Conversation
-                // tab + hint chip disappear for this window. Also
+                // tab disappears for this window. Also
                 // release the conversation lock if it was pointing at
                 // this pane — otherwise the composer would keep
                 // sending to a pane that no longer has an agent.
@@ -1815,20 +1774,12 @@ public class TmuxSessionViewModel @Inject constructor(
         val initialEvents = runCatching {
             agentRepository.readInitialEvents(session, detection)
         }.getOrDefault(emptyList())
-        // Issue #179: a fresh `startAgentConversationForPane` call
-        // (e.g. because [reconcilePanes] cycled and the existing pane
-        // got re-detected) must NOT resurrect a hint the user
-        // already dismissed for the same (pane, session) key. We
-        // therefore initialise `hintVisible` from [dismissedAgentHints]
-        // rather than unconditionally to `true`.
-        val hintKey = hintKeyFor(paneId, detection)
         setAgentConversation(
             paneId,
             AgentConversationUiState(
                 detection = detection,
                 events = boundedDistinctEvents(initialEvents),
                 selectedTab = SessionTab.Terminal,
-                hintVisible = hintKey !in dismissedAgentHints,
             ),
         )
         // Issue #160: OpenCode now tails its JSONL via `session.tail`
@@ -1877,13 +1828,7 @@ public class TmuxSessionViewModel @Inject constructor(
     public fun selectSessionTab(paneId: String, tab: SessionTab) {
         val current = _agentConversations.value[paneId] ?: return
         if (tab == SessionTab.Conversation && current.detection == null) return
-        // Issue #179: tapping the Conversation tab counts as the user
-        // visiting the hint's destination — record the dismissal so a
-        // later JSONL append + reconcile cannot resurrect the chip.
         if (tab == SessionTab.Conversation) {
-            current.detection?.let { detection ->
-                dismissedAgentHints += hintKeyFor(paneId, detection)
-            }
             // Issue #197: lock the conversation send-target to this pane
             // so a subsequent WindowStrip tap to a non-agent window does
             // not silently swap the composer onto a pane with no agent.
@@ -1897,34 +1842,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 _lockedConversationPaneId.value = null
             }
         }
-        setAgentConversation(paneId, current.copy(selectedTab = tab, hintVisible = false))
-    }
-
-    public fun dismissAgentHint(paneId: String) {
-        val current = _agentConversations.value[paneId] ?: return
-        // Issue #179: record the dismissal key so subsequent JSONL
-        // events or reconciles never re-set `hintVisible = true` for
-        // this pane's detected agent session within the process
-        // lifetime. The key matches the one
-        // [startAgentConversationForPane] reads at construction time.
-        current.detection?.let { detection ->
-            dismissedAgentHints += hintKeyFor(paneId, detection)
-        }
-        setAgentConversation(paneId, current.copy(hintVisible = false))
-    }
-
-    /**
-     * Issue #197: acknowledge the first-send confirmation banner for the
-     * conversation pane bound to [paneId]. Once acknowledged the
-     * "Sending to window N's <agent> pane — got it?" banner stays
-     * dismissed for the lifetime of the ViewModel (i.e. the live tmux
-     * session). Public so the screen's "Got it" button has a single
-     * named seam to call.
-     */
-    public fun confirmFirstSendForPane(paneId: String) {
-        if (paneId.isBlank()) return
-        if (paneId in _firstSendConfirmedPanes.value) return
-        _firstSendConfirmedPanes.value = _firstSendConfirmedPanes.value + paneId
+        setAgentConversation(paneId, current.copy(selectedTab = tab))
     }
 
     /**
@@ -1958,25 +1876,6 @@ public class TmuxSessionViewModel @Inject constructor(
         setAgentConversation(locked, current.copy(selectedTab = SessionTab.Terminal))
     }
 
-    /**
-     * Issue #179: the per-pane hint dismissal key. Composed of the
-     * pane id plus the detected agent's `sessionId ?: sourcePath` so a
-     * second pane independently detecting Claude in the same project
-     * still gets its own (un-dismissed) hint chip on first detection.
-     */
-    private fun hintKeyFor(paneId: String, detection: AgentDetection): String {
-        val sessionKey = detection.sessionId ?: detection.sourcePath
-        return "$paneId|$sessionKey"
-    }
-
-    /**
-     * Issue #179: snapshot the dismissed-hint keys for unit tests.
-     * The set is otherwise private — tests need a read-only seam so
-     * they can prove the explicit-dismiss and visit-to-dismiss paths
-     * both populate it.
-     */
-    internal fun dismissedHintKeysForTest(): Set<String> = dismissedAgentHints.toSet()
-
     private fun appendAgentEvents(paneId: String, events: List<ConversationEvent>) {
         if (events.isEmpty()) return
         val current = _agentConversations.value[paneId] ?: return
@@ -1988,29 +1887,23 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #179 test seam: synthesize a freshly-detected agent
-     * conversation on [paneId] without going through the production SSH
-     * + JSONL path. The state mirrors what
-     * [startAgentConversationForPane] produces (initial events, terminal
-     * tab selected, hint visible iff the (pane, detection) key has not
-     * been dismissed). Tests use this to drive the hint-dismiss state
-     * machine deterministically: stamp the detection, dismiss, then
-     * replay this seam to mimic the next JSONL-driven re-detection and
-     * assert the hint stays gone.
+     * Test seam: synthesize a freshly-detected agent conversation on
+     * [paneId] without going through the production SSH + JSONL path.
+     * The state mirrors what [startAgentConversationForPane] produces:
+     * initial events with the Terminal tab selected. Issue #282 removed
+     * the tmux detection popup, so this no longer seeds hint state.
      */
     internal fun startAgentConversationForTest(
         paneId: String,
         detection: AgentDetection,
         initialEvents: List<ConversationEvent> = emptyList(),
     ) {
-        val hintKey = hintKeyFor(paneId, detection)
         setAgentConversation(
             paneId,
             AgentConversationUiState(
                 detection = detection,
                 events = boundedDistinctEvents(initialEvents),
                 selectedTab = SessionTab.Terminal,
-                hintVisible = hintKey !in dismissedAgentHints,
             ),
         )
     }
@@ -2821,10 +2714,8 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputChannels.clear()
         _agentConversations.value = emptyMap()
         // Issue #197: clear conversation-target state so a fresh connect
-        // does not start with a stale lock or a stale "already
-        // acknowledged first send" record from the previous session.
+        // does not start with a stale lock from the previous session.
         _lockedConversationPaneId.value = null
-        _firstSendConfirmedPanes.value = emptySet()
         paneProducerJobs.clear()
         for ((_, row) in paneRows) {
             runCatching { row.terminalState.detachExternalProducer() }
@@ -2907,10 +2798,8 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputChannels.clear()
         _agentConversations.value = emptyMap()
         // Issue #197: clear conversation-target state so the new session
-        // does not inherit a stale lock or first-send acknowledgement
-        // from the session we're leaving.
+        // does not inherit a stale lock from the session we're leaving.
         _lockedConversationPaneId.value = null
-        _firstSendConfirmedPanes.value = emptySet()
         paneProducerJobs.clear()
         for ((_, row) in paneRows) {
             runCatching { row.terminalState.detachExternalProducer() }
@@ -3030,10 +2919,8 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputChannels.clear()
         _agentConversations.value = emptyMap()
         // Issue #197: clear conversation-target state so a fresh connect
-        // does not start with a stale lock or a stale "already
-        // acknowledged first send" record from the previous session.
+        // does not start with a stale lock from the previous session.
         _lockedConversationPaneId.value = null
-        _firstSendConfirmedPanes.value = emptySet()
         paneProducerJobs.clear()
         for ((_, row) in paneRows) {
             runCatching { row.terminalState.detachExternalProducer() }

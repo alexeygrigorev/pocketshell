@@ -25,8 +25,8 @@ import java.io.FileOutputStream
  * not per session.
  *
  * The maintainer's v0.2.8 feedback: a tmux session with 3 windows
- * where only Window 1 had Claude running, but the app surfaced
- * "Claude Code session detected" on Windows 2 and 3 too. The root cause
+ * where only Window 1 had Claude running, but the app surfaced the
+ * old agent-detected chip on Windows 2 and 3 too. The root cause
  * was that [com.pocketshell.app.session.AgentConversationRepository.detect]
  * runs a host-wide process scan, so a JSONL file modified in any window
  * (or shared across panes via cwd) light up the Conversation tab on

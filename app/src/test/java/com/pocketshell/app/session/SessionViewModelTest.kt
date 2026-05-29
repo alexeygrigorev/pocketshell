@@ -901,20 +901,8 @@ class SessionViewModelTest {
         }
     }
 
-    // ─── Issue #179: hint dismiss state machine (raw-SSH mirror) ─────
-    //
-    // The dismiss-then-replay contract mirrors the tmux ViewModel
-    // tests. The raw-SSH SessionViewModel exposes
-    // [startAgentConversationForTest] which seeds `hintVisible = true`
-    // unconditionally — that emulates the "first detection" branch
-    // [startAgentConversation] takes. We then dismiss explicitly OR
-    // via the Conversation-tab visit, and prove the dismissed-set
-    // survives across a follow-up `startAgentConversationForTest`
-    // (which is what production does after a reconnect or a fresh
-    // [startAgentDetection] cycle).
-
-    @org.junit.Test
-    fun rawSshDismissedHintDoesNotReappearAfterReDetection() {
+    @Test
+    fun rawSshAgentConversationCanSwitchTabsWithoutHintState() {
         val vm = newVm()
         val detection = AgentDetection(
             agent = AgentKind.ClaudeCode,
@@ -922,50 +910,21 @@ class SessionViewModelTest {
             sessionId = "abc",
             confidence = AgentDetection.Confidence.ProcessConfirmed,
         )
-        vm.startAgentConversationForTest(detection, emptyList())
-        assertTrue(vm.agentConversation.value.hintVisible)
-
-        vm.dismissAgentHint()
-        org.junit.Assert.assertFalse(vm.agentConversation.value.hintVisible)
-        assertTrue(
-            "explicit dismiss must populate the dismissed-set",
-            vm.dismissedHintKeysForTest().contains("abc"),
-        )
-
-        // Pretend the production path detected the same session again
-        // (e.g. a reconnect / re-detection cycle). The
-        // [startAgentConversationForTest] seam unconditionally writes
-        // hintVisible=true; the suppression is the responsibility of
-        // the production [startAgentConversation] which we mirror by
-        // checking the dismissed-set after the call. Production paths
-        // see [SessionViewModel.startAgentConversation] read the set;
-        // this assertion verifies the persisted dismissal.
-        vm.dismissAgentHint() // re-asserting the dismissal is idempotent
-        assertTrue(vm.dismissedHintKeysForTest().contains("abc"))
-    }
-
-    @org.junit.Test
-    fun rawSshVisitingConversationTabPopulatesDismissedSet() {
-        val vm = newVm()
-        val detection = AgentDetection(
+        val event = ConversationEvent.Message(
+            id = "message-1",
             agent = AgentKind.ClaudeCode,
-            sourcePath = "/home/u/.claude/sessions/abc.jsonl",
-            sessionId = "abc",
-            confidence = AgentDetection.Confidence.ProcessConfirmed,
+            role = ConversationRole.Assistant,
+            text = "ready",
         )
-        vm.startAgentConversationForTest(detection, emptyList())
-        assertTrue(vm.agentConversation.value.hintVisible)
+
+        vm.startAgentConversationForTest(detection, listOf(event))
 
         vm.selectSessionTab(SessionTab.Conversation)
 
-        org.junit.Assert.assertFalse(
-            "visiting Conversation must hide the hint",
-            vm.agentConversation.value.hintVisible,
-        )
-        assertTrue(
-            "visit-to-dismiss must populate the dismissed-set so a future re-detection stays suppressed",
-            vm.dismissedHintKeysForTest().contains("abc"),
-        )
+        val state = vm.agentConversation.value
+        assertEquals(detection, state.detection)
+        assertEquals(SessionTab.Conversation, state.selectedTab)
+        assertEquals(listOf(event), state.events)
     }
 
     // Issue #165 — cancelConnect tests. The progress overlay's 15s

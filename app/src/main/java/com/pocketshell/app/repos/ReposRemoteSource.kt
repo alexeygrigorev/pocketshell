@@ -7,6 +7,8 @@ import javax.inject.Inject
 public class ReposRemoteSource @Inject constructor(
     private val parser: ReposJsonParser,
 ) {
+    private val localRootCache = mutableMapOf<LocalRootCacheKey, LocalRootCacheEntry>()
+
     public suspend fun listRemote(
         session: SshSession,
         limit: Int? = null,
@@ -38,6 +40,47 @@ public class ReposRemoteSource @Inject constructor(
         session: SshSession,
     ): ReposListResult = runList(session, "pocketshell repos list --local --json")
 
+    /**
+     * Expand one watched parent root into the cloned project folders
+     * underneath it via `pocketshell repos list --local --root <path>`.
+     *
+     * This is the host-detail tree gateway path (#301): it is local-only,
+     * server-side over SSH, and deliberately cached app-side so a poller
+     * can ask for the same watched root repeatedly without adding a
+     * blocking SSH exec on every tick. Missing `pocketshell` / missing
+     * `repos` subcommand degrades to an empty result because watched-root
+     * expansion is optional decoration; the session list should keep
+     * working on older hosts.
+     */
+    public suspend fun listLocalRoot(
+        session: SshSession,
+        root: String,
+        cacheNamespace: String,
+        forceRefresh: Boolean = false,
+    ): ReposListResult {
+        val cleanRoot = root.trim()
+        if (cleanRoot.isEmpty()) return ReposListResult.Success(emptyList())
+
+        val cacheKey = LocalRootCacheKey(
+            namespace = cacheNamespace,
+            root = cleanRoot,
+        )
+        if (!forceRefresh) {
+            freshLocalRootCache(cacheKey)?.let { return ReposListResult.Success(it) }
+        }
+
+        val command = "pocketshell repos list --local --json --root ${shellQuote(cleanRoot)}"
+        val result = runList(session, command)
+        val normalized = when (result) {
+            ReposListResult.ToolMissing -> ReposListResult.Success(emptyList())
+            else -> result
+        }
+        if (normalized is ReposListResult.Success) {
+            putLocalRootCache(cacheKey, normalized.repos)
+        }
+        return normalized
+    }
+
     private suspend fun runList(
         session: SshSession,
         command: String,
@@ -45,7 +88,7 @@ public class ReposRemoteSource @Inject constructor(
         val result = session.exec(pathAwareCommand(command))
         when {
             result.exitCode == 0 -> ReposListResult.Success(parser.parseList(result.stdout))
-            result.exitCode == 127 -> ReposListResult.ToolMissing
+            result.isPocketshellReposMissing() -> ReposListResult.ToolMissing
             else -> ReposListResult.Failed(result.failureReason("pocketshell repos exited ${result.exitCode}"))
         }
     } catch (e: CancellationException) {
@@ -95,13 +138,53 @@ public class ReposRemoteSource @Inject constructor(
     }
 
     public companion object {
+        public const val LOCAL_ROOT_CACHE_TTL_MILLIS: Long = 10_000L
+
         public fun pathAwareCommand(command: String): String =
             "PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH\"; $command"
 
         public fun shellQuote(value: String): String =
             "'" + value.replace("'", "'\"'\"'") + "'"
     }
+
+    private fun freshLocalRootCache(key: LocalRootCacheKey): List<RepoEntry>? =
+        synchronized(localRootCache) {
+            val entry = localRootCache[key] ?: return@synchronized null
+            val ageMillis = (System.nanoTime() - entry.writtenAtNanos) / 1_000_000L
+            if (ageMillis <= LOCAL_ROOT_CACHE_TTL_MILLIS) {
+                entry.repos
+            } else {
+                localRootCache.remove(key)
+                null
+            }
+        }
+
+    private fun putLocalRootCache(key: LocalRootCacheKey, repos: List<RepoEntry>) {
+        synchronized(localRootCache) {
+            localRootCache[key] = LocalRootCacheEntry(
+                repos = repos,
+                writtenAtNanos = System.nanoTime(),
+            )
+        }
+    }
+
+    private data class LocalRootCacheKey(
+        val namespace: String,
+        val root: String,
+    )
+
+    private data class LocalRootCacheEntry(
+        val repos: List<RepoEntry>,
+        val writtenAtNanos: Long,
+    )
 }
 
 private fun com.pocketshell.core.ssh.ExecResult.failureReason(fallback: String): String =
     stderr.ifBlank { stdout }.ifBlank { fallback }
+
+private fun com.pocketshell.core.ssh.ExecResult.isPocketshellReposMissing(): Boolean {
+    if (exitCode == 127) return true
+    val output = "$stderr\n$stdout"
+    return output.contains("No such command 'repos'", ignoreCase = true) ||
+        output.contains("No such command \"repos\"", ignoreCase = true)
+}

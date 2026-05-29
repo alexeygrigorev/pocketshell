@@ -145,6 +145,22 @@ Requires the optional `qr` extra (see [Optional extras](#optional-extras)).
 Without it, the command exits 127 with the install hint and every other
 subcommand keeps working.
 
+#### Running from a repo clone (no install)
+
+To run `qr-share` straight from a checkout without installing the tool,
+use `uv run` from `tools/pocketshell` and include the `qr` extra:
+
+```bash
+cd tools/pocketshell
+uv run --extra qr pocketshell qr-share prod
+```
+
+The first run creates `.venv` and installs the QR dependency; later runs
+are instant. Run it in an interactive terminal so stdout is a TTY and the
+QR renders inline — otherwise it falls back to writing PNGs (add
+`--png --out-dir ./qr` to force PNGs). Omitting `--extra qr` makes the
+command exit 127 with the install hint.
+
 ### `pocketshell hooks`
 
 Installs agent **stop / idle-detection** hooks across Claude Code,

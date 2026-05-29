@@ -105,14 +105,45 @@ Phone in hand, dev box reachable over SSH at `dev.example.com`:
    terminal:
 
    ```bash
-   ssh dev.example.com 'uv tool install pocketshell'
+   ssh dev.example.com 'uv tool install pocketshell --with "qrcode[pil]"'
    ```
 
-2. **Generate a QR import payload for the host.** From the same desktop,
-   produce a `pocketshell.ssh-import.v1` payload with your SSH key inline.
-   The format is documented in
-   [docs/ssh-qr-import.md](docs/ssh-qr-import.md). Render it as a QR code
-   on a private screen.
+   The `qrcode[pil]` extra is what renders the QR codes; without it
+   `qr-share` exits with an install hint.
+
+2. **Generate the QR code(s) for the host.** In an interactive SSH
+   session on the dev box, run `pocketshell qr-share` against an
+   ssh-config alias:
+
+   ```bash
+   pocketshell qr-share dev.example.com
+   ```
+
+   This resolves the hostname, port, user, and `IdentityFile` from
+   `~/.ssh/config` (via `ssh -G`), builds the `pocketshell.ssh-import.v1`
+   payload **with the private key inline**, and prints the QR as Unicode
+   blocks in your terminal. If the alias can't be resolved, pass the
+   connection details explicitly:
+
+   ```bash
+   pocketshell qr-share --host dev.example.com --user alex \
+     --key ~/.ssh/id_ed25519 --name "Dev box"
+   ```
+
+   A large key spans multiple QR parts — press Enter to step through
+   them (the phone reassembles parts automatically). To write PNGs for a
+   second screen instead of terminal rendering, add `--png --out-dir ./qr`.
+   Because the payload carries your private key, only render it on a
+   private screen. Format details: [docs/ssh-qr-import.md](docs/ssh-qr-import.md).
+
+   **Alternative — run from a repo clone (no install):** if you have this
+   repo checked out, skip step 1 and run `qr-share` straight from source
+   with `uv run` (the `--extra qr` flag pulls in the QR renderer):
+
+   ```bash
+   cd tools/pocketshell
+   uv run --extra qr pocketshell qr-share dev.example.com
+   ```
 
    Manual entry is the fallback if you don't want to go through QR: open
    PocketShell -> hosts list -> `+` -> fill in host/port/user, pick an

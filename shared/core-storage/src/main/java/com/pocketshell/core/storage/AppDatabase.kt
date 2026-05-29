@@ -26,10 +26,13 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 /**
  * The PocketShell Room database.
  *
- * Version 1 is the fresh baseline schema after the #213/D22 migration
- * cleanup. PocketShell has no external install base to preserve, so older
- * pre-release schema versions are handled by destructive rebuild in the app
- * database builder instead of by carrying migration code forward.
+ * PocketShell has no external install base to preserve, so schema changes
+ * are handled by destructive rebuild in the app database builder
+ * (`fallbackToDestructiveMigration(dropAllTables = true)`) instead of by
+ * carrying migration code forward. That fallback only fires on a version
+ * delta, so any entity-schema change MUST bump this number — otherwise
+ * upgraded installs hit a Room identity-hash mismatch and crash on launch
+ * (#261). Bumped to 2 to wipe the stale pre-0.3.0 schema.
  *
  * `exportSchema = false` matches the reference module. When the schema
  * starts evolving in real users' hands, flip this on and check generated
@@ -48,7 +51,7 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
         AiApiCallEntry::class,
         PendingTranscriptionEntity::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class AppDatabase : RoomDatabase() {

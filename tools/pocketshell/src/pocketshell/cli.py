@@ -26,6 +26,7 @@ from pocketshell.agent_log import agent_log_command
 from pocketshell.env import env_group
 from pocketshell.hooks import hooks_group
 from pocketshell.jobs import jobs_group
+from pocketshell.logs import logs_group
 from pocketshell.qr_share import qr_share_command
 from pocketshell.repos import repos_group
 from pocketshell.sessions import sessions_group
@@ -54,6 +55,7 @@ cli.add_command(agent_log_command, name="agent-log")
 cli.add_command(repos_group, name="repos")
 cli.add_command(env_group, name="env")
 cli.add_command(hooks_group, name="hooks")
+cli.add_command(logs_group, name="logs")
 cli.add_command(qr_share_command, name="qr-share")
 
 

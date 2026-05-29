@@ -64,8 +64,10 @@ import com.pocketshell.app.bootstrap.HostBootstrapSheet
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.DASHBOARD_KILL_ERROR_BANNER_TAG
+import com.pocketshell.app.sessions.SessionsDashboardDialog
 import com.pocketshell.app.sessions.SessionsDashboardViewModel
-import com.pocketshell.app.sessions.SessionsSection
+import com.pocketshell.app.sessions.rememberSessionsDashboardSectionState
+import com.pocketshell.app.sessions.sessionsDashboardItems
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.components.HostCard
@@ -340,12 +342,25 @@ fun HostListScreen(
         }
     }
 
+    // Issues #268 / #269: hoist the Sessions-section UI state out of the
+    // (now removed) self-contained section composable so it survives across
+    // the single screen-level LazyColumn's items and the dialog overlay.
+    val sessionsSectionState = rememberSessionsDashboardSectionState()
+    val createError by sessionsViewModel.createError.collectAsState()
+    // System-clock-derived "now" for relative-time formatting. Recomputed
+    // on each recomposition; the dashboard already recomposes on every
+    // poll so this stays fresh enough for the `2m / 8m` cadence.
+    val nowSec = System.currentTimeMillis() / 1000L
+
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(PocketShellColors.Background),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
+            // App bar stays pinned at the top — it carries navigation
+            // chrome (title + tab row) that must remain reachable while
+            // the content below scrolls.
             HostsAppBar(
                 onKeysClick = onManageKeys,
                 onImportHostClick = { hostSharePicker.launch("*/*") },
@@ -353,121 +368,153 @@ fun HostListScreen(
                 onSettingsClick = onOpenSettings,
             )
 
-            // Issue #40: surface the upgrade prompt at the top so the
-            // user sees it before the host list, but only when the
-            // ViewModel has confirmed a strictly-newer release.
-            updateInfo?.let { info ->
-                UpdateBanner(
-                    info = info,
-                    onUpdate = {
-                        context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse(info.apkUrl)),
+            // Issues #268 / #269: fold the banners, Sessions section, usage
+            // strip, and Hosts list into ONE scrolling LazyColumn so the
+            // whole dashboard scrolls as a single surface. Previously the
+            // Sessions section was an unbounded non-scrolling Column that,
+            // at high session counts, clipped its own overflow and starved
+            // the Hosts LazyColumn (`weight(1f)`) to ~0 height. With a
+            // single list every session row AND every host row is always
+            // reachable regardless of session count, and the section-scoped
+            // `+` FAB that used to overlap the screen FAB is gone.
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                contentPadding = PaddingValues(vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                // Issue #40: surface the upgrade prompt at the top so the
+                // user sees it before the host list, but only when the
+                // ViewModel has confirmed a strictly-newer release.
+                updateInfo?.let { info ->
+                    item(key = "banner:update") {
+                        UpdateBanner(
+                            info = info,
+                            onUpdate = {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW, Uri.parse(info.apkUrl)),
+                                )
+                            },
                         )
-                    },
-                )
-            }
-
-            shareMessage?.let { msg ->
-                ShareMessageBanner(message = msg, onDismiss = viewModel::clearShareMessage)
-            }
-
-            // Issue #120: dedicated banner for the manual "Re-check
-            // setup" acknowledgement. Reuses [ShareMessageBanner] for
-            // visual consistency with the existing share-message banner;
-            // a separate StateFlow keeps the two messages independent so
-            // a host-share doesn't blow away a re-check ack and vice
-            // versa.
-            recheckMessage?.let { msg ->
-                ShareMessageBanner(message = msg, onDismiss = viewModel::clearRecheckMessage)
-            }
-
-            // Issue #168: surface dashboard kill failures inline so the
-            // user can tell a silent failure apart from "kill worked but
-            // the row didn't refresh yet". Reuses [ShareMessageBanner]
-            // for visual consistency with the other one-shot banners.
-            killError?.let { msg ->
-                Box(modifier = Modifier.testTag(DASHBOARD_KILL_ERROR_BANNER_TAG)) {
-                    ShareMessageBanner(message = msg, onDismiss = sessionsViewModel::clearKillError)
+                    }
                 }
-            }
 
-            // Issue #46: cross-host session dashboard. Render the
-            // Sessions section ABOVE the Hosts section per the mockup
-            // at `docs/mockups/dashboard.html`, but only when there is
-            // at least one live tmux session on at least one connected
-            // host. Empty → the chrome (label + rows) collapses
-            // entirely so the host list keeps the visual hierarchy of
-            // an "empty workspace" landing.
-            if (sessions.isNotEmpty()) {
-                SectionLabel(
-                    label = "Sessions",
-                    count = sessionsCountLabel(sessions.size),
-                )
-                SessionsSection(
-                    viewModel = sessionsViewModel,
+                shareMessage?.let { msg ->
+                    item(key = "banner:share") {
+                        ShareMessageBanner(message = msg, onDismiss = viewModel::clearShareMessage)
+                    }
+                }
+
+                // Issue #120: dedicated banner for the manual "Re-check
+                // setup" acknowledgement. Reuses [ShareMessageBanner] for
+                // visual consistency with the existing share-message banner;
+                // a separate StateFlow keeps the two messages independent so
+                // a host-share doesn't blow away a re-check ack and vice
+                // versa.
+                recheckMessage?.let { msg ->
+                    item(key = "banner:recheck") {
+                        ShareMessageBanner(message = msg, onDismiss = viewModel::clearRecheckMessage)
+                    }
+                }
+
+                // Issue #168: surface dashboard kill failures inline so the
+                // user can tell a silent failure apart from "kill worked but
+                // the row didn't refresh yet". Reuses [ShareMessageBanner]
+                // for visual consistency with the other one-shot banners.
+                killError?.let { msg ->
+                    item(key = "banner:kill-error") {
+                        Box(modifier = Modifier.testTag(DASHBOARD_KILL_ERROR_BANNER_TAG)) {
+                            ShareMessageBanner(
+                                message = msg,
+                                onDismiss = sessionsViewModel::clearKillError,
+                            )
+                        }
+                    }
+                }
+
+                // Issue #46: cross-host session dashboard. Render the
+                // Sessions section ABOVE the Hosts section per the mockup
+                // at `docs/mockups/dashboard.html`, but only when there is
+                // at least one live tmux session on at least one connected
+                // host. Empty → the chrome (label + rows) collapses
+                // entirely so the host list keeps the visual hierarchy of
+                // an "empty workspace" landing.
+                if (sessions.isNotEmpty()) {
+                    item(key = "label:sessions") {
+                        SectionLabel(
+                            label = "Sessions",
+                            count = sessionsCountLabel(sessions.size),
+                        )
+                    }
+                }
+                // Issues #268 / #269: emit the Sessions section as LazyColumn
+                // items (header + legend + create-error banner + rows). The
+                // helper itself returns early when there are no sessions and
+                // no pending create error, so the label above and these items
+                // collapse together.
+                sessionsDashboardItems(
+                    state = sessionsSectionState,
+                    sessions = sessions,
+                    createError = createError,
+                    nowSec = nowSec,
+                    entryFor = sessionsViewModel::entryFor,
+                    onClearCreateError = sessionsViewModel::clearCreateError,
                     onOpenTmuxSession = onOpenTmuxSession,
                 )
-            }
 
-            // Issue #214: dismissible in-app usage warnings, one per
-            // provider that crossed the approaching / critical /
-            // exceeded threshold AND that the user hasn't dismissed
-            // for this app session. Banners sit above the Usage strip
-            // so they read as the most prominent quota signal on the
-            // host list. Tapping a banner routes to the Usage panel
-            // (same destination as the strip).
-            val activeBanners = remember(usageWarningProviders, dismissedBanners) {
-                usageWarningProviders
+                // Issue #214: dismissible in-app usage warnings, one per
+                // provider that crossed the approaching / critical /
+                // exceeded threshold AND that the user hasn't dismissed
+                // for this app session. Banners sit above the Usage strip
+                // so they read as the most prominent quota signal on the
+                // host list. Tapping a banner routes to the Usage panel.
+                val activeBanners = usageWarningProviders
                     .filterKeys { it !in dismissedBanners }
                     .entries
                     .sortedBy { it.key }
-            }
-            if (activeBanners.isNotEmpty() && onOpenUsage != null) {
-                Column(modifier = Modifier.padding(top = 8.dp)) {
-                    activeBanners.forEach { (providerId, record) ->
+                if (activeBanners.isNotEmpty() && onOpenUsage != null) {
+                    items(activeBanners, key = { "banner:usage-warning:" + it.key }) { entry ->
                         com.pocketshell.app.usage.UsageWarningBanner(
-                            provider = record,
-                            onDismiss = { viewModel.dismissUsageBanner(providerId) },
+                            provider = entry.value,
+                            onDismiss = { viewModel.dismissUsageBanner(entry.key) },
                             onTap = onOpenUsage,
                         )
                     }
                 }
-            }
 
-            // Issue #116 (usage-panel Fix B): cross-host usage strip
-            // sits above the Hosts section header so the user sees the
-            // at-a-glance quota state for every pocketshell-installed host
-            // before scanning individual rows. The strip is gated on
-            // `hasUsageInstalledHost` so a workspace with no pocketshell hosts
-            // never renders an empty rail (AC: "When no host has pocketshell
-            // installed, the dashboard strip is not rendered"). Tapping
-            // routes to `AppDestination.Usage` via `onOpenUsage` — the
-            // same destination the kebab in SessionScreen / TmuxSession
-            // opens.
-            if (hasUsageInstalledHost && onOpenUsage != null) {
-                com.pocketshell.app.usage.UsageDashboardStrip(
-                    rows = usageDashboardRows,
-                    onClick = onOpenUsage,
-                    modifier = Modifier
-                        .padding(top = 8.dp)
-                        .testTag(USAGE_DASHBOARD_STRIP_TAG),
-                )
-            }
+                // Issue #116 (usage-panel Fix B): cross-host usage strip
+                // sits above the Hosts section header so the user sees the
+                // at-a-glance quota state for every pocketshell-installed host
+                // before scanning individual rows. The strip is gated on
+                // `hasUsageInstalledHost` so a workspace with no pocketshell
+                // hosts never renders an empty rail. Tapping routes to
+                // `AppDestination.Usage` via `onOpenUsage`.
+                if (hasUsageInstalledHost && onOpenUsage != null) {
+                    item(key = "usage:strip") {
+                        com.pocketshell.app.usage.UsageDashboardStrip(
+                            rows = usageDashboardRows,
+                            onClick = onOpenUsage,
+                            modifier = Modifier
+                                .padding(top = 8.dp)
+                                .testTag(USAGE_DASHBOARD_STRIP_TAG),
+                        )
+                    }
+                }
 
-            SectionLabel(
-                label = "Hosts",
-                count = "${hosts.size} saved",
-            )
+                item(key = "label:hosts") {
+                    SectionLabel(
+                        label = "Hosts",
+                        count = "${hosts.size} saved",
+                    )
+                }
 
-            if (hosts.isEmpty()) {
-                EmptyHostList(modifier = Modifier.weight(1f))
-            } else {
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    items(hosts, key = { it.id }) { host ->
+                if (hosts.isEmpty()) {
+                    item(key = "hosts:empty") {
+                        EmptyHostList()
+                    }
+                } else {
+                    items(hosts, key = { "host:" + it.id }) { host ->
                         // Issue #113: the row used to carry three squared
                         // chips ("HostCard | Ports | Share") that visually
                         // competed with the primary "tap → connect" affordance.
@@ -569,13 +616,40 @@ fun HostListScreen(
                         }
                     }
                 }
-            }
 
-            // Footer: installed version. Sits at the bottom of the
-            // column so the host list keeps its prominence; muted text
-            // colour so it doesn't compete with the FAB.
-            VersionFooter(versionName = versionName)
+                // Footer: installed version. Sits at the bottom of the
+                // list so the host list keeps its prominence; muted text
+                // colour so it doesn't compete with the FAB.
+                item(key = "footer:version") {
+                    VersionFooter(versionName = versionName)
+                }
+            }
         }
+
+        // Issues #268 / #269: the Sessions section's lifecycle dialog
+        // (create / rename / kill) renders here, outside the LazyColumn, so
+        // it floats above the whole screen rather than scrolling with a row.
+        SessionsDashboardDialog(
+            state = sessionsSectionState,
+            entryFor = sessionsViewModel::entryFor,
+            onCreateSession = { entry, name, startDirectory ->
+                sessionsViewModel.createSession(
+                    entry = entry,
+                    name = name,
+                    startDirectory = startDirectory,
+                )
+            },
+            onRenameSession = { entry, oldName, newName ->
+                sessionsViewModel.renameSession(
+                    entry = entry,
+                    oldName = oldName,
+                    newName = newName,
+                )
+            },
+            onKillSession = { entry, name ->
+                sessionsViewModel.killSession(entry, name)
+            },
+        )
 
         FloatingActionButton(
             onClick = onAddHost,

@@ -2,6 +2,7 @@ package com.pocketshell.app.sessions
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,12 +12,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -30,10 +32,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.projects.WatchedFoldersChipRow
 import com.pocketshell.uikit.components.SessionRow
 import com.pocketshell.uikit.model.Tag
@@ -50,7 +52,7 @@ internal const val DASHBOARD_START_FOLDER_FIELD_TAG = "dashboard:sessions:start-
 
 /**
  * Tag for the create-session-failure banner — issue #204. Rendered
- * inside [SessionsSection] when [SessionsDashboardViewModel.createError]
+ * emitted by [sessionsDashboardItems] when [SessionsDashboardViewModel.createError]
  * is non-null so users see a duplicate-name rejection or transport
  * failure rather than wondering why the new row never appeared.
  */
@@ -78,63 +80,49 @@ const val DASHBOARD_KILL_ERROR_BANNER_TAG: String = "dashboard:sessions:kill-err
 /**
  * Sessions section of the dashboard — issue #46.
  *
- * Inlined into [com.pocketshell.app.hosts.HostListScreen] above the
- * "Hosts" section per the mockup at `docs/mockups/dashboard.html`. Renders
- * one [SessionRow] per [SessionSummary] from the view model, sorted by
- * recency (most-recent first — handled inside the view model, not here).
+ * Issues #268 / #269: the Sessions rows are now emitted as items of the
+ * single screen-level `LazyColumn` owned by
+ * [com.pocketshell.app.hosts.HostListScreen]. Previously the section was
+ * a self-contained `Column` (no scroll, no height bound) plus its own
+ * section-scoped `+` FAB. At high session counts that `Column` overflowed
+ * the viewport: the lower session rows clipped with no scroll container,
+ * the Hosts `LazyColumn` (`weight(1f)`) starved to ~0 height, and the
+ * section's bottom-right FAB collided with the screen-level add-host FAB
+ * (two `+` buttons). Folding everything into one `LazyColumn` makes the
+ * whole dashboard scroll as one surface so every session row and the
+ * Hosts list are always reachable, and removes the second FAB.
  *
- * The section composable itself is responsible for nothing more than
- * fan-out: it asks the view model for the current list, and for each
- * entry it asks the view model to resolve a navigation tuple at tap
- * time. Tap handling delegates to [onOpenTmuxSession], which the host
- * screen passes through to the navigator.
+ * State that must outlive individual list items (the selected session, the
+ * lifecycle-dialog mode, the legend toggle, dialog field text) is hoisted
+ * into [SessionsDashboardSectionState] via [rememberSessionsDashboardSectionState].
+ * The host screen:
+ *  - emits the section's list content with [LazyListScope.sessionsDashboardItems];
+ *  - renders the lifecycle dialog overlay with [SessionsDashboardDialog]
+ *    (outside the list, so it floats above the whole screen).
  *
- * If the view model's session list is empty the section renders nothing
- * — the host screen gates on `sessions.isNotEmpty()` for the
- * surrounding section label so the chrome doesn't appear above an
- * empty list. The section is also rendered inside a normal Compose
- * column (no `LazyColumn`) — the expected session count is small
- * (single digits per host, a handful of hosts) so the recycling cost of
- * a LazyColumn is not worth the layout complexity here.
- *
- * @param onOpenTmuxSession invoked when the user taps a session row.
- *   The host screen resolves it through the navigator. Default no-op
- *   so unit tests / previews can compose the section without setting
- *   up a navigator stub.
+ * The `+ New session` affordance is no longer a FAB. The screen keeps a
+ * single bottom-right `+` FAB (add-host); creating a session is a button
+ * in the Sessions header row (carrying [DASHBOARD_NEW_SESSION_TAG]) so
+ * both actions stay reachable with exactly one FAB on screen.
  */
-@Composable
-fun SessionsSection(
-    modifier: Modifier = Modifier,
-    viewModel: SessionsDashboardViewModel = hiltViewModel(),
-    hostIdFilter: Long? = null,
-    onOpenTmuxSession: (ActiveTmuxClients.Entry, sessionName: String, startDirectory: String?) -> Unit =
-        { _, _, _ -> },
-) {
-    val allSessions by viewModel.sessions.collectAsState()
-    val sessions = if (hostIdFilter == null) {
-        allSessions
-    } else {
-        allSessions.filter { it.hostId == hostIdFilter }
-    }
-    // Issue #204: even when [sessions] is empty we still render the
-    // section if the view model is currently surfacing a create-session
-    // error. Without that, dismissing the dialog after a duplicate-name
-    // rejection that ALSO happens to leave the host with zero sessions
-    // would hide the banner before the user could read it. The
-    // [createError] StateFlow is the source of truth and the section
-    // collapses again the moment the user dismisses it.
-    val createError by viewModel.createError.collectAsState()
-    if (sessions.isEmpty() && createError == null) return
 
-    val nowSec = System.currentTimeMillis() / 1000L
-    var selectedSession by remember { mutableStateOf<SessionSummary?>(null) }
-    var dialogMode by remember { mutableStateOf<DashboardDialogMode?>(null) }
-    var dialogText by remember { mutableStateOf("") }
-    var dialogStartDirectory by remember { mutableStateOf(DEFAULT_TMUX_START_DIRECTORY) }
+/**
+ * Holder for the Sessions-section UI state that must survive across
+ * individual `LazyColumn` items and the dialog overlay. Created with
+ * [rememberSessionsDashboardSectionState] in the host screen and shared
+ * between [LazyListScope.sessionsDashboardItems] and
+ * [SessionsDashboardDialog].
+ */
+internal class SessionsDashboardSectionState {
+    var selectedSession by mutableStateOf<SessionSummary?>(null)
+    var dialogMode by mutableStateOf<DashboardDialogMode?>(null)
+    var dialogText by mutableStateOf("")
+    var dialogStartDirectory by mutableStateOf(DEFAULT_TMUX_START_DIRECTORY)
+
     // Per issue #202, the legend is closed by default so the chrome
     // stays quiet on the default path. First-time users tap the "?"
     // toggle to see what each indicator means.
-    var legendExpanded by remember { mutableStateOf(false) }
+    var legendExpanded by mutableStateOf(false)
 
     fun openDialog(
         mode: DashboardDialogMode,
@@ -146,223 +134,236 @@ fun SessionsSection(
         dialogStartDirectory = initialStartDirectory
     }
 
-    // Issue #224 (audit #208 row 18 follow-up): the `+ New session`
-    // affordance was originally a `TextButton` anchored at the
-    // top-left of the section header. The audit flagged it as the
-    // lone non-right-aligned FAB across the app — every other primary
-    // FAB (host-list `+`, tmux mic FAB, jump-to-latest) anchors to
-    // `Alignment.BottomEnd`. The fix moves the affordance to a
-    // circular FAB pinned at the bottom-right corner of the section's
-    // content area so right-thumb reach for "create a new session"
-    // matches the rest of the design system (see design-system.md §9
-    // and ux-rules.md rule 3).
-    //
-    // Layout: a `Box` wraps the section content so the FAB can use
-    // `Modifier.align(Alignment.BottomEnd)`. The Box's height wraps
-    // the inner Column (no `fillMaxSize` — `SessionsSection` is one
-    // item in `HostListScreen`'s vertical Column and must not consume
-    // the slack the Hosts section below needs). The FAB therefore
-    // anchors to the bottom-right of the section's bounds, not the
-    // screen's bounds — that's intentional: anchoring to the screen
-    // would collide with HostListScreen's existing host-list `+` FAB
-    // (both at `Alignment.BottomEnd` of the same outer Box). Keeping
-    // the new-session FAB section-scoped puts it inside the right-
-    // thumb arc while preserving the host-list FAB as the bottom-of-
-    // screen primary action.
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp)
-            .testTag(DASHBOARD_SESSIONS_SECTION_TAG),
-    ) {
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            // Header row: the `+ New session` affordance is now a
-            // bottom-right FAB (see the Box overlay below), so this
-            // row only carries the legend toggle. Right-aligned via
-            // `Arrangement.End` so the toggle sits opposite the
-            // section's content rather than floating at the left
-            // edge.
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                SessionsLegendToggle(
-                    expanded = legendExpanded,
-                    onClick = { legendExpanded = !legendExpanded },
-                )
-            }
-            if (legendExpanded) {
-                SessionsLegend()
-            }
-            // Issue #204: surface create-session failures (transport errors,
-            // tmux %error such as duplicate-name rejection) inline. The
-            // banner lives inside the section so it sits next to the
-            // affordance that triggered it; HostListScreen owns the kill
-            // banner instead, which is consistent with the original wiring
-            // because the kill flow can fire from anywhere on the dashboard
-            // surface.
-            createError?.let { msg ->
-                CreateErrorBanner(
-                    message = msg,
-                    onDismiss = { viewModel.clearCreateError() },
-                )
-            }
-            sessions.forEach { summary ->
-                Box(modifier = Modifier.fillMaxWidth()) {
-                    val rowUi = summary.dashboardRowUi()
-                    SessionRow(
-                        modifier = Modifier.testTag(DASHBOARD_SESSION_ROW_TAG_PREFIX + summary.sessionName),
-                        badge = rowUi.badge,
-                        name = summary.sessionName,
-                        host = summary.hostName,
-                        preview = rowUi.preview,
-                        time = formatRelativeTime(nowSec = nowSec, thenSec = summary.lastActivity),
-                        tags = rowUi.tags,
-                        onClick = {
-                            // Resolve the navigation tuple via the view model's
-                            // entry lookup — the row stays light, the view
-                            // model owns the registry handle. If the host has
-                            // unregistered between render and tap we drop the
-                            // tap silently; the row will disappear on the next
-                            // poll cycle.
-                            val entry = viewModel.entryFor(summary.hostId) ?: return@SessionRow
-                            onOpenTmuxSession(entry, summary.sessionName, null)
-                        },
-                        onLongClick = {
-                            selectedSession = summary
-                        },
-                    )
-                    DashboardSessionMenu(
-                        expanded = selectedSession == summary && dialogMode == null,
-                        onDismiss = { selectedSession = null },
-                        onAttach = {
-                            val entry = viewModel.entryFor(summary.hostId)
-                            if (entry != null) {
-                                selectedSession = null
-                                onOpenTmuxSession(entry, summary.sessionName, null)
-                            }
-                        },
-                        onRename = {
-                            selectedSession = summary
-                            openDialog(DashboardDialogMode.RenameSession, summary.sessionName)
-                        },
-                        onKill = {
-                            selectedSession = summary
-                            dialogMode = DashboardDialogMode.KillSession
-                        },
-                    )
-                }
-            }
-        }
-        // Bottom-right FAB — primary `+ New session` affordance.
-        // Mirrors `HostListScreen.kt:589-605` (the gold-standard host-
-        // list FAB cited in audit #208 row 20): 56 dp circle, `Accent`
-        // background, `+` glyph, anchored to `Alignment.BottomEnd` of
-        // its parent Box. The button is gated on at least one
-        // session existing across the registered hosts (the section
-        // returns early on empty), so the FAB is only reachable when
-        // there is a host to create the session against — preserves
-        // the original gating logic from the previous `TextButton`.
-        // The `DASHBOARD_NEW_SESSION_TAG` tag is carried over so
-        // `SessionCreateDashboardE2eTest` (#204) and any other tag-
-        // driven tests keep matching.
-        FloatingActionButton(
-            onClick = {
-                val entry = sessions.firstOrNull()?.let { viewModel.entryFor(it.hostId) }
-                    ?: return@FloatingActionButton
-                selectedSession = SessionSummary(
-                    hostId = entry.hostId,
-                    hostName = entry.hostName,
-                    sessionName = "",
-                    lastActivity = nowSec,
-                    attached = false,
-                )
-                openDialog(DashboardDialogMode.CreateSession)
-            },
+    fun dismissDialog() {
+        dialogMode = null
+        selectedSession = null
+    }
+}
+
+@Composable
+internal fun rememberSessionsDashboardSectionState(): SessionsDashboardSectionState =
+    remember { SessionsDashboardSectionState() }
+
+/**
+ * Emit the Sessions section as items of the host screen's single
+ * `LazyColumn` (issues #268 / #269). Renders, in order:
+ *  - the legend toggle + `+ New session` button header row;
+ *  - the expanded legend panel (when toggled);
+ *  - the create-session error banner (issue #204);
+ *  - one [SessionRow] per [SessionSummary].
+ *
+ * Returns nothing on an empty list with no pending create error — the
+ * caller still emits the "Sessions" section label only when sessions are
+ * present, matching the previous gating.
+ *
+ * @param onOpenTmuxSession invoked when the user taps a session row. The
+ *   host screen resolves it through the navigator.
+ */
+internal fun LazyListScope.sessionsDashboardItems(
+    state: SessionsDashboardSectionState,
+    sessions: List<SessionSummary>,
+    createError: String?,
+    nowSec: Long,
+    entryFor: (hostId: Long) -> ActiveTmuxClients.Entry?,
+    onClearCreateError: () -> Unit,
+    onOpenTmuxSession: (ActiveTmuxClients.Entry, sessionName: String, startDirectory: String?) -> Unit,
+) {
+    if (sessions.isEmpty() && createError == null) return
+
+    item(key = "sessions:header") {
+        Row(
             modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 8.dp, bottom = 8.dp)
-                .size(56.dp)
-                .testTag(DASHBOARD_NEW_SESSION_TAG),
-            shape = CircleShape,
-            containerColor = PocketShellColors.Accent,
-            contentColor = PocketShellColors.OnAccent,
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp)
+                .testTag(DASHBOARD_SESSIONS_SECTION_TAG),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(
-                text = "+",
-                fontSize = 28.sp,
-                fontWeight = FontWeight.Medium,
+            // Issues #268 / #269: the `+ New session` affordance is a
+            // header button (not a FAB) so the screen keeps exactly
+            // one bottom-right `+` FAB (add-host). The button is gated
+            // on at least one live session existing so it can resolve a
+            // host to create the session against — same gate the old
+            // section-scoped FAB used.
+            NewSessionButton(
+                enabled = sessions.isNotEmpty(),
+                onClick = {
+                    val entry = sessions.firstOrNull()?.let { entryFor(it.hostId) }
+                        ?: return@NewSessionButton
+                    state.selectedSession = SessionSummary(
+                        hostId = entry.hostId,
+                        hostName = entry.hostName,
+                        sessionName = "",
+                        lastActivity = nowSec,
+                        attached = false,
+                    )
+                    state.openDialog(DashboardDialogMode.CreateSession)
+                },
+            )
+            SessionsLegendToggle(
+                expanded = state.legendExpanded,
+                onClick = { state.legendExpanded = !state.legendExpanded },
             )
         }
     }
 
-    val currentDialog = dialogMode
-    val currentSession = selectedSession
-    if (currentDialog != null && currentSession != null) {
-        DashboardLifecycleDialog(
-            mode = currentDialog,
-            sessionName = currentSession.sessionName,
-            // Issue #206: thread the host id so the create-session
-            // dialog can render the watched-folders chip row above
-            // the start-folder field. The id is null for rename /
-            // kill modes which don't render the chip row anyway.
-            hostId = currentSession.hostId,
-            text = dialogText,
-            onTextChange = { dialogText = it },
-            startDirectory = dialogStartDirectory,
-            onStartDirectoryChange = { dialogStartDirectory = it },
-            onDismiss = {
-                dialogMode = null
-                selectedSession = null
-            },
-            onConfirm = {
-                val entry = viewModel.entryFor(currentSession.hostId)
-                if (entry != null) {
-                    when (currentDialog) {
-                        DashboardDialogMode.CreateSession -> {
-                            // Issue #204: the previous wiring invoked
-                            // `onOpenTmuxSession` here, which attaches an
-                            // interactive client to a NEW tmux session
-                            // (creating it on the way in). That hijacked
-                            // the dashboard's "+ New session" affordance
-                            // into a navigation move that conflated
-                            // "create" and "open". Per the new
-                            // acceptance criteria the button now runs
-                            // `new-session -d` (detached) via the view
-                            // model, refreshes the list, and leaves the
-                            // user on the dashboard so they can decide
-                            // whether to attach. Attach is a separate
-                            // affordance (tap the row).
-                            viewModel.createSession(
-                                entry = entry,
-                                name = dialogText,
-                                startDirectory = dialogStartDirectory,
-                            )
-                        }
-                        DashboardDialogMode.RenameSession -> {
-                            viewModel.renameSession(
-                                entry = entry,
-                                oldName = currentSession.sessionName,
-                                newName = dialogText,
-                            )
-                        }
-                        DashboardDialogMode.KillSession -> {
-                            viewModel.killSession(entry, currentSession.sessionName)
-                        }
+    if (state.legendExpanded) {
+        item(key = "sessions:legend") {
+            Box(modifier = Modifier.padding(horizontal = 12.dp)) {
+                SessionsLegend()
+            }
+        }
+    }
+
+    // Issue #204: surface create-session failures (transport errors,
+    // tmux %error such as duplicate-name rejection) inline. The banner
+    // lives inside the section so it sits next to the affordance that
+    // triggered it; HostListScreen owns the kill banner instead.
+    createError?.let { msg ->
+        item(key = "sessions:create-error") {
+            Box(modifier = Modifier.padding(horizontal = 12.dp)) {
+                CreateErrorBanner(message = msg, onDismiss = onClearCreateError)
+            }
+        }
+    }
+
+    items(
+        items = sessions,
+        key = { "sessions:row:" + it.sessionName },
+    ) { summary ->
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp),
+        ) {
+            val rowUi = summary.dashboardRowUi()
+            SessionRow(
+                modifier = Modifier.testTag(DASHBOARD_SESSION_ROW_TAG_PREFIX + summary.sessionName),
+                badge = rowUi.badge,
+                name = summary.sessionName,
+                host = summary.hostName,
+                preview = rowUi.preview,
+                time = formatRelativeTime(nowSec = nowSec, thenSec = summary.lastActivity),
+                tags = rowUi.tags,
+                onClick = {
+                    // Resolve the navigation tuple via the view model's
+                    // entry lookup — the row stays light, the view model
+                    // owns the registry handle. If the host has
+                    // unregistered between render and tap we drop the tap
+                    // silently; the row will disappear on the next poll.
+                    val entry = entryFor(summary.hostId) ?: return@SessionRow
+                    onOpenTmuxSession(entry, summary.sessionName, null)
+                },
+                onLongClick = {
+                    state.selectedSession = summary
+                },
+            )
+            DashboardSessionMenu(
+                expanded = state.selectedSession == summary && state.dialogMode == null,
+                onDismiss = { state.selectedSession = null },
+                onAttach = {
+                    val entry = entryFor(summary.hostId)
+                    if (entry != null) {
+                        state.selectedSession = null
+                        onOpenTmuxSession(entry, summary.sessionName, null)
                     }
+                },
+                onRename = {
+                    state.selectedSession = summary
+                    state.openDialog(DashboardDialogMode.RenameSession, summary.sessionName)
+                },
+                onKill = {
+                    state.selectedSession = summary
+                    state.dialogMode = DashboardDialogMode.KillSession
+                },
+            )
+        }
+    }
+}
+
+/**
+ * Lifecycle dialog overlay for the Sessions section (create / rename /
+ * kill). Rendered by the host screen outside the `LazyColumn` so it
+ * floats above the whole screen. No-op when no dialog is pending.
+ */
+@Composable
+internal fun SessionsDashboardDialog(
+    state: SessionsDashboardSectionState,
+    entryFor: (hostId: Long) -> ActiveTmuxClients.Entry?,
+    onCreateSession: (ActiveTmuxClients.Entry, name: String, startDirectory: String) -> Unit,
+    onRenameSession: (ActiveTmuxClients.Entry, oldName: String, newName: String) -> Unit,
+    onKillSession: (ActiveTmuxClients.Entry, name: String) -> Unit,
+) {
+    val currentDialog = state.dialogMode
+    val currentSession = state.selectedSession
+    if (currentDialog == null || currentSession == null) return
+
+    DashboardLifecycleDialog(
+        mode = currentDialog,
+        sessionName = currentSession.sessionName,
+        // Issue #206: thread the host id so the create-session dialog can
+        // render the watched-folders chip row above the start-folder field.
+        hostId = currentSession.hostId,
+        text = state.dialogText,
+        onTextChange = { state.dialogText = it },
+        startDirectory = state.dialogStartDirectory,
+        onStartDirectoryChange = { state.dialogStartDirectory = it },
+        onDismiss = { state.dismissDialog() },
+        onConfirm = {
+            val entry = entryFor(currentSession.hostId)
+            if (entry != null) {
+                when (currentDialog) {
+                    DashboardDialogMode.CreateSession -> onCreateSession(
+                        entry,
+                        state.dialogText,
+                        state.dialogStartDirectory,
+                    )
+                    DashboardDialogMode.RenameSession -> onRenameSession(
+                        entry,
+                        currentSession.sessionName,
+                        state.dialogText,
+                    )
+                    DashboardDialogMode.KillSession -> onKillSession(
+                        entry,
+                        currentSession.sessionName,
+                    )
                 }
-                dialogMode = null
-                selectedSession = null
-            },
+            }
+            state.dismissDialog()
+        },
+    )
+}
+
+/**
+ * Header `+ New session` affordance (issues #268 / #269). Replaces the
+ * old section-scoped bottom-right FAB so the screen keeps exactly one
+ * `+` FAB (the add-host FAB). Carries [DASHBOARD_NEW_SESSION_TAG] so the
+ * existing tag-driven E2E tests keep matching. Pill-shaped accent button
+ * to read as the section's primary action without competing with the
+ * screen FAB's circular glyph.
+ */
+@Composable
+private fun NewSessionButton(enabled: Boolean, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .background(
+                color = if (enabled) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(10.dp),
+            )
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .testTag(DASHBOARD_NEW_SESSION_TAG),
+    ) {
+        Text(
+            text = "+ New session",
+            color = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
         )
     }
 }
 
-private enum class DashboardDialogMode {
+internal enum class DashboardDialogMode {
     CreateSession,
     RenameSession,
     KillSession,

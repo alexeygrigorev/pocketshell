@@ -19,6 +19,9 @@ interface SshKeyDao {
     @Query("SELECT * FROM ssh_keys WHERE name = :name LIMIT 1")
     suspend fun getByName(name: String): SshKeyEntity?
 
+    @Query("SELECT * FROM ssh_keys WHERE fingerprint = :fingerprint ORDER BY id LIMIT 1")
+    suspend fun getByFingerprint(fingerprint: String): SshKeyEntity?
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(key: SshKeyEntity): Long
 

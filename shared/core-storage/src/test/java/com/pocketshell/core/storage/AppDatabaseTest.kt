@@ -63,12 +63,18 @@ class AppDatabaseTest {
     @Test
     fun sshKey_insert_then_read_by_id() = runTest {
         val id = db.sshKeyDao().insert(
-            SshKeyEntity(name = "my-key", privateKeyPath = "/tmp/id_ed25519"),
+            SshKeyEntity(
+                name = "my-key",
+                privateKeyPath = "/tmp/id_ed25519",
+                fingerprint = "sha256:test",
+            ),
         )
         val read = db.sshKeyDao().getById(id)
         assertNotNull(read)
         assertEquals("my-key", read!!.name)
         assertEquals("/tmp/id_ed25519", read.privateKeyPath)
+        assertEquals("sha256:test", read.fingerprint)
+        assertEquals(id, db.sshKeyDao().getByFingerprint("sha256:test")!!.id)
     }
 
     @Test
@@ -285,6 +291,15 @@ class AppDatabaseTest {
         context.deleteDatabase(databaseName)
     }
 
+    @Test
+    fun legacyVersionEightFrom035_isDestroyedOnOpen() {
+        val databaseName = "stale-v8-${System.nanoTime()}.db"
+        seedStaleIdentityDatabase(databaseName, version = LEGACY_035_SCHEMA_VERSION)
+
+        assertStaleIdentityDatabaseIsDestroyed(databaseName)
+        context.deleteDatabase(databaseName)
+    }
+
     private fun openOnDiskDatabase(
         databaseName: String,
         destructiveFallback: Boolean,
@@ -342,6 +357,7 @@ class AppDatabaseTest {
         const val LEGACY_CRASH_SCHEMA_VERSION = 1
         const val LEGACY_026_SCHEMA_VERSION = 5
         const val LEGACY_028_SCHEMA_VERSION = 7
+        const val LEGACY_035_SCHEMA_VERSION = 8
         const val LEGACY_CRASH_IDENTITY_HASH = "4a479a15dfcab2d576e00c7ce10ac581"
     }
 }

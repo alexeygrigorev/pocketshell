@@ -761,6 +761,50 @@ class HostListViewModelTest {
     }
 
     @Test
+    fun importSharedHostPayload_reusesKey_whenSamePrivateKeyPayloadIsScannedAgain() = runTest {
+        File(context.filesDir, "ssh-keys").deleteRecursively()
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
+            settingsRepository = newSettingsRepository(),
+        )
+        val payload = SshImportPayloadCodec.encode(
+            SshImportConfig(
+                name = "qr-prod",
+                host = "qr.example.com",
+                port = 2200,
+                username = "ubuntu",
+                auth = SshImportAuth.PrivateKey(
+                    name = "qr-key",
+                    privateKeyPem = """
+                        -----BEGIN OPENSSH PRIVATE KEY-----
+                        abc
+                        -----END OPENSSH PRIVATE KEY-----
+                    """.trimIndent(),
+                    passphraseRequired = false,
+                ),
+            ),
+        )
+
+        viewModel.importSharedHostPayload(payload).join()
+        viewModel.importSharedHostPayload(payload).join()
+
+        val keys = db.sshKeyDao().getAll().first()
+        val hosts = db.hostDao().getAll().first()
+        val keyFiles = File(context.filesDir, "ssh-keys").listFiles().orEmpty()
+        assertEquals(1, keys.size)
+        assertEquals(1, hosts.size)
+        assertEquals(keys[0].id, hosts[0].keyId)
+        assertEquals(1, keyFiles.size)
+        assertNotNull(viewModel.importConflict.value)
+    }
+
+    @Test
     fun importSharedHostPayload_derivesPassphraseRequirementFromEncryptedOpenSshKey() = runTest {
         File(context.filesDir, "ssh-keys").deleteRecursively()
         val viewModel = HostListViewModel(

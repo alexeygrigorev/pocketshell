@@ -23,7 +23,7 @@ import com.pocketshell.core.storage.entity.SessionEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
-const val APP_DATABASE_SCHEMA_VERSION = 8
+const val APP_DATABASE_SCHEMA_VERSION = 9
 
 /**
  * The PocketShell Room database.
@@ -34,8 +34,9 @@ const val APP_DATABASE_SCHEMA_VERSION = 8
  * carrying migration code forward. That fallback only fires on a version
  * delta, so any entity-schema change MUST bump this number above every
  * shipped version — otherwise upgraded installs hit a Room identity-hash
- * mismatch or downgrade path and crash on launch (#261). Bumped to 8 because
- * the v0.2.x line shipped schema versions through 7.
+ * mismatch or downgrade path and crash on launch (#261). Bumped to 9 because
+ * issue #291 adds SSH key fingerprints and intentionally relies on the
+ * destructive rebuild to remove previously accumulated duplicate keys.
  *
  * `exportSchema = false` matches the reference module. When the schema
  * starts evolving in real users' hands, flip this on and check generated

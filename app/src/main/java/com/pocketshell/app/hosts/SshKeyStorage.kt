@@ -6,6 +6,7 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.security.MessageDigest
 import java.util.UUID
 
 object SshKeyStorage {
@@ -22,6 +23,17 @@ object SshKeyStorage {
         }
 
         return withContext(Dispatchers.IO) {
+            val fingerprint = fingerprintFor(trimmed)
+            val existing = sshKeyDao.getByFingerprint(fingerprint)
+            if (existing != null) {
+                val existingFile = File(existing.privateKeyPath)
+                if (!existingFile.exists()) {
+                    existingFile.parentFile?.mkdirs()
+                    writePrivateKeyFile(existingFile, trimmed)
+                }
+                return@withContext existing
+            }
+
             val safeName = name
                 .substringAfterLast("/")
                 .substringAfterLast("\\")
@@ -34,20 +46,21 @@ object SshKeyStorage {
             } else {
                 File(keyDir, safeName)
             }
-            target.writeText(trimmed, Charsets.UTF_8)
-            runCatching {
-                target.setReadable(false, false)
-                target.setReadable(true, true)
-                target.setWritable(false, false)
-                target.setWritable(true, true)
-            }
+            writePrivateKeyFile(target, trimmed)
             val entity = SshKeyEntity(
                 name = target.name,
                 privateKeyPath = target.absolutePath,
+                fingerprint = fingerprint,
                 hasPassphrase = hasPassphrase,
             )
             entity.copy(id = sshKeyDao.insert(entity))
         }
+    }
+
+    fun fingerprintFor(content: String): String {
+        val bytes = MessageDigest.getInstance("SHA-256")
+            .digest(content.trim().toByteArray(Charsets.UTF_8))
+        return "sha256:${bytes.toHex()}"
     }
 
     fun looksLikePrivateKey(content: String): Boolean {
@@ -95,5 +108,26 @@ object SshKeyStorage {
             value = copyOfRange(start, start + length).toString(Charsets.US_ASCII),
             nextOffset = start + length,
         )
+    }
+
+    private fun writePrivateKeyFile(target: File, content: String) {
+        target.writeText(content, Charsets.UTF_8)
+        runCatching {
+            target.setReadable(false, false)
+            target.setReadable(true, true)
+            target.setWritable(false, false)
+            target.setWritable(true, true)
+        }
+    }
+
+    private fun ByteArray.toHex(): String {
+        val digits = "0123456789abcdef"
+        val chars = CharArray(size * 2)
+        forEachIndexed { index, byte ->
+            val value = byte.toInt() and 0xff
+            chars[index * 2] = digits[value ushr 4]
+            chars[index * 2 + 1] = digits[value and 0x0f]
+        }
+        return String(chars)
     }
 }

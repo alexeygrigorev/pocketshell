@@ -145,6 +145,59 @@ Requires the optional `qr` extra (see [Optional extras](#optional-extras)).
 Without it, the command exits 127 with the install hint and every other
 subcommand keeps working.
 
+### `pocketshell hooks`
+
+Installs agent **stop / idle-detection** hooks across Claude Code,
+Codex, and OpenCode and normalizes their events into a single
+append-only JSONL bus the app can read back. Server-side only;
+integration only — no "tell the agent to continue" action yet (deferred;
+see issue #267 and locked decision **D26** in `docs/decisions.md`).
+
+```bash
+pocketshell hooks install [--engine claude|codex|opencode|all]   # default: all
+pocketshell hooks status  [--engine ...] [--json] [--last N]
+pocketshell hooks events  [--since ISO8601] [--limit N] [--json]
+pocketshell hooks uninstall [--engine ...]
+```
+
+`install` is **non-destructive — it merges, it never clobbers**:
+
+- **Claude Code** — adds a `{type: "command", command: "python3 <handler>"}`
+  entry under the `Stop`, `SubagentStop`, and `Notification` hook events
+  in `~/.claude/settings.json`, only when absent. All other top-level
+  keys and any pre-existing user hooks are preserved.
+- **Codex** — sets the top-level `notify` program in `~/.codex/config.toml`
+  to our handler (Codex hooks do not fire under `codex exec`, so `notify`
+  is the headless-safe signal). If `notify` is already set to something
+  else, it warns and **skips** rather than overwriting. The rest of the
+  TOML is preserved.
+- **OpenCode** — drops a `pocketshell-idle-signal.js` plugin into
+  `~/.config/opencode/plugin/` without disturbing other plugins.
+
+`install` is idempotent (running twice adds nothing new). Handler scripts
+and the event bus live under `~/.cache/pocketshell/hooks/` (override with
+`$POCKETSHELL_HOOKS_DIR`); each handler appends a normalized record
+`{ts, engine, state, source, session_id, cwd, ...}` to
+`events.jsonl`.
+
+**Per-engine uninstall** (`pocketshell hooks uninstall`) removes only what
+we added and is idempotent:
+
+- **Claude Code** — drops our command group from each hook event; an
+  event key (and the top-level `hooks` object) is deleted only if we
+  created it and it ends up empty. A user's pre-existing hooks always
+  survive, so a pre-populated `settings.json` comes back
+  byte-equivalent for the unrelated parts.
+- **Codex** — removes the top-level `notify` line only when it still
+  points at our handler. A `notify` the user pointed elsewhere is left
+  alone.
+- **OpenCode** — deletes our plugin file; other plugins and the dir
+  itself are left in place.
+
+The event bus (`events.jsonl`) is preserved on uninstall so
+already-emitted records stay readable; only the generated handler
+scripts are cleaned up.
+
 ## Development
 
 ```bash

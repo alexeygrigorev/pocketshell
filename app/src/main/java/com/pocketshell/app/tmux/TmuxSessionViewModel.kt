@@ -1811,6 +1811,17 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    internal fun sendControlInputToPane(paneId: String, byte: Int, repeatCount: Int = 1) {
+        if (byte !in 0x00..0x1F || repeatCount <= 0) return
+        val client = clientRef ?: return
+        val bytes = ByteArray(repeatCount) { byte.toByte() }
+        bridgeScope.launch {
+            runCatching {
+                sendRawInputBytes(client, paneId, bytes)
+            }
+        }
+    }
+
     /**
      * Voice Command-mode (and typed) action-assistant entry point (issue
      * #266). Replaces the deleted `planVoiceCommand`: the transcript drives
@@ -2451,6 +2462,14 @@ public class TmuxSessionViewModel @Inject constructor(
         val named = when (label) {
             "Esc" -> "Escape"
             "Tab" -> "Tab"
+            "Ctrl-C" -> {
+                sendControlInputToPane(paneId, CtrlCByte)
+                null
+            }
+            "Ctrl-D" -> {
+                sendControlInputToPane(paneId, CtrlDByte)
+                null
+            }
             "‹", "Left" -> "Left"
             "⌃", "Up" -> "Up"
             "⌄", "Down" -> "Down"
@@ -3249,6 +3268,8 @@ private fun List<String>.toTerminalViewportBytes(cursor: TmuxPaneCursor? = null)
 }
 
 private const val MaxAgentEvents: Int = 500
+internal const val CtrlCByte: Int = 0x03
+internal const val CtrlDByte: Int = 0x04
 
 /**
  * Issue #215: ceiling on the synchronous `detach-client` round-trip the

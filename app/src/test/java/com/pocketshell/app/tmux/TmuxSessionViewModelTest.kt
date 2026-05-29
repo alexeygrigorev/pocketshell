@@ -953,6 +953,46 @@ class TmuxSessionViewModelTest {
         assertTrue(sent.all { it.contains("-t %0") })
     }
 
+    @Test
+    fun onKeyBarKeySendsCtrlCAndCtrlDAsRawControlBytes() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        vm.onKeyBarKey("%0", "Ctrl-C")
+        vm.onKeyBarKey("%0", "Ctrl-D")
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals(
+            listOf(
+                "send-keys -H -t %0 03",
+                "send-keys -H -t %0 04",
+            ),
+            sent,
+        )
+    }
+
+    @Test
+    fun sendControlInputToPaneCanSendDoublePressPayload() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        vm.sendControlInputToPane("%0", CtrlCByte, repeatCount = 2)
+        vm.sendControlInputToPane("%0", CtrlDByte, repeatCount = 2)
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals(
+            listOf(
+                "send-keys -H -t %0 03 03",
+                "send-keys -H -t %0 04 04",
+            ),
+            sent,
+        )
+    }
+
     private fun TestScope.waitForSentCommandCount(client: FakeTmuxClient, expectedCount: Int) {
         repeat(100) {
             advanceUntilIdle()

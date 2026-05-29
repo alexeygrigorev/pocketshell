@@ -28,8 +28,6 @@ import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.InlineDictationErrorStrip
-import com.pocketshell.uikit.model.KeyBinding
-import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
@@ -107,6 +105,29 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
+    fun keyBarWithMicExposesCtrlCAndCtrlDKeysInTmuxSurface() {
+        val taps = mutableListOf<String>()
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                KeyBarWithMic(
+                    keys = TmuxKeyBarLayout,
+                    onKey = { taps += it.label },
+                    micState = InlineDictationViewModel.RecordingState.Idle,
+                    micAmplitude = 0f,
+                    dictationMode = InlineDictationViewModel.DictationMode.Prompt,
+                    onDictationModeSelected = {},
+                    onMicTap = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("Ctrl-C").assertIsDisplayed().assertHasClickAction().performClick()
+        compose.onNodeWithText("Ctrl-D").assertIsDisplayed().assertHasClickAction().performClick()
+
+        assertEquals(listOf("Ctrl-C", "Ctrl-D"), taps)
+    }
+
+    @Test
     fun bottomChipControlsRendersMicFabAndPrimaryChips() {
         var dictateTaps = 0
         var snippetTaps = 0
@@ -177,6 +198,28 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         compose.onNodeWithText("git status").assertHasClickAction().performClick()
         assertEquals(listOf("git status"), chipTaps)
+    }
+
+    @Test
+    fun bottomChipControlsCanSurfaceAgentExitDoublePressChips() {
+        val chipTaps = mutableListOf<String>()
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                BottomChipControls(
+                    chips = AgentExitChips + DefaultSessionChips,
+                    onChipTap = { chipTaps += it },
+                    onDictateTap = {},
+                    onShowKeyboardTap = null,
+                    onAddSnippetTap = null,
+                    onProjectNavigationTap = null,
+                )
+            }
+        }
+
+        compose.onNodeWithText(CtrlC2Chip).assertIsDisplayed().assertHasClickAction().performClick()
+        compose.onNodeWithText(CtrlD2Chip).assertIsDisplayed().assertHasClickAction().performClick()
+
+        assertEquals(listOf(CtrlC2Chip, CtrlD2Chip), chipTaps)
     }
 
     @Test
@@ -251,18 +294,5 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.onNodeWithText("Microphone permission denied.").assertIsDisplayed()
         compose.onNodeWithText("Microphone permission denied.").performClick()
         assertTrue(dismissed)
-    }
-
-    private companion object {
-        val TmuxKeyBarLayout: List<KeyBinding> = listOf(
-            KeyBinding(label = "Esc", kind = KeyKind.Regular),
-            KeyBinding(label = "Tab", kind = KeyKind.Regular),
-            KeyBinding(label = "Ctrl", kind = KeyKind.Modifier),
-            KeyBinding(label = "Alt", kind = KeyKind.Modifier),
-            KeyBinding(label = "<", kind = KeyKind.Arrow),
-            KeyBinding(label = "v", kind = KeyKind.Arrow),
-            KeyBinding(label = "^", kind = KeyKind.Arrow),
-            KeyBinding(label = ">", kind = KeyKind.Arrow),
-        )
     }
 }

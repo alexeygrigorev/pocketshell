@@ -292,8 +292,14 @@ private fun KeySlot(
             // Arrow keys use the UI sans-serif and a larger glyph
             // (`.key.arrow` rule); everything else uses mono.
             fontFamily = if (binding.kind == KeyKind.Arrow) null else JetBrainsMonoFamily,
-            fontSize = if (binding.kind == KeyKind.Arrow) 16.sp else 12.sp,
+            fontSize = when {
+                binding.kind == KeyKind.Arrow -> 16.sp
+                binding.label.length >= 6 -> 9.sp
+                else -> 12.sp
+            },
             fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            softWrap = false,
         )
     }
 }

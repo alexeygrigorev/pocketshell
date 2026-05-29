@@ -138,6 +138,7 @@ class TmuxSessionOpencodeInputDockerTest {
         const val DEVICE_DIR_NAME: String = "terminal-lab"
         const val HOST_NAME: String = "Issue102 RealAgent"
         const val SESSION_NAME: String = "issue102-tmux"
+        const val ISSUE_297_SESSION_NAME: String = "issue297-keybar-agent"
         const val MARKER: String = "issue102-tmux hi"
         const val EDITED_MARKER: String = "issue102-tmux"
         const val BACKSPACES: Int = 3
@@ -341,6 +342,84 @@ class TmuxSessionOpencodeInputDockerTest {
         Unit
     }
 
+    @Test
+    fun keyBarCtrlCAndCtrlDExitRunningAgentOnTmuxSessionScreen() = runBlocking {
+        val sshPort = resolveSshPort()
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val appContext = instrumentation.targetContext
+        val key = instrumentation.context.assets
+            .open("test_key")
+            .bufferedReader()
+            .use { it.readText() }
+        val sshKey = SshKey.Pem(key)
+        waitForSshFixtureReady(sshKey, port = sshPort)
+        killTmuxSession(sshKey, sshPort, ISSUE_297_SESSION_NAME)
+        installIssue297AgentShimAndSeedSession(sshKey, sshPort)
+
+        val hostRowTag: String = persistHost(appContext, key, sshPort)
+        try {
+            launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+            compose.waitUntil(timeoutMillis = 10_000) {
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+
+            compose.waitUntil(timeoutMillis = ATTACH_TIMEOUT_MS) {
+                compose.onAllNodesWithText(ISSUE_297_SESSION_NAME, useUnmergedTree = true)
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+            val attachTapAt = SystemClock.elapsedRealtime()
+            compose.onNodeWithText(ISSUE_297_SESSION_NAME, useUnmergedTree = true).performClick()
+            compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertIsDisplayed()
+            waitForTerminalSessionAttached()
+            recordTiming("issue297_attach_ms", SystemClock.elapsedRealtime() - attachTapAt)
+
+            waitForVisibleTerminalText("issue297-agent-ready", VISIBLE_TIMEOUT_MS) {
+                "issue297-agent-ready" in it
+            }
+            captureArtifact("issue297-00-agent-ready")
+
+            showKeyboardAndWaitForExitKeys()
+            val ctrlCAt = SystemClock.elapsedRealtime()
+            compose.onNodeWithText("Ctrl-C", useUnmergedTree = true).performClick()
+            compose.onNodeWithText("Ctrl-C", useUnmergedTree = true).performClick()
+            waitForVisibleTerminalText("issue297-ctrl-c-exit", VISIBLE_TIMEOUT_MS) {
+                "issue297-ctrl-c-2" in it && "issue297-agent-exited-ctrl-c" in it
+            }
+            recordTiming("issue297_ctrl_c_double_tap_to_exit_ms", SystemClock.elapsedRealtime() - ctrlCAt)
+            captureArtifact("issue297-01-ctrl-c-exited")
+
+            val controller = focusedPaneControllerOrFail()
+            controller.viewModel.writeInputToPane(
+                controller.paneId,
+                "/tmp/issue297/claude\r".toByteArray(Charsets.UTF_8),
+            )
+            waitForVisibleTerminalText("issue297-agent-restarted", VISIBLE_TIMEOUT_MS) {
+                it.substringAfterLast("issue297-agent-exited-ctrl-c")
+                    .contains("issue297-agent-ready")
+            }
+            captureArtifact("issue297-02-agent-restarted")
+
+            showKeyboardAndWaitForExitKeys()
+            val ctrlDAt = SystemClock.elapsedRealtime()
+            compose.onNodeWithText("Ctrl-D", useUnmergedTree = true).performClick()
+            compose.onNodeWithText("Ctrl-D", useUnmergedTree = true).performClick()
+            waitForVisibleTerminalText("issue297-ctrl-d-exit", VISIBLE_TIMEOUT_MS) {
+                "issue297-ctrl-d-2" in it && "issue297-agent-exited-ctrl-d" in it
+            }
+            recordTiming("issue297_ctrl_d_double_tap_to_exit_ms", SystemClock.elapsedRealtime() - ctrlDAt)
+            captureArtifact("issue297-03-ctrl-d-exited")
+
+            writeTimings()
+            writeIssue297Summary()
+        } finally {
+            runCatching { withTimeout(20_000) { killTmuxSession(sshKey, sshPort, ISSUE_297_SESSION_NAME) } }
+        }
+        Unit
+    }
+
     // ============================================================ Test helpers
 
     private fun resolveSshPort(): Int {
@@ -351,6 +430,10 @@ class TmuxSessionOpencodeInputDockerTest {
     }
 
     private suspend fun killStaleTmuxSession(sshKey: SshKey.Pem, sshPort: Int) {
+        killTmuxSession(sshKey, sshPort, SESSION_NAME)
+    }
+
+    private suspend fun killTmuxSession(sshKey: SshKey.Pem, sshPort: Int, sessionName: String) {
         SshConnection.connect(
             host = DEFAULT_HOST,
             port = sshPort,
@@ -359,7 +442,7 @@ class TmuxSessionOpencodeInputDockerTest {
             knownHosts = KnownHostsPolicy.AcceptAll,
             timeoutMs = 15_000,
         ).mapCatching { session ->
-            session.use { it.exec("tmux kill-session -t '$SESSION_NAME' 2>/dev/null || true") }
+            session.use { it.exec("tmux kill-session -t '$sessionName' 2>/dev/null || true") }
         }
     }
 
@@ -385,6 +468,61 @@ class TmuxSessionOpencodeInputDockerTest {
                 it.exec("tmux new-session -d -s '$sessionName' -c /tmp")
             }
         }
+    }
+
+    private suspend fun installIssue297AgentShimAndSeedSession(sshKey: SshKey.Pem, sshPort: Int) {
+        val script = """
+            rm -rf /tmp/issue297
+            mkdir -p /tmp/issue297
+            cat > /tmp/issue297/claude <<'SH'
+            #!/bin/sh
+            set -eu
+            printf 'issue297-agent-ready\r\n'
+            old_stty=${'$'}(stty -g 2>/dev/null || true)
+            stty raw -echo 2>/dev/null || true
+            c_count=0
+            d_count=0
+            while true; do
+              hex=${'$'}(dd bs=1 count=1 2>/dev/null | od -An -t x1 | tr -d ' \n')
+              case "${'$'}hex" in
+                03)
+                  c_count=${'$'}((c_count + 1))
+                  printf '\r\nissue297-ctrl-c-%s\r\n' "${'$'}c_count"
+                  if [ "${'$'}c_count" -ge 2 ]; then
+                    printf 'issue297-agent-exited-ctrl-c\r\n'
+                    break
+                  fi
+                  ;;
+                04)
+                  d_count=${'$'}((d_count + 1))
+                  printf '\r\nissue297-ctrl-d-%s\r\n' "${'$'}d_count"
+                  if [ "${'$'}d_count" -ge 2 ]; then
+                    printf 'issue297-agent-exited-ctrl-d\r\n'
+                    break
+                  fi
+                  ;;
+              esac
+            done
+            if [ -n "${'$'}old_stty" ]; then stty "${'$'}old_stty" 2>/dev/null || true; else stty sane 2>/dev/null || true; fi
+            SH
+            chmod +x /tmp/issue297/claude
+            tmux new-session -d -s '$ISSUE_297_SESSION_NAME' -c /workspace/pocketshell '/tmp/issue297/claude; exec sh'
+        """.trimIndent()
+        SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = sshPort,
+            user = DEFAULT_USER,
+            key = sshKey,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use { it.exec(script) }
+        }.onSuccess { exec ->
+            assertTrue(
+                "expected issue297 agent shim setup to succeed, got exit=${exec.exitCode} stderr='${exec.stderr}'",
+                exec.exitCode == 0,
+            )
+        }.getOrThrow()
     }
 
     private suspend fun persistHost(
@@ -621,6 +759,25 @@ class TmuxSessionOpencodeInputDockerTest {
         assertNotNull("predicate $label timed out; visible terminal:\n$last", null)
     }
 
+    private fun showKeyboardAndWaitForExitKeys() {
+        if (compose.onAllNodesWithText("Ctrl-C", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isEmpty()
+        ) {
+            compose.onNodeWithText("show keyboard", useUnmergedTree = true).performClick()
+        }
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("Ctrl-C", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty() &&
+                compose.onAllNodesWithText("Ctrl-D", useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+        }
+        compose.onNodeWithText("Ctrl-C", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithText("Ctrl-D", useUnmergedTree = true).assertIsDisplayed()
+    }
+
     // ============================================================ Artifacts
 
     private fun captureArtifact(name: String): ViewportArtifact {
@@ -752,6 +909,45 @@ class TmuxSessionOpencodeInputDockerTest {
             appendLine(visible)
         }
         return writeText("$label-summary.txt", body)
+    }
+
+    private fun writeIssue297Summary(): File {
+        val visible = visibleTerminalText()
+        val bounds = terminalViewBounds()
+        val grid = terminalGridSize()
+        val body = buildString {
+            appendLine("scenario=issue297-keybar-agent-exit")
+            appendLine("issue=297")
+            appendLine("session_name=$ISSUE_297_SESSION_NAME")
+            appendLine("terminal_grid_columns=${grid.columns}")
+            appendLine("terminal_grid_rows=${grid.rows}")
+            appendLine("terminal_bounds=$bounds")
+            appendLine("visible_terminal_chars=${visible.length}")
+            appendLine()
+            appendLine("acceptance:")
+            appendLine("ctrl_c_keybar_double_tap=${"issue297-agent-exited-ctrl-c" in visible}")
+            appendLine("ctrl_d_keybar_double_tap=${"issue297-agent-exited-ctrl-d" in visible}")
+            appendLine()
+            appendLine("authoritative_captures:")
+            for (artifact in screenshots.filter { it.name.startsWith("issue297-") }) {
+                appendLine(
+                    "${artifact.fileName} " +
+                        "name=${artifact.name} " +
+                        "grid=${artifact.grid.columns}x${artifact.grid.rows} " +
+                        "bounds=${artifact.bounds} " +
+                        "viewport_bright_pixels=${artifact.brightPixels} " +
+                        "viewport_sha256=${artifact.sha256} " +
+                        "visible_terminal_chars=${artifact.visibleTerminalText.length}",
+                )
+            }
+            appendLine()
+            appendLine("timings:")
+            timings.filter { it.startsWith("issue297_") }.forEach { appendLine(it) }
+            appendLine()
+            appendLine("visible_terminal:")
+            appendLine(visible)
+        }
+        return writeText("issue297-keybar-agent-exit-summary.txt", body)
     }
 
     private fun artifactFile(name: String): File {

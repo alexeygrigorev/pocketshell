@@ -882,7 +882,7 @@ public fun TmuxSessionScreen(
 
             if (isImeVisible && currentPane != null) {
                 KeyBarWithMic(
-                    keys = KeyBarLayout,
+                    keys = TmuxKeyBarLayout,
                     onKey = { binding ->
                         viewModel.onKeyBarKey(currentPane.paneId, binding.label)
                     },
@@ -915,18 +915,39 @@ public fun TmuxSessionScreen(
                     inputEnabled = sessionLive,
                 )
             } else if (!isImeVisible && currentPane != null) {
+                val bottomChips = if (currentAgentConversation?.detection != null) {
+                    AgentExitChips + DefaultSessionChips
+                } else {
+                    DefaultSessionChips
+                }
                 BottomChipControls(
-                    chips = DefaultSessionChips,
+                    chips = bottomChips,
                     onChipTap = { chip ->
-                        // Chip taps run literal commands in the focused
-                        // pane. Mirrors `SessionViewModel.onChipTap` which
-                        // appends a CR; the tmux input bridge translates
-                        // the trailing CR into a named `Enter` key.
                         currentPane?.let { pane ->
-                            viewModel.writeInputToPane(
-                                pane.paneId,
-                                (chip + "\r").toByteArray(Charsets.UTF_8),
-                            )
+                            when (chip) {
+                                CtrlC2Chip -> viewModel.sendControlInputToPane(
+                                    pane.paneId,
+                                    CtrlCByte,
+                                    repeatCount = 2,
+                                )
+                                CtrlD2Chip -> viewModel.sendControlInputToPane(
+                                    pane.paneId,
+                                    CtrlDByte,
+                                    repeatCount = 2,
+                                )
+                                else -> {
+                                    // Chip taps run literal commands in the
+                                    // focused pane. Mirrors
+                                    // `SessionViewModel.onChipTap` which
+                                    // appends a CR; the tmux input bridge
+                                    // translates the trailing CR into a named
+                                    // `Enter` key.
+                                    viewModel.writeInputToPane(
+                                        pane.paneId,
+                                        (chip + "\r").toByteArray(Charsets.UTF_8),
+                                    )
+                                }
+                            }
                         }
                     },
                     onDictateTap = { showMicSheet = true },
@@ -4118,19 +4139,22 @@ private fun PageIndicator(pageCount: Int, currentPage: Int) {
 }
 
 /**
- * Same 8 bar slots as [com.pocketshell.app.session.SessionScreen]'s
- * `KeyBarLayout`. Re-declared here (rather than reaching across packages)
- * so the two screens can evolve independently — tmux pane input has
- * stricter wire encoding (`send-keys -t %N Escape`) than the
- * Ctrl-as-sticky-modifier dance the plain-SSH screen runs.
+ * Tmux-specific 8-slot key bar. Ctrl/Alt modifier slots are intentionally
+ * not mirrored from [com.pocketshell.app.session.SessionScreen]'s layout:
+ * the tmux route sends pane input through `send-keys`, and these one-shot
+ * Ctrl-C / Ctrl-D keys map directly to the control bytes agents expect.
  */
-private val KeyBarLayout: List<KeyBinding> = listOf(
+internal val TmuxKeyBarLayout: List<KeyBinding> = listOf(
     KeyBinding(label = "Esc", kind = KeyKind.Regular),
     KeyBinding(label = "Tab", kind = KeyKind.Regular),
-    KeyBinding(label = "Ctrl", kind = KeyKind.Modifier),
-    KeyBinding(label = "Alt", kind = KeyKind.Modifier),
+    KeyBinding(label = "Ctrl-C", kind = KeyKind.Regular),
+    KeyBinding(label = "Ctrl-D", kind = KeyKind.Regular),
     KeyBinding(label = "‹", kind = KeyKind.Arrow),
     KeyBinding(label = "⌃", kind = KeyKind.Arrow),
     KeyBinding(label = "⌄", kind = KeyKind.Arrow),
     KeyBinding(label = "›", kind = KeyKind.Arrow),
 )
+
+internal const val CtrlC2Chip: String = "Ctrl-C x2"
+internal const val CtrlD2Chip: String = "Ctrl-D x2"
+internal val AgentExitChips: List<String> = listOf(CtrlC2Chip, CtrlD2Chip)

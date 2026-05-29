@@ -5,7 +5,6 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -19,8 +18,7 @@ import org.junit.runner.RunWith
 
 /**
  * Issues #192 / #156: chrome-level coverage for the per-window
- * navigation strip ([WindowStrip]) and per-window Terminal/Conversation
- * toggle ([WindowTabToggle]).
+ * navigation strip ([WindowStrip]).
  *
  * These mount the composables directly (no Hilt / live tmux) so the
  * #192 affordances are verified at the UI layer:
@@ -30,9 +28,9 @@ import org.junit.runner.RunWith
  *    two levels up).
  *  - Selecting a pill switches windows.
  *  - The "+ window" affordance is present on the strip.
- *  - The toggle exposes Terminal + Conversation segments and reports the
- *    tapped index — the per-window inline toggle that replaces the
- *    session-level tab row.
+ * The Terminal/Conversation pill now lives inside
+ * [ConsolidatedTopChrome] per #303; [TmuxSessionScreenImeChromeTest]
+ * covers that inline toolbar behavior.
  */
 @RunWith(AndroidJUnit4::class)
 class WindowStripChromeUiTest {
@@ -117,27 +115,6 @@ class WindowStripChromeUiTest {
 
         compose.onNodeWithTag(TMUX_NEW_WINDOW_BUTTON_TAG).performClick()
         assertTrue(newWindowTapped)
-    }
-
-    @Test
-    fun perWindowToggleReportsTappedTab() {
-        var selectedIndex = -1
-        compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
-                Column {
-                    WindowTabToggle(
-                        labels = listOf("Terminal", "Conversation"),
-                        selectedIndex = 0,
-                        onSelected = { selectedIndex = it },
-                        pulse = false,
-                    )
-                }
-            }
-        }
-
-        compose.onNodeWithTag(TMUX_TABS_TAG).assertIsDisplayed()
-        compose.onNodeWithText("Conversation").performClick()
-        assertEquals(1, selectedIndex)
     }
 
     @Test

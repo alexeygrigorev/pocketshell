@@ -472,7 +472,9 @@ public fun TmuxSessionScreen(
                 remember(panes, agentConversations, currentWindowId) {
                     viewModel.agentForWindow(currentWindowId)
                 }
-            val showConversationTab = currentWindowAgent != null ||
+            val currentPaneHasAgent = currentAgentConversation?.detection != null
+            val showConversationTab = currentPaneHasAgent ||
+                currentWindowAgent != null ||
                 lockedConversationPaneId != null
             val tabs = if (showConversationTab) {
                 listOf("Terminal", "Conversation")
@@ -529,15 +531,13 @@ public fun TmuxSessionScreen(
                         onSwipeDown = { showSessionSwitcher = true },
                     ),
             ) {
-                // Issue #189 / #192: the IME-down chrome is a stable
-                // 56dp header row (back + status + session crumb +
-                // kebab) followed by the per-window navigation strip and,
-                // when the current window hosts an agent, a per-window
-                // Terminal/Conversation toggle. Per #192 the window is
-                // the user's primary mental unit: the [WindowStrip] is
-                // the primary window switcher, kill-window lives on the
-                // pill itself, and the toggle is nested in the window's
-                // content area rather than eating a session-level row.
+                // Issue #189 / #192 / #303: the IME-down chrome is a
+                // stable 56dp header row (back + status + session crumb
+                // + inline Terminal/Conversation pill + kebab) followed
+                // only by the per-window navigation strip when multiple
+                // windows exist. The toggle stays per-window in state,
+                // but it renders inside the fixed toolbar row so agent
+                // sessions do not pay for a dedicated tab row.
                 //
                 // Issue #184 Layer 2 continues to apply on top: the
                 // IME-up state collapses the whole stack to
@@ -561,6 +561,10 @@ public fun TmuxSessionScreen(
                             ConsolidatedTopChrome(
                                 hostLabel = host,
                                 sessionName = sessionName,
+                                tabLabels = tabs,
+                                selectedTabIndex = selectedTabIndex,
+                                onTabSelected = onTabSelected,
+                                pulseConversationTab = showConversationTab,
                                 onBack = onBack,
                                 onMore = { moreExpanded = true },
                                 connectionStatus = status.toUiStatus(),
@@ -583,24 +587,6 @@ public fun TmuxSessionScreen(
                                         dialogMode = TmuxDialogMode.KillWindowFor(window.windowId)
                                     },
                                     onNewWindow = { viewModel.newWindow() },
-                                )
-                            }
-                            // Issue #192: the Terminal/Conversation toggle
-                            // is now per-window — shown only on the window
-                            // that actually hosts an agent (or while a
-                            // conversation is locked). Windows without an
-                            // agent get no toggle and no extra row.
-                            //
-                            // Issue #154 (acceptance criterion #2): the
-                            // toggle pulses briefly when the Conversation
-                            // affordance newly appears so the user notices
-                            // it instead of missing it.
-                            if (tabs.size > 1) {
-                                WindowTabToggle(
-                                    labels = tabs,
-                                    selectedIndex = selectedTabIndex,
-                                    onSelected = onTabSelected,
-                                    pulse = showConversationTab,
                                 )
                             }
                         }
@@ -1835,11 +1821,10 @@ internal const val TMUX_SESSION_USAGE_BADGE_TAG = "tmux:usage-badge"
  * - [TMUX_COMPACT_BREADCRUMB_TAG] is on the slimmed-down session-name
  *   strip that replaces the consolidated row while the IME is up so the
  *   terminal viewport can claim the freed vertical space.
- * - [TMUX_TABS_TAG] is on the per-window Terminal/Conversation toggle
- *   ([WindowTabToggle]) rendered below the [WindowStrip] (rendered only
- *   when an agent has been detected on the current window or a
- *   conversation is locked). Per #192 the toggle is per-window, no
- *   longer part of the consolidated top chrome.
+ * - [TMUX_TABS_TAG] is on the inline Terminal/Conversation toggle
+ *   rendered inside [ConsolidatedTopChrome] (rendered only when an
+ *   agent has been detected on the current window or a conversation is
+ *   locked). Per #303 the toggle no longer consumes a dedicated row.
  * - [TMUX_CONSOLIDATED_SESSION_LABEL_TAG] tags the session crumb text
  *   inside the consolidated row so screenshot tests and future audits
  *   can find it without relying on translatable text.
@@ -3471,15 +3456,16 @@ private fun DropdownMenuSectionHeader(text: String) {
  * Per the #192 information-architecture rework the window is the user's
  * primary mental unit, so window switching lives on the dedicated
  * [WindowStrip] row below this chrome — NOT inside this breadcrumb. The
- * Terminal/Conversation toggle is likewise per-window now ([WindowTabToggle]),
- * so it is no longer carried here either. That keeps this row a stable,
- * uncluttered `‹ session ⋮` header.
+ * Terminal/Conversation toggle remains per-window in state, but issue
+ * #303 renders it inline here so it does not cost a separate row.
  *
  * Layout (left → right inside one 56dp [Row]):
  * - 36dp circular back affordance (chevron).
  * - connection status dot + compact "Reconnecting"/"Disconnected" pill.
  * - `session` crumb (current destination; non-interactive) taking the
  *   remaining width.
+ * - optional inline Terminal/Conversation pill when an agent or locked
+ *   conversation is available.
  * - 36dp circular more affordance (kebab).
  *
  * The host segment is intentionally not surfaced — the host name is
@@ -3493,6 +3479,10 @@ internal fun ConsolidatedTopChrome(
     onBack: () -> Unit,
     onMore: () -> Unit,
     modifier: Modifier = Modifier,
+    tabLabels: List<String> = emptyList(),
+    selectedTabIndex: Int = 0,
+    onTabSelected: (Int) -> Unit = {},
+    pulseConversationTab: Boolean = false,
     // Issues #177 / #249: the live connection state, surfaced through the
     // breadcrumb's status dot (amber pulse while reconnecting, red while
     // disconnected) plus a compact "Reconnecting" / "Disconnected" pill.
@@ -3548,6 +3538,19 @@ internal fun ConsolidatedTopChrome(
                 .padding(horizontal = 4.dp)
                 .testTag(TMUX_CONSOLIDATED_SESSION_LABEL_TAG),
         )
+
+        if (tabLabels.size > 1) {
+            Spacer(modifier = Modifier.width(4.dp))
+            TabsRowWithPulse(pulseVisible = pulseConversationTab) {
+                ConsolidatedTabPill(
+                    labels = tabLabels,
+                    selectedIndex = selectedTabIndex,
+                    onSelected = onTabSelected,
+                    modifier = Modifier.testTag(TMUX_TABS_TAG),
+                )
+            }
+            Spacer(modifier = Modifier.width(4.dp))
+        }
 
         Box(
             modifier = Modifier
@@ -3969,44 +3972,6 @@ private fun Modifier.rightEdgeFade(active: Boolean): Modifier =
                 )
             }
     }
-
-/**
- * Issue #192: per-window Terminal / Conversation toggle, nested inside
- * the window's content area (below the [WindowStrip], above the terminal
- * viewport) instead of in the session-level top chrome. Rendered by
- * [TmuxSessionScreen] only when the current window hosts an agent (or a
- * conversation is locked), so windows without an agent show no toggle
- * and no extra row at all.
- *
- * Carries [TMUX_TABS_TAG] so the existing conversation-tab UI tests keep
- * addressing the same control after the IA rework. Issue #154 (criterion
- * #2): wrapped in [TabsRowWithPulse] so the brief accent overlay fires
- * when the Conversation affordance newly appears.
- */
-@Composable
-internal fun WindowTabToggle(
-    labels: List<String>,
-    selectedIndex: Int,
-    onSelected: (Int) -> Unit,
-    pulse: Boolean,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.Background)
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        TabsRowWithPulse(pulseVisible = pulse) {
-            ConsolidatedTabPill(
-                labels = labels,
-                selectedIndex = selectedIndex,
-                onSelected = onSelected,
-                modifier = Modifier.testTag(TMUX_TABS_TAG),
-            )
-        }
-    }
-}
 
 @Composable
 private fun WindowContextMenu(

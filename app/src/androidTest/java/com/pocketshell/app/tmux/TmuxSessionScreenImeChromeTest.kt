@@ -20,6 +20,8 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -53,12 +55,10 @@ import org.junit.runner.RunWith
  * 4. The consolidated chrome's IME-down footprint is ≤56dp tall — the
  *    Material toolbar height target.
  *
- * Per #192 the WindowStrip and the Terminal/Conversation toggle are
- * rendered by [TmuxSessionScreen] directly below the IME-aware chrome —
- * the strip is the primary window switcher and the toggle is per-window.
- * This test therefore asserts neither the strip nor the tab pill appear
- * inside the chrome region. The [TmuxSessionWindowNavigationE2eTest]
- * connected test owns the end-to-end strip-driven switch + kill journey.
+ * Per #303 the Terminal/Conversation toggle is rendered inside the
+ * fixed 56dp toolbar row when an agent/locked conversation is present.
+ * The WindowStrip remains outside this chrome region and is owned by
+ * [TmuxSessionWindowNavigationE2eTest].
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxSessionScreenImeChromeTest {
@@ -76,18 +76,43 @@ class TmuxSessionScreenImeChromeTest {
 
         compose.onNodeWithTag(TMUX_FULL_BREADCRUMB_TAG).assertIsDisplayed()
         compose.onNodeWithTag(TMUX_COMPACT_BREADCRUMB_TAG).assertIsNotDisplayed()
-        // Issue #192: the strip and the Terminal/Conversation toggle are
-        // rendered by the screen, NOT this chrome region. Asserting they
-        // are absent here locks the IA split in place.
+        // Plain shell: no agent/locked conversation, so no inline pill
+        // and no reserved tab row.
         compose.onNodeWithTag(TMUX_TABS_TAG).assertDoesNotExist()
         compose.onNodeWithTag(TMUX_WINDOW_STRIP_TAG).assertDoesNotExist()
+    }
+
+    @Test
+    fun fullChromeContainsInlineConversationPillForAgentSessions() {
+        var selectedIndex = -1
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                ImeAwareChromeUnderTest(
+                    chromeCompressed = false,
+                    tabLabels = listOf("Terminal", "Conversation"),
+                    selectedTabIndex = 0,
+                    onTabSelected = { selectedIndex = it },
+                )
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_FULL_BREADCRUMB_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_TABS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_WINDOW_STRIP_TAG).assertDoesNotExist()
+
+        compose.onNodeWithText("Conversation").performClick()
+        assertTrue("Conversation segment should select index 1", selectedIndex == 1)
     }
 
     @Test
     fun chromeIsCompressedWhenImeVisible() {
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
-                ImeAwareChromeUnderTest(chromeCompressed = true)
+                ImeAwareChromeUnderTest(
+                    chromeCompressed = true,
+                    tabLabels = listOf("Terminal", "Conversation"),
+                    selectedTabIndex = 1,
+                )
             }
         }
 
@@ -128,7 +153,10 @@ class TmuxSessionScreenImeChromeTest {
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 Column {
-                    ImeAwareChromeUnderTest(chromeCompressed = false)
+                    ImeAwareChromeUnderTest(
+                        chromeCompressed = false,
+                        tabLabels = listOf("Terminal", "Conversation"),
+                    )
                 }
             }
         }
@@ -214,7 +242,12 @@ class TmuxSessionScreenImeChromeTest {
      * inlines this structure rather than exposing a wrapper composable.
      */
     @Composable
-    private fun ImeAwareChromeUnderTest(chromeCompressed: Boolean) {
+    private fun ImeAwareChromeUnderTest(
+        chromeCompressed: Boolean,
+        tabLabels: List<String> = emptyList(),
+        selectedTabIndex: Int = 0,
+        onTabSelected: (Int) -> Unit = {},
+    ) {
         val animEnter = expandVertically(
             animationSpec = tween(durationMillis = 200),
         ) + fadeIn(
@@ -230,6 +263,9 @@ class TmuxSessionScreenImeChromeTest {
                 ConsolidatedTopChrome(
                     hostLabel = "host.example",
                     sessionName = "claude-main",
+                    tabLabels = tabLabels,
+                    selectedTabIndex = selectedTabIndex,
+                    onTabSelected = onTabSelected,
                     onBack = {},
                     onMore = {},
                     modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),

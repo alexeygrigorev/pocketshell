@@ -28,10 +28,10 @@ import org.junit.runner.RunWith
 /**
  * Issues #189 / #192 screenshot evidence — captures the tmux session
  * top chrome ([ConsolidatedTopChrome] / [CompactBreadcrumb]) plus
- * the per-window navigation strip ([WindowStrip]) and per-window
- * Terminal/Conversation toggle ([WindowTabToggle]) in every meaningful
- * permutation so the reviewer and maintainer can eyeball the new
- * information architecture without driving a live tmux session.
+ * the per-window navigation strip ([WindowStrip]) and inline
+ * Terminal/Conversation toggle in every meaningful permutation so the
+ * reviewer and maintainer can eyeball the navigation chrome without
+ * driving a live tmux session.
  *
  * Three artifacts get written to
  * `<media>/additional_test_output/tmux-consolidated-chrome/`:
@@ -40,8 +40,9 @@ import org.junit.runner.RunWith
  *    case (no agent, single window). Just back + session name + kebab;
  *    no strip (nothing to switch to), no toggle.
  *  - `consolidated-chrome-multi-window-with-agent.png` — the loaded
- *    case (#192 IA): header row + per-window strip (active pill carries
- *    the ✕ kill affordance) + per-window Terminal/Conversation toggle.
+ *    case (#303): one 56dp header row containing the
+ *    Terminal/Conversation pill + per-window strip below it (active
+ *    window pill carries the ✕ kill affordance).
  *  - `consolidated-chrome-ime-up-compact.png` — IME-up compressed
  *    chrome (the [CompactBreadcrumb] 40dp strip, no strip, no toggle).
  *
@@ -119,6 +120,8 @@ class TmuxConsolidatedChromeScreenshotTest {
                     ConsolidatedTopChrome(
                         hostLabel = "hetzner",
                         sessionName = "claude-main",
+                        tabLabels = listOf("Terminal", "Conversation"),
+                        selectedTabIndex = 1,
                         onBack = {},
                         onMore = {},
                     )
@@ -129,12 +132,6 @@ class TmuxConsolidatedChromeScreenshotTest {
                         onOpenWindowMenu = {},
                         onKillWindow = {},
                         onNewWindow = {},
-                    )
-                    WindowTabToggle(
-                        labels = listOf("Terminal", "Conversation"),
-                        selectedIndex = 1,
-                        onSelected = {},
-                        pulse = false,
                     )
                     PaneProxy()
                 }

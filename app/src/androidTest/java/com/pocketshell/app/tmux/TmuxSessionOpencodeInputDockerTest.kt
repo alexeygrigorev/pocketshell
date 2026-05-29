@@ -16,6 +16,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModelStore
 import androidx.lifecycle.ViewModelStoreOwner
 import androidx.room.Room
@@ -139,6 +140,11 @@ class TmuxSessionOpencodeInputDockerTest {
         const val HOST_NAME: String = "Issue102 RealAgent"
         const val SESSION_NAME: String = "issue102-tmux"
         const val ISSUE_297_SESSION_NAME: String = "issue297-keybar-agent"
+        const val ISSUE_303_AGENT_SESSION_NAME: String = "issue303-agent-toolbar"
+        const val ISSUE_303_PLAIN_SESSION_NAME: String = "issue303-plain-toolbar"
+        const val ISSUE_303_REMOTE_CWD: String = "/home/testuser/issue303-cwd"
+        const val ISSUE_303_CLAUDE_PATH: String =
+            "/home/testuser/.claude/projects/-home-testuser-issue303-cwd/issue303-claude.jsonl"
         const val MARKER: String = "issue102-tmux hi"
         const val EDITED_MARKER: String = "issue102-tmux"
         const val BACKSPACES: Int = 3
@@ -343,6 +349,101 @@ class TmuxSessionOpencodeInputDockerTest {
     }
 
     @Test
+    fun issue303TerminalConversationPillStaysInToolbarRow() = runBlocking {
+        val sshPort = resolveSshPort()
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val appContext = instrumentation.targetContext
+        val key = instrumentation.context.assets
+            .open("test_key")
+            .bufferedReader()
+            .use { it.readText() }
+        val sshKey = SshKey.Pem(key)
+        waitForSshFixtureReady(sshKey, port = sshPort)
+        killTmuxSession(sshKey, sshPort, ISSUE_303_AGENT_SESSION_NAME)
+        killTmuxSession(sshKey, sshPort, ISSUE_303_PLAIN_SESSION_NAME)
+        seedIssue303AgentSession(sshKey, sshPort)
+        seedIssue303PlainSession(sshKey, sshPort)
+
+        try {
+            val agentHostRowTag = persistHost(appContext, key, sshPort)
+            launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+            attachToSeededSession(
+                hostRowTag = agentHostRowTag,
+                sessionName = ISSUE_303_AGENT_SESSION_NAME,
+            )
+            val agentAttachAt = SystemClock.elapsedRealtime()
+            waitForTerminalSessionAttached()
+            waitForVisibleTerminalText("issue303-agent-ready", VISIBLE_TIMEOUT_MS) {
+                "issue303-agent-terminal-ready" in it
+            }
+            recordTiming("issue303_agent_attach_to_terminal_visible_ms", SystemClock.elapsedRealtime() - agentAttachAt)
+
+            val detectionAt = SystemClock.elapsedRealtime()
+            waitForTabsPill()
+            recordTiming("issue303_agent_terminal_to_tabs_visible_ms", SystemClock.elapsedRealtime() - detectionAt)
+            assertTabsInsideToolbar("issue303_agent_terminal")
+            compose.onNodeWithText("Terminal", useUnmergedTree = true).assertIsDisplayed()
+            compose.onNodeWithText("Conversation", useUnmergedTree = true).assertIsDisplayed()
+            captureArtifact("issue303-01-agent-terminal")
+            captureFullFrame("issue303-01-agent-terminal-full")
+
+            val conversationTapAt = SystemClock.elapsedRealtime()
+            compose.onNodeWithText("Conversation", useUnmergedTree = true).performClick()
+            compose.waitUntil(timeoutMillis = VISIBLE_TIMEOUT_MS) {
+                findTerminalView() == null &&
+                    compose.onAllNodesWithText("ASSISTANT", substring = true, useUnmergedTree = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
+            }
+            recordTiming(
+                "issue303_conversation_tap_to_conversation_visible_ms",
+                SystemClock.elapsedRealtime() - conversationTapAt,
+            )
+            assertTabsInsideToolbar("issue303_agent_conversation")
+            captureFullFrame("issue303-02-agent-conversation-full")
+
+            val terminalTapAt = SystemClock.elapsedRealtime()
+            compose.onNodeWithText("Terminal", useUnmergedTree = true).performClick()
+            waitForTerminalSessionAttached()
+            waitForVisibleTerminalText("issue303-agent-returned", VISIBLE_TIMEOUT_MS) {
+                "issue303-agent-terminal-ready" in it
+            }
+            recordTiming(
+                "issue303_terminal_tap_to_terminal_visible_ms",
+                SystemClock.elapsedRealtime() - terminalTapAt,
+            )
+            assertTabsInsideToolbar("issue303_agent_returned")
+            captureArtifact("issue303-03-agent-returned-terminal")
+            captureFullFrame("issue303-03-agent-returned-terminal-full")
+            launchedActivity?.close()
+            launchedActivity = null
+
+            val plainHostRowTag = persistHost(appContext, key, sshPort)
+            launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+            attachToSeededSession(
+                hostRowTag = plainHostRowTag,
+                sessionName = ISSUE_303_PLAIN_SESSION_NAME,
+            )
+            waitForTerminalSessionAttached()
+            waitForVisibleTerminalText("issue303-plain-ready", VISIBLE_TIMEOUT_MS) {
+                "issue303-plain-terminal-ready" in it
+            }
+            compose.onNodeWithTag(TMUX_TABS_TAG, useUnmergedTree = true).assertDoesNotExist()
+            captureArtifact("issue303-04-plain-terminal")
+            captureFullFrame("issue303-04-plain-terminal-full")
+
+            writeTimings()
+            writeIssue303Summary()
+        } finally {
+            launchedActivity?.close()
+            launchedActivity = null
+            runCatching { withTimeout(20_000) { killTmuxSession(sshKey, sshPort, ISSUE_303_AGENT_SESSION_NAME) } }
+            runCatching { withTimeout(20_000) { killTmuxSession(sshKey, sshPort, ISSUE_303_PLAIN_SESSION_NAME) } }
+        }
+        Unit
+    }
+
+    @Test
     fun keyBarCtrlCAndCtrlDExitRunningAgentOnTmuxSessionScreen() = runBlocking {
         val sshPort = resolveSshPort()
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -525,6 +626,67 @@ class TmuxSessionOpencodeInputDockerTest {
         }.getOrThrow()
     }
 
+    private suspend fun seedIssue303AgentSession(sshKey: SshKey.Pem, sshPort: Int) {
+        val script = """
+            set -eu
+            rm -rf /tmp/issue303-agent
+            mkdir -p /tmp/issue303-agent
+            cat > /tmp/issue303-agent/claude <<'SH'
+            #!/bin/sh
+            printf 'issue303-agent-terminal-ready\r\n'
+            while true; do sleep 60; done
+            SH
+            chmod +x /tmp/issue303-agent/claude
+            mkdir -p '$ISSUE_303_REMOTE_CWD'
+            mkdir -p '${ISSUE_303_CLAUDE_PATH.substringBeforeLast('/')}'
+            cat > '$ISSUE_303_CLAUDE_PATH' <<'JSONL'
+            {"uuid":"issue303-user-1","timestamp":"2026-05-29T18:00:00Z","message":{"role":"user","content":"prove issue303 live toolbar"}}
+            {"uuid":"issue303-assistant-1","timestamp":"2026-05-29T18:00:01Z","message":{"role":"assistant","content":"issue303 live Conversation pane proof"}}
+            JSONL
+            touch '$ISSUE_303_CLAUDE_PATH'
+            tmux new-session -d -s '$ISSUE_303_AGENT_SESSION_NAME' -c '$ISSUE_303_REMOTE_CWD' /tmp/issue303-agent/claude
+            tmux list-panes -t '$ISSUE_303_AGENT_SESSION_NAME' -F '#{session_name} #{window_index} #{pane_id} #{pane_tty} #{pane_current_command} #{pane_current_path}'
+        """.trimIndent()
+        SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = sshPort,
+            user = DEFAULT_USER,
+            key = sshKey,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use { it.exec(script) }
+        }.onSuccess { exec ->
+            assertTrue(
+                "expected issue303 agent session setup to succeed, got exit=${exec.exitCode} stdout='${exec.stdout}' stderr='${exec.stderr}'",
+                exec.exitCode == 0,
+            )
+        }.getOrThrow()
+    }
+
+    private suspend fun seedIssue303PlainSession(sshKey: SshKey.Pem, sshPort: Int) {
+        val script = """
+            set -eu
+            tmux new-session -d -s '$ISSUE_303_PLAIN_SESSION_NAME' -c /tmp "printf 'issue303-plain-terminal-ready\r\n'; exec sh"
+            tmux list-panes -t '$ISSUE_303_PLAIN_SESSION_NAME' -F '#{session_name} #{window_index} #{pane_id} #{pane_tty} #{pane_current_command}'
+        """.trimIndent()
+        SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = sshPort,
+            user = DEFAULT_USER,
+            key = sshKey,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use { it.exec(script) }
+        }.onSuccess { exec ->
+            assertTrue(
+                "expected issue303 plain session setup to succeed, got exit=${exec.exitCode} stdout='${exec.stdout}' stderr='${exec.stderr}'",
+                exec.exitCode == 0,
+            )
+        }.getOrThrow()
+    }
+
     private suspend fun persistHost(
         appContext: android.content.Context,
         key: String,
@@ -558,6 +720,22 @@ class TmuxSessionOpencodeInputDockerTest {
             db.close()
         }
         return hostRowTag
+    }
+
+    private fun attachToSeededSession(hostRowTag: String, sessionName: String) {
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        compose.waitUntil(timeoutMillis = ATTACH_TIMEOUT_MS) {
+            compose.onAllNodesWithText(sessionName, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText(sessionName, useUnmergedTree = true).performClick()
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertIsDisplayed()
     }
 
     private suspend fun readTmuxPaneSize(sshKey: SshKey.Pem, sshPort: Int): TerminalGridSize {
@@ -759,6 +937,38 @@ class TmuxSessionOpencodeInputDockerTest {
         assertNotNull("predicate $label timed out; visible terminal:\n$last", null)
     }
 
+    private fun waitForTabsPill() {
+        compose.waitUntil(timeoutMillis = VISIBLE_TIMEOUT_MS) {
+            compose.onAllNodesWithTag(TMUX_TABS_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+    }
+
+    private fun assertTabsInsideToolbar(label: String) {
+        val toolbar = compose
+            .onNodeWithTag(TMUX_FULL_BREADCRUMB_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val tabs = compose
+            .onNodeWithTag(TMUX_TABS_TAG, useUnmergedTree = true)
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val toolbarHeightPx = toolbar.height
+        val toolbarMaxPx = with(compose.density) { 56.dp.toPx() } + 0.5f
+        assertTrue(
+            "$label: expected full breadcrumb toolbar to fit in 56dp, got height=$toolbarHeightPx max=$toolbarMaxPx bounds=$toolbar",
+            toolbarHeightPx <= toolbarMaxPx,
+        )
+        assertTrue(
+            "$label: expected tabs pill bounds $tabs to be fully inside toolbar bounds $toolbar",
+            tabs.top >= toolbar.top && tabs.bottom <= toolbar.bottom,
+        )
+        recordTiming("${label}_toolbar_height_px", toolbarHeightPx.toLong())
+        recordTiming("${label}_tabs_top_px", tabs.top.toLong())
+        recordTiming("${label}_tabs_bottom_px", tabs.bottom.toLong())
+    }
+
     private fun showKeyboardAndWaitForExitKeys() {
         if (compose.onAllNodesWithText("Ctrl-C", useUnmergedTree = true)
                 .fetchSemanticsNodes()
@@ -837,6 +1047,22 @@ class TmuxSessionOpencodeInputDockerTest {
         val file = artifactFile(name)
         file.writeText(text)
         println("ISSUE102_TMUX_TEXT ${file.absolutePath}")
+        return file
+    }
+
+    private fun captureFullFrame(name: String): File {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        SystemClock.sleep(300)
+        val bitmap = instrumentation.uiAutomation.takeScreenshot()
+        val file = artifactFile("$name.png")
+        FileOutputStream(file).use { out ->
+            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                "failed to write full-frame screenshot to ${file.absolutePath}"
+            }
+        }
+        bitmap.recycle()
+        println("ISSUE303_FULLFRAME ${file.absolutePath}")
         return file
     }
 
@@ -948,6 +1174,67 @@ class TmuxSessionOpencodeInputDockerTest {
             appendLine(visible)
         }
         return writeText("issue297-keybar-agent-exit-summary.txt", body)
+    }
+
+    private fun writeIssue303Summary(): File {
+        val visible = visibleTerminalText()
+        val bounds = terminalViewBounds()
+        val grid = terminalGridSize()
+        val issue303Artifacts = screenshots.filter { it.name.startsWith("issue303-") }
+        val body = buildString {
+            appendLine("scenario=issue303-live-tmux-terminal-conversation-pill")
+            appendLine("issue=303")
+            appendLine("agent_session_name=$ISSUE_303_AGENT_SESSION_NAME")
+            appendLine("plain_session_name=$ISSUE_303_PLAIN_SESSION_NAME")
+            appendLine("terminal_grid_columns=${grid.columns}")
+            appendLine("terminal_grid_rows=${grid.rows}")
+            appendLine("terminal_bounds=$bounds")
+            appendLine("plain_visible_terminal_chars=${visible.length}")
+            appendLine()
+            appendLine("acceptance:")
+            appendLine("agent_terminal_conversation_pill_visible=true")
+            appendLine("pill_bounds_inside_56dp_toolbar=true")
+            appendLine("conversation_opened_with_one_tap=true")
+            appendLine("terminal_returned_with_one_tap=true")
+            appendLine("plain_shell_tabs_absent=true")
+            appendLine("plain_shell_reserved_tab_row_absent=true")
+            appendLine()
+            appendLine("capture_policy:")
+            appendLine(
+                "authoritative=direct TerminalView viewport render plus terminal emulator visible text sidecars for terminal states",
+            )
+            appendLine(
+                "advisory=full-device screenshots prove top chrome placement and Conversation/Terminal tab selection in the live app",
+            )
+            appendLine()
+            appendLine("authoritative_captures:")
+            for (artifact in issue303Artifacts) {
+                appendLine(
+                    "${artifact.fileName} " +
+                        "name=${artifact.name} " +
+                        "grid=${artifact.grid.columns}x${artifact.grid.rows} " +
+                        "bounds=${artifact.bounds} " +
+                        "viewport_bright_pixels=${artifact.brightPixels} " +
+                        "viewport_sha256=${artifact.sha256} " +
+                        "visible_terminal_chars=${artifact.visibleTerminalText.length}",
+                )
+            }
+            appendLine()
+            appendLine("full_device_screenshots:")
+            listOf(
+                "issue303-01-agent-terminal-full.png",
+                "issue303-02-agent-conversation-full.png",
+                "issue303-03-agent-returned-terminal-full.png",
+                "issue303-04-plain-terminal-full.png",
+            ).forEach { appendLine(it) }
+            appendLine()
+            appendLine("timings:")
+            timings.filter { it.startsWith("issue303") }.forEach { appendLine(it) }
+            appendLine()
+            appendLine("visible_terminal:")
+            appendLine(visible)
+        }
+        return writeText("issue303-live-toolbar-summary.txt", body)
     }
 
     private fun artifactFile(name: String): File {

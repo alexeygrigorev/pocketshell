@@ -325,6 +325,7 @@ public class TmuxSessionViewModel @Inject constructor(
         passphrase: CharArray?,
         sessionName: String,
         startDirectory: String? = null,
+        trigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
     ) {
         val target = ConnectionTarget(
             hostId = hostId,
@@ -340,6 +341,21 @@ public class TmuxSessionViewModel @Inject constructor(
         if (connectJob?.isActive == true && connectingTarget == target) return
         if (_connectionStatus.value is ConnectionStatus.Connected && activeTarget == target) return
 
+        val previousActiveTarget = activeTarget
+        val previousSession = sessionRef
+        val willFastSwitch = previousActiveTarget != null &&
+            previousSession != null &&
+            previousSession.isConnected &&
+            isSameHost(previousActiveTarget, target) &&
+            previousActiveTarget.sessionName != target.sessionName
+        val effectiveTrigger = if (willFastSwitch) TmuxConnectTrigger.FastSwitch else trigger
+        val generation = nextConnectGeneration()
+        latestConnectIntent = ConnectIntent(
+            target = target,
+            trigger = effectiveTrigger,
+            generation = generation,
+        )
+
         // Issue #145: deterministic reconnect-loop signal. Every accepted
         // connect attempt increments a process-wide counter and emits a
         // log line that the connected disconnect+reconnect test greps for
@@ -353,11 +369,15 @@ public class TmuxSessionViewModel @Inject constructor(
             "host" to host,
             "port" to port,
             "session" to target.sessionName,
+            "trigger" to effectiveTrigger.logValue,
+            "requestedTrigger" to trigger.logValue,
+            "generation" to generation,
         )
         Log.i(
             ISSUE_145_RECONNECT_TAG,
-            "tmux-connect-attempt count=$attempt host=$host port=$port " +
-                "user=$user session=${target.sessionName}",
+            "tmux-connect-attempt count=$attempt trigger=${effectiveTrigger.logValue} " +
+                "requestedTrigger=${trigger.logValue} generation=$generation " +
+                targetLogFields(target),
         )
 
         // Issue #151: a tap on "Attach" for a different tmux session
@@ -382,8 +402,6 @@ public class TmuxSessionViewModel @Inject constructor(
         // tmux session). The decision MUST be made off the previous
         // [activeTarget] — connectingTarget is the new target by the time
         // the coroutine runs.
-        val previousActiveTarget = activeTarget
-        val previousSession = sessionRef
         connectingTarget = target
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
@@ -429,22 +447,17 @@ public class TmuxSessionViewModel @Inject constructor(
                 // early-return above already covers that case, but
                 // keeping the check explicit here documents the
                 // contract.
-                val canFastSwitch = previousActiveTarget != null &&
-                    previousSession != null &&
-                    previousSession.isConnected &&
-                    isSameHost(previousActiveTarget, target) &&
-                    previousActiveTarget.sessionName != target.sessionName
-                if (canFastSwitch) {
+                if (willFastSwitch) {
                     // Fast path: keep the SSH session, swap the tmux
                     // client. No new handshake fires.
                     closeCurrentClientKeepSession()
-                    runFastSessionSwitch(target, previousSession, attempt)
+                    runFastSessionSwitch(target, previousSession, attempt, effectiveTrigger)
                 } else {
                     // Slow path: full teardown of both the tmux client
                     // and the SSH session before the fresh
                     // [SshConnection.connect] handshake.
-                    closeCurrentConnectionAndJoin()
-                    runConnect(target, attempt)
+                    closeCurrentConnectionAndJoin(preserveConnectingTarget = target)
+                    runConnect(target, attempt, effectiveTrigger)
                 }
             }
         }
@@ -464,6 +477,37 @@ public class TmuxSessionViewModel @Inject constructor(
             previous.port == target.port &&
             previous.user == target.user &&
             previous.keyPath == target.keyPath
+
+    private fun sameSessionIdentity(left: ConnectionTarget, right: ConnectionTarget): Boolean =
+        left.hostId == right.hostId &&
+            left.host == right.host &&
+            left.port == right.port &&
+            left.user == right.user &&
+            left.keyPath == right.keyPath &&
+            left.sessionName == right.sessionName &&
+            left.startDirectory == right.startDirectory
+
+    private fun nextConnectGeneration(): Long {
+        connectGeneration += 1L
+        return connectGeneration
+    }
+
+    private fun targetLogFields(target: ConnectionTarget): String = buildString {
+        append("hostId=")
+        append(target.hostId)
+        append(" host=")
+        append(target.host)
+        append(" port=")
+        append(target.port)
+        append(" user=")
+        append(target.user)
+        append(" session=")
+        append(target.sessionName)
+        target.startDirectory?.let {
+            append(" startDirectory=")
+            append(it)
+        }
+    }
 
     /**
      * Issue #145: explicit reconnect entry point used by the Compose
@@ -492,6 +536,7 @@ public class TmuxSessionViewModel @Inject constructor(
             passphrase = target.passphrase,
             sessionName = target.sessionName,
             startDirectory = target.startDirectory,
+            trigger = TmuxConnectTrigger.Reconnect,
         )
         return true
     }
@@ -542,9 +587,11 @@ public class TmuxSessionViewModel @Inject constructor(
     // we stash the [activeTarget] so [onAppForegrounded] knows what to
     // re-attach to. Going through [activeTarget] for the reconnect path
     // would not work because [closeCurrentConnectionAndJoin] clears it.
-    private var pendingReattachTarget: ConnectionTarget? = null
+    private var pendingReattach: PendingReattach? = null
     private var backgroundDetachJob: Job? = null
     private var foregroundReattachForTest: (() -> Unit)? = null
+    private var latestConnectIntent: ConnectIntent? = null
+    private var connectGeneration: Long = 0L
 
     // Issue #257: the in-flight fire-and-forget `detach-client` of the
     // PREVIOUS tmux client during a same-host session switch. The clean
@@ -584,13 +631,25 @@ public class TmuxSessionViewModel @Inject constructor(
         val target = activeTarget ?: connectingTarget
         if (target == null) return
         if (clientRef == null && sessionRef == null) return
-        pendingReattachTarget = target
+        val intent = latestConnectIntent
+        pendingReattach = PendingReattach(
+            target = target,
+            generation = intent?.generation ?: connectGeneration,
+            intendedTarget = intent?.target,
+            intendedTrigger = intent?.trigger,
+        )
         Log.i(
             ISSUE_235_LIFECYCLE_TAG,
-            "tmux-detach-on-background host=${target.host} port=${target.port} " +
-                "user=${target.user} session=${target.sessionName}",
+            "tmux-detach-on-background generation=${intent?.generation ?: connectGeneration} " +
+                targetLogFields(target) +
+                intent?.target?.let { " intendedSession=${it.sessionName}" }.orEmpty() +
+                intent?.trigger?.let { " intendedTrigger=${it.logValue}" }.orEmpty(),
         )
         if (backgroundDetachJob?.isActive == true) return
+        val preserveConnectingTarget = connectingTarget?.takeIf { connecting ->
+            !sameSessionIdentity(connecting, target) &&
+                intent?.target?.let { sameSessionIdentity(it, connecting) } == true
+        }
         val detachJob = viewModelScope.launch {
             // NonCancellable so a fresh lifecycle transition (e.g.
             // rapid foreground/background) cannot interrupt the detach
@@ -598,7 +657,9 @@ public class TmuxSessionViewModel @Inject constructor(
             // happen even if the foreground hook is already firing
             // the reattach.
             withContext(NonCancellable) {
-                closeCurrentConnectionAndJoin()
+                closeCurrentConnectionAndJoin(
+                    preserveConnectingTarget = preserveConnectingTarget,
+                )
             }
         }
         backgroundDetachJob = detachJob
@@ -628,7 +689,17 @@ public class TmuxSessionViewModel @Inject constructor(
      * and pane reconcile all fire identically to a cold attach.
      */
     public fun onAppForegrounded() {
-        if (pendingReattachTarget == null) return
+        if (pendingReattach == null) {
+            latestConnectIntent?.let { intent ->
+                Log.i(
+                    ISSUE_235_LIFECYCLE_TAG,
+                    "tmux-reattach-on-foreground-skip reason=no-pending " +
+                        "generation=${intent.generation} trigger=${intent.trigger.logValue} " +
+                        targetLogFields(intent.target),
+                )
+            }
+            return
+        }
         val detachJob = backgroundDetachJob
         viewModelScope.launch {
             // If the user backgrounds and immediately foregrounds the
@@ -637,12 +708,33 @@ public class TmuxSessionViewModel @Inject constructor(
             // reattach from being consumed by connect()'s still-connected
             // early return before teardown clears activeTarget/clientRef.
             detachJob?.join()
-            val target = pendingReattachTarget ?: return@launch
-            pendingReattachTarget = null
+            val pending = pendingReattach ?: return@launch
+            val target = pending.target
+            val currentIntent = latestConnectIntent
+            if (
+                currentIntent != null &&
+                currentIntent.generation >= pending.generation &&
+                !sameSessionIdentity(currentIntent.target, target)
+            ) {
+                pendingReattach = null
+                Log.i(
+                    ISSUE_235_LIFECYCLE_TAG,
+                    "tmux-reattach-on-foreground-skip reason=newer-intent " +
+                        "detachedSession=${target.sessionName} " +
+                        "intendedSession=${currentIntent.target.sessionName} " +
+                        "detachedGeneration=${pending.generation} " +
+                        "intendedGeneration=${currentIntent.generation} " +
+                        "intendedTrigger=${currentIntent.trigger.logValue} " +
+                        "detachedHostId=${target.hostId} intendedHostId=${currentIntent.target.hostId}",
+                )
+                return@launch
+            }
+            pendingReattach = null
             Log.i(
                 ISSUE_235_LIFECYCLE_TAG,
-                "tmux-reattach-on-foreground host=${target.host} port=${target.port} " +
-                    "user=${target.user} session=${target.sessionName}",
+                "tmux-reattach-on-foreground trigger=${TmuxConnectTrigger.LifecycleReattach.logValue} " +
+                    "generation=${pending.generation} " +
+                    targetLogFields(target),
             )
             foregroundReattachForTest?.invoke() ?: connect(
                 hostId = target.hostId,
@@ -654,6 +746,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 passphrase = target.passphrase,
                 sessionName = target.sessionName,
                 startDirectory = target.startDirectory,
+                trigger = TmuxConnectTrigger.LifecycleReattach,
             )
         }
     }
@@ -679,7 +772,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // background event in the same instant (rare but observed in
         // QA when the user backgrounds the app during the detach
         // animation) does not re-seed the reattach.
-        pendingReattachTarget = null
+        pendingReattach = null
         Log.i(
             ISSUE_235_LIFECYCLE_TAG,
             "tmux-detach-manual host=${activeTarget?.host} session=${activeTarget?.sessionName}",
@@ -702,7 +795,25 @@ public class TmuxSessionViewModel @Inject constructor(
         onCleared()
     }
 
-    internal fun hasPendingReattachForTest(): Boolean = pendingReattachTarget != null
+    internal fun hasPendingReattachForTest(): Boolean = pendingReattach != null
+
+    internal fun connectingSessionNameForTest(): String? = connectingTarget?.sessionName
+
+    public fun latestRestoreIntentSnapshot(): TmuxRestoreIntentSnapshot? =
+        latestConnectIntent?.let { intent ->
+            TmuxRestoreIntentSnapshot(
+                hostId = intent.target.hostId,
+                hostName = intent.target.hostName,
+                hostname = intent.target.host,
+                port = intent.target.port,
+                username = intent.target.user,
+                keyPath = intent.target.keyPath,
+                sessionName = intent.target.sessionName,
+                startDirectory = intent.target.startDirectory,
+                trigger = intent.trigger,
+                generation = intent.generation,
+            )
+        }
 
     internal fun setForegroundReattachForTest(handler: (() -> Unit)?) {
         foregroundReattachForTest = handler
@@ -751,7 +862,11 @@ public class TmuxSessionViewModel @Inject constructor(
         lifecycleHookHostId = hostId
     }
 
-    private suspend fun runConnect(target: ConnectionTarget, attempt: Int) {
+    private suspend fun runConnect(
+        target: ConnectionTarget,
+        attempt: Int,
+        trigger: TmuxConnectTrigger,
+    ) {
         val startedAtMs = SystemClock.elapsedRealtime()
         try {
             // Issue #178: instrument the actual SSH handshake call so a
@@ -771,11 +886,12 @@ public class TmuxSessionViewModel @Inject constructor(
                 "host" to target.host,
                 "port" to target.port,
                 "session" to target.sessionName,
+                "trigger" to trigger.logValue,
             )
             Log.i(
                 ISSUE_145_RECONNECT_TAG,
-                "tmux-ssh-handshake count=$handshakeNumber host=${target.host} " +
-                    "port=${target.port} user=${target.user} session=${target.sessionName} " +
+                "tmux-ssh-handshake count=$handshakeNumber trigger=${trigger.logValue} " +
+                    "${targetLogFields(target)} " +
                     "attempt=$attempt",
             )
             val key: SshKey = SshKey.Path(File(target.keyPath))
@@ -811,6 +927,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 target = target,
                 startedAtMs = startedAtMs,
                 event = "ssh-connected",
+                trigger = trigger,
             )
             sessionRef = session
 
@@ -827,6 +944,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 attempt = attempt,
                 sessionName = target.sessionName,
                 startedAtMs = startedAtMs,
+                trigger = trigger,
             )
             StartupTiming.mark(
                 "tmux-control-command-started",
@@ -841,6 +959,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 target = target,
                 startedAtMs = startedAtMs,
                 event = "tmux-control-command-started",
+                trigger = trigger,
             )
             activeTmuxClients.register(
                 hostId = target.hostId,
@@ -862,6 +981,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 target = target,
                 attempt = attempt,
                 startedAtMs = startedAtMs,
+                trigger = trigger,
             )
 
             connectingTarget = null
@@ -876,6 +996,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 target = target,
                 startedAtMs = startedAtMs,
                 event = "tmux-connect-ready",
+                trigger = trigger,
             )
             maybeRefreshControlClientSize()
         } catch (t: Throwable) {
@@ -911,6 +1032,7 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
         session: SshSession,
         attempt: Int,
+        trigger: TmuxConnectTrigger,
     ) {
         val startedAtMs = SystemClock.elapsedRealtime()
         try {
@@ -920,7 +1042,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // teardown + reconnect path so the user still ends up on
                 // the requested session instead of a Failed state.
                 sessionRef = null
-                runConnect(target, attempt)
+                runConnect(target, attempt, trigger)
                 return
             }
             sessionRef = session
@@ -937,12 +1059,14 @@ public class TmuxSessionViewModel @Inject constructor(
                 attempt = attempt,
                 sessionName = target.sessionName,
                 startedAtMs = startedAtMs,
+                trigger = trigger,
             )
             logAttachMilestone(
                 attempt = attempt,
                 target = target,
                 startedAtMs = startedAtMs,
                 event = "tmux-control-command-started",
+                trigger = trigger,
             )
             activeTmuxClients.register(
                 hostId = target.hostId,
@@ -964,6 +1088,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 target = target,
                 attempt = attempt,
                 startedAtMs = startedAtMs,
+                trigger = trigger,
             )
 
             connectingTarget = null
@@ -978,12 +1103,12 @@ public class TmuxSessionViewModel @Inject constructor(
                 target = target,
                 startedAtMs = startedAtMs,
                 event = "tmux-connect-ready",
+                trigger = trigger,
             )
             maybeRefreshControlClientSize()
             Log.i(
                 ISSUE_145_RECONNECT_TAG,
-                "tmux-fast-switch host=${target.host} port=${target.port} " +
-                    "user=${target.user} session=${target.sessionName}",
+                "tmux-fast-switch trigger=${trigger.logValue} " + targetLogFields(target),
             )
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
@@ -1002,12 +1127,14 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
         attempt: Int,
         startedAtMs: Long,
+        trigger: TmuxConnectTrigger,
     ) {
         logAttachMilestone(
             attempt = attempt,
             target = target,
             startedAtMs = startedAtMs,
             event = "tmux-list-panes-start",
+            trigger = trigger,
         )
         val result = withTimeoutOrNull<PaneReconcileResult.Ready>(attachPanesReadyTimeoutMs) {
             var ready: PaneReconcileResult.Ready? = null
@@ -1042,6 +1169,7 @@ public class TmuxSessionViewModel @Inject constructor(
             target = target,
             startedAtMs = startedAtMs,
             event = "tmux-control-mode-ready",
+            trigger = trigger,
             detail = "paneCount=${result.paneCount}",
         )
         logAttachMilestone(
@@ -1049,6 +1177,7 @@ public class TmuxSessionViewModel @Inject constructor(
             target = target,
             startedAtMs = startedAtMs,
             event = "tmux-panes-ready",
+            trigger = trigger,
             detail = "paneCount=${result.paneCount}",
         )
     }
@@ -1068,6 +1197,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 target = target,
                 startedAtMs = startedAtMs,
                 event = "tmux-connect-failed",
+                trigger = latestConnectIntent?.takeIf {
+                    sameSessionIdentity(it.target, target)
+                }?.trigger ?: TmuxConnectTrigger.UserTap,
                 detail = "cause=${cause.javaClass.simpleName}: ${cause.message}",
             ),
             cause,
@@ -1095,6 +1227,7 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
         startedAtMs: Long,
         event: String,
+        trigger: TmuxConnectTrigger,
         detail: String = "",
     ) {
         Log.i(
@@ -1104,6 +1237,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 target = target,
                 startedAtMs = startedAtMs,
                 event = event,
+                trigger = trigger,
                 detail = detail,
             ),
         )
@@ -1114,19 +1248,16 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
         startedAtMs: Long,
         event: String,
+        trigger: TmuxConnectTrigger,
         detail: String = "",
     ): String = buildString {
         append(event)
         append(" attempt=")
         append(attempt)
-        append(" host=")
-        append(target.host)
-        append(" port=")
-        append(target.port)
-        append(" user=")
-        append(target.user)
-        append(" session=")
-        append(target.sessionName)
+        append(" trigger=")
+        append(trigger.logValue)
+        append(' ')
+        append(targetLogFields(target))
         append(" elapsedMs=")
         append(SystemClock.elapsedRealtime() - startedAtMs)
         if (detail.isNotBlank()) {
@@ -1142,8 +1273,8 @@ public class TmuxSessionViewModel @Inject constructor(
         Log.i(
             ISSUE_145_RECONNECT_TAG,
             "tmux-first-pane-output attempt=${milestone.attempt} " +
-                "session=${milestone.sessionName} pane=${event.paneId} " +
-                "bytes=${event.data.size} " +
+                "trigger=${milestone.trigger.logValue} session=${milestone.sessionName} " +
+                "pane=${event.paneId} bytes=${event.data.size} " +
                 "elapsedMs=${SystemClock.elapsedRealtime() - milestone.startedAtMs}",
         )
     }
@@ -1378,6 +1509,7 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         val attempt = TMUX_CONNECT_ATTEMPTS.incrementAndGet()
         val startedAtMs = SystemClock.elapsedRealtime()
+        val trigger = TmuxConnectTrigger.UserTap
         connectingTarget = target
         activeTarget = target
         refreshReconnectAvailability()
@@ -1388,9 +1520,10 @@ public class TmuxSessionViewModel @Inject constructor(
             attempt = attempt,
             sessionName = sessionName,
             startedAtMs = startedAtMs,
+            trigger = trigger,
         )
         try {
-            awaitPanesReadyForAttach(target, attempt, startedAtMs)
+            awaitPanesReadyForAttach(target, attempt, startedAtMs, trigger)
             connectingTarget = null
             refreshReconnectAvailability()
             _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
@@ -1421,6 +1554,7 @@ public class TmuxSessionViewModel @Inject constructor(
         host: String,
         port: Int,
         user: String,
+        sessionName: String = "test",
         job: Job,
     ): Job {
         connectingTarget = ConnectionTarget(
@@ -1431,9 +1565,15 @@ public class TmuxSessionViewModel @Inject constructor(
             user = user,
             keyPath = "",
             passphrase = null,
-            sessionName = "test",
+            sessionName = sessionName,
             startDirectory = null,
-        )
+        ).also { target ->
+            latestConnectIntent = ConnectIntent(
+                target = target,
+                trigger = TmuxConnectTrigger.UserTap,
+                generation = nextConnectGeneration(),
+            )
+        }
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
         connectJob = job
@@ -2721,7 +2861,9 @@ public class TmuxSessionViewModel @Inject constructor(
      * exception-propagation policy the caller needs (the production caller
      * wraps this in `NonCancellable`; tests may not need to).
      */
-    private suspend fun closeCurrentConnectionAndJoin() {
+    private suspend fun closeCurrentConnectionAndJoin(
+        preserveConnectingTarget: ConnectionTarget? = null,
+    ) {
         // Issue #257: drain any background detach left in flight by a
         // prior same-host fast-switch before we tear the rest down, so a
         // full teardown (background-detach / cross-host reconnect) never
@@ -2781,7 +2923,10 @@ public class TmuxSessionViewModel @Inject constructor(
         runCatching { sessionRef?.close() }
         sessionRef = null
         activeTarget = null
-        connectingTarget = null
+        connectingTarget = connectingTarget?.takeIf { current ->
+            preserveConnectingTarget?.let { sameSessionIdentity(current, it) } == true
+        }
+        refreshReconnectAvailability()
         activeAttachMilestone = null
         // A fresh attach must capture a fresh phone grid and re-run the
         // size-mismatch check.
@@ -3068,10 +3213,24 @@ public class TmuxSessionViewModel @Inject constructor(
         val startDirectory: String?,
     )
 
+    private data class ConnectIntent(
+        val target: ConnectionTarget,
+        val trigger: TmuxConnectTrigger,
+        val generation: Long,
+    )
+
+    private data class PendingReattach(
+        val target: ConnectionTarget,
+        val generation: Long,
+        val intendedTarget: ConnectionTarget?,
+        val intendedTrigger: TmuxConnectTrigger?,
+    )
+
     private data class AttachMilestone(
         val attempt: Int,
         val sessionName: String,
         val startedAtMs: Long,
+        val trigger: TmuxConnectTrigger,
         var firstPaneOutputLogged: Boolean = false,
     )
 
@@ -3488,6 +3647,27 @@ internal const val ISSUE_235_LIFECYCLE_TAG: String = "PsTmuxLifecycle"
  * under the 23-character Log.isLoggable cap.
  */
 internal const val ISSUE_188_DIAG_TAG: String = "issue188-killwindow"
+
+public enum class TmuxConnectTrigger(public val logValue: String) {
+    UserTap("user-tap"),
+    LifecycleReattach("lifecycle-reattach"),
+    ColdRestore("cold-restore"),
+    FastSwitch("fast-switch"),
+    Reconnect("reconnect"),
+}
+
+public data class TmuxRestoreIntentSnapshot(
+    val hostId: Long,
+    val hostName: String,
+    val hostname: String,
+    val port: Int,
+    val username: String,
+    val keyPath: String,
+    val sessionName: String,
+    val startDirectory: String?,
+    val trigger: TmuxConnectTrigger,
+    val generation: Long,
+)
 
 /**
  * Issue #188: max time we wait for tmux to emit the post-kill

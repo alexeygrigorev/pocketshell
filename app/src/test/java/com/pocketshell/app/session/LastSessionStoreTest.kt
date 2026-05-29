@@ -3,6 +3,9 @@ package com.pocketshell.app.session
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.app.resolveLastSessionForStop
+import com.pocketshell.app.tmux.TmuxConnectTrigger
+import com.pocketshell.app.tmux.TmuxRestoreIntentSnapshot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
@@ -198,6 +201,101 @@ class LastSessionStoreTest {
         assertEquals("second", read!!.composerDraft)
         assertEquals("codex", read.sessionName)
         assertEquals(2_000L, read.savedAtMillis)
+    }
+
+    @Test
+    fun `onStop save uses intended tmux target over stale route destination`() {
+        val store = LastSessionStore(context)
+        val staleRoute = AppDestination.TmuxSession(
+            hostId = 7L,
+            hostName = "prod box",
+            hostname = "10.0.0.5",
+            port = 2222,
+            username = "me",
+            keyPath = "/data/keys/id_ed25519",
+            passphrase = null,
+            sessionName = "session-a",
+            startDirectory = null,
+        )
+        val intended = TmuxRestoreIntentSnapshot(
+            hostId = 7L,
+            hostName = "prod box",
+            hostname = "10.0.0.5",
+            port = 2222,
+            username = "me",
+            keyPath = "/data/keys/id_ed25519",
+            sessionName = "session-b",
+            startDirectory = "/home/me/project-b",
+            trigger = TmuxConnectTrigger.UserTap,
+            generation = 42L,
+        )
+
+        val session = resolveLastSessionForStop(
+            currentDestination = staleRoute,
+            tmuxIntent = intended,
+            composerDraft = "draft while switching",
+            savedAtMillis = 5_000L,
+        )
+        assertNotNull(session)
+        store.save(requireNotNull(session))
+
+        val restored = store.read(nowMillis = 6_000L)
+        assertNotNull(restored)
+        requireNotNull(restored)
+        assertEquals("session-b", restored.sessionName)
+        assertEquals("/home/me/project-b", restored.startDirectory)
+        assertEquals("draft while switching", restored.composerDraft)
+        assertEquals(5_000L, restored.savedAtMillis)
+    }
+
+    @Test
+    fun `onStop save falls back to route destination when no tmux intent exists`() {
+        val route = AppDestination.TmuxSession(
+            hostId = 7L,
+            hostName = "prod box",
+            hostname = "10.0.0.5",
+            port = 2222,
+            username = "me",
+            keyPath = "/data/keys/id_ed25519",
+            passphrase = null,
+            sessionName = "session-a",
+            startDirectory = null,
+        )
+
+        val session = resolveLastSessionForStop(
+            currentDestination = route,
+            tmuxIntent = null,
+            composerDraft = "draft",
+            savedAtMillis = 5_000L,
+        )
+
+        assertNotNull(session)
+        requireNotNull(session)
+        assertEquals("session-a", session.sessionName)
+        assertEquals("draft", session.composerDraft)
+    }
+
+    @Test
+    fun `onStop clears restore when current destination is not a tmux session`() {
+        val session = resolveLastSessionForStop(
+            currentDestination = AppDestination.HostList,
+            tmuxIntent = TmuxRestoreIntentSnapshot(
+                hostId = 7L,
+                hostName = "prod box",
+                hostname = "10.0.0.5",
+                port = 2222,
+                username = "me",
+                keyPath = "/data/keys/id_ed25519",
+                sessionName = "session-b",
+                startDirectory = null,
+                trigger = TmuxConnectTrigger.UserTap,
+                generation = 42L,
+            ),
+            composerDraft = "draft",
+            savedAtMillis = 5_000L,
+        )
+
+        assertNull(session)
     }
 
     private fun LastSessionStore.LastSession.copyWith(

@@ -2,6 +2,7 @@ package com.pocketshell.app.session
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Log
 import com.pocketshell.app.nav.AppDestination
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -79,6 +80,12 @@ class LastSessionStore @Inject constructor(
      * the value is only read on the next foreground.
      */
     fun save(session: LastSession) {
+        Log.i(
+            LAST_SESSION_LOG_TAG,
+            "last-session-save trigger=onStop hostId=${session.hostId} " +
+                "host=${session.hostname} port=${session.port} user=${session.username} " +
+                "session=${session.sessionName} startDirectory=${session.startDirectory}",
+        )
         prefs.edit()
             .putLong(KEY_HOST_ID, session.hostId)
             .putString(KEY_HOST_NAME, session.hostName)
@@ -133,7 +140,14 @@ class LastSessionStore @Inject constructor(
             startDirectory = prefs.safeString(KEY_START_DIR, null),
             composerDraft = prefs.safeString(KEY_COMPOSER_DRAFT, "") ?: "",
             savedAtMillis = savedAt,
-        )
+        ).also { session ->
+            Log.i(
+                LAST_SESSION_LOG_TAG,
+                "last-session-restore trigger=cold-restore hostId=${session.hostId} " +
+                    "host=${session.hostname} port=${session.port} user=${session.username} " +
+                    "session=${session.sessionName} startDirectory=${session.startDirectory}",
+            )
+        }
     }
 
     private fun SharedPreferences.safeString(key: String, default: String?): String? =
@@ -164,6 +178,7 @@ class LastSessionStore @Inject constructor(
      * purpose.
      */
     fun clear() {
+        Log.i(LAST_SESSION_LOG_TAG, "last-session-clear trigger=onStop")
         prefs.edit().clear().apply()
     }
 
@@ -187,6 +202,7 @@ class LastSessionStore @Inject constructor(
 
     companion object {
         private const val PREFS_NAME = "last_session"
+        private const val LAST_SESSION_LOG_TAG = "PsLastSession"
         private const val KEY_HOST_ID = "host_id"
         private const val KEY_HOST_NAME = "host_name"
         private const val KEY_HOSTNAME = "hostname"

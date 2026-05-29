@@ -3,6 +3,7 @@ package com.pocketshell.app
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -49,6 +50,8 @@ import com.pocketshell.app.settings.SettingsScreen
 import com.pocketshell.app.settings.ThemePreference
 import com.pocketshell.app.systemsurfaces.ForwardingChooserScreen
 import com.pocketshell.app.systemsurfaces.ForwardingTileService
+import com.pocketshell.app.tmux.TmuxConnectTrigger
+import com.pocketshell.app.tmux.TmuxRestoreIntentSnapshot
 import com.pocketshell.app.tmux.TmuxSessionScreen
 import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.app.usage.UsageScheduler
@@ -87,6 +90,7 @@ class MainActivity : FragmentActivity() {
     // SessionViewModel stays activity-scoped: we only have one live
     // session at a time today; multi-pane lifecycle arrives with #22.
     private val sessionViewModel: SessionViewModel by viewModels()
+    private val tmuxSessionViewModel: TmuxSessionViewModel by viewModels()
     private var requestedDestination by mutableStateOf<AppDestination>(AppDestination.HostList)
 
     /**
@@ -133,6 +137,7 @@ class MainActivity : FragmentActivity() {
      */
     private var currentTopDestination: AppDestination = AppDestination.HostList
     private var currentComposerDraft: String = ""
+    private var restoredTmuxDestination: AppDestination.TmuxSession? = null
 
     /**
      * Issue #177: the composer draft restored alongside a recent
@@ -213,6 +218,7 @@ class MainActivity : FragmentActivity() {
             "restoredSnapshot" to (restored != null),
             "processDeathResume" to resumingFromProcessDeath,
         )
+        restoredTmuxDestination = requestedDestination as? AppDestination.TmuxSession
         restoredComposerDraft = if (requestedDestination is AppDestination.TmuxSession) {
             restored?.composerDraft.orEmpty()
         } else {
@@ -252,6 +258,7 @@ class MainActivity : FragmentActivity() {
                 ) {
                     AppNavigator(
                         sessionViewModel = sessionViewModel,
+                        tmuxSessionViewModel = tmuxSessionViewModel,
                         usageScheduler = usageScheduler,
                         startDirectoryAutocomplete = startDirectoryAutocomplete,
                         usageWarnPercent = settings.usageWarnThresholdPercent.toDouble(),
@@ -267,6 +274,7 @@ class MainActivity : FragmentActivity() {
                         onComposerDraftChanged = { draft -> currentComposerDraft = draft },
                         initialComposerDraft = restoredComposerDraft,
                         onInitialComposerDraftConsumed = { restoredComposerDraft = "" },
+                        restoredTmuxDestination = restoredTmuxDestination,
                     )
                 }
             }
@@ -283,22 +291,14 @@ class MainActivity : FragmentActivity() {
      * never silently restored after the user navigated away on purpose.
      */
     override fun onStop() {
-        val dest = currentTopDestination
-        if (dest is AppDestination.TmuxSession) {
-            lastSessionStore.save(
-                LastSessionStore.LastSession(
-                    hostId = dest.hostId,
-                    hostName = dest.hostName,
-                    hostname = dest.hostname,
-                    port = dest.port,
-                    username = dest.username,
-                    keyPath = dest.keyPath,
-                    sessionName = dest.sessionName,
-                    startDirectory = dest.startDirectory,
-                    composerDraft = currentComposerDraft,
-                    savedAtMillis = System.currentTimeMillis(),
-                ),
-            )
+        val session = resolveLastSessionForStop(
+            currentDestination = currentTopDestination,
+            tmuxIntent = tmuxSessionViewModel.latestRestoreIntentSnapshot(),
+            composerDraft = currentComposerDraft,
+            savedAtMillis = System.currentTimeMillis(),
+        )
+        if (session != null) {
+            lastSessionStore.save(session)
         } else {
             lastSessionStore.clear()
         }
@@ -338,6 +338,7 @@ private fun ThemePreference.toThemeMode(): PocketShellThemeMode = when (this) {
 @Composable
 private fun AppNavigator(
     sessionViewModel: SessionViewModel,
+    tmuxSessionViewModel: TmuxSessionViewModel,
     usageScheduler: UsageScheduler,
     startDirectoryAutocomplete: StartDirectoryAutocompleteRemoteSource,
     usageWarnPercent: Double,
@@ -355,6 +356,7 @@ private fun AppNavigator(
     // navigation does not re-seed a stale draft.
     initialComposerDraft: String = "",
     onInitialComposerDraftConsumed: () -> Unit = {},
+    restoredTmuxDestination: AppDestination.TmuxSession? = null,
 ) {
     // Issue #116: per-host worst-case usage record map, derived from
     // the scheduler's snapshot flow. Session destinations look up the
@@ -413,6 +415,11 @@ private fun AppNavigator(
 
     val backStack = remember { mutableListOf<AppDestination>() }
 
+    fun setCurrentDestination(dest: AppDestination) {
+        current = dest
+        onCurrentDestinationChanged(dest)
+    }
+
     LaunchedEffect(requestedDestination) {
         StartupTiming.mark(
             "app-navigator-requested",
@@ -421,26 +428,26 @@ private fun AppNavigator(
         )
         if (requestedDestination == AppDestination.PortForwardChooser && current != requestedDestination) {
             backStack += current
-            current = requestedDestination
+            setCurrentDestination(requestedDestination)
         }
     }
 
     fun navigate(dest: AppDestination) {
         backStack += current
-        current = dest
+        setCurrentDestination(dest)
     }
 
     fun replace(dest: AppDestination) {
-        current = dest
+        setCurrentDestination(dest)
     }
 
     fun popToHostList() {
         backStack.clear()
-        current = AppDestination.HostList
+        setCurrentDestination(AppDestination.HostList)
     }
 
     fun back() {
-        current = backStack.removeLastOrNull() ?: AppDestination.HostList
+        setCurrentDestination(backStack.removeLastOrNull() ?: AppDestination.HostList)
     }
 
     when (val dest = current) {
@@ -834,7 +841,7 @@ private fun AppNavigator(
         // plain SSH and this branch is reached only by future deep-link
         // / explicit-route wiring.
         is AppDestination.TmuxSession -> TmuxSessionScreen(
-            viewModel = hiltViewModel<TmuxSessionViewModel>(),
+            viewModel = tmuxSessionViewModel,
             hostId = dest.hostId,
             hostName = dest.hostName,
             host = dest.hostname,
@@ -889,9 +896,74 @@ private fun AppNavigator(
                     typedPrefix = prefix,
                 )
             },
+            connectTrigger = if (dest == restoredTmuxDestination) {
+                TmuxConnectTrigger.ColdRestore
+            } else {
+                TmuxConnectTrigger.UserTap
+            },
         )
     }
 }
+
+internal fun resolveLastSessionForStop(
+    currentDestination: AppDestination,
+    tmuxIntent: TmuxRestoreIntentSnapshot?,
+    composerDraft: String,
+    savedAtMillis: Long,
+): LastSessionStore.LastSession? {
+    val routeDestination = currentDestination as? AppDestination.TmuxSession ?: return null
+    val source = tmuxIntent
+    if (source != null && !source.sameRestoreIdentity(routeDestination)) {
+        Log.i(
+            LAST_SESSION_ACTIVITY_LOG_TAG,
+            "last-session-save-override trigger=onStop reason=intended-target " +
+                "routeHostId=${routeDestination.hostId} routeSession=${routeDestination.sessionName} " +
+                "routeStartDirectory=${routeDestination.startDirectory} " +
+                "intendedHostId=${source.hostId} intendedSession=${source.sessionName} " +
+                "intendedStartDirectory=${source.startDirectory} " +
+                "intendedTrigger=${source.trigger.logValue} intendedGeneration=${source.generation}",
+        )
+    }
+    return if (source != null) {
+        LastSessionStore.LastSession(
+            hostId = source.hostId,
+            hostName = source.hostName,
+            hostname = source.hostname,
+            port = source.port,
+            username = source.username,
+            keyPath = source.keyPath,
+            sessionName = source.sessionName,
+            startDirectory = source.startDirectory,
+            composerDraft = composerDraft,
+            savedAtMillis = savedAtMillis,
+        )
+    } else {
+        LastSessionStore.LastSession(
+            hostId = routeDestination.hostId,
+            hostName = routeDestination.hostName,
+            hostname = routeDestination.hostname,
+            port = routeDestination.port,
+            username = routeDestination.username,
+            keyPath = routeDestination.keyPath,
+            sessionName = routeDestination.sessionName,
+            startDirectory = routeDestination.startDirectory,
+            composerDraft = composerDraft,
+            savedAtMillis = savedAtMillis,
+        )
+    }
+}
+
+private fun TmuxRestoreIntentSnapshot.sameRestoreIdentity(
+    destination: AppDestination.TmuxSession,
+): Boolean =
+    hostId == destination.hostId &&
+        hostName == destination.hostName &&
+        hostname == destination.hostname &&
+        port == destination.port &&
+        username == destination.username &&
+        keyPath == destination.keyPath &&
+        sessionName == destination.sessionName &&
+        startDirectory == destination.startDirectory
 
 internal fun initialDestinationFromIntent(intent: Intent?): AppDestination =
     if (intent?.getBooleanExtra(ForwardingTileService.EXTRA_OPEN_PORT_FORWARDING, false) == true) {
@@ -982,6 +1054,7 @@ internal fun AppDestination.timingName(): String = when (this) {
 }
 
 private const val DefaultTmuxSessionName = "pocketshell"
+private const val LAST_SESSION_ACTIVITY_LOG_TAG = "PsLastSession"
 
 /**
  * Issue #230: derive a tmux session name for a repo opened from the

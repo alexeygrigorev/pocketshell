@@ -133,6 +133,7 @@ class TmuxDetachOnBackgroundE2eTest {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         seedTmuxSession(key)
+        clearLogcat()
 
         val hostRowTag = seedDockerHost(key)
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
@@ -264,6 +265,24 @@ class TmuxDetachOnBackgroundE2eTest {
             SystemClock.elapsedRealtime() - foregroundStart,
         )
         captureViewport("issue235-04-reattach")
+        val logcat = dumpLogcat()
+        writeText("issue272-lifecycle-identity-logcat.txt", logcat.takeLast(500_000))
+        assertTrue(
+            "expected background detach log for $SEEDED_SESSION; logcat tail:\n${logcat.takeLast(4_000)}",
+            logcat.contains("tmux-detach-on-background") &&
+                logcat.contains("session=$SEEDED_SESSION"),
+        )
+        assertTrue(
+            "expected foreground reattach to use lifecycle trigger and same session; logcat tail:\n${logcat.takeLast(4_000)}",
+            logcat.contains("tmux-reattach-on-foreground trigger=lifecycle-reattach") &&
+                logcat.contains("session=$SEEDED_SESSION"),
+        )
+        assertTrue(
+            "expected connect attempt to identify lifecycle-reattach trigger and same session; logcat tail:\n${logcat.takeLast(4_000)}",
+            logcat.contains("tmux-connect-attempt") &&
+                logcat.contains("trigger=lifecycle-reattach") &&
+                logcat.contains("session=$SEEDED_SESSION"),
+        )
 
         writeTimings()
         Unit
@@ -632,6 +651,26 @@ class TmuxDetachOnBackgroundE2eTest {
         timings += line
         println("ISSUE235_TIMING $line")
     }
+
+    private fun clearLogcat() {
+        runCatching { ProcessBuilder("logcat", "-c").start().waitFor() }
+    }
+
+    private fun dumpLogcat(): String =
+        ProcessBuilder(
+            "logcat",
+            "-d",
+            "-v",
+            "threadtime",
+            "PsTmuxLifecycle:I",
+            "PsTmuxReconnect:I",
+            "*:S",
+        )
+            .redirectErrorStream(true)
+            .start()
+            .inputStream
+            .bufferedReader()
+            .use { it.readText() }
 
     private fun View.findTerminalView(): TerminalView? {
         if (this is TerminalView) return this

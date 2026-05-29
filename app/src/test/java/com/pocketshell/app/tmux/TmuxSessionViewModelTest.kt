@@ -16,6 +16,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -2877,6 +2878,67 @@ class TmuxSessionViewModelTest {
         )
         assertEquals(1, foregroundReattachCount)
         assertTrue("client must be closed after backgrounded detach", client.closed)
+    }
+
+    /**
+     * Issue #272: if the user starts switching from session A to session
+     * B and the app backgrounds before B finishes attaching, lifecycle
+     * foreground must not silently reattach A. The newer route/connect
+     * intent owns foreground, so lifecycle reattach is an explicit no-op
+     * and the B target remains available for the in-flight connect path.
+     */
+    @Test
+    fun onAppForegroundedSkipsDetachedSessionWhenNewerConnectIntentExists() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        var foregroundReattachCount = 0
+        vm.setForegroundReattachForTest {
+            foregroundReattachCount += 1
+        }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "session-a",
+            client = client,
+        )
+        vm.beginConnectingForTest(
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            sessionName = "session-b",
+            job = Job(),
+        )
+
+        vm.onAppBackgrounded()
+        advanceUntilIdle()
+
+        assertTrue("background detach must seed pending reattach", vm.hasPendingReattachForTest())
+        assertEquals(
+            "newer connecting session must survive lifecycle teardown",
+            "session-b",
+            vm.connectingSessionNameForTest(),
+        )
+
+        vm.onAppForegrounded()
+        advanceUntilIdle()
+
+        assertFalse(
+            "pending reattach should be consumed as a deliberate newer-intent no-op",
+            vm.hasPendingReattachForTest(),
+        )
+        assertEquals(
+            "lifecycle must not reattach the detached A session when B is intended",
+            0,
+            foregroundReattachCount,
+        )
+        assertEquals(
+            "session-b",
+            vm.connectingSessionNameForTest(),
+        )
     }
 
     /**

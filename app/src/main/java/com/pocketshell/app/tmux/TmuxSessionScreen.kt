@@ -193,6 +193,7 @@ public fun TmuxSessionScreen(
     onInitialComposerDraftConsumed: () -> Unit = {},
     onComposerDraftChanged: (String) -> Unit = {},
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
+    connectTrigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
 ) {
     LaunchedEffect(Unit) {
         StartupTiming.markOnce(
@@ -202,12 +203,13 @@ public fun TmuxSessionScreen(
             "hasStartDirectory" to (startDirectory != null),
         )
     }
-    LaunchedEffect(hostId, hostName, host, port, user, keyPath, passphrase, sessionName, startDirectory) {
+    LaunchedEffect(hostId, hostName, host, port, user, keyPath, passphrase, sessionName, startDirectory, connectTrigger) {
         StartupTiming.mark(
             "tmux-connect-effect-start",
             "hostId" to hostId,
             "session" to sessionName,
             "hasStartDirectory" to (startDirectory != null),
+            "trigger" to connectTrigger.logValue,
         )
         viewModel.connect(
             hostId = hostId,
@@ -219,6 +221,7 @@ public fun TmuxSessionScreen(
             passphrase = passphrase,
             sessionName = sessionName,
             startDirectory = startDirectory,
+            trigger = connectTrigger,
         )
     }
 

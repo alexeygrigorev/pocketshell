@@ -68,6 +68,7 @@ const val ADD_HOST_KEY_SEARCH_TAG = "add-host-key-search"
 const val ADD_HOST_KEY_SEARCH_EMPTY_TAG = "add-host-key-search-empty"
 const val ADD_HOST_DETAILS_TAB_TAG = "add-host-tab-details"
 const val ADD_HOST_MANAGE_KEYS_TAB_TAG = "add-host-tab-manage-keys"
+const val ADD_HOST_SCAN_QR_TAG = "add-host-scan-qr"
 
 /**
  * Default placeholder shown in the optional "Usage command" field
@@ -112,6 +113,7 @@ private const val PORT_SUPPORTING_TEXT = "Default: 22"
 fun AddEditHostScreen(
     hostId: Long?,
     onDone: () -> Unit,
+    onScanQr: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     viewModel: AddEditHostViewModel = hiltViewModel(),
     keyManagementViewModel: SshKeysViewModel = hiltViewModel(),
@@ -193,6 +195,7 @@ fun AddEditHostScreen(
         Column(modifier = Modifier.fillMaxSize()) {
             FormAppBar(
                 title = if (hostId == null) "Add host" else "Edit host",
+                onScanQr = onScanQr.takeIf { hostId == null },
                 onBack = {
                     if (selectedTab == AddEditHostTab.ManageKeys) {
                         selectedTab = AddEditHostTab.Details
@@ -370,7 +373,11 @@ private fun AddEditHostTabs(
  * back affordance instead of a title-only layout.
  */
 @Composable
-private fun FormAppBar(title: String, onBack: () -> Unit) {
+private fun FormAppBar(
+    title: String,
+    onScanQr: (() -> Unit)?,
+    onBack: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -398,8 +405,23 @@ private fun FormAppBar(title: String, onBack: () -> Unit) {
             color = PocketShellColors.Text,
             fontSize = 18.sp,
             fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(start = 4.dp),
+            modifier = Modifier
+                .padding(start = 4.dp)
+                .weight(1f),
         )
+        if (onScanQr != null) {
+            TextButton(
+                onClick = onScanQr,
+                modifier = Modifier.testTag(ADD_HOST_SCAN_QR_TAG),
+            ) {
+                Text(
+                    text = "Scan QR",
+                    color = PocketShellColors.Accent,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
     }
 }
 

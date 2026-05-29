@@ -29,13 +29,14 @@ sealed interface AppDestination {
     data class EditHost(val hostId: Long) : AppDestination
 
     /**
-     * Live camera QR scanner (issue #129). Reachable from the Host list
-     * top-bar actions menu. Hosted by
+     * Live camera QR scanner (issue #129). Reachable from the Add host
+     * screen's Scan QR action (issue #290). Hosted by
      * [com.pocketshell.app.hosts.QrScannerScreen]; on success the
      * payload is dispatched through the existing
      * [com.pocketshell.app.hosts.HostListViewModel.importSharedHostPayload]
      * entry point, which unwraps [com.pocketshell.app.hosts.QrChunkCodec]
-     * envelopes before importing the SSH host payload.
+     * envelopes before importing the SSH host payload, then the app
+     * returns to [HostList] to show the import result.
      */
     data object Scan : AppDestination
 

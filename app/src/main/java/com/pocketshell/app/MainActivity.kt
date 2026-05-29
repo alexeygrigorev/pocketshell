@@ -393,6 +393,11 @@ private fun AppNavigator(
         current = dest
     }
 
+    fun popToHostList() {
+        backStack.clear()
+        current = AppDestination.HostList
+    }
+
     fun back() {
         current = backStack.removeLastOrNull() ?: AppDestination.HostList
     }
@@ -403,7 +408,6 @@ private fun AppNavigator(
             onEditHost = { id -> navigate(AppDestination.EditHost(id)) },
             onOpenCrashReports = { navigate(AppDestination.CrashReports) },
             onOpenSettings = { navigate(AppDestination.Settings) },
-            onOpenScan = { navigate(AppDestination.Scan) },
             // Issue #116 (usage-panel Fix B): wire the cross-host usage
             // strip's tap target to the same Usage destination the
             // bootstrap-success CTA opens. The bootstrap path keeps the
@@ -456,6 +460,7 @@ private fun AppNavigator(
         AppDestination.AddHost -> AddEditHostScreen(
             hostId = null,
             onDone = ::back,
+            onScanQr = { navigate(AppDestination.Scan) },
         )
 
         is AppDestination.EditHost -> AddEditHostScreen(
@@ -463,22 +468,21 @@ private fun AppNavigator(
             onDone = ::back,
         )
 
-        // Issue #129: live camera QR scanner. Dispatches the decoded
-        // envelope payload through the existing host-list import path.
-        // The view model is the activity-scoped
-        // [HostListViewModel] so the resulting "Imported …" banner /
-        // host insertion are observable in the host list when the
-        // navigator pops back.
+        // Issue #129 + #290: live camera QR scanner. It is launched
+        // from Add host and dispatches the decoded envelope payload
+        // through the existing host-list import path. On import we pop
+        // to the host list so the success banner or "already added"
+        // conflict prompt is visible immediately.
         AppDestination.Scan -> {
             val hostListViewModel: HostListViewModel = hiltViewModel()
             QrScannerScreen(
                 onDecoded = { payload ->
                     hostListViewModel.importSharedHostPayload(payload)
-                    back()
+                    popToHostList()
                 },
                 onPickFile = { uri ->
                     hostListViewModel.importSharedHostUri(uri)
-                    back()
+                    popToHostList()
                 },
                 onClose = ::back,
             )

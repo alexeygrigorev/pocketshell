@@ -580,7 +580,7 @@ class HostListViewModel @Inject constructor(
                 _shareMessage.value = "Overwrote ${conflict.existing.name}"
             }
             ImportConflictResolution.Skip -> {
-                _shareMessage.value = "Skipped ${conflict.incoming.name}"
+                _shareMessage.value = "Already added: ${conflict.existing.name}"
             }
             ImportConflictResolution.AddAsNew -> {
                 hostDao.insert(

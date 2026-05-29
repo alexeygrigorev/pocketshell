@@ -1272,7 +1272,7 @@ class HostListViewModelTest {
         assertEquals(1, rows.size)
         assertEquals("existing", rows[0].name)
         assertNull(viewModel.importConflict.value)
-        assertEquals("Skipped incoming", viewModel.shareMessage.value)
+        assertEquals("Already added: existing", viewModel.shareMessage.value)
     }
 
     @Test

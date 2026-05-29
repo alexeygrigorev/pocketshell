@@ -113,10 +113,6 @@ fun HostListScreen(
     // entry point later (e.g. a deep link) without re-threading state.
     @Suppress("UNUSED_PARAMETER") onOpenCrashReports: () -> Unit,
     onOpenSettings: () -> Unit = {},
-    // Issue #129: live QR scanner destination. Optional so older callers
-    // that haven't wired the destination yet keep compiling, but the
-    // production nav graph in `MainActivity` always supplies it.
-    onOpenScan: () -> Unit = {},
     /**
      * Issue #171: navigate to the per-host folder list — the default
      * destination after a host tap. Session navigation (attach /
@@ -344,7 +340,6 @@ fun HostListScreen(
             // while the content below scrolls.
             HostsAppBar(
                 onImportHostClick = { hostSharePicker.launch("*/*") },
-                onScanClick = onOpenScan,
                 onSettingsClick = onOpenSettings,
             )
 
@@ -820,15 +815,14 @@ private fun VersionFooter(versionName: String) {
 /**
  * Top app bar matching the original 60dp dashboard chrome: the
  * "PocketShell" wordmark stays on the left, Settings is the rightmost
- * gear button, and secondary host-list actions live under a compact
- * overflow menu. Issue #299 removes the previous pseudo-tab row because
- * only "Hosts" was a real selected destination; Settings, Import, and
- * Scan were actions.
+ * gear button, and host-list import lives under a compact overflow menu.
+ * Issue #299 removes the previous pseudo-tab row because only "Hosts"
+ * was a real selected destination; issue #290 moves QR scanning into
+ * Add host.
  */
 @Composable
 private fun HostsAppBar(
     onImportHostClick: () -> Unit,
-    onScanClick: () -> Unit,
     onSettingsClick: () -> Unit = {},
 ) {
     Row(
@@ -849,7 +843,6 @@ private fun HostsAppBar(
         )
         HostListActionsMenu(
             onImportClick = onImportHostClick,
-            onScanClick = onScanClick,
         )
         Spacer(modifier = Modifier.width(8.dp))
         TopBarIconButton(
@@ -869,13 +862,11 @@ internal const val SETTINGS_BUTTON_TAG = "hosts:tab:settings"
 
 /**
  * Overflow for host-list actions that used to sit in the pseudo-tab row.
- * Import and Scan stay reachable here until the fuller add-host QR IA
- * work lands in #290. Key management lives inside Add/Edit host.
+ * QR scanning and key management live inside Add/Edit host.
  */
 @Composable
 private fun HostListActionsMenu(
     onImportClick: () -> Unit,
-    onScanClick: () -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
@@ -897,14 +888,6 @@ private fun HostListActionsMenu(
                     onImportClick()
                 },
                 modifier = Modifier.testTag(HOST_IMPORT_ACTION_TAG),
-            )
-            DropdownMenuItem(
-                text = { Text("Scan") },
-                onClick = {
-                    expanded = false
-                    onScanClick()
-                },
-                modifier = Modifier.testTag(HOST_SCAN_ACTION_TAG),
             )
         }
     }
@@ -966,7 +949,6 @@ private fun SettingsGearIcon() {
 
 internal const val HOST_ACTIONS_BUTTON_TAG: String = "hosts:actions:button"
 internal const val HOST_IMPORT_ACTION_TAG: String = "hosts:actions:import"
-internal const val HOST_SCAN_ACTION_TAG: String = "hosts:actions:scan"
 
 /**
  * Trailing kebab (vertical three-dot) button + the [DropdownMenu] it
@@ -1195,15 +1177,14 @@ private fun ImportConflictDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                text = "Host already exists",
+                text = "Already added: ${conflict.existing.name}",
                 color = PocketShellColors.Text,
             )
         },
         text = {
             Column(modifier = Modifier.testTag(IMPORT_CONFLICT_DIALOG_TAG)) {
                 Text(
-                    text = "A host with endpoint $endpoint is already saved as " +
-                        "“${conflict.existing.name}”.",
+                    text = "This QR code matches the saved host “${conflict.existing.name}” at $endpoint.",
                     color = PocketShellColors.TextSecondary,
                     fontSize = 13.sp,
                 )
@@ -1216,8 +1197,8 @@ private fun ImportConflictDialog(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Overwrite replaces the existing row in place. " +
-                        "Add as new keeps both. Skip discards the import.",
+                    text = "Update replaces the saved host in place. Add as new keeps both. " +
+                        "Already added leaves the saved host unchanged.",
                     color = PocketShellColors.TextMuted,
                     fontSize = 12.sp,
                 )
@@ -1228,7 +1209,7 @@ private fun ImportConflictDialog(
                 onClick = onOverwrite,
                 modifier = Modifier.testTag(IMPORT_CONFLICT_OVERWRITE_TAG),
             ) {
-                Text("Overwrite", color = PocketShellColors.Accent)
+                Text("Update", color = PocketShellColors.Accent)
             }
         },
         dismissButton = {
@@ -1243,7 +1224,7 @@ private fun ImportConflictDialog(
                     onClick = onSkip,
                     modifier = Modifier.testTag(IMPORT_CONFLICT_SKIP_TAG),
                 ) {
-                    Text("Skip", color = PocketShellColors.TextSecondary)
+                    Text("Already added", color = PocketShellColors.TextSecondary)
                 }
             }
         },

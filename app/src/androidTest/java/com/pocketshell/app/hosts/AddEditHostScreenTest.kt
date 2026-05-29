@@ -7,6 +7,7 @@ import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -87,15 +88,18 @@ class AddEditHostScreenTest {
      * the test does not need Hilt's test runtime.
      */
     private fun renderScreen(
+        hostId: Long? = null,
         onDone: () -> Unit = {},
+        onScanQr: (() -> Unit)? = null,
     ): AddEditHostViewModel {
         val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
         val keysVm = SshKeysViewModel(db.sshKeyDao())
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 AddEditHostScreen(
-                    hostId = null,
+                    hostId = hostId,
                     onDone = onDone,
+                    onScanQr = onScanQr,
                     viewModel = vm,
                     keyManagementViewModel = keysVm,
                     keyManagementRequiresUnlock = { false },
@@ -103,6 +107,28 @@ class AddEditHostScreenTest {
             }
         }
         return vm
+    }
+
+    @Test
+    fun scanQrAction_visibleOnAddHost_andInvokesCallback() {
+        var clicked = false
+        renderScreen(onScanQr = { clicked = true })
+
+        compose.onNodeWithTag(ADD_HOST_SCAN_QR_TAG, useUnmergedTree = true)
+            .assertExists()
+            .performClick()
+
+        compose.runOnIdle {
+            assertEquals(true, clicked)
+        }
+    }
+
+    @Test
+    fun scanQrAction_hiddenOnEditHost() {
+        renderScreen(hostId = 42L, onScanQr = {})
+
+        compose.onAllNodesWithTag(ADD_HOST_SCAN_QR_TAG, useUnmergedTree = true)
+            .assertCountEquals(0)
     }
 
     @Test

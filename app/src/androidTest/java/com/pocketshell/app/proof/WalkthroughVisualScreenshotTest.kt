@@ -24,7 +24,6 @@ import com.pocketshell.app.hosts.HOST_ACTIONS_BUTTON_TAG
 import com.pocketshell.app.hosts.HOST_IMPORT_ACTION_TAG
 import com.pocketshell.app.hosts.HOST_LIST_ADD_FAB_TAG
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
-import com.pocketshell.app.hosts.HOST_SCAN_ACTION_TAG
 import com.pocketshell.app.hosts.SETTINGS_BUTTON_TAG
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_NEW_SESSION_FAB_TAG
@@ -102,7 +101,8 @@ class WalkthroughVisualScreenshotTest {
             )
             // Issue #299 collapsed the old Hosts / Settings / Import /
             // Scan / Keys pseudo-tab row into a title row with a
-            // Settings gear and an actions overflow.
+            // Settings gear and an actions overflow. Issue #290 moves
+            // Scan into Add host.
             compose.onNodeWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true).assertExists()
             compose.onNodeWithTag(HOST_ACTIONS_BUTTON_TAG, useUnmergedTree = true).assertExists()
             listOf("Settings", "Import", "Scan", "Keys").forEach { oldTabLabel ->
@@ -115,10 +115,15 @@ class WalkthroughVisualScreenshotTest {
             }
             compose.onNodeWithTag(HOST_ACTIONS_BUTTON_TAG, useUnmergedTree = true).performClick()
             compose.onNodeWithTag(HOST_IMPORT_ACTION_TAG, useUnmergedTree = true).assertExists()
-            compose.onNodeWithTag(HOST_SCAN_ACTION_TAG, useUnmergedTree = true).assertExists()
             assertTrue(
                 "host actions menu must not expose key management as a top-level action",
                 compose.onAllNodesWithText("Keys", useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isEmpty(),
+            )
+            assertTrue(
+                "host actions menu must not expose Scan as a top-level action",
+                compose.onAllNodesWithText("Scan", useUnmergedTree = true)
                     .fetchSemanticsNodes()
                     .isEmpty(),
             )

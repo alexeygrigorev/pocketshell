@@ -263,24 +263,25 @@ class AppDatabaseTest {
         val databaseName = "stale-v1-${System.nanoTime()}.db"
         seedStaleIdentityDatabase(databaseName, version = LEGACY_CRASH_SCHEMA_VERSION)
 
-        val migratedDb = openOnDiskDatabase(databaseName, destructiveFallback = true)
-        try {
-            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
-        } finally {
-            migratedDb.close()
-        }
+        assertStaleIdentityDatabaseIsDestroyed(databaseName)
+        context.deleteDatabase(databaseName)
+    }
 
-        val sqlite = SQLiteDatabase.openDatabase(
-            context.getDatabasePath(databaseName).path,
-            null,
-            SQLiteDatabase.OPEN_READONLY,
-        )
-        sqlite.use {
-            it.rawQuery("PRAGMA user_version", null).use { cursor ->
-                assertTrue(cursor.moveToFirst())
-                assertEquals(currentRoomSchemaVersion(), cursor.getInt(0))
-            }
-        }
+    @Test
+    fun legacyVersionFiveFrom026_isDestroyedOnOpen() {
+        val databaseName = "stale-v5-${System.nanoTime()}.db"
+        seedStaleIdentityDatabase(databaseName, version = LEGACY_026_SCHEMA_VERSION)
+
+        assertStaleIdentityDatabaseIsDestroyed(databaseName)
+        context.deleteDatabase(databaseName)
+    }
+
+    @Test
+    fun legacyVersionSevenFrom028_isDestroyedOnOpen() {
+        val databaseName = "stale-v7-${System.nanoTime()}.db"
+        seedStaleIdentityDatabase(databaseName, version = LEGACY_028_SCHEMA_VERSION)
+
+        assertStaleIdentityDatabaseIsDestroyed(databaseName)
         context.deleteDatabase(databaseName)
     }
 
@@ -313,11 +314,34 @@ class AppDatabaseTest {
         }
     }
 
+    private fun assertStaleIdentityDatabaseIsDestroyed(databaseName: String) {
+        val migratedDb = openOnDiskDatabase(databaseName, destructiveFallback = true)
+        try {
+            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
+        } finally {
+            migratedDb.close()
+        }
+
+        val sqlite = SQLiteDatabase.openDatabase(
+            context.getDatabasePath(databaseName).path,
+            null,
+            SQLiteDatabase.OPEN_READONLY,
+        )
+        sqlite.use {
+            it.rawQuery("PRAGMA user_version", null).use { cursor ->
+                assertTrue(cursor.moveToFirst())
+                assertEquals(currentRoomSchemaVersion(), cursor.getInt(0))
+            }
+        }
+    }
+
     private fun currentRoomSchemaVersion(): Int =
         APP_DATABASE_SCHEMA_VERSION
 
     private companion object {
         const val LEGACY_CRASH_SCHEMA_VERSION = 1
+        const val LEGACY_026_SCHEMA_VERSION = 5
+        const val LEGACY_028_SCHEMA_VERSION = 7
         const val LEGACY_CRASH_IDENTITY_HASH = "4a479a15dfcab2d576e00c7ce10ac581"
     }
 }

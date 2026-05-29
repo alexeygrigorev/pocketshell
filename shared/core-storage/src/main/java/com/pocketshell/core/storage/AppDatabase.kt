@@ -23,7 +23,7 @@ import com.pocketshell.core.storage.entity.SessionEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
-const val APP_DATABASE_SCHEMA_VERSION = 2
+const val APP_DATABASE_SCHEMA_VERSION = 8
 
 /**
  * The PocketShell Room database.
@@ -32,9 +32,10 @@ const val APP_DATABASE_SCHEMA_VERSION = 2
  * are handled by destructive rebuild in the app database builder
  * (`fallbackToDestructiveMigration(dropAllTables = true)`) instead of by
  * carrying migration code forward. That fallback only fires on a version
- * delta, so any entity-schema change MUST bump this number — otherwise
- * upgraded installs hit a Room identity-hash mismatch and crash on launch
- * (#261). Bumped to 2 to wipe the stale pre-0.3.0 schema.
+ * delta, so any entity-schema change MUST bump this number above every
+ * shipped version — otherwise upgraded installs hit a Room identity-hash
+ * mismatch or downgrade path and crash on launch (#261). Bumped to 8 because
+ * the v0.2.x line shipped schema versions through 7.
  *
  * `exportSchema = false` matches the reference module. When the schema
  * starts evolving in real users' hands, flip this on and check generated

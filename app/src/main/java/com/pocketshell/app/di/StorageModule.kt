@@ -1,6 +1,7 @@
 package com.pocketshell.app.di
 
 import android.content.Context
+import android.database.sqlite.SQLiteException
 import androidx.room.Room
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.AiApiCallLogDao
@@ -38,6 +39,25 @@ object StorageModule {
     @Provides
     @Singleton
     fun provideAppDatabase(@ApplicationContext context: Context): AppDatabase =
+        openOrRebuildPreReleaseDatabase(context)
+
+    private fun openOrRebuildPreReleaseDatabase(context: Context): AppDatabase {
+        val db = buildDatabase(context)
+        return try {
+            db.openHelper.writableDatabase.query("SELECT 1").close()
+            db
+        } catch (error: IllegalStateException) {
+            db.close()
+            context.deletePreReleaseDatabaseFiles()
+            buildDatabase(context)
+        } catch (error: SQLiteException) {
+            db.close()
+            context.deletePreReleaseDatabaseFiles()
+            buildDatabase(context)
+        }
+    }
+
+    private fun buildDatabase(context: Context): AppDatabase =
         Room.databaseBuilder(
             context,
             AppDatabase::class.java,
@@ -48,7 +68,17 @@ object StorageModule {
             // every table and recreate the fresh v1 baseline; SSH host setup
             // can be restored quickly through the QR import path.
             .fallbackToDestructiveMigration(dropAllTables = true)
+            .fallbackToDestructiveMigrationOnDowngrade(dropAllTables = true)
             .build()
+
+    private fun Context.deletePreReleaseDatabaseFiles() {
+        deleteDatabase(DATABASE_NAME)
+        val databasePath = getDatabasePath(DATABASE_NAME)
+        databasePath.delete()
+        databasePath.resolveSibling("$DATABASE_NAME-wal").delete()
+        databasePath.resolveSibling("$DATABASE_NAME-shm").delete()
+        databasePath.resolveSibling("$DATABASE_NAME-journal").delete()
+    }
 
     @Provides
     fun provideHostDao(db: AppDatabase): HostDao = db.hostDao()

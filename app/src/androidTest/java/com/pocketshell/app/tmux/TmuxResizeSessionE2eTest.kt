@@ -3,6 +3,8 @@ package com.pocketshell.app.tmux
 import android.graphics.Bitmap
 import android.os.SystemClock
 import android.util.Log
+import android.view.View
+import android.view.ViewGroup
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -25,6 +27,7 @@ import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.termux.view.TerminalView
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
@@ -37,7 +40,7 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Issue #238 — connected E2E for the "Resize session" manual kebab item.
+ * Issue #285 — connected E2E for automatic tmux sizing on attach.
  *
  * Workflow:
  *  1. Seed a tmux session on the Docker `agents` fixture, force it to
@@ -45,16 +48,15 @@ import java.io.FileOutputStream
  *     having attached before the phone).
  *  2. Launch [MainActivity], tap the seeded host, attach to the session
  *     via the picker — phone's Compose grid is ~85x30 (Pixel 7 viewport).
- *  3. After attach, [TmuxSessionViewModel.resizeRemotePty] has cached
- *     the phone's Compose grid. The session remains desktop-sized until
- *     the user explicitly taps "Resize session".
- *  4. Verify `tmux display-message -p '#{window_width}x#{window_height}'`
- *     reports the phone dims (not the desktop dims).
+ *  3. After attach, [TmuxSessionViewModel.resizeRemotePty] reports the
+ *     phone grid through `refresh-client -C`; no manual prompt/tap is used.
+ *  4. Verify tmux pane dims match the live [TerminalView] grid and the
+ *     manual Resize affordance is absent.
  *
  * Artifacts under
- * `<media>/additional_test_output/issue238-resize-session/`:
- *  - `01-before-resize-viewport.png` (kebab open, just before tapping)
- *  - `02-after-resize-viewport.png` (post-tap)
+ * `<media>/additional_test_output/issue285-auto-resize-session/`:
+ *  - `01-attached-viewport.png`
+ *  - `02-menu-without-resize-viewport.png`
  *  - `timings.txt`
  *  - `summary.txt`
  */
@@ -79,11 +81,17 @@ class TmuxResizeSessionE2eTest {
     }
 
     @Test
-    fun resizeSessionSnapsRemoteDimsToPhoneViewport() = runBlocking {
+    fun attachAutomaticallySizesTmuxToPhoneViewport() = runBlocking {
         val key = readFixtureKey()
         waitForSshFixtureReady(SshKey.Pem(key))
         seedDesktopSizedSession(key)
-        val hostRowTag = seedDockerHost(key, "Issue238 Resize Session")
+        val seededWindowDims = readRemoteDims(key)
+        assertEquals(
+            "pre-attach seed should start at desktop size; got $seededWindowDims",
+            "${DESKTOP_COLS}x${DESKTOP_ROWS}",
+            seededWindowDims,
+        )
+        val hostRowTag = seedDockerHost(key, "Issue285 Auto Resize")
 
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
 
@@ -110,24 +118,37 @@ class TmuxResizeSessionE2eTest {
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        // Give the phone a moment to lay out and cache its Compose grid.
-        // The wait period is sized to be larger than the SSH-handshake +
-        // tmux-CC bootstrap + first-layout window so the ViewModel cache
-        // (remoteColumns / remoteRows) is populated before the manual tap.
-        kotlinx.coroutines.delay(PHONE_LAYOUT_WAIT_MS)
-
-        // Force the remote to desktop dimensions so the manual button has
-        // a deterministic "session is desktop-sized, phone has not snapped
-        // it yet" state to fix.
-        forceSessionToDesktopDims(key)
-        val pushedUpDims = readRemoteDims(key)
+        compose.waitUntil(timeoutMillis = 30_000) {
+            terminalGridSizeOrNull() != null
+        }
+        val waitStartedAt = SystemClock.elapsedRealtime()
+        val initialPaneSize = readRemotePaneSize(key)
+        var phoneGrid = terminalGridSize()
+        var remotePaneSize = initialPaneSize
+        val deadline = SystemClock.elapsedRealtime() + RESIZE_TIMEOUT_MS
+        while (remotePaneSize != phoneGrid && SystemClock.elapsedRealtime() < deadline) {
+            kotlinx.coroutines.delay(200)
+            phoneGrid = terminalGridSize()
+            remotePaneSize = readRemotePaneSize(key)
+        }
+        val autoResizeMs = SystemClock.elapsedRealtime() - waitStartedAt
+        captureFullDevice("01-attached")
         assertEquals(
-            "post-push remote dims should report the desktop size we just forced; got $pushedUpDims",
-            "${DESKTOP_COLS}x${DESKTOP_ROWS}",
-            pushedUpDims,
+            "tmux pane size should automatically match the on-screen phone grid",
+            phoneGrid,
+            remotePaneSize,
+        )
+        val afterResizeWindowDims = readRemoteDims(key)
+        val windowSizePolicy = readWindowSizePolicy(key)
+        val clients = readTmuxClients(key)
+        recordTiming("auto_resize_ms", autoResizeMs)
+        Log.i(
+            LOG_TAG,
+            "auto size landed in ${autoResizeMs}ms; grid=$phoneGrid pane=$remotePaneSize " +
+                "window=$afterResizeWindowDims policy=$windowSizePolicy",
         )
 
-        // --- (3) Open kebab. Confirm "Resize session" item is present.
+        // --- (3) Open kebab. Confirm the hard-cut manual item is absent.
         compose.waitUntil(timeoutMillis = 30_000) {
             compose.onAllNodesWithText("⋮", useUnmergedTree = true)
                 .fetchSemanticsNodes()
@@ -135,68 +156,36 @@ class TmuxResizeSessionE2eTest {
         }
         compose.onNodeWithText("⋮").performClick()
         compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithTag(TMUX_RESIZE_BUTTON_TAG, useUnmergedTree = true)
+            compose.onAllNodesWithText("Kill session", useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        compose.onNodeWithTag(TMUX_RESIZE_BUTTON_TAG, useUnmergedTree = true)
-            .assertExists()
-        captureFullDevice("01-before-resize")
-
-        val tapAt = SystemClock.elapsedRealtime()
-        compose.onNodeWithTag(TMUX_RESIZE_BUTTON_TAG, useUnmergedTree = true)
-            .performClick()
-
-        // --- (4) Poll the remote: the window dims must drop from
-        // DESKTOP_COLSxDESKTOP_ROWS to whatever the phone reports.
-        var afterResize = readRemoteDims(key)
-        val deadline = SystemClock.elapsedRealtime() + RESIZE_TIMEOUT_MS
-        while (
-            afterResize == "${DESKTOP_COLS}x${DESKTOP_ROWS}" &&
-            SystemClock.elapsedRealtime() < deadline
-        ) {
-            kotlinx.coroutines.delay(200)
-            afterResize = readRemoteDims(key)
-        }
-        val latencyMs = SystemClock.elapsedRealtime() - tapAt
         assertTrue(
-            "remote window dims should NOT still be the desktop size " +
-                "after tapping Resize; got $afterResize after ${latencyMs}ms",
-            afterResize != "${DESKTOP_COLS}x${DESKTOP_ROWS}",
-        )
-        // Sanity: the post-resize dims must REPORT THE PHONE'S
-        // current Compose grid - i.e. they must NOT be the desktop
-        // seed any more. We do not pin to "smaller in both axes" since
-        // a portrait phone viewport is narrower (cols < 200) but
-        // typically TALLER in rows than an arbitrary desktop seed
-        // height (rows > 50 is normal on a Pixel-class portrait grid).
-        // The contract the maintainer wants is "snap from desktop dims
-        // to phone dims"; the dims simply have to change.
-        val (afterCols, afterRows) = parseDims(afterResize)
-        assertTrue(
-            "afterResize must parse a positive col/row pair; got '$afterResize' -> ${afterCols}x${afterRows}",
-            afterCols > 0 && afterRows > 0,
+            "manual Resize session menu item must be absent",
+            compose.onAllNodesWithText("Resize session", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isEmpty(),
         )
         assertTrue(
-            "post-resize cols ($afterCols) must match a phone viewport - " +
-                "narrower than the desktop $DESKTOP_COLS",
-            afterCols < DESKTOP_COLS,
+            "size mismatch prompt must be absent",
+            compose.onAllNodesWithText("Resize to", substring = true, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isEmpty(),
         )
-        // Row dimension can grow on a portrait-oriented phone; just
-        // require the combined dim tuple to differ from the desktop
-        // seed so the test is not pinned to AVD-specific row counts.
-        assertTrue(
-            "after-resize dims (${afterCols}x${afterRows}) must NOT equal " +
-                "desktop dims (${DESKTOP_COLS}x${DESKTOP_ROWS})",
-            "${afterCols}x${afterRows}" != "${DESKTOP_COLS}x${DESKTOP_ROWS}",
-        )
-        recordTiming("manual_resize_ms", latencyMs)
-        Log.i(LOG_TAG, "resize landed in ${latencyMs}ms; dims=${afterResize}")
-        captureFullDevice("02-after-resize")
+        captureFullDevice("02-menu-without-resize")
 
         // --- (5) Write artifacts.
         writeTimings()
-        writeSummary(latencyMs, pushedUpDims, afterResize)
+        writeSummary(
+            autoResizeMs = autoResizeMs,
+            seededWindowDims = seededWindowDims,
+            initialPaneSize = initialPaneSize,
+            phoneGrid = phoneGrid,
+            remotePaneSize = remotePaneSize,
+            afterResizeWindowDims = afterResizeWindowDims,
+            windowSizePolicy = windowSizePolicy,
+            clients = clients,
+        )
         Unit
     }
 
@@ -255,8 +244,8 @@ class TmuxResizeSessionE2eTest {
             // process survives a phone-CC attach + later detach without
             // EOF-ing on the pty (which would cause the window to close,
             // the session to end, and the tmux server to shut down -
-            // taking the seed's 200x50 dims with it before the manual
-            // resize tap can verify the round-trip).
+            // taking the seed's 200x50 dims with it before the app can
+            // verify automatic sizing.
             appendLine(
                 "tmux new-session -d -s ${shellQuote(SESSION_LAB)} -x $DESKTOP_COLS -y $DESKTOP_ROWS " +
                     shellQuote("printf 'READY\\n'; while true; do sleep 60; done"),
@@ -293,34 +282,6 @@ class TmuxResizeSessionE2eTest {
     }
 
     /**
-     * Re-force the seeded session to desktop dims AFTER the app has
-     * attached. The ViewModel caches phone dims but does not resize
-     * automatically, so this gives us a deterministic "remote is now
-     * desktop-sized, phone hasn't snapped it yet" state to verify the
-     * manual tap drives the actual round-trip.
-     */
-    private suspend fun forceSessionToDesktopDims(key: String) {
-        val script = "tmux resize-window -t ${shellQuote(SESSION_LAB)} " +
-            "-x $DESKTOP_COLS -y $DESKTOP_ROWS"
-        val result = SshConnection.connect(
-            host = DEFAULT_HOST,
-            port = DEFAULT_PORT,
-            user = DEFAULT_USER,
-            key = SshKey.Pem(key),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-            timeoutMs = 15_000,
-        ).mapCatching { session ->
-            session.use { it.exec(script) }
-        }
-        val exec = result.getOrNull()
-        assertTrue(
-            "expected to force desktop dims; got " +
-                "exception=${result.exceptionOrNull()} stderr='${exec?.stderr}'",
-            exec?.exitCode == 0,
-        )
-    }
-
-    /**
      * Read the current `#{window_width}x#{window_height}` for the
      * seeded session via a fresh SSH exec. Used to verify both the
      * pre-resize desktop size and the post-resize phone size.
@@ -341,10 +302,85 @@ class TmuxResizeSessionE2eTest {
         return result.getOrNull()?.stdout?.trim().orEmpty()
     }
 
-    private fun parseDims(raw: String): Pair<Int, Int> {
-        val parts = raw.trim().split('x')
-        if (parts.size != 2) return 0 to 0
-        return (parts[0].trim().toIntOrNull() ?: 0) to (parts[1].trim().toIntOrNull() ?: 0)
+    private suspend fun readRemotePaneSize(key: String): TerminalGridSize {
+        val script = "tmux display-message -p -t ${shellQuote(SESSION_LAB)} " +
+            shellQuote("#{pane_width} #{pane_height}")
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use { it.exec(script) }
+        }
+        val raw = result.getOrNull()?.stdout?.trim().orEmpty()
+        val parts = raw.split(' ')
+        return TerminalGridSize(
+            columns = parts.getOrNull(0)?.toIntOrNull() ?: -1,
+            rows = parts.getOrNull(1)?.toIntOrNull() ?: -1,
+        )
+    }
+
+    private suspend fun readWindowSizePolicy(key: String): String {
+        val script = "tmux show-options -w -v -t ${shellQuote(SESSION_LAB)} window-size"
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use { it.exec(script) }
+        }
+        return result.getOrNull()?.stdout?.trim().orEmpty()
+    }
+
+    private suspend fun readTmuxClients(key: String): String {
+        val script = "tmux list-clients -F " +
+            shellQuote("#{client_name}|#{client_width}|#{client_height}|#{client_control_mode}") +
+            " 2>/dev/null || true"
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).mapCatching { session ->
+            session.use { it.exec(script) }
+        }
+        return result.getOrNull()?.stdout?.trim().orEmpty()
+    }
+
+    private fun terminalGridSize(): TerminalGridSize {
+        return checkNotNull(terminalGridSizeOrNull()) {
+            "Terminal emulator grid was not available"
+        }
+    }
+
+    private fun terminalGridSizeOrNull(): TerminalGridSize? {
+        var grid: TerminalGridSize? = null
+        launchedActivity?.onActivity { activity ->
+            activity.window.decorView
+                .findTerminalView()
+                ?.currentSession
+                ?.emulator
+                ?.let { grid = TerminalGridSize(columns = it.mColumns, rows = it.mRows) }
+        }
+        return grid
+    }
+
+    private fun View.findTerminalView(): TerminalView? {
+        if (this is TerminalView) return this
+        if (this !is ViewGroup) return null
+        for (index in 0 until childCount) {
+            val match = getChildAt(index).findTerminalView()
+            if (match != null) return match
+        }
+        return null
     }
 
     private suspend fun cleanupSeededSessions(key: String) {
@@ -380,7 +416,7 @@ class TmuxResizeSessionE2eTest {
                     "could not write screenshot ${file.absolutePath}"
                 }
             }
-            println("ISSUE238_SCREENSHOT ${file.absolutePath}")
+            println("ISSUE285_SCREENSHOT ${file.absolutePath}")
         } finally {
             bitmap.recycle()
         }
@@ -401,38 +437,49 @@ class TmuxResizeSessionE2eTest {
     private fun recordTiming(name: String, value: Long) {
         val line = "$name=$value"
         timings += line
-        println("ISSUE238_TIMING $line")
+        println("ISSUE285_TIMING $line")
     }
 
     private fun writeTimings() {
         val file = artifactFile("timings.txt")
         file.writeText(timings.joinToString(separator = "\n", postfix = "\n"))
-        println("ISSUE238_TIMINGS ${file.absolutePath}")
+        println("ISSUE285_TIMINGS ${file.absolutePath}")
     }
 
     private fun writeSummary(
-        latencyMs: Long,
-        pushedUpDims: String,
-        afterResize: String,
+        autoResizeMs: Long,
+        seededWindowDims: String,
+        initialPaneSize: TerminalGridSize,
+        phoneGrid: TerminalGridSize,
+        remotePaneSize: TerminalGridSize,
+        afterResizeWindowDims: String,
+        windowSizePolicy: String,
+        clients: String,
     ) {
         val file = artifactFile("summary.txt")
         file.writeText(
             buildString {
-                appendLine("scenario=resize-session")
+                appendLine("scenario=auto-resize-session")
                 appendLine("host=$DEFAULT_HOST port=$DEFAULT_PORT user=$DEFAULT_USER")
                 appendLine("seeded_session=$SESSION_LAB")
                 appendLine("desktop_size_seeded=${DESKTOP_COLS}x${DESKTOP_ROWS}")
-                appendLine("pushed_up_dims=$pushedUpDims")
-                appendLine("after_resize_dims=$afterResize")
-                appendLine("manual_resize_ms=$latencyMs")
+                appendLine("seeded_window_dims=$seededWindowDims")
+                appendLine("initial_pane_size=${initialPaneSize.columns}x${initialPaneSize.rows}")
+                appendLine("phone_grid=${phoneGrid.columns}x${phoneGrid.rows}")
+                appendLine("remote_pane_size=${remotePaneSize.columns}x${remotePaneSize.rows}")
+                appendLine("after_resize_window_dims=$afterResizeWindowDims")
+                appendLine("window_size_policy=$windowSizePolicy")
+                appendLine("tmux_clients:")
+                clients.lineSequence().forEach { appendLine("  $it") }
+                appendLine("auto_resize_ms=$autoResizeMs")
                 appendLine("threshold_ms=$RESIZE_TIMEOUT_MS")
                 appendLine("artifacts:")
-                appendLine("  01-before-resize-viewport.png")
-                appendLine("  02-after-resize-viewport.png")
+                appendLine("  01-attached-viewport.png")
+                appendLine("  02-menu-without-resize-viewport.png")
                 appendLine("  timings.txt")
             },
         )
-        println("ISSUE238_SUMMARY ${file.absolutePath}")
+        println("ISSUE285_SUMMARY ${file.absolutePath}")
     }
 
     private fun shellQuote(value: String): String =
@@ -440,8 +487,8 @@ class TmuxResizeSessionE2eTest {
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
-        const val LOG_TAG: String = "Issue238Resize"
-        const val DEVICE_DIR_NAME: String = "issue238-resize-session"
+        const val LOG_TAG: String = "Issue285Resize"
+        const val DEVICE_DIR_NAME: String = "issue285-auto-resize-session"
 
         /**
          * Session name to attach against. Must be one of the names the
@@ -452,8 +499,7 @@ class TmuxResizeSessionE2eTest {
         const val SESSION_LAB: String = "opencode-lab"
 
         /**
-         * Desktop dims to seed (and then re-push) before the manual
-         * resize tap. 200x50 mirrors what the maintainer reported on
+         * Desktop dims to seed before attach. 200x50 mirrors what the maintainer reported on
          * dogfood — a tmux session left at a desktop terminal's
          * geometry that PocketShell then attached to.
          */
@@ -461,22 +507,10 @@ class TmuxResizeSessionE2eTest {
         const val DESKTOP_ROWS: Int = 50
 
         /**
-         * Compose wait envelope for the post-tap remote-dims refresh.
-         * The tmux `resize-window` round-trip is sub-1s on a healthy
-         * local Docker fixture; we pad to 5s to absorb scheduling jitter
-         * (similar headroom shape to the kill-window E2E #188's 5s
-         * envelope for the post-kill window-list refresh).
+         * Compose wait envelope for the automatic remote-dims refresh.
          */
         const val RESIZE_TIMEOUT_MS: Long = 5_000L
-
-        /**
-         * Wait period after the session screen mounts before we
-         * re-force the desktop dims and tap Resize. Long enough for
-         * the SSH-CC handshake + first Compose layout pass to populate
-         * the [TmuxSessionViewModel]'s `remoteColumns` / `remoteRows`
-         * cache, so the manual button has dims to send when tapped.
-         * Sub-second for healthy local Docker; we pad for AVD slack.
-         */
-        const val PHONE_LAYOUT_WAIT_MS: Long = 5_000L
     }
+
+    private data class TerminalGridSize(val columns: Int, val rows: Int)
 }

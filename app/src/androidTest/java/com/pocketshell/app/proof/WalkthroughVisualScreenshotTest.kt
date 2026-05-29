@@ -182,7 +182,7 @@ class WalkthroughVisualScreenshotTest {
             }
             compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
             waitForSessionConnectUiToSettle()
-            dismissSizeMismatchPromptIfPresent()
+            waitForTmuxPaneReady()
 
             sendCommandViaComposer("echo $marker")
             waitForTerminalTranscript("walkthrough marker") { transcript ->
@@ -279,23 +279,9 @@ class WalkthroughVisualScreenshotTest {
         }
     }
 
-    private fun dismissSizeMismatchPromptIfPresent() {
+    private fun waitForTmuxPaneReady() {
         compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText("Resize to", substring = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty() ||
-                terminalTranscriptSnapshot().contains("tmux visual pass ready")
-        }
-        Thread.sleep(500)
-        val resizeNodes = compose.onAllNodesWithText("Resize to", substring = true)
-            .fetchSemanticsNodes()
-        if (resizeNodes.isNotEmpty()) {
-            compose.onNodeWithText("Resize to", substring = true).performClick()
-            compose.waitUntil(timeoutMillis = 10_000) {
-                compose.onAllNodesWithText("Resize to", substring = true)
-                    .fetchSemanticsNodes()
-                    .isEmpty()
-            }
+            terminalTranscriptSnapshot().contains("tmux visual pass ready")
         }
     }
 

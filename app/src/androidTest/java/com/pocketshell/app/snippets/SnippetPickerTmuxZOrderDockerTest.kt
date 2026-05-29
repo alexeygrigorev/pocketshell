@@ -21,8 +21,6 @@ import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.waitForSshFixtureReady
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
-import com.pocketshell.app.tmux.TMUX_SIZE_MISMATCH_PROMPT_TAG
-import com.pocketshell.app.tmux.TMUX_SIZE_MISMATCH_RESIZE_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -108,12 +106,6 @@ class SnippetPickerTmuxZOrderDockerTest {
             compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
                 .assertIsDisplayed()
 
-            // Let the pane settle. If a size-mismatch prompt appears it sits
-            // in the same status band as the chip controls; dismiss it by
-            // accepting the resize so the bottom chip row (with `+ snippet`)
-            // is the active bottom band.
-            dismissSizeMismatchPromptIfPresent()
-
             // Wait for the bottom chip controls (IME down) to render the
             // `+ snippet` chip, then open the picker.
             compose.waitUntil(timeoutMillis = 15_000) {
@@ -145,18 +137,6 @@ class SnippetPickerTmuxZOrderDockerTest {
             .getString("terminalWorkbenchSshPort")
             ?.toIntOrNull()
             ?: DEFAULT_PORT
-
-    private fun dismissSizeMismatchPromptIfPresent() {
-        val present = compose.onAllNodesWithTag(TMUX_SIZE_MISMATCH_PROMPT_TAG, useUnmergedTree = true)
-            .fetchSemanticsNodes().isNotEmpty()
-        if (present) {
-            runCatching {
-                compose.onNodeWithTag(TMUX_SIZE_MISMATCH_RESIZE_TAG, useUnmergedTree = true)
-                    .performClick()
-            }
-            SystemClock.sleep(800)
-        }
-    }
 
     private suspend fun killStaleTmuxSession(sshKey: SshKey.Pem, sshPort: Int) {
         SshConnection.connect(

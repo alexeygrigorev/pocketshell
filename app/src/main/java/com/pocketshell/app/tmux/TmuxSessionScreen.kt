@@ -2,7 +2,6 @@ package com.pocketshell.app.tmux
 
 import android.Manifest
 import android.content.pm.PackageManager
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -92,7 +91,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.composer.PromptComposerSheet
-import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.settings.SettingsViewModel
@@ -115,7 +113,9 @@ import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.core.agents.ConversationEvent
+import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.agents.ToolCallSummary
+import com.pocketshell.app.composer.MarkdownText
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
@@ -240,7 +240,6 @@ public fun TmuxSessionScreen(
     }
     val startDirectoryAutocompleteController =
         rememberStartDirectoryAutocompleteController(suggestStartDirectories)
-    val sizeMismatchPrompt by viewModel.sizeMismatchPrompt.collectAsState()
     val agentConversations by viewModel.agentConversations.collectAsState()
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
     val assistantState by viewModel.assistantState.collectAsState()
@@ -356,21 +355,6 @@ public fun TmuxSessionScreen(
     LaunchedEffect(isImeVisible) {
         if (isImeVisible) {
             com.pocketshell.core.terminal.ui.pinTerminalToBottom(composeRootView)
-        }
-    }
-
-    // Issue #238: collect the view model's one-shot user-facing messages
-    // (currently just the manual "Resize session" success / error string)
-    // and render them as a short Toast. Keying on the viewmodel reference
-    // means the collector lives for as long as the screen is composed
-    // against the same VM instance — every emission is delivered exactly
-    // once. We use Toast (not a Snackbar) because the issue body
-    // explicitly asks for one ("Visible toast on success") and because
-    // Toast survives the screen being torn down mid-deliver, which a
-    // Snackbar inside the disposed Compose tree wouldn't.
-    LaunchedEffect(viewModel) {
-        viewModel.userMessages.collect { message ->
-            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -493,15 +477,6 @@ public fun TmuxSessionScreen(
             onSwitchWindow = {
                 moreExpanded = false
                 showWindowSwitcher = true
-            },
-            // Issue #238: maintainer-asked "Resize session" — snap
-            // tmux session window dims to the phone cols × rows
-            // cached from Compose by [TmuxSessionViewModel.resizeRemotePty].
-            // The handler posts a [TmuxSessionViewModel.userMessages]
-            // string the LaunchedEffect below surfaces as a Toast.
-            onResizeSession = {
-                moreExpanded = false
-                viewModel.requestManualResize()
             },
             onDetach = {
                 // Issue #235: detach the tmux `-CC` client
@@ -723,13 +698,6 @@ public fun TmuxSessionScreen(
                     message = failed.message,
                     onReconnect = { viewModel.reconnect() },
                     canReconnect = canReconnect,
-                )
-            }
-            sizeMismatchPrompt?.let { prompt ->
-                SizeMismatchPromptRow(
-                    prompt = prompt,
-                    onResize = viewModel::resizeFromSizeMismatchPrompt,
-                    onKeep = viewModel::keepCurrentSessionSize,
                 )
             }
             // Issue #116 (usage-panel Fix B): in-session blocked /
@@ -1922,18 +1890,6 @@ internal const val TMUX_CONNECTING_CANCEL_TAG = "tmux:session:connecting:cancel"
  */
 internal const val SLOW_CONNECT_HINT_AFTER_MS: Long = 5_000L
 internal const val CANCEL_AVAILABLE_AFTER_MS: Long = 15_000L
-/**
- * Issue #238: stable test tag for the kebab "Resize session" menu item.
- * The maintainer's dogfood report asks for a manual button that snaps the
- * remote tmux session window to the phone's current Compose grid dims via
- * `tmux resize-window`. Connected E2E test
- * [TmuxResizeSessionE2eTest] asserts the item is present and that tapping
- * it drops the remote `#{window_width}×#{window_height}` to phone dims.
- */
-internal const val TMUX_RESIZE_BUTTON_TAG = "tmux:resize-button"
-internal const val TMUX_SIZE_MISMATCH_PROMPT_TAG = "tmux:size-mismatch-prompt"
-internal const val TMUX_SIZE_MISMATCH_RESIZE_TAG = "tmux:size-mismatch-prompt:resize"
-internal const val TMUX_SIZE_MISMATCH_KEEP_TAG = "tmux:size-mismatch-prompt:keep"
 /** Issue #158: the WindowStrip is the per-session window tabs row. Hidden when only one window exists. */
 internal const val TMUX_WINDOW_STRIP_TAG = "tmux:window-strip"
 /**
@@ -2247,47 +2203,6 @@ private fun FailedConnectionRow(
                 modifier = Modifier.testTag(TMUX_SESSION_RECONNECT_TAG),
             ) {
                 Text("Reconnect")
-            }
-        }
-    }
-}
-
-@Composable
-private fun SizeMismatchPromptRow(
-    prompt: TmuxSessionViewModel.TmuxSizeMismatchPrompt,
-    onResize: () -> Unit,
-    onKeep: () -> Unit,
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(color = PocketShellColors.AccentSoft)
-            .padding(horizontal = 12.dp, vertical = 8.dp)
-            .testTag(TMUX_SIZE_MISMATCH_PROMPT_TAG),
-    ) {
-        Text(
-            text = "Session is ${prompt.sessionColumns}×${prompt.sessionRows}; phone is " +
-                "${prompt.phoneColumns}×${prompt.phoneRows}.",
-            color = PocketShellColors.Text,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            TextButton(
-                onClick = onKeep,
-                modifier = Modifier.testTag(TMUX_SIZE_MISMATCH_KEEP_TAG),
-            ) {
-                Text("Keep size")
-            }
-            TextButton(
-                onClick = onResize,
-                modifier = Modifier.testTag(TMUX_SIZE_MISMATCH_RESIZE_TAG),
-            ) {
-                Text("Resize to ${prompt.phoneColumns}×${prompt.phoneRows}")
             }
         }
     }
@@ -2671,8 +2586,8 @@ internal fun TmuxConversationPane(
                 modifier = Modifier
                     .fillMaxSize()
                     .testTag(TMUX_CONVERSATION_LIST_TAG),
-                contentPadding = PaddingValues(vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                contentPadding = PaddingValues(vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 if (filteredEvents.isEmpty()) {
                     item {
@@ -3049,7 +2964,27 @@ private fun ConversationEventRow(
 
 @Composable
 private fun ConversationMessageRow(event: ConversationEvent.Message) {
-    ConversationMessageTurn(event = event)
+    val isUser = event.role == ConversationRole.User
+    val title = when (event.role) {
+        ConversationRole.User -> "USER"
+        ConversationRole.Assistant -> if (event.streaming) "ASSISTANT - streaming" else "ASSISTANT"
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = if (isUser) PocketShellColors.SurfaceElev else PocketShellColors.Surface)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = title,
+            color = if (isUser) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        MarkdownText(text = event.text)
+    }
 }
 
 private fun Map<String, ConversationEvent>.findToolResultFor(
@@ -3353,12 +3288,6 @@ internal fun TmuxMoreMenu(
     // switch to.
     multipleWindows: Boolean = false,
     onSwitchWindow: () -> Unit = {},
-    // Issue #238: maintainer-asked manual "Resize session" affordance.
-    // Snaps the tmux session window to the phone's current Compose grid
-    // via `tmux resize-window`. Lives under "On this host" rather than
-    // "In this session" because the resize targets the session window
-    // as a whole — same scope as Rename/Kill session.
-    onResizeSession: () -> Unit = {},
 ) {
     DropdownMenu(
         expanded = expanded,
@@ -3395,16 +3324,6 @@ internal fun TmuxMoreMenu(
         DropdownMenuItem(text = { Text("+ New session") }, onClick = onCreateSession)
         DropdownMenuItem(text = { Text("Switch session") }, onClick = onSwitchSession)
         DropdownMenuItem(text = { Text("Rename session") }, onClick = onRenameSession)
-        // Issue #238: manual "Resize session" — issues `tmux resize-window`
-        // against the active session with the phone's current Compose
-        // grid (cols × rows) so a session previously sized by a desktop
-        // terminal snaps to the phone's viewport. Explicitly NOT
-        // automatic on attach per maintainer ask.
-        DropdownMenuItem(
-            text = { Text("Resize session") },
-            onClick = onResizeSession,
-            modifier = Modifier.testTag(TMUX_RESIZE_BUTTON_TAG),
-        )
         DropdownMenuItem(text = { Text("Kill session") }, onClick = onKillSession)
         HorizontalDivider()
         // Issue #235: explicit "I'm done with this session for now"

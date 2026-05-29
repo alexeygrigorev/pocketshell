@@ -992,12 +992,9 @@ class SessionsDashboardViewModelTest {
         // configured command name.
         override suspend fun detachCleanly(timeoutMs: Long) =
             delegate.detachCleanly(timeoutMs)
-        // Issue #238: resizeWindow added to TmuxClient. Delegate to
-        // FakeTmuxClient so the kill-session tests don't have to reason
-        // about manual-resize behaviour.
-        override suspend fun resizeWindow(sessionId: String, cols: Int, rows: Int) =
-            delegate.resizeWindow(sessionId, cols, rows)
-        override suspend fun getWindowDimensions(sessionId: String) =
-            delegate.getWindowDimensions(sessionId)
+        override suspend fun setWindowSizeLatest(sessionId: String) =
+            delegate.setWindowSizeLatest(sessionId)
+        override suspend fun refreshClientSize(cols: Int, rows: Int) =
+            delegate.refreshClientSize(cols, rows)
     }
 }

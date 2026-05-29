@@ -85,14 +85,12 @@ import java.security.MessageDigest
  *      tappable rows. The tap routes to
  *      [com.pocketshell.app.tmux.TmuxSessionScreen] (the screen at the
  *      heart of the reopened-#102 bug).
- *   3. Wait for the per-pane [TerminalSurface] to mount and the tmux
- *      pane to settle. If PocketShell detects that the saved tmux
- *      window size differs from the phone grid, accept the in-screen
- *      resize prompt; #240 made this explicit instead of automatic.
+ *   3. Wait for the per-pane [TerminalSurface] to mount and for
+ *      PocketShell to report the phone grid to tmux automatically.
  *   4. **Load-bearing assertion**: query tmux for `#{pane_width}
  *      #{pane_height}` via a sidecar SSH session and assert it equals
  *      the on-screen [TerminalView] grid. Without the
- *      [TmuxSessionViewModel.resizeRemotePty] detection and prompt-resize path,
+ *      [TmuxSessionViewModel.resizeRemotePty] automatic control-client sizing path,
  *      tmux stays at 80x24 (the SSH PTY default) while the local grid
  *      is whatever the phone viewport computes — and that mismatch is
  *      the root cause of the reopened regression.
@@ -124,7 +122,7 @@ import java.security.MessageDigest
  * match the on-screen emulator grid. That is the single most-important
  * property whose absence drives the "input in the wrong place"
  * symptom in opencode, Codex, and Claude Code — and the property the
- * fix in [TmuxSessionViewModel.resizeFromSizeMismatchPrompt] restores.
+ * fix in [TmuxSessionViewModel.resizeRemotePty] restores.
  *
  * Gated by `-e tmuxSessionOpencodeInputDocker 1` (the workbench
  * script can pass `-e tmuxSessionOpencodeInputDocker 1` when running
@@ -225,12 +223,11 @@ class TmuxSessionOpencodeInputDockerTest {
             // Capture baseline (pane attached, shell prompt only).
             captureArtifact("issue102-tmux-00-attached")
 
-            // ----- Step 1: #240 changed resize from automatic layout
-            // side effect to explicit prompt/manual action. The #102
-            // invariant still matters: before driving a TUI, tmux must
-            // be snapped to the phone grid so the inner CLI draws at the
-            // same geometry the local emulator paints.
-            resizeFromMismatchPromptIfNeeded(sshKey = sshKey, sshPort = sshPort)
+            // ----- Step 1: before driving a TUI, tmux must be snapped
+            // to the phone grid so the inner CLI draws at the same
+            // geometry the local emulator paints. #285 makes this
+            // automatic through `refresh-client -C`, with no prompt tap.
+            waitForAutomaticTmuxSize(sshKey = sshKey, sshPort = sshPort)
 
             // ----- Step 2: drive the on-screen-input -> tmux send-keys
             // pipeline by running `pocketshell-tui-smoke` inside the
@@ -258,7 +255,7 @@ class TmuxSessionOpencodeInputDockerTest {
 
             // ----- Load-bearing #102 assertion: tmux pane geometry must
             // match the on-screen TerminalView grid. Without the
-            // `resizeRemotePty` detection + prompt-resize path in
+            // `resizeRemotePty` automatic control-client sizing path in
             // TmuxSessionScreen/TmuxSessionViewModel, tmux keeps the pane
             // at the 80x24 default set by the SSH PTY allocation while the
             // local emulator renders at the phone viewport grid. The
@@ -391,11 +388,7 @@ class TmuxSessionOpencodeInputDockerTest {
             compose.onNodeWithText("Conversation", useUnmergedTree = true).performClick()
             compose.waitUntil(timeoutMillis = VISIBLE_TIMEOUT_MS) {
                 findTerminalView() == null &&
-                    compose.onAllNodesWithText(
-                        "issue303 live Conversation pane proof",
-                        substring = true,
-                        useUnmergedTree = true,
-                    )
+                    compose.onAllNodesWithText("ASSISTANT", substring = true, useUnmergedTree = true)
                         .fetchSemanticsNodes()
                         .isNotEmpty()
             }
@@ -766,26 +759,15 @@ class TmuxSessionOpencodeInputDockerTest {
         return TerminalGridSize(columns = columns, rows = rows)
     }
 
-    private suspend fun resizeFromMismatchPromptIfNeeded(sshKey: SshKey.Pem, sshPort: Int) {
+    private suspend fun waitForAutomaticTmuxSize(sshKey: SshKey.Pem, sshPort: Int) {
         val initialGrid = terminalGridSize()
         val initialTmuxPaneSize = readTmuxPaneSize(sshKey = sshKey, sshPort = sshPort)
         recordTiming("initial_terminal_grid_columns", initialGrid.columns.toLong())
         recordTiming("initial_terminal_grid_rows", initialGrid.rows.toLong())
         recordTiming("initial_tmux_pane_columns", initialTmuxPaneSize.columns.toLong())
         recordTiming("initial_tmux_pane_rows", initialTmuxPaneSize.rows.toLong())
-        if (initialGrid == initialTmuxPaneSize) return
 
-        compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithTag(TMUX_SIZE_MISMATCH_PROMPT_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-        }
-        captureArtifact("issue102-tmux-01-size-mismatch-prompt")
-
-        val tapAt = SystemClock.elapsedRealtime()
-        compose.onNodeWithTag(TMUX_SIZE_MISMATCH_RESIZE_TAG, useUnmergedTree = true)
-            .performClick()
-
+        val waitStartedAt = SystemClock.elapsedRealtime()
         var grid = terminalGridSize()
         var tmuxPaneSize = readTmuxPaneSize(sshKey = sshKey, sshPort = sshPort)
         val deadline = SystemClock.elapsedRealtime() + VISIBLE_TIMEOUT_MS
@@ -794,12 +776,17 @@ class TmuxSessionOpencodeInputDockerTest {
             grid = terminalGridSize()
             tmuxPaneSize = readTmuxPaneSize(sshKey = sshKey, sshPort = sshPort)
         }
-        recordTiming("prompt_resize_latency_ms", SystemClock.elapsedRealtime() - tapAt)
-        recordTiming("prompt_resized_terminal_grid_columns", grid.columns.toLong())
-        recordTiming("prompt_resized_terminal_grid_rows", grid.rows.toLong())
-        recordTiming("prompt_resized_tmux_pane_columns", tmuxPaneSize.columns.toLong())
-        recordTiming("prompt_resized_tmux_pane_rows", tmuxPaneSize.rows.toLong())
-        captureArtifact("issue102-tmux-02-after-prompt-resize")
+        recordTiming("auto_resize_latency_ms", SystemClock.elapsedRealtime() - waitStartedAt)
+        recordTiming("auto_resized_terminal_grid_columns", grid.columns.toLong())
+        recordTiming("auto_resized_terminal_grid_rows", grid.rows.toLong())
+        recordTiming("auto_resized_tmux_pane_columns", tmuxPaneSize.columns.toLong())
+        recordTiming("auto_resized_tmux_pane_rows", tmuxPaneSize.rows.toLong())
+        captureArtifact("issue102-tmux-01-after-auto-resize")
+        assertEquals(
+            "tmux pane size must automatically match the on-screen TerminalView grid before input",
+            grid,
+            tmuxPaneSize,
+        )
     }
 
     /**

@@ -137,29 +137,25 @@ public interface TmuxClient : AutoCloseable {
     override fun close()
 
     /**
-     * Issue #238: resize the tmux window for [sessionId] to [cols] columns ×
-     * [rows] rows by issuing `resize-window -t '<sessionId>' -x <cols> -y <rows>`.
-     *
-     * Convenience wrapper over [sendCommand] so callers do not have to build
-     * the literal command string (and worry about escaping the session
-     * id) themselves. Returns the [CommandResponse] from tmux so the caller
-     * can branch on [CommandResponse.isError] for user feedback.
-     *
-     * No-op for non-positive [cols] / [rows]. The session id is wrapped in
-     * single quotes with POSIX `'\''` escaping so session names containing
-     * apostrophes (e.g. `alex's-lab`) still parse correctly.
+     * Issue #285: choose tmux's `latest` window-size policy for the
+     * active window in [sessionId] so the phone control client can drive
+     * sizing when it becomes the most recently active client. This also
+     * clears the `manual` policy left behind by older `resize-window`
+     * flows.
      */
-    public suspend fun resizeWindow(sessionId: String, cols: Int, rows: Int): CommandResponse
+    public suspend fun setWindowSizeLatest(sessionId: String): CommandResponse
 
     /**
-     * Issue #240: read the active tmux window dimensions for [sessionId].
+     * Issue #285: report this `tmux -CC` control client's viewport size
+     * to tmux. This is the control-mode primitive equivalent to a real
+     * terminal changing size; it avoids forcing the window into
+     * `window-size manual`.
      *
-     * Uses `display -t '<sessionId>' -p '#{window_width}|#{window_height}'`
-     * and parses the first non-blank response row. Returns `null` when
-     * tmux rejects the command or returns an unexpected / non-positive
-     * shape so callers can treat detection as best-effort UI hinting.
+     * No-op for non-positive [cols] / [rows], surfaced as a synthetic
+     * error response so callers can handle invalid geometry the same way
+     * they handle tmux refusals.
      */
-    public suspend fun getWindowDimensions(sessionId: String): TmuxWindowDimensions?
+    public suspend fun refreshClientSize(cols: Int, rows: Int): CommandResponse
 
     /**
      * Issue #215: server-clean teardown of the tmux `-CC` control client.
@@ -206,12 +202,6 @@ public interface TmuxClient : AutoCloseable {
  */
 public class TmuxClientException(message: String, cause: Throwable? = null) :
     RuntimeException(message, cause)
-
-/** Current tmux window geometry in character cells. */
-public data class TmuxWindowDimensions(
-    val columns: Int,
-    val rows: Int,
-)
 
 /**
  * Real implementation of [TmuxClient] backed by an [SshSession]'s shell
@@ -437,36 +427,20 @@ internal class RealTmuxClient(
             .filter { it.paneId == paneId }
     }
 
-    override suspend fun resizeWindow(sessionId: String, cols: Int, rows: Int): CommandResponse {
-        // Issue #238: refuse non-positive dimensions outright — a tmux
-        // `resize-window -x 0 -y 0` is an error response that would wipe
-        // out the legitimate prior size. Surface the no-op as a synthetic
-        // error so callers can branch the same way they would on a real
-        // tmux refusal.
+    override suspend fun setWindowSizeLatest(sessionId: String): CommandResponse =
+        sendCommand(
+            "set-window-option -t '${escapeSingleQuoted(sessionId)}' window-size latest",
+        )
+
+    override suspend fun refreshClientSize(cols: Int, rows: Int): CommandResponse {
         if (cols <= 0 || rows <= 0) {
             return CommandResponse(
                 number = -1L,
-                output = listOf("resize-window: non-positive dimensions ${cols}x${rows}"),
+                output = listOf("refresh-client: non-positive dimensions ${cols}x${rows}"),
                 isError = true,
             )
         }
-        return sendCommand(
-            "resize-window -t '${escapeSingleQuoted(sessionId)}' -x $cols -y $rows",
-        )
-    }
-
-    override suspend fun getWindowDimensions(sessionId: String): TmuxWindowDimensions? {
-        val response = sendCommand(
-            "display -t '${escapeSingleQuoted(sessionId)}' -p '#{window_width}|#{window_height}'",
-        )
-        if (response.isError) return null
-        val row = response.output.firstOrNull { it.isNotBlank() }?.trim() ?: return null
-        val parts = row.split('|', limit = 2)
-        if (parts.size != 2) return null
-        val columns = parts[0].trim().toIntOrNull() ?: return null
-        val rows = parts[1].trim().toIntOrNull() ?: return null
-        if (columns <= 0 || rows <= 0) return null
-        return TmuxWindowDimensions(columns = columns, rows = rows)
+        return sendCommand("refresh-client -C ${cols}x${rows}")
     }
 
     override suspend fun detachCleanly(timeoutMs: Long) {

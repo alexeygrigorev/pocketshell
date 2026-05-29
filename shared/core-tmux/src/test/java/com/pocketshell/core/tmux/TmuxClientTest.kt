@@ -269,7 +269,7 @@ class TmuxClientTest {
     }
 
     @Test
-    fun `getWindowDimensions sends display command and parses dimensions`() = runBlocking {
+    fun `setWindowSizeLatest sends window option command and shell-quotes target`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
         val client = RealTmuxClient(session, scope)
@@ -281,32 +281,28 @@ class TmuxClientTest {
             shell.resetStdin()
 
             val response = scope.async {
-                client.getWindowDimensions("work")
+                client.setWindowSizeLatest("it isn't work")
             }
             withTimeout(2_000) {
                 while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
             }
             assertEquals(
-                "display -t 'work' -p '#{window_width}|#{window_height}'\n",
+                "set-window-option -t 'it isn'\\''t work' window-size latest\n",
                 shell.stdinAsString(),
             )
 
             shell.feed(
                 "%begin 1700000000 8 0\n" +
-                    "200|50\n" +
                     "%end 1700000000 8 0\n",
             )
-            assertEquals(
-                TmuxWindowDimensions(columns = 200, rows = 50),
-                withTimeout(3_000) { response.await() },
-            )
+            assertFalse(withTimeout(3_000) { response.await() }.isError)
         } finally {
             client.close()
         }
     }
 
     @Test
-    fun `getWindowDimensions returns null for malformed output`() = runBlocking {
+    fun `refreshClientSize sends control client size command`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
         val client = RealTmuxClient(session, scope)
@@ -318,17 +314,39 @@ class TmuxClientTest {
             shell.resetStdin()
 
             val response = scope.async {
-                client.getWindowDimensions("work")
+                client.refreshClientSize(cols = 62, rows = 52)
             }
             withTimeout(2_000) {
                 while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
             }
+            assertEquals("refresh-client -C 62x52\n", shell.stdinAsString())
             shell.feed(
                 "%begin 1700000000 9 0\n" +
-                    "wide|tall\n" +
                     "%end 1700000000 9 0\n",
             )
-            assertEquals(null, withTimeout(3_000) { response.await() })
+            assertFalse(withTimeout(3_000) { response.await() }.isError)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `refreshClientSize rejects non-positive dimensions before writing command`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val response = client.refreshClientSize(cols = 0, rows = 52)
+
+            assertTrue(response.isError)
+            assertTrue(response.output.single().contains("non-positive dimensions 0x52"))
+            assertEquals("", shell.stdinAsString())
         } finally {
             client.close()
         }

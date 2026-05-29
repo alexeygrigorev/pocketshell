@@ -1,7 +1,6 @@
 package com.pocketshell.app.session
 
 import androidx.test.core.app.ApplicationProvider
-import com.pocketshell.app.di.CommandPlannerClientFactory
 import com.pocketshell.app.session.SessionViewModel.Modifier
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.dao.ProjectRootDao
@@ -14,11 +13,6 @@ import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
-import com.pocketshell.core.voice.CommandPlan
-import com.pocketshell.core.voice.CommandPlannerClient
-import com.pocketshell.core.voice.CommandPlannerException
-import com.pocketshell.core.voice.CommandPlannerRequest
-import com.pocketshell.core.voice.PlannedCommand
 import com.pocketshell.uikit.model.KeyModifierState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -69,11 +63,9 @@ import org.robolectric.annotation.Config
 class SessionViewModelTest {
 
     private fun newVm(
-        commandPlannerClientFactory: CommandPlannerClientFactory = CommandPlannerClientFactory { null },
         projectRootDao: ProjectRootDao? = null,
     ): SessionViewModel = SessionViewModel(
         applicationContext = ApplicationProvider.getApplicationContext(),
-        commandPlannerClientFactory = commandPlannerClientFactory,
         projectRootDao = projectRootDao,
     )
 
@@ -466,152 +458,6 @@ class SessionViewModelTest {
             vm.sendText("summarize git status", withEnter = true)
 
             waitForStdin(stdin, "summarize git status\r")
-        } finally {
-            producerJob.cancel()
-            producerScope.cancel()
-            vm.terminalState.detachExternalProducer()
-        }
-    }
-
-    @Test
-    fun voiceCommandTranscriptCallsPlannerAndShowsPendingReview() = runTest {
-        val planner = FakeCommandPlannerClient(
-            result = Result.success(CommandPlan(listOf(PlannedCommand("git status --short")))),
-        )
-        val vm = newVm(commandPlannerClientFactory = CommandPlannerClientFactory { planner })
-
-        vm.planVoiceCommand(" show git status ")
-        advanceUntilIdle()
-
-        assertEquals("show git status", planner.requests.single().transcript)
-        assertEquals(SessionDefaults.HOST, planner.requests.single().session.hostLabel)
-        assertEquals(SessionDefaults.USER, planner.requests.single().session.username)
-        assertTrue(planner.requests.single().safety.requireReviewBeforeExecution)
-        assertEquals(false, planner.requests.single().safety.allowAutoSend)
-        val state = vm.voiceCommandReview.value
-        assertEquals(false, state.isPlanning)
-        assertNull(state.error)
-        assertEquals("git status --short", state.pendingPlan!!.commands.single().command)
-    }
-
-    @Test
-    fun voiceCommandPlannerRequestIncludesProjectRootsFromBoundHost() = runTest {
-        val dao = FakeProjectRootDao()
-        dao.roots.value = listOf(
-            ProjectRootEntity(id = 1L, hostId = 42, label = "work", path = "/srv/work"),
-            ProjectRootEntity(id = 2L, hostId = 42, label = "src", path = "~/src"),
-        )
-        val planner = FakeCommandPlannerClient(
-            result = Result.success(CommandPlan(listOf(PlannedCommand("ls")))),
-        )
-        val vm = newVm(
-            commandPlannerClientFactory = CommandPlannerClientFactory { planner },
-            projectRootDao = dao,
-        )
-        vm.bindProjectNavigationHost(42)
-        advanceUntilIdle()
-
-        vm.planVoiceCommand("list files")
-        advanceUntilIdle()
-
-        val session = planner.requests.single().session
-        assertEquals(listOf("/srv/work", "~/src"), session.projectRoots)
-        // currentDirectory / shellType have no opportunistic value yet
-        // for a freshly bound host that the user has not navigated.
-        assertNull(session.currentDirectory)
-        assertNull(session.shellType)
-    }
-
-    @Test
-    fun voiceCommandPlannerRequestIncludesRecentDirectoryAfterProjectNavigation() = runTest {
-        val planner = FakeCommandPlannerClient(
-            result = Result.success(CommandPlan(listOf(PlannedCommand("ls")))),
-        )
-        val vm = newVm(commandPlannerClientFactory = CommandPlannerClientFactory { planner })
-
-        vm.navigateToDirectory("~/work/current")
-        vm.planVoiceCommand("list files")
-        advanceUntilIdle()
-
-        val session = planner.requests.single().session
-        assertEquals("~/work/current", session.currentDirectory)
-        // No DAO bound → projectRoots is empty, not null.
-        assertEquals(emptyList<String>(), session.projectRoots)
-    }
-
-    @Test
-    fun voiceCommandPlannerFailureShowsVisibleErrorState() = runTest {
-        val planner = FakeCommandPlannerClient(
-            result = Result.failure(CommandPlannerException.Rejected("unsafe command")),
-        )
-        val vm = newVm(commandPlannerClientFactory = CommandPlannerClientFactory { planner })
-
-        vm.planVoiceCommand("delete everything")
-        advanceUntilIdle()
-
-        val state = vm.voiceCommandReview.value
-        assertNull(state.pendingPlan)
-        assertTrue(state.error!!.contains("rejected"))
-        assertTrue(state.error!!.contains("unsafe command"))
-    }
-
-    @Test
-    fun approvingPlannedCommandInsertsWithoutEnterThroughTerminalBridge() = runBlocking {
-        val vm = newVm(
-            commandPlannerClientFactory = CommandPlannerClientFactory {
-                FakeCommandPlannerClient(
-                    result = Result.success(CommandPlan(listOf(PlannedCommand("git status")))),
-                )
-            },
-        )
-        val stdin = ByteArrayOutputStream()
-        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
-        val producerJob = vm.terminalState.attachExternalProducer(
-            scope = producerScope,
-            stdout = stdout,
-            remoteStdin = stdin,
-        )
-
-        try {
-            vm.planVoiceCommand("git status")
-            waitUntil { vm.voiceCommandReview.value.pendingPlan != null }
-            vm.approvePendingVoiceCommand(withEnter = false)
-
-            waitForStdin(stdin, "git status")
-            assertNull(vm.voiceCommandReview.value.pendingPlan)
-        } finally {
-            producerJob.cancel()
-            producerScope.cancel()
-            vm.terminalState.detachExternalProducer()
-        }
-    }
-
-    @Test
-    fun approvingPlannedCommandRunsWithKeyboardEnterThroughTerminalBridge() = runBlocking {
-        val vm = newVm(
-            commandPlannerClientFactory = CommandPlannerClientFactory {
-                FakeCommandPlannerClient(
-                    result = Result.success(CommandPlan(listOf(PlannedCommand("git status")))),
-                )
-            },
-        )
-        val stdin = ByteArrayOutputStream()
-        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
-        val producerJob = vm.terminalState.attachExternalProducer(
-            scope = producerScope,
-            stdout = stdout,
-            remoteStdin = stdin,
-        )
-
-        try {
-            vm.planVoiceCommand("git status")
-            waitUntil { vm.voiceCommandReview.value.pendingPlan != null }
-            vm.approvePendingVoiceCommand(withEnter = true)
-
-            waitForStdin(stdin, "git status\r")
-            assertNull(vm.voiceCommandReview.value.pendingPlan)
         } finally {
             producerJob.cancel()
             producerScope.cancel()
@@ -1029,17 +875,6 @@ class SessionViewModelTest {
         ): String = error("uploadStream not used in this test")
 
         override fun close() = Unit
-    }
-
-    private class FakeCommandPlannerClient(
-        private val result: Result<CommandPlan>,
-    ) : CommandPlannerClient {
-        val requests = mutableListOf<CommandPlannerRequest>()
-
-        override suspend fun plan(request: CommandPlannerRequest): Result<CommandPlan> {
-            requests += request
-            return result
-        }
     }
 
     private suspend fun waitForStdin(stdin: ByteArrayOutputStream, expected: String) {

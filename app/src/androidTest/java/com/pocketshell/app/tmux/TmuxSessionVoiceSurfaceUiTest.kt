@@ -15,19 +15,19 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.assistant.AssistantAgentLoop
+import com.pocketshell.app.assistant.AssistantUiState
 import com.pocketshell.app.session.INLINE_DICTATION_MIC_SLOT_TAG
 import com.pocketshell.app.session.INLINE_DICTATION_WAVEFORM_TAG
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.session.KeyBarWithMic
-import com.pocketshell.app.session.VoiceCommandReviewUiState
+import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.InlineDictationErrorStrip
-import com.pocketshell.app.voice.VoiceCommandReviewStrip
-import com.pocketshell.core.voice.CommandPlan
-import com.pocketshell.core.voice.PlannedCommand
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -180,30 +180,60 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
-    fun voiceCommandReviewStripRoutesInsertAndRunThroughCallbacks() {
+    fun assistantStripConfirmOrCorrectRoutesThroughCallbacks() {
         val events = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
-                VoiceCommandReviewStrip(
-                    state = VoiceCommandReviewUiState(
-                        transcript = "show git status",
-                        pendingPlan = CommandPlan(
-                            commands = listOf(PlannedCommand("git status --short")),
+                AssistantStrip(
+                    state = AssistantUiState.Confirming(
+                        AssistantAgentLoop.Candidate(
+                            toolName = "run_command",
+                            summary = "git status --short",
                         ),
                     ),
-                    onInsert = { events += "insert" },
-                    onRun = { events += "run" },
+                    onConfirm = { events += "confirm" },
+                    onCorrect = { events += "correct:$it" },
+                    onCancel = { events += "cancel" },
                     onDismiss = { events += "dismiss" },
                 )
             }
         }
 
+        compose.onNodeWithText("Is this what you want me to execute?").assertIsDisplayed()
         compose.onNodeWithText("git status --short").assertIsDisplayed()
-        compose.onNodeWithText("Insert").performClick()
-        compose.onNodeWithText("Run").performClick()
-        compose.onNodeWithText("Dismiss").performClick()
 
-        assertEquals(listOf("insert", "run", "dismiss"), events)
+        // Confirm-or-correct: choose "No, do something else", type a
+        // correction, and send it — proving the rejection path feeds a
+        // correction back rather than aborting.
+        compose.onNodeWithTag("assistant:correct").performClick()
+        compose.onNodeWithTag("assistant:correction-field").performTextInput("show the last 5 commits")
+        compose.onNodeWithTag("assistant:send-correction").performClick()
+
+        assertEquals(listOf("correct:show the last 5 commits"), events)
+    }
+
+    @Test
+    fun assistantStripConfirmRunsCandidate() {
+        val events = mutableListOf<String>()
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                AssistantStrip(
+                    state = AssistantUiState.Confirming(
+                        AssistantAgentLoop.Candidate(
+                            toolName = "run_command",
+                            summary = "git status --short",
+                        ),
+                    ),
+                    onConfirm = { events += "confirm" },
+                    onCorrect = { events += "correct:$it" },
+                    onCancel = { events += "cancel" },
+                    onDismiss = { events += "dismiss" },
+                )
+            }
+        }
+
+        compose.onNodeWithTag("assistant:confirm").performClick()
+        assertEquals(listOf("confirm"), events)
     }
 
     @Test

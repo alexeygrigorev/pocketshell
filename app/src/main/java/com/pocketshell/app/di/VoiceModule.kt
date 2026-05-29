@@ -15,10 +15,7 @@ import com.pocketshell.core.voice.AiCostRecord
 import com.pocketshell.core.voice.AiCostRecorder
 import com.pocketshell.core.voice.AndroidKeystoreApiKeyStorage
 import com.pocketshell.core.voice.AudioRecorder
-import com.pocketshell.core.voice.CommandPlannerClient
-import com.pocketshell.core.voice.CommandPlannerConfig
 import com.pocketshell.core.voice.OkHttpWhisperClient
-import com.pocketshell.core.voice.OkHttpOpenAiCommandPlannerClient
 import com.pocketshell.core.voice.PriceCatalogue
 import com.pocketshell.core.voice.WhisperClient
 import dagger.Module
@@ -169,11 +166,6 @@ object VoiceModule {
     fun provideConnectivityProbe(
         observer: ConnectivityObserver,
     ): PromptComposerViewModel.ConnectivityProbe = ConnectivityObserverProbe(observer)
-
-    @Provides
-    fun provideCommandPlannerClientFactory(
-        storage: AndroidKeystoreApiKeyStorage,
-    ): CommandPlannerClientFactory = CommandPlannerClientFactory { reloadCommandPlannerClient(storage) }
 }
 
 /**
@@ -333,17 +325,6 @@ internal class ConnectivityObserverProbe(
     override fun refresh(): Boolean = observer.refresh()
 }
 
-private fun reloadCommandPlannerClient(storage: AndroidKeystoreApiKeyStorage): CommandPlannerClient? {
-    val key = storage.load() ?: return null
-    return try {
-        OkHttpOpenAiCommandPlannerClient(
-            config = CommandPlannerConfig(apiKey = key),
-        )
-    } finally {
-        java.util.Arrays.fill(key, ' ')
-    }
-}
-
 /**
  * Functional factory injected into [com.pocketshell.app.composer.PromptComposerViewModel].
  *
@@ -356,8 +337,4 @@ private fun reloadCommandPlannerClient(storage: AndroidKeystoreApiKeyStorage): C
  */
 public fun interface WhisperClientFactory {
     public fun create(): WhisperClient?
-}
-
-public fun interface CommandPlannerClientFactory {
-    public fun create(): CommandPlannerClient?
 }

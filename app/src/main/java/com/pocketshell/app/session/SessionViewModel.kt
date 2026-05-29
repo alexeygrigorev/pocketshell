@@ -4,7 +4,21 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.R
-import com.pocketshell.app.di.CommandPlannerClientFactory
+import com.pocketshell.app.assistant.AppAssistantActions
+import com.pocketshell.app.assistant.AssistantActions
+import com.pocketshell.app.assistant.AssistantInstallId
+import com.pocketshell.app.assistant.AssistantSshExecutor
+import com.pocketshell.app.assistant.AssistantSshParams
+import com.pocketshell.app.assistant.AssistantUiState
+import com.pocketshell.app.assistant.ExecutorTraceSink
+import com.pocketshell.app.assistant.RealAssistantSshExecutor
+import com.pocketshell.app.assistant.SessionAssistantController
+import com.pocketshell.app.assistant.SessionActionBridge
+import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.app.projects.FolderListGateway
+import com.pocketshell.app.repos.ReposRemoteSource
+import com.pocketshell.core.assistant.AssistantLlmClientFactory
+import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.app.proof.SshShellHandle
 import com.pocketshell.app.proof.createStdoutFlow
 import com.pocketshell.app.proof.openShell
@@ -19,11 +33,6 @@ import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
-import com.pocketshell.core.voice.CommandPlan
-import com.pocketshell.core.voice.CommandPlannerException
-import com.pocketshell.core.voice.CommandPlannerRequest
-import com.pocketshell.core.voice.CommandPlannerSafetyConstraints
-import com.pocketshell.core.voice.CommandPlannerSessionMetadata
 import com.pocketshell.uikit.model.KeyModifierState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -31,8 +40,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
@@ -100,9 +111,23 @@ import javax.inject.Inject
 @HiltViewModel
 public class SessionViewModel @Inject constructor(
     @ApplicationContext private val applicationContext: Context,
-    private val commandPlannerClientFactory: CommandPlannerClientFactory = CommandPlannerClientFactory { null },
+    private val assistantClientFactory: AssistantLlmClientFactory? = null,
+    private val hostDao: HostDao? = null,
+    private val folderListGateway: FolderListGateway? = null,
+    private val reposRemoteSource: ReposRemoteSource? = null,
     private val projectRootDao: ProjectRootDao? = null,
 ) : ViewModel() {
+
+    /**
+     * SSH executor seam for assistant inspect/exec tools. Not Hilt-injected
+     * (no binding needed) — tests substitute it via [setAssistantSshExecutor].
+     */
+    private var assistantSshExecutor: AssistantSshExecutor = RealAssistantSshExecutor()
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setAssistantSshExecutor(executor: AssistantSshExecutor) {
+        assistantSshExecutor = executor
+    }
 
     /**
      * The terminal surface state hosted by the session screen. Created
@@ -139,11 +164,29 @@ public class SessionViewModel @Inject constructor(
     public val agentConversation: StateFlow<AgentConversationUiState> =
         _agentConversation.asStateFlow()
 
-    private val _voiceCommandReview: MutableStateFlow<VoiceCommandReviewUiState> =
-        MutableStateFlow(VoiceCommandReviewUiState())
+    // Issue #266: the assistant replaces the deleted CommandPlanner voice
+    // path (D22 hard cut). Command-mode dictation now lands in
+    // [dictateToAssistant]; the controller owns the confirm-or-correct loop.
+    private var assistantHostId: Long? = null
+    private var assistantHostName: String? = null
+    private var assistantHostname: String? = null
+    private var assistantPort: Int = SessionDefaults.PORT
+    private var assistantUsername: String? = null
+    private var assistantKeyPath: String? = null
+    private var assistantPassphrase: CharArray? = null
 
-    public val voiceCommandReview: StateFlow<VoiceCommandReviewUiState> =
-        _voiceCommandReview.asStateFlow()
+    private val _assistantNavRequests: MutableSharedFlow<AppDestination> =
+        MutableSharedFlow(extraBufferCapacity = 4)
+
+    /** Navigation requests the assistant made; the screen routes them. */
+    internal val assistantNavRequests: kotlinx.coroutines.flow.SharedFlow<AppDestination> =
+        _assistantNavRequests.asSharedFlow()
+
+    private val assistant: SessionAssistantController =
+        SessionAssistantController(scope = viewModelScope, sessionFactory = ::buildAssistantDeps)
+
+    /** Assistant UI state (idle / thinking / confirming / done / error). */
+    internal val assistantState: StateFlow<AssistantUiState> = assistant.state
 
     private val _projectNavigation: MutableStateFlow<ProjectNavigationUiState> =
         MutableStateFlow(ProjectNavigationUiState())
@@ -161,7 +204,6 @@ public class SessionViewModel @Inject constructor(
     private var connectJob: Job? = null
     private var agentDetectJob: Job? = null
     private var agentTailJob: Job? = null
-    private var commandPlannerJob: Job? = null
     private var projectRootsJob: Job? = null
 
     /**
@@ -559,61 +601,109 @@ public class SessionViewModel @Inject constructor(
     }
 
     /**
-     * Voice Command-mode transcript entry point. Prompt-mode dictation keeps
-     * using [sendText] directly; Command mode comes here so generated shell
-     * commands are planned, validated, and held for explicit review.
+     * Bind the SSH connection params the assistant needs for host-scoped
+     * inspect / mutating tools (issue #266). Called by the screen with the
+     * same resolved values the nav destination carries.
      */
-    public fun planVoiceCommand(transcript: String) {
-        val cleaned = transcript.trim()
-        if (cleaned.isEmpty()) return
-        if (commandPlannerJob?.isActive == true) return
-
-        val client = commandPlannerClientFactory.create()
-        if (client == null) {
-            _voiceCommandReview.value = VoiceCommandReviewUiState(
-                error = "No OpenAI API key saved. Open the composer to add one.",
-            )
-            return
-        }
-
-        _voiceCommandReview.value = VoiceCommandReviewUiState(isPlanning = true, transcript = cleaned)
-        commandPlannerJob = viewModelScope.launch {
-            val result = client.plan(
-                CommandPlannerRequest(
-                    transcript = cleaned,
-                    session = commandPlannerSessionMetadata(),
-                    safety = CommandPlannerSafetyConstraints(
-                        requireReviewBeforeExecution = true,
-                        allowAutoSend = false,
-                    ),
-                ),
-            )
-            _voiceCommandReview.value = result.fold(
-                onSuccess = { plan ->
-                    VoiceCommandReviewUiState(
-                        transcript = cleaned,
-                        pendingPlan = plan,
-                    )
-                },
-                onFailure = { error ->
-                    VoiceCommandReviewUiState(
-                        transcript = cleaned,
-                        error = commandPlannerMessage(error),
-                    )
-                },
-            )
-        }
+    internal fun bindAssistant(
+        hostId: Long?,
+        hostName: String?,
+        hostname: String?,
+        port: Int,
+        username: String?,
+        keyPath: String?,
+        passphrase: CharArray?,
+    ) {
+        assistantHostId = hostId
+        assistantHostName = hostName
+        assistantHostname = hostname
+        assistantPort = port
+        assistantUsername = username
+        assistantKeyPath = keyPath
+        assistantPassphrase = passphrase
     }
 
-    public fun approvePendingVoiceCommand(withEnter: Boolean) {
-        val plan = _voiceCommandReview.value.pendingPlan ?: return
-        sendText(plan.commands.joinToString("\n") { it.command }, withEnter = withEnter)
-        _voiceCommandReview.value = VoiceCommandReviewUiState()
+    /**
+     * Voice Command-mode (and typed) action-assistant entry point (issue
+     * #266). Replaces the deleted `planVoiceCommand`: the transcript is
+     * handed to the agent loop, which inspects state and performs actions
+     * through tools, gating mutating actions behind confirm-or-correct.
+     */
+    public fun dictateToAssistant(transcript: String) {
+        assistant.start(transcript)
     }
 
-    public fun dismissVoiceCommandReview() {
-        commandPlannerJob?.cancel()
-        _voiceCommandReview.value = VoiceCommandReviewUiState()
+    /** Confirm the pending mutating candidate. */
+    public fun confirmAssistantAction() = assistant.confirm()
+
+    /** Reject the candidate and supply a [correction] (voice or typed). */
+    public fun correctAssistantAction(correction: String) = assistant.correct(correction)
+
+    /** Cancel the pending mutating candidate. */
+    public fun cancelAssistantAction() = assistant.cancel()
+
+    /** Dismiss the assistant surface and reset to idle. */
+    public fun dismissAssistant() = assistant.dismiss()
+
+    private fun buildAssistantDeps(): SessionAssistantController.AssistantRunDeps? {
+        val client = assistantClientFactory?.create() ?: return null
+        val dao = hostDao ?: return null
+        val gateway = folderListGateway ?: return null
+        val repos = reposRemoteSource ?: return null
+
+        val connected = _connectionStatus.value as? ConnectionStatus.Connected
+        val activeHostName = assistantHostName ?: connected?.host ?: SessionDefaults.HOST
+        val nav = _projectNavigation.value
+        val recentDir = nav.recentDirectories.firstOrNull()?.takeIf { it.isNotBlank() }
+
+        val bridge = object : SessionActionBridge {
+            override fun activeHostName(): String? =
+                if (_connectionStatus.value is ConnectionStatus.Connected) activeHostName else null
+            override fun activeCwd(): String? = recentDir
+            override fun activeSessionName(): String? = null
+            override fun currentScreenLabel(): String = "raw-ssh session on $activeHostName"
+            override fun sendCommand(command: String) = sendText(command, withEnter = true)
+            override fun navigate(destination: AppDestination) {
+                _assistantNavRequests.tryEmit(destination)
+            }
+        }
+
+        fun paramsForActive(): AssistantSshParams? {
+            val id = assistantHostId ?: return null
+            val key = assistantKeyPath ?: return null
+            return AssistantSshParams(
+                hostId = id,
+                hostName = activeHostName,
+                hostname = assistantHostname ?: connected?.host ?: SessionDefaults.HOST,
+                port = assistantPort,
+                username = assistantUsername ?: connected?.user ?: SessionDefaults.USER,
+                keyPath = key,
+                passphrase = assistantPassphrase,
+            )
+        }
+
+        val actions: AssistantActions = AppAssistantActions(
+            bridge = bridge,
+            hostDao = dao,
+            folderListGateway = gateway,
+            reposRemoteSource = repos,
+            sshExecutor = assistantSshExecutor,
+            // The raw-SSH route only ever acts against its own connected
+            // host; resolve only the active host by name and otherwise fall
+            // back to the active params.
+            resolveParams = { name -> paramsForActive()?.takeIf { it.hostName == name } },
+            activeParams = ::paramsForActive,
+        )
+
+        val traceSink = ExecutorTraceSink(assistantSshExecutor, ::paramsForActive)
+
+        return SessionAssistantController.AssistantRunDeps(
+            client = client,
+            actions = actions,
+            traceSink = traceSink,
+            installId = AssistantInstallId.get(applicationContext),
+            sessionId = null,
+        )
     }
 
     /**
@@ -704,41 +794,6 @@ public class SessionViewModel @Inject constructor(
 
     private fun updateProjectNavigationFeedback(message: String?) {
         _projectNavigation.value = _projectNavigation.value.copy(feedback = message)
-    }
-
-    private fun commandPlannerSessionMetadata(): CommandPlannerSessionMetadata {
-        val connected = _connectionStatus.value as? ConnectionStatus.Connected
-        val nav = _projectNavigation.value
-        // Opportunistic cwd capture: the project-navigation chips
-        // ([navigateToDirectory], [createFolderAndCd], [cloneRepositoryAndCd])
-        // push the target path onto [recentDirectories] the moment the
-        // command is dispatched. The freshest entry is therefore the
-        // best directory the ViewModel knows about — better than `null`,
-        // and free of the round-trip a periodic `pwd` would cost. When
-        // the user has not yet navigated this session, fall back to null
-        // and let the planner default to `~`.
-        val recentDir = nav.recentDirectories.firstOrNull()?.takeIf { it.isNotBlank() }
-        return CommandPlannerSessionMetadata(
-            hostLabel = connected?.host ?: SessionDefaults.HOST,
-            username = connected?.user ?: SessionDefaults.USER,
-            currentDirectory = recentDir,
-            projectRoots = nav.roots.map { it.path },
-            // Raw-SSH shell type detection (e.g. parsing `$SHELL` or
-            // `ps -p $$`) requires a round-trip per session boot and is
-            // covered by the follow-up to #66 — leaving null until we
-            // wire a one-shot probe at connect time.
-            shellType = null,
-        )
-    }
-
-    private fun commandPlannerMessage(error: Throwable): String = when (error) {
-        is CommandPlannerException.Rejected -> "Command planner rejected this request: ${error.message}"
-        is CommandPlannerException.Auth -> "Command planner credentials were rejected."
-        is CommandPlannerException.RateLimited -> "Command planner is rate limited. Try again later."
-        is CommandPlannerException.Server -> "Command planner service failed. Try again later."
-        is CommandPlannerException.Parse -> "Command planner returned an invalid response."
-        is CommandPlannerException.Transport -> "Command planner could not be reached."
-        else -> error.message ?: "Command planner failed."
     }
 
     /**
@@ -872,7 +927,7 @@ public class SessionViewModel @Inject constructor(
     override fun onCleared() {
         agentDetectJob?.cancel()
         agentTailJob?.cancel()
-        commandPlannerJob?.cancel()
+        assistant.dismiss()
         projectRootsJob?.cancel()
         producerJob?.cancel()
         terminalState.detachExternalProducer()
@@ -948,13 +1003,6 @@ public data class AgentConversationUiState(
      * that the composer wires `onValueChange` into.
      */
     val searchQuery: String = "",
-)
-
-public data class VoiceCommandReviewUiState(
-    val isPlanning: Boolean = false,
-    val transcript: String? = null,
-    val pendingPlan: CommandPlan? = null,
-    val error: String? = null,
 )
 
 private const val MaxAgentEvents: Int = 500

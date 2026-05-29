@@ -589,6 +589,7 @@ private fun AppNavigator(
                 )
             },
             onOpenUsage = { navigate(AppDestination.Usage) },
+            onAssistantNavigate = ::navigate,
             // Issue #116: in-session blocked / near-limit chip for the
             // active host. Look up by [HostEntity.id]; absence means the
             // scheduler has no recent record warranting a chip.
@@ -829,6 +830,7 @@ private fun AppNavigator(
                 )
             },
             onOpenUsage = { navigate(AppDestination.Usage) },
+            onAssistantNavigate = ::navigate,
             // Issue #116: same per-host chip as the plain-SSH route.
             usageBadgeProvider = usageBadgesByHost[dest.hostId],
             // Issue #177: seed the restored composer draft into the agent

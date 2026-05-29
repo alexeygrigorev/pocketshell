@@ -108,7 +108,7 @@ import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.InlineDictationErrorStrip
-import com.pocketshell.app.voice.VoiceCommandReviewStrip
+import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.agents.ToolCallSummary
@@ -176,6 +176,8 @@ public fun TmuxSessionScreen(
     onReplaceTmuxSession: (sessionName: String) -> Unit = {},
     onOpenJobs: () -> Unit = {},
     onOpenUsage: () -> Unit = {},
+    /** Route an assistant-requested navigation (issue #266). */
+    onAssistantNavigate: (com.pocketshell.app.nav.AppDestination) -> Unit = {},
     /**
      * Issue #116 (usage-panel Fix B): same per-host worst-case
      * [com.pocketshell.core.usage.UsageProviderRecord] surface as
@@ -235,7 +237,7 @@ public fun TmuxSessionScreen(
     val sizeMismatchPrompt by viewModel.sizeMismatchPrompt.collectAsState()
     val agentConversations by viewModel.agentConversations.collectAsState()
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
-    val voiceCommandReview by viewModel.voiceCommandReview.collectAsState()
+    val assistantState by viewModel.assistantState.collectAsState()
     val dictationState by inlineDictationViewModel.uiState.collectAsState()
     // Issue #197: when the user explicitly opens the Conversation tab on
     // an agent pane, the ViewModel records that pane id here. While
@@ -366,6 +368,11 @@ public fun TmuxSessionScreen(
         }
     }
 
+    // Issue #266: route assistant-requested navigation through the app nav.
+    LaunchedEffect(viewModel) {
+        viewModel.assistantNavRequests.collect { onAssistantNavigate(it) }
+    }
+
     // Route inline-dictation transcripts into the currently focused pane.
     // The collector re-binds whenever the focused pane or dictation mode
     // changes so we always write into the pane the user is looking at, not
@@ -382,7 +389,7 @@ public fun TmuxSessionScreen(
                         viewModel.writeInputToPane(paneId, text.toByteArray(Charsets.UTF_8))
                     }
                 }
-                InlineDictationViewModel.DictationMode.Command -> viewModel.planVoiceCommand(text, paneId)
+                InlineDictationViewModel.DictationMode.Command -> viewModel.dictateToAssistant(text, paneId)
             }
         }
     }
@@ -865,19 +872,12 @@ public fun TmuxSessionScreen(
             dictationState.error?.let { msg ->
                 InlineDictationErrorStrip(msg, onDismiss = inlineDictationViewModel::clearError)
             }
-            VoiceCommandReviewStrip(
-                state = voiceCommandReview,
-                onInsert = {
-                    currentPane?.let { pane ->
-                        viewModel.approvePendingVoiceCommand(pane.paneId, withEnter = false)
-                    }
-                },
-                onRun = {
-                    currentPane?.let { pane ->
-                        viewModel.approvePendingVoiceCommand(pane.paneId, withEnter = true)
-                    }
-                },
-                onDismiss = viewModel::dismissVoiceCommandReview,
+            AssistantStrip(
+                state = assistantState,
+                onConfirm = viewModel::confirmAssistantAction,
+                onCorrect = viewModel::correctAssistantAction,
+                onCancel = viewModel::cancelAssistantAction,
+                onDismiss = viewModel::dismissAssistant,
             )
 
             if (isImeVisible && currentPane != null) {

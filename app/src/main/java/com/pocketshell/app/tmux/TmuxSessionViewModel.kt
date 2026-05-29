@@ -1,15 +1,30 @@
 package com.pocketshell.app.tmux
 
+import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.pocketshell.app.di.CommandPlannerClientFactory
+import dagger.hilt.android.qualifiers.ApplicationContext
+import com.pocketshell.app.assistant.AppAssistantActions
+import com.pocketshell.app.assistant.AssistantActions
+import com.pocketshell.app.assistant.AssistantInstallId
+import com.pocketshell.app.assistant.AssistantSshExecutor
+import com.pocketshell.app.assistant.AssistantSshParams
+import com.pocketshell.app.assistant.AssistantUiState
+import com.pocketshell.app.assistant.ExecutorTraceSink
+import com.pocketshell.app.assistant.RealAssistantSshExecutor
+import com.pocketshell.app.assistant.SessionActionBridge
+import com.pocketshell.app.assistant.SessionAssistantController
+import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.app.projects.FolderListGateway
+import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
-import com.pocketshell.app.session.VoiceCommandReviewUiState
 import com.pocketshell.app.session.reconcileAgentEvents
+import com.pocketshell.core.assistant.AssistantLlmClientFactory
+import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
@@ -28,10 +43,6 @@ import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.TmuxWindowDimensions
 import com.pocketshell.core.tmux.protocol.ControlEvent
-import com.pocketshell.core.voice.CommandPlannerException
-import com.pocketshell.core.voice.CommandPlannerRequest
-import com.pocketshell.core.voice.CommandPlannerSafetyConstraints
-import com.pocketshell.core.voice.CommandPlannerSessionMetadata
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -115,10 +126,21 @@ import javax.inject.Inject
 public class TmuxSessionViewModel @Inject constructor(
     private val tmuxClientFactory: TmuxClientFactory,
     private val activeTmuxClients: ActiveTmuxClients,
-    private val commandPlannerClientFactory: CommandPlannerClientFactory =
-        CommandPlannerClientFactory { null },
+    private val assistantClientFactory: AssistantLlmClientFactory? = null,
+    private val hostDao: HostDao? = null,
+    private val folderListGateway: FolderListGateway? = null,
+    private val reposRemoteSource: ReposRemoteSource? = null,
+    @ApplicationContext private val applicationContext: Context? = null,
     private val projectRootDao: ProjectRootDao? = null,
 ) : ViewModel() {
+
+    /** SSH executor seam for assistant tools; tests substitute it. */
+    private var assistantSshExecutor: AssistantSshExecutor = RealAssistantSshExecutor()
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setAssistantSshExecutor(executor: AssistantSshExecutor) {
+        assistantSshExecutor = executor
+    }
 
     private val _panes: MutableStateFlow<List<TmuxPaneState>> =
         MutableStateFlow(emptyList())
@@ -216,20 +238,22 @@ public class TmuxSessionViewModel @Inject constructor(
     public val sizeMismatchPrompt: StateFlow<TmuxSizeMismatchPrompt?> =
         _sizeMismatchPrompt.asStateFlow()
 
-    // Voice Command-mode planner state — mirrors
-    // [com.pocketshell.app.session.SessionViewModel]'s voice planner so the
-    // tmux route (host tap → tmux picker → "Attach to session") gets the
-    // same dictate-then-review affordance as the raw-SSH route. The pending
-    // plan is screen-global, not per-pane, because the user reviews and
-    // approves one transcript at a time; the approving call targets the
-    // currently focused pane (see [approvePendingVoiceCommand]).
-    private val _voiceCommandReview: MutableStateFlow<VoiceCommandReviewUiState> =
-        MutableStateFlow(VoiceCommandReviewUiState())
+    // Issue #266: in-app action assistant — replaces the deleted
+    // CommandPlanner voice path (D22 hard cut). Command-mode dictation lands
+    // in [dictateToAssistant]; the controller owns the confirm-or-correct
+    // loop. `run_command` targets the currently focused pane.
+    private var assistantFocusedPaneId: String? = null
 
-    public val voiceCommandReview: StateFlow<VoiceCommandReviewUiState> =
-        _voiceCommandReview.asStateFlow()
+    private val _assistantNavRequests: MutableSharedFlow<AppDestination> =
+        MutableSharedFlow(extraBufferCapacity = 4)
 
-    private var commandPlannerJob: Job? = null
+    internal val assistantNavRequests: SharedFlow<AppDestination> =
+        _assistantNavRequests.asSharedFlow()
+
+    private val assistant: SessionAssistantController =
+        SessionAssistantController(scope = viewModelScope, sessionFactory = ::buildAssistantDeps)
+
+    internal val assistantState: StateFlow<AssistantUiState> = assistant.state
 
     // Project roots for the connected host, mirrored from
     // [ProjectRootDao.getByHostId] so the voice planner request can carry
@@ -1788,138 +1812,85 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Voice Command-mode transcript entry point. Mirrors
-     * [com.pocketshell.app.session.SessionViewModel.planVoiceCommand]:
-     * Prompt-mode dictation writes the transcript bytes directly into the
-     * pane (via [writeInputToPane]); Command mode lands here so the
-     * generated shell commands are planned, validated, and held for
-     * explicit user review before they reach a pane.
-     *
-     * [focusedPaneId] is the pane the user is currently looking at — when
-     * non-null we use its cached `pane_current_path` / `pane_current_command`
-     * to populate the planner request's per-session metadata. The screen
-     * supplies the pager's `currentPage` pane; tests can pass `null` to
-     * exercise the no-focus path.
+     * Voice Command-mode (and typed) action-assistant entry point (issue
+     * #266). Replaces the deleted `planVoiceCommand`: the transcript drives
+     * the agent loop, which inspects state and performs actions through
+     * tools, gating mutating actions behind confirm-or-correct. `run_command`
+     * targets [focusedPaneId] — the pane the user is currently looking at.
      */
-    public fun planVoiceCommand(transcript: String, focusedPaneId: String? = null) {
-        val cleaned = transcript.trim()
-        if (cleaned.isEmpty()) return
-        if (commandPlannerJob?.isActive == true) return
-
-        val client = commandPlannerClientFactory.create()
-        if (client == null) {
-            _voiceCommandReview.value = VoiceCommandReviewUiState(
-                error = "No OpenAI API key saved. Open the composer to add one.",
-            )
-            return
-        }
-
-        _voiceCommandReview.value = VoiceCommandReviewUiState(
-            isPlanning = true,
-            transcript = cleaned,
-        )
-        commandPlannerJob = viewModelScope.launch {
-            val result = client.plan(
-                CommandPlannerRequest(
-                    transcript = cleaned,
-                    session = commandPlannerSessionMetadata(focusedPaneId),
-                    safety = CommandPlannerSafetyConstraints(
-                        requireReviewBeforeExecution = true,
-                        allowAutoSend = false,
-                    ),
-                ),
-            )
-            _voiceCommandReview.value = result.fold(
-                onSuccess = { plan ->
-                    VoiceCommandReviewUiState(
-                        transcript = cleaned,
-                        pendingPlan = plan,
-                    )
-                },
-                onFailure = { error ->
-                    VoiceCommandReviewUiState(
-                        transcript = cleaned,
-                        error = commandPlannerMessage(error),
-                    )
-                },
-            )
-        }
+    public fun dictateToAssistant(transcript: String, focusedPaneId: String? = null) {
+        assistantFocusedPaneId = focusedPaneId
+        assistant.start(transcript)
     }
 
-    /**
-     * Approve the held [voiceCommandReview] plan and route its commands
-     * into [paneId] through the same `send-keys` bridge used by chip taps,
-     * inline dictation prompt-mode, and snippet picks. `withEnter = true`
-     * sends Enter after the literal so the command runs; `false` inserts
-     * the bytes only so the user can keep editing.
-     */
-    public fun approvePendingVoiceCommand(paneId: String, withEnter: Boolean) {
-        val plan = _voiceCommandReview.value.pendingPlan ?: return
-        if (paneId.isBlank()) return
-        val joined = plan.commands.joinToString("\n") { it.command }
-        val payload = if (withEnter) joined + "\r" else joined
-        writeInputToPane(paneId, payload.toByteArray(Charsets.UTF_8))
-        _voiceCommandReview.value = VoiceCommandReviewUiState()
-    }
+    /** Confirm the pending mutating candidate. */
+    public fun confirmAssistantAction() = assistant.confirm()
 
-    public fun dismissVoiceCommandReview() {
-        commandPlannerJob?.cancel()
-        _voiceCommandReview.value = VoiceCommandReviewUiState()
-    }
+    /** Reject the candidate and supply a [correction] (voice or typed). */
+    public fun correctAssistantAction(correction: String) = assistant.correct(correction)
 
-    private fun commandPlannerSessionMetadata(
-        focusedPaneId: String? = null,
-    ): CommandPlannerSessionMetadata {
-        val connected = _connectionStatus.value as? ConnectionStatus.Connected
-        val target = activeTarget
+    /** Cancel the pending mutating candidate. */
+    public fun cancelAssistantAction() = assistant.cancel()
+
+    /** Dismiss the assistant surface and reset to idle. */
+    public fun dismissAssistant() = assistant.dismiss()
+
+    private fun buildAssistantDeps(): SessionAssistantController.AssistantRunDeps? {
+        val client = assistantClientFactory?.create() ?: return null
+        val dao = hostDao ?: return null
+        val gateway = folderListGateway ?: return null
+        val repos = reposRemoteSource ?: return null
+        val context = applicationContext ?: return null
+        val target = activeTarget ?: return null
+
+        val focusedPaneId = assistantFocusedPaneId
         val focusedPane = focusedPaneId?.let { paneRows[it] }
-        return CommandPlannerSessionMetadata(
-            hostLabel = target?.hostName?.takeIf { it.isNotBlank() }
-                ?: connected?.host
-                ?: target?.host
-                ?: "",
-            username = connected?.user ?: target?.user ?: "",
-            // tmux already caches each pane's `pane_current_path` /
-            // `pane_current_command` (see [reconcilePanes]); when the
-            // screen tells us which pane the user is looking at, we
-            // forward that cache to the planner request rather than do a
-            // redundant `pwd` round-trip.
-            currentDirectory = focusedPane?.cwd?.takeIf { it.isNotBlank() },
-            projectRoots = _projectRoots.value.map { it.path },
-            // `pane_current_command` is the *focused* foreground process
-            // tmux is reporting — often a shell name (`bash` / `zsh` /
-            // `fish`) but sometimes a transient process (`vim`, `git`,
-            // `claude`). Only forward it when it looks like a known
-            // shell; anything else falls back to null so the planner
-            // sees "unknown" instead of being misled by an editor name.
-            shellType = focusedPane?.currentCommand?.let { shellTypeOrNull(it) },
-        )
-    }
 
-    /**
-     * Filter [pane_current_command] down to a known shell name, or null
-     * if the foreground process is not a shell we want to advertise.
-     *
-     * Keeping the allow-list narrow on purpose: passing `vim` or `git`
-     * as `shell_type` would teach the planner the wrong syntax. The list
-     * matches the common Unix login shells called out in the #66 doc.
-     */
-    private fun shellTypeOrNull(command: String): String? {
-        val trimmed = command.trim().substringAfterLast('/')
-        return when (trimmed) {
-            "bash", "zsh", "fish", "sh", "dash", "ksh", "tcsh", "csh" -> trimmed
-            else -> null
+        val bridge = object : SessionActionBridge {
+            override fun activeHostName(): String? =
+                target.hostName.takeIf { it.isNotBlank() } ?: target.host
+            override fun activeCwd(): String? = focusedPane?.cwd?.takeIf { it.isNotBlank() }
+            override fun activeSessionName(): String? = target.sessionName
+            override fun currentScreenLabel(): String =
+                "tmux session ${target.sessionName} on ${target.hostName}"
+            override fun sendCommand(command: String) {
+                val pane = focusedPaneId ?: return
+                val payload = command + "\r"
+                writeInputToPane(pane, payload.toByteArray(Charsets.UTF_8))
+            }
+            override fun navigate(destination: AppDestination) {
+                _assistantNavRequests.tryEmit(destination)
+            }
         }
-    }
 
-    private fun commandPlannerMessage(error: Throwable): String = when (error) {
-        is CommandPlannerException.Rejected -> "Command planner rejected this request: ${error.message}"
-        is CommandPlannerException.Auth -> "Command planner credentials were rejected."
-        is CommandPlannerException.RateLimited -> "Command planner is rate limited. Try again later."
-        is CommandPlannerException.Server -> "Command planner service failed. Try again later."
-        is CommandPlannerException.Parse -> "Command planner returned an invalid response."
-        is CommandPlannerException.Transport -> "Command planner could not be reached."
-        else -> error.message ?: "Command planner failed."
+        val hostName = target.hostName.takeIf { it.isNotBlank() } ?: target.host
+        fun paramsForActive(): AssistantSshParams = AssistantSshParams(
+            hostId = target.hostId,
+            hostName = hostName,
+            hostname = target.host,
+            port = target.port,
+            username = target.user,
+            keyPath = target.keyPath,
+            passphrase = target.passphrase,
+        )
+
+        val actions: AssistantActions = AppAssistantActions(
+            bridge = bridge,
+            hostDao = dao,
+            folderListGateway = gateway,
+            reposRemoteSource = repos,
+            sshExecutor = assistantSshExecutor,
+            resolveParams = { name -> paramsForActive().takeIf { it.hostName == name } },
+            activeParams = ::paramsForActive,
+        )
+
+        return SessionAssistantController.AssistantRunDeps(
+            client = client,
+            actions = actions,
+            traceSink = ExecutorTraceSink(assistantSshExecutor) { paramsForActive() },
+            installId = AssistantInstallId.get(context),
+            sessionId = target.sessionName,
+        )
     }
 
     private fun inputSinkForPane(paneId: String): OutputStream {
@@ -2530,8 +2501,7 @@ public class TmuxSessionViewModel @Inject constructor(
     override fun onCleared() {
         connectJob?.cancel()
         connectJob = null
-        commandPlannerJob?.cancel()
-        commandPlannerJob = null
+        assistant.dismiss()
         closeCurrentConnection()
         // Issue #235: remove the application-scoped lifecycle hooks
         // installed during the first attach. The hooks survive across

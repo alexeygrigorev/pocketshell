@@ -64,7 +64,7 @@ import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.InlineDictationErrorStrip
-import com.pocketshell.app.voice.VoiceCommandReviewStrip
+import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.agents.ToolCallSummary
@@ -152,6 +152,8 @@ public fun SessionScreen(
     onBack: () -> Unit = {},
     onOpenJobs: () -> Unit = {},
     onOpenUsage: () -> Unit = {},
+    /** Route an assistant-requested navigation (issue #266). */
+    onAssistantNavigate: (com.pocketshell.app.nav.AppDestination) -> Unit = {},
     /**
      * Issue #116 (usage-panel Fix B): the most-concerning
      * [com.pocketshell.core.usage.UsageProviderRecord] for this
@@ -174,6 +176,14 @@ public fun SessionScreen(
     LaunchedEffect(hostId) {
         viewModel.bindProjectNavigationHost(hostId)
     }
+    // Issue #266: give the assistant the SSH params for host-scoped tools.
+    LaunchedEffect(hostId, host, port, user, keyPath) {
+        viewModel.bindAssistant(hostId, host, host, port, user, keyPath, passphrase)
+    }
+    // Issue #266: route assistant-requested navigation through the app nav.
+    LaunchedEffect(viewModel) {
+        viewModel.assistantNavRequests.collect { onAssistantNavigate(it) }
+    }
 
     val status by viewModel.connectionStatus.collectAsState()
     // Issue #249: gate the composer / send / dictation surfaces on a live
@@ -182,7 +192,7 @@ public fun SessionScreen(
     val sessionLive = status is ConnectionStatus.Connected
     val modifierStates by viewModel.modifierStates.collectAsState()
     val agentConversation by viewModel.agentConversation.collectAsState()
-    val voiceCommandReview by viewModel.voiceCommandReview.collectAsState()
+    val assistantState by viewModel.assistantState.collectAsState()
     val projectNavigation by viewModel.projectNavigation.collectAsState()
     val dictationState by inlineDictationViewModel.uiState.collectAsState()
     val appSettings by settingsViewModel.state.collectAsState()
@@ -215,7 +225,7 @@ public fun SessionScreen(
         inlineDictationViewModel.transcriptions.collect { text ->
             when (dictationState.mode) {
                 InlineDictationViewModel.DictationMode.Prompt -> viewModel.sendText(text, withEnter = false)
-                InlineDictationViewModel.DictationMode.Command -> viewModel.planVoiceCommand(text)
+                InlineDictationViewModel.DictationMode.Command -> viewModel.dictateToAssistant(text)
             }
         }
     }
@@ -374,11 +384,12 @@ public fun SessionScreen(
             dictationState.error?.let { msg ->
                 InlineDictationErrorStrip(msg, onDismiss = inlineDictationViewModel::clearError)
             }
-            VoiceCommandReviewStrip(
-                state = voiceCommandReview,
-                onInsert = { viewModel.approvePendingVoiceCommand(withEnter = false) },
-                onRun = { viewModel.approvePendingVoiceCommand(withEnter = true) },
-                onDismiss = viewModel::dismissVoiceCommandReview,
+            AssistantStrip(
+                state = assistantState,
+                onConfirm = viewModel::confirmAssistantAction,
+                onCorrect = viewModel::correctAssistantAction,
+                onCancel = viewModel::cancelAssistantAction,
+                onDismiss = viewModel::dismissAssistant,
             )
 
             if (isImeVisible) {

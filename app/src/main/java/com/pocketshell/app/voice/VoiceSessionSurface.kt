@@ -26,7 +26,14 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.pocketshell.app.session.VoiceCommandReviewUiState
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import com.pocketshell.app.assistant.AssistantAgentLoop
+import com.pocketshell.app.assistant.AssistantUiState
 import com.pocketshell.uikit.components.CommandChip
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.model.MicButtonState
@@ -74,65 +81,119 @@ internal fun InlineDictationErrorStrip(message: String, onDismiss: () -> Unit) {
 }
 
 /**
- * Voice command planner review strip — surfaced after a Command-mode
- * dictation transcript is sent to the planner. Renders Insert / Run /
- * Dismiss affordances or the planning/error transient state.
+ * In-app action-assistant strip (issue #266). Replaces the deleted
+ * `VoiceCommandReviewStrip` (D22 hard cut). Renders the assistant's state:
+ *
+ *  - Thinking → a transient "Working..." line.
+ *  - Confirming → the mutating candidate plus the **confirm-or-correct**
+ *    affordances: a "Run" / "Confirm" button, a "No, do something else"
+ *    button that reveals a correction field (typed; voice goes through the
+ *    same mic and lands via [onCorrect]), and a Cancel button. This is the
+ *    confirm-or-correct gate, not a bare yes/no.
+ *  - Done / Error → a final message with Dismiss.
  */
 @Composable
-internal fun VoiceCommandReviewStrip(
-    state: VoiceCommandReviewUiState,
-    onInsert: () -> Unit,
-    onRun: () -> Unit,
+internal fun AssistantStrip(
+    state: AssistantUiState,
+    onConfirm: () -> Unit,
+    onCorrect: (String) -> Unit,
+    onCancel: () -> Unit,
     onDismiss: () -> Unit,
 ) {
-    val plan = state.pendingPlan
-    if (!state.isPlanning && state.error == null && plan == null) return
+    if (state is AssistantUiState.Idle) return
+
+    var correcting by remember(state) { mutableStateOf(false) }
+    var correctionText by remember(state) { mutableStateOf("") }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .background(color = PocketShellColors.Surface)
             .border(width = 1.dp, color = PocketShellColors.AccentDim)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .testTag(ASSISTANT_STRIP_TAG),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text(
-            text = when {
-                state.isPlanning -> "Planning command..."
-                state.error != null -> state.error
-                else -> "Review planned command"
-            },
-            color = if (state.error != null) PocketShellColors.Accent else PocketShellColors.Text,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-        )
-        if (plan != null) {
-            Text(
-                text = plan.commands.joinToString("\n") { it.command },
+        when (state) {
+            is AssistantUiState.Thinking -> Text(
+                text = "Working...",
                 color = PocketShellColors.Text,
                 fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
             )
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                TextButton(onClick = onInsert) {
-                    Text("Insert")
-                }
-                TextButton(onClick = onRun) {
-                    Text("Run")
-                }
-                TextButton(onClick = onDismiss) {
-                    Text("Dismiss")
+            is AssistantUiState.Confirming -> {
+                Text(
+                    text = "Is this what you want me to execute?",
+                    color = PocketShellColors.Text,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                Text(
+                    text = state.candidate.summary,
+                    color = PocketShellColors.Text,
+                    fontSize = 12.sp,
+                    modifier = Modifier.testTag(ASSISTANT_CANDIDATE_TAG),
+                )
+                if (correcting) {
+                    OutlinedTextField(
+                        value = correctionText,
+                        onValueChange = { correctionText = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag(ASSISTANT_CORRECTION_FIELD_TAG),
+                        keyboardActions = KeyboardActions(onDone = {
+                            onCorrect(correctionText)
+                            correcting = false
+                            correctionText = ""
+                        }),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(
+                            onClick = {
+                                onCorrect(correctionText)
+                                correcting = false
+                                correctionText = ""
+                            },
+                            modifier = Modifier.testTag(ASSISTANT_SEND_CORRECTION_TAG),
+                        ) { Text("Send correction") }
+                        TextButton(onClick = { correcting = false }) { Text("Back") }
+                    }
+                } else {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        TextButton(
+                            onClick = onConfirm,
+                            modifier = Modifier.testTag(ASSISTANT_CONFIRM_TAG),
+                        ) { Text("Run") }
+                        TextButton(
+                            onClick = { correcting = true },
+                            modifier = Modifier.testTag(ASSISTANT_CORRECT_TAG),
+                        ) { Text("No, do something else") }
+                        TextButton(onClick = onCancel) { Text("Cancel") }
+                    }
                 }
             }
-        } else if (state.error != null) {
-            TextButton(onClick = onDismiss) {
-                Text("Dismiss")
+            is AssistantUiState.Done -> {
+                Text(text = state.message, color = PocketShellColors.Text, fontSize = 12.sp)
+                TextButton(onClick = onDismiss) { Text("Dismiss") }
             }
+            is AssistantUiState.Error -> {
+                Text(text = state.message, color = PocketShellColors.Accent, fontSize = 12.sp)
+                TextButton(onClick = onDismiss) { Text("Dismiss") }
+            }
+            AssistantUiState.Idle -> Unit
         }
     }
 }
+
+internal const val ASSISTANT_STRIP_TAG: String = "assistant:strip"
+internal const val ASSISTANT_CANDIDATE_TAG: String = "assistant:candidate"
+internal const val ASSISTANT_CONFIRM_TAG: String = "assistant:confirm"
+internal const val ASSISTANT_CORRECT_TAG: String = "assistant:correct"
+internal const val ASSISTANT_CORRECTION_FIELD_TAG: String = "assistant:correction-field"
+internal const val ASSISTANT_SEND_CORRECTION_TAG: String = "assistant:send-correction"
 
 /**
  * Scrollable strip of secondary command chips. Only the chips here are

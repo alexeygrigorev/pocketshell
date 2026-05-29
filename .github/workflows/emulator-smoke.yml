@@ -1,0 +1,120 @@
+name: Emulator Smoke
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 2 * * *"
+
+jobs:
+  emulator:
+    name: Emulator smoke (Docker agents)
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    # This job is intentionally non-blocking. It is long and historically
+    # flaky, so release confidence should come from the regular Tests workflow
+    # plus explicit release validation when needed.
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', '**/*.gradle*', '**/libs.versions.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Verify Docker is available
+        run: docker info
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Build SSH base image
+        run: docker compose -f tests/docker/docker-compose.yml build sshd
+
+      - name: Start Docker fixtures (agents, flaky-agent, tmux)
+        run: docker compose -f tests/docker/docker-compose.yml up -d --build --no-deps agents flaky-agent tmux
+
+      - name: Wait for fixture containers to report healthy
+        run: |
+          source tests/docker/lib/wait-for-healthy.sh
+          wait_for_container_healthy tests/docker/docker-compose.yml agents /tmp/agents-health.log 60
+          cat /tmp/agents-health.log
+          wait_for_container_healthy tests/docker/docker-compose.yml flaky-agent /tmp/flaky-agent-health.log 60
+          cat /tmp/flaky-agent-health.log
+          wait_for_container_healthy tests/docker/docker-compose.yml tmux /tmp/tmux-health.log 60
+          cat /tmp/tmux-health.log
+
+      - name: Verify agent SSH target tool surface
+        run: |
+          chmod 600 tests/docker/test_key
+          ssh -i tests/docker/test_key -p 2222 \
+            -o BatchMode=yes \
+            -o ConnectTimeout=2 \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            testuser@127.0.0.1 \
+            'for tool in pocketshell agent-log-explorer tmuxctl quse; do command -v "$tool"; done'
+
+      - name: Run connected Android tests
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 34
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          script: ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.pocketshellCi=true --stacktrace
+
+      - name: Collect Docker logs
+        if: always()
+        run: |
+          mkdir -p artifacts/docker
+          docker compose -f tests/docker/docker-compose.yml ps > artifacts/docker/compose-ps.txt
+          docker compose -f tests/docker/docker-compose.yml logs --no-color agents > artifacts/docker/agents.log
+          docker compose -f tests/docker/docker-compose.yml logs --no-color flaky-agent > artifacts/docker/flaky-agent.log 2>/dev/null || true
+          docker compose -f tests/docker/docker-compose.yml logs --no-color tmux > artifacts/docker/tmux.log 2>/dev/null || true
+          docker inspect pocketshell-test-agents > artifacts/docker/agents-inspect.json 2>/dev/null || true
+          docker inspect pocketshell-test-flaky-agent > artifacts/docker/flaky-agent-inspect.json 2>/dev/null || true
+          docker inspect pocketshell-test-tmux > artifacts/docker/tmux-inspect.json 2>/dev/null || true
+
+      - name: Upload Android test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-android-test-reports
+          path: |
+            **/build/reports/androidTests/
+            **/build/outputs/androidTest-results/
+            **/build/outputs/connected_android_test_additional_output/
+          if-no-files-found: ignore
+
+      - name: Upload Docker logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: emulator-docker-logs
+          path: artifacts/docker/
+          if-no-files-found: ignore
+
+      - name: Stop Docker fixtures
+        if: always()
+        run: docker compose -f tests/docker/docker-compose.yml down --volumes --remove-orphans

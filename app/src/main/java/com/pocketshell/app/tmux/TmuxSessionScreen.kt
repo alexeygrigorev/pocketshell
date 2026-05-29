@@ -106,6 +106,7 @@ import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
+import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
@@ -197,7 +198,21 @@ public fun TmuxSessionScreen(
     onComposerDraftChanged: (String) -> Unit = {},
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
 ) {
+    LaunchedEffect(Unit) {
+        StartupTiming.markOnce(
+            "tmux-screen-composed",
+            "hostId" to hostId,
+            "session" to sessionName,
+            "hasStartDirectory" to (startDirectory != null),
+        )
+    }
     LaunchedEffect(hostId, hostName, host, port, user, keyPath, passphrase, sessionName, startDirectory) {
+        StartupTiming.mark(
+            "tmux-connect-effect-start",
+            "hostId" to hostId,
+            "session" to sessionName,
+            "hasStartDirectory" to (startDirectory != null),
+        )
         viewModel.connect(
             hostId = hostId,
             hostName = hostName,

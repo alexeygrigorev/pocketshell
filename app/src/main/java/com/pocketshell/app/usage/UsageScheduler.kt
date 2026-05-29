@@ -4,6 +4,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -325,8 +326,14 @@ public class UsageScheduler @Inject constructor(
 
     private suspend fun fetchOnce() {
         _tickCount.incrementAndGet()
+        StartupTiming.markOnce("usage-fetch-once-start")
         val hosts = hostDao.getAll().first()
         val pocketshellHosts = hosts.filter { it.pocketshellInstalled == true }
+        StartupTiming.markOnce(
+            "usage-fetch-hosts",
+            "hostCount" to hosts.size,
+            "pocketshellHostCount" to pocketshellHosts.size,
+        )
         if (pocketshellHosts.isEmpty()) {
             // Drop any stale snapshots for hosts that no longer have pocketshell.
             if (_snapshots.value.isNotEmpty()) _snapshots.value = emptyMap()
@@ -353,6 +360,12 @@ public class UsageScheduler @Inject constructor(
         if (key.hasPassphrase) return null
 
         val session: SshSession = try {
+            StartupTiming.markOnce(
+                "usage-ssh-connect-start",
+                "hostId" to host.id,
+                "host" to host.hostname,
+                "port" to host.port,
+            )
             SshConnection.connect(
                 host = host.hostname,
                 port = host.port,

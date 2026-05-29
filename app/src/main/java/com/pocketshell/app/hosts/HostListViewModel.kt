@@ -17,6 +17,7 @@ import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.SessionSummary
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
+import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.usage.UsageDashboardRow
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
@@ -371,6 +372,7 @@ class HostListViewModel @Inject constructor(
     fun reprobeUnknownHostsOnce() {
         if (autoReprobeKicked) return
         autoReprobeKicked = true
+        StartupTiming.mark("hostlist-reprobe-kicked")
         viewModelScope.launch {
             // Defensive: probe failures stay silent for the user — the
             // badge just remains `Unknown` and the manual re-check
@@ -383,6 +385,12 @@ class HostListViewModel @Inject constructor(
                         val key = sshKeyDao.getById(host.keyId) ?: return@forEach
                         if (key.hasPassphrase) return@forEach
                         if (!File(key.privateKeyPath).exists()) return@forEach
+                        StartupTiming.markOnce(
+                            "hostlist-reprobe-ssh-start",
+                            "hostId" to host.id,
+                            "host" to host.hostname,
+                            "port" to host.port,
+                        )
                         recheckHostSilently(host, key.privateKeyPath)
                     }
             } catch (_: IllegalStateException) {
@@ -632,6 +640,7 @@ class HostListViewModel @Inject constructor(
      * each call is a fresh HTTP request.
      */
     fun checkForUpdates() {
+        StartupTiming.markOnce("hostlist-update-check-start")
         viewModelScope.launch {
             val currentVersion = currentVersionName()
             if (currentVersion == null) {

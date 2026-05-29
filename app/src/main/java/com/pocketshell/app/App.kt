@@ -8,6 +8,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.usage.UsageScheduler
 import dagger.hilt.android.HiltAndroidApp
 import kotlinx.coroutines.CoroutineScope
@@ -75,15 +76,19 @@ class App : Application() {
     }
 
     override fun onCreate() {
+        StartupTiming.mark("app-on-create-start")
         super.onCreate()
         CrashReporter.install(this)
+        StartupTiming.mark("app-crash-reporter-installed")
         // No-background-work hook-up (issue #161 / D21). Attach the
         // ProcessLifecycleOwner observer before starting the loop so
         // the loop's `processStarted.first { it }` gate sees the
         // already-correct value rather than waiting for the first
         // ON_START event.
         usageScheduler.observeProcessLifecycle()
+        StartupTiming.mark("usage-lifecycle-observed")
         usageScheduler.start()
+        StartupTiming.mark("usage-scheduler-started")
 
         // Issue #235: auto-detach tmux `-CC` clients on lifecycle
         // background + reattach on foreground. The observer attaches
@@ -92,6 +97,7 @@ class App : Application() {
         // every config change) so the journey only fires when ALL
         // PocketShell activities go background.
         ProcessLifecycleOwner.get().lifecycle.addObserver(tmuxLifecycleObserver)
+        StartupTiming.mark("app-on-create-end")
     }
 
     private fun dispatchTmuxBackground() {

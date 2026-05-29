@@ -24,6 +24,7 @@ import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.session.reconcileAgentEvents
+import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -345,6 +346,14 @@ public class TmuxSessionViewModel @Inject constructor(
         // from logcat. The two early-return guards above intentionally do
         // NOT emit — they are no-ops, not reconnect attempts.
         val attempt = TMUX_CONNECT_ATTEMPTS.incrementAndGet()
+        StartupTiming.mark(
+            "tmux-connect-attempt",
+            "attempt" to attempt,
+            "hostId" to hostId,
+            "host" to host,
+            "port" to port,
+            "session" to target.sessionName,
+        )
         Log.i(
             ISSUE_145_RECONNECT_TAG,
             "tmux-connect-attempt count=$attempt host=$host port=$port " +
@@ -754,6 +763,15 @@ public class TmuxSessionViewModel @Inject constructor(
             // tag the slow-path test already greps for, with a distinct
             // event prefix so a `grep` matches either.
             val handshakeNumber = SSH_HANDSHAKE_ATTEMPTS.incrementAndGet()
+            StartupTiming.mark(
+                "tmux-ssh-handshake",
+                "attempt" to attempt,
+                "handshake" to handshakeNumber,
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "session" to target.sessionName,
+            )
             Log.i(
                 ISSUE_145_RECONNECT_TAG,
                 "tmux-ssh-handshake count=$handshakeNumber host=${target.host} " +
@@ -780,6 +798,14 @@ public class TmuxSessionViewModel @Inject constructor(
                 )
                 return
             }
+            StartupTiming.mark(
+                "ssh-connected",
+                "attempt" to attempt,
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "session" to target.sessionName,
+            )
             logAttachMilestone(
                 attempt = attempt,
                 target = target,
@@ -801,6 +827,14 @@ public class TmuxSessionViewModel @Inject constructor(
                 attempt = attempt,
                 sessionName = target.sessionName,
                 startedAtMs = startedAtMs,
+            )
+            StartupTiming.mark(
+                "tmux-control-command-started",
+                "attempt" to attempt,
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "session" to target.sessionName,
             )
             logAttachMilestone(
                 attempt = attempt,

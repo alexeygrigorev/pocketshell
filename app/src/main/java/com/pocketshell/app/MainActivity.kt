@@ -43,6 +43,7 @@ import com.pocketshell.app.session.SessionScreen
 import com.pocketshell.app.session.SessionViewModel
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteRemoteSource
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteTarget
+import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.settings.SettingsScreen
 import com.pocketshell.app.settings.ThemePreference
@@ -142,6 +143,7 @@ class MainActivity : FragmentActivity() {
     private var restoredComposerDraft by mutableStateOf("")
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        StartupTiming.mark("main-on-create-start", "savedInstanceState" to (savedInstanceState != null))
         super.onCreate(savedInstanceState)
         // Issue #177: prefer the explicit intent route (deep links, the
         // QS-tile forwarding chooser). Otherwise the launch lands on the
@@ -185,6 +187,12 @@ class MainActivity : FragmentActivity() {
         // is not restored.
         val intentDestination = initialDestinationFromIntent(intent)
         val resumingFromProcessDeath = savedInstanceState != null
+        StartupTiming.mark(
+            "main-initial-route-input",
+            "savedInstanceState" to resumingFromProcessDeath,
+            "intentDestination" to intentDestination.timingName(),
+            "hasImportPayload" to (importPayloadFromIntent(intent) != null),
+        )
         // Only read the persisted snapshot on the process-death resume path;
         // a fresh launch must not even touch the store so the cold-launch
         // route is always the host list (see [resolveInitialDestination]).
@@ -198,6 +206,12 @@ class MainActivity : FragmentActivity() {
             intentDestination = intentDestination,
             resumingFromProcessDeath = resumingFromProcessDeath,
             restoredDestination = restored?.let { with(lastSessionStore) { it.toDestination() } },
+        )
+        StartupTiming.mark(
+            "main-requested-destination",
+            "destination" to requestedDestination.timingName(),
+            "restoredSnapshot" to (restored != null),
+            "processDeathResume" to resumingFromProcessDeath,
         )
         restoredComposerDraft = if (requestedDestination is AppDestination.TmuxSession) {
             restored?.composerDraft.orEmpty()
@@ -226,6 +240,7 @@ class MainActivity : FragmentActivity() {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
         }
+        StartupTiming.mark("main-set-content-called")
         setContent {
             val settings by settingsRepository.settings.collectAsState()
             PocketShellTheme(mode = settings.theme.toThemeMode()) {
@@ -256,6 +271,7 @@ class MainActivity : FragmentActivity() {
                 }
             }
         }
+        StartupTiming.mark("main-on-create-end")
     }
 
     /**
@@ -293,6 +309,11 @@ class MainActivity : FragmentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         requestedDestination = initialDestinationFromIntent(intent)
+        StartupTiming.mark(
+            "main-new-intent",
+            "requestedDestination" to requestedDestination.timingName(),
+            "hasImportPayload" to (importPayloadFromIntent(intent) != null),
+        )
         importPayloadFromIntent(intent)?.let { pendingImportPayload = it }
     }
 }
@@ -374,17 +395,30 @@ private fun AppNavigator(
     var current: AppDestination by remember {
         mutableStateOf(requestedDestination)
     }
+    LaunchedEffect(Unit) {
+        StartupTiming.markOnce(
+            "app-navigator-first-composed",
+            "current" to current.timingName(),
+            "requestedDestination" to requestedDestination.timingName(),
+        )
+    }
 
     // Issue #177: report the current top destination up to the activity
     // so `onStop` can persist the in-session view. Fires on every
     // navigation, including the initial restored destination.
     LaunchedEffect(current) {
+        StartupTiming.mark("app-navigator-current", "destination" to current.timingName())
         onCurrentDestinationChanged(current)
     }
 
     val backStack = remember { mutableListOf<AppDestination>() }
 
     LaunchedEffect(requestedDestination) {
+        StartupTiming.mark(
+            "app-navigator-requested",
+            "requestedDestination" to requestedDestination.timingName(),
+            "current" to current.timingName(),
+        )
         if (requestedDestination == AppDestination.PortForwardChooser && current != requestedDestination) {
             backStack += current
             current = requestedDestination
@@ -925,6 +959,26 @@ internal fun importPayloadFromIntent(intent: Intent?): String? {
     val payload = data.getQueryParameter("payload")
     if (!payload.isNullOrBlank()) return payload
     return null
+}
+
+internal fun AppDestination.timingName(): String = when (this) {
+    AppDestination.HostList -> "HostList"
+    AppDestination.AddHost -> "AddHost"
+    is AppDestination.EditHost -> "EditHost"
+    AppDestination.Scan -> "Scan"
+    AppDestination.CrashReports -> "CrashReports"
+    AppDestination.Settings -> "Settings"
+    AppDestination.Usage -> "Usage"
+    AppDestination.AiCosts -> "AiCosts"
+    AppDestination.PortForwardChooser -> "PortForwardChooser"
+    is AppDestination.Session -> "Session(hostId=$hostId)"
+    is AppDestination.PortForwardPanel -> "PortForwardPanel(hostId=$hostId)"
+    is AppDestination.WatchedFolders -> "WatchedFolders(hostId=$hostId)"
+    is AppDestination.TmuxSession -> "TmuxSession(hostId=$hostId,session=$sessionName)"
+    is AppDestination.FolderList -> "FolderList(hostId=$hostId)"
+    is AppDestination.RepoBrowser -> "RepoBrowser(hostId=$hostId)"
+    is AppDestination.EnvFiles -> "EnvFiles(hostId=$hostId)"
+    is AppDestination.RecurringJobs -> "RecurringJobs(session=$sessionName)"
 }
 
 private const val DefaultTmuxSessionName = "pocketshell"

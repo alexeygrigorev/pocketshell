@@ -17,21 +17,8 @@ if [[ -n "${RUN_ID:-}" ]]; then
   esac
 fi
 
-# Acquire an exclusive AVD lock so parallel-worktree gate runs serialize on the
-# shared local Android emulator. Sibling `connectedAndroidTest` invocations
-# from individual implementer/reviewer worktrees are intentionally NOT held by
-# this lock — only the release-gate scripts that drive long sequential
-# emulator workflows (see issue #182). When invoked from a parent gate script
-# that already holds the lock, the env-var guard makes this a no-op.
-LOCK_FILE="${POCKETSHELL_AVD_LOCK_FILE:-$ROOT_DIR/build/.avd-lock}"
-if [[ -z "${POCKETSHELL_AVD_LOCK_ACQUIRED:-}" ]]; then
-  mkdir -p "$(dirname "$LOCK_FILE")"
-  if ! flock -n "$LOCK_FILE" -c true; then
-    echo "Another emulator-touching script holds the AVD lock ($LOCK_FILE); waiting..." >&2
-  fi
-  export POCKETSHELL_AVD_LOCK_ACQUIRED=1
-  exec flock -o "$LOCK_FILE" "$0" "$@"
-fi
+source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+pocketshell_acquire_avd_lock "$ROOT_DIR"
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
@@ -314,6 +301,7 @@ wait_for_ssh_fixture() {
 
 collect_diagnostics() {
   local exit_code=$?
+  set +e
   {
     printf 'exit_code=%s\n' "$exit_code"
     printf 'run_dir=%s\n' "$RUN_DIR"
@@ -323,6 +311,7 @@ collect_diagnostics() {
   docker compose -f "$COMPOSE_FILE" logs --no-color --timestamps "$AGENT_SERVICE" > "$RUN_DIR/docker-agents.log" 2>&1 || true
   "$ADB" exec-out screencap -p > "$RUN_DIR/final-screen.png" 2>/dev/null || true
   "$ADB" logcat -d -v threadtime -t 4000 > "$RUN_DIR/logcat.txt" 2>&1 || true
+  pocketshell_release_avd_lock
 }
 
 case "$RUN_DIR" in

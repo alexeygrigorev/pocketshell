@@ -4,21 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-# Acquire an exclusive AVD lock so parallel-worktree gate runs serialize on the
-# shared local Android emulator. Sibling `connectedAndroidTest` invocations
-# from individual implementer/reviewer worktrees are intentionally NOT held by
-# this lock — only the release-gate scripts that drive long sequential
-# emulator workflows (see issue #182). Skipped when the caller is just asking
-# for --help so help stays cheap and never blocks on a sibling gate run.
-LOCK_FILE="${POCKETSHELL_AVD_LOCK_FILE:-$ROOT_DIR/build/.avd-lock}"
-if [[ "${1:-}" != "--help" && "${1:-}" != "-h" && -z "${POCKETSHELL_AVD_LOCK_ACQUIRED:-}" ]]; then
-  mkdir -p "$(dirname "$LOCK_FILE")"
-  if ! flock -n "$LOCK_FILE" -c true; then
-    echo "Another emulator-touching script holds the AVD lock ($LOCK_FILE); waiting..." >&2
-  fi
-  export POCKETSHELL_AVD_LOCK_ACQUIRED=1
-  exec flock -o "$LOCK_FILE" "$0" "$@"
-fi
+source "$ROOT_DIR/scripts/lib/avd-lock.sh"
+pocketshell_acquire_avd_lock "$ROOT_DIR" "${1:-}"
 
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/release-emulator-validation}"
 if [[ "$LOG_ROOT" != /* ]]; then

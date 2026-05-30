@@ -67,7 +67,8 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.model.HostSetupState
 import com.pocketshell.uikit.theme.PocketShellColors
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
@@ -191,7 +192,7 @@ fun HostListScreen(
 
     // Resolve-key-then-navigate is async (suspending DAO read) but the tap
     // originates from the main thread. The request is funneled through a
-    // SharedFlow consumed by a LaunchedEffect — keeps suspending work out
+    // buffered Channel consumed by a LaunchedEffect — keeps suspending work out
     // of the click handler.
     //
     // Issue #38 item 2: keyed on `Unit` (not `hosts`) so the collector is
@@ -205,14 +206,14 @@ fun HostListScreen(
     // sheet, and signals readiness via `pendingNavigation`. The
     // navigation collector watches that StateFlow and fires
     // `onOpenSession` only once `ready == true`.
-    val tapRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
-    val portPanelRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
-    val recheckRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
+    val tapRequests = remember { Channel<Long>(capacity = Channel.BUFFERED) }
+    val portPanelRequests = remember { Channel<Long>(capacity = Channel.BUFFERED) }
+    val recheckRequests = remember { Channel<Long>(capacity = Channel.BUFFERED) }
     // Issue #206: kebab → "Watched folders" follows the same resolve-
     // key-then-navigate pattern as Ports so the discover probe can
     // authenticate with the same one-shot biometric / passphrase
     // unlock the user already cleared for a session start.
-    val watchedFoldersRequests = remember { MutableSharedFlow<Long>(extraBufferCapacity = 4) }
+    val watchedFoldersRequests = remember { Channel<Long>(capacity = Channel.BUFFERED) }
     val currentHosts by rememberUpdatedState(hosts)
     val currentOpenFolderList by rememberUpdatedState(onOpenFolderList)
     val currentOpenPortForwardPanel by rememberUpdatedState(onOpenPortForwardPanel)
@@ -270,14 +271,14 @@ fun HostListScreen(
     }
 
     LaunchedEffect(Unit) {
-        tapRequests.collect { hostId ->
+        tapRequests.receiveAsFlow().collect { hostId ->
             val host = currentHosts.find { it.id == hostId } ?: return@collect
             val key = viewModel.keyFor(host.keyId) ?: return@collect
             requestProtectedConnection(host, key, PendingPassphraseAction.OpenSession)
         }
     }
     LaunchedEffect(Unit) {
-        portPanelRequests.collect { hostId ->
+        portPanelRequests.receiveAsFlow().collect { hostId ->
             val host = currentHosts.find { it.id == hostId } ?: return@collect
             val key = viewModel.keyFor(host.keyId) ?: return@collect
             requestProtectedConnection(host, key, PendingPassphraseAction.OpenPorts)
@@ -286,7 +287,7 @@ fun HostListScreen(
     // Issue #206: watched-folders kebab item — same resolve-key-then-
     // navigate flow as Ports above.
     LaunchedEffect(Unit) {
-        watchedFoldersRequests.collect { hostId ->
+        watchedFoldersRequests.receiveAsFlow().collect { hostId ->
             val host = currentHosts.find { it.id == hostId } ?: return@collect
             val key = viewModel.keyFor(host.keyId) ?: return@collect
             requestProtectedConnection(host, key, PendingPassphraseAction.OpenWatchedFolders)
@@ -298,7 +299,7 @@ fun HostListScreen(
     // surfaces a one-shot acknowledgement message via [recheckMessage]
     // which renders in the share-banner slot.
     LaunchedEffect(Unit) {
-        recheckRequests.collect { hostId ->
+        recheckRequests.receiveAsFlow().collect { hostId ->
             val host = currentHosts.find { it.id == hostId } ?: return@collect
             val key = viewModel.keyFor(host.keyId) ?: return@collect
             viewModel.recheckSetup(host, key.privateKeyPath)
@@ -493,7 +494,7 @@ fun HostListScreen(
                                 name = host.name,
                                 subtitle = "${host.username}@${host.hostname}:${host.port}",
                                 status = hostStatus,
-                                onClick = { tapRequests.tryEmit(host.id) },
+                                onClick = { tapRequests.trySend(host.id) },
                                 // Issue #113: long-press now opens the same
                                 // overflow menu the kebab exposes — gives
                                 // users two equivalent ways to reach the
@@ -514,7 +515,7 @@ fun HostListScreen(
                                     // `pocketshellInstalled == false`, both of
                                     // which surface the sheet when the
                                     // probe re-runs.
-                                    { tapRequests.tryEmit(host.id) }
+                                    { tapRequests.trySend(host.id) }
                                 } else null,
                                 trailingContent = {
                                     HostOverflowMenuAnchor(
@@ -525,11 +526,11 @@ fun HostListScreen(
                                         usageBadgeTestTag = HOST_USAGE_BADGE_TAG_PREFIX + host.id,
                                         onOpenPorts = {
                                             menuOpen = false
-                                            portPanelRequests.tryEmit(host.id)
+                                            portPanelRequests.trySend(host.id)
                                         },
                                         onOpenWatchedFolders = {
                                             menuOpen = false
-                                            watchedFoldersRequests.tryEmit(host.id)
+                                            watchedFoldersRequests.trySend(host.id)
                                         },
                                         onShare = {
                                             menuOpen = false
@@ -537,7 +538,7 @@ fun HostListScreen(
                                         },
                                         onRecheckSetup = {
                                             menuOpen = false
-                                            recheckRequests.tryEmit(host.id)
+                                            recheckRequests.trySend(host.id)
                                         },
                                     )
                                 },

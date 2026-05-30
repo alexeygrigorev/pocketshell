@@ -25,6 +25,7 @@ import com.pocketshell.app.hosts.SETTINGS_BUTTON_TAG
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_NEW_SESSION_FAB_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
+import com.pocketshell.app.projects.folderHeaderClickTestTag
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
@@ -146,20 +147,33 @@ class WalkthroughVisualScreenshotTest {
             }
 
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-            // Issue #171: post-tap surface is the FolderListScreen
-            // ("Folders" title) with sessions visible inline as
-            // SessionRow nodes under their folder header. The seeded
-            // session lives in its session_path so it surfaces under a
-            // folder row; tapping its name routes to TmuxSession.
+            // Issue #171 + #299: post-tap surface is the tree-mode
+            // FolderListScreen ("Workspace" title). The seeded session
+            // lives in its session_path and is visible after expanding the
+            // project row.
+            val sessionProjectPath = "/home/$DEFAULT_USER"
             compose.waitUntil(timeoutMillis = 20_000) {
-                compose.onAllNodesWithText("Folders").fetchSemanticsNodes().isNotEmpty() &&
-                    compose.onAllNodesWithText(tmuxSessionName).fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodesWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty() &&
+                    compose.onAllNodesWithText("Workspace", useUnmergedTree = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty() &&
+                    compose.onAllNodesWithTag(folderHeaderClickTestTag(sessionProjectPath), useUnmergedTree = true)
+                        .fetchSemanticsNodes()
+                        .isNotEmpty()
             }
             compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true).assertExists()
             compose.onNodeWithTag(FOLDER_LIST_NEW_SESSION_FAB_TAG, useUnmergedTree = true).assertExists()
+            compose.onNodeWithTag(folderHeaderClickTestTag(sessionProjectPath), useUnmergedTree = true).performClick()
+            compose.waitUntil(timeoutMillis = 10_000) {
+                compose.onAllNodesWithText(tmuxSessionName, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
             val sessionPickerScreenshot = WalkthroughScreenshotArtifacts.capture("02-host-setup-folder-list")
             assertTextsClearOfNavigationBar(
-                texts = listOf("Folders", tmuxSessionName),
+                texts = listOf("Workspace", tmuxSessionName),
                 screenshotName = "02-host-setup-folder-list.png",
                 artifact = sessionPickerScreenshot,
             )
@@ -221,6 +235,9 @@ class WalkthroughVisualScreenshotTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    pocketshellInstalled = true,
+                    pocketshellLastDetectedAt = System.currentTimeMillis(),
+                    pocketshellVersionCompatible = true,
                 ),
             )
             db.snippetDao().insert(

@@ -39,6 +39,7 @@ COMPOSE_FILE="${COMPOSE_FILE:-tests/docker/docker-compose.yml}"
 SSH_KEY="${SSH_KEY:-tests/docker/test_key}"
 APK_PATH="${APK_PATH:-app/build/outputs/apk/debug/app-debug.apk}"
 TEST_APK_PATH="${TEST_APK_PATH:-app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"
+APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS="${APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS:-3}"
 
 APP_WALKTHROUGH_TESTS=(
   "com.pocketshell.app.composer.PromptComposerSmokeTest#recordingAndTranscribingStatesAreVisible"
@@ -80,6 +81,7 @@ Environment overrides:
   COMPOSE_FILE=tests/docker/docker-compose.yml
   APK_PATH=app/build/outputs/apk/debug/app-debug.apk
   TEST_APK_PATH=app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+  APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS=3
 USAGE
 }
 
@@ -677,13 +679,32 @@ instrumentation_output_has_failure_markers() {
   printf '%s\n' "\$output" | grep -Eq '(^FAILURES!!!$|^FAILURE: |^INSTRUMENTATION_STATUS_CODE: -[0-9]+$|^INSTRUMENTATION_STATUS: stack=|^[[:space:]]*at (com[.]pocketshell|androidx[.]test|org[.]junit|kotlin[.]|java[.]|android[.])|^[[:alnum:]_.]*(Exception|Error): |^Process crashed[.])'
 }
 
+logcat_has_app_or_test_failure_markers() {
+  grep -Eq 'Process: com[.]pocketshell[.]app|FATAL EXCEPTION.*com[.]pocketshell[.]app|FATAL SIGNAL.*com[.]pocketshell[.]app|AndroidRuntime.*com[.]pocketshell[.]app|(^|[[:space:]])FAILURES!!!($|[[:space:]])|INSTRUMENTATION_STATUS: stack=|INSTRUMENTATION_RESULT: shortMsg=Process crashed' "\$full_logcat_file"
+}
+
+logcat_has_adb_transport_drop_markers() {
+  grep -Eq 'adbd[[:space:]].*(connection terminated|offline|read failed)|host-[0-9]+: read failed|UiAutomation service owner died' "\$full_logcat_file"
+}
+
+should_retry_interrupted_instrumentation() {
+  [ "\$instrument_status" -eq 255 ] || return 1
+  printf '%s\n' "\$output" | grep -q 'INSTRUMENTATION_CODE: -1' && return 1
+  instrumentation_output_has_failure_markers && return 1
+  logcat_has_app_or_test_failure_markers && return 1
+  logcat_has_adb_transport_drop_markers
+}
+
 '$ADB' logcat -c || true
-for attempt in 1 2; do
+for attempt in \$(seq 1 '$APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS'); do
   '$ADB' logcat -c || true
   set +e
   output=\$('$ADB' shell am instrument -w -r -e class '$selector' com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner 2>&1)
   instrument_status=\$?
   set -e
+  if [ "\$instrument_status" -ne 0 ]; then
+    sleep 2
+  fi
   '$ADB' logcat -d -v time -t 5000 > "\$full_logcat_file" 2>&1 || true
   printf '%s\n' "\$output"
   if [ "\$instrument_status" -eq 0 ] &&
@@ -696,6 +717,20 @@ for attempt in 1 2; do
     grep -q 'Crash of app com[.]pocketshell[.]app running instrumentation' "\$full_logcat_file"; then
     cp "\$full_logcat_file" "\$full_logcat_file.attempt1" || true
     printf 'Focused instrumentation crashed after external app force-stop; retrying selector once.\n' >&2
+    for package in com.pocketshell.app.test com.pocketshell.app; do
+      '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
+    done
+    '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
+    '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
+    sleep 2
+    continue
+  fi
+  if should_retry_interrupted_instrumentation && [ "\$attempt" -lt '$APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS' ]; then
+    cp "\$full_logcat_file" "\$full_logcat_file.attempt\$attempt" || true
+    printf '%s\n' "\$output" > "\$diagnostics_file.attempt\$attempt-output" || true
+    printf 'Focused instrumentation interrupted by adb transport drop on attempt %s; retrying selector.\n' "\$attempt" >&2
+    '$ADB' reconnect >/dev/null 2>&1 || true
+    '$ADB' wait-for-device >/dev/null 2>&1 || true
     for package in com.pocketshell.app.test com.pocketshell.app; do
       '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
     done
@@ -735,6 +770,10 @@ printf 'Gradle flags: %s\n' "$GRADLE_FLAGS"
 require_executable "$ADB" "adb"
 require_executable "$EMULATOR" "emulator"
 require_command_or_executable "$PYTHON3" "python3"
+
+if ! [[ "$APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+  fail "APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS must be a positive integer"
+fi
 
 run_step "android-sdk-paths" "$ADB" version
 run_step "available-avds" "$EMULATOR" -list-avds

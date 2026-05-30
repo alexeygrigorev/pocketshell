@@ -121,6 +121,7 @@ class AppAssistantActionsTest {
                 payload: FolderImportPayload,
             ): Result<String> = Result.success("$folderPath/${payload.remoteName}")
         },
+        createdProjects: MutableList<String> = mutableListOf(),
     ): AppAssistantActions {
         val executor = object : AssistantSshExecutor {
             override suspend fun <T> withSession(
@@ -136,6 +137,7 @@ class AppAssistantActionsTest {
             sshExecutor = executor,
             resolveParams = { name -> if (name == "dev") params else null },
             activeParams = { params },
+            onProjectCreated = { createdProjects += it },
         )
     }
 
@@ -205,6 +207,30 @@ class AppAssistantActionsTest {
         val result = actions.startSession("dev", "/home/dev/proj", "codex")
         assertTrue(result.ok)
         assertTrue(bridge.navigated.any { it is AppDestination.TmuxSession })
+    }
+
+    @Test
+    fun createProject_usesFolderGatewayAndReportsCreatedPath() = runTest {
+        val created = mutableListOf<String>()
+        val actions = actions(responder = { ExecResult("", "", 0) }, createdProjects = created)
+        val result = actions.createProject("dev", "/home/dev/git", "new-app")
+        assertTrue(result.ok)
+        assertEquals(listOf("/home/dev/git/new-app"), created)
+    }
+
+    @Test
+    fun cloneRepo_successReportsCreatedPathForHostDetailRefresh() = runTest {
+        val created = mutableListOf<String>()
+        val actions = actions(
+            responder = { cmd ->
+                if (cmd.contains("repos clone")) ExecResult("/home/dev/git/repo\n", "", 0)
+                else ExecResult("", "", 0)
+            },
+            createdProjects = created,
+        )
+        val result = actions.cloneRepo("owner/repo", null)
+        assertTrue(result.ok)
+        assertEquals(listOf("/home/dev/git/repo"), created)
     }
 
     @Test

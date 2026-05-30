@@ -798,6 +798,9 @@ private fun AppNavigator(
                     ),
                 )
             },
+            onAssistantNavigate = { destination ->
+                navigate(destination)
+            },
             suggestStartDirectories = { prefix ->
                 startDirectoryAutocomplete.suggestions(
                     target = StartDirectoryAutocompleteTarget(

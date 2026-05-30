@@ -88,6 +88,10 @@ internal class AppAssistantActions(
     private val resolveParams: suspend (hostName: String) -> AssistantSshParams?,
     /** SSH params for the active host (for path-scoped inspect/exec). */
     private val activeParams: () -> AssistantSshParams?,
+    /** Extra screen-specific context appended to get_context. */
+    private val extraContext: suspend () -> String = { "" },
+    /** Called when a project path is created or cloned so host detail can refresh optimistically. */
+    private val onProjectCreated: (String) -> Unit = {},
 ) : AssistantActions {
 
     override suspend fun getContext(): String = buildString {
@@ -95,6 +99,8 @@ internal class AppAssistantActions(
         appendLine("active_host: ${bridge.activeHostName() ?: "(none)"}")
         appendLine("active_session: ${bridge.activeSessionName() ?: "(none)"}")
         appendLine("cwd: ${bridge.activeCwd() ?: "(unknown)"}")
+        val extra = extraContext().trim()
+        if (extra.isNotEmpty()) appendLine(extra)
     }.trim()
 
     override suspend fun listHosts(): String {
@@ -235,6 +241,25 @@ internal class AppAssistantActions(
         )
     }
 
+    override suspend fun createProject(host: String, parentPath: String, folderName: String): ActionResult {
+        val params = resolveParams(host) ?: return ActionResult.error("Unknown host: $host")
+        val entity = hostEntity(params) ?: return ActionResult.error("Unknown host: $host")
+        val result = folderListGateway.createEmptyProject(
+            host = entity,
+            keyPath = params.keyPath,
+            passphrase = params.passphrase,
+            parentPath = parentPath,
+            folderName = folderName,
+        )
+        return result.fold(
+            onSuccess = { path ->
+                onProjectCreated(path)
+                ActionResult.ok("Created project $path.")
+            },
+            onFailure = { ActionResult.error("Failed to create project: ${it.message}") },
+        )
+    }
+
     override suspend fun runCommand(command: String): ActionResult {
         // Safety already validated by the loop before this call.
         if (bridge.activeHostName() == null) {
@@ -278,6 +303,7 @@ internal class AppAssistantActions(
             when {
                 result.exitCode == 0 -> {
                     val path = result.stdout.lineSequence().firstOrNull { it.isNotBlank() }?.trim()
+                    path?.let(onProjectCreated)
                     ActionResult.ok("Cloned $fullName to ${path ?: root}.")
                 }
                 result.exitCode == 127 ->

@@ -9,6 +9,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,6 +29,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -54,9 +56,12 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.app.assistant.AssistantUiState
+import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.app.share.FilenameSanitiser
 import com.pocketshell.app.share.ShareUploader
+import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlin.math.PI
@@ -128,6 +133,7 @@ fun FolderListScreen(
      * from the same data the user saw here (D24).
      */
     onEditEnv: (path: String, label: String, allFolders: List<Pair<String, String>>) -> Unit,
+    onAssistantNavigate: (AppDestination) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: FolderListViewModel = hiltViewModel(),
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
@@ -136,6 +142,7 @@ fun FolderListScreen(
     LaunchedEffect(hostId, hostname, port, username, keyPath) {
         viewModel.bind(
             hostId = hostId,
+            hostName = hostName,
             hostname = hostname,
             port = port,
             username = username,
@@ -154,6 +161,7 @@ fun FolderListScreen(
     }
     val state by viewModel.state.collectAsState()
     val actionStatus by viewModel.actionStatus.collectAsState()
+    val assistantState by viewModel.assistantState.collectAsState()
     val context = LocalContext.current
     val showFlatFolderList = hostDetailViewMode == HostDetailViewMode.Flat
     var pickerFolder by remember { mutableStateOf<PickerTarget?>(null) }
@@ -161,6 +169,11 @@ fun FolderListScreen(
     var emptyProjectFolder by remember { mutableStateOf<PickerTarget?>(null) }
     var importFolder by remember { mutableStateOf<PickerTarget?>(null) }
     var rootAddSheet by remember { mutableStateOf<FolderTreeRoot?>(null) }
+    var showAssistant by remember { mutableStateOf(false) }
+
+    LaunchedEffect(viewModel) {
+        viewModel.assistantNavRequests.collect { onAssistantNavigate(it) }
+    }
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent(),
     ) { uri ->
@@ -190,6 +203,7 @@ fun FolderListScreen(
                 onBack = onBack,
                 onBrowseRepos = { onBrowseRepos(null) },
                 onOpenWorkspaceSettings = onOpenWorkspaceSettings,
+                onOpenAssistant = { showAssistant = true },
             )
             when (val s = state) {
                 FolderListUiState.Loading -> LoadingPanel()
@@ -258,6 +272,23 @@ fun FolderListScreen(
             contentColor = PocketShellColors.OnAccent,
         ) {
             Text(text = "+", fontSize = 28.sp, fontWeight = FontWeight.Medium)
+        }
+
+        if (showAssistant || assistantState !is AssistantUiState.Idle) {
+            HostDetailAssistantPanel(
+                state = assistantState,
+                onSubmit = viewModel::startAssistant,
+                onConfirm = viewModel::confirmAssistantAction,
+                onCorrect = viewModel::correctAssistantAction,
+                onCancel = viewModel::cancelAssistantAction,
+                onDismiss = {
+                    viewModel.dismissAssistant()
+                    showAssistant = false
+                },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(start = 12.dp, end = 12.dp, bottom = 88.dp),
+            )
         }
     }
 
@@ -392,6 +423,7 @@ private fun FolderListAppBar(
     onBack: () -> Unit,
     onBrowseRepos: () -> Unit,
     onOpenWorkspaceSettings: () -> Unit,
+    onOpenAssistant: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -443,12 +475,122 @@ private fun FolderListAppBar(
         }
         Spacer(modifier = Modifier.size(8.dp))
         TopBarIconButton(
+            contentDescription = "Host assistant",
+            testTag = FOLDER_LIST_ASSISTANT_TAG,
+            onClick = onOpenAssistant,
+        ) {
+            AssistantSparkIcon()
+        }
+        Spacer(modifier = Modifier.size(8.dp))
+        TopBarIconButton(
             contentDescription = "Workspace settings",
             testTag = FOLDER_LIST_WORKSPACE_SETTINGS_TAG,
             onClick = onOpenWorkspaceSettings,
         ) {
             SettingsGearIcon()
         }
+    }
+}
+
+@Composable
+private fun HostDetailAssistantPanel(
+    state: AssistantUiState,
+    onSubmit: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onCorrect: (String) -> Unit,
+    onCancel: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var prompt by remember { mutableStateOf("") }
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface, RoundedCornerShape(12.dp))
+            .border(1.dp, PocketShellColors.AccentDim, RoundedCornerShape(12.dp))
+            .padding(10.dp)
+            .testTag(FOLDER_LIST_ASSISTANT_PANEL_TAG),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "Assistant",
+                color = PocketShellColors.Text,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag(FOLDER_LIST_ASSISTANT_CLOSE_TAG),
+            ) {
+                Text("Close", color = PocketShellColors.TextSecondary, fontSize = 12.sp)
+            }
+        }
+        if (state !is AssistantUiState.Idle) {
+            AssistantStrip(
+                state = state,
+                onConfirm = onConfirm,
+                onCorrect = onCorrect,
+                onCancel = onCancel,
+                onDismiss = onDismiss,
+            )
+        }
+        if (state is AssistantUiState.Idle || state is AssistantUiState.Done || state is AssistantUiState.Error) {
+            OutlinedTextField(
+                value = prompt,
+                onValueChange = { prompt = it },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(FOLDER_LIST_ASSISTANT_PROMPT_TAG),
+                placeholder = {
+                    Text("Create a project or start a session", color = PocketShellColors.TextSecondary)
+                },
+                keyboardActions = KeyboardActions(onDone = {
+                    val text = prompt.trim()
+                    if (text.isNotEmpty()) {
+                        prompt = ""
+                        onSubmit(text)
+                    }
+                }),
+                singleLine = true,
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(
+                    onClick = {
+                        val text = prompt.trim()
+                        if (text.isNotEmpty()) {
+                            prompt = ""
+                            onSubmit(text)
+                        }
+                    },
+                    modifier = Modifier.testTag(FOLDER_LIST_ASSISTANT_SUBMIT_TAG),
+                ) {
+                    Text("Ask", color = PocketShellColors.Accent, fontWeight = FontWeight.SemiBold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AssistantSparkIcon() {
+    val color = PocketShellColors.TextSecondary
+    Canvas(modifier = Modifier.size(20.dp)) {
+        val center = androidx.compose.ui.geometry.Offset(size.width / 2f, size.height / 2f)
+        drawLine(
+            color = color,
+            start = androidx.compose.ui.geometry.Offset(center.x, size.height * 0.12f),
+            end = androidx.compose.ui.geometry.Offset(center.x, size.height * 0.88f),
+            strokeWidth = size.minDimension * 0.09f,
+        )
+        drawLine(
+            color = color,
+            start = androidx.compose.ui.geometry.Offset(size.width * 0.12f, center.y),
+            end = androidx.compose.ui.geometry.Offset(size.width * 0.88f, center.y),
+            strokeWidth = size.minDimension * 0.09f,
+        )
+        drawCircle(color = color, radius = size.minDimension * 0.12f, center = center)
     }
 }
 
@@ -1177,6 +1319,11 @@ const val FOLDER_LIST_NEW_SESSION_FAB_TAG: String = "folder-list:new-session-fab
 const val FOLDER_LIST_BROWSE_REPOS_TAG: String = "folder-list:browse-repos"
 const val FOLDER_LIST_VIEW_TOGGLE_TAG: String = "folder-list:view-toggle"
 const val FOLDER_LIST_WORKSPACE_SETTINGS_TAG: String = "folder-list:workspace-settings"
+const val FOLDER_LIST_ASSISTANT_TAG: String = "folder-list:assistant"
+const val FOLDER_LIST_ASSISTANT_PANEL_TAG: String = "folder-list:assistant:panel"
+const val FOLDER_LIST_ASSISTANT_PROMPT_TAG: String = "folder-list:assistant:prompt"
+const val FOLDER_LIST_ASSISTANT_SUBMIT_TAG: String = "folder-list:assistant:submit"
+const val FOLDER_LIST_ASSISTANT_CLOSE_TAG: String = "folder-list:assistant:close"
 const val FOLDER_LIST_ACTION_STATUS_TAG: String = "folder-list:action-status"
 const val FOLDER_LIST_ACTION_STATUS_DISMISS_TAG: String = "folder-list:action-status:dismiss"
 

@@ -1,19 +1,37 @@
 package com.pocketshell.app.projects
 
+import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.assistant.AppAssistantActions
+import com.pocketshell.app.assistant.AssistantActions
+import com.pocketshell.app.assistant.AssistantInstallId
+import com.pocketshell.app.assistant.AssistantSshExecutor
+import com.pocketshell.app.assistant.AssistantSshParams
+import com.pocketshell.app.assistant.AssistantUiState
+import com.pocketshell.app.assistant.ExecutorTraceSink
+import com.pocketshell.app.assistant.RealAssistantSshExecutor
+import com.pocketshell.app.assistant.SessionActionBridge
+import com.pocketshell.app.assistant.SessionAssistantController
+import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.sessions.WarmSshConnections
 import com.pocketshell.app.sessions.WarmSshTarget
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.uikit.model.SessionAgentKind
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
@@ -143,6 +161,9 @@ class FolderListViewModel @Inject constructor(
     private val hostDao: HostDao,
     private val projectRootDao: ProjectRootDao,
     private val warmSshConnections: WarmSshConnections = WarmSshConnections(),
+    @ApplicationContext private val applicationContext: Context? = null,
+    private val assistantClientFactory: AssistantLlmClientFactory? = null,
+    private val reposRemoteSource: ReposRemoteSource? = null,
 ) : ViewModel() {
 
     private val _state: MutableStateFlow<FolderListUiState> =
@@ -152,6 +173,15 @@ class FolderListViewModel @Inject constructor(
     private val _actionStatus: MutableStateFlow<FolderActionStatus> =
         MutableStateFlow(FolderActionStatus.Idle)
     val actionStatus: StateFlow<FolderActionStatus> = _actionStatus.asStateFlow()
+
+    private val assistant: SessionAssistantController =
+        SessionAssistantController(scope = viewModelScope, sessionFactory = ::buildAssistantDeps)
+    internal val assistantState: StateFlow<AssistantUiState> = assistant.state
+
+    private val _assistantNavRequests: MutableSharedFlow<AppDestination> = MutableSharedFlow(extraBufferCapacity = 1)
+    val assistantNavRequests: SharedFlow<AppDestination> = _assistantNavRequests.asSharedFlow()
+
+    private var assistantSshExecutor: AssistantSshExecutor = RealAssistantSshExecutor()
 
     private var bound: BoundParams? = null
     private var warmJob: Job? = null
@@ -179,6 +209,7 @@ class FolderListViewModel @Inject constructor(
      */
     fun bind(
         hostId: Long,
+        hostName: String,
         hostname: String,
         port: Int,
         username: String,
@@ -187,6 +218,7 @@ class FolderListViewModel @Inject constructor(
     ) {
         val params = BoundParams(
             hostId = hostId,
+            hostName = hostName,
             hostname = hostname,
             port = port,
             username = username,
@@ -348,6 +380,102 @@ class FolderListViewModel @Inject constructor(
         emitReady()
     }
 
+    @androidx.annotation.VisibleForTesting
+    internal fun setAssistantSshExecutor(executor: AssistantSshExecutor) {
+        assistantSshExecutor = executor
+    }
+
+    fun startAssistant(prompt: String) = assistant.start(prompt)
+
+    fun confirmAssistantAction() = assistant.confirm()
+
+    fun correctAssistantAction(correction: String) = assistant.correct(correction)
+
+    fun cancelAssistantAction() = assistant.cancel()
+
+    fun dismissAssistant() = assistant.dismiss()
+
+    private fun buildAssistantDeps(): SessionAssistantController.AssistantRunDeps? {
+        val context = applicationContext ?: return null
+        val client = assistantClientFactory?.create() ?: return null
+        val repos = reposRemoteSource ?: return null
+        val params = activeAssistantParams() ?: return null
+
+        val bridge = object : SessionActionBridge {
+            override fun activeHostName(): String? = params.hostName
+            override fun activeCwd(): String? = null
+            override fun activeSessionName(): String? = null
+            override fun currentScreenLabel(): String = "host detail for ${params.hostName}"
+            override fun sendCommand(command: String) = Unit
+            override fun navigate(destination: AppDestination) {
+                _assistantNavRequests.tryEmit(destination)
+            }
+        }
+
+        val actions: AssistantActions = AppAssistantActions(
+            bridge = bridge,
+            hostDao = hostDao,
+            folderListGateway = gateway,
+            reposRemoteSource = repos,
+            sshExecutor = assistantSshExecutor,
+            resolveParams = { name ->
+                params.takeIf {
+                    name.isBlank() ||
+                        name == it.hostName ||
+                        name == it.hostname
+                }
+            },
+            activeParams = ::activeAssistantParams,
+            extraContext = ::hostDetailAssistantContext,
+            onProjectCreated = ::recordAssistantCreatedProject,
+        )
+
+        return SessionAssistantController.AssistantRunDeps(
+            client = client,
+            actions = actions,
+            traceSink = ExecutorTraceSink(assistantSshExecutor, ::activeAssistantParams),
+            installId = AssistantInstallId.get(context),
+            sessionId = null,
+        )
+    }
+
+    private fun activeAssistantParams(): AssistantSshParams? {
+        val params = bound ?: return null
+        return AssistantSshParams(
+            hostId = params.hostId,
+            hostName = params.hostName,
+            hostname = params.hostname,
+            port = params.port,
+            username = params.username,
+            keyPath = params.keyPath,
+            passphrase = params.passphrase,
+        )
+    }
+
+    private fun hostDetailAssistantContext(): String = buildString {
+        appendLine("workspace_roots:")
+        val roots = (state.value as? FolderListUiState.Ready)?.treeRoots.orEmpty()
+        if (roots.isEmpty()) {
+            lastWatchedFolders.forEach { appendLine("- ${it.label}: ${it.path}") }
+        } else {
+            roots.forEach { root ->
+                appendLine("- ${root.label}: ${root.path}")
+                root.folders.take(8).forEach { folder ->
+                    appendLine("  - ${folder.label}: ${folder.path} (${folder.sessions.size} sessions)")
+                }
+            }
+        }
+        appendLine("known_sessions:")
+        lastSessions.take(12).forEach { appendLine("- ${it.sessionName}") }
+    }.trim()
+
+    private fun recordAssistantCreatedProject(path: String) {
+        val canonical = canonicalisePath(path)
+        lastCreatedFolders = lastCreatedFolders + (canonical to defaultLabelForPath(canonical))
+        emitReady()
+        refresh()
+    }
+
     private fun startPolling() {
         val params = bound ?: return
         pollingJob?.cancel()
@@ -474,6 +602,7 @@ class FolderListViewModel @Inject constructor(
 
     private data class BoundParams(
         val hostId: Long,
+        val hostName: String,
         val hostname: String,
         val port: Int,
         val username: String,
@@ -484,6 +613,7 @@ class FolderListViewModel @Inject constructor(
             if (this === other) return true
             if (other !is BoundParams) return false
             if (hostId != other.hostId) return false
+            if (hostName != other.hostName) return false
             if (hostname != other.hostname) return false
             if (port != other.port) return false
             if (username != other.username) return false
@@ -497,6 +627,7 @@ class FolderListViewModel @Inject constructor(
 
         override fun hashCode(): Int {
             var result = hostId.hashCode()
+            result = 31 * result + hostName.hashCode()
             result = 31 * result + hostname.hashCode()
             result = 31 * result + port
             result = 31 * result + username.hashCode()

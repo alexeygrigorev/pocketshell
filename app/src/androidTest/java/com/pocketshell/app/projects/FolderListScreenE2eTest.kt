@@ -12,6 +12,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextInput
 import androidx.core.graphics.createBitmap
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -190,6 +191,16 @@ class FolderListScreenE2eTest {
             .assertExists()
             .performClick()
         compose.waitUntil(timeoutMillis = 5_000) { openedWorkspaceSettings }
+        compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_TAG)
+            .assertExists()
+            .performClick()
+        compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_PANEL_TAG).assertExists()
+        compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_PROMPT_TAG)
+            .performTextInput("create a project called notes under code")
+        compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_SUBMIT_TAG).performClick()
+        compose.onNodeWithText("No assistant provider configured. Add an API key in Settings → Assistant.")
+            .assertExists()
+        compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_CLOSE_TAG).performClick()
 
         // --- Assertion 2: two active folder rows — pocketshell and
         //    llm-zoomcamp. The inactive scanned empty-pinned project is

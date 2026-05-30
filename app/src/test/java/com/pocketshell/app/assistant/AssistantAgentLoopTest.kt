@@ -63,6 +63,9 @@ class AssistantAgentLoopTest {
         override suspend fun startSession(host: String, cwd: String, agent: String): ActionResult {
             calls += "start_session($host,$cwd,$agent)"; return ActionResult.ok("started")
         }
+        override suspend fun createProject(host: String, parentPath: String, folderName: String): ActionResult {
+            calls += "create_project($host,$parentPath,$folderName)"; return ActionResult.ok("created")
+        }
         override suspend fun runCommand(command: String): ActionResult {
             calls += "run_command($command)"; ranCommands += command; return ActionResult.ok("ran")
         }

@@ -260,6 +260,19 @@ internal class AssistantAgentLoop(
                     actions.startSession(host, cwd, agent)
                 }
             }
+            AssistantTools.CREATE_PROJECT -> {
+                val host = args.optString("host")
+                val parentPath = args.optString("parent_path")
+                val folderName = args.optString("folder_name")
+                traceAction(
+                    name,
+                    host,
+                    parentPath,
+                    mapOf("host" to host, "parent_path" to parentPath, "folder_name" to folderName),
+                ) {
+                    actions.createProject(host, parentPath, folderName)
+                }
+            }
             AssistantTools.CLONE_REPO -> {
                 val fullName = args.optString("full_name")
                 val folder = args.optString("folder").takeIf { it.isNotBlank() }
@@ -281,6 +294,11 @@ internal class AssistantAgentLoop(
         AssistantTools.START_SESSION -> Candidate(
             name,
             "Start ${args.optString("agent")} session in ${args.optString("cwd")} " +
+                "on ${args.optString("host")}",
+        )
+        AssistantTools.CREATE_PROJECT -> Candidate(
+            name,
+            "Create ${args.optString("folder_name")} in ${args.optString("parent_path")} " +
                 "on ${args.optString("host")}",
         )
         AssistantTools.CLONE_REPO -> Candidate(name, "Clone ${args.optString("full_name")}")
@@ -347,7 +365,7 @@ internal class AssistantAgentLoop(
                 "request; you inspect app state and perform actions through the provided tools. " +
                 "Resolve references like \"this folder\", \"here\", or \"it\" by calling " +
                 "get_context FIRST. Prefer inspect tools before acting. Mutating tools " +
-                "(run_command, create_file, start_session, clone_repo) are confirmed by the user " +
+                "(run_command, create_file, start_session, create_project, clone_repo) are confirmed by the user " +
                 "before they run; if the user corrects you, revise the candidate and try again. " +
                 "Keep shell commands short and non-interactive. When the task is complete, reply " +
                 "with a brief confirmation and stop calling tools."

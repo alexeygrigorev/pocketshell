@@ -67,6 +67,13 @@ internal interface AssistantActions {
     suspend fun startSession(host: String, cwd: String, agent: String): ActionResult
 
     /**
+     * Create an empty project folder under [parentPath] on [host]. Host-detail
+     * assistant entry point for the same workflow exposed by the workspace
+     * root add sheet.
+     */
+    suspend fun createProject(host: String, parentPath: String, folderName: String): ActionResult
+
+    /**
      * Run [command] in the active terminal via `send-keys` (also handles
      * "cd to …"). The safety gate has already passed by the time the loop
      * calls this.

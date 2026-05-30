@@ -30,6 +30,7 @@ internal object AssistantTools {
     const val OPEN_SCREEN = "open_screen"
 
     const val START_SESSION = "start_session"
+    const val CREATE_PROJECT = "create_project"
     const val RUN_COMMAND = "run_command"
     const val CREATE_FILE = "create_file"
     const val CLONE_REPO = "clone_repo"
@@ -37,6 +38,7 @@ internal object AssistantTools {
     /** Tools that mutate remote/nav state and must pass the confirm gate. */
     val MUTATING_TOOLS: Set<String> = setOf(
         START_SESSION,
+        CREATE_PROJECT,
         RUN_COMMAND,
         CREATE_FILE,
         CLONE_REPO,
@@ -144,6 +146,18 @@ internal object AssistantTools {
                   "agent":{"type":"string","description":"Agent to launch.",
                     "enum":["claude","codex","opencode","shell"]}
                 },"required":["host","cwd","agent"],"additionalProperties":false}
+            """.trimIndent(),
+        ),
+        ToolSpec(
+            name = CREATE_PROJECT,
+            description = "Create an empty project folder under a configured workspace root on " +
+                "a host. MUTATING: the user confirms the parent path and folder name before it runs.",
+            parametersJsonSchema = """
+                {"type":"object","properties":{
+                  "host":{"type":"string","description":"Saved host name."},
+                  "parent_path":{"type":"string","description":"Absolute or ~-relative parent directory."},
+                  "folder_name":{"type":"string","description":"New project folder name."}
+                },"required":["host","parent_path","folder_name"],"additionalProperties":false}
             """.trimIndent(),
         ),
         ToolSpec(

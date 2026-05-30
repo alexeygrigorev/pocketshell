@@ -38,6 +38,10 @@ public sealed interface TmuxStatus {
  */
 public sealed interface InstallResult {
     public data object Success : InstallResult
+    public data class SetupIncomplete(
+        val report: HostBootstrapReport,
+        val reason: String,
+    ) : InstallResult
     public data class Failed(val stderr: String, val exitCode: Int) : InstallResult
     public data class UnsupportedOs(val osId: String?) : InstallResult
     public data class Error(val reason: String) : InstallResult
@@ -249,6 +253,26 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         }
 
         val afterTools = checkServerSetup(session, expectedPocketshellVersion)
+        if (afterTools.versionMismatchedTools.isNotEmpty()) {
+            return InstallResult.SetupIncomplete(
+                report = afterTools,
+                reason = "PocketShell found pocketshell on the host, but it is still not app-compatible after setup.",
+            )
+        }
+        if (afterTools.unknownTools.isNotEmpty()) {
+            val unknown = afterTools.unknownTools.joinToString { it.binaryName }
+            return InstallResult.SetupIncomplete(
+                report = afterTools,
+                reason = "Could not detect required host tools after setup: $unknown.",
+            )
+        }
+        if (afterTools.missingTools.isNotEmpty()) {
+            val missing = afterTools.missingTools.joinToString { it.binaryName }
+            return InstallResult.SetupIncomplete(
+                report = afterTools,
+                reason = "Required host tools are still missing after setup: $missing.",
+            )
+        }
         val daemon = afterTools.daemon
         if (daemon is PocketshellDaemonStatus.Unavailable) {
             return InstallResult.Error(daemon.reason)

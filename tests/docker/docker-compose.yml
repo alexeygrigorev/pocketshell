@@ -97,6 +97,18 @@ services:
       - "2231:22"
     healthcheck: *ssh-healthcheck
 
+  bootstrap-uv-upgrade:
+    build:
+      context: .
+      dockerfile: Dockerfile.bootstrap
+      args:
+        SCENARIO: uv-upgrade
+    image: pocketshell-test:bootstrap-uv-upgrade
+    container_name: pocketshell-test-bootstrap-uv-upgrade
+    ports:
+      - "2236:22"
+    healthcheck: *ssh-healthcheck
+
   bootstrap-unsupported:
     build:
       context: .
@@ -158,7 +170,7 @@ services:
   # stay fast. The container entrypoint seeds a long-lived `flaky-main`
   # tmux session so the picker's first SSH probe lists it immediately.
   # Bound on host port 2226 (distinct from `agents`/2222, `tmux`/2224,
-  # bootstrap variants/2230-2235).
+  # bootstrap variants/2230-2236).
   flaky-agent:
     build:
       context: .

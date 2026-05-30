@@ -1,16 +1,21 @@
 #!/bin/sh
 set -eu
 
-if [ "${1:-}" = "tool" ] && [ "${2:-}" = "install" ] && [ -n "${3:-}" ]; then
+if [ "${1:-}" = "tool" ] && { [ "${2:-}" = "install" ] || [ "${2:-}" = "upgrade" ]; } && [ -n "${3:-}" ]; then
+  action="$2"
   package="$3"
   target_dir="${HOME}/.local/bin"
   source_dir="${POCKETSHELL_BOOTSTRAP_BIN_DIR:-/opt/pocketshell-bootstrap-bin}"
+  version_file="${POCKETSHELL_BOOTSTRAP_VERSION_FILE:-/tmp/pocketshell-bootstrap-pocketshell-version}"
   install -d "$target_dir"
   cp "${source_dir}/${package}" "${target_dir}/${package}"
   chmod +x "${target_dir}/${package}"
-  printf 'installed fixture tool %s\n' "$package"
+  if [ "$package" = "pocketshell" ]; then
+    printf '0.3.7\n' > "$version_file"
+  fi
+  printf '%s fixture tool %s\n' "$action" "$package"
   exit 0
 fi
 
-printf 'uv bootstrap fixture supports: tool install <package>\n' >&2
+printf 'uv bootstrap fixture supports: tool install|upgrade <package>\n' >&2
 exit 64

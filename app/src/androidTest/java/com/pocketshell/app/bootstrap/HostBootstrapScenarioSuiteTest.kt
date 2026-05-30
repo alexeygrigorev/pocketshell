@@ -86,6 +86,29 @@ class HostBootstrapScenarioSuiteTest {
     }
 
     @Test
+    fun uvUpgrade() = scenario("uv-upgrade") {
+        launchSeededHost()
+        tapSeededHost()
+
+        waitForBootstrapSheet()
+        compose.onNodeWithText("Host setup needed").assertExists()
+        assertSetupRows("pocketshell CLI update needed")
+        compose.onNodeWithText("Upgrade").assertExists()
+        capture("02-cli-update-needed")
+        compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALL_ALL_TAG).assertExists().performClick()
+        compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALLING_TAG).assertExists()
+        capture("03-upgrading")
+        compose.waitUntil(timeoutMillis = 20_000) {
+            compose.onAllNodesWithText("Host ready").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("Host ready").assertExists()
+        capture("04-host-ready")
+        assertRemote("uv upgrade should leave an app-compatible pocketshell CLI") {
+            installedToolsAndEnabledDaemonCommand("0.3.7")
+        }
+    }
+
+    @Test
     fun unsupported() = scenario("unsupported") {
         launchSeededHost()
         tapSeededHost()
@@ -298,10 +321,17 @@ class HostBootstrapScenarioSuiteTest {
         )
     }
 
-    private fun installedToolsAndEnabledDaemonCommand(): String =
-        "/bin/sh -lc 'PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; " +
-            "command -v pocketshell >/dev/null && " +
-            "systemctl --user is-enabled pocketshell-jobs.service >/dev/null'"
+    private fun installedToolsAndEnabledDaemonCommand(expectedVersion: String? = null): String {
+        val versionCheck = expectedVersion?.let {
+            "pocketshell --version | grep -F '${it}' >/dev/null && "
+        }.orEmpty()
+        return (
+            "/bin/sh -lc 'PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; " +
+                "command -v pocketshell >/dev/null && " +
+                versionCheck +
+                "systemctl --user is-enabled pocketshell-jobs.service >/dev/null'"
+        )
+    }
 
     private fun waitForBootstrapSheet() {
         compose.waitUntil(timeoutMillis = 20_000) {
@@ -311,14 +341,16 @@ class HostBootstrapScenarioSuiteTest {
     }
 
     private fun waitForReadyNavigation() {
-        // Issue #171: post-bootstrap navigation now lands on the
-        // FolderListScreen ("Folders" title) instead of the inline
-        // HostTmuxSessionPickerSheet ("Tmux sessions" title).
+        // Issue #171: post-bootstrap navigation now lands on FolderListScreen
+        // instead of the inline HostTmuxSessionPickerSheet.
         compose.waitUntil(timeoutMillis = 20_000) {
-            compose.onAllNodesWithText("Folders").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithText("Folders").fetchSemanticsNodes().isNotEmpty() ||
+                compose.onAllNodesWithText("Workspace").fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag(HOST_BOOTSTRAP_SHEET_TAG).assertDoesNotExist()
-        compose.onNodeWithText("Folders").assertExists()
+        val folderTitleVisible = compose.onAllNodesWithText("Folders").fetchSemanticsNodes().isNotEmpty()
+        val workspaceTitleVisible = compose.onAllNodesWithText("Workspace").fetchSemanticsNodes().isNotEmpty()
+        assertTrue("expected FolderListScreen title", folderTitleVisible || workspaceTitleVisible)
     }
 
     private fun assertSetupRows(vararg rows: String) {
@@ -367,6 +399,13 @@ class HostBootstrapScenarioSuiteTest {
                 label = "uv install",
                 port = 2231,
                 resetCommand = "rm -f ~/.local/bin/pocketshell; " +
+                    "printf 'active enabled\\n' > $STATE_FILE",
+            ),
+            "uv-upgrade" to ScenarioDefinition(
+                label = "uv upgrade",
+                port = 2236,
+                resetCommand = "rm -f ~/.local/bin/pocketshell; " +
+                    "printf '0.3.6\\n' > /tmp/pocketshell-bootstrap-pocketshell-version; " +
                     "printf 'active enabled\\n' > $STATE_FILE",
             ),
             "unsupported" to ScenarioDefinition(

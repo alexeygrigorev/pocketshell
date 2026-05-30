@@ -296,7 +296,7 @@ non-hold, or contradictory authoritative terminal evidence. Set
 `REAL_AGENTS=1` when the issue requires real interactive agent CLI screens.
 
 The host setup matrix is available through the same harness. It starts the
-bootstrap Docker services on ports `2230` through `2235`, drives the emulator UI
+bootstrap Docker services on ports `2230` through `2236`, drives the emulator UI
 for each profile, and stores per-profile screenshots, UI assertion output,
 remote probes, timings, logcat, Docker logs, and crash diagnostics:
 
@@ -599,6 +599,7 @@ Start all bootstrap host profiles:
 docker compose -f tests/docker/docker-compose.yml up -d --build \
   bootstrap-ready \
   bootstrap-uv-install \
+  bootstrap-uv-upgrade \
   bootstrap-unsupported \
   bootstrap-daemon-disabled \
   bootstrap-user-local-path \
@@ -631,6 +632,7 @@ Scenario-to-service mapping:
 | `daemon-disabled` | `bootstrap-daemon-disabled` | `2233` |
 | `user-local-path` | `bootstrap-user-local-path` | `2234` |
 | `fish-user-local-path` | `bootstrap-fish-user-local-path` | `2235` |
+| `uv-upgrade` | `bootstrap-uv-upgrade` | `2236` |
 
 Cleanup:
 

@@ -771,6 +771,47 @@ class HostBootstrapperTest {
         assertTrue(session.recorded.none { it.contains("uv tool install pocketshell") })
     }
 
+    @Test
+    fun installServerSetup_returnsSetupIncomplete_whenPocketshellStillMismatchedAfterUpgrade() = runTest {
+        val session = FakeSshSession(
+            dynamic = { command ->
+                when (command) {
+                    pathAware("command -v 'pocketshell'") -> ExecResult("/home/u/.local/bin/pocketshell\n", "", 0)
+                    pathAware("'pocketshell' --version") -> ExecResult("pocketshell, version 0.3.6\n", "", 0)
+                    pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
+                    pathAware("uv tool upgrade pocketshell") -> ExecResult("upgraded pocketshell\n", "", 0)
+                    pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
+                    systemdAware("systemctl --user is-active pocketshell-jobs.service") -> ExecResult("active\n", "", 0)
+                    systemdAware("systemctl --user is-enabled pocketshell-jobs.service") -> ExecResult("enabled\n", "", 0)
+                    else -> null
+                }
+            },
+        )
+        val report = HostBootstrapReport(
+            tools = mapOf(
+                BootstrapTool.Pocketshell to ToolStatus.VersionMismatch(
+                    path = "/home/u/.local/bin/pocketshell",
+                    currentVersion = "0.3.6",
+                    expectedVersion = "0.3.7",
+                ),
+            ),
+            installer = PythonToolInstaller.Uv,
+            daemon = PocketshellDaemonStatus.Running(enabled = true),
+        )
+
+        val result = bootstrapper.installServerSetup(
+            session,
+            report,
+            expectedPocketshellVersion = "0.3.7",
+        )
+
+        assertTrue(result is InstallResult.SetupIncomplete)
+        val incomplete = result as InstallResult.SetupIncomplete
+        assertEquals(listOf(BootstrapTool.Pocketshell), incomplete.report.versionMismatchedTools)
+        assertTrue(incomplete.reason.contains("not app-compatible"))
+        assertTrue(session.recorded.contains(pathAware("uv tool upgrade pocketshell")))
+    }
+
     /**
      * Test-only fake. Records commands and returns canned results. Throws
      * for transport-failure tests when `throwOnExec` is non-null.

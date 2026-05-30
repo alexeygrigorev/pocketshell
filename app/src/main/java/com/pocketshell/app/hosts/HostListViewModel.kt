@@ -837,6 +837,8 @@ class HostListViewModel @Inject constructor(
             when (tmuxResult) {
                 InstallResult.Success -> Unit
 
+                is InstallResult.SetupIncomplete -> Unit
+
                 is InstallResult.Failed -> {
                     _bootstrapState.value = HostBootstrapSheetState.Failed(
                         message = tmuxResult.stderr.ifBlank { "exit ${tmuxResult.exitCode}" },
@@ -866,11 +868,27 @@ class HostListViewModel @Inject constructor(
             )) {
                 InstallResult.Success -> {
                     // Re-probe so the persisted pocketshell flag reflects the
-                    // post-install reality, then flip to the success
-                    // state so the sheet can offer the Open Usage CTA.
+                    // post-install reality. Only show the success state when
+                    // that final report is fully ready; a successful command
+                    // exit is not enough if the version gate still fails.
                     val finalReport = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
                     persistPocketshellResult(host, finalReport)
-                    _bootstrapState.value = HostBootstrapSheetState.Success
+                    _bootstrapState.value = if (finalReport.isReady) {
+                        HostBootstrapSheetState.Success
+                    } else {
+                        HostBootstrapSheetState.Prompt(
+                            needsTmux = false,
+                            report = finalReport,
+                        )
+                    }
+                }
+
+                is InstallResult.SetupIncomplete -> {
+                    persistPocketshellResult(host, result.report)
+                    _bootstrapState.value = HostBootstrapSheetState.Prompt(
+                        needsTmux = false,
+                        report = result.report,
+                    )
                 }
 
                 is InstallResult.Failed -> {
@@ -917,6 +935,10 @@ class HostListViewModel @Inject constructor(
             }
             when (result) {
                 InstallResult.Success -> refreshServerSetupPrompt(session, needsTmux = prompt.needsTmux)
+                is InstallResult.SetupIncomplete -> _bootstrapState.value = HostBootstrapSheetState.Prompt(
+                    needsTmux = prompt.needsTmux,
+                    report = result.report,
+                )
                 is InstallResult.Failed -> _bootstrapState.value = HostBootstrapSheetState.Failed(
                     message = result.stderr.ifBlank { "exit ${result.exitCode}" },
                 )
@@ -943,6 +965,10 @@ class HostListViewModel @Inject constructor(
         viewModelScope.launch {
             when (val result = bootstrapper.installPocketshellDaemon(session)) {
                 InstallResult.Success -> refreshServerSetupPrompt(session, needsTmux = prompt.needsTmux)
+                is InstallResult.SetupIncomplete -> _bootstrapState.value = HostBootstrapSheetState.Prompt(
+                    needsTmux = prompt.needsTmux,
+                    report = result.report,
+                )
                 is InstallResult.Failed -> _bootstrapState.value = HostBootstrapSheetState.Failed(
                     message = result.stderr.ifBlank { "exit ${result.exitCode}" },
                 )

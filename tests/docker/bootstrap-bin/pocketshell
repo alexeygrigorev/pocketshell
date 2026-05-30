@@ -6,8 +6,14 @@ set -eu
 # This bootstrap fixture only needs to prove `pocketshell` is on PATH, runs
 # `--version` cleanly, and that the jobs-daemon ExecStart target
 # (`pocketshell jobs daemon`) resolves.
+version_file="${POCKETSHELL_BOOTSTRAP_VERSION_FILE:-/tmp/pocketshell-bootstrap-pocketshell-version}"
+fixture_version="0.3.7"
+if [ -r "$version_file" ]; then
+  fixture_version="$(cat "$version_file")"
+fi
+
 if [ "${1:-}" = "--version" ]; then
-  printf 'pocketshell bootstrap fixture 0.0.0\n'
+  printf 'pocketshell bootstrap fixture %s\n' "$fixture_version"
   exit 0
 fi
 

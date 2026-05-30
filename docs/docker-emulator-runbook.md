@@ -66,37 +66,40 @@ Reusable compose services:
   shims plus seeded agent fixtures. Use it for normal connected Android smoke,
   walkthrough journeys, usage/jobs/agent fixture checks, and the APK pre-release gate.
 - `bootstrap-ready`: builds `pocketshell-test:bootstrap-ready`, maps host port
-  `2230`, and contains the shared bootstrap base plus `tmuxctl`, `heru`,
-  `agent-log-explorer`, and `systemctl` shims in `/usr/local/bin`; the
-  `systemctl` shim reports `tmuxctl-jobs.service` as active and enabled. This
+  `2230`, and contains the shared bootstrap base plus `pocketshell` and
+  `systemctl` shims in `/usr/local/bin`; the
+  `systemctl` shim reports `pocketshell-jobs.service` as active and enabled. This
   represents a host where server tools and the user daemon are already ready.
   Used by `HostBootstrapScenarioSuiteTest#ready`.
 - `bootstrap-uv-install`: builds `pocketshell-test:bootstrap-uv-install`, maps
   host port `2231`, and contains the shared bootstrap base plus `uv` and
-  `systemctl` shims in `/usr/local/bin`; `tmuxctl`, `heru`, and
-  `agent-log-explorer` start absent and can be copied into
+  `systemctl` shims in `/usr/local/bin`; `pocketshell` starts absent and can be copied into
   `/home/testuser/.local/bin` by the `uv tool install <package>` shim. The
-  `systemctl` shim reports `tmuxctl-jobs.service` as active and enabled. Used
+  `systemctl` shim reports `pocketshell-jobs.service` as active and enabled. Used
   by `HostBootstrapScenarioSuiteTest#uvInstall`.
+- `bootstrap-uv-upgrade`: builds `pocketshell-test:bootstrap-uv-upgrade`, maps
+  host port `2236`, and contains a stale `pocketshell` fixture plus `uv` and
+  `systemctl` shims in `/usr/local/bin`; `uv tool upgrade pocketshell` refreshes
+  the fixture version under `/home/testuser/.local/bin`. Used by
+  `HostBootstrapScenarioSuiteTest#uvUpgrade`.
 - `bootstrap-unsupported`: builds `pocketshell-test:bootstrap-unsupported`,
   maps host port `2232`, and contains only the shared bootstrap base. No
-  `tmuxctl`, `heru`, `agent-log-explorer`, `uv`, or `systemctl` shim is
+  `pocketshell`, `uv`, or `systemctl` shim is
   installed on `PATH`; the fixture daemon state is inactive and disabled. This
   represents a host with missing tools and no supported installer. Used by
   `HostBootstrapScenarioSuiteTest#unsupported`.
 - `bootstrap-daemon-disabled`: builds
   `pocketshell-test:bootstrap-daemon-disabled`, maps host port `2233`, and
-  contains the shared bootstrap base plus `tmuxctl`, `heru`,
-  `agent-log-explorer`, and `systemctl` shims in `/usr/local/bin`; the
-  `systemctl` shim reports `tmuxctl-jobs.service` as active but disabled. This
-  represents a host where tools are present but `tmuxctl-jobs.service` is
+  contains the shared bootstrap base plus `pocketshell` and `systemctl` shims in
+  `/usr/local/bin`; the `systemctl` shim reports `pocketshell-jobs.service` as active but disabled. This
+  represents a host where tools are present but `pocketshell-jobs.service` is
   disabled. Used by `HostBootstrapScenarioSuiteTest#daemonDisabled`.
 - `bootstrap-user-local-path`: builds
   `pocketshell-test:bootstrap-user-local-path`, maps host port `2234`, and
-  contains the shared bootstrap base plus `tmuxctl`, `heru`, and
-  `agent-log-explorer` shims in `/home/testuser/.local/bin` and a `systemctl`
+  contains the shared bootstrap base plus a `pocketshell` shim in
+  `/home/testuser/.local/bin` and a `systemctl`
   shim in `/usr/local/bin`; the `systemctl` shim reports
-  `tmuxctl-jobs.service` as active and enabled. This represents a host where
+  `pocketshell-jobs.service` as active and enabled. This represents a host where
   tools live under user-local paths that must be found by login/PATH handling.
   Used by
   `HostBootstrapScenarioSuiteTest#userLocalPath`.
@@ -128,7 +131,7 @@ Check before starting Docker profiles:
 ```bash
 docker ps --format '{{.ID}} {{.Names}} {{.Ports}}'
 ss -ltnp 'sport = :2222' || true
-for port in 2224 2230 2231 2232 2233 2234 2235; do
+for port in 2224 2230 2231 2232 2233 2234 2235 2236; do
   ss -ltnp "sport = :$port" || true
 done
 ```
@@ -147,19 +150,19 @@ For parallel testing, prefer existing non-overlapping ports:
 
 - `agents` on `2222` for the normal connected Android smoke.
 - `tmux` on `2224` for manual tmux checks.
-- bootstrap profiles on `2230` through `2235`.
+- bootstrap profiles on `2230` through `2236`.
 
 Do not run `sshd` and `agents` together without changing one of their host
 ports because both claim `2222`. The standard safe parallel sets are:
 
 - Android connected smoke plus manual tmux: `agents` + `tmux`.
-- Bootstrap setup suite: all six `bootstrap-*` services.
+- Bootstrap setup suite: all seven `bootstrap-*` services.
 - JVM Testcontainers suites plus any compose service: safe by default because
   Testcontainers uses ephemeral host ports.
 
 If a new compose profile must run in parallel, add a new explicit host port in
 `tests/docker/docker-compose.yml`; do not reuse `2222`, `2224`, or `2230`
-through `2235`. Update the service list above, any Android fixture constants,
+through `2236`. Update the service list above, any Android fixture constants,
 and the host-side sanity command in this runbook in the same change.
 
 ## Standard Commands
@@ -256,7 +259,7 @@ state with the explicit `adb` path, runs only the selected scenario, and writes
 screenshots, timings, logcat, instrumentation output, Docker logs, command
 logs, and crash diagnostics under `build/phone-walkthrough/<run-id>/`.
 `setup-detection` starts the `bootstrap-*` services on ports `2230` through
-`2235`; use `setup-detection:<profile>` to run one profile.
+`2236`; use `setup-detection:<profile>` to run one profile.
 `visual-audit` writes normalized reviewer screenshots under
 `build/phone-walkthrough/<run-id>/screenshots/visual-audit/` and raw pulled device
 output under
@@ -510,6 +513,7 @@ Start all bootstrap profiles:
 docker compose -f tests/docker/docker-compose.yml up -d --build \
   bootstrap-ready \
   bootstrap-uv-install \
+  bootstrap-uv-upgrade \
   bootstrap-unsupported \
   bootstrap-daemon-disabled \
   bootstrap-user-local-path \

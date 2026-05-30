@@ -91,6 +91,7 @@ SETUP_DETECTION_PROFILES=(
 declare -A SETUP_DETECTION_SERVICES=(
   ["ready"]="bootstrap-ready"
   ["uv-install"]="bootstrap-uv-install"
+  ["uv-upgrade"]="bootstrap-uv-upgrade"
   ["unsupported"]="bootstrap-unsupported"
   ["daemon-disabled"]="bootstrap-daemon-disabled"
   ["user-local-path"]="bootstrap-user-local-path"
@@ -103,6 +104,7 @@ declare -A SETUP_DETECTION_PORTS=(
   ["daemon-disabled"]="2233"
   ["user-local-path"]="2234"
   ["fish-user-local-path"]="2235"
+  ["uv-upgrade"]="2236"
 )
 declare -A SETUP_DETECTION_METHODS=(
   ["ready"]="ready"
@@ -244,6 +246,7 @@ collect_diagnostics() {
   docker compose -f "$COMPOSE_FILE" logs --no-color --timestamps \
     bootstrap-ready \
     bootstrap-uv-install \
+    bootstrap-uv-upgrade \
     bootstrap-unsupported \
     bootstrap-daemon-disabled \
     bootstrap-user-local-path \

@@ -5,6 +5,7 @@ import android.content.ContextWrapper
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import androidx.lifecycle.ViewModelStore
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.bootstrap.HostBootstrapper
@@ -17,6 +18,8 @@ import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
 import com.pocketshell.app.usage.worstBadgeRecord
 import com.pocketshell.core.storage.AppDatabase
+import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import kotlinx.coroutines.flow.first
@@ -58,6 +61,8 @@ class HostListViewModelTest {
 
     private lateinit var db: AppDatabase
     private lateinit var context: Context
+    private val viewModelStore = ViewModelStore()
+    private var nextViewModelKey = 0
 
     private class BrokenPackageContext(base: Context) : ContextWrapper(base) {
         override fun getPackageManager(): PackageManager {
@@ -96,8 +101,30 @@ class HostListViewModelTest {
 
     @After
     fun tearDown() {
+        viewModelStore.clear()
         db.close()
     }
+
+    private fun newViewModel(
+        applicationContext: Context = context,
+        hostDao: HostDao = db.hostDao(),
+        sshKeyDao: SshKeyDao = db.sshKeyDao(),
+        releaseChecker: ReleaseChecker = FakeReleaseChecker(result = null),
+        bootstrapper: HostBootstrapper = HostBootstrapper(),
+        usageScheduler: UsageScheduler = newUsageScheduler(),
+        activeClients: ActiveTmuxClients = ActiveTmuxClients(),
+        settingsRepository: SettingsRepository = newSettingsRepository(),
+    ): HostListViewModel =
+        HostListViewModel(
+            applicationContext = applicationContext,
+            hostDao = hostDao,
+            sshKeyDao = sshKeyDao,
+            releaseChecker = releaseChecker,
+            bootstrapper = bootstrapper,
+            usageScheduler = usageScheduler,
+            activeClients = activeClients,
+            settingsRepository = settingsRepository,
+        ).also { viewModelStore.put("HostListViewModel-${nextViewModelKey++}", it) }
 
     /**
      * A scheduler wired against the in-memory database so the ViewModel
@@ -158,7 +185,7 @@ class HostListViewModelTest {
             HostEntity(name = "alpha", hostname = "a.example", username = "u", keyId = keyB),
         )
 
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -186,7 +213,7 @@ class HostListViewModelTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "my-key", privateKeyPath = "/tmp/id_ed25519"),
         )
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -204,7 +231,7 @@ class HostListViewModelTest {
 
     @Test
     fun keyFor_returnsNullForMissingId() = runTest {
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -229,7 +256,7 @@ class HostListViewModelTest {
         )
         val fake = FakeReleaseChecker(result = info)
 
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -249,7 +276,7 @@ class HostListViewModelTest {
     @Test
     fun updateAvailable_staysNull_whenCheckerReturnsNull() = runTest {
         val fake = FakeReleaseChecker(result = null)
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -267,7 +294,7 @@ class HostListViewModelTest {
     @Test
     fun checkForUpdates_canBeReInvoked() = runTest {
         val fake = FakeReleaseChecker(result = null)
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -297,7 +324,7 @@ class HostListViewModelTest {
                 apkUrl = "https://example.com/pocketshell-0.2.0-debug.apk",
             ),
         )
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = BrokenPackageContext(context),
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -349,7 +376,7 @@ class HostListViewModelTest {
             ),
         )
         val host = db.hostDao().getById(hostId)!!
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -401,7 +428,7 @@ class HostListViewModelTest {
             ),
         )
         val host = db.hostDao().getById(hostId)!!
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -447,7 +474,7 @@ class HostListViewModelTest {
             ),
         )
         val host = db.hostDao().getById(hostId)!!
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -596,7 +623,7 @@ class HostListViewModelTest {
             ),
         )
 
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -653,7 +680,7 @@ class HostListViewModelTest {
             ),
         )
         val host = db.hostDao().getById(hostId)!!
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -708,7 +735,7 @@ class HostListViewModelTest {
             username = "ubuntu",
             keyId = keyId,
         )
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -741,7 +768,7 @@ class HostListViewModelTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "shared-key", privateKeyPath = "/tmp/shared-key"),
         )
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -775,7 +802,7 @@ class HostListViewModelTest {
 
     @Test
     fun importSharedHostPayload_reportsMissingKey() = runTest {
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -807,7 +834,7 @@ class HostListViewModelTest {
     @Test
     fun importSharedHostPayload_insertsHostAndKey_forSshImportPrivateKeyPayload() = runTest {
         File(context.filesDir, "ssh-keys").deleteRecursively()
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -855,7 +882,7 @@ class HostListViewModelTest {
     @Test
     fun importSharedHostPayload_reusesKey_whenSamePrivateKeyPayloadIsScannedAgain() = runTest {
         File(context.filesDir, "ssh-keys").deleteRecursively()
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -899,7 +926,7 @@ class HostListViewModelTest {
     @Test
     fun importSharedHostPayload_derivesPassphraseRequirementFromEncryptedOpenSshKey() = runTest {
         File(context.filesDir, "ssh-keys").deleteRecursively()
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -937,7 +964,7 @@ class HostListViewModelTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "existing-key", privateKeyPath = "/tmp/existing-key"),
         )
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -974,7 +1001,7 @@ class HostListViewModelTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "existing-key", privateKeyPath = "/tmp/existing-key"),
         )
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -1010,7 +1037,7 @@ class HostListViewModelTest {
         // is not a complete payload. The view model surfaces guidance
         // pointing the user to the QR scanner rather than silently
         // failing.
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -1045,7 +1072,7 @@ class HostListViewModelTest {
     fun hasUsageInstalledHost_reflectsPersistedPocketshellFlag() = runTest {
         val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
         // First: no hosts at all → false.
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -1145,7 +1172,7 @@ class HostListViewModelTest {
         }
         scheduler.refreshNow()
 
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -1191,7 +1218,7 @@ class HostListViewModelTest {
      */
     @Test
     fun dismissUsageBanner_addsProviderIdToDismissedSet_andNormalisesCase() = runTest {
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -1233,7 +1260,7 @@ class HostListViewModelTest {
                 keyId = keyId,
             ),
         )
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -1286,7 +1313,7 @@ class HostListViewModelTest {
                 pocketshellLastDetectedAt = 1234L,
             ),
         )
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -1337,7 +1364,7 @@ class HostListViewModelTest {
                 keyId = keyId,
             ),
         )
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -1381,7 +1408,7 @@ class HostListViewModelTest {
                 keyId = keyId,
             ),
         )
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
@@ -1426,7 +1453,7 @@ class HostListViewModelTest {
                 keyId = keyId,
             ),
         )
-        val viewModel = HostListViewModel(
+        val viewModel = newViewModel(
             applicationContext = context,
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),

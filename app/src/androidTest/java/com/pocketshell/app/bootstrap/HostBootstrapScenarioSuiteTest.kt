@@ -104,7 +104,7 @@ class HostBootstrapScenarioSuiteTest {
         compose.onNodeWithText("Host ready").assertExists()
         capture("04-host-ready")
         assertRemote("uv upgrade should leave an app-compatible pocketshell CLI") {
-            installedToolsAndEnabledDaemonCommand("0.3.7")
+            installedToolsAndEnabledDaemonCommand(targetAppVersion())
         }
     }
 
@@ -330,8 +330,16 @@ class HostBootstrapScenarioSuiteTest {
                 "command -v pocketshell >/dev/null && " +
                 versionCheck +
                 "systemctl --user is-enabled pocketshell-jobs.service >/dev/null'"
-        )
+            )
     }
+
+    private fun targetAppVersion(): String =
+        InstrumentationRegistry.getInstrumentation()
+            .targetContext
+            .packageManager
+            .getPackageInfo(InstrumentationRegistry.getInstrumentation().targetContext.packageName, 0)
+            .versionName
+            ?: error("target app versionName is missing")
 
     private fun waitForBootstrapSheet() {
         compose.waitUntil(timeoutMillis = 20_000) {

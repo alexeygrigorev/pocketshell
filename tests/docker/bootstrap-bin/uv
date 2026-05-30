@@ -16,11 +16,12 @@ if [ "${1:-}" = "tool" ] && [ "${2:-}" = "install" ]; then
   target_dir="${HOME}/.local/bin"
   source_dir="${POCKETSHELL_BOOTSTRAP_BIN_DIR:-/opt/pocketshell-bootstrap-bin}"
   version_file="${POCKETSHELL_BOOTSTRAP_VERSION_FILE:-/tmp/pocketshell-bootstrap-pocketshell-version}"
+  latest_version="${POCKETSHELL_BOOTSTRAP_LATEST_VERSION:-0.3.8}"
   install -d "$target_dir"
   cp "${source_dir}/${package}" "${target_dir}/${package}"
   chmod +x "${target_dir}/${package}"
   if [ "$package" = "pocketshell" ]; then
-    printf '0.3.7\n' > "$version_file"
+    printf '%s\n' "$latest_version" > "$version_file"
   fi
   printf '%s fixture tool %s\n' "$action" "$package"
   exit 0
@@ -31,6 +32,7 @@ if [ "${1:-}" = "tool" ] && [ "${2:-}" = "upgrade" ] && [ -n "${3:-}" ]; then
   target_dir="${HOME}/.local/bin"
   source_dir="${POCKETSHELL_BOOTSTRAP_BIN_DIR:-/opt/pocketshell-bootstrap-bin}"
   version_file="${POCKETSHELL_BOOTSTRAP_VERSION_FILE:-/tmp/pocketshell-bootstrap-pocketshell-version}"
+  latest_version="${POCKETSHELL_BOOTSTRAP_LATEST_VERSION:-0.3.8}"
   if [ ! -x "${target_dir}/${package}" ]; then
     printf 'uv fixture cannot upgrade unmanaged tool: %s\n' "$package" >&2
     exit 2
@@ -38,7 +40,7 @@ if [ "${1:-}" = "tool" ] && [ "${2:-}" = "upgrade" ] && [ -n "${3:-}" ]; then
   cp "${source_dir}/${package}" "${target_dir}/${package}"
   chmod +x "${target_dir}/${package}"
   if [ "$package" = "pocketshell" ]; then
-    printf '0.3.7\n' > "$version_file"
+    printf '%s\n' "$latest_version" > "$version_file"
   fi
   printf 'upgrade fixture tool %s\n' "$package"
   exit 0

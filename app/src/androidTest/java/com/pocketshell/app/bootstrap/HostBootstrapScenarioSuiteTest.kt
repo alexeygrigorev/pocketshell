@@ -269,7 +269,7 @@ class HostBootstrapScenarioSuiteTest {
 
         suspend fun resetRemote() {
             val reset = connect().mapCatching { session ->
-                session.use { it.exec(definition.resetCommand) }
+                session.use { it.exec(definition.resetCommand(targetAppVersion())) }
             }
             assertTrue(
                 "expected reset for bootstrap scenario '$name' on $DEFAULT_HOST:${definition.port}, got ${reset.exceptionOrNull()}",
@@ -387,7 +387,7 @@ class HostBootstrapScenarioSuiteTest {
     private data class ScenarioDefinition(
         val label: String,
         val port: Int,
-        val resetCommand: String,
+        val resetCommand: (targetAppVersion: String) -> String,
     )
 
     private companion object {
@@ -395,48 +395,80 @@ class HostBootstrapScenarioSuiteTest {
         const val DEFAULT_USER: String = "testuser"
         const val DATABASE_NAME: String = "pocketshell.db"
         const val STATE_FILE: String = "/tmp/pocketshell-bootstrap-systemctl-state"
+        const val VERSION_FILE: String = "/tmp/pocketshell-bootstrap-pocketshell-version"
+        const val LATEST_VERSION_FILE: String = "/tmp/pocketshell-bootstrap-latest-version"
+
+        fun versionReset(targetAppVersion: String): String =
+            "printf ${shellQuote("$targetAppVersion\n")} > $VERSION_FILE; " +
+                "printf ${shellQuote("$targetAppVersion\n")} > $LATEST_VERSION_FILE; "
+
+        fun latestVersionReset(targetAppVersion: String): String =
+            "printf ${shellQuote("$targetAppVersion\n")} > $LATEST_VERSION_FILE; "
+
+        fun shellQuote(value: String): String =
+            "'" + value.replace("'", "'\"'\"'") + "'"
 
         val SCENARIOS = mapOf(
             "ready" to ScenarioDefinition(
                 label = "ready",
                 port = 2230,
-                resetCommand = "rm -f ~/.local/bin/pocketshell; " +
-                    "printf 'active enabled\\n' > $STATE_FILE",
+                resetCommand = { targetAppVersion ->
+                    "rm -f ~/.local/bin/pocketshell; " +
+                        versionReset(targetAppVersion) +
+                        "printf 'active enabled\\n' > $STATE_FILE"
+                },
             ),
             "uv-install" to ScenarioDefinition(
                 label = "uv install",
                 port = 2231,
-                resetCommand = "rm -f ~/.local/bin/pocketshell; " +
-                    "printf 'active enabled\\n' > $STATE_FILE",
+                resetCommand = { targetAppVersion ->
+                    "rm -f ~/.local/bin/pocketshell $VERSION_FILE; " +
+                        latestVersionReset(targetAppVersion) +
+                        "printf 'active enabled\\n' > $STATE_FILE"
+                },
             ),
             "uv-upgrade" to ScenarioDefinition(
                 label = "uv upgrade",
                 port = 2236,
-                resetCommand = "rm -f ~/.local/bin/pocketshell; " +
-                    "printf '0.3.6\\n' > /tmp/pocketshell-bootstrap-pocketshell-version; " +
-                    "printf 'active enabled\\n' > $STATE_FILE",
+                resetCommand = { targetAppVersion ->
+                    "rm -f ~/.local/bin/pocketshell; " +
+                        "printf '0.3.6\\n' > $VERSION_FILE; " +
+                        latestVersionReset(targetAppVersion) +
+                        "printf 'active enabled\\n' > $STATE_FILE"
+                },
             ),
             "unsupported" to ScenarioDefinition(
                 label = "unsupported",
                 port = 2232,
-                resetCommand = "rm -f ~/.local/bin/pocketshell; " +
-                    "printf 'inactive disabled\\n' > $STATE_FILE",
+                resetCommand = {
+                    "rm -f ~/.local/bin/pocketshell $VERSION_FILE $LATEST_VERSION_FILE; " +
+                        "printf 'inactive disabled\\n' > $STATE_FILE"
+                },
             ),
             "daemon-disabled" to ScenarioDefinition(
                 label = "daemon disabled",
                 port = 2233,
-                resetCommand = "rm -f ~/.local/bin/pocketshell; " +
-                    "printf 'active disabled\\n' > $STATE_FILE",
+                resetCommand = { targetAppVersion ->
+                    "rm -f ~/.local/bin/pocketshell; " +
+                        versionReset(targetAppVersion) +
+                        "printf 'active disabled\\n' > $STATE_FILE"
+                },
             ),
             "user-local-path" to ScenarioDefinition(
                 label = "user local path",
                 port = 2234,
-                resetCommand = "printf 'active enabled\\n' > $STATE_FILE",
+                resetCommand = { targetAppVersion ->
+                    versionReset(targetAppVersion) +
+                        "printf 'active enabled\\n' > $STATE_FILE"
+                },
             ),
             "fish-user-local-path" to ScenarioDefinition(
                 label = "fish user local path",
                 port = 2235,
-                resetCommand = "printf 'active enabled\\n' > $STATE_FILE",
+                resetCommand = { targetAppVersion ->
+                    versionReset(targetAppVersion) +
+                        "printf 'active enabled\\n' > $STATE_FILE"
+                },
             ),
         )
     }

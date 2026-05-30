@@ -7,7 +7,12 @@ set -eu
 # `--version` cleanly, and that the jobs-daemon ExecStart target
 # (`pocketshell jobs daemon`) resolves.
 version_file="${POCKETSHELL_BOOTSTRAP_VERSION_FILE:-/tmp/pocketshell-bootstrap-pocketshell-version}"
-fixture_version="${POCKETSHELL_BOOTSTRAP_LATEST_VERSION:-0.3.8}"
+latest_version_file="${POCKETSHELL_BOOTSTRAP_LATEST_VERSION_FILE:-/tmp/pocketshell-bootstrap-latest-version}"
+fixture_version="${POCKETSHELL_BOOTSTRAP_LATEST_VERSION:-}"
+if [ -z "$fixture_version" ] && [ -r "$latest_version_file" ]; then
+  fixture_version="$(cat "$latest_version_file")"
+fi
+fixture_version="${fixture_version:-0.3.8}"
 if [ -r "$version_file" ]; then
   fixture_version="$(cat "$version_file")"
 fi

@@ -79,7 +79,13 @@ class ForwardingController @Inject constructor(
             // Update in place — the reconnect hook may have changed
             // because the panel rebuilt its supervisor.
             activeHosts.remove(existing)
-            activeHosts += ActiveHost(hostId, hostName, reconnectHook, existing.tunnelCount)
+            activeHosts += ActiveHost(
+                hostId = hostId,
+                hostName = hostName,
+                reconnectHook = reconnectHook,
+                tunnelCount = existing.tunnelCount,
+                activeRemotePorts = existing.activeRemotePorts,
+            )
         } else {
             activeHosts += ActiveHost(hostId, hostName, reconnectHook, tunnelCount = 0)
         }
@@ -120,6 +126,25 @@ class ForwardingController @Inject constructor(
     }
 
     /**
+     * Update the exact set of remote ports currently forwarding for
+     * [hostId]. Host-detail surfaces use this to label per-port rows;
+     * aggregate-only counts are insufficient because a host can have
+     * one active tunnel alongside several discovered-but-idle ports.
+     */
+    @Synchronized
+    fun updateActiveTunnels(hostId: Long, remotePorts: Set<Int>) {
+        val entry = activeHosts.firstOrNull { it.hostId == hostId } ?: return
+        val normalized = remotePorts.toSortedSet()
+        if (entry.activeRemotePorts == normalized && entry.tunnelCount == normalized.size) return
+        activeHosts.remove(entry)
+        activeHosts += entry.copy(
+            tunnelCount = normalized.size,
+            activeRemotePorts = normalized,
+        )
+        recomputeSnapshot()
+    }
+
+    /**
      * Network-recovery / user-action hint. Fans out to every
      * registered host's [ActiveHost.reconnectHook] so each supervisor
      * has a chance to cancel its in-flight backoff sleep. Idempotent
@@ -138,6 +163,7 @@ class ForwardingController @Inject constructor(
                 host.hostId to ForwardingHostSnapshot(
                     active = true,
                     tunnelCount = host.tunnelCount,
+                    activeRemotePorts = host.activeRemotePorts,
                 )
             }
         }
@@ -154,10 +180,12 @@ class ForwardingController @Inject constructor(
         val hostName: String,
         val reconnectHook: (() -> Unit)?,
         val tunnelCount: Int,
+        val activeRemotePorts: Set<Int> = emptySet(),
     )
 }
 
 data class ForwardingHostSnapshot(
     val active: Boolean,
     val tunnelCount: Int,
+    val activeRemotePorts: Set<Int> = emptySet(),
 )

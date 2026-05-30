@@ -42,9 +42,17 @@ class FolderListGatewayWarmSshTest {
             listOf(
                 SshFolderListGateway.LIST_SESSIONS_COMMAND,
                 SshFolderListGateway.LIST_PANES_COMMAND,
+                "ss -tlnp 2>/dev/null | awk 'NR>1 {print \$4, \$7}'",
+                "netstat -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {print \$4, \$7}'",
+                "ss -tln 2>/dev/null | awk 'NR>1 {print \$4}'",
                 SshFolderListGateway.LIST_SESSIONS_COMMAND,
                 SshFolderListGateway.LIST_PANES_COMMAND,
-            ).map { ReposRemoteSource.pathAwareCommand(it) },
+                "ss -tlnp 2>/dev/null | awk 'NR>1 {print \$4, \$7}'",
+                "netstat -tlnp 2>/dev/null | awk 'NR>1 && /LISTEN/ {print \$4, \$7}'",
+                "ss -tln 2>/dev/null | awk 'NR>1 {print \$4}'",
+            ).map { command ->
+                if (command.startsWith("tmux ")) ReposRemoteSource.pathAwareCommand(command) else command
+            },
             session.execCommands,
         )
     }

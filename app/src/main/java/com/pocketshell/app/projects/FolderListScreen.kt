@@ -951,8 +951,14 @@ private fun PortForwardingSummaryCard(
                     modifier = Modifier.weight(1f),
                 )
                 Text(
-                    text = if (summary.active) "Forwarding" else "Discovered",
-                    color = if (summary.active) PocketShellColors.Green else PocketShellColors.TextMuted,
+                    text = when (port.status) {
+                        HostPortForwardingPortStatus.FORWARDING -> "Forwarding"
+                        HostPortForwardingPortStatus.DISCOVERED -> "Discovered"
+                    },
+                    color = when (port.status) {
+                        HostPortForwardingPortStatus.FORWARDING -> PocketShellColors.Green
+                        HostPortForwardingPortStatus.DISCOVERED -> PocketShellColors.TextMuted
+                    },
                     fontSize = 11.sp,
                 )
             }

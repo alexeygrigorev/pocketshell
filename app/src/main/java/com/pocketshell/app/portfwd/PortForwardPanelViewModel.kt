@@ -372,10 +372,11 @@ class PortForwardPanelViewModel @Inject constructor(
                     // render `N tunnels active`. Count only FORWARDING
                     // tunnels — AVAILABLE / FAILED / STOPPED rows
                     // shouldn't inflate the notification count.
-                    val forwardingCount = tunnels.count { tunnel ->
-                        tunnel.status == TunnelInfo.Status.FORWARDING
-                    }
-                    forwardingController.updateTunnelCount(host.id, forwardingCount)
+                    val activeRemotePorts = tunnels
+                        .filter { tunnel -> tunnel.status == TunnelInfo.Status.FORWARDING }
+                        .map { tunnel -> tunnel.remotePort }
+                        .toSet()
+                    forwardingController.updateActiveTunnels(host.id, activeRemotePorts)
                 }
             }
             pendingStartPort?.let { remotePort ->

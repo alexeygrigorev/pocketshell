@@ -181,6 +181,24 @@ class ForwardingControllerTest {
     }
 
     @Test
+    fun `host snapshots expose active remote ports when known`() {
+        val controller = ForwardingController(context)
+
+        controller.registerActiveHost(hostId = 1, hostName = "alpha")
+        controller.updateActiveTunnels(hostId = 1, remotePorts = setOf(8080, 3000))
+
+        assertEquals(
+            ForwardingHostSnapshot(
+                active = true,
+                tunnelCount = 2,
+                activeRemotePorts = setOf(3000, 8080),
+            ),
+            controller.flowOfHostSnapshots().value[1L],
+        )
+        assertEquals(2, controller.flowOfTotalTunnelCount().value)
+    }
+
+    @Test
     fun `reconnectNow fans out hints to every registered host hook`() {
         val controller = ForwardingController(context)
         val calls1 = java.util.concurrent.atomic.AtomicInteger(0)

@@ -62,6 +62,7 @@ BUILD_APKS="${BUILD_APKS:-1}"
 HOLD_MS="${HOLD_MS:-0}"
 DEBUG_HOLD_MS="${DEBUG_HOLD_MS:-0}"
 REAL_AGENTS="${REAL_AGENTS:-0}"
+SHELL_SCREENCAP="${SHELL_SCREENCAP:-0}"
 ALLOW_DUPLICATE_VIEWPORT_HASHES="${ALLOW_DUPLICATE_VIEWPORT_HASHES:-0}"
 WORKBENCH_INSTRUMENTATION_ATTEMPTS="${WORKBENCH_INSTRUMENTATION_ATTEMPTS:-3}"
 if [[ -n "${TEST_SELECTOR:-}" ]]; then
@@ -327,6 +328,7 @@ printf 'Artifacts: %s\n' "$RUN_DIR"
 printf 'Hold ms: %s\n' "$HOLD_MS"
 printf 'Debug hold ms: %s\n' "$DEBUG_HOLD_MS"
 printf 'Real agents: %s\n' "$REAL_AGENTS"
+printf 'Shell screencap: %s\n' "$SHELL_SCREENCAP"
 printf 'Agent service: %s\n' "$AGENT_SERVICE"
 printf 'Test selector: %s\n' "$TEST_SELECTOR"
 printf 'Instrumentation attempts: %s\n' "$WORKBENCH_INSTRUMENTATION_ATTEMPTS"
@@ -359,6 +361,7 @@ INSTRUMENTATION_ARGS=(
   -e terminalWorkbenchHoldMs "$HOLD_MS"
   -e terminalWorkbenchDebugHoldMs "$DEBUG_HOLD_MS"
   -e terminalWorkbenchSshPort "$SSH_PORT"
+  -e terminalLabShellScreencap "$SHELL_SCREENCAP"
   -e class "$TEST_SELECTOR"
 )
 if [[ "$REAL_AGENTS" == "1" ]]; then
@@ -450,6 +453,9 @@ if [[ -d "$ARTIFACT_DIR" ]]; then
     printf 'test_selector=%s\n' "$TEST_SELECTOR"
     printf 'hold_ms=%s\n' "$HOLD_MS"
     printf 'debug_hold_ms=%s\n' "$DEBUG_HOLD_MS"
+    printf 'shell_screencap=%s\n' "$SHELL_SCREENCAP"
+    printf 'instrumentation_exit_code=%s\n' "$instrumentation_status"
+    printf 'artifact_pull_exit_code=%s\n' "$pull_status"
     printf 'device_artifact_dir=%s\n' "$DEVICE_ARTIFACT_DIR"
     printf '\nPulled artifacts:\n'
     find "$ARTIFACT_DIR" -maxdepth 1 -type f -printf '%f\t%k KB\n' | sort

@@ -13,6 +13,7 @@ LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/terminal-lab}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
 RUN_DIR="$LOG_ROOT/$RUN_ID"
 BUILD_APKS="${BUILD_APKS:-1}"
+SHELL_SCREENCAP="${SHELL_SCREENCAP:-0}"
 DEVICE_OUTPUT_DIR="/sdcard/Android/media/com.pocketshell.app/additional_test_output"
 DEVICE_ARTIFACT_DIR="$DEVICE_OUTPUT_DIR/terminal-lab"
 TEST_CLASS="com.pocketshell.app.terminal.TerminalLabDockerTest"
@@ -173,6 +174,7 @@ instrumentation_status=0
 run_logged "11-run-terminal-lab-instrumentation" \
   "$ADB" shell am instrument -w -r \
   -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
+  -e terminalLabShellScreencap "$SHELL_SCREENCAP" \
   -e class "$TEST_CLASS" \
   com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner ||
   instrumentation_status=$?

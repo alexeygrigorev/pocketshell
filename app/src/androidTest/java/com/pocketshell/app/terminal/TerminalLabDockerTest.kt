@@ -41,6 +41,7 @@ class TerminalLabDockerTest {
 
     private companion object {
         const val REAL_AGENT_CLI_SCREENS_ARG = "terminalWorkbenchRealAgents"
+        const val SHELL_SCREENCAP_ARG = "terminalLabShellScreencap"
     }
 
     @get:Rule
@@ -54,6 +55,7 @@ class TerminalLabDockerTest {
         terminalGrid = ::terminalGridSize,
         visibleTerminalText = ::visibleTerminalText,
         captureTerminalViewport = ::captureTerminalViewport,
+        shellScreencapEnabled = ::shellScreencapEnabled,
     )
 
     @After
@@ -152,6 +154,11 @@ class TerminalLabDockerTest {
             enabled,
         )
     }
+
+    private fun shellScreencapEnabled(): Boolean =
+        InstrumentationRegistry.getArguments()
+            .getString(SHELL_SCREENCAP_ARG)
+            ?.lowercase(Locale.US) in setOf("1", "true", "yes")
 
     private suspend fun runTerminalWorkbench(
         markerPrefix: String,
@@ -846,8 +853,8 @@ class TerminalLabDockerTest {
                 appendLine("authoritative=direct TerminalView viewport render plus terminal emulator visible text")
                 appendLine("advisory=full-device/window screenshots; saved for diagnosis but not used for terminal ink assertions")
                 appendLine(
-                    "advisory_device_strategy=adopted UiAutomation.executeShellCommand(\"screencap -p\") " +
-                        "when available; UiAutomation.takeScreenshot retained as fallback/legacy evidence",
+                    "advisory_shell_screencap=opt-in via -e $SHELL_SCREENCAP_ARG 1; " +
+                        "skipped/unavailable statuses are recorded and do not affect authoritative validation",
                 )
                 appendLine()
                 appendLine("authoritative_captures:")
@@ -879,7 +886,8 @@ class TerminalLabDockerTest {
                             "device_screencap_bright_pixels=${screenshot.deviceScreencapBrightPixels ?: -1} " +
                             "device_screencap_sha256=${screenshot.deviceScreencapSha256 ?: "unavailable"} " +
                             "device_screencap_blank=${screenshot.deviceScreencapAppearsBlank ?: "unavailable"} " +
-                            "device_screencap_contradicts_authoritative=${screenshot.deviceScreencapContradictsAuthoritative ?: "unavailable"}",
+                            "device_screencap_contradicts_authoritative=${screenshot.deviceScreencapContradictsAuthoritative ?: "unavailable"} " +
+                            "device_screencap_status=${screenshot.deviceScreencapStatus}",
                     )
                 }
                 appendLine()
@@ -911,6 +919,7 @@ private data class TerminalScreenshotArtifact(
     val deviceContradictsAuthoritative: Boolean,
     val deviceScreencapAppearsBlank: Boolean?,
     val deviceScreencapContradictsAuthoritative: Boolean?,
+    val deviceScreencapStatus: String,
 )
 
 private data class TerminalGridSize(
@@ -970,24 +979,29 @@ private class TerminalCaptureHelper(
     private val terminalGrid: () -> TerminalGridSize,
     private val visibleTerminalText: () -> String,
     private val captureTerminalViewport: (String) -> File,
+    private val shellScreencapEnabled: () -> Boolean,
 ) {
     fun capture(name: String): TerminalScreenshotArtifact {
         val bounds = terminalBounds()
         val grid = terminalGrid()
         val viewportScreenshot = captureTerminalViewport("$name-viewport")
         val deviceScreenshot = TerminalLabArtifacts.capture(name)
-        val deviceScreencap = TerminalLabArtifacts.captureDeviceScreencap("$name-device-screencap")
+        val deviceScreencap = if (shellScreencapEnabled()) {
+            TerminalLabArtifacts.captureDeviceScreencap("$name-device-screencap")
+        } else {
+            TerminalDeviceScreencapCapture.skipped("$name-device-screencap")
+        }
         val visibleText = visibleTerminalText()
         TerminalLabArtifacts.writeText("$name-visible-terminal.txt", visibleText)
 
         val viewportInkPixels = TerminalLabArtifacts.countBrightPixels(viewportScreenshot)
         val deviceInkPixels = TerminalLabArtifacts.countBrightPixels(deviceScreenshot, bounds)
-        val deviceScreencapInkPixels = deviceScreencap?.let {
+        val deviceScreencapInkPixels = deviceScreencap.file?.let {
             TerminalLabArtifacts.countBrightPixels(it, bounds)
         }
         val viewportHash = TerminalLabArtifacts.sha256(viewportScreenshot)
         val deviceHash = TerminalLabArtifacts.sha256(deviceScreenshot)
-        val deviceScreencapHash = deviceScreencap?.let(TerminalLabArtifacts::sha256)
+        val deviceScreencapHash = deviceScreencap.file?.let(TerminalLabArtifacts::sha256)
         val authoritativeHasTerminal = viewportInkPixels > 0 && visibleText.isNotBlank()
         val deviceBlank = deviceInkPixels == 0
         val deviceScreencapBlank = deviceScreencapInkPixels?.let { it == 0 }
@@ -996,10 +1010,10 @@ private class TerminalCaptureHelper(
             name = name,
             viewportFile = viewportScreenshot,
             deviceFile = deviceScreenshot,
-            deviceScreencapFile = deviceScreencap,
+            deviceScreencapFile = deviceScreencap.file,
             fileName = viewportScreenshot.name,
             deviceFileName = deviceScreenshot.name,
-            deviceScreencapFileName = deviceScreencap?.name,
+            deviceScreencapFileName = deviceScreencap.file?.name,
             bounds = bounds,
             grid = grid,
             brightPixels = viewportInkPixels,
@@ -1015,7 +1029,28 @@ private class TerminalCaptureHelper(
             deviceScreencapContradictsAuthoritative = deviceScreencapBlank?.let {
                 authoritativeHasTerminal && it
             },
+            deviceScreencapStatus = deviceScreencap.status,
         )
+    }
+}
+
+internal data class TerminalDeviceScreencapCapture(
+    val file: File?,
+    val status: String,
+) {
+    companion object {
+        fun captured(file: File): TerminalDeviceScreencapCapture =
+            TerminalDeviceScreencapCapture(file = file, status = "captured")
+
+        fun skipped(name: String): TerminalDeviceScreencapCapture {
+            TerminalLabArtifacts.writeText("$name-skipped.txt", "screencap -p skipped: opt-in disabled\n")
+            return TerminalDeviceScreencapCapture(file = null, status = "skipped_disabled")
+        }
+
+        fun unavailable(name: String, reason: String): TerminalDeviceScreencapCapture {
+            TerminalLabArtifacts.writeText("$name-error.txt", "screencap -p unavailable: $reason\n")
+            return TerminalDeviceScreencapCapture(file = null, status = "unavailable")
+        }
     }
 }
 
@@ -1033,7 +1068,7 @@ object TerminalLabArtifacts {
         }
     }
 
-    fun captureDeviceScreencap(name: String): File? {
+    internal fun captureDeviceScreencap(name: String): TerminalDeviceScreencapCapture {
         return try {
             val instrumentation = InstrumentationRegistry.getInstrumentation()
             instrumentation.waitForIdleSync()
@@ -1046,20 +1081,20 @@ object TerminalLabArtifacts {
                 }
                 if (file.length() <= 0L) {
                     file.delete()
-                    recordDeviceScreencapUnavailable(name, "screencap -p produced an empty artifact")
-                    null
+                    TerminalDeviceScreencapCapture.unavailable(name, "empty output")
                 } else {
                     println("TERMINAL_LAB_DEVICE_SCREENCAP ${file.absolutePath}")
-                    file
+                    TerminalDeviceScreencapCapture.captured(file)
                 }
             }
         } catch (t: Throwable) {
+            val message = "${t::class.java.name}: ${t.message}"
             recordDeviceScreencapUnavailable(
                 name = name,
-                message = "screencap -p unavailable: ${t::class.java.name}: ${t.message}",
+                message = "screencap -p unavailable: $message",
                 throwable = t,
             )
-            null
+            TerminalDeviceScreencapCapture.unavailable(name, message)
         }
     }
 

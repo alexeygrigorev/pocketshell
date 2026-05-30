@@ -29,6 +29,10 @@ import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
+import com.pocketshell.app.sessions.SSH_SOURCE_TMUX_CONNECT
+import com.pocketshell.app.sessions.SshOpenTelemetry
+import com.pocketshell.app.sessions.WarmSshConnections
+import com.pocketshell.app.sessions.WarmSshTarget
 import com.pocketshell.app.sessions.remoteStartDirectoryExists
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.core.agents.AgentDetection
@@ -135,6 +139,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private val reposRemoteSource: ReposRemoteSource? = null,
     @ApplicationContext private val applicationContext: Context? = null,
     private val projectRootDao: ProjectRootDao? = null,
+    private val warmSshConnections: WarmSshConnections = WarmSshConnections(),
 ) : ViewModel() {
 
     /** SSH executor seam for assistant tools; tests substitute it. */
@@ -460,6 +465,15 @@ public class TmuxSessionViewModel @Inject constructor(
             previous.port == target.port &&
             previous.user == target.user &&
             previous.keyPath == target.keyPath
+
+    private fun ConnectionTarget.toWarmSshTarget(): WarmSshTarget =
+        WarmSshTarget(
+            hostId = hostId,
+            hostname = host,
+            port = port,
+            username = user,
+            keyPath = keyPath,
+        )
 
     private fun sameSessionIdentity(left: ConnectionTarget, right: ConnectionTarget): Boolean =
         left.hostId == right.hostId &&
@@ -852,50 +866,76 @@ public class TmuxSessionViewModel @Inject constructor(
     ) {
         val startedAtMs = SystemClock.elapsedRealtime()
         try {
-            // Issue #178: instrument the actual SSH handshake call so a
-            // connected test (and humans reading logcat) can see whether
-            // the slow path or the fast tmux-only swap path was taken.
-            // The counter is process-wide so tests can snapshot it
-            // before/after a session-switch and assert "no new
-            // handshake" without grepping logcat. We log under the same
-            // tag the slow-path test already greps for, with a distinct
-            // event prefix so a `grep` matches either.
-            val handshakeNumber = SSH_HANDSHAKE_ATTEMPTS.incrementAndGet()
-            StartupTiming.mark(
-                "tmux-ssh-handshake",
-                "attempt" to attempt,
-                "handshake" to handshakeNumber,
-                "hostId" to target.hostId,
-                "host" to target.host,
-                "port" to target.port,
-                "session" to target.sessionName,
-                "trigger" to trigger.logValue,
-            )
-            Log.i(
-                ISSUE_145_RECONNECT_TAG,
-                "tmux-ssh-handshake count=$handshakeNumber trigger=${trigger.logValue} " +
-                    "${targetLogFields(target)} " +
-                    "attempt=$attempt",
-            )
-            val key: SshKey = SshKey.Path(File(target.keyPath))
-            val sessionResult = SshConnection.connect(
-                host = target.host,
-                port = target.port,
-                user = target.user,
-                key = key,
-                passphrase = target.passphrase?.copyOf(),
-                knownHosts = KnownHostsPolicy.AcceptAll,
-            )
-            val session = sessionResult.getOrElse { e ->
-                failConnectAttempt(
-                    target = target,
-                    attempt = attempt,
-                    startedAtMs = startedAtMs,
-                    message = "connect failed: ${e.message}",
-                    cause = e,
-                    preserveReconnectTarget = false,
+            val warmSession = warmSshConnections.take(target.toWarmSshTarget())
+            val session = if (warmSession != null && warmSession.isConnected) {
+                StartupTiming.mark(
+                    "tmux-warm-ssh-reused",
+                    "attempt" to attempt,
+                    "hostId" to target.hostId,
+                    "host" to target.host,
+                    "port" to target.port,
+                    "session" to target.sessionName,
+                    "trigger" to trigger.logValue,
                 )
-                return
+                Log.i(
+                    ISSUE_145_RECONNECT_TAG,
+                    "tmux-warm-ssh-reused trigger=${trigger.logValue} " +
+                        "${targetLogFields(target)} attempt=$attempt",
+                )
+                warmSession
+            } else {
+                warmSession?.let { runCatching { it.close() } }
+                // Issue #178: instrument the actual SSH handshake call so a
+                // connected test (and humans reading logcat) can see whether
+                // the slow path or the fast tmux-only swap path was taken.
+                // The counter is process-wide so tests can snapshot it
+                // before/after a session-switch and assert "no new
+                // handshake" without grepping logcat. We log under the same
+                // tag the slow-path test already greps for, with a distinct
+                // event prefix so a `grep` matches either.
+                val handshakeNumber = SSH_HANDSHAKE_ATTEMPTS.incrementAndGet()
+                StartupTiming.mark(
+                    "tmux-ssh-handshake",
+                    "attempt" to attempt,
+                    "handshake" to handshakeNumber,
+                    "hostId" to target.hostId,
+                    "host" to target.host,
+                    "port" to target.port,
+                    "session" to target.sessionName,
+                    "trigger" to trigger.logValue,
+                )
+                Log.i(
+                    ISSUE_145_RECONNECT_TAG,
+                    "tmux-ssh-handshake count=$handshakeNumber trigger=${trigger.logValue} " +
+                        "${targetLogFields(target)} " +
+                        "attempt=$attempt",
+                )
+                SshOpenTelemetry.record(
+                    source = SSH_SOURCE_TMUX_CONNECT,
+                    host = target.host,
+                    port = target.port,
+                    user = target.user,
+                )
+                val key: SshKey = SshKey.Path(File(target.keyPath))
+                val sessionResult = SshConnection.connect(
+                    host = target.host,
+                    port = target.port,
+                    user = target.user,
+                    key = key,
+                    passphrase = target.passphrase?.copyOf(),
+                    knownHosts = KnownHostsPolicy.AcceptAll,
+                )
+                sessionResult.getOrElse { e ->
+                    failConnectAttempt(
+                        target = target,
+                        attempt = attempt,
+                        startedAtMs = startedAtMs,
+                        message = "connect failed: ${e.message}",
+                        cause = e,
+                        preserveReconnectTarget = false,
+                    )
+                    return
+                }
             }
             StartupTiming.mark(
                 "ssh-connected",

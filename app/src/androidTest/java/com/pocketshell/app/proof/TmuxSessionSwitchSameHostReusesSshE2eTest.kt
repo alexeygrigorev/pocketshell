@@ -25,6 +25,7 @@ import com.pocketshell.app.sessions.SSH_SOURCE_FOLDER_LIST_PROBE
 import com.pocketshell.app.sessions.SSH_SOURCE_SESSION_PICKER_LIST
 import com.pocketshell.app.sessions.SSH_SOURCE_START_DIRECTORY_AUTOCOMPLETE
 import com.pocketshell.app.sessions.SSH_SOURCE_TMUX_CONNECT
+import com.pocketshell.app.sessions.SSH_SOURCE_WARM_HOST_CONNECT
 import com.pocketshell.app.sessions.SshOpenTelemetry
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_MORE_BUTTON_TAG
@@ -753,6 +754,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         const val MAX_PAGER_PAGES: Int = 12
         val SSH_SWITCH_SOURCES: List<String> = listOf(
             SSH_SOURCE_TMUX_CONNECT,
+            SSH_SOURCE_WARM_HOST_CONNECT,
             SSH_SOURCE_SESSION_PICKER_LIST,
             SSH_SOURCE_FOLDER_LIST_PROBE,
             SSH_SOURCE_START_DIRECTORY_AUTOCOMPLETE,

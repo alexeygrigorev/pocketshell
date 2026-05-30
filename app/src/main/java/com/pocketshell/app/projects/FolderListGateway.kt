@@ -6,23 +6,19 @@ import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.HostTmuxSessionListParser
-import com.pocketshell.app.sessions.SSH_SOURCE_FOLDER_LIST_PROBE
-import com.pocketshell.app.sessions.SshOpenTelemetry
+import com.pocketshell.app.sessions.WarmSshConnections
+import com.pocketshell.app.sessions.WarmSshTarget
 import com.pocketshell.app.sessions.remoteStartDirectoryExists
 import com.pocketshell.app.sessions.startDirectoryMissingMessage
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshSession
-import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
-import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import kotlinx.coroutines.CancellationException
 import org.json.JSONArray
 import org.json.JSONObject
-import java.io.File
 import java.io.InputStream
 import javax.inject.Inject
 
@@ -167,10 +163,16 @@ data class FolderImportPayload(
 class SshFolderListGateway @Inject constructor(
     private val reposRemoteSource: ReposRemoteSource,
     private val activeTmuxClients: ActiveTmuxClients,
+    private val warmSshConnections: WarmSshConnections = WarmSshConnections(),
     private val sessionListParser: HostTmuxSessionListParser = HostTmuxSessionListParser(),
 ) : FolderListGateway {
 
-    constructor() : this(ReposRemoteSource(ReposJsonParser()), ActiveTmuxClients(), HostTmuxSessionListParser())
+    constructor() : this(
+        ReposRemoteSource(ReposJsonParser()),
+        ActiveTmuxClients(),
+        WarmSshConnections(),
+        HostTmuxSessionListParser(),
+    )
 
     // Issue #252: reuse the SAME detection logic the Conversation view
     // uses instead of maintaining a forked candidate-enumeration +
@@ -196,33 +198,50 @@ class SshFolderListGateway @Inject constructor(
             listSessionsWithFolderFromLiveClient(host, keyPath)?.let { return it }
         }
 
-        SshOpenTelemetry.record(
-            source = SSH_SOURCE_FOLDER_LIST_PROBE,
-            host = host.hostname,
-            port = host.port,
-            user = host.username,
-        )
-        val session = SshConnection.connect(
-            host = host.hostname,
-            port = host.port,
-            user = host.username,
-            key = SshKey.Path(File(keyPath)),
-            passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-        ).getOrElse { error ->
-            return FolderListResult.ConnectFailed(error)
-        }
-
         return try {
-            val listSessions = session.exec(pathAware(LIST_SESSIONS_COMMAND))
-            listSessionsFromNativeOrPocketshell(session, host, watchedRoots, listSessions)
+            warmSshConnections.withSession(
+                target = host.toWarmSshTarget(keyPath),
+                passphrase = passphrase,
+            ) { session ->
+                val listSessions = session.exec(pathAware(LIST_SESSIONS_COMMAND))
+                listSessionsFromNativeOrPocketshell(session, host, watchedRoots, listSessions)
+            }.fold(
+                onSuccess = { it },
+                onFailure = { error -> FolderListResult.ConnectFailed(error) },
+            )
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
             FolderListResult.Failed("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
-        } finally {
-            session.close()
         }
+    }
+
+    private fun HostEntity.toWarmSshTarget(keyPath: String): WarmSshTarget =
+        WarmSshTarget(
+            hostId = id,
+            hostname = hostname,
+            port = port,
+            username = username,
+            keyPath = keyPath,
+        )
+
+    private suspend fun <T> withWarmSession(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        block: suspend (SshSession) -> T,
+    ): Result<T> {
+        val warmResult = try {
+            warmSshConnections.withSession(host.toWarmSshTarget(keyPath), passphrase, block)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            return Result.failure(t)
+        }
+        if (warmResult.isSuccess) return warmResult
+        val warmError = warmResult.exceptionOrNull()
+        if (warmError is CancellationException) throw warmError
+        return Result.failure(warmError ?: RuntimeException("SSH connection failed"))
     }
 
     internal suspend fun listSessionsFromNativeOrPocketshell(
@@ -430,23 +449,12 @@ class SshFolderListGateway @Inject constructor(
         cwd: String,
         startCommand: String?,
     ): Result<String> {
-        val session = SshConnection.connect(
-            host = host.hostname,
-            port = host.port,
-            user = host.username,
-            key = SshKey.Path(File(keyPath)),
-            passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-        ).getOrElse { return Result.failure(it) }
-
-        return try {
+        return withWarmSession(host, keyPath, passphrase) { session ->
             if (!remoteStartDirectoryExists(session, cwd)) {
-                return Result.failure(
-                    RuntimeException(
-                        startDirectoryMissingMessage(
-                            sessionName = sessionName,
-                            startDirectory = cwd,
-                        ),
+                throw RuntimeException(
+                    startDirectoryMissingMessage(
+                        sessionName = sessionName,
+                        startDirectory = cwd,
                     ),
                 )
             }
@@ -461,7 +469,7 @@ class SshFolderListGateway @Inject constructor(
                 pathAware("tmux new-session -A -d -s $quotedName -c $quotedCwd"),
             )
             if (createResult.exitCode != 0 && createResult.stderr.isNotBlank()) {
-                return Result.failure(RuntimeException(createResult.stderr.trim()))
+                throw RuntimeException(createResult.stderr.trim())
             }
             // Launch the start command via send-keys if requested. tmux
             // 's `send-keys ... Enter` sequence pipes the literal
@@ -484,13 +492,7 @@ class SshFolderListGateway @Inject constructor(
                     pathAware("tmux send-keys -t $quotedName $quotedCommand Enter"),
                 )
             }
-            Result.success(sessionName)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            Result.failure(t)
-        } finally {
-            session.close()
+            sessionName
         }
     }
 
@@ -504,28 +506,13 @@ class SshFolderListGateway @Inject constructor(
         val safeName = normaliseProjectFolderName(folderName)
             ?: return Result.failure(IllegalArgumentException("Enter a project folder name."))
         val child = childPath(parentPath, safeName)
-        val session = SshConnection.connect(
-            host = host.hostname,
-            port = host.port,
-            user = host.username,
-            key = SshKey.Path(File(keyPath)),
-            passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-        ).getOrElse { return Result.failure(it) }
-
-        return try {
+        return withWarmSession(host, keyPath, passphrase) { session ->
             val result = session.exec(pathAware("mkdir -p -- ${shellQuoteRemotePath(child)}"))
             if (result.exitCode == 0) {
-                Result.success(resolveRemoteDirectory(session, child).getOrDefault(child))
+                resolveRemoteDirectory(session, child).getOrDefault(child)
             } else {
-                Result.failure(RuntimeException(result.stderr.ifBlank { result.stdout }.trim()))
+                throw RuntimeException(result.stderr.ifBlank { result.stdout }.trim())
             }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            Result.failure(t)
-        } finally {
-            session.close()
         }
     }
 
@@ -536,25 +523,16 @@ class SshFolderListGateway @Inject constructor(
         folderPath: String,
         payload: FolderImportPayload,
     ): Result<String> {
-        val session = SshConnection.connect(
-            host = host.hostname,
-            port = host.port,
-            user = host.username,
-            key = SshKey.Path(File(keyPath)),
-            passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-        ).getOrElse { return Result.failure(it) }
-
-        return try {
+        return withWarmSession(host, keyPath, passphrase) { session ->
             val mkdir = session.exec(pathAware("mkdir -p -- ${shellQuoteRemotePath(folderPath)}"))
             if (mkdir.exitCode != 0) {
-                return Result.failure(RuntimeException(mkdir.stderr.ifBlank { mkdir.stdout }.trim()))
+                throw RuntimeException(mkdir.stderr.ifBlank { mkdir.stdout }.trim())
             }
             val resolvedFolderPath = resolveRemoteDirectory(session, folderPath)
-                .getOrElse { return Result.failure(it) }
+                .getOrThrow()
             val remotePath = childPath(resolvedFolderPath, payload.remoteName)
             val input = payload.openStream()
-                ?: return Result.failure(RuntimeException("Couldn't read selected file."))
+                ?: throw RuntimeException("Couldn't read selected file.")
             input.use { stream ->
                 session.uploadStream(
                     input = stream,
@@ -563,13 +541,7 @@ class SshFolderListGateway @Inject constructor(
                     remotePath = remotePath,
                 )
             }
-            Result.success(remotePath)
-        } catch (e: CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            Result.failure(t)
-        } finally {
-            session.close()
+            remotePath
         }
     }
 

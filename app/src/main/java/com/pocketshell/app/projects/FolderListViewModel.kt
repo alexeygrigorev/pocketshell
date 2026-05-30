@@ -2,6 +2,8 @@ package com.pocketshell.app.projects
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.app.sessions.WarmSshConnections
+import com.pocketshell.app.sessions.WarmSshTarget
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -140,6 +142,7 @@ class FolderListViewModel @Inject constructor(
     private val gateway: FolderListGateway,
     private val hostDao: HostDao,
     private val projectRootDao: ProjectRootDao,
+    private val warmSshConnections: WarmSshConnections = WarmSshConnections(),
 ) : ViewModel() {
 
     private val _state: MutableStateFlow<FolderListUiState> =
@@ -151,6 +154,8 @@ class FolderListViewModel @Inject constructor(
     val actionStatus: StateFlow<FolderActionStatus> = _actionStatus.asStateFlow()
 
     private var bound: BoundParams? = null
+    private var warmJob: Job? = null
+    private var warmReleaseJob: Job? = null
     private var watchedFoldersJob: Job? = null
     private var pollingJob: Job? = null
     private var lastSessions: List<FolderSessionEntry> = emptyList()
@@ -188,9 +193,21 @@ class FolderListViewModel @Inject constructor(
             keyPath = keyPath,
             passphrase = passphrase,
         )
-        if (bound == params) return
+        warmReleaseJob?.cancel()
+        warmReleaseJob = null
+        if (bound == params) {
+            if (pollingJob == null) startPolling()
+            return
+        }
         bound = params
 
+        warmJob?.cancel()
+        warmJob = viewModelScope.launch {
+            warmSshConnections.warm(
+                target = params.toWarmSshTarget(),
+                passphrase = params.passphrase,
+            )
+        }
         watchedFoldersJob?.cancel()
         watchedFoldersJob = viewModelScope.launch {
             projectRootDao.getByHostId(hostId).collectLatest { rows ->
@@ -359,6 +376,7 @@ class FolderListViewModel @Inject constructor(
     fun stopPolling() {
         pollingJob?.cancel()
         pollingJob = null
+        scheduleWarmRelease()
     }
 
     private suspend fun runProbe(params: BoundParams) {
@@ -444,9 +462,14 @@ class FolderListViewModel @Inject constructor(
     }
 
     override fun onCleared() {
-        super.onCleared()
         pollingJob?.cancel()
+        warmJob?.cancel()
+        warmReleaseJob?.cancel()
+        bound?.let { params ->
+            warmSshConnections.closeIfIdle(params.toWarmSshTarget())
+        }
         watchedFoldersJob?.cancel()
+        super.onCleared()
     }
 
     private data class BoundParams(
@@ -481,6 +504,24 @@ class FolderListViewModel @Inject constructor(
             result = 31 * result + (passphrase?.contentHashCode() ?: 0)
             return result
         }
+
+        fun toWarmSshTarget(): WarmSshTarget =
+            WarmSshTarget(
+                hostId = hostId,
+                hostname = hostname,
+                port = port,
+                username = username,
+                keyPath = keyPath,
+            )
+    }
+
+    private fun scheduleWarmRelease() {
+        val params = bound ?: return
+        warmReleaseJob?.cancel()
+        warmReleaseJob = viewModelScope.launch {
+            delay(WARM_RELEASE_DELAY_MS)
+            warmSshConnections.close(params.toWarmSshTarget())
+        }
     }
 
     companion object {
@@ -508,6 +549,7 @@ class FolderListViewModel @Inject constructor(
          * startup").
          */
         const val POLL_INTERVAL_MS: Long = 5_000L
+        const val WARM_RELEASE_DELAY_MS: Long = 10_000L
 
         /**
          * Maximum time the polling coroutine spends inside `delay()`

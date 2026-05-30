@@ -5,6 +5,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 internal const val SSH_SOURCE_TMUX_CONNECT: String = "tmux-connect"
+internal const val SSH_SOURCE_WARM_HOST_CONNECT: String = "warm-host-connect"
 internal const val SSH_SOURCE_SESSION_PICKER_LIST: String = "session-picker-list"
 internal const val SSH_SOURCE_FOLDER_LIST_PROBE: String = "folder-list-probe"
 internal const val SSH_SOURCE_START_DIRECTORY_AUTOCOMPLETE: String = "start-directory-autocomplete"

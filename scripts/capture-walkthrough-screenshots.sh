@@ -184,30 +184,78 @@ wait_for_instrumentation() {
   fail "Android test instrumentation was not registered after APK install"
 }
 
+visual_audit_instrumentation_log_has_success() {
+  local log_file="$1"
+  grep -q "INSTRUMENTATION_CODE: -1" "$log_file" &&
+    grep -q "OK (" "$log_file" &&
+    ! grep -q "FAILURES!!!" "$log_file"
+}
+
+visual_audit_instrumentation_log_has_failure_markers() {
+  local log_file="$1"
+  grep -Eq '(^FAILURES!!!$|^FAILURE: |^INSTRUMENTATION_STATUS_CODE: -[0-9]+$|^INSTRUMENTATION_STATUS: stack=|^INSTRUMENTATION_RESULT: shortMsg=Process crashed[.]|^[[:space:]]*at (com[.]pocketshell|androidx[.]test|org[.]junit|kotlin[.]|java[.]|android[.])|java[.]lang[.]AssertionError|junit[.]framework[.]AssertionFailedError|org[.]junit[.]ComparisonFailure|kotlin[.]AssertionError|androidx[.]test[.]espresso[.](AmbiguousViewMatcherException|NoMatchingRootException|NoMatchingViewException|PerformException)|^Process crashed[.])' "$log_file"
+}
+
+visual_audit_logcat_has_app_or_test_failure_markers() {
+  local logcat_file="$1"
+  grep -Eq 'Process: com[.]pocketshell[.]app|FATAL EXCEPTION.*com[.]pocketshell[.]app|FATAL SIGNAL.*com[.]pocketshell[.]app|AndroidRuntime.*com[.]pocketshell[.]app|(^|[[:space:]])FAILURES!!!($|[[:space:]])|INSTRUMENTATION_STATUS: stack=|INSTRUMENTATION_RESULT: shortMsg=Process crashed' "$logcat_file"
+}
+
+visual_audit_instrumentation_log_has_transport_drop_markers() {
+  local log_file="$1"
+  grep -Eiq 'adb:.*(closed|device|disconnected|no devices|offline|protocol fault)|error: (closed|device .* not found|device offline|failed to get feature set|more than one device/emulator|no devices/emulators found|protocol fault)|device offline|device .* not found|transport .* (closed|disconnected|error|not found|offline)|Connection reset by peer|Broken pipe|lost connection to device|UiAutomation.*(connection.*(died|lost)|died|disconnected|not connected)|java[.]lang[.]IllegalStateException: UiAutomation not connected|android[.]os[.]DeadObjectException' "$log_file"
+}
+
+visual_audit_logcat_has_transport_drop_markers() {
+  local logcat_file="$1"
+  grep -Eq 'adbd[[:space:]].*(connection terminated|offline|read failed)|host-[0-9]+: read failed|UiAutomation service owner died' "$logcat_file"
+}
+
+visual_audit_should_retry_interrupted_instrumentation() {
+  local status="$1"
+  local instrumentation_log="$2"
+  local logcat_file="$3"
+  [[ "$status" -ne 0 ]] || return 1
+  visual_audit_instrumentation_log_has_success "$instrumentation_log" && return 1
+  visual_audit_instrumentation_log_has_failure_markers "$instrumentation_log" && return 1
+  visual_audit_logcat_has_app_or_test_failure_markers "$logcat_file" && return 1
+  visual_audit_instrumentation_log_has_transport_drop_markers "$instrumentation_log" ||
+    visual_audit_logcat_has_transport_drop_markers "$logcat_file"
+}
+
 run_instrumentation_class() {
   local step_name="$1"
   local test_class="$2"
-  local attempt
+  local attempt instrumentation_status attempt_logcat
   for attempt in $(seq 1 "$INSTRUMENTATION_ATTEMPTS"); do
     local attempt_step="$step_name-attempt-$attempt"
     run_logged "$attempt_step-pre-force-stop" bash -lc \
       "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; sleep 5"
+    "$ADB" logcat -c >/dev/null 2>&1 || true
+    instrumentation_status=0
     run_logged "$attempt_step" \
       "$ADB" shell am instrument -w -r \
       -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
       -e class "$test_class" \
-      com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner
+      com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner ||
+      instrumentation_status=$?
     cp "$RUN_DIR/$attempt_step.log" "$RUN_DIR/$step_name.log"
-    if grep -q "INSTRUMENTATION_CODE: -1" "$RUN_DIR/$attempt_step.log" &&
-      grep -q "OK (" "$RUN_DIR/$attempt_step.log" &&
-      ! grep -q "FAILURES!!!" "$RUN_DIR/$attempt_step.log"; then
+    attempt_logcat="$RUN_DIR/$attempt_step-logcat.txt"
+    "$ADB" logcat -d -v threadtime -t 4000 > "$attempt_logcat" 2>&1 || true
+    if visual_audit_instrumentation_log_has_success "$RUN_DIR/$attempt_step.log"; then
       return 0
     fi
     if [[ "$attempt" -eq "$INSTRUMENTATION_ATTEMPTS" ]]; then
       fail "$test_class did not report instrumentation success"
     fi
-    printf 'Retrying %s after instrumentation failure; see %s\n' \
-      "$test_class" "$RUN_DIR/$attempt_step.log" >&2
+    if ! visual_audit_should_retry_interrupted_instrumentation \
+      "$instrumentation_status" "$RUN_DIR/$attempt_step.log" "$attempt_logcat"; then
+      fail "$test_class did not report instrumentation success"
+    fi
+    printf 'Retrying %s after adb transport/UIAutomation interruption; see %s and %s\n' \
+      "$test_class" "$RUN_DIR/$attempt_step.log" "$attempt_logcat" >&2
+    "$ADB" reconnect >/dev/null 2>&1 || true
+    "$ADB" wait-for-device >/dev/null 2>&1 || true
     "$ADB" shell cmd package wait-for-handler >/dev/null 2>&1 || true
     sleep 8
   done

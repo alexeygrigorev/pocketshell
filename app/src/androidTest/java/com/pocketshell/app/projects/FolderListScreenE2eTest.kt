@@ -17,6 +17,9 @@ import androidx.core.graphics.createBitmap
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.di.WhisperClientFactory
+import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -145,6 +148,7 @@ class FolderListScreenE2eTest {
             hostDao = db.hostDao(),
             projectRootDao = db.projectRootDao(),
         )
+        val dictationViewModel = noopAssistantDictationViewModel()
         var openedWorkspaceSettings = false
 
         compose.setContent {
@@ -165,6 +169,7 @@ class FolderListScreenE2eTest {
                     onEditEnv = { _, _, _ -> },
                     modifier = Modifier.fillMaxSize(),
                     viewModel = viewModel,
+                    assistantDictationViewModel = dictationViewModel,
                 )
             }
         }
@@ -191,10 +196,13 @@ class FolderListScreenE2eTest {
             .assertExists()
             .performClick()
         compose.waitUntil(timeoutMillis = 5_000) { openedWorkspaceSettings }
+        compose.onNodeWithContentDescription("Host assistant").assertExists()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_TAG)
             .assertExists()
             .performClick()
+        compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_ICON_TAG, useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_PANEL_TAG).assertExists()
+        compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_PROMPT_MIC_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_PROMPT_TAG)
             .performTextInput("create a project called notes under code")
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_SUBMIT_TAG).performClick()
@@ -371,6 +379,25 @@ class FolderListScreenE2eTest {
         }
     }
 }
+
+private fun noopAssistantDictationViewModel(): InlineDictationViewModel =
+    InlineDictationViewModel(
+        audioRecorder = object : PromptComposerViewModel.MicCapture {
+            override fun start() = Unit
+            override fun stop(): ByteArray = ByteArray(0)
+            override fun currentAmplitude(): Float = 0f
+        },
+        whisperClientFactory = WhisperClientFactory { null },
+        apiKeyStorage = object : PromptComposerViewModel.ApiKeyVault {
+            override fun save(key: CharArray) = Unit
+            override fun load(): CharArray? = null
+            override fun clear() = Unit
+        },
+        voiceSettings = object : PromptComposerViewModel.VoiceSettingsSnapshot {
+            override fun silenceWindowMs(): Long = InlineDictationViewModel.SILENCE_WINDOW_MS
+            override fun whisperLanguageHint(): String? = null
+        },
+    )
 
 /**
  * Fake [FolderListGateway] that returns a static [rows] payload — the

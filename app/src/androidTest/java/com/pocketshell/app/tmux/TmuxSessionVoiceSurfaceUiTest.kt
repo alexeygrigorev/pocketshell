@@ -1,15 +1,16 @@
 package com.pocketshell.app.tmux
 
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.assistant.AssistantAgentLoop
@@ -19,6 +20,9 @@ import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.session.KeyBarWithMic
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.ADD_PROMPT_CHIP_LABEL
+import com.pocketshell.app.voice.ASSISTANT_CORRECTION_MIC_TAG
+import com.pocketshell.app.voice.AssistantCorrectionDictation
+import com.pocketshell.app.voice.AssistantDictationTextEvent
 import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
@@ -179,6 +183,8 @@ class TmuxSessionVoiceSurfaceUiTest {
     @Test
     fun assistantStripConfirmOrCorrectRoutesThroughCallbacks() {
         val events = mutableListOf<String>()
+        var micTaps = 0
+        val dictated = mutableStateOf<AssistantDictationTextEvent?>(null)
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 AssistantStrip(
@@ -192,6 +198,12 @@ class TmuxSessionVoiceSurfaceUiTest {
                     onCorrect = { events += "correct:$it" },
                     onCancel = { events += "cancel" },
                     onDismiss = { events += "dismiss" },
+                    correctionDictation = AssistantCorrectionDictation(
+                        recording = InlineDictationViewModel.RecordingState.Idle,
+                        dictatedText = dictated.value,
+                        onDictatedTextConsumed = { dictated.value = null },
+                        onMicTap = { micTaps += 1 },
+                    ),
                 )
             }
         }
@@ -203,10 +215,16 @@ class TmuxSessionVoiceSurfaceUiTest {
         // correction, and send it — proving the rejection path feeds a
         // correction back rather than aborting.
         compose.onNodeWithTag("assistant:correct").performClick()
-        compose.onNodeWithTag("assistant:correction-field").performTextInput("show the last 5 commits")
+        compose.onNodeWithTag(ASSISTANT_CORRECTION_MIC_TAG).assertIsDisplayed().performClick()
+        compose.runOnIdle {
+            dictated.value = AssistantDictationTextEvent(1L, "show the last 5 commits")
+        }
+        compose.onNodeWithTag("assistant:correction-field")
+            .assertTextContains("show the last 5 commits")
         compose.onNodeWithTag("assistant:send-correction").performClick()
 
         assertEquals(listOf("correct:show the last 5 commits"), events)
+        assertEquals(1, micTaps)
     }
 
     @Test

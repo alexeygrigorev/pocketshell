@@ -1,6 +1,8 @@
 package com.pocketshell.app.projects
 
+import android.Manifest
 import android.content.ContentResolver
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -29,6 +31,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -43,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -55,13 +59,22 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.assistant.AssistantUiState
 import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.app.share.FilenameSanitiser
 import com.pocketshell.app.share.ShareUploader
+import com.pocketshell.app.voice.AssistantCorrectionDictation
+import com.pocketshell.app.voice.AssistantDictationTextEvent
 import com.pocketshell.app.voice.AssistantStrip
+import com.pocketshell.app.voice.DictateDotIcon
+import com.pocketshell.app.voice.InlineDictationErrorStrip
+import com.pocketshell.app.voice.appendDictationText
+import com.pocketshell.app.voice.toMicButtonState
+import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlin.math.PI
@@ -136,6 +149,7 @@ fun FolderListScreen(
     onAssistantNavigate: (AppDestination) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: FolderListViewModel = hiltViewModel(),
+    assistantDictationViewModel: InlineDictationViewModel = hiltViewModel(),
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
     hostDetailViewMode: HostDetailViewMode = HostDetailViewMode.Tree,
 ) {
@@ -162,6 +176,7 @@ fun FolderListScreen(
     val state by viewModel.state.collectAsState()
     val actionStatus by viewModel.actionStatus.collectAsState()
     val assistantState by viewModel.assistantState.collectAsState()
+    val assistantDictationState by assistantDictationViewModel.uiState.collectAsState()
     val context = LocalContext.current
     val showFlatFolderList = hostDetailViewMode == HostDetailViewMode.Flat
     var pickerFolder by remember { mutableStateOf<PickerTarget?>(null) }
@@ -170,9 +185,44 @@ fun FolderListScreen(
     var importFolder by remember { mutableStateOf<PickerTarget?>(null) }
     var rootAddSheet by remember { mutableStateOf<FolderTreeRoot?>(null) }
     var showAssistant by remember { mutableStateOf(false) }
+    var dictationTarget by remember { mutableStateOf(AssistantDictationTarget.Prompt) }
+    var dictationEventId by remember { mutableStateOf(0L) }
+    var promptDictationEvent by remember { mutableStateOf<AssistantDictationTextEvent?>(null) }
+    var correctionDictationEvent by remember { mutableStateOf<AssistantDictationTextEvent?>(null) }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            assistantDictationViewModel.onMicTap()
+        } else {
+            assistantDictationViewModel.surfacePermissionDenied()
+        }
+    }
 
     LaunchedEffect(viewModel) {
         viewModel.assistantNavRequests.collect { onAssistantNavigate(it) }
+    }
+    LaunchedEffect(assistantDictationViewModel) {
+        assistantDictationViewModel.transcriptions.collect { text ->
+            val event = AssistantDictationTextEvent(id = ++dictationEventId, text = text)
+            when (dictationTarget) {
+                AssistantDictationTarget.Prompt -> promptDictationEvent = event
+                AssistantDictationTarget.Correction -> correctionDictationEvent = event
+            }
+        }
+    }
+    val onAssistantMicTap: (AssistantDictationTarget) -> Unit = { target ->
+        dictationTarget = target
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            assistantDictationViewModel.onMicTap()
+        } else {
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
     }
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent(),
@@ -285,6 +335,17 @@ fun FolderListScreen(
                     viewModel.dismissAssistant()
                     showAssistant = false
                 },
+                dictationState = assistantDictationState,
+                promptDictation = promptDictationEvent,
+                onPromptDictationConsumed = { promptDictationEvent = null },
+                correctionDictation = AssistantCorrectionDictation(
+                    recording = assistantDictationState.recording,
+                    dictatedText = correctionDictationEvent,
+                    onDictatedTextConsumed = { correctionDictationEvent = null },
+                    onMicTap = { onAssistantMicTap(AssistantDictationTarget.Correction) },
+                ),
+                onPromptMicTap = { onAssistantMicTap(AssistantDictationTarget.Prompt) },
+                onDismissDictationError = assistantDictationViewModel::clearError,
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(start = 12.dp, end = 12.dp, bottom = 88.dp),
@@ -370,6 +431,8 @@ fun FolderListScreen(
 }
 
 private data class PickerTarget(val path: String, val label: String)
+
+private enum class AssistantDictationTarget { Prompt, Correction }
 
 private fun folderImportPayload(resolver: ContentResolver, uri: Uri): FolderImportPayload {
     val displayName = ShareUploader.queryUriDisplayName(resolver, uri)
@@ -479,7 +542,7 @@ private fun FolderListAppBar(
             testTag = FOLDER_LIST_ASSISTANT_TAG,
             onClick = onOpenAssistant,
         ) {
-            AssistantSparkIcon()
+            AssistantMicSparkIcon()
         }
         Spacer(modifier = Modifier.size(8.dp))
         TopBarIconButton(
@@ -500,9 +563,20 @@ private fun HostDetailAssistantPanel(
     onCorrect: (String) -> Unit,
     onCancel: () -> Unit,
     onDismiss: () -> Unit,
+    dictationState: InlineDictationViewModel.UiState,
+    promptDictation: AssistantDictationTextEvent?,
+    onPromptDictationConsumed: () -> Unit,
+    correctionDictation: AssistantCorrectionDictation,
+    onPromptMicTap: () -> Unit,
+    onDismissDictationError: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var prompt by remember { mutableStateOf("") }
+    LaunchedEffect(promptDictation?.id) {
+        val event = promptDictation ?: return@LaunchedEffect
+        prompt = appendDictationText(prompt, event.text)
+        onPromptDictationConsumed()
+    }
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -534,28 +608,46 @@ private fun HostDetailAssistantPanel(
                 onCorrect = onCorrect,
                 onCancel = onCancel,
                 onDismiss = onDismiss,
+                correctionDictation = correctionDictation,
             )
         }
+        dictationState.error?.let { msg ->
+            InlineDictationErrorStrip(message = msg, onDismiss = onDismissDictationError)
+        }
         if (state is AssistantUiState.Idle || state is AssistantUiState.Done || state is AssistantUiState.Error) {
-            OutlinedTextField(
-                value = prompt,
-                onValueChange = { prompt = it },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag(FOLDER_LIST_ASSISTANT_PROMPT_TAG),
-                placeholder = {
-                    Text("Create a project or start a session", color = PocketShellColors.TextSecondary)
-                },
-                keyboardActions = KeyboardActions(onDone = {
-                    val text = prompt.trim()
-                    if (text.isNotEmpty()) {
-                        prompt = ""
-                        onSubmit(text)
-                    }
-                }),
-                singleLine = true,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                OutlinedTextField(
+                    value = prompt,
+                    onValueChange = { prompt = it },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(FOLDER_LIST_ASSISTANT_PROMPT_TAG),
+                    placeholder = {
+                        Text("Create a project or start a session", color = PocketShellColors.TextSecondary)
+                    },
+                    keyboardActions = KeyboardActions(onDone = {
+                        val text = prompt.trim()
+                        if (text.isNotEmpty()) {
+                            prompt = ""
+                            onSubmit(text)
+                        }
+                    }),
+                    singleLine = true,
+                )
+                MicButton(
+                    state = dictationState.recording.toMicButtonState(),
+                    onClick = onPromptMicTap,
+                    modifier = Modifier.testTag(FOLDER_LIST_ASSISTANT_PROMPT_MIC_TAG),
+                )
+            }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 TextButton(
                     onClick = {
                         val text = prompt.trim()
@@ -574,23 +666,39 @@ private fun HostDetailAssistantPanel(
 }
 
 @Composable
-private fun AssistantSparkIcon() {
-    val color = PocketShellColors.TextSecondary
-    Canvas(modifier = Modifier.size(20.dp)) {
-        val center = androidx.compose.ui.geometry.Offset(size.width / 2f, size.height / 2f)
-        drawLine(
-            color = color,
-            start = androidx.compose.ui.geometry.Offset(center.x, size.height * 0.12f),
-            end = androidx.compose.ui.geometry.Offset(center.x, size.height * 0.88f),
-            strokeWidth = size.minDimension * 0.09f,
+private fun AssistantMicSparkIcon() {
+    Box(
+        modifier = Modifier
+            .size(22.dp)
+            .testTag(FOLDER_LIST_ASSISTANT_ICON_TAG),
+    ) {
+        Icon(
+            imageVector = DictateDotIcon,
+            contentDescription = null,
+            tint = PocketShellColors.TextSecondary,
+            modifier = Modifier
+                .size(18.dp)
+                .align(Alignment.CenterStart),
         )
-        drawLine(
-            color = color,
-            start = androidx.compose.ui.geometry.Offset(size.width * 0.12f, center.y),
-            end = androidx.compose.ui.geometry.Offset(size.width * 0.88f, center.y),
-            strokeWidth = size.minDimension * 0.09f,
-        )
-        drawCircle(color = color, radius = size.minDimension * 0.12f, center = center)
+        Canvas(
+            modifier = Modifier
+                .size(9.dp)
+                .align(Alignment.TopEnd),
+        ) {
+            val diamond = Path().apply {
+                moveTo(size.width * 0.5f, 0f)
+                lineTo(size.width, size.height * 0.5f)
+                lineTo(size.width * 0.5f, size.height)
+                lineTo(0f, size.height * 0.5f)
+                close()
+            }
+            drawPath(path = diamond, color = PocketShellColors.Accent)
+            drawCircle(
+                color = PocketShellColors.Accent,
+                radius = size.minDimension * 0.12f,
+                center = Offset(size.width * 0.08f, size.height * 0.12f),
+            )
+        }
     }
 }
 
@@ -1320,8 +1428,10 @@ const val FOLDER_LIST_BROWSE_REPOS_TAG: String = "folder-list:browse-repos"
 const val FOLDER_LIST_VIEW_TOGGLE_TAG: String = "folder-list:view-toggle"
 const val FOLDER_LIST_WORKSPACE_SETTINGS_TAG: String = "folder-list:workspace-settings"
 const val FOLDER_LIST_ASSISTANT_TAG: String = "folder-list:assistant"
+const val FOLDER_LIST_ASSISTANT_ICON_TAG: String = "folder-list:assistant:icon"
 const val FOLDER_LIST_ASSISTANT_PANEL_TAG: String = "folder-list:assistant:panel"
 const val FOLDER_LIST_ASSISTANT_PROMPT_TAG: String = "folder-list:assistant:prompt"
+const val FOLDER_LIST_ASSISTANT_PROMPT_MIC_TAG: String = "folder-list:assistant:prompt-mic"
 const val FOLDER_LIST_ASSISTANT_SUBMIT_TAG: String = "folder-list:assistant:submit"
 const val FOLDER_LIST_ASSISTANT_CLOSE_TAG: String = "folder-list:assistant:close"
 const val FOLDER_LIST_ACTION_STATUS_TAG: String = "folder-list:action-status"

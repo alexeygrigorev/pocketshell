@@ -16,6 +16,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -34,6 +35,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.pocketshell.app.assistant.AssistantAgentLoop
 import com.pocketshell.app.assistant.AssistantUiState
+import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.uikit.components.CommandChip
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.model.MicButtonState
@@ -99,6 +101,7 @@ internal fun AssistantStrip(
     onCorrect: (String) -> Unit,
     onCancel: () -> Unit,
     onDismiss: () -> Unit,
+    correctionDictation: AssistantCorrectionDictation? = null,
 ) {
     if (state is AssistantUiState.Idle) return
 
@@ -135,18 +138,35 @@ internal fun AssistantStrip(
                     modifier = Modifier.testTag(ASSISTANT_CANDIDATE_TAG),
                 )
                 if (correcting) {
-                    OutlinedTextField(
-                        value = correctionText,
-                        onValueChange = { correctionText = it },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .testTag(ASSISTANT_CORRECTION_FIELD_TAG),
-                        keyboardActions = KeyboardActions(onDone = {
-                            onCorrect(correctionText)
-                            correcting = false
-                            correctionText = ""
-                        }),
-                    )
+                    LaunchedEffect(correctionDictation?.dictatedText?.id) {
+                        val event = correctionDictation?.dictatedText ?: return@LaunchedEffect
+                        correctionText = appendDictationText(correctionText, event.text)
+                        correctionDictation.onDictatedTextConsumed()
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        OutlinedTextField(
+                            value = correctionText,
+                            onValueChange = { correctionText = it },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag(ASSISTANT_CORRECTION_FIELD_TAG),
+                            keyboardActions = KeyboardActions(onDone = {
+                                onCorrect(correctionText)
+                                correcting = false
+                                correctionText = ""
+                            }),
+                        )
+                        correctionDictation?.let { dictation ->
+                            MicButton(
+                                state = dictation.recording.toMicButtonState(),
+                                onClick = dictation.onMicTap,
+                                modifier = Modifier.testTag(ASSISTANT_CORRECTION_MIC_TAG),
+                            )
+                        }
+                    }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         TextButton(
                             onClick = {
@@ -188,11 +208,38 @@ internal fun AssistantStrip(
     }
 }
 
+internal data class AssistantCorrectionDictation(
+    val recording: InlineDictationViewModel.RecordingState,
+    val dictatedText: AssistantDictationTextEvent?,
+    val onDictatedTextConsumed: () -> Unit,
+    val onMicTap: () -> Unit,
+)
+
+internal data class AssistantDictationTextEvent(
+    val id: Long,
+    val text: String,
+)
+
+internal fun appendDictationText(existing: String, dictated: String): String {
+    val trimmed = dictated.trim()
+    if (trimmed.isEmpty()) return existing
+    val base = existing.trimEnd()
+    if (base.isEmpty()) return trimmed
+    return "$base $trimmed"
+}
+
+internal fun InlineDictationViewModel.RecordingState.toMicButtonState(): MicButtonState = when (this) {
+    InlineDictationViewModel.RecordingState.Idle -> MicButtonState.Idle
+    InlineDictationViewModel.RecordingState.Recording -> MicButtonState.Recording
+    InlineDictationViewModel.RecordingState.Transcribing -> MicButtonState.Disabled
+}
+
 internal const val ASSISTANT_STRIP_TAG: String = "assistant:strip"
 internal const val ASSISTANT_CANDIDATE_TAG: String = "assistant:candidate"
 internal const val ASSISTANT_CONFIRM_TAG: String = "assistant:confirm"
 internal const val ASSISTANT_CORRECT_TAG: String = "assistant:correct"
 internal const val ASSISTANT_CORRECTION_FIELD_TAG: String = "assistant:correction-field"
+internal const val ASSISTANT_CORRECTION_MIC_TAG: String = "assistant:correction-mic"
 internal const val ASSISTANT_SEND_CORRECTION_TAG: String = "assistant:send-correction"
 
 /**

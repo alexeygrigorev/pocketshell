@@ -10,5 +10,20 @@ See https://github.com/alexeygrigorev/pocketshell/issues/170.
 
 from __future__ import annotations
 
+import tomllib
+from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+
 __all__ = ["__version__"]
-__version__ = "0.3.6"
+
+
+def _metadata_version() -> str:
+    try:
+        return version("pocketshell")
+    except PackageNotFoundError:
+        pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        with pyproject.open("rb") as handle:
+            return tomllib.load(handle)["project"]["version"]
+
+
+__version__ = _metadata_version()

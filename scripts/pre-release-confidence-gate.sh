@@ -40,6 +40,7 @@ SSH_KEY="${SSH_KEY:-tests/docker/test_key}"
 APK_PATH="${APK_PATH:-app/build/outputs/apk/debug/app-debug.apk}"
 TEST_APK_PATH="${TEST_APK_PATH:-app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"
 APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS="${APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS:-3}"
+ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS="${ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS:-3}"
 
 APP_WALKTHROUGH_TESTS=(
   "com.pocketshell.app.composer.PromptComposerSmokeTest#recordingAndTranscribingStatesAreVisible"
@@ -82,6 +83,7 @@ Environment overrides:
   APK_PATH=app/build/outputs/apk/debug/app-debug.apk
   TEST_APK_PATH=app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
   APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS=3
+  ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS=3
 USAGE
 }
 
@@ -582,6 +584,36 @@ install_or_fallback_uninstall() {
   exit "\$status"
 }
 
+adb_output_has_transport_drop_markers() {
+  printf '%s\n' "\${1:-}" | grep -Eiq 'device offline|device still connecting|error: closed|error: device .+ not found|no devices/emulators found|connection reset|connection refused|protocol fault|failed to read|read failed|transport.*(offline|error|closed)|adb: failed to'
+}
+
+logcat_has_app_crash_signature() {
+  [ -f "\$1" ] || return 1
+  grep -Eiq 'Room cannot verify|Expected identity hash|Process: com[.]pocketshell[.]app|FATAL EXCEPTION.*com[.]pocketshell[.]app|AndroidRuntime.*com[.]pocketshell[.]app' "\$1"
+}
+
+logcat_has_adb_transport_drop_markers() {
+  [ -f "\$1" ] || return 1
+  grep -Eq 'adbd[[:space:]].*(connection terminated|offline|read failed)|host-[0-9]+: read failed|UiAutomation service owner died' "\$1"
+}
+
+should_retry_launch_attempt() {
+  [ "\$attempt" -lt '$ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS' ] || return 1
+  ! logcat_has_app_crash_signature "\$attempt_logcat_file" || return 1
+  if [ "\$start_status" -ne 0 ] && {
+    adb_output_has_transport_drop_markers "\$start_output" || logcat_has_adb_transport_drop_markers "\$attempt_logcat_file"
+  }; then
+    return 0
+  fi
+  if [ "\$pid_status" -ne 0 ] && {
+    adb_output_has_transport_drop_markers "\$pid_output" || logcat_has_adb_transport_drop_markers "\$attempt_logcat_file"
+  }; then
+    return 0
+  fi
+  return 1
+}
+
 '$PYTHON3' - "\$stale_db_host" <<'PY'
 import sqlite3
 import sys
@@ -612,24 +644,81 @@ wait_package_manager_idle
 '$ADB' shell run-as com.pocketshell.app sh -c "'mkdir -p databases && cp \$stale_db_device databases/pocketshell.db && chmod 600 databases/pocketshell.db && rm -f databases/pocketshell.db-wal databases/pocketshell.db-shm databases/pocketshell.db-journal'"
 '$ADB' shell rm -f "\$stale_db_device" >/dev/null 2>&1 || true
 
-'$ADB' logcat -c || true
-'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
-'$ADB' shell am start -W -n com.pocketshell.app/.MainActivity
-sleep 5
-pid=\$('$ADB' shell pidof com.pocketshell.app | tr -d '\r' || true)
-'$ADB' logcat -d -v time -t 5000 > "\$logcat_file" 2>&1 || true
+for attempt in \$(seq 1 '$ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS'); do
+  attempt_logcat_file="\$logcat_file"
+  if [ "\$attempt" -lt '$ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS' ]; then
+    attempt_logcat_file="\$logcat_file.attempt\$attempt"
+  fi
+  rm -f "\$attempt_logcat_file"
+  '$ADB' logcat -c || true
+  '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
 
-if [ -z "\$pid" ]; then
-  printf 'PocketShell process was not alive after launching with the #261 stale Room DB.\n' >&2
-  grep -Ei -C 40 'Room cannot verify|Expected identity hash|AndroidRuntime|FATAL EXCEPTION|com[.]pocketshell' "\$logcat_file" >&2 || true
-  exit 1
-fi
+  set +e
+  start_output=\$('$ADB' shell am start -W -n com.pocketshell.app/.MainActivity 2>&1)
+  start_status=\$?
+  set -e
+  printf '%s\n' "\$start_output"
 
-if grep -Eiq 'Room cannot verify|Expected identity hash|Process: com[.]pocketshell[.]app|FATAL EXCEPTION.*com[.]pocketshell[.]app' "\$logcat_file"; then
-  printf 'Crash signature found after launching with the #261 stale Room DB.\n' >&2
-  grep -Ei -C 40 'Room cannot verify|Expected identity hash|AndroidRuntime|FATAL EXCEPTION|com[.]pocketshell' "\$logcat_file" >&2 || true
-  exit 1
-fi
+  if [ "\$start_status" -eq 0 ]; then
+    sleep 5
+  else
+    sleep 2
+  fi
+
+  set +e
+  pid_output=\$('$ADB' shell pidof com.pocketshell.app 2>&1)
+  pid_status=\$?
+  set -e
+  pid=""
+  if [ "\$pid_status" -eq 0 ]; then
+    pid=\$(printf '%s\n' "\$pid_output" | tr -d '\r')
+  fi
+  '$ADB' logcat -d -v time -t 5000 > "\$attempt_logcat_file" 2>&1 || true
+
+  if logcat_has_app_crash_signature "\$attempt_logcat_file"; then
+    cp "\$attempt_logcat_file" "\$logcat_file" 2>/dev/null || true
+    printf 'Crash signature found after launching with the #261 stale Room DB.\n' >&2
+    grep -Ei -C 40 'Room cannot verify|Expected identity hash|AndroidRuntime|FATAL EXCEPTION|com[.]pocketshell' "\$logcat_file" >&2 || true
+    exit 1
+  fi
+
+  if [ "\$start_status" -ne 0 ]; then
+    if should_retry_launch_attempt; then
+      printf 'Issue #261 stale DB launch was interrupted by adb transport on attempt %s; retrying.\n' "\$attempt" >&2
+      '$ADB' reconnect >/dev/null 2>&1 || true
+      '$ADB' wait-for-device >/dev/null 2>&1 || true
+      sleep 2
+      continue
+    fi
+    cp "\$attempt_logcat_file" "\$logcat_file" 2>/dev/null || true
+    printf 'Launching PocketShell with the #261 stale Room DB failed with status %s.\n' "\$start_status" >&2
+    printf '%s\n' "\$start_output" >&2
+    grep -Ei -C 40 'Room cannot verify|Expected identity hash|AndroidRuntime|FATAL EXCEPTION|com[.]pocketshell|adbd|connection terminated|offline|read failed' "\$logcat_file" >&2 || true
+    exit "\$start_status"
+  fi
+
+  if [ -z "\$pid" ]; then
+    if should_retry_launch_attempt; then
+      printf 'Issue #261 stale DB pid check was interrupted by adb transport on attempt %s; retrying.\n' "\$attempt" >&2
+      '$ADB' reconnect >/dev/null 2>&1 || true
+      '$ADB' wait-for-device >/dev/null 2>&1 || true
+      sleep 2
+      continue
+    fi
+    cp "\$attempt_logcat_file" "\$logcat_file" 2>/dev/null || true
+    printf 'PocketShell process was not alive after launching with the #261 stale Room DB.\n' >&2
+    if [ "\$pid_status" -ne 0 ]; then
+      printf '%s\n' "\$pid_output" >&2
+    fi
+    grep -Ei -C 40 'Room cannot verify|Expected identity hash|AndroidRuntime|FATAL EXCEPTION|com[.]pocketshell|adbd|connection terminated|offline|read failed' "\$logcat_file" >&2 || true
+    exit 1
+  fi
+
+  if [ "\$attempt_logcat_file" != "\$logcat_file" ]; then
+    cp "\$attempt_logcat_file" "\$logcat_file"
+  fi
+  break
+done
 
 '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
 printf 'Issue #261 stale Room DB launch survived with pid %s\n' "\$pid"
@@ -773,6 +862,9 @@ require_command_or_executable "$PYTHON3" "python3"
 
 if ! [[ "$APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
   fail "APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS must be a positive integer"
+fi
+if ! [[ "$ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
+  fail "ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS must be a positive integer"
 fi
 
 run_step "android-sdk-paths" "$ADB" version

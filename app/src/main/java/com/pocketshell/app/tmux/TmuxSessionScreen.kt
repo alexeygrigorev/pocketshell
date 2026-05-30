@@ -1,6 +1,10 @@
 package com.pocketshell.app.tmux
 
+import android.Manifest
+import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
@@ -77,6 +81,7 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
@@ -84,9 +89,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.core.content.ContextCompat
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.composer.PromptComposerSheet
+import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.InlineDictationViewModel
+import com.pocketshell.app.session.KeyBarWithMic
 import com.pocketshell.app.settings.SettingsViewModel
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
@@ -116,7 +124,6 @@ import androidx.compose.foundation.layout.width
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
-import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
@@ -340,6 +347,36 @@ public fun TmuxSessionScreen(
     // renders one pane at a time, so the helper's recursive search lands
     // on the visible pane's `TerminalView`.
     val composeRootView = LocalView.current
+    val context = LocalContext.current
+
+    // Runtime RECORD_AUDIO permission flow for the inline-dictation path.
+    // Mirrors SessionScreen so the tmux route uses the same right-side mic
+    // affordance instead of falling back to a separate terminal-only path.
+    val inlinePermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            inlineDictationViewModel.onMicTap()
+        } else {
+            inlineDictationViewModel.surfacePermissionDenied()
+        }
+    }
+
+    fun onInlineMicTap() {
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            inlinePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+            return
+        }
+        if (!inlineDictationViewModel.hasApiKey()) {
+            showMicSheet = true
+            return
+        }
+        inlineDictationViewModel.onMicTap()
+    }
 
     // Issue #184 Layer 1: when the IME comes up, snap the active
     // pane's terminal viewport back to the bottom so the cursor row
@@ -494,16 +531,7 @@ public fun TmuxSessionScreen(
             // currently visible pane only. A sibling pane/window's agent
             // no longer keeps Conversation mounted or routes sends away
             // from what the user is looking at.
-            val currentPaneHasAgent = currentAgentConversation?.detection != null
-            val showConversationTab = currentPaneHasAgent
-            val tabs = if (showConversationTab) {
-                listOf("Terminal", "Conversation")
-            } else {
-                listOf("Terminal")
-            }
-            val conversationTabSelected = currentPaneHasAgent &&
-                currentAgentConversation?.selectedTab == SessionTab.Conversation
-            val selectedTabIndex = if (conversationTabSelected) 1 else 0
+            val tabState = tmuxSessionTabState(currentAgentConversation)
             val onTabSelected: (Int) -> Unit = { index ->
                 if (index == 1) {
                     currentPane
@@ -557,10 +585,10 @@ public fun TmuxSessionScreen(
                             ConsolidatedTopChrome(
                                 hostLabel = host,
                                 sessionName = sessionName,
-                                tabLabels = tabs,
-                                selectedTabIndex = selectedTabIndex,
+                                tabLabels = tabState.labels,
+                                selectedTabIndex = tabState.selectedIndex,
                                 onTabSelected = onTabSelected,
-                                pulseConversationTab = showConversationTab,
+                                pulseConversationTab = tabState.showsConversationTab,
                                 onBack = onBack,
                                 onMore = { moreExpanded = true },
                                 moreMenu = { AnchoredTmuxMoreMenu() },
@@ -765,13 +793,19 @@ public fun TmuxSessionScreen(
             )
 
             if (isImeVisible && currentPane != null) {
-                KeyBar(
+                KeyBarWithMic(
                     keys = TmuxKeyBarLayout,
                     onKey = if (sessionLive) {
                         { binding -> viewModel.onKeyBarKey(currentPane.paneId, binding.label) }
                     } else {
                         { _ -> }
                     },
+                    micState = dictationState.recording,
+                    micAmplitude = dictationState.amplitude,
+                    dictationMode = dictationState.mode,
+                    onDictationModeSelected = inlineDictationViewModel::selectMode,
+                    onMicTap = ::onInlineMicTap,
+                    inputEnabled = sessionLive,
                 )
             } else if (!isImeVisible && currentPane != null) {
                 val isAgentPane = currentAgentConversation?.detection != null
@@ -805,7 +839,7 @@ public fun TmuxSessionScreen(
                             }
                         }
                     },
-                    onDictateTap = null,
+                    onDictateTap = { showMicSheet = true },
                     // Issue #131: surface the show-keyboard chip on the
                     // tmux route too. The helper looks up the
                     // `TerminalView` of the currently visible pane (the
@@ -1511,6 +1545,23 @@ internal data class SessionSwitcherPage(
     val statusLabel: String,
     val selectable: Boolean,
 )
+
+internal data class TmuxSessionTabState(
+    val labels: List<String>,
+    val selectedIndex: Int,
+    val showsConversationTab: Boolean,
+)
+
+internal fun tmuxSessionTabState(
+    currentAgentConversation: AgentConversationUiState?,
+): TmuxSessionTabState {
+    val hasAgent = currentAgentConversation?.detection != null
+    return TmuxSessionTabState(
+        labels = if (hasAgent) listOf("Terminal", "Conversation") else listOf("Terminal"),
+        selectedIndex = if (hasAgent && currentAgentConversation.selectedTab == SessionTab.Conversation) 1 else 0,
+        showsConversationTab = hasAgent,
+    )
+}
 
 internal fun handleTmuxSessionSelection(
     currentSessionName: String,

@@ -1,8 +1,12 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.app.session.AgentConversationUiState
+import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.app.sessions.HostTmuxSessionRow
+import com.pocketshell.core.agents.AgentDetection
+import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import org.junit.Assert.assertEquals
@@ -147,6 +151,43 @@ class TmuxSessionScreenTest {
         assertEquals(listOf("dismiss", "replace:logs"), events)
     }
 
+    @Test
+    fun tmuxSessionTabStateShowsOnlyTerminalForNonAgentPane() {
+        val state = tmuxSessionTabState(null)
+
+        assertEquals(listOf("Terminal"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(!state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateShowsConversationForAgentPane() {
+        val state = tmuxSessionTabState(
+            AgentConversationUiState(
+                detection = claudeDetection(),
+                selectedTab = SessionTab.Terminal,
+            ),
+        )
+
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        assertEquals(0, state.selectedIndex)
+        assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun tmuxSessionTabStateSelectsConversationOnlyForAgentPane() {
+        val state = tmuxSessionTabState(
+            AgentConversationUiState(
+                detection = claudeDetection(),
+                selectedTab = SessionTab.Conversation,
+            ),
+        )
+
+        assertEquals(listOf("Terminal", "Conversation"), state.labels)
+        assertEquals(1, state.selectedIndex)
+        assertTrue(state.showsConversationTab)
+    }
+
     // ─── Issues #177 / #249: breadcrumb status mapping ──────────────────
 
     @Test
@@ -210,5 +251,13 @@ class TmuxSessionScreenTest {
             sessionId = "\$0",
             title = title,
             terminalState = TerminalSurfaceState(),
+        )
+
+    private fun claudeDetection(): AgentDetection =
+        AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/u/.claude/sessions/abc.jsonl",
+            sessionId = "abc",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
         )
 }

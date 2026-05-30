@@ -15,6 +15,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.assistant.AssistantAgentLoop
 import com.pocketshell.app.assistant.AssistantUiState
 import com.pocketshell.app.session.INLINE_DICTATION_MIC_SLOT_TAG
+import com.pocketshell.app.session.InlineDictationViewModel
+import com.pocketshell.app.session.KeyBarWithMic
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.ADD_PROMPT_CHIP_LABEL
 import com.pocketshell.app.voice.AssistantStrip
@@ -24,7 +26,6 @@ import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
-import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
@@ -36,8 +37,9 @@ import org.junit.runner.RunWith
 /**
  * Emulator validation for the tmux terminal bottom controls. The full
  * `TmuxSessionScreen` requires Hilt + a live tmux connect, so this test
- * isolates the input strips the screen renders and verifies #283's
- * no-terminal-mic chrome plus agent-vs-shell prompt/command affordances.
+ * isolates the input strips the screen renders and verifies #311's
+ * session-open controls: terminal chrome keeps dictation on the right
+ * while agent-vs-shell sessions expose different prompt/command affordances.
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxSessionVoiceSurfaceUiTest {
@@ -46,18 +48,25 @@ class TmuxSessionVoiceSurfaceUiTest {
     val compose = createComposeRule()
 
     @Test
-    fun tmuxKeyBarOmitsInlineMicSlot() {
+    fun tmuxKeyBarExposesInlineMicSlot() {
+        var micTaps = 0
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
-                KeyBar(
+                KeyBarWithMic(
                     keys = TmuxKeyBarLayout,
                     onKey = {},
+                    micState = InlineDictationViewModel.RecordingState.Idle,
+                    micAmplitude = 0f,
+                    dictationMode = InlineDictationViewModel.DictationMode.Prompt,
+                    onDictationModeSelected = {},
+                    onMicTap = { micTaps++ },
                 )
             }
         }
 
         compose.onNodeWithText("Ctrl-C").assertIsDisplayed()
-        compose.onNodeWithTag(INLINE_DICTATION_MIC_SLOT_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(INLINE_DICTATION_MIC_SLOT_TAG).assertIsDisplayed().performClick()
+        assertEquals(1, micTaps)
     }
 
     @Test
@@ -65,9 +74,14 @@ class TmuxSessionVoiceSurfaceUiTest {
         val taps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
-                KeyBar(
+                KeyBarWithMic(
                     keys = TmuxKeyBarLayout,
                     onKey = { taps += it.label },
+                    micState = InlineDictationViewModel.RecordingState.Idle,
+                    micAmplitude = 0f,
+                    dictationMode = InlineDictationViewModel.DictationMode.Prompt,
+                    onDictationModeSelected = {},
+                    onMicTap = {},
                 )
             }
         }
@@ -79,16 +93,17 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
-    fun shellBottomChipControlsRenderCommandsWithoutMic() {
+    fun shellBottomChipControlsRenderCommandsWithMic() {
         var snippetTaps = 0
         var keyboardTaps = 0
+        var dictateTaps = 0
         val chipTaps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 BottomChipControls(
                     chips = DefaultSessionChips,
                     onChipTap = { chipTaps += it },
-                    onDictateTap = null,
+                    onDictateTap = { dictateTaps++ },
                     onShowKeyboardTap = { keyboardTaps += 1 },
                     onAddSnippetTap = { snippetTaps += 1 },
                     addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
@@ -100,7 +115,8 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         captureViewportArtifact("shell-command-bottom-strip.png")
 
-        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed().performClick()
+        assertEquals(1, dictateTaps)
         compose.onNodeWithText("dictate").assertDoesNotExist()
 
         // Issue #131 / #221 (round 2): the show-keyboard and picker
@@ -129,13 +145,14 @@ class TmuxSessionVoiceSurfaceUiTest {
     @Test
     fun agentBottomChipControlsRenderPromptsAndExitChipsWithoutShellCommands() {
         var snippetTaps = 0
+        var dictateTaps = 0
         val chipTaps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 BottomChipControls(
                     chips = AgentExitChips,
                     onChipTap = { chipTaps += it },
-                    onDictateTap = null,
+                    onDictateTap = { dictateTaps++ },
                     onShowKeyboardTap = null,
                     onAddSnippetTap = { snippetTaps += 1 },
                     addSnippetLabel = ADD_PROMPT_CHIP_LABEL,
@@ -145,7 +162,8 @@ class TmuxSessionVoiceSurfaceUiTest {
             }
         }
 
-        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed().performClick()
+        assertEquals(1, dictateTaps)
         compose.onNodeWithText(CtrlC2Chip).assertIsDisplayed().assertHasClickAction().performClick()
         compose.onNodeWithText(CtrlD2Chip).assertIsDisplayed().assertHasClickAction().performClick()
         compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG).assertIsDisplayed().performClick()

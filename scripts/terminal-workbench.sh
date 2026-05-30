@@ -76,6 +76,7 @@ HOLD_MS="${HOLD_MS:-0}"
 DEBUG_HOLD_MS="${DEBUG_HOLD_MS:-0}"
 REAL_AGENTS="${REAL_AGENTS:-0}"
 ALLOW_DUPLICATE_VIEWPORT_HASHES="${ALLOW_DUPLICATE_VIEWPORT_HASHES:-0}"
+WORKBENCH_INSTRUMENTATION_ATTEMPTS="${WORKBENCH_INSTRUMENTATION_ATTEMPTS:-3}"
 if [[ -n "${TEST_SELECTOR:-}" ]]; then
   TEST_SELECTOR_WAS_SET=1
 else
@@ -339,11 +340,13 @@ printf 'Debug hold ms: %s\n' "$DEBUG_HOLD_MS"
 printf 'Real agents: %s\n' "$REAL_AGENTS"
 printf 'Agent service: %s\n' "$AGENT_SERVICE"
 printf 'Test selector: %s\n' "$TEST_SELECTOR"
+printf 'Instrumentation attempts: %s\n' "$WORKBENCH_INSTRUMENTATION_ATTEMPTS"
 
 [[ -x "$ADB" ]] || fail "adb is not executable at $ADB"
 [[ -x "$EMULATOR" ]] || fail "emulator is not executable at $EMULATOR"
 [[ -f "$SSH_KEY" ]] || fail "SSH key missing at $SSH_KEY"
 command -v ssh >/dev/null 2>&1 || fail "ssh client is missing"
+require_positive_integer "$WORKBENCH_INSTRUMENTATION_ATTEMPTS" "WORKBENCH_INSTRUMENTATION_ATTEMPTS"
 # OpenSSH refuses to use private keys with group/world-readable permissions.
 chmod 600 "$SSH_KEY" || fail "could not restrict SSH key permissions at $SSH_KEY"
 
@@ -362,7 +365,6 @@ else
 fi
 
 run_logged "05-install-apks" bash -lc "'$ADB' install -r -d -t '$APP_APK' && '$ADB' install -r -d -t '$TEST_APK'"
-run_logged "06-reset-artifacts" "$ADB" shell rm -rf "$DEVICE_ARTIFACT_DIR"
 INSTRUMENTATION_ARGS=(
   -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR"
   -e terminalWorkbenchHoldMs "$HOLD_MS"
@@ -373,14 +375,71 @@ INSTRUMENTATION_ARGS=(
 if [[ "$REAL_AGENTS" == "1" ]]; then
   INSTRUMENTATION_ARGS+=(-e terminalWorkbenchRealAgents 1)
 fi
+
+instrumentation_log_has_success() {
+  local log_file="$1"
+  grep -q "OK (" "$log_file" &&
+    grep -q "INSTRUMENTATION_CODE: -1" "$log_file"
+}
+
+instrumentation_log_has_failure_markers() {
+  local log_file="$1"
+  grep -Eq '(^FAILURES!!!$|^FAILURE: |^INSTRUMENTATION_STATUS_CODE: -[0-9]+$|^INSTRUMENTATION_STATUS: stack=|^[[:space:]]*at (com[.]pocketshell|androidx[.]test|org[.]junit|kotlin[.]|java[.]|android[.])|^[[:alnum:]_.]*(Exception|Error): |^Process crashed[.])' "$log_file"
+}
+
+logcat_has_app_or_test_failure_markers() {
+  local logcat_file="$1"
+  grep -Eq 'Process: com[.]pocketshell[.]app|FATAL EXCEPTION.*com[.]pocketshell[.]app|FATAL SIGNAL.*com[.]pocketshell[.]app|AndroidRuntime.*com[.]pocketshell[.]app|(^|[[:space:]])FAILURES!!!($|[[:space:]])|INSTRUMENTATION_STATUS: stack=|INSTRUMENTATION_RESULT: shortMsg=Process crashed' "$logcat_file"
+}
+
+logcat_has_adb_transport_drop_markers() {
+  local logcat_file="$1"
+  grep -Eq 'adbd[[:space:]].*(connection terminated|offline|read failed)|host-[0-9]+: read failed|UiAutomation service owner died' "$logcat_file"
+}
+
+should_retry_interrupted_instrumentation() {
+  local status="$1"
+  local instrumentation_log="$2"
+  local logcat_file="$3"
+  [[ "$status" -eq 255 ]] || return 1
+  instrumentation_log_has_success "$instrumentation_log" && return 1
+  instrumentation_log_has_failure_markers "$instrumentation_log" && return 1
+  logcat_has_app_or_test_failure_markers "$logcat_file" && return 1
+  logcat_has_adb_transport_drop_markers "$logcat_file"
+}
+
 instrumentation_status=0
-set +e
-run_logged "07-run-workbench" \
-  "$ADB" shell am instrument -w -r \
-  "${INSTRUMENTATION_ARGS[@]}" \
-  com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner
-instrumentation_status=$?
-set -e
+for attempt in $(seq 1 "$WORKBENCH_INSTRUMENTATION_ATTEMPTS"); do
+  run_logged "06-reset-artifacts" "$ADB" shell rm -rf "$DEVICE_ARTIFACT_DIR"
+  "$ADB" logcat -c || true
+  set +e
+  run_logged "07-run-workbench" \
+    "$ADB" shell am instrument -w -r \
+    "${INSTRUMENTATION_ARGS[@]}" \
+    com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner
+  instrumentation_status=$?
+  set -e
+  if (( instrumentation_status != 0 )); then
+    sleep 2
+  fi
+  attempt_logcat="$RUN_DIR/logcat-workbench-attempt-$attempt.txt"
+  "$ADB" logcat -d -v threadtime -t 4000 > "$attempt_logcat" 2>&1 || true
+  if (( instrumentation_status == 0 )) || instrumentation_log_has_success "$RUN_DIR/07-run-workbench.log"; then
+    break
+  fi
+  if should_retry_interrupted_instrumentation "$instrumentation_status" "$RUN_DIR/07-run-workbench.log" "$attempt_logcat" &&
+    (( attempt < WORKBENCH_INSTRUMENTATION_ATTEMPTS )); then
+    cp "$RUN_DIR/07-run-workbench.log" "$RUN_DIR/07-run-workbench-attempt-$attempt.log" || true
+    printf 'Terminal workbench instrumentation interrupted by adb transport drop on attempt %s; retrying.\n' "$attempt" >&2
+    "$ADB" reconnect >/dev/null 2>&1 || true
+    "$ADB" wait-for-device >/dev/null 2>&1 || true
+    "$ADB" shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true
+    "$ADB" shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+    sleep 2
+    continue
+  fi
+  break
+done
 rm -rf "$RUN_DIR/artifacts"
 mkdir -p "$RUN_DIR/artifacts"
 pull_status=0
@@ -391,6 +450,7 @@ set -e
 {
   printf 'instrumentation_exit_code=%s\n' "$instrumentation_status"
   printf 'artifact_pull_exit_code=%s\n' "$pull_status"
+  printf 'instrumentation_attempts=%s\n' "$attempt"
 } > "$RUN_DIR/instrumentation-status.txt"
 if [[ -d "$ARTIFACT_DIR" ]]; then
   run_logged "09-artifact-file-info" file "$RUN_DIR"/artifacts/terminal-lab/* || true
@@ -419,8 +479,7 @@ if [[ -d "$ARTIFACT_DIR" ]]; then
 fi
 
 instrumentation_log_passed=0
-if grep -q "OK (" "$RUN_DIR/07-run-workbench.log" &&
-  grep -q "INSTRUMENTATION_CODE: -1" "$RUN_DIR/07-run-workbench.log"; then
+if instrumentation_log_has_success "$RUN_DIR/07-run-workbench.log"; then
   instrumentation_log_passed=1
 fi
 

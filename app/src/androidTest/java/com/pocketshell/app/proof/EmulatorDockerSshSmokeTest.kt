@@ -20,6 +20,10 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.projects.FolderListViewModel
+import com.pocketshell.app.projects.folderDetailRowTestTag
+import com.pocketshell.app.projects.folderHeaderClickTestTag
+import com.pocketshell.app.projects.folderRowTestTag
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.core.agents.AgentDetection
@@ -222,6 +226,10 @@ class EmulatorDockerSshSmokeTest {
     fun walkthroughJourneyOpensAppSessionAndRunsShellAndTmuxCommands() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val appContext = instrumentation.targetContext
+        val appVersion = appContext.packageManager
+            .getPackageInfo(appContext.packageName, 0)
+            .versionName
+            ?: error("Target app versionName is unavailable")
         val key = instrumentation.context
             .assets
             .open("test_key")
@@ -260,6 +268,11 @@ class EmulatorDockerSshSmokeTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    pocketshellInstalled = true,
+                    pocketshellLastDetectedAt = System.currentTimeMillis(),
+                    pocketshellCliVersion = appVersion,
+                    pocketshellExpectedCliVersion = appVersion,
+                    pocketshellVersionCompatible = true,
                 ),
             )
             hostRowTag = HOST_ROW_TAG_PREFIX + hostId
@@ -282,6 +295,7 @@ class EmulatorDockerSshSmokeTest {
             setupCheck.isSuccess,
         )
         cleanupRemoteWalkthroughArtifacts(key, tmpDir, sessionName)
+        resetRemoteTmuxServer(key)
         prepareRemoteWalkthroughScript(
             key = key,
             tmpDir = tmpDir,
@@ -301,11 +315,27 @@ class EmulatorDockerSshSmokeTest {
             compose.onNodeWithText("Walkthrough Docker", useUnmergedTree = true).assertExists()
             compose.onNodeWithText(DEFAULT_HOST, substring = true, useUnmergedTree = true).assertExists()
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+            compose.waitUntil(timeoutMillis = 45_000) {
+                compose.onAllNodesWithTag(
+                    folderRowTestTag(FolderListViewModel.UNTRACKED_PATH),
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithTag(
+                folderHeaderClickTestTag(FolderListViewModel.UNTRACKED_PATH),
+                useUnmergedTree = true,
+            ).performClick()
             compose.waitUntil(timeoutMillis = 20_000) {
-                compose.onAllNodesWithText(existingTmuxSessionName).fetchSemanticsNodes().isNotEmpty()
+                compose.onAllNodesWithTag(
+                    folderDetailRowTestTag(FolderListViewModel.UNTRACKED_PATH, existingTmuxSessionName),
+                    useUnmergedTree = true,
+                ).fetchSemanticsNodes().isNotEmpty()
             }
             val attachTapAt = SystemClock.elapsedRealtime()
-            compose.onNodeWithText(existingTmuxSessionName).performClick()
+            compose.onNodeWithTag(
+                folderDetailRowTestTag(FolderListViewModel.UNTRACKED_PATH, existingTmuxSessionName),
+                useUnmergedTree = true,
+            ).performClick()
             // Issue #216: the visible "Terminal" tab label is only
             // rendered when the consolidated tab pill (#189) has 2+
             // entries — i.e. an agent has been detected. For a
@@ -621,6 +651,29 @@ class EmulatorDockerSshSmokeTest {
         val result = prepared.getOrNull()
         assertTrue(
             "expected remote issue #78 script setup to succeed, got ${prepared.exceptionOrNull()} " +
+                "stdout='${result?.stdout}' stderr='${result?.stderr}'",
+            result?.exitCode == 0,
+        )
+    }
+
+    private suspend fun resetRemoteTmuxServer(key: String) {
+        val reset = withTimeout(20_000) {
+            SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+                timeoutMs = 15_000,
+            ).mapCatching { session ->
+                session.use {
+                    it.exec("tmux kill-server 2>/dev/null || true")
+                }
+            }
+        }
+        val result = reset.getOrNull()
+        assertTrue(
+            "expected remote tmux reset to succeed, got ${reset.exceptionOrNull()} " +
                 "stdout='${result?.stdout}' stderr='${result?.stderr}'",
             result?.exitCode == 0,
         )

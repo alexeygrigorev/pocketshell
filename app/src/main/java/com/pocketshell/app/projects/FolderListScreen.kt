@@ -1229,6 +1229,7 @@ private fun FolderHeader(
             .background(PocketShellColors.Surface, RoundedCornerShape(10.dp))
             .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
             .clickable(role = Role.Button, onClick = onToggleExpanded)
+            .testTag(folderHeaderClickTestTag(folder.path))
             .padding(horizontal = 10.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1536,6 +1537,7 @@ const val FOLDER_LIST_ACTION_STATUS_TAG: String = "folder-list:action-status"
 const val FOLDER_LIST_ACTION_STATUS_DISMISS_TAG: String = "folder-list:action-status:dismiss"
 
 fun folderRowTestTag(path: String): String = "folder-list:row:$path"
+fun folderHeaderClickTestTag(path: String): String = "folder-list:header-click:$path"
 fun folderHeaderLabelTag(path: String): String = "folder-list:header:$path"
 fun folderCountPillTestTag(path: String): String = "folder-list:count:$path"
 fun folderListFlatRowTestTag(sessionName: String): String = "folder-list:flat-row:$sessionName"

@@ -323,7 +323,8 @@ public fun SessionScreen(
             // up against either the IME or the system nav, whichever is
             // present.
             Box(modifier = Modifier.weight(1f)) {
-                if (agentConversation.selectedTab == SessionTab.Conversation && agentConversation.detection != null) {
+                val detection = agentConversation.detection
+                if (agentConversation.selectedTab == SessionTab.Conversation && detection != null) {
                     ConversationPane(
                         events = agentConversation.events,
                         onSendToAgent = viewModel::sendToAgent,
@@ -338,6 +339,7 @@ public fun SessionScreen(
                         onQueryChange = viewModel::setAgentSearchQuery,
                         // Issue #249: don't deliver-then-clear while down.
                         sendEnabled = sessionLive,
+                        agentName = detection.agent.displayName,
                     )
                 } else {
                     TerminalSurface(
@@ -447,8 +449,8 @@ public fun SessionScreen(
     if (showMicSheet) {
         // Wires the issue #15 prompt composer. `onSend` is the contract
         // the composer drives:
-        //  - `withEnter = false` -> write the prompt bytes only (Send)
-        //  - `withEnter = true`  -> write the prompt bytes + Enter (Send + ↵)
+        //  - `withEnter = false` -> insert the prompt bytes only
+        //  - `withEnter = true`  -> send the prompt bytes + Enter
         // Either way we dismiss the sheet so the user lands back on the
         // live terminal with their submission visible.
         PromptComposerSheet(
@@ -493,7 +495,6 @@ public fun SessionScreen(
     if (showProjectNavigation) {
         ProjectNavigationSheet(
             state = projectNavigation,
-            targetLabel = "$user@$host",
             onDismiss = {
                 showProjectNavigation = false
                 viewModel.clearProjectNavigationFeedback()
@@ -567,6 +568,7 @@ internal fun ConversationPane(
     // keeps direct callers (the connected `ConversationInteractE2eTest`)
     // running with the always-enabled behaviour.
     sendEnabled: Boolean = true,
+    agentName: String = "agent",
 ) {
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     var composerText by remember { mutableStateOf("") }
@@ -682,6 +684,7 @@ internal fun ConversationPane(
             inputFieldTag = SESSION_CONVERSATION_COMPOSER_INPUT_TAG,
             sendButtonTag = SESSION_CONVERSATION_COMPOSER_SEND_TAG,
             sendEnabled = sendEnabled,
+            placeholder = "Message ${agentName.ifBlank { "agent" }}",
         )
     }
 }
@@ -1175,7 +1178,6 @@ private fun ArmedModifierPill(pill: ArmedModifierPillUi) {
 @Composable
 private fun ProjectNavigationSheet(
     state: ProjectNavigationUiState,
-    targetLabel: String,
     onDismiss: () -> Unit,
     onDirectoryTap: (String) -> Unit,
     onAddRoot: (path: String, label: String) -> Unit,
@@ -1210,11 +1212,6 @@ private fun ProjectNavigationSheet(
                     color = PocketShellColors.Text,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    text = "Commands send to $targetLabel pane 1",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 12.sp,
                 )
             }
             state.feedback?.let { feedback ->

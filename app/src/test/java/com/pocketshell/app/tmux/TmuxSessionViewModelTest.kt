@@ -2,6 +2,7 @@ package com.pocketshell.app.tmux
 
 import android.os.Looper
 import com.pocketshell.app.hosts.MainDispatcherRule
+import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.core.agents.AgentDetection
@@ -1545,118 +1546,78 @@ class TmuxSessionViewModelTest {
         assertEquals(AgentKind.ClaudeCode, after.detection?.agent)
     }
 
-    // ─── Issue #197: conversation send-target lock ───────────────────
-    //
-    // The lock keeps the conversation composer bound to the agent pane
-    // even after the user navigates to a sibling window via the
-    // WindowStrip — so a `send-keys` from the composer cannot silently
-    // land on a non-agent pane in another window.
+    // ─── Issue #256: current-pane conversation semantics ──────────────
 
     @Test
-    fun selectingConversationTabLocksTargetToThatPane() = runTest {
+    fun selectingConversationTabOnlyMutatesTheCurrentPaneState() = runTest {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         vm.startAgentConversationForTest("%0", newClaudeDetection())
-        assertNull(
-            "lock must start unset before the user opens the Conversation tab",
-            vm.lockedConversationPaneId.value,
+        vm.startAgentConversationForTest(
+            "%1",
+            AgentDetection(
+                agent = AgentKind.Codex,
+                sourcePath = "/home/u/.codex/sessions/xyz.jsonl",
+                sessionId = "xyz",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
         )
 
         vm.selectSessionTab("%0", SessionTab.Conversation)
 
+        assertEquals(SessionTab.Conversation, vm.agentConversations.value["%0"]!!.selectedTab)
+        assertEquals(SessionTab.Terminal, vm.agentConversations.value["%1"]!!.selectedTab)
+    }
+
+    @Test
+    fun selectingConversationTabForUnknownOrPlainPaneIsNoOp() = runTest {
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        val before = vm.agentConversations.value
+
+        vm.selectSessionTab("%missing", SessionTab.Conversation)
+
+        assertEquals(before, vm.agentConversations.value)
+    }
+
+    @Test
+    fun sendToAgentPaneAppendsOptimisticMessageAndWritesCarriageReturn() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+
+        vm.sendToAgentPane("%0", "  run tests  ")
+        advanceUntilIdle()
+
+        val state = vm.agentConversations.value["%0"]!!
+        val optimistic = state.events.single() as ConversationEvent.Message
+        assertTrue(optimistic.id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX))
+        assertEquals(ConversationRole.User, optimistic.role)
+        assertEquals("run tests", optimistic.text)
+        assertEquals(AgentKind.ClaudeCode, optimistic.agent)
         assertEquals(
-            "lock must point at the pane the user opened conversation on",
-            "%0",
-            vm.lockedConversationPaneId.value,
+            listOf(
+                "send-keys -l -t %0 -- 'run tests'",
+                "send-keys -t %0 Enter",
+            ),
+            client.sentCommands.filter { it.startsWith("send-keys") },
         )
     }
 
     @Test
-    fun returningToTerminalTabClearsTheLock() = runTest {
+    fun sendToAgentPaneBlankTextIsNoOp() = runTest {
         val vm = newVm()
-        vm.attachClientForTest(FakeTmuxClient())
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
         vm.startAgentConversationForTest("%0", newClaudeDetection())
 
-        vm.selectSessionTab("%0", SessionTab.Conversation)
-        assertEquals("%0", vm.lockedConversationPaneId.value)
+        vm.sendToAgentPane("%0", "   ")
+        advanceUntilIdle()
 
-        vm.selectSessionTab("%0", SessionTab.Terminal)
-
-        assertNull(
-            "switching back to Terminal must unlock the conversation target",
-            vm.lockedConversationPaneId.value,
-        )
-    }
-
-    @Test
-    fun terminalTabOnNonLockedPaneDoesNotClearTheLock() = runTest {
-        // If the user is viewing a sibling pane (%1) while the lock is
-        // pointing at %0, calling selectSessionTab on the sibling
-        // (which can happen when the screen re-fires the tab callback
-        // against `currentPane`) must NOT clear the lock — clearing
-        // would defeat the whole purpose of #197's "don't auto-switch"
-        // behaviour. Only an explicit Terminal-tab tap on the locked
-        // pane unlocks.
-        val vm = newVm()
-        vm.attachClientForTest(FakeTmuxClient())
-        vm.startAgentConversationForTest("%0", newClaudeDetection())
-        // Synthesize a sibling pane (no detection) so a Terminal-tab
-        // selectSessionTab call against it is well-formed.
-        vm.startAgentConversationForTest("%1", newClaudeDetection())
-        vm.selectSessionTab("%0", SessionTab.Conversation)
-        assertEquals("%0", vm.lockedConversationPaneId.value)
-
-        vm.selectSessionTab("%1", SessionTab.Terminal)
-
-        assertEquals(
-            "lock must remain on the agent pane after a non-locked-pane tab tap",
-            "%0",
-            vm.lockedConversationPaneId.value,
-        )
-    }
-
-    @Test
-    fun returnToTerminalFromConversationClearsLockEvenFromSiblingPane() = runTest {
-        // The screen's Terminal-tab tap can fire from a pane that has
-        // no AgentConversationUiState (the user navigated to a sibling
-        // window while the conversation was locked). The standalone
-        // unlock entry point must still clear the lock and flip the
-        // locked pane's selectedTab back to Terminal.
-        val vm = newVm()
-        vm.attachClientForTest(FakeTmuxClient())
-        vm.startAgentConversationForTest("%0", newClaudeDetection())
-        vm.selectSessionTab("%0", SessionTab.Conversation)
-        assertEquals("%0", vm.lockedConversationPaneId.value)
-        assertEquals(
-            SessionTab.Conversation,
-            vm.agentConversations.value["%0"]!!.selectedTab,
-        )
-
-        vm.returnToTerminalFromConversation()
-
-        assertNull(
-            "explicit return-to-Terminal must unlock the conversation",
-            vm.lockedConversationPaneId.value,
-        )
-        assertEquals(
-            "locked pane's selected tab must flip back to Terminal",
-            SessionTab.Terminal,
-            vm.agentConversations.value["%0"]!!.selectedTab,
-        )
-    }
-
-    @Test
-    fun returnToTerminalFromConversationIsNoOpWhenNotLocked() = runTest {
-        val vm = newVm()
-        vm.attachClientForTest(FakeTmuxClient())
-        vm.startAgentConversationForTest("%0", newClaudeDetection())
-        assertNull(vm.lockedConversationPaneId.value)
-        val before = vm.agentConversations.value["%0"]
-
-        vm.returnToTerminalFromConversation()
-
-        assertNull(vm.lockedConversationPaneId.value)
-        assertEquals(before, vm.agentConversations.value["%0"])
+        assertTrue(vm.agentConversations.value["%0"]!!.events.isEmpty())
+        assertTrue(client.sentCommands.none { it.startsWith("send-keys") })
     }
 
     // ─── Issue #154: conversation search query persistence ─────────────
@@ -1878,12 +1839,11 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun lockClearsWhenLockedPaneLosesDetection() = runTest {
-        // Issue #186 / #197 interaction: if the user has opened the
-        // Conversation tab on the agent pane (locking the composer to
-        // that pane), and then exits the agent in that pane, the lock
-        // must clear so the composer doesn't keep sending into a
-        // shell that no longer hosts an agent.
+    fun conversationStateClearsWhenPaneLosesDetection() = runTest {
+        // If the user has opened the Conversation tab on the agent pane
+        // and then exits the agent in that pane, the per-pane
+        // conversation state must disappear so the screen falls back to
+        // Terminal for that visible pane.
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         vm.applyParsedPanesForTest(
@@ -1893,13 +1853,13 @@ class TmuxSessionViewModelTest {
         )
         vm.startAgentConversationForTest("%0", newClaudeDetection())
         vm.selectSessionTab("%0", SessionTab.Conversation)
-        assertEquals("%0", vm.lockedConversationPaneId.value)
+        assertEquals(SessionTab.Conversation, vm.agentConversations.value["%0"]!!.selectedTab)
 
         vm.clearAgentDetectionForPaneForTest("%0")
 
         assertNull(
-            "lock must clear when the locked pane loses its detection",
-            vm.lockedConversationPaneId.value,
+            "conversation state must clear when the pane loses its detection",
+            vm.agentConversations.value["%0"],
         )
         assertNull(
             "agentForWindow must report null once the pane lost its detection",
@@ -2711,9 +2671,9 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun closedPaneClearsConversationLock() = runTest {
-        // A pane that tmux removes between reconciles cannot remain the
-        // conversation lock target.
+    fun closedPaneClearsConversationRoutingState() = runTest {
+        // A pane that tmux removes between reconciles cannot keep any
+        // conversation state behind.
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
         vm.applyParsedPanesForTest(
@@ -2721,14 +2681,14 @@ class TmuxSessionViewModelTest {
         )
         vm.startAgentConversationForTest("%0", newClaudeDetection())
         vm.selectSessionTab("%0", SessionTab.Conversation)
-        assertEquals("%0", vm.lockedConversationPaneId.value)
+        assertEquals(SessionTab.Conversation, vm.agentConversations.value["%0"]!!.selectedTab)
 
         // Reconcile with the pane gone.
         vm.applyParsedPanesForTest(emptyList())
 
-        assertNull(
-            "lock must be cleared when the locked pane disappears",
-            vm.lockedConversationPaneId.value,
+        assertTrue(
+            "conversation state must be empty when the pane disappears",
+            vm.agentConversations.value.isEmpty(),
         )
     }
 

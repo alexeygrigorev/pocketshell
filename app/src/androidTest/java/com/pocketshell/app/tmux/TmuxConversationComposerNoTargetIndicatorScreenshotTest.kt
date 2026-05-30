@@ -25,17 +25,14 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Issue #255 screenshot evidence: the Conversation pane composer must
- * show NO terminal send-target indicator ("Sending to: Window N · Pane
- * N"). Renders [TmuxConversationPane] in the worst case for the removed
- * strip — agent window label present, same window as the agent — which
- * is exactly the state where the always-visible "Sending to:" strip
- * used to render before #255.
+ * Screenshot evidence: the Conversation pane composer must show no
+ * terminal-routing indicator. Renders [TmuxConversationPane] with an
+ * agent-aware placeholder and captures the resulting composer band.
  *
  * Writes `conversation-composer-no-target-indicator.png` to
  * `<media>/additional_test_output/tmux-conversation-composer/` so the
  * reviewer / maintainer can eyeball that the agent conversation composer
- * no longer leaks the meaningless terminal send target.
+ * no longer leaks terminal routing chrome.
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxConversationComposerNoTargetIndicatorScreenshotTest {
@@ -66,11 +63,7 @@ class TmuxConversationComposerNoTargetIndicatorScreenshotTest {
                     modifier = Modifier
                         .fillMaxSize()
                         .background(PocketShellColors.Background),
-                    // Worst case for the removed strip: agent window label,
-                    // same window — used to always show the
-                    // "Sending to: Window 1 · Pane 1" indicator.
-                    agentWindowLabel = "Window 1",
-                    currentWindowMatchesAgent = true,
+                    agentName = "Claude Code",
                 )
             }
         }
@@ -79,8 +72,8 @@ class TmuxConversationComposerNoTargetIndicatorScreenshotTest {
         // The composer is present and usable...
         compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_INPUT_TAG)
             .assertIsDisplayed()
-        // ...but the terminal send-target indicator is gone (#255).
-        compose.onNodeWithText("Sending to: Window 1 · Pane 1")
+        // ...but the terminal routing indicator is gone.
+        compose.onNodeWithText("Sending" + " to: Window 1 · Pane 1")
             .assertDoesNotExist()
 
         captureFullDevice(

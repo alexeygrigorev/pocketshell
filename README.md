@@ -181,14 +181,16 @@ background work on the phone).
   library, command chips. See
   [docs/input-methods.md](docs/input-methods.md).
 - **Agent-aware conversation view.** Detects Claude Code, Codex, and
-  OpenCode in the active tmux pane and renders a clean read-only
-  conversation surface by tailing the JSONL log over SSH. Tool calls
-  collapsible, search within session, long-press to quote-reply. Codex
-  and OpenCode detection fires once the agent has flushed at least one
-  turn to its rollout JSONL (the per-pane detector uses a 2-hour
-  freshness window so a mid-session Codex pane still registers after a
-  pause between turns). Real-world OpenCode that persists to a SQLite
-  `opencode.db` rather than JSONL is still pending a dedicated reader.
+  OpenCode in the currently visible tmux pane and renders a clean
+  conversation surface by tailing the agent log over SSH. Conversation
+  replies send in place to that visible detected agent pane; panes
+  without a detected agent show the terminal, with no cross-window
+  target lock. Tool calls are collapsible, search works within the
+  session, and long-press supports quote-reply. Codex and OpenCode
+  detection fires once the agent has flushed at least one turn to its
+  rollout JSONL (the per-pane detector uses a 2-hour freshness window
+  so a mid-session Codex pane still registers after a pause between
+  turns). OpenCode sessions persisted to `opencode.db` are read directly.
   See [docs/agent-awareness.md](docs/agent-awareness.md).
 - **Usage dashboard.** Per-provider quota (Claude, Codex, Copilot, Z.AI)
   via the server-side `pocketshell usage` helper. Zero credentials on the

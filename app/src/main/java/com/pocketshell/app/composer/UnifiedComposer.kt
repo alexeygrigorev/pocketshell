@@ -354,6 +354,7 @@ internal object ComposerAboveAnchorPopupPositionProvider : PopupPositionProvider
  * @param sendEnabled gate on top of the non-blank check (e.g. session
  *   liveness for #249) — when false the button is disabled and a tap
  *   cannot deliver-then-clear the draft.
+ * @param placeholder hint text for the destination-specific agent name.
  * @param inputFieldTag / sendButtonTag the surface-specific test tags so
  *   the existing tmux / raw-SSH connected tests keep resolving the same
  *   nodes.
@@ -367,6 +368,7 @@ internal fun AgentComposerSurface(
     sendButtonTag: String,
     modifier: Modifier = Modifier,
     sendEnabled: Boolean = true,
+    placeholder: String = "Message agent",
 ) {
     val canSend = sendEnabled && value.isNotBlank()
     Row(
@@ -379,7 +381,7 @@ internal fun AgentComposerSurface(
         ComposerDraftField(
             value = value,
             onValueChange = onValueChange,
-            placeholder = "Message agent",
+            placeholder = placeholder,
             fieldTag = inputFieldTag,
             minHeight = 48.dp,
             singleLine = true,

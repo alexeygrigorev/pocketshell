@@ -4,15 +4,7 @@ import android.graphics.Bitmap
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
@@ -20,14 +12,8 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.pocketshell.app.composer.MarkdownText
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
@@ -44,29 +30,13 @@ import org.junit.runner.RunWith
  * Issue #260 visual evidence for the conversation turn layout. The
  * direct [TmuxConversationPane] render keeps the artifact focused on
  * message density and role differentiation, independent of the live tmux
- * client and #256 composer/send-target work.
+ * client and #256 composer-routing work.
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxConversationTurnDensityScreenshotTest {
 
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
-
-    @Test
-    fun captureLegacyConversationTurnReference() {
-        compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
-                LegacyFlatConversationReference(
-                    events = sampleConversationEvents().filterIsInstance<ConversationEvent.Message>(),
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(PocketShellColors.Background),
-                )
-            }
-        }
-        compose.waitForIdle()
-        captureFullDevice(File(artifactDir(), "before-current-flat-rectangles.png"))
-    }
 
     @Test
     fun captureDenseConversationTurnDensity() {
@@ -79,8 +49,7 @@ class TmuxConversationTurnDensityScreenshotTest {
                         .fillMaxSize()
                         .background(PocketShellColors.Background)
                         .testTag(TMUX_CONVERSATION_PANE_TAG),
-                    agentWindowLabel = "Window 1",
-                    currentWindowMatchesAgent = true,
+                    agentName = "Claude Code",
                 )
             }
         }
@@ -88,10 +57,20 @@ class TmuxConversationTurnDensityScreenshotTest {
 
         compose.onNodeWithTag(TMUX_CONVERSATION_PANE_TAG)
             .assertIsDisplayed()
-        compose.onAllNodesWithText("USER", substring = true, useUnmergedTree = true)
-            .assertCountEquals(2)
-        compose.onAllNodesWithText("ASSISTANT", substring = true, useUnmergedTree = true)
-            .assertCountEquals(2)
+        compose.onAllNodesWithText("US" + "ER", substring = true, useUnmergedTree = true)
+            .assertCountEquals(0)
+        compose.onAllNodesWithText("ASS" + "ISTANT", substring = true, useUnmergedTree = true)
+            .assertCountEquals(0)
+        compose.onAllNodesWithText(
+            "Check why the staging deploy failed",
+            substring = true,
+            useUnmergedTree = true,
+        ).assertCountEquals(1)
+        compose.onAllNodesWithText(
+            "I will inspect the deploy logs",
+            substring = true,
+            useUnmergedTree = true,
+        ).assertCountEquals(1)
 
         captureFullDevice(File(artifactDir(), "after-dense-terminal-turns.png"))
     }
@@ -162,42 +141,6 @@ class TmuxConversationTurnDensityScreenshotTest {
             println("ISSUE_260_CONVERSATION_TURNS_SCREENSHOT ${file.absolutePath}")
         } finally {
             bitmap.recycle()
-        }
-    }
-}
-
-@Composable
-private fun LegacyFlatConversationReference(
-    events: List<ConversationEvent.Message>,
-    modifier: Modifier = Modifier,
-) {
-    LazyColumn(
-        modifier = modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-        contentPadding = PaddingValues(vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        items(events, key = { it.id }) { event ->
-            val isUser = event.role == ConversationRole.User
-            val title = when (event.role) {
-                ConversationRole.User -> "USER"
-                ConversationRole.Assistant -> if (event.streaming) "ASSISTANT - streaming" else "ASSISTANT"
-            }
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(color = if (isUser) PocketShellColors.SurfaceElev else PocketShellColors.Surface)
-                    .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Text(
-                    text = title,
-                    color = if (isUser) PocketShellColors.Accent else PocketShellColors.TextSecondary,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Medium,
-                )
-                MarkdownText(text = event.text)
-            }
         }
     }
 }

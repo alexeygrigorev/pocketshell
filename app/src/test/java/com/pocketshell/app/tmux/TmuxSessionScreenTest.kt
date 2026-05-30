@@ -34,22 +34,6 @@ class TmuxSessionScreenTest {
         )
     }
 
-    // ─── Issue #197: agent target labelling helpers ─────────────────
-
-    @Test
-    fun agentWindowLabelForReturnsMatchingWindowSummaryTitle() {
-        val panes = listOf(
-            pane(paneId = "%0", windowId = "@1"),
-            pane(paneId = "%1", windowId = "@0"),
-        )
-        val windows = panes.toWindowSummaries()
-
-        // %0 is the first pane to mention @1 → "Window 1".
-        assertEquals("Window 1", agentWindowLabelFor(panes[0], panes, windows))
-        // %1 is the first pane to mention @0 → "Window 2".
-        assertEquals("Window 2", agentWindowLabelFor(panes[1], panes, windows))
-    }
-
     @Test
     fun sessionSwitcherPagesMirrorReadySessionRowsAndMarkCurrent() {
         val pages = sessionSwitcherPages(

@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Rect
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
@@ -1020,6 +1021,7 @@ private class TerminalCaptureHelper(
 
 object TerminalLabArtifacts {
     private const val DEVICE_DIR_NAME: String = "terminal-lab"
+    private const val LOG_TAG: String = "TerminalLabArtifacts"
 
     fun capture(name: String): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
@@ -1032,10 +1034,10 @@ object TerminalLabArtifacts {
     }
 
     fun captureDeviceScreencap(name: String): File? {
-        val instrumentation = InstrumentationRegistry.getInstrumentation()
-        instrumentation.waitForIdleSync()
-        SystemClock.sleep(300)
         return try {
+            val instrumentation = InstrumentationRegistry.getInstrumentation()
+            instrumentation.waitForIdleSync()
+            SystemClock.sleep(300)
             val descriptor = instrumentation.uiAutomation.executeShellCommand("screencap -p")
             descriptor.useInputStream { input ->
                 val file = artifactFile("$name.png")
@@ -1044,6 +1046,7 @@ object TerminalLabArtifacts {
                 }
                 if (file.length() <= 0L) {
                     file.delete()
+                    recordDeviceScreencapUnavailable(name, "screencap -p produced an empty artifact")
                     null
                 } else {
                     println("TERMINAL_LAB_DEVICE_SCREENCAP ${file.absolutePath}")
@@ -1051,8 +1054,42 @@ object TerminalLabArtifacts {
                 }
             }
         } catch (t: Throwable) {
-            writeText("$name-error.txt", "screencap -p unavailable: ${t::class.java.name}: ${t.message}\n")
+            recordDeviceScreencapUnavailable(
+                name = name,
+                message = "screencap -p unavailable: ${t::class.java.name}: ${t.message}",
+                throwable = t,
+            )
             null
+        }
+    }
+
+    private fun recordDeviceScreencapUnavailable(
+        name: String,
+        message: String,
+        throwable: Throwable? = null,
+    ) {
+        if (throwable != null) {
+            Log.w(LOG_TAG, message, throwable)
+        } else {
+            Log.w(LOG_TAG, message)
+        }
+
+        try {
+            writeText(
+                "$name-error.txt",
+                buildString {
+                    appendLine(message)
+                    appendLine("advisory=true")
+                    appendLine("capture=UiAutomation.executeShellCommand(\"screencap -p\")")
+                    if (throwable != null) {
+                        appendLine("throwable=${throwable::class.java.name}")
+                        appendLine("stacktrace:")
+                        append(Log.getStackTraceString(throwable))
+                    }
+                },
+            )
+        } catch (artifactError: Throwable) {
+            Log.w(LOG_TAG, "could not write advisory screencap failure artifact for $name", artifactError)
         }
     }
 

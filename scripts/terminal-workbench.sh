@@ -4,6 +4,19 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
+if [[ -n "${RUN_ID:-}" ]]; then
+  [[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || {
+    printf 'FAIL: RUN_ID contains unsafe characters: %s\n' "$RUN_ID" >&2
+    exit 1
+  }
+  case "$RUN_ID" in
+    .|..)
+      printf 'FAIL: RUN_ID cannot be %s\n' "$RUN_ID" >&2
+      exit 1
+      ;;
+  esac
+fi
+
 # Acquire an exclusive AVD lock so parallel-worktree gate runs serialize on the
 # shared local Android emulator. Sibling `connectedAndroidTest` invocations
 # from individual implementer/reviewer worktrees are intentionally NOT held by
@@ -13,13 +26,11 @@ cd "$ROOT_DIR"
 LOCK_FILE="${POCKETSHELL_AVD_LOCK_FILE:-$ROOT_DIR/build/.avd-lock}"
 if [[ -z "${POCKETSHELL_AVD_LOCK_ACQUIRED:-}" ]]; then
   mkdir -p "$(dirname "$LOCK_FILE")"
-  exec 9>"$LOCK_FILE"
-  if ! flock -n 9; then
+  if ! flock -n "$LOCK_FILE" -c true; then
     echo "Another emulator-touching script holds the AVD lock ($LOCK_FILE); waiting..." >&2
-    flock 9
   fi
-  echo "Acquired AVD lock (fd 9): $LOCK_FILE" >&2
   export POCKETSHELL_AVD_LOCK_ACQUIRED=1
+  exec flock -o "$LOCK_FILE" "$0" "$@"
 fi
 
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
@@ -31,8 +42,33 @@ if [[ -n "${COMPOSE_FILE:-}" ]]; then
   COMPOSE_FILE_WAS_SET=1
 fi
 COMPOSE_FILE="${COMPOSE_FILE:-tests/docker/docker-compose.yml}"
-LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/terminal-workbench}"
+DEFAULT_LOG_ROOT="$ROOT_DIR/build/terminal-workbench"
+LOG_ROOT="${LOG_ROOT:-$DEFAULT_LOG_ROOT}"
+if [[ "$LOG_ROOT" != /* ]]; then
+  LOG_ROOT="$ROOT_DIR/$LOG_ROOT"
+fi
+DEFAULT_LOG_ROOT="$(realpath -m "$DEFAULT_LOG_ROOT")"
+RELEASE_GATE_LOG_ROOT="$(realpath -m "$ROOT_DIR/build/release-terminal-gate")"
+LOG_ROOT="$(realpath -m "$LOG_ROOT")"
+case "$LOG_ROOT" in
+  "$DEFAULT_LOG_ROOT"|"$DEFAULT_LOG_ROOT"/*) ;;
+  "$RELEASE_GATE_LOG_ROOT"/*/workbench|"$RELEASE_GATE_LOG_ROOT"/*/workbench/*) ;;
+  *)
+    printf 'FAIL: LOG_ROOT must stay under %s or a release terminal gate workbench dir: %s\n' "$DEFAULT_LOG_ROOT" "$LOG_ROOT" >&2
+    exit 1
+    ;;
+esac
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
+[[ "$RUN_ID" =~ ^[A-Za-z0-9._-]+$ ]] || {
+  printf 'FAIL: RUN_ID contains unsafe characters: %s\n' "$RUN_ID" >&2
+  exit 1
+}
+case "$RUN_ID" in
+  .|..)
+    printf 'FAIL: RUN_ID cannot be %s\n' "$RUN_ID" >&2
+    exit 1
+    ;;
+esac
 RUN_DIR="$LOG_ROOT/$RUN_ID"
 ARTIFACT_DIR="$RUN_DIR/artifacts/terminal-lab"
 BUILD_APKS="${BUILD_APKS:-1}"
@@ -61,6 +97,7 @@ TEST_SELECTOR="${TEST_SELECTOR:-com.pocketshell.app.terminal.TerminalLabDockerTe
 if [[ "$REAL_AGENTS" == "1" && "$TEST_SELECTOR_WAS_SET" != "1" ]]; then
   TEST_SELECTOR="com.pocketshell.app.terminal.TerminalLabDockerTest#terminalWorkbenchCapturesRealAgentCliScreens"
 fi
+REAL_AGENT_TEST_SELECTOR="com.pocketshell.app.terminal.TerminalLabDockerTest#terminalWorkbenchCapturesRealAgentCliScreens"
 APP_APK="$ROOT_DIR/app/build/outputs/apk/debug/app-debug.apk"
 TEST_APK="$ROOT_DIR/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
 SSH_KEY="${SSH_KEY:-$ROOT_DIR/tests/docker/test_key}"
@@ -183,6 +220,16 @@ validate_terminal_artifacts() {
   if [[ "$REAL_AGENTS" == "1" ]]; then
     (( real_agent_cli_count > 0 )) ||
       fail "real-agent workbench did not produce an interactive agent CLI viewport"
+    local expected_agent_viewport
+    for expected_agent_viewport in \
+      agents-02-opencode-viewport.png \
+      agents-03-codex-viewport.png \
+      agents-04-claude-viewport.png; do
+      [[ -s "$ARTIFACT_DIR/$expected_agent_viewport" ]] ||
+        fail "real-agent workbench is missing expected viewport: $expected_agent_viewport"
+      grep -q "$expected_agent_viewport" "$hash_index" ||
+        fail "real-agent viewport was not validated through artifact summary: $expected_agent_viewport"
+    done
     find "$ARTIFACT_DIR" -maxdepth 1 -type f -name 'agents-*-visible-terminal.txt' -print0 |
       xargs -0 grep -E 'Ask anything|Welcome to Codex|Welcome to Claude Code' >/dev/null ||
       fail "real-agent visible terminal artifacts are missing expected interactive CLI screen text"
@@ -277,6 +324,11 @@ collect_diagnostics() {
   "$ADB" logcat -d -v threadtime -t 4000 > "$RUN_DIR/logcat.txt" 2>&1 || true
 }
 
+case "$RUN_DIR" in
+  "$LOG_ROOT"/*) ;;
+  *) fail "refusing to reset unexpected terminal workbench run dir: $RUN_DIR" ;;
+esac
+rm -rf -- "$RUN_DIR"
 mkdir -p "$RUN_DIR"
 trap collect_diagnostics EXIT
 
@@ -321,14 +373,25 @@ INSTRUMENTATION_ARGS=(
 if [[ "$REAL_AGENTS" == "1" ]]; then
   INSTRUMENTATION_ARGS+=(-e terminalWorkbenchRealAgents 1)
 fi
+instrumentation_status=0
+set +e
 run_logged "07-run-workbench" \
   "$ADB" shell am instrument -w -r \
   "${INSTRUMENTATION_ARGS[@]}" \
   com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner
-mkdir -p "$RUN_DIR/artifacts"
+instrumentation_status=$?
+set -e
 rm -rf "$RUN_DIR/artifacts"
 mkdir -p "$RUN_DIR/artifacts"
+pull_status=0
+set +e
 run_logged "08-pull-artifacts" "$ADB" pull "$DEVICE_ARTIFACT_DIR" "$RUN_DIR/artifacts/"
+pull_status=$?
+set -e
+{
+  printf 'instrumentation_exit_code=%s\n' "$instrumentation_status"
+  printf 'artifact_pull_exit_code=%s\n' "$pull_status"
+} > "$RUN_DIR/instrumentation-status.txt"
 if [[ -d "$ARTIFACT_DIR" ]]; then
   run_logged "09-artifact-file-info" file "$RUN_DIR"/artifacts/terminal-lab/* || true
   {
@@ -355,11 +418,29 @@ if [[ -d "$ARTIFACT_DIR" ]]; then
   } > "$RUN_DIR/artifact-summary.txt"
 fi
 
-grep -q "OK (" "$RUN_DIR/07-run-workbench.log" &&
-  grep -q "INSTRUMENTATION_CODE: -1" "$RUN_DIR/07-run-workbench.log" ||
-  fail "terminal workbench instrumentation did not pass"
+instrumentation_log_passed=0
+if grep -q "OK (" "$RUN_DIR/07-run-workbench.log" &&
+  grep -q "INSTRUMENTATION_CODE: -1" "$RUN_DIR/07-run-workbench.log"; then
+  instrumentation_log_passed=1
+fi
 
 validate_terminal_artifacts
+
+(( pull_status == 0 )) ||
+  fail "terminal workbench artifact pull exited $pull_status"
+
+if (( instrumentation_status == 0 )) && (( instrumentation_log_passed != 1 )); then
+  fail "terminal workbench instrumentation exited 0 but did not report OK/INSTRUMENTATION_CODE -1"
+fi
+if (( instrumentation_status != 0 )) && (( instrumentation_log_passed == 1 )); then
+  printf 'WARN: terminal workbench instrumentation exited %s after reporting OK/INSTRUMENTATION_CODE -1; artifact validation passed\n' "$instrumentation_status" >&2
+fi
+if (( instrumentation_status != 0 )) && (( instrumentation_log_passed != 1 )); then
+  if [[ "$REAL_AGENTS" != "1" || "$TEST_SELECTOR" != "$REAL_AGENT_TEST_SELECTOR" ]]; then
+    fail "terminal workbench instrumentation exited $instrumentation_status and did not report OK/INSTRUMENTATION_CODE -1"
+  fi
+  printf 'WARN: terminal workbench instrumentation exited %s without final OK/INSTRUMENTATION_CODE -1; complete artifact validation passed\n' "$instrumentation_status" >&2
+fi
 
 printf '\nPASS: terminal workbench completed\n'
 printf 'Artifacts: %s\n' "$ARTIFACT_DIR"

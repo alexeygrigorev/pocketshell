@@ -13,13 +13,11 @@ cd "$ROOT_DIR"
 LOCK_FILE="${POCKETSHELL_AVD_LOCK_FILE:-$ROOT_DIR/build/.avd-lock}"
 if [[ "${1:-}" != "--help" && "${1:-}" != "-h" && -z "${POCKETSHELL_AVD_LOCK_ACQUIRED:-}" ]]; then
   mkdir -p "$(dirname "$LOCK_FILE")"
-  exec 9>"$LOCK_FILE"
-  if ! flock -n 9; then
+  if ! flock -n "$LOCK_FILE" -c true; then
     echo "Another emulator-touching script holds the AVD lock ($LOCK_FILE); waiting..." >&2
-    flock 9
   fi
-  echo "Acquired AVD lock (fd 9): $LOCK_FILE" >&2
   export POCKETSHELL_AVD_LOCK_ACQUIRED=1
+  exec flock -o "$LOCK_FILE" "$0" "$@"
 fi
 
 LOG_ROOT="${LOG_ROOT:-$ROOT_DIR/build/release-emulator-validation}"

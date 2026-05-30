@@ -157,7 +157,7 @@ Environment overrides:
   PHONE_WALKTHROUGH_CLEAN_GENERATED=0
                           skip generated-output cleanup before APK build
   PHONE_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS=3
-                          retry interrupted setup-detection instrumentation runs
+                          retry interrupted instrumentation runs
   LOGCAT_LINES=4000       bounded logcat lines collected at exit
   SSH_KEY=tests/docker/test_key
   SSH_HOST=127.0.0.1
@@ -193,6 +193,12 @@ require_command() {
   command -v "$1" >/dev/null 2>&1 || fail "$1 was not found on PATH"
 }
 
+require_positive_integer() {
+  local value="$1"
+  local label="$2"
+  [[ "$value" =~ ^[1-9][0-9]*$ ]] || fail "$label must be a positive integer; got '$value'"
+}
+
 run_logged() {
   local name="$1"
   shift
@@ -217,6 +223,136 @@ run_logged() {
   elapsed_ms=$((end_ms - start_ms))
   printf '%s\tstatus=%s\telapsed_ms=%s\n' "$name" "$status" "$elapsed_ms" >> "$TIMING_DIR/commands.tsv"
   return "$status"
+}
+
+instrumentation_success() {
+  local log_file="$1"
+  grep -q "INSTRUMENTATION_CODE: -1" "$log_file" &&
+    grep -q "OK (" "$log_file" &&
+    ! grep -q "FAILURES!!!" "$log_file"
+}
+
+instrumentation_has_app_failure_evidence() {
+  local instrumentation_log="$1"
+  local crash_file="$2"
+  [[ ! -s "$crash_file" ]] || return 0
+  rg -qi 'INSTRUMENTATION_RESULT: shortMsg=Process crashed|FATAL EXCEPTION|Process: com[.]pocketshell[.]app|Crash of app com[.]pocketshell[.]app|ANR in com[.]pocketshell[.]app|java[.]lang[.]AssertionError|junit[.]framework[.]AssertionFailedError|org[.]junit[.]ComparisonFailure|kotlin[.]AssertionError|androidx[.]test[.]espresso[.](AmbiguousViewMatcherException|NoMatchingRootException|NoMatchingViewException|PerformException)|expected:<|but was:<' "$instrumentation_log"
+}
+
+instrumentation_has_transport_interruption() {
+  local instrumentation_log="$1"
+  local logcat_file="$2"
+  rg -qi 'adb:.*(closed|device|disconnected|no devices|offline|protocol fault)|error: (closed|device .* not found|device offline|failed to get feature set|more than one device/emulator|no devices/emulators found|protocol fault)|device offline|device .* not found|transport .* (closed|disconnected|error|not found|offline)|Connection reset by peer|Broken pipe|lost connection to device|UiAutomation.*(connection.*(died|lost)|died|disconnected|not connected)|java[.]lang[.]IllegalStateException: UiAutomation not connected|android[.]os[.]DeadObjectException' "$instrumentation_log" ||
+    rg -q 'adbd .*connection terminated|adbd .*offline|host-[0-9]+: read failed|UiAutomation service owner died' "$logcat_file"
+}
+
+collect_instrumentation_attempt_diagnostics() {
+  local attempt_log="$1"
+  local attempt_name="$2"
+  local attempt_logcat="$LOG_DIR/$attempt_name-logcat.txt"
+  local attempt_crash="$LOG_DIR/$attempt_name-crash-diagnostics.txt"
+
+  timeout 20s "$ADB" logcat -d -v threadtime -t "$LOGCAT_LINES" > "$attempt_logcat" 2>&1 || true
+  rg -n 'FATAL EXCEPTION|Process: com[.]pocketshell[.]app|Crash of app com[.]pocketshell[.]app|ANR in com[.]pocketshell[.]app|INSTRUMENTATION_RESULT: shortMsg=Process crashed' \
+    "$attempt_logcat" "$attempt_log" > "$attempt_crash" 2>&1 || true
+  printf '%s\n' "$attempt_crash"
+}
+
+reset_device_artifacts_command() {
+  local device_artifact_dir="$1"
+  local retry boot_completed
+
+  for retry in $(seq 1 30); do
+    timeout 20s "$ADB" wait-for-device >/dev/null 2>&1 || {
+      sleep 1
+      continue
+    }
+    boot_completed="$(timeout 20s "$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d "\r" || true)"
+    [[ "$boot_completed" == "1" ]] || {
+      sleep 1
+      continue
+    }
+    timeout 20s "$ADB" shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+    timeout 20s "$ADB" shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true
+    timeout 20s "$ADB" shell input keyevent HOME >/dev/null 2>&1 || true
+    timeout 20s "$ADB" shell rm -rf "$device_artifact_dir" && return 0
+    sleep 1
+  done
+  return 1
+}
+
+reset_device_artifacts_after_interrupted_attempt() {
+  local name="$1"
+  local attempt="$2"
+  local device_artifact_dir="$3"
+
+  run_logged "$name-retry-$attempt-reset-device-artifacts" \
+    reset_device_artifacts_command "$device_artifact_dir"
+}
+
+run_instrumentation_with_retry() {
+  local name="$1"
+  local selector="$2"
+  local device_artifact_dir="$3"
+  shift 3
+  local -a runner_args=("$@")
+  local canonical_log="$LOG_DIR/$name.log"
+  local summary_file="$LOG_DIR/$name-retry-summary.txt"
+  local max_attempts="$PHONE_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS"
+  local attempt status attempt_name attempt_log crash_file logcat_file retryable_status
+
+  : > "$summary_file"
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    if [[ "$attempt" -gt 1 ]]; then
+      if ! reset_device_artifacts_after_interrupted_attempt "$name" "$attempt" "$device_artifact_dir"; then
+        printf 'attempt=%s result=cleanup-failed\n' "$attempt" >> "$summary_file"
+        return 1
+      fi
+      run_logged "$name-retry-$attempt-clear-logcat" "$ADB" logcat -c || true
+    fi
+
+    attempt_name="$name-attempt-$attempt"
+    attempt_log="$LOG_DIR/$attempt_name.log"
+    status=0
+    run_logged "$attempt_name" \
+      "$ADB" shell am instrument -w -r \
+      -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
+      "${runner_args[@]}" \
+      -e class "$selector" \
+      com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner ||
+      status=$?
+    cp "$attempt_log" "$canonical_log"
+
+    crash_file="$(collect_instrumentation_attempt_diagnostics "$attempt_log" "$attempt_name")"
+    logcat_file="$LOG_DIR/$attempt_name-logcat.txt"
+    if [[ "$status" -eq 0 ]] && instrumentation_success "$attempt_log"; then
+      printf 'attempt=%s status=%s result=success log=%s logcat=%s\n' \
+        "$attempt" "$status" "$(relpath "$attempt_log")" "$(relpath "$logcat_file")" >> "$summary_file"
+      return 0
+    fi
+
+    retryable_status="$status"
+    [[ "$retryable_status" -ne 0 ]] || retryable_status=1
+    if [[ "$attempt" -ge "$max_attempts" ]]; then
+      printf 'attempt=%s status=%s result=failed-final log=%s logcat=%s crash_diagnostics=%s\n' \
+        "$attempt" "$status" "$(relpath "$attempt_log")" "$(relpath "$logcat_file")" "$(relpath "$crash_file")" >> "$summary_file"
+      return "$retryable_status"
+    fi
+
+    if instrumentation_has_transport_interruption "$attempt_log" "$logcat_file" &&
+      ! instrumentation_has_app_failure_evidence "$attempt_log" "$crash_file"; then
+      printf 'attempt=%s status=%s result=retry-transport-interruption log=%s logcat=%s crash_diagnostics=%s\n' \
+        "$attempt" "$status" "$(relpath "$attempt_log")" "$(relpath "$logcat_file")" "$(relpath "$crash_file")" >> "$summary_file"
+      printf 'Retrying %s after host-side instrumentation transport interruption; see %s\n' \
+        "$selector" "$(relpath "$attempt_log")" >&2
+      continue
+    fi
+
+    printf 'attempt=%s status=%s result=failed-nonretry log=%s logcat=%s crash_diagnostics=%s\n' \
+      "$attempt" "$status" "$(relpath "$attempt_log")" "$(relpath "$logcat_file")" "$(relpath "$crash_file")" >> "$summary_file"
+    return "$retryable_status"
+  done
 }
 
 mkdir -p "$RUN_DIR" "$LOG_DIR" "$SCREENSHOT_ROOT" "$TIMING_DIR" "$DEVICE_ARTIFACT_ROOT"
@@ -310,6 +446,7 @@ verify_static_tools() {
   require_command docker
   require_command ssh
   require_command rg
+  require_positive_integer "$PHONE_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS" "PHONE_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS"
   [[ -f "$SSH_KEY" ]] || fail "SSH key was not found at $SSH_KEY"
   chmod 600 "$SSH_KEY"
 
@@ -495,31 +632,8 @@ assert_no_crash_diagnostics() {
 assert_instrumentation_success() {
   local log_file="$1"
   local selector="$2"
-  grep -q "INSTRUMENTATION_CODE: -1" "$log_file" &&
-    grep -q "OK (" "$log_file" &&
-    ! grep -q "FAILURES!!!" "$log_file" ||
+  instrumentation_success "$log_file" ||
     fail "$selector did not report instrumentation success"
-}
-
-should_retry_interrupted_instrumentation() {
-  local status="$1"
-  local instrumentation_log="$2"
-  local logcat_file="$3"
-
-  [[ "$status" -eq 255 ]] || return 1
-  ! grep -q "INSTRUMENTATION_CODE: -1" "$instrumentation_log" || return 1
-  ! grep -q "OK (" "$instrumentation_log" || return 1
-  ! grep -q "FAILURES!!!" "$instrumentation_log" || return 1
-  ! grep -q "INSTRUMENTATION_STATUS: stack=" "$instrumentation_log" || return 1
-  ! grep -q "INSTRUMENTATION_RESULT: shortMsg=Process crashed" "$instrumentation_log" || return 1
-  rg -q 'adbd .*connection terminated|adbd .*offline|host-[0-9]+: read failed|UiAutomation service owner died' "$logcat_file" || return 1
-  if rg -q 'FATAL EXCEPTION|Process: com[.]pocketshell[.]app|Crash of app com[.]pocketshell[.]app|ANR in com[.]pocketshell[.]app|INSTRUMENTATION_RESULT: shortMsg=Process crashed' \
-    "$logcat_file" "$instrumentation_log"; then
-    rg -q 'UiAutomation service owner died' "$logcat_file" &&
-      rg -q 'Error while (connecting|disconnecting) UiAutomation|Cannot call disconnect[(][)] while connecting UiAutomation' "$logcat_file" ||
-      return 1
-  fi
-  return 0
 }
 
 run_terminal_lab() {
@@ -540,11 +654,10 @@ run_terminal_lab() {
     "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$TERMINAL_LAB_DEVICE_DIR'"
   run_logged "13-clear-logcat" "$ADB" logcat -c
 
-  run_logged "14-run-terminal-lab-instrumentation" \
-    "$ADB" shell am instrument -w -r \
-    -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
-    -e class "$TERMINAL_LAB_TEST_CLASS" \
-    com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner ||
+  run_instrumentation_with_retry \
+    "14-run-terminal-lab-instrumentation" \
+    "$TERMINAL_LAB_TEST_CLASS" \
+    "$TERMINAL_LAB_DEVICE_DIR" ||
     instrumentation_status=$?
 
   cp "$LOG_DIR/14-run-terminal-lab-instrumentation.log" "$LOG_DIR/instrumentation.txt"
@@ -561,10 +674,7 @@ run_terminal_lab() {
   if [[ "$instrumentation_status" -ne 0 ]]; then
     fail "$TERMINAL_LAB_TEST_CLASS instrumentation command exited with $instrumentation_status"
   fi
-  grep -q "INSTRUMENTATION_CODE: -1" "$LOG_DIR/instrumentation.txt" &&
-    grep -q "OK (" "$LOG_DIR/instrumentation.txt" &&
-    ! grep -q "FAILURES!!!" "$LOG_DIR/instrumentation.txt" ||
-    fail "$TERMINAL_LAB_TEST_CLASS did not report instrumentation success"
+  assert_instrumentation_success "$LOG_DIR/instrumentation.txt" "$TERMINAL_LAB_TEST_CLASS"
 
   local missing=()
   local screenshot
@@ -623,11 +733,10 @@ run_visual_audit() {
 
   local main_start_ms main_end_ms composer_start_ms composer_end_ms
   main_start_ms="$(date +%s%3N)"
-  run_logged "14-run-visual-audit-main-instrumentation" \
-    "$ADB" shell am instrument -w -r \
-    -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
-    -e class "$VISUAL_AUDIT_MAIN_TEST_CLASS" \
-    com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner ||
+  run_instrumentation_with_retry \
+    "14-run-visual-audit-main-instrumentation" \
+    "$VISUAL_AUDIT_MAIN_TEST_CLASS" \
+    "$VISUAL_AUDIT_DEVICE_DIR" ||
     main_status=$?
   main_end_ms="$(date +%s%3N)"
 
@@ -635,11 +744,10 @@ run_visual_audit() {
   run_logged "15-pull-visual-audit-main-artifacts" "$ADB" pull "$VISUAL_AUDIT_DEVICE_DIR" "$DEVICE_ARTIFACT_ROOT/" || true
 
   composer_start_ms="$(date +%s%3N)"
-  run_logged "16-run-visual-audit-composer-instrumentation" \
-    "$ADB" shell am instrument -w -r \
-    -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
-    -e class "$VISUAL_AUDIT_COMPOSER_TEST_CLASS" \
-    com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner ||
+  run_instrumentation_with_retry \
+    "16-run-visual-audit-composer-instrumentation" \
+    "$VISUAL_AUDIT_COMPOSER_TEST_CLASS" \
+    "$VISUAL_AUDIT_DEVICE_DIR" ||
     composer_status=$?
   composer_end_ms="$(date +%s%3N)"
 
@@ -731,11 +839,10 @@ run_tmux_existing_session() {
     "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$TMUX_EXISTING_SESSION_DEVICE_DIR'"
   run_logged "13-clear-logcat" "$ADB" logcat -c
 
-  run_logged "14-run-tmux-existing-session-instrumentation" \
-    "$ADB" shell am instrument -w -r \
-    -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
-    -e class "$TMUX_EXISTING_SESSION_TEST_SELECTOR" \
-    com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner ||
+  run_instrumentation_with_retry \
+    "14-run-tmux-existing-session-instrumentation" \
+    "$TMUX_EXISTING_SESSION_TEST_SELECTOR" \
+    "$TMUX_EXISTING_SESSION_DEVICE_DIR" ||
     instrumentation_status=$?
 
   cp "$LOG_DIR/14-run-tmux-existing-session-instrumentation.log" "$LOG_DIR/instrumentation.txt"
@@ -754,10 +861,7 @@ run_tmux_existing_session() {
   if [[ "$instrumentation_status" -ne 0 ]]; then
     fail "$TMUX_EXISTING_SESSION_TEST_SELECTOR instrumentation command exited with $instrumentation_status"
   fi
-  grep -q "INSTRUMENTATION_CODE: -1" "$LOG_DIR/instrumentation.txt" &&
-    grep -q "OK (" "$LOG_DIR/instrumentation.txt" &&
-    ! grep -q "FAILURES!!!" "$LOG_DIR/instrumentation.txt" ||
-    fail "$TMUX_EXISTING_SESSION_TEST_SELECTOR did not report instrumentation success"
+  assert_instrumentation_success "$LOG_DIR/instrumentation.txt" "$TMUX_EXISTING_SESSION_TEST_SELECTOR"
 
   local source_screenshot="$pulled_artifact_dir/issue78-existing-tmux-output.png"
   local source_transcript="$pulled_artifact_dir/issue78-existing-tmux-transcript.txt"
@@ -829,70 +933,40 @@ run_setup_detection_profile() {
   local logcat_file="$LOG_DIR/logcat-setup-detection-$profile.txt"
   local crash_file="$LOG_DIR/crash-diagnostics-setup-detection-$profile.txt"
   local docker_log="$LOG_DIR/docker-setup-detection-$profile.txt"
-  local max_attempts="$PHONE_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS"
 
   scenario_start_ms="$(date +%s%3N)"
 
-  if [[ ! "$max_attempts" =~ ^[1-9][0-9]*$ ]]; then
-    fail "PHONE_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS must be a positive integer"
+  rm -rf "$device_artifact_dir" "$screenshot_dir"
+  run_logged "12-reset-setup-detection-$profile-artifacts" bash -lc \
+    "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$SETUP_DETECTION_DEVICE_DIR/$profile'"
+  run_logged "13-clear-logcat-setup-detection-$profile" "$ADB" logcat -c
+
+  run_instrumentation_with_retry \
+    "14-run-setup-detection-$profile-instrumentation" \
+    "$SETUP_DETECTION_TEST_CLASS#$method" \
+    "$SETUP_DETECTION_DEVICE_DIR/$profile" \
+    -e pocketshellBootstrapScenarios true ||
+    instrumentation_status=$?
+
+  cp "$LOG_DIR/14-run-setup-detection-$profile-instrumentation.log" "$instrumentation_log"
+  cp "$instrumentation_log" "$LOG_DIR/instrumentation.txt"
+  "$ADB" logcat -d -v threadtime -t "$LOGCAT_LINES" > "$logcat_file" 2>&1 || true
+  cp "$logcat_file" "$LOG_DIR/logcat.txt"
+  docker compose -f "$COMPOSE_FILE" logs --no-color --timestamps "$service" > "$docker_log" 2>&1 || true
+  rg -n 'FATAL EXCEPTION|Process: com[.]pocketshell[.]app|Crash of app com[.]pocketshell[.]app|ANR in com[.]pocketshell[.]app|INSTRUMENTATION_RESULT: shortMsg=Process crashed' \
+    "$logcat_file" "$instrumentation_log" > "$crash_file" 2>&1 || true
+  cp "$crash_file" "$LOG_DIR/crash-diagnostics.txt"
+
+  mkdir -p "$device_artifact_parent" "$screenshot_dir"
+  run_logged "15-pull-setup-detection-$profile-artifacts" "$ADB" pull "$SETUP_DETECTION_DEVICE_DIR/$profile" "$device_artifact_parent/" || true
+  if [[ -d "$device_artifact_dir" ]]; then
+    run_logged "16-setup-detection-$profile-artifact-file-info" file "$device_artifact_dir"/* || true
   fi
-
-  local attempt
-  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-    instrumentation_status=0
-    rm -rf "$device_artifact_dir"
-    rm -rf "$screenshot_dir"
-    run_logged "12-reset-setup-detection-$profile-artifacts" bash -lc \
-      "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$SETUP_DETECTION_DEVICE_DIR/$profile'"
-    run_logged "13-clear-logcat-setup-detection-$profile" "$ADB" logcat -c
-
-    run_logged "14-run-setup-detection-$profile-instrumentation" \
-      "$ADB" shell am instrument -w -r \
-      -e additionalTestOutputDir "$DEVICE_OUTPUT_DIR" \
-      -e pocketshellBootstrapScenarios true \
-      -e class "$SETUP_DETECTION_TEST_CLASS#$method" \
-      com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner ||
-      instrumentation_status=$?
-
-    cp "$LOG_DIR/14-run-setup-detection-$profile-instrumentation.log" "$instrumentation_log"
-    cp "$instrumentation_log" "$LOG_DIR/instrumentation.txt"
-    if [[ "$instrumentation_status" -ne 0 ]]; then
-      sleep 2
-    fi
-    "$ADB" logcat -d -v threadtime -t "$LOGCAT_LINES" > "$logcat_file" 2>&1 || true
-    cp "$logcat_file" "$LOG_DIR/logcat.txt"
-    docker compose -f "$COMPOSE_FILE" logs --no-color --timestamps "$service" > "$docker_log" 2>&1 || true
-    rg -n 'FATAL EXCEPTION|Process: com[.]pocketshell[.]app|Crash of app com[.]pocketshell[.]app|ANR in com[.]pocketshell[.]app|INSTRUMENTATION_RESULT: shortMsg=Process crashed' \
-      "$logcat_file" "$instrumentation_log" > "$crash_file" 2>&1 || true
-    cp "$crash_file" "$LOG_DIR/crash-diagnostics.txt"
-
-    mkdir -p "$device_artifact_parent" "$screenshot_dir"
-    run_logged "15-pull-setup-detection-$profile-artifacts" "$ADB" pull "$SETUP_DETECTION_DEVICE_DIR/$profile" "$device_artifact_parent/" || true
-    if [[ -d "$device_artifact_dir" ]]; then
-      run_logged "16-setup-detection-$profile-artifact-file-info" file "$device_artifact_dir"/* || true
-    fi
-
-    if [[ "$instrumentation_status" -eq 0 || "$attempt" -eq "$max_attempts" ]]; then
-      break
-    fi
-    if ! should_retry_interrupted_instrumentation "$instrumentation_status" "$instrumentation_log" "$logcat_file"; then
-      break
-    fi
-    cp "$instrumentation_log" "$LOG_DIR/instrumentation-setup-detection-$profile-attempt-$attempt.txt"
-    cp "$logcat_file" "$LOG_DIR/logcat-setup-detection-$profile-attempt-$attempt.txt"
-    printf 'Retrying setup-detection:%s after interrupted instrumentation attempt %s/%s\n' \
-      "$profile" "$attempt" "$max_attempts" | tee -a "$LOG_DIR/setup-detection-$profile-retries.txt"
-    run_logged "17-cleanup-setup-detection-$profile-interrupted-attempt-$attempt" bash -lc \
-      "'$ADB' reconnect >/dev/null 2>&1 || true; '$ADB' wait-for-device >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell input keyevent HOME >/dev/null 2>&1 || true; sleep 2"
-  done
 
   if [[ "$instrumentation_status" -ne 0 ]]; then
     fail "$SETUP_DETECTION_TEST_CLASS#$method instrumentation command exited with $instrumentation_status"
   fi
-  grep -q "INSTRUMENTATION_CODE: -1" "$instrumentation_log" &&
-    grep -q "OK (" "$instrumentation_log" &&
-    ! grep -q "FAILURES!!!" "$instrumentation_log" ||
-    fail "$SETUP_DETECTION_TEST_CLASS#$method did not report instrumentation success"
+  assert_instrumentation_success "$instrumentation_log" "$SETUP_DETECTION_TEST_CLASS#$method"
 
   local screenshot_count=0
   if [[ -d "$device_artifact_dir" ]]; then

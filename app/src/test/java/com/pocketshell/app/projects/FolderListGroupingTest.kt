@@ -4,6 +4,7 @@ import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -385,6 +386,9 @@ class FolderListGroupingTest {
         )
 
         assertEquals(listOf("git", FolderListViewModel.OTHER_ROOT_LABEL), roots.map { it.label })
+        assertEquals("/home/alexey/git", roots[0].displayPath)
+        assertEquals(FolderListViewModel.OTHER_ROOT_PATH, roots[1].path)
+        assertNull(roots[1].displayPath)
         assertEquals("pocketshell", roots[0].folders.single().label)
         assertEquals("scratch", roots[1].folders.single().label)
         assertFalse(roots[1].isWatched)

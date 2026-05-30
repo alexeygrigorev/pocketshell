@@ -86,11 +86,13 @@ internal fun RootProjectAddSheetContent(
             fontSize = 18.sp,
             fontWeight = FontWeight.SemiBold,
         )
-        Text(
-            text = root.path,
-            color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
-        )
+        root.displayPath?.let { path ->
+            Text(
+                text = path,
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             RootQuickAction(
                 label = "Empty project",

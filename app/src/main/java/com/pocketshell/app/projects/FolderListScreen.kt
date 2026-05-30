@@ -1106,11 +1106,13 @@ private fun FolderTreeRootHeader(
                     WatchedPin()
                 }
             }
-            Text(
-                text = root.path,
-                color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
-            )
+            root.displayPath?.let { path ->
+                Text(
+                    text = path,
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 11.sp,
+                )
+            }
         }
         if (root.path != FolderListViewModel.OTHER_ROOT_PATH) {
             TextButton(

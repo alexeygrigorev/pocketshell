@@ -91,6 +91,7 @@ data class FolderTreeRoot(
 ) {
     val isEmpty: Boolean get() = folders.isEmpty()
     val mostRecentActivity: Long get() = folders.maxOfOrNull { it.mostRecentActivity } ?: 0L
+    val displayPath: String? get() = path.takeUnless { it == FolderListViewModel.OTHER_ROOT_PATH }
 }
 
 data class RootProjectCandidate(
@@ -495,7 +496,9 @@ class FolderListViewModel @Inject constructor(
             lastWatchedFolders.forEach { appendLine("- ${it.label}: ${it.path}") }
         } else {
             roots.forEach { root ->
-                appendLine("- ${root.label}: ${root.path}")
+                append("- ${root.label}")
+                root.displayPath?.let { append(": $it") }
+                appendLine()
                 root.folders.take(8).forEach { folder ->
                     appendLine("  - ${folder.label}: ${folder.path} (${folder.sessions.size} sessions)")
                 }

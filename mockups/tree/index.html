@@ -1,0 +1,1670 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PocketShell Host Detail Tree Mockups</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #090d13;
+      --panel: #101721;
+      --panel-2: #141c27;
+      --line: #2a3544;
+      --line-strong: #3b4a5d;
+      --text: #e6edf6;
+      --muted: #8c97a7;
+      --dim: #5f6b7a;
+      --cyan: #29c7df;
+      --green: #38d07a;
+      --amber: #e9b949;
+      --danger: #ef6b73;
+      --purple: #9b7bff;
+      --row: 38px;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .page {
+      max-width: 1260px;
+      margin: 0 auto;
+      padding: 28px;
+    }
+
+    h1 {
+      margin: 0 0 8px;
+      font-size: 26px;
+      font-weight: 750;
+      letter-spacing: 0;
+    }
+
+    .intro {
+      margin: 0 0 22px;
+      color: var(--muted);
+      max-width: 860px;
+      line-height: 1.45;
+    }
+
+    .mockups {
+      display: grid;
+      grid-template-columns: minmax(320px, 430px);
+      gap: 18px;
+      align-items: start;
+      justify-content: center;
+    }
+
+    .phone {
+      width: 100%;
+      max-width: 390px;
+      min-height: 820px;
+      border: 1px solid #202a36;
+      background: #080c12;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, .38);
+      overflow: hidden;
+    }
+
+    .phone h2 {
+      margin: 0;
+      font-size: 14px;
+      color: var(--muted);
+      font-weight: 650;
+      padding: 12px 14px;
+      border-bottom: 1px solid #202a36;
+      background: #0d131b;
+    }
+
+    .appbar {
+      display: grid;
+      grid-template-columns: 32px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      padding: 14px 12px 12px;
+      border-bottom: 1px solid #202a36;
+    }
+
+    .back,
+    .iconbtn {
+      width: 32px;
+      height: 32px;
+      display: grid;
+      place-items: center;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--muted);
+      font-size: 22px;
+    }
+
+    .title {
+      min-width: 0;
+    }
+
+    .title strong {
+      display: block;
+      font-size: 20px;
+      line-height: 1.1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .title span {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      margin-top: 4px;
+    }
+
+    .seg {
+      display: inline-grid;
+      grid-auto-flow: column;
+      border: 1px solid #293442;
+      border-radius: 7px;
+      overflow: hidden;
+      height: 30px;
+    }
+
+    .view-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .seg button {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      padding: 0 9px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 750;
+    }
+
+    .seg .on {
+      color: #041116;
+      background: var(--cyan);
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid #17202b;
+    }
+
+    .search {
+      flex: 1;
+      height: 32px;
+      border-radius: 6px;
+      border: 1px solid #273341;
+      color: var(--muted);
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      font-size: 13px;
+      background: #0f151e;
+    }
+
+    .small-btn {
+      height: 32px;
+      border: 1px solid #2c3948;
+      background: #121a24;
+      color: var(--cyan);
+      padding: 0 9px;
+      border-radius: 6px;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 750;
+    }
+
+    .gear-btn {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      border: 1px solid #2c3948;
+      border-radius: 7px;
+      background: #121a24;
+      color: var(--cyan);
+      font: inherit;
+      font-size: 15px;
+      cursor: pointer;
+    }
+
+    .tree {
+      padding: 8px 0 90px;
+    }
+
+    .section {
+      margin-top: 6px;
+      padding: 8px 12px 5px;
+      font-size: 11px;
+      color: var(--dim);
+      text-transform: uppercase;
+      font-weight: 800;
+      letter-spacing: .08em;
+    }
+
+    .row {
+      min-height: var(--row);
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 8px;
+      padding: 0 10px;
+      position: relative;
+      font-size: 13px;
+    }
+
+    .row:hover {
+      background: #0f151e;
+    }
+
+    .row.root,
+    .row.project,
+    .action,
+    .seg button,
+    .small-btn,
+    .bottom {
+      cursor: pointer;
+    }
+
+    .root {
+      --row: 42px;
+      border-top: 1px solid #151e29;
+      border-bottom: 1px solid #151e29;
+      background: #0d131b;
+      font-weight: 800;
+    }
+
+    .project {
+      --row: 36px;
+    }
+
+    .session {
+      --row: 32px;
+      color: #d8e0ea;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+
+    .indent-0 { padding-left: 10px; }
+    .indent-1 { padding-left: 30px; }
+    .indent-2 { padding-left: 54px; }
+
+    .indent-1::before,
+    .indent-2::before {
+      content: "";
+      position: absolute;
+      left: 20px;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background: var(--line);
+    }
+
+    .terminal-focus .indent-1::after {
+      content: "";
+      position: absolute;
+      left: 20px;
+      top: 17px;
+      width: 12px;
+      height: 1px;
+      background: var(--line);
+    }
+
+    .indent-2::after {
+      content: "";
+      position: absolute;
+      left: 20px;
+      top: 16px;
+      width: 22px;
+      height: 1px;
+      background: var(--line);
+    }
+
+    .terminal-focus .session.indent-2 {
+      padding-left: 70px;
+    }
+
+    .terminal-focus .session.indent-2::before {
+      left: 38px;
+    }
+
+    .terminal-focus .session.indent-2::after {
+      left: 38px;
+      width: 22px;
+    }
+
+    .indent-2 .fork::before {
+      content: "";
+      position: absolute;
+      left: 44px;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background: var(--line);
+    }
+
+    .chev {
+      width: 14px;
+      color: var(--muted);
+      text-align: center;
+      font-size: 12px;
+    }
+
+    .name {
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .sub {
+      color: var(--muted);
+      font-size: 11px;
+      margin-left: 4px;
+      font-weight: 600;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 20px;
+      height: 20px;
+      border-radius: 10px;
+      padding: 0 7px;
+      border: 1px solid #334255;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 800;
+      text-transform: lowercase;
+    }
+
+    .pill.active {
+      color: var(--muted);
+      background: transparent;
+      border-color: transparent;
+    }
+
+    .pill.git {
+      color: #071114;
+      background: var(--cyan);
+      border-color: var(--cyan);
+    }
+
+    .pill.agent {
+      color: var(--cyan);
+      background: rgba(41, 199, 223, .08);
+      border-color: rgba(41, 199, 223, .24);
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--dim);
+    }
+
+    .dot.on {
+      background: var(--green);
+      box-shadow: 0 0 0 3px rgba(56, 208, 122, .12);
+    }
+
+    .state-dot {
+      width: 7px;
+      height: 7px;
+      display: inline-block;
+      margin-right: 7px;
+      border-radius: 50%;
+      background: var(--dim);
+      vertical-align: 1px;
+    }
+
+    .state-dot.active {
+      background: var(--green);
+      box-shadow: 0 0 0 3px rgba(56, 208, 122, .10);
+    }
+
+    .action {
+      color: var(--cyan);
+      font-weight: 800;
+      font-size: 16px;
+    }
+
+    .root-action {
+      width: auto;
+      min-width: 16px;
+      height: 24px;
+      display: inline-grid;
+      place-items: center;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      color: var(--cyan);
+      background: transparent;
+      font-size: 16px;
+      font-weight: 800;
+    }
+
+    .project-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .faded {
+      color: var(--muted);
+    }
+
+    .compact .row {
+      --row: 34px;
+      grid-template-columns: auto 1fr auto;
+      font-size: 14px;
+    }
+
+    .compact .root {
+      --row: 38px;
+      font-weight: 650;
+    }
+
+    .compact .session {
+      --row: 31px;
+      font-size: 13px;
+    }
+
+    .rail .row {
+      grid-template-columns: 16px 1fr auto;
+    }
+
+    .rail .root {
+      margin: 8px 8px 0;
+      border: 1px solid #202a36;
+      border-radius: 6px;
+      padding-left: 8px;
+    }
+
+    .rail .project {
+      margin-left: 12px;
+      margin-right: 8px;
+      border-left: 2px solid var(--line-strong);
+      padding-left: 14px;
+    }
+
+    .rail .session {
+      margin-left: 12px;
+      margin-right: 8px;
+      border-left: 2px solid var(--line);
+      padding-left: 34px;
+    }
+
+    .empty {
+      color: var(--muted);
+    }
+
+    .bottom {
+      position: absolute;
+      right: 18px;
+      bottom: 18px;
+      width: 54px;
+      height: 54px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: var(--cyan);
+      color: #041116;
+      font-size: 30px;
+      font-weight: 800;
+      box-shadow: 0 12px 28px rgba(41, 199, 223, .18);
+    }
+
+    .screen {
+      position: relative;
+      min-height: 720px;
+    }
+
+    .hidden-option {
+      display: none;
+    }
+
+    .terminal-focus {
+      max-width: 430px;
+    }
+
+    .terminal-focus .phone-title {
+      color: var(--cyan);
+    }
+
+    .flat-list {
+      display: none;
+      padding: 8px 0 90px;
+    }
+
+    .flat-row {
+      min-height: 38px;
+      display: grid;
+      grid-template-columns: 10px 1fr auto;
+      align-items: center;
+      gap: 9px;
+      padding: 0 12px;
+      font-size: 14px;
+      border-bottom: 1px solid #111923;
+    }
+
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 22px;
+      transform: translateX(-50%);
+      max-width: 360px;
+      padding: 10px 12px;
+      border: 1px solid #314052;
+      border-radius: 8px;
+      background: #111923;
+      color: var(--text);
+      font-size: 13px;
+      box-shadow: 0 14px 40px rgba(0, 0, 0, .38);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .16s ease;
+    }
+
+    .toast.show {
+      opacity: 1;
+    }
+
+    .sheet-backdrop {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: end;
+      justify-content: center;
+      background: rgba(0, 0, 0, .45);
+      padding: 18px;
+      z-index: 10;
+    }
+
+    .sheet-backdrop.show {
+      display: flex;
+    }
+
+    .sheet {
+      width: min(420px, 100%);
+      border: 1px solid #293746;
+      border-radius: 12px 12px 8px 8px;
+      background: #121a24;
+      padding: 14px;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, .45);
+    }
+
+    .sheet h3 {
+      margin: 0 0 4px;
+      font-size: 17px;
+    }
+
+    .sheet p {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .sheet button {
+      width: 100%;
+      height: 42px;
+      margin-top: 8px;
+      border: 1px solid #334255;
+      border-radius: 7px;
+      background: #0e151e;
+      color: var(--text);
+      font: inherit;
+      font-weight: 750;
+      text-align: left;
+      padding: 0 12px;
+    }
+
+    .sheet button.primary {
+      background: var(--cyan);
+      border-color: var(--cyan);
+      color: #041116;
+    }
+
+    .sheet-list {
+      max-height: 260px;
+      overflow: auto;
+      margin-top: 12px;
+      border-top: 1px solid #263341;
+      padding-top: 8px;
+    }
+
+    .sheet-section {
+      margin: 10px 0 6px;
+      color: var(--dim);
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .sheet-project {
+      min-height: 34px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 8px;
+      color: var(--text);
+      font-size: 13px;
+      border-bottom: 1px solid #18212c;
+    }
+
+    .sheet-project span {
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .settings-screen {
+      display: none;
+      position: absolute;
+      inset: 0;
+      z-index: 5;
+      background: #080c12;
+    }
+
+    .app-screen {
+      display: none;
+    }
+
+    .app-screen.show {
+      display: block;
+    }
+
+    .host-card {
+      min-height: 72px;
+      display: grid;
+      grid-template-columns: 42px 1fr auto;
+      align-items: center;
+      gap: 12px;
+      margin: 10px 12px;
+      padding: 10px;
+      border: 1px solid #202a36;
+      border-radius: 8px;
+      background: #101721;
+      cursor: pointer;
+    }
+
+    .avatar {
+      width: 36px;
+      height: 36px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: #232d3a;
+      color: var(--cyan);
+      font-weight: 800;
+    }
+
+    .terminal {
+      height: 548px;
+      padding: 10px;
+      background: #02050a;
+      color: #d8e0ea;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+      border-top: 1px solid #17202b;
+    }
+
+    .session-chrome {
+      display: grid;
+      grid-template-columns: 44px auto 1fr auto 36px;
+      align-items: center;
+      gap: 6px;
+      height: 56px;
+      padding: 0 6px 0 4px;
+      border-bottom: 1px solid #17202b;
+      background: #080c12;
+    }
+
+    .session-title {
+      min-width: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    .kebab {
+      width: 36px;
+      height: 36px;
+      display: grid;
+      place-items: center;
+      color: var(--muted);
+      font-size: 21px;
+      cursor: pointer;
+      position: relative;
+    }
+
+    .menu {
+      position: absolute;
+      top: 46px;
+      right: 8px;
+      z-index: 8;
+      min-width: 190px;
+      display: none;
+      padding: 6px;
+      border: 1px solid #293746;
+      border-radius: 8px;
+      background: #121a24;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, .42);
+    }
+
+    .menu.show {
+      display: block;
+    }
+
+    .menu button {
+      width: 100%;
+      height: 36px;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      font-size: 13px;
+      text-align: left;
+      padding: 0 10px;
+      cursor: pointer;
+    }
+
+    .menu button:hover {
+      background: #192332;
+    }
+
+    .window-strip {
+      height: 34px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 10px;
+      border-bottom: 1px solid #17202b;
+      background: #0b1118;
+      overflow: hidden;
+    }
+
+    .window-pill {
+      max-width: 100%;
+      height: 24px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 9px;
+      border-radius: 6px;
+      background: #121a24;
+      border: 1px solid #253140;
+      color: var(--text);
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .bottom-chips {
+      display: grid;
+      grid-template-columns: auto auto auto 1fr auto;
+      align-items: center;
+      gap: 8px;
+      padding: 10px;
+      border-top: 1px solid #202a36;
+      background: #0d131b;
+      overflow: hidden;
+    }
+
+    .chip {
+      height: 34px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0 12px;
+      border: 1px solid #263341;
+      border-radius: 8px;
+      color: var(--text);
+      background: #101721;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+
+    .chip.primary {
+      border-color: #1d8fa1;
+      color: var(--cyan);
+    }
+
+    .mic-button {
+      width: 44px;
+      height: 44px;
+      display: grid;
+      place-items: center;
+      border: 0;
+      border-radius: 50%;
+      background: var(--cyan);
+      color: #041116;
+      font-size: 20px;
+      font-weight: 900;
+      box-shadow: 0 8px 22px rgba(41, 199, 223, .18);
+    }
+
+    .composer {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      padding: 10px;
+      border-top: 1px solid #202a36;
+      background: #0d131b;
+    }
+
+    .composer div {
+      height: 34px;
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      border: 1px solid #263341;
+      border-radius: 7px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .conversation {
+      display: none;
+      padding: 12px;
+      min-height: 575px;
+      background: #080c12;
+      border-top: 1px solid #17202b;
+    }
+
+    .message {
+      padding: 10px 0;
+      border-bottom: 1px solid #17202b;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .assistant-fab {
+      position: absolute;
+      right: 18px;
+      bottom: 18px;
+      width: 52px;
+      height: 52px;
+      border: 0;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      background: var(--cyan);
+      color: #041116;
+      font-size: 20px;
+      font-weight: 900;
+      box-shadow: 0 12px 28px rgba(41, 199, 223, .22);
+      cursor: pointer;
+    }
+
+    .assistant-panel {
+      display: none;
+      position: absolute;
+      inset: auto 10px 10px 10px;
+      z-index: 7;
+      border: 1px solid #293746;
+      border-radius: 10px;
+      background: #121a24;
+      box-shadow: 0 18px 45px rgba(0, 0, 0, .45);
+      padding: 12px;
+    }
+
+    .assistant-panel.show {
+      display: block;
+    }
+
+    .assistant-panel h3 {
+      margin: 0 0 4px;
+      font-size: 16px;
+    }
+
+    .assistant-panel p {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.4;
+    }
+
+    .assistant-input {
+      min-height: 44px;
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      border: 1px solid #2b3746;
+      border-radius: 7px;
+      color: var(--text);
+      background: #0d131b;
+      font-size: 13px;
+      margin-bottom: 10px;
+    }
+
+    .assistant-thread {
+      max-height: 300px;
+      overflow: auto;
+      margin: 10px 0;
+      border-top: 1px solid #243140;
+      border-bottom: 1px solid #243140;
+      padding: 8px 0;
+    }
+
+    .assistant-turn {
+      padding: 8px 0;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+
+    .assistant-turn strong {
+      display: block;
+      margin-bottom: 3px;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .06em;
+    }
+
+    .assistant-compose {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 8px;
+      align-items: center;
+      margin-top: 10px;
+    }
+
+    .assistant-compose .assistant-input {
+      margin-bottom: 0;
+    }
+
+    .assistant-proposal {
+      border: 1px solid #253140;
+      border-radius: 8px;
+      background: #0d131b;
+      padding: 10px;
+      font-size: 13px;
+      line-height: 1.4;
+      margin-bottom: 10px;
+    }
+
+    .assistant-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .settings-screen.show {
+      display: block;
+    }
+
+    .settings-body {
+      padding: 12px;
+    }
+
+    .setting-label {
+      margin: 16px 0 8px;
+      color: var(--dim);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .root-editor-row {
+      min-height: 44px;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 8px;
+      padding: 0 10px;
+      border: 1px solid #202a36;
+      border-radius: 7px;
+      background: #101721;
+      margin-bottom: 8px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+    }
+
+    .root-editor-row button {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      font: inherit;
+      font-size: 18px;
+      cursor: pointer;
+    }
+
+    .hint {
+      color: var(--muted);
+      line-height: 1.45;
+      font-size: 12px;
+      margin: 10px 0 0;
+    }
+
+    .row.inactive-overflow {
+      color: #798595;
+    }
+
+    .terminal-focus .project .name {
+      font-weight: 700;
+    }
+
+    .terminal-focus .session .name {
+      color: var(--muted);
+      font-weight: 500;
+    }
+
+    @media (max-width: 1060px) {
+      .mockups {
+        grid-template-columns: 1fr;
+      }
+
+      .phone {
+        max-width: 430px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <h1>Host Detail Tree Mockups</h1>
+    <p class="intro">
+      This is the screen after tapping a host. The primary objects are your configured workspace roots, e.g.
+      <strong>~/git</strong> and <strong>~/tmp</strong>. Inside each root: active projects first, inactive projects after.
+      Sessions running outside configured roots are still visible, but only after the configured roots.
+    </p>
+
+    <section class="mockups">
+      <article class="phone hidden-option">
+        <h2>A. Host Detail: Classic Tree</h2>
+        <div class="screen">
+          <div class="appbar">
+            <div class="back">‹</div>
+            <div class="title"><strong>hetzner</strong><span>~/git, ~/tmp</span></div>
+            <div class="seg"><button class="on">Tree</button><button>Flat</button></div>
+          </div>
+          <div class="toolbar">
+            <div class="search">Filter projects...</div>
+            <button class="small-btn">Roots</button>
+          </div>
+          <div class="tree">
+            <div class="section">Configured folders</div>
+            <div class="row root indent-0">
+              <span class="chev">▾</span><span class="name">~/git <span class="sub">3 active · 5 inactive</span></span><span class="action">＋</span>
+            </div>
+            <div class="section">Active projects</div>
+            <div class="row project indent-1">
+              <span class="chev">▾</span><span class="name">pocketshell <span class="sub">main</span></span><span class="pill active">2</span>
+            </div>
+            <div class="row session indent-2">
+              <span class="fork"></span><span class="name"><span class="dot on"></span> codex-main</span><span class="pill git">Codex</span>
+            </div>
+            <div class="row session indent-2">
+              <span class="fork"></span><span class="name"><span class="dot on"></span> release-check</span><span class="pill">tmux</span>
+            </div>
+            <div class="row project indent-1">
+              <span class="chev">▸</span><span class="name">llm-zoomcamp <span class="sub">1 session</span></span><span class="pill active">1</span>
+            </div>
+            <div class="row project indent-1">
+              <span class="chev">▸</span><span class="name">ai-shipping-labs <span class="sub">1 session</span></span><span class="pill active">1</span>
+            </div>
+            <div class="section">Inactive projects</div>
+            <div class="row project indent-1 empty">
+              <span class="chev">▸</span><span class="name">data-engineering-zoomcamp</span><span class="action">＋</span>
+            </div>
+            <div class="row project indent-1 empty">
+              <span class="chev">▸</span><span class="name">machine-learning-zoomcamp</span><span class="action">＋</span>
+            </div>
+
+            <div class="row root indent-0">
+              <span class="chev">▾</span><span class="name">~/tmp <span class="sub">1 active · 2 inactive</span></span><span class="action">＋</span>
+            </div>
+            <div class="section">Active projects</div>
+            <div class="row project indent-1">
+              <span class="chev">▾</span><span class="name">lambda-deploy</span><span class="pill active">1</span>
+            </div>
+            <div class="row session indent-2">
+              <span class="fork"></span><span class="name"><span class="dot on"></span> deploy-debug</span><span class="pill">Claude</span>
+            </div>
+            <div class="section">Other session folders</div>
+            <div class="row project indent-1">
+              <span class="chev">▸</span><span class="name">/opt/work/demo <span class="sub">outside roots</span></span><span class="pill active">1</span>
+            </div>
+          </div>
+          <div class="bottom">＋</div>
+        </div>
+      </article>
+
+      <article class="phone hidden-option">
+        <h2>B. Host Detail: Dense Root Sections</h2>
+        <div class="screen rail">
+          <div class="appbar">
+            <div class="back">‹</div>
+            <div class="title"><strong>hetzner</strong><span>Workspace roots</span></div>
+            <div class="seg"><button class="on">Tree</button><button>Flat</button></div>
+          </div>
+          <div class="toolbar">
+            <button class="small-btn">+ Git</button>
+            <button class="small-btn">+ Empty</button>
+            <div class="search">~/git, ~/tmp</div>
+          </div>
+          <div class="tree compact">
+            <div class="row root">
+              <span class="chev">▾</span><span class="name">~/git</span><span class="pill active">3 active</span>
+            </div>
+            <div class="section">Active</div>
+            <div class="row project">
+              <span class="dot on"></span><span class="name">pocketshell <span class="sub">2 sessions · main</span></span><span class="action">⋯</span>
+            </div>
+            <div class="row session">
+              <span></span><span class="name">codex-main</span><span class="pill git">codex</span>
+            </div>
+            <div class="row session">
+              <span></span><span class="name">release-check</span><span class="pill">tmux</span>
+            </div>
+            <div class="row project">
+              <span class="dot on"></span><span class="name">llm-zoomcamp <span class="sub">1 session</span></span><span class="action">⋯</span>
+            </div>
+            <div class="row project">
+              <span class="dot on"></span><span class="name">ai-shipping-labs <span class="sub">1 session</span></span><span class="action">⋯</span>
+            </div>
+            <div class="section">Inactive</div>
+            <div class="row project empty">
+              <span></span><span class="name">data-engineering-zoomcamp</span><span class="small-btn">New</span>
+            </div>
+            <div class="row project empty">
+              <span></span><span class="name">machine-learning-zoomcamp</span><span class="small-btn">New</span>
+            </div>
+            <div class="row project empty">
+              <span></span><span class="name">python-course-code</span><span class="small-btn">New</span>
+            </div>
+
+            <div class="row root">
+              <span class="chev">▾</span><span class="name">~/tmp</span><span class="pill active">1 active</span>
+            </div>
+            <div class="section">Active</div>
+            <div class="row project">
+              <span class="dot on"></span><span class="name">lambda-deploy <span class="sub">1 session</span></span><span class="action">⋯</span>
+            </div>
+            <div class="section">Inactive</div>
+            <div class="row project empty">
+              <span></span><span class="name">aws-token-vending-machine</span><span class="small-btn">New</span>
+            </div>
+            <div class="row project empty">
+              <span></span><span class="name">investment-coach-bot</span><span class="small-btn">New</span>
+            </div>
+
+            <div class="section">Other active sessions</div>
+            <div class="row project">
+              <span class="dot on"></span><span class="name">/opt/work/demo</span><span class="pill">1</span>
+            </div>
+          </div>
+        </div>
+      </article>
+
+      <article class="phone terminal-focus">
+        <h2 class="phone-title">Host Detail: Terminal-Style Outline</h2>
+        <div class="screen">
+          <div class="app-screen show" data-screen="hosts">
+            <div class="appbar">
+              <div class="title"><strong>PocketShell</strong></div>
+              <div></div>
+              <button class="gear-btn">⚙</button>
+            </div>
+            <div class="section">Hosts</div>
+            <div class="host-card" data-open-host>
+              <div class="avatar">H</div>
+              <div class="title"><strong>hetzner</strong><span>10.0.2.2:2222</span></div>
+              <span class="pill active">11</span>
+            </div>
+            <div class="host-card">
+              <div class="avatar">L</div>
+              <div class="title"><strong>local-lab</strong><span>not connected</span></div>
+              <span class="pill">0</span>
+            </div>
+          </div>
+          <div class="app-screen" data-screen="host-detail">
+          <div class="appbar">
+            <div class="back">‹</div>
+            <div class="title"><strong>hetzner</strong></div>
+            <div class="view-controls">
+              <button class="gear-btn" data-open-settings title="Workspace tree settings">⚙</button>
+            </div>
+          </div>
+          <div class="tree compact" data-view-panel="tree"></div>
+          <div class="flat-list compact" data-view-panel="flat">
+            <div class="section">Active projects</div>
+            <div class="flat-row"><span class="dot on"></span><span class="name">~/git/ai-engineering-buildcamp</span><span class="pill active">4</span></div>
+            <div class="flat-row"><span class="dot on"></span><span class="name">~/git/ai-shipping-labs <span class="sub">Claude, node</span></span><span class="pill active">2</span></div>
+            <div class="flat-row"><span class="dot on"></span><span class="name">~/git/banner-generator <span class="sub">node</span></span><span class="pill active">1</span></div>
+            <div class="flat-row"><span class="dot on"></span><span class="name">~/git/datamailer <span class="sub">node</span></span><span class="pill active">1</span></div>
+            <div class="flat-row"><span class="dot on"></span><span class="name">~/git/llm-zoomcamp <span class="sub">2 sessions</span></span><span class="pill active">2</span></div>
+            <div class="flat-row"><span class="dot on"></span><span class="name">~/git/pocketshell <span class="sub">node, Claude</span></span><span class="pill active">2</span></div>
+            <div class="flat-row"><span class="dot on"></span><span class="name">~/git/telegram-writing-assistant <span class="sub">Claude</span></span><span class="pill active">1</span></div>
+            <div class="flat-row"><span class="dot on"></span><span class="name">~/tmp <span class="sub">bash</span></span><span class="pill active">1</span></div>
+            <div class="section">Inactive projects</div>
+            <div class="flat-row"><span></span><span class="name">~/git/data-engineering-zoomcamp</span><span class="action" data-action="project" data-label="~/git/data-engineering-zoomcamp">＋</span></div>
+            <div class="flat-row"><span></span><span class="name">~/git/machine-learning-zoomcamp</span><span class="action" data-action="project" data-label="~/git/machine-learning-zoomcamp">＋</span></div>
+            <div class="flat-row"><span></span><span class="name">~/tmp/aws-token-vending-machine</span><span class="action" data-action="project" data-label="~/tmp/aws-token-vending-machine">＋</span></div>
+            <div class="flat-row"><span></span><span class="name">~/tmp/lambda-deploy</span><span class="action" data-action="project" data-label="~/tmp/lambda-deploy">＋</span></div>
+            <div class="section">Other active sessions</div>
+            <div class="flat-row"><span class="dot on"></span><span class="name">/home/alexey/.codex <span class="sub">outside roots</span></span><span class="pill active">1</span></div>
+            <div class="flat-row"><span class="dot on"></span><span class="name">/home/alexey/inbox <span class="sub">outside roots</span></span><span class="pill active">2</span></div>
+          </div>
+          <button class="assistant-fab" data-open-assistant title="Assistant">✦</button>
+          <div class="assistant-panel" data-assistant-panel>
+            <h3>Assistant</h3>
+            <p>Voice action assistant from #266.</p>
+            <div class="assistant-thread">
+              <div class="assistant-turn"><strong>You</strong>Create an empty project called tree-spike in ~/tmp and start Codex there.</div>
+              <div class="assistant-turn"><strong>Assistant</strong>I found host <strong>hetzner</strong> and configured root <strong>~/tmp</strong>. I can create the folder and start a Codex tmux session there.</div>
+              <div class="assistant-proposal">
+                Proposed action:<br>
+                1. create folder <strong>~/tmp/tree-spike</strong><br>
+                2. start <strong>codex</strong> session in that folder
+              </div>
+            </div>
+            <div class="assistant-actions">
+              <button class="small-btn" data-assistant-confirm>Confirm</button>
+              <button class="small-btn" data-assistant-correct>No, change it</button>
+            </div>
+            <div class="assistant-compose">
+              <div class="assistant-input">Type a correction or dictate...</div>
+              <button class="mic-button" title="Dictate assistant correction">●</button>
+            </div>
+          </div>
+          <div class="settings-screen" data-settings-screen>
+            <div class="appbar">
+              <button class="back" data-close-settings>‹</button>
+              <div class="title"><strong>Workspace roots</strong><span>this machine</span></div>
+              <button class="iconbtn" data-close-settings>✓</button>
+            </div>
+            <div class="settings-body">
+              <div class="setting-label">Shown first on host detail</div>
+              <div class="root-editor-row"><span>~/git</span><button data-remove-root>×</button></div>
+              <div class="root-editor-row"><span>~/tmp</span><button data-remove-root>×</button></div>
+              <button class="small-btn" data-add-root>+ Add folder</button>
+              <div class="setting-label">Default view</div>
+              <div class="seg" data-settings-view>
+                <button class="on" data-settings-default="tree">Tree</button>
+                <button data-settings-default="flat">Flat</button>
+              </div>
+              <p class="hint">Projects under these folders appear before any sessions found elsewhere. Each root shows active projects first, then inactive projects.</p>
+            </div>
+          </div>
+          </div>
+          <div class="app-screen" data-screen="terminal">
+            <div class="session-chrome">
+              <button class="back" data-back-host>‹</button>
+              <span class="dot on"></span>
+              <div class="session-title" data-terminal-title>session</div>
+              <div class="seg" data-terminal-tabs><button class="on" data-terminal-tab="terminal">Terminal</button><button data-terminal-tab="conversation">Conversation</button></div>
+              <div class="kebab" data-session-menu-button>⋮</div>
+              <div class="menu" data-session-menu>
+                <button data-menu-action="Switch window">Switch window</button>
+                <button data-menu-action="Resize session">Resize session</button>
+                <button data-menu-action="Detach">Detach</button>
+                <button data-menu-action="Close session">Close session</button>
+              </div>
+            </div>
+            <div class="window-strip"><div class="window-pill"><span class="dot on"></span><span data-terminal-window>0: shell</span></div></div>
+            <div class="terminal" data-terminal-panel>~ $ echo ready
+ready
+~ $</div>
+            <div class="conversation" data-conversation-panel>
+              <div class="message"><strong>you</strong><br>check the current failures and suggest the smallest fix</div>
+              <div class="message"><strong data-agent-name>agent</strong><br>I found the failing path. The focused change is in the host-detail tree state.</div>
+            </div>
+            <div class="bottom-chips" data-bottom-chips>
+              <div class="chip">git status</div>
+              <div class="chip primary">show keyboard</div>
+              <div class="chip" data-add-chip>+ command</div>
+              <div></div>
+              <button class="mic-button" title="Dictate">●</button>
+            </div>
+          </div>
+        </div>
+      </article>
+    </section>
+  </main>
+  <div class="sheet-backdrop" data-sheet>
+    <div class="sheet">
+      <h3 data-sheet-title>Create project</h3>
+      <p data-sheet-subtitle></p>
+      <button class="primary" data-sheet-choice="clone">Clone from git here</button>
+      <button data-sheet-choice="empty">Create empty project here</button>
+      <p class="hint" data-implementation-note>Implementation note: "Had sessions before" should come from the `pocketshell` CLI session/project history, then remaining folders come from the root scan.</p>
+      <div class="sheet-list" data-sheet-list></div>
+      <button data-sheet-close>Cancel</button>
+    </div>
+  </div>
+  <div class="toast" data-toast></div>
+  <script>
+    const hadSessionsBefore = new Set([
+      'data-engineering-zoomcamp',
+      'machine-learning-zoomcamp',
+      'python-course-code',
+      'quse',
+      'aws-token-vending-machine',
+      'lambda-deploy',
+    ]);
+
+    const roots = [
+      {
+        label: '~/git',
+        projects: [
+          { name: 'pocketshell', active: true, lru: 100, sessions: [{ name: 'dev server', kind: 'node' }, { name: 'Claude review', kind: 'claude' }] },
+          { name: 'ai-engineering-buildcamp', active: true, lru: 95, sessions: [{ name: 'Buildcamp main', kind: 'claude' }, { name: 'Content pass', kind: 'codex' }, { name: 'Preview server', kind: 'node' }, { name: 'v2 build', kind: 'make' }] },
+          { name: 'ai-shipping-labs', active: true, lru: 90, sessions: [{ name: 'Claude workspace', kind: 'claude' }, { name: 'content server', kind: 'node' }] },
+          { name: 'llm-zoomcamp', active: true, lru: 85, sessions: [{ name: 'site preview', kind: 'node' }, { name: 'lesson preview', kind: 'node' }] },
+          { name: 'telegram-writing-assistant', active: true, lru: 80, sessions: [{ name: 'Claude workspace', kind: 'claude' }] },
+          { name: 'datamailer', active: true, lru: 75, sessions: [{ name: 'web server', kind: 'node' }] },
+          { name: 'banner-generator', active: true, lru: 70, sessions: [{ name: 'web server', kind: 'node' }] },
+          ...'.claude|.codex|agent-log-explorer|ai-engineering-buildcamp-code|ai-engineering-field-guide|ai-shipping-labs-content|ai-shipping-labs-infra|ai-shipping-labs-workshops|ai-shipping-labs-workshops-raw|au-tomator-lambda|certificate-creator|codehive|codoc|course-management-agent|course-management-platform|data-engineering-zoomcamp|datamailer-infra|datamailer-worktrees|datatalks.club-docs|datatalksclub.github.io|datatasks|dtc-operations|faq|faq_benchmark|goz|heru|litehive|machine-learning-zoomcamp|merm|minsearch|mlops-zoomcamp|mlwiki.org|nobook|phone-aws-auth|pocketshelpocket|python-course|python-course-code|quse|rds-export|rustkyl|sandbox-screenshots|scholarships|snippets|sqlitesearch|ssh-auto-forward|ssh-auto-forward-android|stop-handle|stylint|tmuxcli|toyaikit|workshops|zoom-calls|zoomcamp-scoring'
+            .split('|')
+            .map((name) => ({ name, active: false, lru: 0, sessions: [], hadSessions: hadSessionsBefore.has(name) })),
+        ],
+      },
+      {
+        label: '~/tmp',
+        projects: [
+          { name: '.', active: true, lru: 60, sessions: [{ name: 'shell', kind: 'bash' }] },
+          ...'ai-shipping-labs-docs|aws-credentials-vending-machine|aws-token-vending-machine|hf-onnx|investment-coach-bot|lambda-deploy|openclaw|typefully|voices'
+            .split('|')
+            .map((name) => ({ name, active: false, lru: 0, sessions: [], hadSessions: hadSessionsBefore.has(name) })),
+        ],
+      },
+    ];
+
+    const outsideSessions = [
+      { path: '/home/alexey/.codex', sessions: [{ name: 'Config edit', kind: 'codex' }] },
+      { path: '/home/alexey/inbox', sessions: [{ name: 'Notes cleanup', kind: 'bash' }, { name: 'Transcript review', kind: 'claude' }] },
+    ];
+
+    const toast = document.querySelector('[data-toast]');
+    const sheet = document.querySelector('[data-sheet]');
+    const sheetTitle = document.querySelector('[data-sheet-title]');
+    const sheetSubtitle = document.querySelector('[data-sheet-subtitle]');
+    const sheetList = document.querySelector('[data-sheet-list]');
+    const settingsScreen = document.querySelector('[data-settings-screen]');
+    let currentTarget = '';
+
+    function projectPath(root, project) {
+      return project.name === '.' ? root.label : `${root.label}/${project.name}`;
+    }
+
+    function kindClass(kind) {
+      return kind === 'codex' || kind === 'claude' ? ' agent' : '';
+    }
+
+    function sessionRank(session) {
+      if (session.kind === 'claude') return 0;
+      if (session.kind === 'codex') return 1;
+      return 2;
+    }
+
+    function renderMockData() {
+      const treePanel = document.querySelector('[data-view-panel="tree"]');
+      const flatPanel = document.querySelector('[data-view-panel="flat"]');
+      const tree = [];
+      const flatActive = [];
+      const flatInactive = [];
+
+      tree.push('<div class="section">Workspace roots</div>');
+      roots.forEach((root) => {
+        const active = root.projects.filter((p) => p.active).sort((a, b) => b.lru - a.lru);
+        const inactive = root.projects.filter((p) => !p.active).sort((a, b) => a.name.localeCompare(b.name));
+        const sessionCount = active.reduce((sum, p) => sum + p.sessions.length, 0);
+        tree.push(`
+          <div class="row root indent-0">
+            <span class="chev">▾</span><span class="name">${root.label} <span class="sub">${active.length} active · ${sessionCount} sessions</span></span><span class="root-action" data-action="root" data-label="${root.label}">＋</span>
+          </div>
+        `);
+        active.forEach((project) => {
+          const path = projectPath(root, project);
+          tree.push(`
+            <div class="row project indent-1">
+              <span class="chev">▸</span><span class="name"><span class="state-dot active"></span>${project.name}</span><span class="project-actions"><span class="pill active">${project.sessions.length}</span><span class="root-action" data-action="session" data-label="${path}">＋</span></span>
+            </div>
+          `);
+          const sessions = [...project.sessions].sort((a, b) => sessionRank(a) - sessionRank(b) || a.name.localeCompare(b.name));
+          sessions.forEach((session, index) => {
+            tree.push(`
+              <div class="row session indent-2" style="display:none" data-initially-collapsed="true">
+                <span class="fork"></span><span class="name"><span class="state-dot active"></span>${session.name}</span><span class="pill${kindClass(session.kind)}">${session.kind}</span>
+              </div>
+            `);
+          });
+          flatActive.push(`
+            <div class="flat-row"><span class="dot on"></span><span class="name">${path}</span><span class="pill active">${project.sessions.length}</span></div>
+          `);
+        });
+      });
+
+      tree.push('<div class="section">Outside configured roots</div>');
+      outsideSessions.forEach((group) => {
+        tree.push(`
+          <div class="row project indent-0">
+            <span class="chev">▸</span><span class="name">${group.path}</span><span class="pill active">${group.sessions.length}</span>
+          </div>
+        `);
+        group.sessions.forEach((session, index) => {
+          tree.push(`
+            <div class="row session indent-1" style="display:none" data-initially-collapsed="true">
+              <span class="fork"></span><span class="name"><span class="state-dot active"></span>${session.name}</span><span class="pill${kindClass(session.kind)}">${session.kind}</span>
+            </div>
+          `);
+        });
+        flatActive.push(`
+          <div class="flat-row"><span class="dot on"></span><span class="name">${group.path}</span><span class="pill active">${group.sessions.length}</span></div>
+        `);
+      });
+
+      treePanel.innerHTML = tree.join('');
+      flatPanel.innerHTML = `
+        <div class="section">Active projects</div>
+        ${flatActive.join('')}
+      `;
+    }
+
+    renderMockData();
+
+    function showToast(text) {
+      toast.textContent = text;
+      toast.classList.add('show');
+      window.clearTimeout(showToast.timer);
+      showToast.timer = window.setTimeout(() => toast.classList.remove('show'), 1700);
+    }
+
+    function levelOf(row) {
+      if (row.classList.contains('indent-2')) return 2;
+      if (row.classList.contains('indent-1')) return 1;
+      return 0;
+    }
+
+    function isTreeRow(el) {
+      return el && el.classList && (el.classList.contains('root') || el.classList.contains('project'));
+    }
+
+    function bindTreeRows() {
+      document.querySelectorAll('.terminal-focus .row.root, .terminal-focus .row.project').forEach((row) => {
+      row.dataset.collapseId = Math.random().toString(36).slice(2);
+      let nextInitial = row.nextElementSibling;
+      while (nextInitial && !(isTreeRow(nextInitial) && levelOf(nextInitial) <= levelOf(row))) {
+        if (nextInitial.dataset.initiallyCollapsed === 'true') {
+          nextInitial.dataset.hiddenBy = row.dataset.collapseId;
+        }
+        nextInitial = nextInitial.nextElementSibling;
+      }
+      row.addEventListener('click', (event) => {
+        if (event.target.closest('[data-action]')) return;
+        const chev = row.querySelector('.chev');
+        if (!chev || chev.textContent.trim() === '·') return;
+        const currentLevel = levelOf(row);
+        const collapsing = chev.textContent.trim() === '▾';
+        const collapseId = row.dataset.collapseId;
+        chev.textContent = collapsing ? '▸' : '▾';
+
+        let next = row.nextElementSibling;
+        while (next) {
+          if (next.classList.contains('section')) {
+            if (currentLevel === 0 && next.textContent.includes('Outside')) break;
+            next = next.nextElementSibling;
+            continue;
+          }
+          if (isTreeRow(next) && levelOf(next) <= currentLevel) break;
+          if (collapsing) {
+            next.dataset.hiddenBy = collapseId;
+            next.style.display = 'none';
+          } else if (next.dataset.hiddenBy === collapseId) {
+            delete next.dataset.hiddenBy;
+            if (currentLevel === 0 && next.classList.contains('session') && next.dataset.initiallyCollapsed === 'true') {
+              next.style.display = 'none';
+            } else {
+              next.style.display = '';
+            }
+          } else if (!collapsing && currentLevel > 0 && next.dataset.initiallyCollapsed === 'true') {
+            next.style.display = '';
+          }
+          next = next.nextElementSibling;
+        }
+      });
+      });
+    }
+
+    bindTreeRows();
+
+    document.querySelectorAll('[data-view-switch] button').forEach((button) => {
+      button.addEventListener('click', () => {
+        const screen = button.closest('.screen');
+        const view = button.dataset.view;
+        screen.querySelectorAll('[data-view-switch] button').forEach((b) => b.classList.toggle('on', b === button));
+        screen.querySelector('[data-view-panel="tree"]').style.display = view === 'tree' ? '' : 'none';
+        screen.querySelector('[data-view-panel="flat"]').style.display = view === 'flat' ? 'block' : 'none';
+        showToast(view === 'tree' ? 'Tree view: grouped by ~/git and ~/tmp' : 'Flat view: active projects first across roots');
+      });
+    });
+
+    document.addEventListener('click', (event) => {
+      const action = event.target.closest('[data-action]');
+      if (!action) return;
+      currentTarget = action.dataset.label || 'selected folder';
+      sheetTitle.textContent =
+        action.dataset.action === 'root' ? 'Add under root' :
+        action.dataset.action === 'session' ? 'New session' :
+        'Start project';
+      sheetSubtitle.textContent = currentTarget;
+      const cloneButton = sheet.querySelector('[data-sheet-choice="clone"]');
+      const emptyButton = sheet.querySelector('[data-sheet-choice="empty"]');
+      if (action.dataset.action === 'session') {
+        cloneButton.textContent = 'Start tmux session here';
+        emptyButton.textContent = 'Start raw SSH shell here';
+        sheetList.innerHTML = '';
+      } else if (action.dataset.action === 'root') {
+        cloneButton.textContent = 'Clone git repo here';
+        emptyButton.textContent = 'Create empty project here';
+        const root = roots.find((candidate) => candidate.label === currentTarget);
+        if (root) {
+          const inactive = root.projects.filter((project) => !project.active);
+          const previous = inactive.filter((project) => project.hadSessions).sort((a, b) => a.name.localeCompare(b.name));
+          const rest = inactive.filter((project) => !project.hadSessions).sort((a, b) => a.name.localeCompare(b.name));
+          const renderProject = (project) => `
+            <div class="sheet-project">
+              <span>${project.name}</span>
+              <span class="root-action" data-action="session" data-label="${projectPath(root, project)}">＋</span>
+            </div>
+          `;
+          sheetList.innerHTML = `
+            <div class="sheet-section">Had sessions before</div>
+            ${previous.map(renderProject).join('') || '<div class="sheet-project"><span>None yet</span></div>'}
+            <div class="sheet-section">All folders</div>
+            ${rest.map(renderProject).join('')}
+          `;
+        }
+      } else {
+        cloneButton.textContent = 'Clone from git here';
+        emptyButton.textContent = 'Create empty project here';
+        sheetList.innerHTML = '';
+      }
+      sheet.classList.add('show');
+    });
+
+    document.querySelectorAll('[data-sheet-close], [data-sheet]').forEach((el) => {
+      el.addEventListener('click', (event) => {
+        if (event.target === sheet || event.target.hasAttribute('data-sheet-close')) sheet.classList.remove('show');
+      });
+    });
+
+    document.querySelectorAll('[data-sheet-choice]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const choice = button.dataset.sheetChoice === 'clone' ? 'Clone from git' : 'Create empty project';
+        sheet.classList.remove('show');
+        showToast(`${choice}: ${currentTarget}`);
+      });
+    });
+
+    document.querySelector('[data-open-settings]').addEventListener('click', () => {
+      settingsScreen.classList.add('show');
+    });
+
+    document.querySelectorAll('[data-close-settings]').forEach((button) => {
+      button.addEventListener('click', () => settingsScreen.classList.remove('show'));
+    });
+
+    document.querySelector('[data-add-root]').addEventListener('click', () => {
+      showToast('Would open folder picker / path entry');
+    });
+
+    document.querySelectorAll('[data-remove-root]').forEach((button) => {
+      button.addEventListener('click', () => showToast('Mock only: root stays configured'));
+    });
+
+    document.querySelectorAll('[data-settings-view] button').forEach((button) => {
+      button.addEventListener('click', () => {
+        button.closest('[data-settings-view]').querySelectorAll('button').forEach((b) => b.classList.toggle('on', b === button));
+        showToast(`Default host detail view: ${button.dataset.settingsDefault}`);
+      });
+    });
+
+    function showScreen(name) {
+      document.querySelectorAll('[data-screen]').forEach((screen) => screen.classList.toggle('show', screen.dataset.screen === name));
+    }
+
+    document.querySelector('[data-open-host]').addEventListener('click', () => showScreen('host-detail'));
+    document.querySelector('[data-back-host]').addEventListener('click', () => showScreen('host-detail'));
+    document.querySelector('[data-screen="host-detail"] .back').addEventListener('click', () => showScreen('hosts'));
+
+    document.querySelector('[data-open-assistant]').addEventListener('click', () => {
+      document.querySelector('[data-assistant-panel]').classList.toggle('show');
+    });
+
+    document.querySelector('[data-assistant-confirm]').addEventListener('click', () => {
+      document.querySelector('[data-assistant-panel]').classList.remove('show');
+      showToast('Confirmed: create ~/tmp/tree-spike and start codex');
+    });
+
+    document.querySelector('[data-assistant-correct]').addEventListener('click', () => {
+      showToast('Correction flow: dictate or type a change');
+    });
+
+    document.addEventListener('click', (event) => {
+      const sessionRow = event.target.closest('.row.session');
+      if (!sessionRow || !sessionRow.closest('[data-view-panel="tree"]')) return;
+      const label = sessionRow.querySelector('.name').textContent.trim();
+      const kind = sessionRow.querySelector('.pill')?.textContent.trim() || 'shell';
+      const isAgent = kind === 'claude' || kind === 'codex';
+      document.querySelector('[data-terminal-title]').textContent = label;
+      document.querySelector('[data-terminal-window]').textContent = isAgent ? `0: ${kind}` : `0: ${kind}`;
+      document.querySelector('[data-terminal-tabs]').style.display = isAgent ? 'inline-grid' : 'none';
+      document.querySelector('[data-add-chip]').textContent = isAgent ? '+ prompt' : '+ command';
+      document.querySelector('[data-agent-name]').textContent = kind;
+      document.querySelector('[data-terminal-panel]').style.display = 'block';
+      document.querySelector('[data-conversation-panel]').style.display = 'none';
+      document.querySelectorAll('[data-terminal-tabs] button').forEach((button) => button.classList.toggle('on', button.dataset.terminalTab === 'terminal'));
+      showScreen('terminal');
+    });
+
+    document.querySelectorAll('[data-terminal-tab]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const tab = button.dataset.terminalTab;
+        document.querySelectorAll('[data-terminal-tab]').forEach((candidate) => candidate.classList.toggle('on', candidate === button));
+        document.querySelector('[data-terminal-panel]').style.display = tab === 'terminal' ? 'block' : 'none';
+        document.querySelector('[data-conversation-panel]').style.display = tab === 'conversation' ? 'block' : 'none';
+      });
+    });
+
+    document.querySelector('[data-session-menu-button]').addEventListener('click', (event) => {
+      event.stopPropagation();
+      document.querySelector('[data-session-menu]').classList.toggle('show');
+    });
+
+    document.querySelectorAll('[data-menu-action]').forEach((button) => {
+      button.addEventListener('click', () => {
+        document.querySelector('[data-session-menu]').classList.remove('show');
+        showToast(button.dataset.menuAction);
+      });
+    });
+
+    document.addEventListener('click', (event) => {
+      if (!event.target.closest('[data-session-menu]')) {
+        document.querySelector('[data-session-menu]').classList.remove('show');
+      }
+    });
+  </script>
+</body>
+</html>

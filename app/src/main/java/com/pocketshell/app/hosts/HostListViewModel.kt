@@ -87,7 +87,7 @@ import javax.inject.Inject
  * us access to `PackageManager` for reading the installed `versionName`.
  */
 @HiltViewModel
-class HostListViewModel @Inject constructor(
+class HostListViewModel internal constructor(
     @ApplicationContext private val applicationContext: Context,
     private val hostDao: HostDao,
     private val sshKeyDao: SshKeyDao,
@@ -116,7 +116,30 @@ class HostListViewModel @Inject constructor(
     // the right place to start surfacing warnings. The repository is
     // hot-cached and reading `.value` from it costs no I/O.
     private val settingsRepository: SettingsRepository,
+    private val sessionOpener: HostSessionOpener,
 ) : ViewModel() {
+
+    @Inject
+    constructor(
+        @ApplicationContext applicationContext: Context,
+        hostDao: HostDao,
+        sshKeyDao: SshKeyDao,
+        releaseChecker: ReleaseChecker,
+        bootstrapper: HostBootstrapper,
+        usageScheduler: UsageScheduler,
+        activeClients: ActiveTmuxClients,
+        settingsRepository: SettingsRepository,
+    ) : this(
+        applicationContext = applicationContext,
+        hostDao = hostDao,
+        sshKeyDao = sshKeyDao,
+        releaseChecker = releaseChecker,
+        bootstrapper = bootstrapper,
+        usageScheduler = usageScheduler,
+        activeClients = activeClients,
+        settingsRepository = settingsRepository,
+        sessionOpener = RealHostSessionOpener,
+    )
 
     /** Live list of saved hosts, sorted by name (DAO query). */
     val hosts: StateFlow<List<HostEntity>> = hostDao.getAll()
@@ -1019,16 +1042,7 @@ class HostListViewModel @Inject constructor(
     }
 
     private suspend fun openSession(host: HostEntity, keyPath: String, passphrase: CharArray?): SshSession? {
-        val file = File(keyPath)
-        if (!file.exists()) return null
-        return SshConnection.connect(
-            host = host.hostname,
-            port = host.port,
-            user = host.username,
-            key = SshKey.Path(file),
-            passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-        ).getOrNull()
+        return sessionOpener.open(host, keyPath, passphrase)
     }
 
     private suspend fun persistResult(host: HostEntity, installed: Boolean) {
@@ -1189,6 +1203,25 @@ class HostListViewModel @Inject constructor(
         return pocketshellInstalled == true &&
             pocketshellVersionCompatible == true &&
             now - last < BOOTSTRAP_CACHE_MS
+    }
+}
+
+internal fun interface HostSessionOpener {
+    suspend fun open(host: HostEntity, keyPath: String, passphrase: CharArray?): SshSession?
+}
+
+private object RealHostSessionOpener : HostSessionOpener {
+    override suspend fun open(host: HostEntity, keyPath: String, passphrase: CharArray?): SshSession? {
+        val file = File(keyPath)
+        if (!file.exists()) return null
+        return SshConnection.connect(
+            host = host.hostname,
+            port = host.port,
+            user = host.username,
+            key = SshKey.Path(file),
+            passphrase = passphrase?.copyOf(),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrNull()
     }
 }
 

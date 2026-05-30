@@ -114,6 +114,7 @@ class HostListViewModelTest {
         usageScheduler: UsageScheduler = newUsageScheduler(),
         activeClients: ActiveTmuxClients = ActiveTmuxClients(),
         settingsRepository: SettingsRepository = newSettingsRepository(),
+        sessionOpener: HostSessionOpener = HostSessionOpener { _, _, _ -> null },
     ): HostListViewModel =
         HostListViewModel(
             applicationContext = applicationContext,
@@ -124,7 +125,11 @@ class HostListViewModelTest {
             usageScheduler = usageScheduler,
             activeClients = activeClients,
             settingsRepository = settingsRepository,
+            sessionOpener = sessionOpener,
         ).also { viewModelStore.put("HostListViewModel-${nextViewModelKey++}", it) }
+
+    private fun neverOpeningSession(): HostSessionOpener =
+        HostSessionOpener { _, _, _ -> kotlinx.coroutines.awaitCancellation() }
 
     /**
      * A scheduler wired against the in-memory database so the ViewModel
@@ -437,6 +442,7 @@ class HostListViewModelTest {
             usageScheduler = newUsageScheduler(),
             activeClients = ActiveTmuxClients(),
             settingsRepository = newSettingsRepository(),
+            sessionOpener = neverOpeningSession(),
         )
 
         viewModel.bootstrapHost(host, keyPath = keyFile.absolutePath)
@@ -483,6 +489,7 @@ class HostListViewModelTest {
             usageScheduler = newUsageScheduler(),
             activeClients = ActiveTmuxClients(),
             settingsRepository = newSettingsRepository(),
+            sessionOpener = neverOpeningSession(),
         )
 
         // Synchronous cache-check sets pending immediately at ready=false

@@ -1002,73 +1002,149 @@
       display: block;
     }
 
-    .forward-summary {
+    .forward-toggle-row {
+      min-height: 58px;
       display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 12px;
       padding: 12px;
       border-bottom: 1px solid #17202b;
     }
 
-    .forward-stat {
-      min-height: 66px;
-      border: 1px solid #202a36;
-      border-radius: 8px;
-      background: #101721;
-      padding: 10px;
-    }
-
-    .forward-stat strong {
-      display: block;
-      font-size: 18px;
-      line-height: 1;
-      margin-bottom: 7px;
-    }
-
-    .forward-stat span {
-      color: var(--muted);
-      font-size: 11px;
-      font-weight: 750;
-      text-transform: uppercase;
-      letter-spacing: .06em;
-    }
-
-    .forward-row {
-      min-height: 54px;
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 10px;
-      align-items: center;
-      padding: 8px 12px;
-      border-bottom: 1px solid #111923;
-    }
-
-    .forward-row strong {
+    .forward-toggle-row strong {
       display: block;
       font-size: 14px;
-      margin-bottom: 4px;
+      margin-bottom: 3px;
     }
 
-    .forward-row span {
+    .forward-toggle-row span {
       color: var(--muted);
       font-size: 12px;
     }
 
-    .forward-url {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      color: var(--cyan);
+    .switch {
+      width: 42px;
+      height: 24px;
+      border-radius: 999px;
+      background: #1a2430;
+      border: 1px solid #2c3948;
+      position: relative;
+    }
+
+    .switch::after {
+      content: "";
+      position: absolute;
+      left: 3px;
+      top: 3px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+
+    .switch.on {
+      background: rgba(41, 199, 223, .28);
+      border-color: rgba(41, 199, 223, .36);
+    }
+
+    .switch.on::after {
+      left: auto;
+      right: 3px;
+      background: var(--cyan);
+    }
+
+    .forward-note {
+      margin: 0;
+      padding: 8px 12px 10px;
+      border-bottom: 1px solid #17202b;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.35;
+    }
+
+    .port-table-head,
+    .port-row {
+      display: grid;
+      grid-template-columns: .72fr .72fr 1.18fr .92fr 1fr auto;
+      gap: 6px;
+      align-items: center;
+      padding: 8px 10px;
+    }
+
+    .port-table-head {
+      background: #0d131b;
+      border-top: 1px solid #17202b;
+      border-bottom: 1px solid #17202b;
+      color: var(--dim);
+      font-size: 10px;
+      font-weight: 850;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+
+    .port-row {
+      min-height: 44px;
+      border-bottom: 1px solid #111923;
       font-size: 12px;
     }
 
-    .forward-state {
+    .port-row.forwarding {
+      background: rgba(41, 199, 223, .08);
+    }
+
+    .port-row.discovered {
+      background: transparent;
+    }
+
+    .port-cell {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .port-cell.mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .port-cell.status-forwarding {
+      color: var(--green);
+      font-weight: 750;
+    }
+
+    .port-cell.status-available {
+      color: var(--muted);
+    }
+
+    .port-cell.status-failed {
+      color: var(--danger);
+    }
+
+    .port-action {
+      min-width: 48px;
+      height: 28px;
       display: inline-flex;
       align-items: center;
-      gap: 6px;
+      justify-content: center;
+      border: 1px solid #2b3746;
+      border-radius: 7px;
+      background: #121a24;
+      color: var(--text);
+      font-size: 12px;
+      font-weight: 750;
+    }
+
+    .forward-log {
+      margin: 10px 12px 0;
+      padding: 10px;
+      border: 1px solid #202a36;
+      border-radius: 8px;
+      background: #0d131b;
       color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 11px;
-      font-weight: 800;
-      text-transform: uppercase;
-      letter-spacing: .05em;
+      line-height: 1.45;
     }
 
     .settings-screen.show {
@@ -1355,30 +1431,53 @@
           <div class="forward-panel" data-forward-panel>
             <div class="appbar">
               <button class="back" data-close-forwarding>‹</button>
-              <div class="title"><strong>Forwarding</strong><span>ssh-auto-forward integration · #203</span></div>
+              <div class="title"><strong>Port forwarding</strong><span><span class="state-dot active"></span>hetzner · SSH active</span></div>
               <button class="iconbtn" data-close-forwarding>✓</button>
             </div>
-            <div class="forward-summary">
-              <div class="forward-stat"><strong>3</strong><span>active tunnels</span></div>
-              <div class="forward-stat"><strong>1.8 MB</strong><span>traffic now</span></div>
+            <div class="forward-toggle-row">
+              <div><strong>Auto-forward is off</strong><span>Active SSH lets PocketShell inspect ports without starting tunnels</span></div>
+              <div class="switch" data-forward-switch title="Enable auto-forward"></div>
             </div>
-            <div class="section">Auto-discovered ports</div>
-            <div class="forward-row">
-              <div><strong>pocketshell dev server</strong><span>~/git/pocketshell · node · remote 5173</span></div>
-              <div class="forward-url">localhost:5173</div>
+            <p class="forward-note">Enable only when you want browser access to remote services. It starts a foreground forwarding service and keeps tunnels alive while active, so PocketShell should not run it by default.</p>
+            <div class="port-table-head">
+              <span>Remote</span><span>Local</span><span>Process</span><span>Status</span><span>Traffic</span><span></span>
             </div>
-            <div class="forward-row">
-              <div><strong>buildcamp preview</strong><span>~/git/ai-engineering-buildcamp · remote 8000</span></div>
-              <div class="forward-url">localhost:8000</div>
+            <div class="port-row discovered">
+              <span class="port-cell mono">5173</span>
+              <span class="port-cell mono">5173</span>
+              <span class="port-cell">node</span>
+              <span class="port-cell status-available">Available</span>
+              <span class="port-cell mono">-</span>
+              <span class="port-action" data-port-toggle="5173">Start</span>
             </div>
-            <div class="forward-row">
-              <div><strong>notebook</strong><span>~/tmp/hf-onnx · python · remote 8888</span></div>
-              <div class="forward-url">localhost:8888</div>
+            <div class="port-row discovered">
+              <span class="port-cell mono">8000</span>
+              <span class="port-cell mono">8000</span>
+              <span class="port-cell">python</span>
+              <span class="port-cell status-available">Available</span>
+              <span class="port-cell mono">-</span>
+              <span class="port-action" data-port-toggle="8000">Start</span>
             </div>
-            <div class="section">Suggested</div>
-            <div class="forward-row">
-              <div><strong>datamailer api</strong><span>detected listening on remote 3000</span></div>
-              <div class="forward-state"><span class="state-dot"></span>off</div>
+            <div class="port-row discovered">
+              <span class="port-cell mono">8888</span>
+              <span class="port-cell mono">8888</span>
+              <span class="port-cell">jupyter</span>
+              <span class="port-cell status-available">Available</span>
+              <span class="port-cell mono">-</span>
+              <span class="port-action" data-port-toggle="8888">Start</span>
+            </div>
+            <div class="port-row discovered">
+              <span class="port-cell mono">3000</span>
+              <span class="port-cell mono">3000</span>
+              <span class="port-cell">node</span>
+              <span class="port-cell status-available">Available</span>
+              <span class="port-cell mono">-</span>
+              <span class="port-action" data-port-toggle="3000">Start</span>
+            </div>
+            <div class="forward-log">
+              [11:06:01] SSH active for hetzner<br>
+              [11:06:02] Discovered remote port 5173 (node)<br>
+              [11:06:02] Forwarding disabled; no local tunnels running
             </div>
           </div>
           <div class="settings-screen" data-settings-screen>
@@ -1740,6 +1839,34 @@ ready
 
     document.querySelectorAll('[data-close-forwarding]').forEach((button) => {
       button.addEventListener('click', () => document.querySelector('[data-forward-panel]').classList.remove('show'));
+    });
+
+    document.querySelector('[data-forward-switch]').addEventListener('click', (event) => {
+      const switchEl = event.currentTarget;
+      const enabled = !switchEl.classList.contains('on');
+      switchEl.classList.toggle('on', enabled);
+      const row = switchEl.closest('.forward-toggle-row');
+      row.querySelector('strong').textContent = enabled ? 'Auto-forward is on' : 'Auto-forward is off';
+      row.querySelector('span').textContent = enabled
+        ? 'Foreground forwarding service is running for this host'
+        : 'Active SSH lets PocketShell inspect ports without starting tunnels';
+      showToast(enabled ? 'Auto-forward enabled for hetzner' : 'Auto-forward disabled');
+    });
+
+    document.querySelectorAll('[data-port-open]').forEach((row) => {
+      row.addEventListener('click', (event) => {
+        if (event.target.closest('[data-port-toggle]')) return;
+        showToast(`Open http://127.0.0.1:${row.dataset.portOpen}`);
+      });
+    });
+
+    document.querySelectorAll('[data-port-toggle]').forEach((button) => {
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        const stopping = button.textContent.trim() === 'Stop';
+        button.textContent = stopping ? 'Start' : 'Stop';
+        showToast(`${stopping ? 'Stop' : 'Start'} forwarding ${button.dataset.portToggle}`);
+      });
     });
 
     function showScreen(name) {

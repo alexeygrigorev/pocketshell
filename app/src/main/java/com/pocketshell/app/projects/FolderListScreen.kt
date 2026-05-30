@@ -81,6 +81,7 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
+import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
  * Per-host folder list — issue #171.
@@ -149,7 +150,7 @@ fun FolderListScreen(
     onAssistantNavigate: (AppDestination) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: FolderListViewModel = hiltViewModel(),
-    assistantDictationViewModel: InlineDictationViewModel = hiltViewModel(),
+    assistantDictationViewModel: InlineDictationViewModel? = null,
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
     hostDetailViewMode: HostDetailViewMode = HostDetailViewMode.Tree,
 ) {
@@ -176,7 +177,11 @@ fun FolderListScreen(
     val state by viewModel.state.collectAsState()
     val actionStatus by viewModel.actionStatus.collectAsState()
     val assistantState by viewModel.assistantState.collectAsState()
-    val assistantDictationState by assistantDictationViewModel.uiState.collectAsState()
+    val assistantDictationUiState = remember(assistantDictationViewModel) {
+        assistantDictationViewModel?.uiState
+            ?: MutableStateFlow(InlineDictationViewModel.UiState())
+    }
+    val assistantDictationState by assistantDictationUiState.collectAsState()
     val context = LocalContext.current
     val showFlatFolderList = hostDetailViewMode == HostDetailViewMode.Flat
     var pickerFolder by remember { mutableStateOf<PickerTarget?>(null) }
@@ -194,9 +199,9 @@ fun FolderListScreen(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
         if (granted) {
-            assistantDictationViewModel.onMicTap()
+            assistantDictationViewModel?.onMicTap()
         } else {
-            assistantDictationViewModel.surfacePermissionDenied()
+            assistantDictationViewModel?.surfacePermissionDenied()
         }
     }
 
@@ -204,7 +209,7 @@ fun FolderListScreen(
         viewModel.assistantNavRequests.collect { onAssistantNavigate(it) }
     }
     LaunchedEffect(assistantDictationViewModel) {
-        assistantDictationViewModel.transcriptions.collect { text ->
+        assistantDictationViewModel?.transcriptions?.collect { text ->
             val event = AssistantDictationTextEvent(id = ++dictationEventId, text = text)
             when (dictationTarget) {
                 AssistantDictationTarget.Prompt -> promptDictationEvent = event
@@ -212,14 +217,15 @@ fun FolderListScreen(
             }
         }
     }
-    val onAssistantMicTap: (AssistantDictationTarget) -> Unit = { target ->
+    val onAssistantMicTap: (AssistantDictationTarget) -> Unit = onAssistantMicTap@ { target ->
+        val dictationViewModel = assistantDictationViewModel ?: return@onAssistantMicTap
         dictationTarget = target
         val granted = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.RECORD_AUDIO,
         ) == PackageManager.PERMISSION_GRANTED
         if (granted) {
-            assistantDictationViewModel.onMicTap()
+            dictationViewModel.onMicTap()
         } else {
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
@@ -345,7 +351,7 @@ fun FolderListScreen(
                     onMicTap = { onAssistantMicTap(AssistantDictationTarget.Correction) },
                 ),
                 onPromptMicTap = { onAssistantMicTap(AssistantDictationTarget.Prompt) },
-                onDismissDictationError = assistantDictationViewModel::clearError,
+                onDismissDictationError = { assistantDictationViewModel?.clearError() },
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(start = 12.dp, end = 12.dp, bottom = 88.dp),

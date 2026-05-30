@@ -39,6 +39,7 @@ import com.pocketshell.app.projects.FolderListScreen
 import com.pocketshell.app.projects.RepoBrowserScreen
 import com.pocketshell.app.projects.WatchedFoldersScreen
 import com.pocketshell.app.projects.WatchedFoldersViewModel
+import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.session.LastSessionStore
 import com.pocketshell.app.session.SessionScreen
 import com.pocketshell.app.session.SessionViewModel
@@ -801,6 +802,7 @@ private fun AppNavigator(
             onAssistantNavigate = { destination ->
                 navigate(destination)
             },
+            assistantDictationViewModel = hiltViewModel<InlineDictationViewModel>(),
             suggestStartDirectories = { prefix ->
                 startDirectoryAutocomplete.suggestions(
                     target = StartDirectoryAutocompleteTarget(

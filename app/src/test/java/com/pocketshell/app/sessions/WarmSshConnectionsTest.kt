@@ -4,8 +4,12 @@ import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertSame
@@ -69,6 +73,31 @@ class WarmSshConnectionsTest {
         warm.warm(TARGET, passphrase = null).getOrThrow()
 
         assertTrue(warm.closeIfIdle(TARGET))
+        assertTrue(session.closed)
+        assertEquals(null, warm.take(TARGET))
+    }
+
+    @Test
+    fun closeIfIdleAbandonsInFlightWarmConnectAfterCancellation() = runTest {
+        val connectStarted = CompletableDeferred<Unit>()
+        val connectResult = CompletableDeferred<FakeSshSession>()
+        val connector = SshConnector { _, _ ->
+            connectStarted.complete(Unit)
+            val session = withContext(NonCancellable) { connectResult.await() }
+            Result.success(session)
+        }
+        val warm = WarmSshConnections(connector)
+
+        val warmJob = launch { warm.warm(TARGET, passphrase = null) }
+        connectStarted.await()
+
+        warmJob.cancel()
+        assertFalse(warm.closeIfIdle(TARGET))
+
+        val session = FakeSshSession()
+        connectResult.complete(session)
+        warmJob.join()
+
         assertTrue(session.closed)
         assertEquals(null, warm.take(TARGET))
     }

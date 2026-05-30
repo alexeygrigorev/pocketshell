@@ -45,13 +45,16 @@ class WarmSshConnections @Inject constructor() {
     }
 
     private val mutex = Mutex()
+    private val closeGenerationLock = Any()
+    private val closeGenerations: MutableMap<WarmSshTarget, Long> = mutableMapOf()
     private var entry: Entry? = null
 
     suspend fun warm(
         target: WarmSshTarget,
         passphrase: CharArray?,
     ): Result<Unit> = mutex.withLock {
-        ensureLocked(target, passphrase).map { }
+        val closeGeneration = closeGeneration(target)
+        ensureLocked(target, passphrase, closeGeneration).map { }
     }
 
     suspend fun <T> withSession(
@@ -59,9 +62,18 @@ class WarmSshConnections @Inject constructor() {
         passphrase: CharArray?,
         block: suspend (SshSession) -> T,
     ): Result<T> = mutex.withLock {
-        val session = ensureLocked(target, passphrase).getOrElse { return@withLock Result.failure(it) }
+        val closeGeneration = closeGeneration(target)
+        val session = ensureLocked(
+            target = target,
+            passphrase = passphrase,
+            closeGeneration = closeGeneration,
+        ).getOrElse { return@withLock Result.failure(it) }
         try {
-            Result.success(block(session))
+            val value = block(session)
+            if (closeRequestedSince(target, closeGeneration)) {
+                closeLocked(target)
+            }
+            Result.success(value)
         } catch (e: CancellationException) {
             closeLocked(target)
             throw e
@@ -77,9 +89,14 @@ class WarmSshConnections @Inject constructor() {
      * normal cold connect path.
      */
     suspend fun take(target: WarmSshTarget): SshSession? = mutex.withLock {
+        val closeGeneration = closeGeneration(target)
         val current = entry ?: return@withLock null
         if (!current.target.matches(target)) return@withLock null
         if (!current.session.isConnected) {
+            closeLocked(target)
+            return@withLock null
+        }
+        if (closeRequestedSince(target, closeGeneration)) {
             closeLocked(target)
             return@withLock null
         }
@@ -96,10 +113,12 @@ class WarmSshConnections @Inject constructor() {
     /**
      * Best-effort synchronous close for ViewModel teardown paths where the
      * caller cannot safely suspend. Returns false if a warm/connect/exec
-     * operation is currently holding the session; that operation's coroutine
-     * cancellation path will close the connection if it is interrupted.
+     * operation is currently holding the session. The close request is still
+     * recorded so a non-cooperative in-flight connect cannot publish a warm
+     * session after teardown.
      */
     fun closeIfIdle(target: WarmSshTarget): Boolean {
+        requestClose(target)
         if (!mutex.tryLock()) return false
         return try {
             closeLocked(target)
@@ -119,9 +138,14 @@ class WarmSshConnections @Inject constructor() {
     private suspend fun ensureLocked(
         target: WarmSshTarget,
         passphrase: CharArray?,
+        closeGeneration: Long,
     ): Result<SshSession> {
         entry?.let { current ->
             if (current.target.matches(target) && current.session.isConnected) {
+                if (closeRequestedSince(target, closeGeneration)) {
+                    closeLocked(target)
+                    return Result.failure(WarmSshConnectionAbandonedException())
+                }
                 return Result.success(current.session)
             }
             runCatching { current.session.close() }
@@ -130,6 +154,10 @@ class WarmSshConnections @Inject constructor() {
 
         val result = connector.connect(target, passphrase)
         val session = result.getOrElse { return Result.failure(it) }
+        if (closeRequestedSince(target, closeGeneration)) {
+            runCatching { session.close() }
+            return Result.failure(WarmSshConnectionAbandonedException())
+        }
         entry = Entry(target = target, session = session)
         return Result.success(session)
     }
@@ -144,6 +172,26 @@ class WarmSshConnections @Inject constructor() {
     private data class Entry(
         val target: WarmSshTarget,
         val session: SshSession,
+    )
+
+    private fun closeGeneration(target: WarmSshTarget): Long =
+        synchronized(closeGenerationLock) {
+            closeGenerations[target] ?: 0L
+        }
+
+    private fun requestClose(target: WarmSshTarget) {
+        synchronized(closeGenerationLock) {
+            closeGenerations[target] = (closeGenerations[target] ?: 0L) + 1L
+        }
+    }
+
+    private fun closeRequestedSince(target: WarmSshTarget, generation: Long): Boolean =
+        synchronized(closeGenerationLock) {
+            (closeGenerations[target] ?: 0L) > generation
+        }
+
+    private class WarmSshConnectionAbandonedException : CancellationException(
+        "Warm SSH connection abandoned",
     )
 }
 

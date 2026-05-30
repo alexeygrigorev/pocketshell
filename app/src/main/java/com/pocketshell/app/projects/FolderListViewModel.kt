@@ -14,6 +14,8 @@ import com.pocketshell.app.assistant.RealAssistantSshExecutor
 import com.pocketshell.app.assistant.SessionActionBridge
 import com.pocketshell.app.assistant.SessionAssistantController
 import com.pocketshell.app.nav.AppDestination
+import com.pocketshell.app.portfwd.ForwardingController
+import com.pocketshell.app.portfwd.ForwardingHostSnapshot
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.sessions.WarmSshConnections
 import com.pocketshell.app.sessions.WarmSshTarget
@@ -102,6 +104,27 @@ data class RootProjectCandidate(
 
 enum class RootProjectSource { Active, History, Scanned }
 
+data class HostDiscoveredPort(
+    val remotePort: Int,
+    val process: String,
+    val status: HostPortForwardingPortStatus = HostPortForwardingPortStatus.DISCOVERED,
+    val discovered: Boolean = true,
+)
+
+enum class HostPortForwardingPortStatus {
+    DISCOVERED,
+    FORWARDING,
+}
+
+data class HostPortForwardingSummary(
+    val discoveredPorts: List<HostDiscoveredPort> = emptyList(),
+    val active: Boolean = false,
+    val activeTunnelCount: Int = 0,
+) {
+    val discoveredCount: Int
+        get() = discoveredPorts.count { it.discovered }
+}
+
 /**
  * One session inside a [FolderRow]. Carries the minimum fields the
  * folder detail screen needs to render a `SessionRow` and route the
@@ -122,6 +145,7 @@ sealed interface FolderListUiState {
         val treeRoots: List<FolderTreeRoot>,
         val flatSessions: List<FolderSessionEntry>,
         val expandedProjectPaths: Set<String>,
+        val portForwarding: HostPortForwardingSummary = HostPortForwardingSummary(),
     ) : FolderListUiState
 
     data class Failed(val message: String) : FolderListUiState
@@ -164,6 +188,7 @@ class FolderListViewModel @Inject constructor(
     @ApplicationContext private val applicationContext: Context? = null,
     private val assistantClientFactory: AssistantLlmClientFactory? = null,
     private val reposRemoteSource: ReposRemoteSource? = null,
+    private val forwardingController: ForwardingController,
 ) : ViewModel() {
 
     private val _state: MutableStateFlow<FolderListUiState> =
@@ -196,6 +221,17 @@ class FolderListViewModel @Inject constructor(
     private var lastResolvedWatchedRootPaths: Map<String, String> = emptyMap()
     private var lastCreatedFolders: Map<String, String> = emptyMap()
     private var expandedProjectPaths: Set<String> = emptySet()
+    private var lastDiscoveredPorts: List<HostDiscoveredPort> = emptyList()
+    private var forwardingSnapshots: Map<Long, ForwardingHostSnapshot> = emptyMap()
+
+    init {
+        viewModelScope.launch {
+            forwardingController.flowOfHostSnapshots().collectLatest { snapshots ->
+                forwardingSnapshots = snapshots
+                emitReady()
+            }
+        }
+    }
 
     /**
      * Bind to a host and kick a one-shot probe. Re-calling with the same
@@ -534,6 +570,12 @@ class FolderListViewModel @Inject constructor(
                 lastScannedProjectFoldersByRoot = result.projectFoldersByRoot
                 lastHistoryProjectFoldersByRoot = result.historyProjectFoldersByRoot
                 lastResolvedWatchedRootPaths = result.resolvedWatchedRootPaths
+                lastDiscoveredPorts = result.discoveredPorts.map { port ->
+                    HostDiscoveredPort(
+                        remotePort = port.port,
+                        process = port.processName,
+                    )
+                }
                 emitReady()
             }
             is FolderListResult.Failed -> {
@@ -586,6 +628,20 @@ class FolderListViewModel @Inject constructor(
                     .thenBy { it.sessionName },
             ),
             expandedProjectPaths = expandedProjectPaths,
+            portForwarding = forwardingSummary(),
+        )
+    }
+
+    private fun forwardingSummary(): HostPortForwardingSummary {
+        val hostId = bound?.hostId ?: return HostPortForwardingSummary(discoveredPorts = lastDiscoveredPorts)
+        val snapshot = forwardingSnapshots[hostId]
+        return HostPortForwardingSummary(
+            discoveredPorts = mergeForwardingPortRows(
+                discoveredPorts = lastDiscoveredPorts,
+                activeRemotePorts = snapshot?.activeRemotePorts.orEmpty(),
+            ),
+            active = snapshot?.active == true,
+            activeTunnelCount = snapshot?.tunnelCount ?: 0,
         )
     }
 
@@ -1029,6 +1085,32 @@ class FolderListViewModel @Inject constructor(
         fun toggleProjectExpansion(expandedPaths: Set<String>, projectPath: String): Set<String> {
             val canonical = canonicalisePath(projectPath)
             return if (canonical in expandedPaths) expandedPaths - canonical else expandedPaths + canonical
+        }
+
+        internal fun mergeForwardingPortRows(
+            discoveredPorts: List<HostDiscoveredPort>,
+            activeRemotePorts: Set<Int>,
+        ): List<HostDiscoveredPort> {
+            if (activeRemotePorts.isEmpty()) {
+                return discoveredPorts
+                    .map { it.copy(status = HostPortForwardingPortStatus.DISCOVERED) }
+                    .sortedBy { it.remotePort }
+            }
+            val active = activeRemotePorts.toSet()
+            val discoveredByPort = discoveredPorts.associateBy { it.remotePort }
+            return (discoveredByPort.keys + active).sorted().map { remotePort ->
+                val discovered = discoveredByPort[remotePort]
+                HostDiscoveredPort(
+                    remotePort = remotePort,
+                    process = discovered?.process.orEmpty(),
+                    status = if (remotePort in active) {
+                        HostPortForwardingPortStatus.FORWARDING
+                    } else {
+                        HostPortForwardingPortStatus.DISCOVERED
+                    },
+                    discovered = discovered != null,
+                )
+            }
         }
 
         private fun rootProjectCandidateSort(

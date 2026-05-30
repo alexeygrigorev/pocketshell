@@ -767,6 +767,15 @@ private fun AppNavigator(
                     ),
                 )
             },
+            onOpenPortForwarding = {
+                navigate(
+                    AppDestination.PortForwardPanel(
+                        hostId = dest.hostId,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                    ),
+                )
+            },
             onOpenWorkspaceSettings = {
                 navigate(
                     AppDestination.WatchedFolders(

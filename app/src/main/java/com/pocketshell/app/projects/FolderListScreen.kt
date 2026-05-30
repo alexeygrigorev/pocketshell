@@ -137,6 +137,7 @@ fun FolderListScreen(
      * the same SSH credentials this screen already holds.
      */
     onBrowseRepos: (cloneRoot: String?) -> Unit,
+    onOpenPortForwarding: () -> Unit = {},
     onOpenWorkspaceSettings: () -> Unit = {},
     /**
      * Issue #264: open the per-folder `.env` / `.envrc` key manager.
@@ -276,9 +277,11 @@ fun FolderListScreen(
                     folders = s.folders,
                     treeRoots = s.treeRoots,
                     expandedProjectPaths = s.expandedProjectPaths,
+                    portForwarding = s.portForwarding,
                     showFlatFolderList = showFlatFolderList,
                     actionStatus = actionStatus,
                     onDismissActionStatus = viewModel::clearActionStatus,
+                    onOpenPortForwarding = onOpenPortForwarding,
                     onSessionClick = { folderPath, sessionName ->
                         onOpenSession(
                             sessionName,
@@ -799,9 +802,11 @@ private fun FolderListContent(
     folders: List<FolderRow>,
     treeRoots: List<FolderTreeRoot>,
     expandedProjectPaths: Set<String>,
+    portForwarding: HostPortForwardingSummary,
     showFlatFolderList: Boolean,
     actionStatus: FolderActionStatus,
     onDismissActionStatus: () -> Unit,
+    onOpenPortForwarding: () -> Unit,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
     onCreateInFolder: (FolderRow) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
@@ -829,6 +834,12 @@ private fun FolderListContent(
                     onDismiss = onDismissActionStatus,
                 )
             }
+        }
+        item {
+            PortForwardingSummaryCard(
+                summary = portForwarding,
+                onOpen = onOpenPortForwarding,
+            )
         }
         if (!showFlatFolderList && treeRoots.isEmpty()) {
             item {
@@ -871,6 +882,80 @@ private fun FolderListContent(
                     .height(8.dp)
                     .testTag(FOLDER_LIST_BOTTOM_SPACER_TAG),
             )
+        }
+    }
+}
+
+@Composable
+private fun PortForwardingSummaryCard(
+    summary: HostPortForwardingSummary,
+    onOpen: () -> Unit,
+) {
+    val statusText = when {
+        summary.active -> "${summary.activeTunnelCount} active"
+        summary.discoveredCount > 0 -> "${summary.discoveredCount} discovered"
+        else -> "Off"
+    }
+    val detailText = when {
+        summary.active -> "Foreground forwarding service is running."
+        summary.discoveredCount > 0 -> "Ports are discovered only; no local tunnels are running."
+        else -> "Auto-forward is off by default."
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
+            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
+            .clickable(role = Role.Button, onClick = onOpen)
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .testTag(FOLDER_LIST_PORT_FORWARDING_TAG),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Port forwarding",
+                    color = PocketShellColors.Text,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                Text(
+                    text = detailText,
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+            Text(
+                text = statusText,
+                color = if (summary.active) PocketShellColors.Green else PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.padding(start = 12.dp),
+            )
+        }
+        summary.discoveredPorts.take(3).forEach { port ->
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = port.remotePort.toString(),
+                    color = PocketShellColors.Text,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.width(56.dp),
+                )
+                Text(
+                    text = port.process.ifBlank { "unknown process" },
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 12.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = if (summary.active) "Forwarding" else "Discovered",
+                    color = if (summary.active) PocketShellColors.Green else PocketShellColors.TextMuted,
+                    fontSize = 11.sp,
+                )
+            }
         }
     }
 }
@@ -1420,6 +1505,7 @@ private val FolderListFabContentClearance = 112.dp
 // Test tags exposed for the unit / connected E2E suite.
 const val FOLDER_LIST_SCREEN_TAG: String = "folder-list:screen"
 const val FOLDER_LIST_CONTENT_TAG: String = "folder-list:content"
+const val FOLDER_LIST_PORT_FORWARDING_TAG: String = "folder-list:port-forwarding"
 const val FOLDER_LIST_BOTTOM_SPACER_TAG: String = "folder-list:bottom-spacer"
 const val FOLDER_LIST_BACK_TAG: String = "folder-list:back"
 const val FOLDER_LIST_TITLE_TAG: String = "folder-list:title"

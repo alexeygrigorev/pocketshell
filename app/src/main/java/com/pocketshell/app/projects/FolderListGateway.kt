@@ -11,6 +11,8 @@ import com.pocketshell.app.sessions.WarmSshTarget
 import com.pocketshell.app.sessions.remoteStartDirectoryExists
 import com.pocketshell.app.sessions.startDirectoryMissingMessage
 import com.pocketshell.core.agents.AgentKind
+import com.pocketshell.core.portfwd.PortScanner
+import com.pocketshell.core.portfwd.RemotePort
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.entity.HostEntity
@@ -69,6 +71,7 @@ sealed interface FolderListResult {
         val projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
         val historyProjectFoldersByRoot: Map<String, List<String>> = emptyMap(),
         val resolvedWatchedRootPaths: Map<String, String> = emptyMap(),
+        val discoveredPorts: List<RemotePort> = emptyList(),
     ) : FolderListResult
     data object ToolUnavailable : FolderListResult
     data class Failed(val message: String) : FolderListResult
@@ -337,11 +340,13 @@ class SshFolderListGateway @Inject constructor(
             host = host,
             watchedRoots = watchedRoots,
         )
+        val discoveredPorts = runCatching { PortScanner.scan(session) }.getOrDefault(emptyList())
         return FolderListResult.Sessions(
             rows = rows,
             projectFoldersByRoot = expansion.projectFoldersByRoot,
             historyProjectFoldersByRoot = expansion.historyProjectFoldersByRoot,
             resolvedWatchedRootPaths = expansion.resolvedWatchedRootPaths,
+            discoveredPorts = discoveredPorts,
         )
     }
 

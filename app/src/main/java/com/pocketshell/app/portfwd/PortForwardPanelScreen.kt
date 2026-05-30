@@ -83,7 +83,7 @@ fun PortForwardPanelScreen(
     }
 
     LaunchedEffect(hostId, keyPath, passphrase) {
-        viewModel.load(hostId, keyPath, passphrase)
+        viewModel.load(hostId, keyPath, passphrase, discoverPorts = true)
     }
 
     Box(
@@ -125,7 +125,25 @@ fun PortForwardPanelScreen(
                 }
 
                 !state.autoForwardEnabled -> {
-                    DisabledState(modifier = Modifier.weight(1f))
+                    if (state.tunnels.isEmpty()) {
+                        DisabledState(
+                            scanning = state.connectionState == PortForwardConnectionState.Connecting,
+                            modifier = Modifier.weight(1f),
+                        )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(bottom = 12.dp),
+                        ) {
+                            items(state.tunnels, key = { it.remotePort }) { tunnel ->
+                                PortForwardRow(
+                                    tunnel = tunnel,
+                                    onToggle = { viewModel.startPort(tunnel.remotePort) },
+                                    onOpen = {},
+                                )
+                            }
+                        }
+                    }
                 }
 
                 else -> {
@@ -215,7 +233,11 @@ private fun AutoForwardRow(enabled: Boolean, onEnabledChange: (Boolean) -> Unit)
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
-                text = if (enabled) "Scanning and forwarding matching remote ports" else "Stopped",
+                text = if (enabled) {
+                    "Foreground service keeps tunnels alive while active"
+                } else {
+                    "Off; discovery rows do not open local tunnels"
+                },
                 color = PocketShellColors.TextMuted,
                 fontSize = 12.sp,
             )
@@ -358,9 +380,13 @@ private fun EmptyScanningState(modifier: Modifier) {
 }
 
 @Composable
-private fun DisabledState(modifier: Modifier) {
+private fun DisabledState(scanning: Boolean, modifier: Modifier) {
     Box(modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-        Text("Enable auto-forward to scan this host.", color = PocketShellColors.TextSecondary, fontSize = 13.sp)
+        Text(
+            if (scanning) "Discovering listening ports..." else "No listening ports discovered.",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 13.sp,
+        )
     }
 }
 

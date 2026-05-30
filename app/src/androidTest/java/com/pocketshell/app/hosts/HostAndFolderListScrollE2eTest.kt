@@ -20,6 +20,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.projects.FOLDER_LIST_BOTTOM_SPACER_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_CONTENT_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
@@ -206,6 +207,7 @@ class FolderListScrollE2eTest {
             gateway = fakeGateway,
             hostDao = database.hostDao(),
             projectRootDao = database.projectRootDao(),
+            forwardingController = ForwardingController(InstrumentationRegistry.getInstrumentation().targetContext),
         )
         val lastRowTag = folderDetailRowTestTag(folders.first(), rows.first().sessionName)
         var hostDetailViewMode by mutableStateOf(HostDetailViewMode.Tree)

@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.portfwd.AutoForwardConfig
 import com.pocketshell.core.portfwd.AutoForwarder
 import com.pocketshell.core.portfwd.AutoForwarderSupervisor
+import com.pocketshell.core.portfwd.PortScanner
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.dao.HostDao
@@ -74,6 +75,9 @@ class PortForwardPanelViewModel @Inject constructor(
     private var session: SshSession? = null
     private var forwarder: AutoForwarder? = null
     private var tunnelCollection: Job? = null
+    private var discoveryJob: Job? = null
+    private var discoveryGeneration: Long = 0
+    private var discoverPortsOnIdle: Boolean = false
     private var loadJob: Job? = null
     private var loadGeneration: Long = 0
     private var connectJob: Job? = null
@@ -87,6 +91,7 @@ class PortForwardPanelViewModel @Inject constructor(
      * been replaced (e.g. user navigated to a different host's panel).
      */
     private var registeredHostId: Long? = null
+    private var pendingStartPort: Int? = null
 
     /**
      * Snapshot of whether auto-forward was active immediately before the
@@ -194,7 +199,12 @@ class PortForwardPanelViewModel @Inject constructor(
         }
     }
 
-    fun load(hostId: Long, initialKeyPath: String? = null, initialPassphrase: CharArray? = null) {
+    fun load(
+        hostId: Long,
+        initialKeyPath: String? = null,
+        initialPassphrase: CharArray? = null,
+        discoverPorts: Boolean = false,
+    ) {
         if (
             currentHostId == hostId &&
             requestedKeyPath == initialKeyPath &&
@@ -205,11 +215,14 @@ class PortForwardPanelViewModel @Inject constructor(
         }
         val requestGeneration = ++loadGeneration
         loadJob?.cancel()
+        stopDiscovery()
         stopForwarding()
         clearPassphrase()
+        pendingStartPort = null
         currentHostId = hostId
         requestedKeyPath = initialKeyPath
         keyPath = initialKeyPath
+        discoverPortsOnIdle = discoverPorts
         passphrase = initialPassphrase?.copyOf()
         _state.value = PortForwardPanelState()
         loadJob = viewModelScope.launch {
@@ -230,8 +243,8 @@ class PortForwardPanelViewModel @Inject constructor(
             }
             keyPath = resolvedKeyPath
             _state.value = PortForwardPanelState(host = host)
-            if (host.enabled && resolvedKeyPath != null) {
-                setAutoForwardEnabled(true)
+            if (discoverPorts && resolvedKeyPath != null) {
+                startDiscovery(host, resolvedKeyPath)
             }
             if (requestGeneration == loadGeneration) {
                 loadJob = null
@@ -243,11 +256,14 @@ class PortForwardPanelViewModel @Inject constructor(
         loadGeneration++
         loadJob?.cancel()
         loadJob = null
+        stopDiscovery()
         stopForwarding()
         clearPassphrase()
+        pendingStartPort = null
         currentHostId = null
         requestedKeyPath = null
         keyPath = null
+        discoverPortsOnIdle = false
         // A user navigating away erases any pending "restore on
         // ON_START" intent — the panel will autostart on the next
         // re-entry only if [HostEntity.enabled] is persisted true.
@@ -278,6 +294,9 @@ class PortForwardPanelViewModel @Inject constructor(
                 tunnels = emptyList(),
                 error = null,
             )
+            if (discoverPortsOnIdle && !lifecycleDriven) {
+                keyPath?.let { startDiscovery(host, it) }
+            }
             return
         }
 
@@ -291,6 +310,7 @@ class PortForwardPanelViewModel @Inject constructor(
             return
         }
 
+        stopDiscovery()
         _state.value = _state.value.copy(
             autoForwardEnabled = true,
             connectionState = PortForwardConnectionState.Connecting,
@@ -313,6 +333,7 @@ class PortForwardPanelViewModel @Inject constructor(
                 return@launch
             }
             val sshSession = connected.getOrElse { failure ->
+                pendingStartPort = null
                 _state.value = _state.value.copy(
                     autoForwardEnabled = false,
                     connectionState = PortForwardConnectionState.Error,
@@ -356,6 +377,10 @@ class PortForwardPanelViewModel @Inject constructor(
                     }
                     forwardingController.updateTunnelCount(host.id, forwardingCount)
                 }
+            }
+            pendingStartPort?.let { remotePort ->
+                pendingStartPort = null
+                autoForwarder.togglePort(remotePort)
             }
             autoForwarder.start(viewModelScope)
             // Foreground-service rendezvous: tell the controller this
@@ -405,10 +430,26 @@ class PortForwardPanelViewModel @Inject constructor(
         }
     }
 
+    fun startPort(remotePort: Int) {
+        val autoForwarder = forwarder
+        if (autoForwarder == null) {
+            pendingStartPort = remotePort
+            setAutoForwardEnabled(true)
+            return
+        }
+        viewModelScope.launch {
+            val current = _state.value.tunnels.firstOrNull { it.remotePort == remotePort }
+            if (current?.status != TunnelInfo.Status.FORWARDING) {
+                autoForwarder.togglePort(remotePort)
+            }
+        }
+    }
+
     override fun onCleared() {
         loadGeneration++
         loadJob?.cancel()
         loadJob = null
+        stopDiscovery()
         stopForwarding()
         clearPassphrase()
         // Detach the lifecycle observer so the ViewModel is GC-eligible
@@ -440,6 +481,82 @@ class PortForwardPanelViewModel @Inject constructor(
             forwardingController.unregisterActiveHost(hostId)
         }
         registeredHostId = null
+        pendingStartPort = null
+    }
+
+    private fun startDiscovery(host: HostEntity, resolvedKeyPath: String) {
+        val requestGeneration = ++discoveryGeneration
+        val requestLoadGeneration = loadGeneration
+        val requestPassphrase = passphrase?.copyOf()
+        discoveryJob?.cancel()
+        _state.value = _state.value.copy(
+            connectionState = PortForwardConnectionState.Connecting,
+            error = null,
+        )
+        discoveryJob = viewModelScope.launch {
+            val connected = connector.connect(host, resolvedKeyPath, requestPassphrase)
+            if (
+                requestGeneration != discoveryGeneration ||
+                requestLoadGeneration != loadGeneration ||
+                _state.value.host?.id != host.id ||
+                _state.value.autoForwardEnabled ||
+                !currentCoroutineContext().isActive
+            ) {
+                connected.getOrNull()?.close()
+                return@launch
+            }
+            val sshSession = connected.getOrElse { failure ->
+                _state.value = _state.value.copy(
+                    connectionState = PortForwardConnectionState.Error,
+                    error = failure.message ?: "SSH connection failed.",
+                )
+                return@launch
+            }
+            try {
+                val remappings = runCatching {
+                    portRemappingDao.getByHostId(host.id).first()
+                        .associate { it.remotePort to it.localPort }
+                }.getOrElse { emptyMap() }
+                val discovered = PortScanner.scan(sshSession).map { port ->
+                    TunnelInfo(
+                        remotePort = port.port,
+                        localPort = remappings[port.port] ?: port.port,
+                        process = port.processName,
+                        status = TunnelInfo.Status.AVAILABLE,
+                    )
+                }.sortedBy { it.remotePort }
+                if (
+                    requestGeneration == discoveryGeneration &&
+                    requestLoadGeneration == loadGeneration &&
+                    _state.value.host?.id == host.id &&
+                    !_state.value.autoForwardEnabled
+                ) {
+                    _state.value = _state.value.copy(
+                        connectionState = PortForwardConnectionState.Connected,
+                        tunnels = discovered,
+                        error = null,
+                    )
+                }
+            } catch (t: Throwable) {
+                if (requestGeneration == discoveryGeneration && !_state.value.autoForwardEnabled) {
+                    _state.value = _state.value.copy(
+                        connectionState = PortForwardConnectionState.Error,
+                        error = t.message ?: "Port discovery failed.",
+                    )
+                }
+            } finally {
+                sshSession.close()
+                if (requestGeneration == discoveryGeneration) {
+                    discoveryJob = null
+                }
+            }
+        }
+    }
+
+    private fun stopDiscovery() {
+        discoveryGeneration++
+        discoveryJob?.cancel()
+        discoveryJob = null
     }
 
     private fun clearPassphrase() {

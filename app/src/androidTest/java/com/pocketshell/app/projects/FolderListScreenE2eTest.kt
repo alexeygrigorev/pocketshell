@@ -19,6 +19,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.di.WhisperClientFactory
+import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
@@ -147,6 +148,7 @@ class FolderListScreenE2eTest {
             gateway = fakeGateway,
             hostDao = db.hostDao(),
             projectRootDao = db.projectRootDao(),
+            forwardingController = ForwardingController(InstrumentationRegistry.getInstrumentation().targetContext),
         )
         val dictationViewModel = noopAssistantDictationViewModel()
         var openedWorkspaceSettings = false

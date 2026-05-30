@@ -157,6 +157,30 @@ class ForwardingControllerTest {
     }
 
     @Test
+    fun `host snapshots expose per-host active state and tunnel counts`() {
+        val controller = ForwardingController(context)
+
+        controller.registerActiveHost(hostId = 1, hostName = "alpha")
+        controller.registerActiveHost(hostId = 2, hostName = "beta")
+        controller.updateTunnelCount(hostId = 1, count = 2)
+
+        assertEquals(
+            mapOf(
+                1L to ForwardingHostSnapshot(active = true, tunnelCount = 2),
+                2L to ForwardingHostSnapshot(active = true, tunnelCount = 0),
+            ),
+            controller.flowOfHostSnapshots().value,
+        )
+
+        controller.unregisterActiveHost(hostId = 1)
+
+        assertEquals(
+            mapOf(2L to ForwardingHostSnapshot(active = true, tunnelCount = 0)),
+            controller.flowOfHostSnapshots().value,
+        )
+    }
+
+    @Test
     fun `reconnectNow fans out hints to every registered host hook`() {
         val controller = ForwardingController(context)
         val calls1 = java.util.concurrent.atomic.AtomicInteger(0)

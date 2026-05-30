@@ -16,6 +16,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
@@ -99,6 +100,7 @@ class FolderListSessionClickTest {
             gateway = fakeGateway,
             hostDao = db.hostDao(),
             projectRootDao = db.projectRootDao(),
+            forwardingController = ForwardingController(InstrumentationRegistry.getInstrumentation().targetContext),
         )
 
         compose.setContent {
@@ -155,6 +157,7 @@ class FolderListSessionClickTest {
             gateway = fakeGateway,
             hostDao = db.hostDao(),
             projectRootDao = db.projectRootDao(),
+            forwardingController = ForwardingController(InstrumentationRegistry.getInstrumentation().targetContext),
         )
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
@@ -248,6 +251,7 @@ class FolderListSessionClickTest {
             gateway = fakeGateway,
             hostDao = db.hostDao(),
             projectRootDao = db.projectRootDao(),
+            forwardingController = ForwardingController(InstrumentationRegistry.getInstrumentation().targetContext),
         )
         var mode by mutableStateOf(HostDetailViewMode.Tree)
 

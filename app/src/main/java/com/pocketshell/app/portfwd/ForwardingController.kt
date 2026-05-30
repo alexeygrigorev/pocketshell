@@ -54,10 +54,12 @@ class ForwardingController @Inject constructor(
     private val activeHostCount = MutableStateFlow(0)
     private val totalTunnelCount = MutableStateFlow(0)
     private val primaryHostName = MutableStateFlow("")
+    private val hostSnapshots = MutableStateFlow<Map<Long, ForwardingHostSnapshot>>(emptyMap())
 
     fun flowOfActiveHostCount(): StateFlow<Int> = activeHostCount.asStateFlow()
     fun flowOfTotalTunnelCount(): StateFlow<Int> = totalTunnelCount.asStateFlow()
     fun flowOfPrimaryHostName(): StateFlow<String> = primaryHostName.asStateFlow()
+    fun flowOfHostSnapshots(): StateFlow<Map<Long, ForwardingHostSnapshot>> = hostSnapshots.asStateFlow()
 
     /**
      * Tell the controller that [hostId] has just gone active.
@@ -131,6 +133,14 @@ class ForwardingController @Inject constructor(
         activeHostCount.update { activeHosts.size }
         totalTunnelCount.update { activeHosts.sumOf { it.tunnelCount } }
         primaryHostName.update { activeHosts.firstOrNull()?.hostName.orEmpty() }
+        hostSnapshots.update {
+            activeHosts.associate { host ->
+                host.hostId to ForwardingHostSnapshot(
+                    active = true,
+                    tunnelCount = host.tunnelCount,
+                )
+            }
+        }
     }
 
     /**
@@ -146,3 +156,8 @@ class ForwardingController @Inject constructor(
         val tunnelCount: Int,
     )
 }
+
+data class ForwardingHostSnapshot(
+    val active: Boolean,
+    val tunnelCount: Int,
+)

@@ -46,7 +46,7 @@ class FolderListGatewayFallbackTest {
         assertEquals(listOf("claude-main", "codex"), rows.map { it.sessionName })
         assertEquals(listOf(null, null), rows.map { it.cwd })
         assertEquals(listOf(false, false), rows.map { it.attached })
-        assertTrue(session.execCommands.single().contains(SshFolderListGateway.POCKETSHELL_SESSIONS_COMMAND))
+        assertTrue(session.execCommands.any { it.contains(SshFolderListGateway.POCKETSHELL_SESSIONS_COMMAND) })
     }
 
     private class FakeSshSession(

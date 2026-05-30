@@ -135,6 +135,58 @@ class PortForwardPanelViewModelTest {
     }
 
     @Test
+    fun loadWithDiscoveryShowsAvailablePortsWithoutStartingForwarding() = runTest {
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
+        val session = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val viewModel = newViewModel(FakeConnector(Result.success(session)))
+
+        viewModel.load(hostId, "/tmp/key", discoverPorts = true)
+        runCurrent()
+
+        val state = viewModel.state.value
+        assertFalse("discovery must leave auto-forward off", state.autoForwardEnabled)
+        assertEquals(PortForwardConnectionState.Connected, state.connectionState)
+        assertEquals(1, state.tunnels.size)
+        val tunnel = state.tunnels.single()
+        assertEquals(3000, tunnel.remotePort)
+        assertEquals(3000, tunnel.localPort)
+        assertEquals("node", tunnel.process)
+        assertEquals(com.pocketshell.core.portfwd.TunnelInfo.Status.AVAILABLE, tunnel.status)
+        assertEquals(emptyList<FakePortForward>(), session.openedForwards)
+        assertTrue("passive discovery SSH session should close after scan", session.closed)
+    }
+
+    @Test
+    fun startPortFromDiscoveredStateEnablesForwardingExplicitly() = runTest {
+        val hostId = insertHost(maxAutoPort = 2000, skipPortsBelow = 1000)
+        val discoverySession = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val forwardingSession = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val connector = QueueConnector(
+            listOf(Result.success(discoverySession), Result.success(forwardingSession)),
+        )
+        val viewModel = newViewModel(connector)
+
+        viewModel.load(hostId, "/tmp/key", discoverPorts = true)
+        runCurrent()
+        viewModel.startPort(3000)
+        runCurrent()
+
+        assertFalse(discoverySession.openedForwards.any())
+        assertTrue(viewModel.state.value.autoForwardEnabled)
+        assertEquals(listOf(3000), forwardingSession.openedForwards.map { it.remotePort })
+        assertEquals(com.pocketshell.core.portfwd.TunnelInfo.Status.FORWARDING, viewModel.state.value.tunnels.single().status)
+
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
     fun loadingDifferentHostStopsExistingForwarderAndSession() = runTest {
         val hostA = insertHost(name = "a", keyPath = "/tmp/a", maxAutoPort = 4000, skipPortsBelow = 1000)
         val hostB = insertHost(name = "b", keyPath = "/tmp/b", maxAutoPort = 5000, skipPortsBelow = 1000)
@@ -264,27 +316,24 @@ class PortForwardPanelViewModelTest {
     }
 
     @Test
-    fun reloadingSamePanelAfterLeaveAutostartsEnabledHost() = runTest {
+    fun reloadingSamePanelAfterLeaveDoesNotAutostartEnabledHost() = runTest {
         val hostId = insertHost(keyPath = "/tmp/key", enabled = true)
-        val firstSession = FakeSshSession(ssOutput = "")
-        val secondSession = FakeSshSession(ssOutput = "")
-        val connector = QueueConnector(listOf(Result.success(firstSession), Result.success(secondSession)))
+        val connector = QueueConnector(emptyList())
         val viewModel = newViewModel(connector)
 
         viewModel.load(hostId, "/tmp/key", "secret".toCharArray())
         runCurrent()
-        assertEquals(PortForwardConnectionState.Connected, viewModel.state.value.connectionState)
+        assertEquals(PortForwardConnectionState.Idle, viewModel.state.value.connectionState)
+        assertFalse(viewModel.state.value.autoForwardEnabled)
 
         viewModel.leavePanel()
         runCurrent()
         viewModel.load(hostId, "/tmp/key")
         runCurrent()
 
-        assertEquals(listOf("secret", null), connector.passphrases)
-        assertEquals(PortForwardConnectionState.Connected, viewModel.state.value.connectionState)
-        assertTrue(viewModel.state.value.autoForwardEnabled)
-        assertTrue(firstSession.closed)
-        assertFalse(secondSession.closed)
+        assertEquals(emptyList<String?>(), connector.passphrases)
+        assertEquals(PortForwardConnectionState.Idle, viewModel.state.value.connectionState)
+        assertFalse(viewModel.state.value.autoForwardEnabled)
 
         viewModel.leavePanel()
         runCurrent()
@@ -415,7 +464,8 @@ class PortForwardPanelViewModelTest {
 
         viewModel.load(hostId, "/tmp/key")
         runCurrent()
-        // load() autostarts because enabled=true; baseline check.
+        viewModel.setAutoForwardEnabled(true)
+        runCurrent()
         assertTrue(viewModel.state.value.autoForwardEnabled)
 
         viewModel.setAutoForwardEnabled(false)

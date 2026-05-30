@@ -235,10 +235,13 @@ public class AutoForwarderSupervisor(
         // any state.
         reconnectWaiter?.complete(Unit)
         reconnectWaiter = null
-        // Also nudge the live session closed if we believe it's stuck.
-        // The connect-and-reconnect loop will pick the close up via the
-        // session-health poll and proceed to the reconnect step.
-        runCatching { currentSession?.close() }
+        // Do not churn a healthy connected tunnel: Android may deliver
+        // onAvailable immediately for the already-active default
+        // network. Once the supervisor has entered reconnect/backoff,
+        // the waiter wake above is enough to retry promptly.
+        if (connectionState.value != ConnectionState.Connected) {
+            runCatching { currentSession?.close() }
+        }
     }
 
     /**

@@ -47,12 +47,11 @@ import org.junit.runner.RunWith
  *     `Connected`, assert the tunnel is open.
  *  5. `moveToState(Lifecycle.State.CREATED)` — backgrounds the process,
  *     `ProcessLifecycleOwner` flips to `CREATED`, the panel's observer
- *     dispatches `ON_STOP` and tears the forwarder down. Assert the
- *     tunnel is closed.
+ *     dispatches `ON_STOP`, and the foreground-service carve-out keeps
+ *     the active tunnel alive.
  *  6. `moveToState(Lifecycle.State.RESUMED)` — process returns to
- *     `STARTED`. `ON_START` fires; the panel re-connects via the
- *     connector and re-opens tunnels for the same ports. Assert the
- *     forwarding state is restored.
+ *     `STARTED`. `ON_START` must not reconnect an already-supervised
+ *     tunnel.
  *
  * The test deliberately avoids navigating through the chooser → panel
  * Compose UI flow because the panel is only mounted inside a sub-graph
@@ -76,7 +75,7 @@ class PortForwardPanelLifecycleE2eTest {
     }
 
     @Test
-    fun lifecycleStopClosesTunnels_lifecycleStartReopensThem() = runBlocking {
+    fun lifecycleStopKeepsTunnels_lifecycleStartDoesNotReconnectThem() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val targetContext = instrumentation.targetContext
 
@@ -147,43 +146,36 @@ class PortForwardPanelLifecycleE2eTest {
         assertTrue(firstSession.openedForwards.single().isActive)
 
         // 5. Background the app. ProcessLifecycleOwner flips to STOPPED;
-        //    the panel observer dispatches ON_STOP and tears the
-        //    forwarder down.
+        //    the foreground-service carve-out keeps the supervisor and
+        //    tunnel alive.
         launchedActivity!!.moveToState(Lifecycle.State.CREATED)
 
         withTimeout(STATE_TIMEOUT_MS) {
-            waitFor("panel paused on ON_STOP") {
+            waitFor("panel kept tunnel active on ON_STOP") {
                 val state = viewModel.state.value
-                !state.autoForwardEnabled &&
-                    state.tunnels.isEmpty() &&
-                    firstSession.closed &&
-                    !firstSession.openedForwards.single().isActive
+                state.autoForwardEnabled &&
+                    state.tunnels.any { it.status == TunnelInfo.Status.FORWARDING } &&
+                    !firstSession.closed &&
+                    firstSession.openedForwards.single().isActive
             }
         }
 
-        // 6. Resume the app. ON_START fires; the panel re-connects via
-        //    a fresh session from the factory.
+        // 6. Resume the app. ON_START must not open a second SSH session
+        //    when the first one stayed supervised while backgrounded.
         launchedActivity!!.moveToState(Lifecycle.State.RESUMED)
 
         withTimeout(STATE_TIMEOUT_MS) {
-            waitFor("panel reconnected on ON_START") {
+            waitFor("panel still connected on ON_START") {
                 val state = viewModel.state.value
                 state.connectionState == PortForwardConnectionState.Connected &&
                     state.tunnels.any { it.status == TunnelInfo.Status.FORWARDING }
             }
         }
-        val resumedSession = requireNotNull(sessionFactory.lastSession()) {
-            "fake session factory did not produce a session for the resume"
-        }
-        assertTrue(
-            "ON_START must hand out a fresh session, not reuse the closed one",
-            resumedSession !== firstSession,
-        )
         assertFalse(
-            "resumed session must still be open after ON_START",
-            resumedSession.closed,
+            "initial session must still be open after ON_START",
+            firstSession.closed,
         )
-        assertEquals(2, connector.connectCount)
+        assertEquals(1, connector.connectCount)
 
         // Cleanup so the next test starts from a clean lifecycle.
         withContext(Dispatchers.Main) {

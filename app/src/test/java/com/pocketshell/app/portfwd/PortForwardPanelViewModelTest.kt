@@ -24,6 +24,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -502,7 +503,7 @@ class PortForwardPanelViewModelTest {
     }
 
     @Test
-    fun lifecycleStopPausesScanAndClosesActiveTunnels() = runTest {
+    fun lifecycleStopKeepsActiveTunnelsUnderForegroundServiceCarveOut() = runTest {
         val hostId = insertHost(enabled = false)
         val session = FakeSshSession(
             ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
@@ -524,13 +525,16 @@ class PortForwardPanelViewModelTest {
         owner.moveTo(Lifecycle.State.CREATED) // dispatches ON_PAUSE then ON_STOP
         runCurrent()
 
-        assertFalse(
-            "ON_STOP must pause the scan/forwarding loop",
+        assertTrue(
+            "ON_STOP must keep explicit auto-forward sessions active under the foreground-service carve-out",
             viewModel.state.value.autoForwardEnabled,
         )
-        assertEquals(emptyList<com.pocketshell.core.portfwd.TunnelInfo>(), viewModel.state.value.tunnels)
-        assertTrue("active tunnels must close on ON_STOP", session.closed)
-        assertFalse(session.openedForwards.single().isActive)
+        assertEquals(
+            com.pocketshell.core.portfwd.TunnelInfo.Status.FORWARDING,
+            viewModel.state.value.tunnels.single().status,
+        )
+        assertFalse("active tunnels must survive ON_STOP", session.closed)
+        assertTrue(session.openedForwards.single().isActive)
 
         viewModel.leavePanel()
         runCurrent()
@@ -562,19 +566,22 @@ class PortForwardPanelViewModelTest {
             "lifecycle ON_STOP must NOT clear HostEntity.enabled; user intent preserved",
             stored!!.enabled,
         )
+
+        viewModel.leavePanel()
+        runCurrent()
     }
 
     @Test
-    fun lifecycleStartResumesPreviouslyActiveTunnels() = runTest {
+    fun lifecycleStartDoesNotReconnectAlreadySupervisedTunnels() = runTest {
         val hostId = insertHost(enabled = false)
         val firstSession = FakeSshSession(
             ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
         )
-        val resumedSession = FakeSshSession(
+        val unusedResumedSession = FakeSshSession(
             ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
         )
         val connector = QueueConnector(
-            listOf(Result.success(firstSession), Result.success(resumedSession)),
+            listOf(Result.success(firstSession), Result.success(unusedResumedSession)),
         )
         val viewModel = newViewModel(connector)
         val owner = ManualLifecycleOwner().also { it.moveTo(Lifecycle.State.RESUMED) }
@@ -589,19 +596,19 @@ class PortForwardPanelViewModelTest {
 
         owner.moveTo(Lifecycle.State.CREATED)
         runCurrent()
-        assertFalse(viewModel.state.value.autoForwardEnabled)
-        assertTrue(firstSession.closed)
+        assertTrue(viewModel.state.value.autoForwardEnabled)
+        assertFalse(firstSession.closed)
 
         owner.moveTo(Lifecycle.State.RESUMED) // dispatches ON_START then ON_RESUME
         runCurrent()
 
         assertTrue(
-            "ON_START must re-open tunnels that were active before background",
+            "ON_START must leave already-supervised tunnels running without a second connect",
             viewModel.state.value.autoForwardEnabled,
         )
         assertEquals(PortForwardConnectionState.Connected, viewModel.state.value.connectionState)
-        assertFalse(resumedSession.closed)
-        assertEquals(2, connector.hosts.size)
+        assertTrue(firstSession.openedForwards.single().isActive)
+        assertEquals(1, connector.hosts.size)
 
         viewModel.leavePanel()
         runCurrent()
@@ -684,18 +691,14 @@ class PortForwardPanelViewModelTest {
         // The fake session opened one forward for the discovered port.
         assertEquals(1, session.openedForwards.size)
 
-        // Triggering ON_STOP must fire stop exactly once even though the
+        // Triggering ON_STOP must not stop forwarding even though the
         // owner was observed twice.
         owner.moveTo(Lifecycle.State.CREATED)
         runCurrent()
-        assertFalse(viewModel.state.value.autoForwardEnabled)
-        // The single opened forward is now closed; observing the owner
-        // twice did not double-close anything (a double close on a
-        // FakeSshSession is harmless but the assertion is on the
-        // count of unique closed forwards, which stays at exactly one).
+        assertTrue(viewModel.state.value.autoForwardEnabled)
         assertEquals(1, session.openedForwards.size)
-        assertFalse(session.openedForwards.single().isActive)
-        assertTrue(session.closed)
+        assertTrue(session.openedForwards.single().isActive)
+        assertFalse(session.closed)
 
         viewModel.leavePanel()
         runCurrent()
@@ -746,6 +749,108 @@ class PortForwardPanelViewModelTest {
         )
 
         viewModel.setAutoForwardEnabled(false)
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
+    fun networkRecoveryReconnectsSupervisorAndRestoresTunnels() = runTest {
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
+        val firstSession = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val recoveredSession = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val connector = QueueConnector(
+            listOf(Result.success(firstSession), Result.success(recoveredSession)),
+        )
+        val forwardingController = ForwardingController(context)
+        val viewModel = newViewModel(
+            connector = connector,
+            forwardingController = forwardingController,
+        )
+
+        viewModel.load(hostId, "/tmp/key", "secret".toCharArray())
+        runCurrent()
+        viewModel.setAutoForwardEnabled(true)
+        runCurrent()
+
+        assertEquals(PortForwardConnectionState.Connected, viewModel.state.value.connectionState)
+        assertEquals(
+            com.pocketshell.core.portfwd.TunnelInfo.Status.FORWARDING,
+            viewModel.state.value.tunnels.single().status,
+        )
+        assertEquals(1, firstSession.openedForwards.size)
+
+        firstSession.close()
+        advanceTimeBy(1_000)
+        runCurrent()
+
+        assertEquals(
+            PortForwardConnectionState.Reconnecting,
+            viewModel.state.value.connectionState,
+        )
+        assertEquals(
+            com.pocketshell.core.portfwd.TunnelInfo.Status.STOPPED,
+            viewModel.state.value.tunnels.single().status,
+        )
+        assertEquals(0, forwardingController.flowOfTotalTunnelCount().value)
+
+        forwardingController.reconnectNow()
+        runCurrent()
+
+        assertEquals(listOf("dev", "dev"), connector.hosts)
+        assertEquals(listOf("secret", "secret"), connector.passphrases)
+        assertEquals(PortForwardConnectionState.Connected, viewModel.state.value.connectionState)
+        assertEquals(
+            com.pocketshell.core.portfwd.TunnelInfo.Status.FORWARDING,
+            viewModel.state.value.tunnels.single().status,
+        )
+        assertEquals(1, recoveredSession.openedForwards.size)
+        assertEquals(1, forwardingController.flowOfTotalTunnelCount().value)
+
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
+    fun reconnectNowWhileAlreadyConnectedDoesNotChurnHealthyTunnel() = runTest {
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
+        val session = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val unusedReconnectSession = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val connector = QueueConnector(
+            listOf(Result.success(session), Result.success(unusedReconnectSession)),
+        )
+        val forwardingController = ForwardingController(context)
+        val viewModel = newViewModel(
+            connector = connector,
+            forwardingController = forwardingController,
+        )
+
+        viewModel.load(hostId, "/tmp/key")
+        runCurrent()
+        viewModel.setAutoForwardEnabled(true)
+        runCurrent()
+
+        forwardingController.reconnectNow()
+        runCurrent()
+        advanceTimeBy(1_000)
+        runCurrent()
+
+        assertEquals(
+            "onAvailable for an already-active network must not force a second SSH connect",
+            listOf("dev"),
+            connector.hosts,
+        )
+        assertFalse(session.closed)
+        assertTrue(session.openedForwards.single().isActive)
+        assertEquals(PortForwardConnectionState.Connected, viewModel.state.value.connectionState)
+
         viewModel.leavePanel()
         runCurrent()
     }

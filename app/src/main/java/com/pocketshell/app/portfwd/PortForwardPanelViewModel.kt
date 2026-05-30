@@ -7,7 +7,6 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.portfwd.AutoForwardConfig
-import com.pocketshell.core.portfwd.AutoForwarder
 import com.pocketshell.core.portfwd.AutoForwarderSupervisor
 import com.pocketshell.core.portfwd.PortScanner
 import com.pocketshell.core.portfwd.TunnelInfo
@@ -41,6 +40,7 @@ enum class PortForwardConnectionState {
     Idle,
     Connecting,
     Connected,
+    Reconnecting,
     Error,
 }
 
@@ -72,8 +72,8 @@ class PortForwardPanelViewModel @Inject constructor(
     private var requestedKeyPath: String? = null
     private var keyPath: String? = null
     private var passphrase: CharArray? = null
-    private var session: SshSession? = null
-    private var forwarder: AutoForwarder? = null
+    private var reconnectPassphrase: CharArray? = null
+    private var supervisor: AutoForwarderSupervisor? = null
     private var tunnelCollection: Job? = null
     private var discoveryJob: Job? = null
     private var discoveryGeneration: Long = 0
@@ -94,28 +94,6 @@ class PortForwardPanelViewModel @Inject constructor(
     private var pendingStartPort: Int? = null
 
     /**
-     * Snapshot of whether auto-forward was active immediately before the
-     * app went into `ON_STOP`. Restored on the next `ON_START` so the
-     * user returns to the panel with the same tunnels they left behind
-     * (subject to a fresh SSH connect + scan).
-     *
-     * Cleared once a restore attempt has been kicked off or the user
-     * leaves the panel — we never want a stale "was-enabled" flag to
-     * second-guess an explicit user toggle later.
-     */
-    private var wasAutoForwardEnabledBeforeBackground: Boolean = false
-
-    /**
-     * `true` while the most recent `setAutoForwardEnabled` call is being
-     * driven by the lifecycle observer (background -> resume), not the
-     * user toggling the Switch. Lifecycle-driven changes must NOT
-     * persist `enabled` back to [HostEntity] — `enabled` is the user's
-     * intent for autostart, and a `STOP` event is not "the user turned
-     * it off".
-     */
-    private var lifecycleDriven: Boolean = false
-
-    /**
      * Reference to the attached lifecycle owner + observer so
      * [onCleared] can detach cleanly. Only the Compose screen calls
      * [observeProcessLifecycle]; unit tests can opt in to a controlled
@@ -132,9 +110,10 @@ class PortForwardPanelViewModel @Inject constructor(
     }
 
     /**
-     * Attach the process-wide lifecycle so the panel pauses its scan
-     * loop + closes active tunnels on `ON_STOP` (D21, issue #161 — no
-     * background work) and re-opens them on the next `ON_START`.
+     * Attach the process-wide lifecycle. Auto-forward itself is the D21
+     * foreground-service carve-out, so active tunnels stay supervised
+     * through `ON_STOP`; the observer exists to keep that decision
+     * explicit and testable.
      *
      * Idempotent: a second call with the same owner is a no-op; passing
      * a different owner detaches the previous one first so tests can
@@ -164,39 +143,15 @@ class PortForwardPanelViewModel @Inject constructor(
     }
 
     private fun handleLifecycleStop() {
-        // Only pause if forwarding is actually active. Otherwise this
-        // is a no-op so the next ON_START doesn't auto-start an idle
-        // panel.
-        if (!_state.value.autoForwardEnabled) {
-            wasAutoForwardEnabledBeforeBackground = false
-            return
-        }
-        wasAutoForwardEnabledBeforeBackground = true
-        lifecycleDriven = true
-        try {
-            setAutoForwardEnabled(false)
-        } finally {
-            lifecycleDriven = false
-        }
+        // Auto-forward is the D21 foreground-service carve-out: once
+        // the user has enabled it, [ForwardingService] keeps the
+        // supervisor alive while the app is backgrounded. ON_STOP
+        // should not unregister the active host or close the tunnels.
     }
 
     private fun handleLifecycleStart() {
-        // Re-open the tunnels the user had active before the app went
-        // to the background. If nothing was active, do nothing — a
-        // fresh ON_START should not auto-start an idle panel.
-        if (!wasAutoForwardEnabledBeforeBackground) return
-        wasAutoForwardEnabledBeforeBackground = false
-        // Only attempt to restore if we still have the panel state
-        // (host + key path) that the original enable used. If the user
-        // left the panel while backgrounded, leavePanel() already
-        // cleared this and the restore is silently skipped.
-        if (_state.value.host == null || keyPath == null) return
-        lifecycleDriven = true
-        try {
-            setAutoForwardEnabled(true)
-        } finally {
-            lifecycleDriven = false
-        }
+        // Active tunnels were never torn down on ON_STOP, and idle
+        // panels must not auto-start when the app returns foreground.
     }
 
     fun load(
@@ -264,10 +219,6 @@ class PortForwardPanelViewModel @Inject constructor(
         requestedKeyPath = null
         keyPath = null
         discoverPortsOnIdle = false
-        // A user navigating away erases any pending "restore on
-        // ON_START" intent — the panel will autostart on the next
-        // re-entry only if [HostEntity.enabled] is persisted true.
-        wasAutoForwardEnabledBeforeBackground = false
         _state.value = PortForwardPanelState()
     }
 
@@ -276,10 +227,8 @@ class PortForwardPanelViewModel @Inject constructor(
         if (enabled == _state.value.autoForwardEnabled) return
         // User-driven disable: persist immediately. We don't wait for
         // anything else because there is no async success-or-fail path
-        // on disable. A lifecycle-driven `ON_STOP` skips this branch
-        // (see [observeProcessLifecycle]) — a backgrounded process is
-        // not the user disabling forwarding.
-        if (!lifecycleDriven && !enabled && host.enabled) {
+        // on disable.
+        if (!enabled && host.enabled) {
             val updated = host.copy(enabled = false)
             _state.value = _state.value.copy(host = updated)
             viewModelScope.launch {
@@ -294,7 +243,7 @@ class PortForwardPanelViewModel @Inject constructor(
                 tunnels = emptyList(),
                 error = null,
             )
-            if (discoverPortsOnIdle && !lifecycleDriven) {
+            if (discoverPortsOnIdle) {
                 keyPath?.let { startDiscovery(host, it) }
             }
             return
@@ -319,7 +268,7 @@ class PortForwardPanelViewModel @Inject constructor(
         val requestGeneration = ++connectGeneration
         val requestLoadGeneration = loadGeneration
         val requestPassphrase = passphrase?.copyOf()
-        val shouldPersistOnSuccess = !lifecycleDriven && !host.enabled
+        val shouldPersistOnSuccess = !host.enabled
         connectJob?.cancel()
         connectJob = viewModelScope.launch {
             val connected = connector.connect(host, resolvedKeyPath, requestPassphrase)
@@ -346,7 +295,6 @@ class PortForwardPanelViewModel @Inject constructor(
                 return@launch
             }
 
-            session = sshSession
             // Load persisted remote->local port remappings before the
             // scan loop starts so the first round of forwards honours
             // them. `first()` snapshots the current set; the panel
@@ -356,60 +304,91 @@ class PortForwardPanelViewModel @Inject constructor(
                 portRemappingDao.getByHostId(host.id).first()
                     .associate { it.remotePort to it.localPort }
             }.getOrElse { emptyMap() }
-            val autoForwarder = AutoForwarder(
-                session = sshSession,
+            reconnectPassphrase?.fill('\u0000')
+            // The supervisor may need to reconnect after the UI has
+            // cleared the entry passphrase, so keep a dedicated copy
+            // only for the lifetime of this auto-forward session.
+            reconnectPassphrase = requestPassphrase?.copyOf()
+            var firstSession: SshSession? = sshSession
+            val autoForwarderSupervisor = AutoForwarderSupervisor(
+                sessionFactory = {
+                    firstSession?.also { firstSession = null }
+                        ?: connector.connect(host, resolvedKeyPath, reconnectPassphrase?.copyOf())
+                            .getOrElse { throw it }
+                },
                 config = host.toAutoForwardConfig(),
                 initialRemappings = remappings,
             )
-            forwarder = autoForwarder
+            supervisor = autoForwarderSupervisor
             tunnelCollection?.cancel()
             tunnelCollection = viewModelScope.launch {
-                autoForwarder.flowOfTunnels().collect { tunnels ->
-                    _state.value = _state.value.copy(tunnels = tunnels)
-                    // Issue #203 expanded scope (foreground-service
-                    // slice): mirror the tunnel count out to the
-                    // controller so the persistent notification can
-                    // render `N tunnels active`. Count only FORWARDING
-                    // tunnels — AVAILABLE / FAILED / STOPPED rows
-                    // shouldn't inflate the notification count.
-                    val activeRemotePorts = tunnels
-                        .filter { tunnel -> tunnel.status == TunnelInfo.Status.FORWARDING }
-                        .map { tunnel -> tunnel.remotePort }
-                        .toSet()
-                    forwardingController.updateActiveTunnels(host.id, activeRemotePorts)
+                launch {
+                    autoForwarderSupervisor.flowOfTunnels().collect { tunnels ->
+                        _state.value = _state.value.copy(tunnels = tunnels)
+                        // Issue #203 expanded scope (foreground-service
+                        // slice): mirror the tunnel count out to the
+                        // controller so the persistent notification can
+                        // render `N tunnels active`. Count only FORWARDING
+                        // tunnels — AVAILABLE / FAILED / STOPPED rows
+                        // shouldn't inflate the notification count.
+                        val activeRemotePorts = tunnels
+                            .filter { tunnel -> tunnel.status == TunnelInfo.Status.FORWARDING }
+                            .map { tunnel -> tunnel.remotePort }
+                            .toSet()
+                        forwardingController.updateActiveTunnels(host.id, activeRemotePorts)
+                    }
+                }
+                launch {
+                    autoForwarderSupervisor.flowOfConnectionState().collect { supervisorState ->
+                        _state.value = _state.value.copy(
+                            connectionState = supervisorState.toPanelConnectionState(),
+                        )
+                    }
+                }
+                launch {
+                    autoForwarderSupervisor.flowOfEvents().collect { event ->
+                        when (event) {
+                            is AutoForwarderSupervisor.Event.Connected -> {
+                                _state.value = _state.value.copy(error = null)
+                            }
+                            is AutoForwarderSupervisor.Event.Error -> {
+                                _state.value = _state.value.copy(
+                                    error = "Port forwarding reconnect failed: ${event.message}",
+                                )
+                            }
+                            is AutoForwarderSupervisor.Event.ConnectionLost -> {
+                                _state.value = _state.value.copy(
+                                    connectionState = PortForwardConnectionState.Error,
+                                    error = event.lastError,
+                                )
+                            }
+                            is AutoForwarderSupervisor.Event.Disconnected -> Unit
+                        }
+                    }
                 }
             }
+            autoForwarderSupervisor.start(viewModelScope)
             pendingStartPort?.let { remotePort ->
                 pendingStartPort = null
-                autoForwarder.togglePort(remotePort)
+                viewModelScope.launch {
+                    autoForwarderSupervisor.togglePort(remotePort)
+                }
             }
-            autoForwarder.start(viewModelScope)
             // Foreground-service rendezvous: tell the controller this
             // host is now actively forwarding. The controller starts
             // [ForwardingService] when this is the first registered
-            // host. Reconnect-on-network-recovery is not yet wired
-            // through to the bare [AutoForwarder] — a follow-up round
-            // swaps the forwarder for [AutoForwarderSupervisor] and
-            // passes the supervisor's `reconnectNow()` as the
-            // reconnect hook below. For now we register without a
-            // hook so the service still tracks the host (and keeps
-            // the process alive), but the network callback's
-            // `controller.reconnectNow()` becomes a no-op for this
-            // host. The supervisor exists and is fully unit-tested
-            // (see `AutoForwarderSupervisorTest`) for that follow-up.
+            // host, and its network callback fans reconnect hints back
+            // to this supervisor.
             forwardingController.registerActiveHost(
                 hostId = host.id,
                 hostName = host.name,
-                reconnectHook = null,
+                reconnectHook = autoForwarderSupervisor::reconnectNow,
             )
             registeredHostId = host.id
-            _state.value = _state.value.copy(connectionState = PortForwardConnectionState.Connected)
             // User-driven enable: persist only after the SSH connect +
             // forwarder bring-up succeeded. A failed enable leaves the
             // persisted `host.enabled` flag untouched so the next load
-            // does not autostart a still-broken connection. A
-            // lifecycle-driven restore (`ON_START` after `ON_STOP`)
-            // skips this — the value was already true.
+            // does not autostart a still-broken connection.
             if (shouldPersistOnSuccess) {
                 val current = _state.value.host
                 if (current != null && current.id == host.id && !current.enabled) {
@@ -425,15 +404,15 @@ class PortForwardPanelViewModel @Inject constructor(
     }
 
     fun togglePort(remotePort: Int) {
-        val autoForwarder = forwarder ?: return
+        val autoForwarderSupervisor = supervisor ?: return
         viewModelScope.launch {
-            autoForwarder.togglePort(remotePort)
+            autoForwarderSupervisor.togglePort(remotePort)
         }
     }
 
     fun startPort(remotePort: Int) {
-        val autoForwarder = forwarder
-        if (autoForwarder == null) {
+        val autoForwarderSupervisor = supervisor
+        if (autoForwarderSupervisor == null) {
             pendingStartPort = remotePort
             setAutoForwardEnabled(true)
             return
@@ -441,7 +420,7 @@ class PortForwardPanelViewModel @Inject constructor(
         viewModelScope.launch {
             val current = _state.value.tunnels.firstOrNull { it.remotePort == remotePort }
             if (current?.status != TunnelInfo.Status.FORWARDING) {
-                autoForwarder.togglePort(remotePort)
+                autoForwarderSupervisor.togglePort(remotePort)
             }
         }
     }
@@ -468,10 +447,10 @@ class PortForwardPanelViewModel @Inject constructor(
         connectJob = null
         tunnelCollection?.cancel()
         tunnelCollection = null
-        forwarder?.stop()
-        forwarder = null
-        session?.close()
-        session = null
+        supervisor?.stop()
+        supervisor = null
+        reconnectPassphrase?.fill('\u0000')
+        reconnectPassphrase = null
         // Foreground-service rendezvous: tell the controller this host
         // is no longer forwarding. The controller stops
         // [com.pocketshell.app.portfwd.service.ForwardingService] when
@@ -571,6 +550,15 @@ class PortForwardPanelViewModel @Inject constructor(
             maxAutoPort = maxAutoPort,
             skipPortsBelow = skipPortsBelow,
         )
+
+    private fun AutoForwarderSupervisor.ConnectionState.toPanelConnectionState(): PortForwardConnectionState =
+        when (this) {
+            AutoForwarderSupervisor.ConnectionState.Idle -> PortForwardConnectionState.Idle
+            AutoForwarderSupervisor.ConnectionState.Connecting -> PortForwardConnectionState.Connecting
+            AutoForwarderSupervisor.ConnectionState.Connected -> PortForwardConnectionState.Connected
+            AutoForwarderSupervisor.ConnectionState.Reconnecting -> PortForwardConnectionState.Reconnecting
+            AutoForwarderSupervisor.ConnectionState.Lost -> PortForwardConnectionState.Error
+        }
 }
 
 private infix fun CharArray?.contentEquals(other: CharArray?): Boolean =

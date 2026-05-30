@@ -70,14 +70,10 @@ fun PortForwardPanelScreen(
         onDispose { viewModel.leavePanel() }
     }
 
-    // D21 / issue #161 — pause the scan loop + close active tunnels
-    // when the app backgrounds, restore on the next ON_START. The
-    // ViewModel does the actual work; the panel just opts in to the
-    // process-wide lifecycle here (mirrors the
-    // [UsageScheduler.observeProcessLifecycle] hook in `App.onCreate`,
-    // but scoped to the panel since the port-forward path is the only
-    // surface that opens a phone-side ServerSocket + an SSH session
-    // for tunnels).
+    // D21 foreground-service carve-out: the ViewModel observes process
+    // lifecycle explicitly so active auto-forward tunnels remain
+    // supervised while backgrounded, and idle panels stay idle on
+    // foreground return.
     LaunchedEffect(viewModel) {
         viewModel.observeProcessLifecycle()
     }
@@ -395,6 +391,7 @@ private val PortForwardConnectionState.label: String
         PortForwardConnectionState.Idle -> "Idle"
         PortForwardConnectionState.Connecting -> "Connecting"
         PortForwardConnectionState.Connected -> "Connected"
+        PortForwardConnectionState.Reconnecting -> "Reconnecting"
         PortForwardConnectionState.Error -> "Error"
     }
 
@@ -403,6 +400,7 @@ private val PortForwardConnectionState.color: androidx.compose.ui.graphics.Color
         PortForwardConnectionState.Idle -> PocketShellColors.TextMuted
         PortForwardConnectionState.Connecting -> PocketShellColors.Amber
         PortForwardConnectionState.Connected -> PocketShellColors.Green
+        PortForwardConnectionState.Reconnecting -> PocketShellColors.Amber
         PortForwardConnectionState.Error -> PocketShellColors.Red
     }
 

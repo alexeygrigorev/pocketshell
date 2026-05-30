@@ -212,8 +212,9 @@ background work on the phone).
   PocketShell to either paste into the currently-attached session or
   save as a file on the remote host.
 - **Port forwarding.** Auto-forward modules ported from
-  `ssh-auto-forward-android`. Per-host port table, restart on transport
-  bounce.
+  `ssh-auto-forward-android`. Per-host port table, foreground-service
+  network recovery, and visible reconnecting/stopped tunnel state while
+  tunnels restart after a transport bounce.
 
 ## Architecture
 

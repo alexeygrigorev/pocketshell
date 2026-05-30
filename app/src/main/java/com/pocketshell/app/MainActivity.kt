@@ -58,9 +58,13 @@ import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageScreen
 import com.pocketshell.app.usage.UsageViewModel
 import com.pocketshell.app.usage.worstBadgeRecord
+import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellThemeMode
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.runBlocking
+import java.io.File
 import javax.inject.Inject
 
 /**
@@ -129,6 +133,12 @@ class MainActivity : FragmentActivity() {
     @Inject
     lateinit var startDirectoryAutocomplete: StartDirectoryAutocompleteRemoteSource
 
+    @Inject
+    lateinit var hostDao: HostDao
+
+    @Inject
+    lateinit var sshKeyDao: SshKeyDao
+
     /**
      * Issue #177: the navigator's current top destination, reported up by
      * [AppNavigator] so `onStop` can persist it. The session screen also
@@ -192,11 +202,12 @@ class MainActivity : FragmentActivity() {
         // is not restored.
         val intentDestination = initialDestinationFromIntent(intent)
         val resumingFromProcessDeath = savedInstanceState != null
+        val importPayload = importPayloadFromIntent(intent)
         StartupTiming.mark(
             "main-initial-route-input",
             "savedInstanceState" to resumingFromProcessDeath,
             "intentDestination" to intentDestination.timingName(),
-            "hasImportPayload" to (importPayloadFromIntent(intent) != null),
+            "hasImportPayload" to (importPayload != null),
         )
         // Only read the persisted snapshot on the process-death resume path;
         // a fresh launch must not even touch the store so the cold-launch
@@ -207,16 +218,34 @@ class MainActivity : FragmentActivity() {
             } else {
                 null
             }
+        val defaultHostDestination =
+            if (
+                intentDestination == AppDestination.HostList &&
+                !resumingFromProcessDeath &&
+                importPayload == null
+            ) {
+                runBlocking {
+                    resolveDefaultHostLaunchDestination(
+                        defaultHostId = settingsRepository.settings.value.defaultHostId,
+                        hostDao = hostDao,
+                        sshKeyDao = sshKeyDao,
+                    )
+                }
+            } else {
+                null
+            }
         requestedDestination = resolveInitialDestination(
             intentDestination = intentDestination,
             resumingFromProcessDeath = resumingFromProcessDeath,
             restoredDestination = restored?.let { with(lastSessionStore) { it.toDestination() } },
+            defaultHostDestination = defaultHostDestination,
         )
         StartupTiming.mark(
             "main-requested-destination",
             "destination" to requestedDestination.timingName(),
             "restoredSnapshot" to (restored != null),
             "processDeathResume" to resumingFromProcessDeath,
+            "defaultHostLaunch" to (defaultHostDestination != null),
         )
         restoredTmuxDestination = requestedDestination as? AppDestination.TmuxSession
         restoredComposerDraft = if (requestedDestination is AppDestination.TmuxSession) {
@@ -224,7 +253,7 @@ class MainActivity : FragmentActivity() {
         } else {
             ""
         }
-        pendingImportPayload = importPayloadFromIntent(intent)
+        pendingImportPayload = importPayload
         window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(DarkSystemBarColor))
         window.decorView.setBackgroundColor(DarkSystemBarColor)
         @Suppress("DEPRECATION")
@@ -1000,10 +1029,34 @@ internal fun resolveInitialDestination(
     intentDestination: AppDestination,
     resumingFromProcessDeath: Boolean,
     restoredDestination: AppDestination?,
+    defaultHostDestination: AppDestination? = null,
 ): AppDestination {
     if (intentDestination != AppDestination.HostList) return intentDestination
-    if (!resumingFromProcessDeath) return AppDestination.HostList
+    if (!resumingFromProcessDeath) return defaultHostDestination ?: AppDestination.HostList
     return restoredDestination ?: AppDestination.HostList
+}
+
+internal suspend fun resolveDefaultHostLaunchDestination(
+    defaultHostId: Long?,
+    hostDao: HostDao,
+    sshKeyDao: SshKeyDao,
+    keyFileExists: (String) -> Boolean = { path -> File(path).exists() },
+): AppDestination.FolderList? {
+    val hostId = defaultHostId?.takeIf { it > 0L } ?: return null
+    val host = hostDao.getById(hostId) ?: return null
+    val key = sshKeyDao.getById(host.keyId) ?: return null
+    if (key.hasPassphrase) return null
+    val keyPath = key.privateKeyPath.trim()
+    if (keyPath.isEmpty() || !keyFileExists(keyPath)) return null
+    return AppDestination.FolderList(
+        hostId = host.id,
+        hostName = host.name,
+        hostname = host.hostname,
+        port = host.port,
+        username = host.username,
+        keyPath = keyPath,
+        passphrase = null,
+    )
 }
 
 /**

@@ -144,6 +144,8 @@ class SettingsViewModel @Inject constructor(
     fun setTmuxOnAttachByDefault(enabled: Boolean) =
         repository.setTmuxOnAttachByDefault(enabled)
 
+    fun setDefaultHostId(hostId: Long?) = repository.setDefaultHostId(hostId)
+
     /**
      * Persist [code] as the user's preferred Whisper language. The Voice
      * section enforces that [code] comes from

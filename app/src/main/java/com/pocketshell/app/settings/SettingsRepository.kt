@@ -69,6 +69,19 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(tmuxOnAttachByDefault = enabled)
     }
 
+    fun setDefaultHostId(hostId: Long?) {
+        val normalised = hostId?.takeIf { it > 0L }
+        if (_settings.value.defaultHostId == normalised) return
+        val edit = prefs.edit()
+        if (normalised == null) {
+            edit.remove(KEY_DEFAULT_HOST_ID)
+        } else {
+            edit.putLong(KEY_DEFAULT_HOST_ID, normalised)
+        }
+        edit.apply()
+        _settings.value = _settings.value.copy(defaultHostId = normalised)
+    }
+
     /**
      * Persist the user's preferred Whisper language. [code] is either
      * [AppSettings.VOICE_LANGUAGE_AUTO] (Whisper auto-detect) or an
@@ -144,6 +157,8 @@ class SettingsRepository @Inject constructor(
             ?.lowercase()
             ?.ifEmpty { AppSettings.VOICE_LANGUAGE_AUTO }
             ?: AppSettings.VOICE_LANGUAGE_AUTO
+        val defaultHostId = prefs.safeLong(KEY_DEFAULT_HOST_ID, 0L)
+            .takeIf { it > 0L }
         val silence = prefs.safeFloat(
             KEY_VOICE_SILENCE_SECONDS,
             AppSettings.DEFAULT_VOICE_SILENCE_SECONDS,
@@ -165,6 +180,7 @@ class SettingsRepository @Inject constructor(
             theme = theme,
             terminalFontSizeSp = font,
             tmuxOnAttachByDefault = tmux,
+            defaultHostId = defaultHostId,
             voiceLanguage = language,
             voiceSilenceThresholdSeconds = silence,
             showSystemNotes = showSystemNotes,
@@ -221,11 +237,19 @@ class SettingsRepository @Inject constructor(
                 default
             }
 
+    private fun SharedPreferences.safeLong(key: String, default: Long): Long =
+        runCatching { getLong(key, default) }
+            .getOrElse {
+                edit().remove(key).apply()
+                default
+            }
+
     private companion object {
         const val PREFS_NAME = "app_settings"
         const val KEY_THEME = "theme"
         const val KEY_TERMINAL_FONT_SP = "terminal_font_sp"
         const val KEY_TMUX_ON_ATTACH = "tmux_on_attach_default"
+        const val KEY_DEFAULT_HOST_ID = "default_host_id"
         const val KEY_VOICE_LANGUAGE = "voice_language"
         const val KEY_VOICE_SILENCE_SECONDS = "voice_silence_seconds"
         const val KEY_SHOW_SYSTEM_NOTES = "show_system_notes"

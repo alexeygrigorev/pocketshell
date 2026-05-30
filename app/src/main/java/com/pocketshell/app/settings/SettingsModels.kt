@@ -41,6 +41,8 @@ enum class ThemePreference {
  *   is detected. The actual host-bootstrap flow continues to surface its
  *   own per-host choice — this preference only changes the default
  *   highlighted option.
+ * @property defaultHostId saved host opened automatically on normal app
+ *   launch. `null` keeps the launch destination at the host list.
  * @property voiceLanguage ISO-639-1 language code passed to Whisper's
  *   `language` parameter. The sentinel value [VOICE_LANGUAGE_AUTO]
  *   (default) means "let Whisper auto-detect"; in that case no language
@@ -61,6 +63,7 @@ data class AppSettings(
     val theme: ThemePreference = ThemePreference.System,
     val terminalFontSizeSp: Float = DEFAULT_TERMINAL_FONT_SP,
     val tmuxOnAttachByDefault: Boolean = true,
+    val defaultHostId: Long? = null,
     val voiceLanguage: String = VOICE_LANGUAGE_AUTO,
     val voiceSilenceThresholdSeconds: Float = DEFAULT_VOICE_SILENCE_SECONDS,
     val showSystemNotes: Boolean = DEFAULT_SHOW_SYSTEM_NOTES,

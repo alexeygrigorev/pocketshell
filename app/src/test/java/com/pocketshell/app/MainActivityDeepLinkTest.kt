@@ -102,6 +102,26 @@ class MainActivityDeepLinkTest {
     }
 
     @Test
+    fun resolveInitialDestination_freshColdLaunch_usesDefaultHostDestination() {
+        val defaultHost = AppDestination.FolderList(
+            hostId = 9L,
+            hostName = "default",
+            hostname = "10.0.0.9",
+            port = 22,
+            username = "me",
+            keyPath = "/data/keys/default",
+            passphrase = null,
+        )
+        val dest = resolveInitialDestination(
+            intentDestination = AppDestination.HostList,
+            resumingFromProcessDeath = false,
+            restoredDestination = restoredSession(),
+            defaultHostDestination = defaultHost,
+        )
+        assertEquals(defaultHost, dest)
+    }
+
+    @Test
     fun resolveInitialDestination_processDeathResume_restoresSession() {
         // savedInstanceState != null (system re-created the activity after
         // reaping the backgrounded process) AND a fresh snapshot exists.
@@ -110,6 +130,15 @@ class MainActivityDeepLinkTest {
             intentDestination = AppDestination.HostList,
             resumingFromProcessDeath = true,
             restoredDestination = restored,
+            defaultHostDestination = AppDestination.FolderList(
+                hostId = 9L,
+                hostName = "default",
+                hostname = "10.0.0.9",
+                port = 22,
+                username = "me",
+                keyPath = "/data/keys/default",
+                passphrase = null,
+            ),
         )
         assertEquals(restored, dest)
     }

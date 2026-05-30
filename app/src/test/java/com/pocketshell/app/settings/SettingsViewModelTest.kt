@@ -150,6 +150,15 @@ class SettingsViewModelTest {
         assertEquals(false, repo.settings.value.tmuxOnAttachByDefault)
     }
 
+    @Test
+    fun `setDefaultHostId flows through to repository`() {
+        val vm = newVm()
+        vm.setDefaultHostId(11L)
+        assertEquals(11L, repo.settings.value.defaultHostId)
+        vm.setDefaultHostId(null)
+        assertEquals(null, repo.settings.value.defaultHostId)
+    }
+
     // -- Issue #125: Voice section -----------------------------------------
 
     @Test

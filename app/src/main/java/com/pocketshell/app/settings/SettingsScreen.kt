@@ -136,6 +136,13 @@ fun SettingsScreen(
                 )
             }
             item {
+                StartupSection(
+                    hosts = hosts,
+                    selectedHostId = settings.defaultHostId,
+                    onSelectDefaultHost = viewModel::setDefaultHostId,
+                )
+            }
+            item {
                 WatchedFoldersSection(
                     hosts = hosts,
                     onPickHost = onOpenWatchedFoldersForHost,
@@ -454,6 +461,100 @@ private fun TerminalSection(
                     modifier = Modifier.testTag(TMUX_SWITCH_TAG),
                 )
             }
+        }
+    }
+}
+
+/**
+ * Issue #305: startup destination preference. Exactly one saved host
+ * can be selected as the launch default, or the selection can be
+ * cleared with the "Host list" row. The actual launch resolver still
+ * validates that the host and key exist before routing, so a deleted
+ * host gracefully lands back on the host list.
+ */
+@Composable
+private fun StartupSection(
+    hosts: List<com.pocketshell.core.storage.entity.HostEntity>,
+    selectedHostId: Long?,
+    onSelectDefaultHost: (Long?) -> Unit,
+) {
+    val selectedExists = selectedHostId != null && hosts.any { it.id == selectedHostId }
+    Column {
+        SectionLabel("Startup")
+        SectionCard {
+            Text(
+                text = "Open on launch",
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Choose a saved host to open directly when PocketShell starts.",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            DefaultHostOptionRow(
+                title = "Host list",
+                subtitle = "Show all saved hosts first",
+                selected = selectedHostId == null || !selectedExists,
+                onClick = { onSelectDefaultHost(null) },
+                testTag = DEFAULT_HOST_NONE_TAG,
+            )
+            hosts.forEach { host ->
+                DefaultHostOptionRow(
+                    title = host.name,
+                    subtitle = "${host.username}@${host.hostname}:${host.port}",
+                    selected = host.id == selectedHostId,
+                    onClick = { onSelectDefaultHost(host.id) },
+                    testTag = defaultHostOptionTag(host.id),
+                )
+            }
+            if (hosts.isEmpty()) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "Add a host first to choose a launch default.",
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 12.sp,
+                    modifier = Modifier.testTag(DEFAULT_HOST_EMPTY_TAG),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DefaultHostOptionRow(
+    title: String,
+    subtitle: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    testTag: String,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.RadioButton, onClick = onClick)
+            .padding(vertical = 10.dp)
+            .testTag(testTag),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioMark(selected = selected)
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = subtitle,
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+            )
         }
     }
 }
@@ -1365,6 +1466,8 @@ internal const val SETTINGS_BACK_TAG = "settings:back"
 internal const val SETTINGS_TITLE_TAG = "settings:title"
 internal const val TERMINAL_FONT_SLIDER_TAG = "settings:terminal:font-slider"
 internal const val TMUX_SWITCH_TAG = "settings:terminal:tmux-switch"
+internal const val DEFAULT_HOST_NONE_TAG = "settings:startup:default-host:none"
+internal const val DEFAULT_HOST_EMPTY_TAG = "settings:startup:default-host:empty"
 internal const val DIAGNOSTICS_CRASHES_TAG = "settings:diagnostics:crashes"
 internal const val USAGE_OPEN_TAG = "settings:usage:open"
 internal const val USAGE_EMPTY_HINT_TAG = "settings:usage:empty-hint"
@@ -1413,6 +1516,9 @@ const val WATCHED_FOLDERS_SETTINGS_EMPTY_TAG: String = "settings:watched-folders
 
 fun watchedFoldersSettingsHostRowTag(hostId: Long): String =
     "settings:watched-folders:host:$hostId"
+
+fun defaultHostOptionTag(hostId: Long): String =
+    "settings:startup:default-host:$hostId"
 
 internal fun themeOptionTestTag(theme: ThemePreference): String =
     "settings:appearance:theme:" + theme.name.lowercase()

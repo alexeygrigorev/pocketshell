@@ -54,6 +54,7 @@ class SettingsRepositoryTest {
         // build did, just visually de-emphasized.
         assertEquals(AppSettings.DEFAULT_SHOW_SYSTEM_NOTES, snap.showSystemNotes)
         assertTrue("expected default to be ON", snap.showSystemNotes)
+        assertEquals(null, snap.defaultHostId)
     }
 
     @Test
@@ -116,6 +117,7 @@ class SettingsRepositoryTest {
             .putString("voice_silence_seconds", "soon")
             .putString("show_system_notes", "maybe")
             .putString("usage_warn_threshold_percent", "eighty")
+            .putString("default_host_id", "host-a")
             .commit()
 
         val repo = SettingsRepository(context)
@@ -126,6 +128,29 @@ class SettingsRepositoryTest {
         assertEquals(AppSettings.DEFAULT_VOICE_SILENCE_SECONDS, snap.voiceSilenceThresholdSeconds, 0f)
         assertEquals(AppSettings.DEFAULT_SHOW_SYSTEM_NOTES, snap.showSystemNotes)
         assertEquals(AppSettings.DEFAULT_USAGE_WARN_PERCENT, snap.usageWarnThresholdPercent)
+        assertEquals(null, snap.defaultHostId)
+    }
+
+    // -- Issue #305: default launch host preference -----------------------
+
+    @Test
+    fun `setDefaultHostId persists and round-trips`() {
+        val repo = SettingsRepository(context)
+        repo.setDefaultHostId(42L)
+        assertEquals(42L, repo.settings.value.defaultHostId)
+        assertEquals(42L, SettingsRepository(context).settings.value.defaultHostId)
+    }
+
+    @Test
+    fun `setDefaultHostId clears selection when null or non-positive`() {
+        val repo = SettingsRepository(context)
+        repo.setDefaultHostId(42L)
+        repo.setDefaultHostId(null)
+        assertEquals(null, repo.settings.value.defaultHostId)
+        assertEquals(null, SettingsRepository(context).settings.value.defaultHostId)
+
+        repo.setDefaultHostId(-1L)
+        assertEquals(null, repo.settings.value.defaultHostId)
     }
 
     // -- Issue #125: voice preferences -------------------------------------

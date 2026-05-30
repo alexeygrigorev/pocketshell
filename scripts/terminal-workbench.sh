@@ -292,6 +292,8 @@ printf 'Test selector: %s\n' "$TEST_SELECTOR"
 [[ -x "$EMULATOR" ]] || fail "emulator is not executable at $EMULATOR"
 [[ -f "$SSH_KEY" ]] || fail "SSH key missing at $SSH_KEY"
 command -v ssh >/dev/null 2>&1 || fail "ssh client is missing"
+# OpenSSH refuses to use private keys with group/world-readable permissions.
+chmod 600 "$SSH_KEY" || fail "could not restrict SSH key permissions at $SSH_KEY"
 
 if ! "$ADB" get-state >/dev/null 2>&1; then
   run_logged "00-start-emulator" "$EMULATOR" -avd "$AVD_NAME" -no-snapshot -no-window -gpu swiftshader_indirect -no-audio -no-boot-anim &

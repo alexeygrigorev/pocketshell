@@ -400,38 +400,71 @@ should_retry_interrupted_instrumentation() {
   logcat_has_adb_transport_drop_markers "$logcat_file"
 }
 
-instrumentation_status=0
-for attempt in $(seq 1 "$WORKBENCH_INSTRUMENTATION_ATTEMPTS"); do
-  run_logged "06-reset-artifacts" "$ADB" shell rm -rf "$DEVICE_ARTIFACT_DIR"
-  "$ADB" logcat -c || true
-  set +e
-  run_logged "07-run-workbench" \
-    "$ADB" shell am instrument -w -r \
-    "${INSTRUMENTATION_ARGS[@]}" \
-    com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner
-  instrumentation_status=$?
-  set -e
-  if (( instrumentation_status != 0 )); then
-    sleep 2
-  fi
-  attempt_logcat="$RUN_DIR/logcat-workbench-attempt-$attempt.txt"
-  "$ADB" logcat -d -v threadtime -t 4000 > "$attempt_logcat" 2>&1 || true
-  if (( instrumentation_status == 0 )) || instrumentation_log_has_success "$RUN_DIR/07-run-workbench.log"; then
-    break
-  fi
-  if should_retry_interrupted_instrumentation "$instrumentation_status" "$RUN_DIR/07-run-workbench.log" "$attempt_logcat" &&
-    (( attempt < WORKBENCH_INSTRUMENTATION_ATTEMPTS )); then
+write_instrumentation_status() {
+  local artifact_pull_status="$1"
+  {
+    printf 'instrumentation_exit_code=%s\n' "$instrumentation_status"
+    printf 'artifact_pull_exit_code=%s\n' "$artifact_pull_status"
+    printf 'instrumentation_attempts=%s\n' "$instrumentation_attempt"
+    printf 'instrumentation_retry_exhausted=%s\n' "$instrumentation_retry_exhausted"
+  } > "$RUN_DIR/instrumentation-status.txt"
+}
+
+run_terminal_workbench_instrumentation() {
+  instrumentation_status=0
+  instrumentation_attempt=0
+  instrumentation_retry_exhausted=0
+
+  local attempt attempt_logcat
+  for attempt in $(seq 1 "$WORKBENCH_INSTRUMENTATION_ATTEMPTS"); do
+    instrumentation_attempt="$attempt"
+    run_logged "06-reset-artifacts" "$ADB" shell rm -rf "$DEVICE_ARTIFACT_DIR"
+    "$ADB" logcat -c || true
+    set +e
+    run_logged "07-run-workbench" \
+      "$ADB" shell am instrument -w -r \
+      "${INSTRUMENTATION_ARGS[@]}" \
+      com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner
+    instrumentation_status=$?
+    set -e
     cp "$RUN_DIR/07-run-workbench.log" "$RUN_DIR/07-run-workbench-attempt-$attempt.log" || true
-    printf 'Terminal workbench instrumentation interrupted by adb transport drop on attempt %s; retrying.\n' "$attempt" >&2
-    "$ADB" reconnect >/dev/null 2>&1 || true
-    "$ADB" wait-for-device >/dev/null 2>&1 || true
-    "$ADB" shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true
-    "$ADB" shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
-    sleep 2
-    continue
+    if (( instrumentation_status != 0 )); then
+      sleep 2
+    fi
+    attempt_logcat="$RUN_DIR/logcat-workbench-attempt-$attempt.txt"
+    "$ADB" logcat -d -v threadtime -t 4000 > "$attempt_logcat" 2>&1 || true
+    if (( instrumentation_status == 0 )) || instrumentation_log_has_success "$RUN_DIR/07-run-workbench.log"; then
+      break
+    fi
+    if should_retry_interrupted_instrumentation "$instrumentation_status" "$RUN_DIR/07-run-workbench.log" "$attempt_logcat"; then
+      if (( attempt >= WORKBENCH_INSTRUMENTATION_ATTEMPTS )); then
+        instrumentation_retry_exhausted=1
+        break
+      fi
+      printf 'Terminal workbench instrumentation interrupted by adb transport drop on attempt %s; retrying.\n' "$attempt" >&2
+      "$ADB" reconnect >/dev/null 2>&1 || true
+      "$ADB" wait-for-device >/dev/null 2>&1 || true
+      "$ADB" shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true
+      "$ADB" shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+      sleep 2
+      continue
+    fi
+    break
+  done
+}
+
+fail_if_terminal_workbench_retry_exhausted() {
+  if (( instrumentation_retry_exhausted == 1 )); then
+    write_instrumentation_status "not_run"
+    fail "terminal workbench instrumentation interrupted by adb transport drop after $instrumentation_attempt/$WORKBENCH_INSTRUMENTATION_ATTEMPTS attempts; retry budget exhausted"
   fi
-  break
-done
+}
+
+instrumentation_status=0
+instrumentation_attempt=0
+instrumentation_retry_exhausted=0
+run_terminal_workbench_instrumentation
+fail_if_terminal_workbench_retry_exhausted
 rm -rf "$RUN_DIR/artifacts"
 mkdir -p "$RUN_DIR/artifacts"
 pull_status=0
@@ -439,11 +472,7 @@ set +e
 run_logged "08-pull-artifacts" "$ADB" pull "$DEVICE_ARTIFACT_DIR" "$RUN_DIR/artifacts/"
 pull_status=$?
 set -e
-{
-  printf 'instrumentation_exit_code=%s\n' "$instrumentation_status"
-  printf 'artifact_pull_exit_code=%s\n' "$pull_status"
-  printf 'instrumentation_attempts=%s\n' "$attempt"
-} > "$RUN_DIR/instrumentation-status.txt"
+write_instrumentation_status "$pull_status"
 if [[ -d "$ARTIFACT_DIR" ]]; then
   run_logged "09-artifact-file-info" file "$RUN_DIR"/artifacts/terminal-lab/* || true
   {

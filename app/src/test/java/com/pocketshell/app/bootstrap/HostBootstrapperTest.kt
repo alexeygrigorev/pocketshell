@@ -737,7 +737,7 @@ class HostBootstrapperTest {
                         0,
                     )
                     pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
-                    pathAware("uv tool upgrade pocketshell") -> {
+                    pathAware("uv tool install --upgrade pocketshell") -> {
                         upgraded = true
                         ExecResult("upgraded pocketshell\n", "", 0)
                     }
@@ -767,8 +767,8 @@ class HostBootstrapperTest {
         )
 
         assertEquals(InstallResult.Success, result)
-        assertTrue(session.recorded.contains(pathAware("uv tool upgrade pocketshell")))
-        assertTrue(session.recorded.none { it.contains("uv tool install pocketshell") })
+        assertTrue(session.recorded.contains(pathAware("uv tool install --upgrade pocketshell")))
+        assertTrue(session.recorded.none { it.contains("uv tool upgrade pocketshell") })
     }
 
     @Test
@@ -779,7 +779,7 @@ class HostBootstrapperTest {
                     pathAware("command -v 'pocketshell'") -> ExecResult("/home/u/.local/bin/pocketshell\n", "", 0)
                     pathAware("'pocketshell' --version") -> ExecResult("pocketshell, version 0.3.6\n", "", 0)
                     pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
-                    pathAware("uv tool upgrade pocketshell") -> ExecResult("upgraded pocketshell\n", "", 0)
+                    pathAware("uv tool install --upgrade pocketshell") -> ExecResult("upgraded pocketshell\n", "", 0)
                     pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
                     systemdAware("systemctl --user is-active pocketshell-jobs.service") -> ExecResult("active\n", "", 0)
                     systemdAware("systemctl --user is-enabled pocketshell-jobs.service") -> ExecResult("enabled\n", "", 0)
@@ -809,7 +809,7 @@ class HostBootstrapperTest {
         val incomplete = result as InstallResult.SetupIncomplete
         assertEquals(listOf(BootstrapTool.Pocketshell), incomplete.report.versionMismatchedTools)
         assertTrue(incomplete.reason.contains("not app-compatible"))
-        assertTrue(session.recorded.contains(pathAware("uv tool upgrade pocketshell")))
+        assertTrue(session.recorded.contains(pathAware("uv tool install --upgrade pocketshell")))
     }
 
     /**

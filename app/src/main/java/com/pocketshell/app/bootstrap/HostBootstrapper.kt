@@ -234,7 +234,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         val mismatchedTools = currentReport.versionMismatchedTools
         if (mismatchedTools.isNotEmpty()) {
             val installer = currentReport.installer ?: return InstallResult.Error(
-                "PocketShell found pocketshell on the host, but it is not app-compatible. Upgrade it with `uv tool upgrade pocketshell` or `pipx upgrade pocketshell`, then reconnect.",
+                "PocketShell found pocketshell on the host, but it is not app-compatible. Upgrade it with `uv tool install --upgrade pocketshell` or `pipx upgrade pocketshell`, then reconnect.",
             )
             for (tool in mismatchedTools) {
                 val result = upgradeServerTool(session, installer, tool, bootstrapPath)
@@ -604,7 +604,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         bootstrapPath: String?,
     ): InstallResult {
         val command = when (installer) {
-            PythonToolInstaller.Uv -> "uv tool upgrade ${tool.packageName}"
+            PythonToolInstaller.Uv -> "uv tool install --upgrade ${tool.packageName}"
             PythonToolInstaller.Pipx -> "pipx upgrade ${tool.packageName}"
         }
         return runInstall(session, pathAwareCommand(command, bootstrapPath), needsRoot = false)

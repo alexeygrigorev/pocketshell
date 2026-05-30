@@ -468,9 +468,9 @@ private fun installCommand(installer: PythonToolInstaller?, tool: BootstrapTool)
 }
 
 private fun upgradeCommand(installer: PythonToolInstaller?, tool: BootstrapTool): String = when (installer) {
-    PythonToolInstaller.Uv -> "uv tool upgrade ${tool.packageName}"
+    PythonToolInstaller.Uv -> "uv tool install --upgrade ${tool.packageName}"
     PythonToolInstaller.Pipx -> "pipx upgrade ${tool.packageName}"
-    null -> "uv tool upgrade ${tool.packageName} or pipx upgrade ${tool.packageName}"
+    null -> "uv tool install --upgrade ${tool.packageName} or pipx upgrade ${tool.packageName}"
 }
 
 private fun versionMismatchDetail(

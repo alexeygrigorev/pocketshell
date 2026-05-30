@@ -79,8 +79,8 @@ Reusable compose services:
   by `HostBootstrapScenarioSuiteTest#uvInstall`.
 - `bootstrap-uv-upgrade`: builds `pocketshell-test:bootstrap-uv-upgrade`, maps
   host port `2236`, and contains a stale `pocketshell` fixture plus `uv` and
-  `systemctl` shims in `/usr/local/bin`; `uv tool upgrade pocketshell` refreshes
-  the fixture version under `/home/testuser/.local/bin`. Used by
+  `systemctl` shims in `/usr/local/bin`; `uv tool install --upgrade pocketshell`
+  refreshes the fixture version under `/home/testuser/.local/bin`. Used by
   `HostBootstrapScenarioSuiteTest#uvUpgrade`.
 - `bootstrap-unsupported`: builds `pocketshell-test:bootstrap-unsupported`,
   maps host port `2232`, and contains only the shared bootstrap base. No

@@ -25,6 +25,7 @@ TERMINAL_WORKBENCH_LOG_ROOT="$ROOT_DIR/build/terminal-workbench"
 REAL_AGENT_RELEASE_GATE_RUN_ID="$RUN_ID-real-agent-release-gate"
 REAL_AGENT_RELEASE_GATE_LOG_ROOT="$ROOT_DIR/build/real-agent-release-gate"
 REAL_AGENT_RELEASE_GATE_RUN_DIR="$REAL_AGENT_RELEASE_GATE_LOG_ROOT/$REAL_AGENT_RELEASE_GATE_RUN_ID"
+REAL_AGENT_RELEASE_GATE_INSTRUMENTATION_ATTEMPTS="${REAL_AGENT_RELEASE_GATE_INSTRUMENTATION_ATTEMPTS:-2}"
 REAL_AGENT_COMPOSE_FILE="${REAL_AGENT_COMPOSE_FILE:-tests/docker/real-agent/compose.yml}"
 REAL_AGENT_RELEASE_GATE_TEST_CLASS="com.pocketshell.app.proof.RealAgentReleaseGateTest"
 
@@ -170,6 +171,38 @@ publish_validated_apk() {
   record_artifact "tested debug APK" "build/release-emulator-validation/$RUN_ID/app-debug.apk"
 }
 
+real_agent_release_gate_instrumentation_log_has_success() {
+  local log_file="$1"
+  grep -q 'INSTRUMENTATION_CODE: -1' "$log_file" &&
+    grep -q 'OK (' "$log_file"
+}
+
+real_agent_release_gate_instrumentation_log_has_failure_markers() {
+  local log_file="$1"
+  grep -Eq '(^FAILURES!!!$|^FAILURE: |^INSTRUMENTATION_STATUS_CODE: -[0-9]+$|^INSTRUMENTATION_STATUS: stack=|^INSTRUMENTATION_RESULT: shortMsg=Process crashed[.]|^[[:space:]]*at (com[.]pocketshell|androidx[.]test|org[.]junit|kotlin[.]|java[.]|android[.])|^[[:alnum:]_.]*(Exception|Error): |^Process crashed[.])' "$log_file"
+}
+
+real_agent_release_gate_logcat_has_app_or_test_failure_markers() {
+  local logcat_file="$1"
+  grep -Eq 'Process: com[.]pocketshell[.]app|FATAL EXCEPTION.*com[.]pocketshell[.]app|FATAL SIGNAL.*com[.]pocketshell[.]app|AndroidRuntime.*com[.]pocketshell[.]app|(^|[[:space:]])FAILURES!!!($|[[:space:]])|INSTRUMENTATION_STATUS: stack=|INSTRUMENTATION_RESULT: shortMsg=Process crashed' "$logcat_file"
+}
+
+real_agent_release_gate_logcat_has_adb_transport_drop_markers() {
+  local logcat_file="$1"
+  grep -Eq 'adbd[[:space:]].*(connection terminated|offline|read failed)|host-[0-9]+: read failed|UiAutomation service owner died' "$logcat_file"
+}
+
+real_agent_release_gate_should_retry_interrupted_instrumentation() {
+  local status="$1"
+  local instrumentation_log="$2"
+  local logcat_file="$3"
+  [[ "$status" -eq 255 ]] || return 1
+  real_agent_release_gate_instrumentation_log_has_success "$instrumentation_log" && return 1
+  real_agent_release_gate_instrumentation_log_has_failure_markers "$instrumentation_log" && return 1
+  real_agent_release_gate_logcat_has_app_or_test_failure_markers "$logcat_file" && return 1
+  real_agent_release_gate_logcat_has_adb_transport_drop_markers "$logcat_file"
+}
+
 # Run RealAgentReleaseGateTest against the same real-agent Docker fixture the
 # terminal-workbench step exercises. The workbench step covers
 # viewport/visible-text capture; this additional step asserts on real-agent CLI
@@ -182,6 +215,11 @@ run_real_agent_release_gate_instrumentation() {
   local docker_log="$run_dir/docker-real-agents.log"
   local ssh_log="$run_dir/docker-ssh-readiness.log"
   local logcat="$run_dir/logcat.txt"
+  local instrumentation_status=0
+  local attempt=1
+  local attempt_instrumentation_log
+  local attempt_logcat
+  local attempt_docker_log
   mkdir -p "$run_dir"
 
   printf '\n[real-agent release gate instrumentation]\n'
@@ -221,22 +259,60 @@ run_real_agent_release_gate_instrumentation() {
     return 1
   }
 
-  # Clear logcat so the captured slice belongs to this instrumentation only.
-  "$ADB" logcat -c >/dev/null 2>&1 || true
+  for attempt in $(seq 1 "$REAL_AGENT_RELEASE_GATE_INSTRUMENTATION_ATTEMPTS"); do
+    attempt_instrumentation_log="$run_dir/instrumentation-attempt-$attempt.log"
+    attempt_logcat="$run_dir/logcat-attempt-$attempt.txt"
+    attempt_docker_log="$run_dir/docker-real-agents-attempt-$attempt.log"
 
-  set +e
-  "$ADB" shell am instrument -w -r \
-    -e class "$REAL_AGENT_RELEASE_GATE_TEST_CLASS" \
-    -e pocketshellRealAgentReleaseGate 1 \
-    com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner \
-    2>&1 | tee "$instrumentation_log"
-  local instrumentation_status="${PIPESTATUS[0]}"
-  set -e
+    # Clear logcat so each captured slice belongs to one instrumentation attempt.
+    "$ADB" logcat -c >/dev/null 2>&1 || true
 
-  # Capture diagnostics regardless of outcome so reviewers can audit.
-  docker compose -f "$REAL_AGENT_COMPOSE_FILE" logs --no-color --timestamps real-agents \
-    > "$docker_log" 2>&1 || true
-  "$ADB" logcat -d -v threadtime -t 6000 > "$logcat" 2>&1 || true
+    set +e
+    "$ADB" shell am instrument -w -r \
+      -e class "$REAL_AGENT_RELEASE_GATE_TEST_CLASS" \
+      -e pocketshellRealAgentReleaseGate 1 \
+      com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner \
+      2>&1 | tee "$attempt_instrumentation_log"
+    instrumentation_status="${PIPESTATUS[0]}"
+    set -e
+
+    # Capture diagnostics regardless of outcome so reviewers can audit.
+    docker compose -f "$REAL_AGENT_COMPOSE_FILE" logs --no-color --timestamps real-agents \
+      > "$attempt_docker_log" 2>&1 || true
+    "$ADB" logcat -d -v threadtime -t 6000 > "$attempt_logcat" 2>&1 || true
+    cp "$attempt_instrumentation_log" "$instrumentation_log" || true
+    cp "$attempt_docker_log" "$docker_log" || true
+    cp "$attempt_logcat" "$logcat" || true
+
+    if [[ "$instrumentation_status" -eq 0 ]] ||
+      real_agent_release_gate_instrumentation_log_has_success "$attempt_instrumentation_log"; then
+      break
+    fi
+
+    if real_agent_release_gate_should_retry_interrupted_instrumentation \
+      "$instrumentation_status" "$attempt_instrumentation_log" "$attempt_logcat" &&
+      [[ "$attempt" -lt "$REAL_AGENT_RELEASE_GATE_INSTRUMENTATION_ATTEMPTS" ]]; then
+      printf 'RealAgentReleaseGateTest instrumentation interrupted by adb transport drop on attempt %s; retrying.\n' "$attempt" >&2
+      "$ADB" reconnect >/dev/null 2>&1 || true
+      "$ADB" wait-for-device >/dev/null 2>&1 || true
+      "$ADB" shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true
+      "$ADB" shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+      "$ADB" shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
+      "$ADB" shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
+      sleep 2
+      continue
+    fi
+    break
+  done
+
+  {
+    printf 'instrumentation_exit_code=%s\n' "$instrumentation_status"
+    printf 'instrumentation_attempts=%s\n' "$attempt"
+    printf 'instrumentation_max_attempts=%s\n' "$REAL_AGENT_RELEASE_GATE_INSTRUMENTATION_ATTEMPTS"
+    printf 'final_instrumentation_log=%s\n' "$instrumentation_log"
+    printf 'final_logcat=%s\n' "$logcat"
+    printf 'final_docker_log=%s\n' "$docker_log"
+  } > "$run_dir/instrumentation-status.txt"
 
   if [[ "$instrumentation_status" -ne 0 ]]; then
     printf 'FAIL: RealAgentReleaseGateTest instrumentation exited %s\n' "$instrumentation_status" >&2

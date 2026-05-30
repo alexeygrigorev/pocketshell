@@ -667,12 +667,15 @@ class HostListViewModel @Inject constructor(
      * the user taps Skip / Continue on the sheet).
      */
     fun bootstrapHost(host: HostEntity, keyPath: String, passphrase: CharArray? = null) {
-        // Cache: a fresh tmux result skips the bootstrap SSH probe. The
-        // session picker can discover pocketshell/tmux on its own and fall back
-        // cleanly, so blocking every host tap on server-tool checks makes the
-        // phone path pay for setup work before the user has even picked a
-        // session.
-        val skipTmuxProbe = host.tmuxInstalled == true && host.isBootstrapFresh()
+        // Cache: a fresh tmux result skips the bootstrap SSH probe only
+        // when the matching server-setup probe also proved the unified
+        // pocketshell CLI is present and app-compatible. NeedsSetup /
+        // CliUpdateNeeded rows must not route immediately off a fresh
+        // tmux-only cache; they need a chance to re-run checkServerSetup
+        // so README-installed CLIs can be upgraded.
+        val skipTmuxProbe = host.tmuxInstalled == true &&
+            host.isBootstrapFresh() &&
+            host.hasFreshCompatiblePocketshellResult()
 
         // Probe (re-probe if stale or unknown). For a previously-missing
         // host we still want to re-check because the user may have fixed
@@ -1153,6 +1156,13 @@ class HostListViewModel @Inject constructor(
     private fun HostEntity.isBootstrapFresh(now: Long = System.currentTimeMillis()): Boolean {
         val last = lastBootstrapAt ?: return false
         return now - last < BOOTSTRAP_CACHE_MS
+    }
+
+    private fun HostEntity.hasFreshCompatiblePocketshellResult(now: Long = System.currentTimeMillis()): Boolean {
+        val last = pocketshellLastDetectedAt ?: return false
+        return pocketshellInstalled == true &&
+            pocketshellVersionCompatible == true &&
+            now - last < BOOTSTRAP_CACHE_MS
     }
 }
 

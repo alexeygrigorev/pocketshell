@@ -319,10 +319,11 @@ class HostListViewModelTest {
     }
 
     /**
-     * Issue #49: when the host's bootstrap row says tmux is installed
-     * and the last probe is fresh (within 24h), the ViewModel must not
-     * open a new SSH session — it flips `pendingNavigation.ready` to
-     * `true` immediately so the screen can route to the session.
+     * Issue #49 + #315: when the host's bootstrap row says tmux is
+     * installed and the last matching server-setup probe is fresh and
+     * app-compatible, the ViewModel must not open a new SSH session — it
+     * flips `pendingNavigation.ready` to `true` immediately so the screen
+     * can route to the session.
      *
      * The fake bootstrapper never gets called because we never connect;
      * the test asserts the pending-navigation tuple, which is the
@@ -339,6 +340,11 @@ class HostListViewModelTest {
                 username = "u",
                 keyId = keyId,
                 tmuxInstalled = true,
+                pocketshellInstalled = true,
+                pocketshellLastDetectedAt = now - 60_000L,
+                pocketshellCliVersion = "0.2.0",
+                pocketshellExpectedCliVersion = "0.2.0",
+                pocketshellVersionCompatible = true,
                 lastBootstrapAt = now - 60_000L, // 1 minute ago
             ),
         )
@@ -362,6 +368,60 @@ class HostListViewModelTest {
         // Cache-hit fast path → ready=true immediately.
         assertEquals(true, pending.ready)
         // Sheet stays hidden.
+        assertNull(viewModel.bootstrapState.value)
+    }
+
+    /**
+     * Issue #315 follow-up: a fresh tmux cache is not enough to skip the
+     * server-setup probe. If the last pocketshell result was
+     * NeedsSetup, tapping the host must go through the async probe path
+     * instead of immediately routing to the session off the tmux-only
+     * cache.
+     */
+    @Test
+    fun bootstrapHost_reprobes_whenFreshTmuxCacheHasMissingPocketshell() = runTest {
+        val keyFile = File.createTempFile("pocketshell-hostlist", ".key").apply {
+            writeText("not a real key")
+            deleteOnExit()
+        }
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = keyFile.absolutePath))
+        val now = System.currentTimeMillis()
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "needs-setup",
+                hostname = "127.0.0.1",
+                port = 1, // closed port; connect happens after the synchronous probe decision.
+                username = "u",
+                keyId = keyId,
+                tmuxInstalled = true,
+                lastBootstrapAt = now - 60_000L,
+                pocketshellInstalled = false,
+                pocketshellLastDetectedAt = now - 60_000L,
+                pocketshellVersionCompatible = null,
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = HostListViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
+            settingsRepository = newSettingsRepository(),
+        )
+
+        viewModel.bootstrapHost(host, keyPath = keyFile.absolutePath)
+
+        val pending = viewModel.pendingNavigation.value
+        assertNotNull(pending)
+        assertEquals(hostId, pending!!.host.id)
+        assertEquals(
+            "fresh tmux cache with missing pocketshell must not route immediately",
+            false,
+            pending.ready,
+        )
         assertNull(viewModel.bootstrapState.value)
     }
 

@@ -171,7 +171,9 @@ open class UsageViewModel @Inject constructor(
         inFlight?.cancel()
         inFlight = viewModelScope.launch {
             _state.value = _state.value.copy(isRefreshing = true)
-            val hosts = hostDao.getAll().first()
+            val hosts = hostDao.getAll()
+                .first()
+                .filter { it.pocketshellVersionCompatible != false }
             val snapshots = mutableListOf<UsageHostSnapshot>()
             val missing = mutableListOf<UsageMissingToolHost>()
             val schedulerUpdates = mutableMapOf<Long, UsageSnapshot>()

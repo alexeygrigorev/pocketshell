@@ -152,6 +152,55 @@ class UsageViewModelTest {
     }
 
     @Test
+    fun refresh_skipsHostsWithIncompatiblePocketshellCli() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
+        )
+        val compatibleId = db.hostDao().insert(
+            HostEntity(
+                name = "compatible",
+                hostname = "ok.example",
+                username = "u",
+                keyId = keyId,
+                pocketshellInstalled = true,
+                pocketshellVersionCompatible = true,
+            ),
+        )
+        db.hostDao().insert(
+            HostEntity(
+                name = "mismatch",
+                hostname = "mismatch.example",
+                username = "u",
+                keyId = keyId,
+                pocketshellInstalled = true,
+                pocketshellCliVersion = "0.3.6",
+                pocketshellExpectedCliVersion = "0.3.7",
+                pocketshellVersionCompatible = false,
+            ),
+        )
+        val parser = PocketshellUsageJsonParser()
+        val records = parser.parse(
+            """{"provider":"codex","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+        )
+        val fetcher = FakeFetcher(
+            scripts = mapOf(
+                "ok.example" to HostUsageFetch.Records(records, Instant.now()),
+                "mismatch.example" to HostUsageFetch.ToolMissing,
+            ),
+        )
+
+        val viewModel = UsageViewModel(db.hostDao(), fetcher)
+        advanceUntilIdle()
+
+        assertEquals(listOf("ok.example"), fetcher.fetchedHostnames)
+        val state = viewModel.state.value
+        assertEquals(1, state.hosts.size)
+        assertEquals(compatibleId, state.hosts.single().hostId)
+        assertTrue(state.missingToolHosts.isEmpty())
+        assertFalse(state.isRefreshing)
+    }
+
+    @Test
     fun emptyHostList_yieldsEmptyState() = runTest {
         val fetcher = FakeFetcher(scripts = emptyMap())
         val viewModel = UsageViewModel(db.hostDao(), fetcher)
@@ -169,9 +218,11 @@ class UsageViewModelTest {
     ) : HostUsageFetcher {
         var callCount: Int = 0
             private set
+        val fetchedHostnames: MutableList<String> = mutableListOf()
 
         override suspend fun fetch(host: HostEntity): HostUsageFetch {
             callCount += 1
+            fetchedHostnames += host.hostname
             return scripts[host.hostname] ?: HostUsageFetch.Skipped
         }
     }

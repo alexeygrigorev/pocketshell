@@ -122,6 +122,10 @@ private fun ConversationEvent.Message.isOptimistic(): Boolean =
  */
 internal const val DEFAULT_MAX_AGENT_EVENTS: Int = 500
 
+private const val PROCESS_TREE_SCAN_COMMAND: String =
+    "ps -eo pid,ppid,tty,comm,args 2>/dev/null | " +
+        "grep -E 'claude|codex|opencode|node' | grep -v grep || true"
+
 internal class AgentConversationRepository(
     private val detector: AgentDetector = AgentDetector(),
     private val tailScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
@@ -180,9 +184,10 @@ internal class AgentConversationRepository(
      * the JSONL file is shared across the same cwd. This entry point
      * fixes that by:
      *
-     *  1. Restricting the process scan to processes whose controlling
-     *     terminal is [paneTty] (e.g. `/dev/pts/3`). `ps -t <tty>` is
-     *     the standard POSIX selector for "processes on this TTY".
+     *  1. Restricting the process scan to the process subtree rooted at
+     *     rows whose controlling terminal is [paneTty] (e.g.
+     *     `/dev/pts/3`). This includes agent children whose own TTY is
+     *     `?`, as long as their parent belongs to this pane.
      *  2. Including the pane's foreground process name ([paneCommand],
      *     i.e. `#{pane_current_command}` from `list-panes`) so callers
      *     that have already paid for a `list-panes` query don't need a
@@ -202,7 +207,7 @@ internal class AgentConversationRepository(
      *   construction not a candidate for agent attribution.
      * @param paneCommand value of `#{pane_current_command}` from tmux,
      *   forwarded as an additional process-name hint. Most Node-based
-     *   CLIs report as `node` here, so the TTY-scoped `ps` is the
+     *   CLIs report as `node` here, so the process-tree scan is the
      *   primary signal; the pane command is best-effort.
      */
     suspend fun detectForPane(
@@ -220,22 +225,24 @@ internal class AgentConversationRepository(
             .mapNotNull(::parseCandidate)
             .toList()
         // Per-pane process list. We strip any leading `/dev/` from the
-        // tty because `ps -t` accepts both `pts/3` and `/dev/pts/3` on
-        // GNU/BSD `ps`, but the unprefixed form is portable across
-        // every `ps` variant. Tmux usually reports the full path; we
-        // normalise here to keep the contract loose for callers.
+        // tty because `ps` reports the controlling TTY as `pts/3`.
+        // Tmux usually reports the full path; we normalise here to keep
+        // the contract loose for callers. The scan is host-wide so we
+        // can preserve child rows whose TTY is `?` but whose parent is a
+        // pane-owned Node wrapper.
         val ttyArg = normalizedTty.removePrefix("/dev/")
-        val paneProcesses = session.exec(
-            "ps -t ${shellQuote(ttyArg)} -o pid,comm,args 2>/dev/null || true",
+        val processSnapshot = session.exec(
+            PROCESS_TREE_SCAN_COMMAND,
         )
             .stdout
             .lines()
             // Drop blank trailing rows and the ps header row.
             .filter { it.isNotBlank() && !it.trimStart().startsWith("PID") }
+        val paneProcesses = processLinesForPane(processSnapshot, ttyArg)
         // The pane's foreground process name is a cheap signal we
         // already have from `list-panes` — merge it in so callers that
         // wrap a JS-based agent in a shell wrapper still register
-        // (the `comm` column on `ps -t` reports `node` for Claude /
+        // (the `comm` column on `ps` reports `node` for Claude /
         // Codex / OpenCode in their Node form, but `args` carries the
         // wrapper command name, which `namesAgent` already greps for).
         val processLines = if (paneCommand.isBlank()) {
@@ -330,12 +337,14 @@ internal class AgentConversationRepository(
             .mapNotNull(::parseCandidate)
             .toList()
 
-        // Round-trip 2: one host-wide process scan. The `tty` column lets
-        // us slice per pane in-memory rather than paying a `ps -t` round
-        // trip per session.
+        // Round-trip 2: one host-wide process scan. The `pid` / `ppid`
+        // / `tty` columns let us slice per pane in-memory rather than
+        // paying a `ps -t` round trip per session. Keep `node` rows so
+        // wrapper launches can seed the pane-owned process subtree even
+        // when the real agent child reports TTY `?`; AgentDetector still
+        // requires an agent command token from the merged subtree.
         val processLines = session.exec(
-            "ps -eo pid,tty,comm,args 2>/dev/null | " +
-                "grep -E 'claude|codex|opencode' | grep -v grep || true",
+            PROCESS_TREE_SCAN_COMMAND,
         )
             .stdout
             .lines()
@@ -351,16 +360,12 @@ internal class AgentConversationRepository(
             val paneCandidates = candidates.filter { it.cwd == pane.cwd }
             if (paneCandidates.isEmpty()) continue
 
-            // Slice the host-wide ps output to THIS pane's TTY. The `ps
-            // -eo pid,tty,comm,args` layout puts the controlling terminal
-            // in the second whitespace token (e.g. `pts/3`); a process
-            // with no controlling terminal reports `?`. Matching the
-            // unprefixed tty arg (e.g. `pts/3`) reproduces the `ps -t`
-            // selection detectForPane uses.
-            val ttyFiltered = processLines.filter { line ->
-                val tokens = line.trim().split(Regex("\\s+"), limit = 3)
-                tokens.size >= 2 && tokens[1] == pane.ttyArg
-            }
+            // Slice the host-wide ps output to THIS pane's process
+            // subtree. Exact TTY rows seed the subtree; descendants stay
+            // included even if their own TTY is `?`, which covers Node
+            // wrappers that own the pane while the native agent child is
+            // detached from the controlling terminal.
+            val ttyFiltered = processLinesForPane(processLines, pane.ttyArg)
             val merged = if (pane.paneCommand.isBlank()) {
                 ttyFiltered
             } else {
@@ -387,6 +392,57 @@ internal class AgentConversationRepository(
         val ttyArg: String,
         val paneCommand: String,
     )
+
+    private data class ProcessRow(
+        val pid: Long,
+        val ppid: Long,
+        val tty: String,
+        val raw: String,
+    )
+
+    private fun processLinesForPane(lines: List<String>, ttyArg: String): List<String> {
+        val rows = lines.mapNotNull(::parseProcessRow)
+        if (rows.isEmpty()) {
+            return lines.filter { line ->
+                val tokens = line.trim().split(Regex("\\s+"), limit = 3)
+                tokens.size >= 2 && tokens[1] == ttyArg
+            }
+        }
+
+        val includedPids = rows
+            .asSequence()
+            .filter { it.tty == ttyArg }
+            .mapTo(mutableSetOf()) { it.pid }
+        if (includedPids.isEmpty()) return emptyList()
+
+        var changed: Boolean
+        do {
+            changed = false
+            for (row in rows) {
+                if (row.pid !in includedPids && row.ppid in includedPids) {
+                    includedPids += row.pid
+                    changed = true
+                }
+            }
+        } while (changed)
+
+        return rows
+            .filter { it.pid in includedPids }
+            .map { it.raw }
+    }
+
+    private fun parseProcessRow(line: String): ProcessRow? {
+        val tokens = line.trim().split(Regex("\\s+"), limit = 5)
+        if (tokens.size < 4) return null
+        val pid = tokens[0].toLongOrNull() ?: return null
+        val ppid = tokens[1].toLongOrNull() ?: return null
+        return ProcessRow(
+            pid = pid,
+            ppid = ppid,
+            tty = tokens[2],
+            raw = line,
+        )
+    }
 
     /**
      * Concatenate the per-cwd [detectionCommand] into one script, each cwd

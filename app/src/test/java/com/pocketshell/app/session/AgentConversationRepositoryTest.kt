@@ -339,9 +339,8 @@ class AgentConversationRepositoryTest {
                 claude|${nowSeconds}|/workspace/pocketshell|/home/testuser/.claude/projects/-workspace-pocketshell/pocketshell-claude.jsonl
                 opencode|${nowSeconds - 60}|/workspace/pocketshell|/home/testuser/.local/share/opencode/opencode.db#opencode-1
             """.trimIndent(),
-            paneProcessOutput = """
-                  PID COMMAND         COMMAND
-                 4242 node            node /usr/local/bin/opencode --fixture /home/testuser/.claude/projects/-workspace-pocketshell/pocketshell-claude.jsonl
+            hostWideProcessOutput = """
+                4242 4000 pts/3 node node /usr/local/bin/opencode --fixture /home/testuser/.claude/projects/-workspace-pocketshell/pocketshell-claude.jsonl
             """.trimIndent(),
         )
 
@@ -354,7 +353,7 @@ class AgentConversationRepositoryTest {
 
         assertEquals(AgentKind.OpenCode, detection?.agent)
         assertEquals("opencode-1", detection?.sessionId)
-        assertTrue(session.execCommands.any { it.contains("ps -t 'pts/3'") })
+        assertTrue(session.execCommands.any { it.contains("ps -eo pid,ppid,tty,comm,args") })
     }
 
     // ----------------------------------------------------------------
@@ -374,7 +373,7 @@ class AgentConversationRepositoryTest {
                 claude|$nowSeconds|/workspace/claude|/home/testuser/.claude/projects/-workspace-claude/c.jsonl
                 codex|$nowSeconds|/workspace/codex|/home/testuser/.codex/sessions/2026/05/28/rollout-x.jsonl
             """.trimIndent(),
-            // One host-wide `ps -eo pid,tty,comm,args` snapshot. The
+            // One host-wide `ps -eo pid,ppid,tty,comm,args` snapshot. The
             // claude process is on pts/1, the codex process on pts/2.
             // The plain shells (pts/3, pts/4, pts/5) carry no agent rows.
             hostWideProcessOutput = """
@@ -411,9 +410,74 @@ class AgentConversationRepositoryTest {
             session.execCommands.size,
         )
         assertEquals(1, session.execCommands.count { it.contains("claude_dir=") })
-        assertEquals(1, session.execCommands.count { it.contains("ps -eo pid,tty,comm,args") })
+        assertEquals(1, session.execCommands.count { it.contains("ps -eo pid,ppid,tty,comm,args") })
         // It must NOT fall back to the per-pane `ps -t` round-trip.
         assertFalse(session.execCommands.any { it.contains("ps -t ") })
+    }
+
+    @Test
+    fun detectForPanesClassifiesCodexWhenNodeWrapperOwnsPaneAndAgentChildHasNoTty() = runTest {
+        val nowSeconds = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                codex|$nowSeconds|/home/alexey/git/pocketshell|/home/alexey/.codex/sessions/2026/05/30/rollout-abc.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = """
+                3145219 1781663 pts/84 MainThread node /tmp/npm-wrapper.js --agent-session rollout-abc
+                3145228 3145219 ? codex /home/alexey/.nvm/versions/node/v24.13.1/lib/node_modules/@openai/codex-linux-x64/bin/codex --dangerously-bypass-approvals-and-sandbox
+            """.trimIndent(),
+        )
+
+        val detections = AgentConversationRepository().detectForPanes(
+            session,
+            listOf(
+                AgentConversationRepository.PaneProbe(
+                    key = "git-pocketshell-c",
+                    cwd = "/home/alexey/git/pocketshell",
+                    paneTty = "/dev/pts/84",
+                    paneCommand = "node",
+                ),
+            ),
+        )
+
+        assertEquals(AgentKind.Codex, detections["git-pocketshell-c"]?.agent)
+        assertTrue(
+            "host-wide scan must keep node wrapper rows so the pane-owned " +
+                "parent can pull in an agent child whose own TTY is `?`; got ${session.execCommands}",
+            session.execCommands.any { it.contains("claude|codex|opencode|node") },
+        )
+    }
+
+    @Test
+    fun detectForPanesDoesNotClassifyPlainNodeDevServerAsCodex() = runTest {
+        val nowSeconds = System.currentTimeMillis() / 1000
+        val session = FakeSshSession(
+            detectionOutput = """
+                codex|$nowSeconds|/workspace/app|/home/testuser/.codex/sessions/2026/05/30/rollout-abc.jsonl
+            """.trimIndent(),
+            hostWideProcessOutput = """
+                4200 1 pts/9 node node /workspace/app/server.js
+                4201 4200 ? node /usr/bin/node /workspace/app/worker.js
+            """.trimIndent(),
+        )
+
+        val detections = AgentConversationRepository().detectForPanes(
+            session,
+            listOf(
+                AgentConversationRepository.PaneProbe(
+                    key = "plain-node",
+                    cwd = "/workspace/app",
+                    paneTty = "/dev/pts/9",
+                    paneCommand = "node",
+                ),
+            ),
+        )
+
+        assertFalse(
+            "plain node rows must not classify unless the process args name " +
+                "an agent command token",
+            detections.containsKey("plain-node"),
+        )
     }
 
     @Test
@@ -654,6 +718,7 @@ class AgentConversationRepositoryTest {
             execCommands += command
             val stdout = when {
                 command.contains("claude_dir=") -> detectionOutput
+                command.contains("ps -eo pid,ppid,tty,comm,args") -> hostWideProcessOutput
                 command.contains("ps -eo pid,tty,comm,args") -> hostWideProcessOutput
                 command.contains("ps -t ") -> paneProcessOutput
                 command.contains("stat -c '%Y' ") -> statOutputs.removeFirstOrNull() ?: statOutputs.lastOrNull() ?: "0\n"

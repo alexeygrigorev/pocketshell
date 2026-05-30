@@ -90,6 +90,48 @@ class ControlEventStreamTest {
     }
 
     @Test
+    fun `response block can span DCS wrapped begin and terminator suffixed end`() = runTest {
+        val payload = mutableListOf<Pair<Long, String>>()
+        val stream = ControlEventStream(
+            onResponsePayload = { number, line -> payload += number to line },
+        )
+
+        val lines = listOf(
+            "\u001bP1000p%begin 1 7 0",
+            "%0::@0::/tmp::bash::1",
+            "%end 1 7 0\u001b\\",
+        )
+
+        val events = stream.events(lines.asFlow()).toList()
+
+        assertEquals(2, events.size)
+        assertTrue(events[0] is ControlEvent.Begin)
+        assertTrue(events[1] is ControlEvent.End)
+        assertEquals(listOf(7L to "%0::@0::/tmp::bash::1"), payload)
+    }
+
+    @Test
+    fun `response payload line is normalized when DCS wrapped`() = runTest {
+        val payload = mutableListOf<Pair<Long, String>>()
+        val stream = ControlEventStream(
+            onResponsePayload = { number, line -> payload += number to line },
+        )
+
+        val lines = listOf(
+            "\u001bP1000p%begin 1 7 0",
+            "\u001bP1000p%0|PS|@0|PS|\$0|PS|work\u001b\\",
+            "%end 1 7 0\u001b\\",
+        )
+
+        val events = stream.events(lines.asFlow()).toList()
+
+        assertEquals(2, events.size)
+        assertTrue(events[0] is ControlEvent.Begin)
+        assertTrue(events[1] is ControlEvent.End)
+        assertEquals(listOf(7L to "%0|PS|@0|PS|\$0|PS|work"), payload)
+    }
+
+    @Test
     fun `error closes a response block just like end`() = runTest {
         val payload = mutableListOf<String>()
         val stream = ControlEventStream(

@@ -150,6 +150,21 @@ class ControlModeParserTest {
     }
 
     @Test
+    fun `parses begin event wrapped in terminal DCS passthrough`() {
+        val event = parser.parse("\u001bP1000p%begin 1234567890 1 0") as ControlEvent.Begin
+        assertEquals(1234567890L, event.time)
+        assertEquals(1L, event.number)
+        assertEquals(0, event.flags)
+    }
+
+    @Test
+    fun `parses output event wrapped in terminal DCS passthrough`() {
+        val event = parser.parse("\u001bP1000p%output %0 hello\u001b\\") as ControlEvent.Output
+        assertEquals("%0", event.paneId)
+        assertArrayEquals("hello".toByteArray(Charsets.US_ASCII), event.data)
+    }
+
+    @Test
     fun `parses end event`() {
         val event = parser.parse("%end 1234567890 1 0") as ControlEvent.End
         assertEquals(1234567890L, event.time)

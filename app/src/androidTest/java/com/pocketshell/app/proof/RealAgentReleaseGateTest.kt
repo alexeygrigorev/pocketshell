@@ -7,7 +7,6 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
-import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -18,6 +17,9 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.projects.folderDetailRowTestTag
+import com.pocketshell.app.projects.folderHeaderClickTestTag
+import com.pocketshell.app.projects.folderRowTestTag
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
@@ -117,7 +119,12 @@ class RealAgentReleaseGateTest {
         prepareEnvironment(key, workDir, sessionName)
         try {
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-            openHostPickerAndAttachTmux(hostRowTag, "Real Claude Release Gate $marker", sessionName)
+            openHostPickerAndAttachTmux(
+                hostRowTag,
+                "Real Claude Release Gate $marker",
+                workDir,
+                sessionName,
+            )
 
             // Drive the real Claude CLI in non-interactive `--print`
             // mode so we get a deterministic single-shot run. The CLI
@@ -164,7 +171,12 @@ class RealAgentReleaseGateTest {
         prepareEnvironment(key, workDir, sessionName)
         try {
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-            openHostPickerAndAttachTmux(hostRowTag, "Real Codex Release Gate $marker", sessionName)
+            openHostPickerAndAttachTmux(
+                hostRowTag,
+                "Real Codex Release Gate $marker",
+                workDir,
+                sessionName,
+            )
 
             // Drive Codex CLI's non-interactive `exec` subcommand with
             // `--skip-git-repo-check` so the freshly created tmp working
@@ -228,6 +240,9 @@ class RealAgentReleaseGateTest {
                 name = "real-agent-release-gate-${System.currentTimeMillis()}",
                 content = key,
             )
+            val appVersion = appContext.packageManager
+                .getPackageInfo(appContext.packageName, 0)
+                .versionName ?: error("target app versionName is missing")
             val hostId = db.hostDao().insert(
                 HostEntity(
                     name = hostName,
@@ -237,6 +252,11 @@ class RealAgentReleaseGateTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    pocketshellInstalled = true,
+                    pocketshellLastDetectedAt = System.currentTimeMillis(),
+                    pocketshellCliVersion = appVersion,
+                    pocketshellExpectedCliVersion = appVersion,
+                    pocketshellVersionCompatible = true,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId
@@ -277,6 +297,7 @@ class RealAgentReleaseGateTest {
     private fun openHostPickerAndAttachTmux(
         hostRowTag: String,
         hostName: String,
+        workDir: String,
         sessionName: String,
     ) {
         compose.waitUntil(timeoutMillis = 10_000) {
@@ -286,23 +307,33 @@ class RealAgentReleaseGateTest {
         }
         compose.onNodeWithText(hostName, useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        // Wait for the folder list (issue #171) to render its "Folders"
-        // header before looking for our session name — the SSH probe and
-        // initial list query can take 5-15s on the heavier real-agent
-        // image even when the bootstrap check is cached. The session
-        // is rendered inline under its folder so the next assertion can
-        // grab it directly by text.
         compose.waitUntil(timeoutMillis = 30_000) {
-            compose.onAllNodesWithText("Folders", useUnmergedTree = true)
+            compose.onAllNodesWithTag(folderRowTestTag(workDir), useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
+        if (compose.onAllNodesWithTag(
+                folderDetailRowTestTag(workDir, sessionName),
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isEmpty()
+        ) {
+            compose.onNodeWithTag(
+                folderHeaderClickTestTag(workDir),
+                useUnmergedTree = true,
+            ).performClick()
+        }
         compose.waitUntil(timeoutMillis = 30_000) {
-            compose.onAllNodesWithText(sessionName, useUnmergedTree = true)
+            compose.onAllNodesWithTag(
+                folderDetailRowTestTag(workDir, sessionName),
+                useUnmergedTree = true,
+            )
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        compose.onNodeWithText(sessionName).performClick()
+        compose.onNodeWithTag(
+            folderDetailRowTestTag(workDir, sessionName),
+            useUnmergedTree = true,
+        ).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
         // Give the tmux pane a moment to render its initial prompt
@@ -576,7 +607,7 @@ class RealAgentReleaseGateTest {
     }
 
     private fun waitForTerminalViewAttached() {
-        compose.waitUntil(timeoutMillis = 20_000) {
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
             var attached = false
             launchedActivity?.onActivity { activity ->
                 val view = activity.window.decorView.findTerminalView()

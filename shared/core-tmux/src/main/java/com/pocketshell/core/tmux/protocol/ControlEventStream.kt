@@ -48,7 +48,8 @@ public class ControlEventStream(
         // so we can forward payload lines correctly.
         var openBlock: Long? = null
 
-        lines.collect { line ->
+        lines.collect { rawLine ->
+            val line = normalizeControlLine(rawLine)
             if (openBlock != null) {
                 // Inside a response block. The block ends only at `%end` or
                 // `%error` with the matching command-number; until then,

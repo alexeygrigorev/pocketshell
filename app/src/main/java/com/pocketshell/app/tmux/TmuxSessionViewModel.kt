@@ -863,11 +863,18 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
         attempt: Int,
         trigger: TmuxConnectTrigger,
+        allowWarmSshReuse: Boolean = true,
     ) {
         val startedAtMs = SystemClock.elapsedRealtime()
+        var reusedWarmSsh = false
         try {
-            val warmSession = warmSshConnections.take(target.toWarmSshTarget())
+            val warmSession = if (allowWarmSshReuse) {
+                warmSshConnections.take(target.toWarmSshTarget())
+            } else {
+                null
+            }
             val session = if (warmSession != null && warmSession.isConnected) {
+                reusedWarmSsh = true
                 StartupTiming.mark(
                     "tmux-warm-ssh-reused",
                     "attempt" to attempt,
@@ -1024,6 +1031,39 @@ public class TmuxSessionViewModel @Inject constructor(
             maybeRefreshControlClientSize()
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
+            if (reusedWarmSsh && t is TmuxAttachPanesReadyException) {
+                StartupTiming.mark(
+                    "tmux-warm-ssh-retry-cold",
+                    "attempt" to attempt,
+                    "hostId" to target.hostId,
+                    "host" to target.host,
+                    "port" to target.port,
+                    "session" to target.sessionName,
+                    "trigger" to trigger.logValue,
+                )
+                Log.w(
+                    ISSUE_145_RECONNECT_TAG,
+                    attachMilestoneMessage(
+                        attempt = attempt,
+                        target = target,
+                        startedAtMs = startedAtMs,
+                        event = "tmux-warm-ssh-retry-cold",
+                        trigger = trigger,
+                        detail = "cause=${t.javaClass.simpleName}: ${t.message}",
+                    ),
+                    t,
+                )
+                withContext(NonCancellable) {
+                    closeCurrentConnectionAndJoin(preserveConnectingTarget = target)
+                }
+                runConnect(
+                    target = target,
+                    attempt = attempt,
+                    trigger = trigger,
+                    allowWarmSshReuse = false,
+                )
+                return
+            }
             failConnectAttempt(
                 target = target,
                 attempt = attempt,
@@ -1727,7 +1767,23 @@ public class TmuxSessionViewModel @Inject constructor(
         append("-F ")
         // Issue #186: append `#{pane_tty}` so per-pane agent detection
         // can scope its process scan to the pane's TTY.
-        append("'#{pane_id}\t#{window_id}\t#{session_id}\t#{session_name}\t#{pane_title}\t#{pane_index}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_tty}'")
+        append("'#{pane_id}")
+        append(LIST_PANES_FIELD_SEPARATOR)
+        append("#{window_id}")
+        append(LIST_PANES_FIELD_SEPARATOR)
+        append("#{session_id}")
+        append(LIST_PANES_FIELD_SEPARATOR)
+        append("#{session_name}")
+        append(LIST_PANES_FIELD_SEPARATOR)
+        append("#{pane_title}")
+        append(LIST_PANES_FIELD_SEPARATOR)
+        append("#{pane_index}")
+        append(LIST_PANES_FIELD_SEPARATOR)
+        append("#{pane_current_path}")
+        append(LIST_PANES_FIELD_SEPARATOR)
+        append("#{pane_current_command}")
+        append(LIST_PANES_FIELD_SEPARATOR)
+        append("#{pane_tty}'")
     }
 
     /**
@@ -3117,7 +3173,11 @@ public class TmuxSessionViewModel @Inject constructor(
      * than the format string requested.
      */
     private fun parsePaneRow(line: String): ParsedPane? {
-        val parts = line.split('\t')
+        val parts = if (LIST_PANES_FIELD_SEPARATOR in line) {
+            line.split(LIST_PANES_FIELD_SEPARATOR)
+        } else {
+            line.split('\t')
+        }
         if (parts.size < 5) return null
         val paneId = parts[0].takeIf { it.startsWith("%") } ?: return null
         val windowId = parts[1].takeIf { it.startsWith("@") } ?: return null
@@ -3582,8 +3642,9 @@ internal const val CtrlDByte: Int = 0x04
  * teardown pause rather than an apparent app freeze.
  */
 internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
-internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 12_000L
+internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 30_000L
 internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
+internal const val LIST_PANES_FIELD_SEPARATOR: String = "|PS|"
 
 /**
  * Issue #145: logcat tag used by the disconnect observer + connect-attempt

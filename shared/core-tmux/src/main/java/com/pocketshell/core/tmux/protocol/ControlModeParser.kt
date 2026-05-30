@@ -29,10 +29,11 @@ public class ControlModeParser {
      * payload line inside a `%begin` block, blank line, etc.).
      */
     public fun parse(line: String): ControlEvent? {
+        val controlLine = normalizeControlLine(line)
         // Cheap reject: anything not starting with `%` is not an event.
         // Inside a response block these lines are command output; outside,
         // they're a protocol violation we just skip.
-        if (line.isEmpty() || line[0] != '%') {
+        if (controlLine.isEmpty() || controlLine[0] != '%') {
             return null
         }
 
@@ -40,16 +41,16 @@ public class ControlModeParser {
         // payload contains arbitrary bytes that need escape-decoding. We
         // special-case it before the generic split-on-space dispatch so we
         // don't accidentally lose embedded spaces inside the data.
-        if (line.startsWith(OUTPUT_PREFIX)) {
-            return parseOutput(line)
+        if (controlLine.startsWith(OUTPUT_PREFIX)) {
+            return parseOutput(controlLine)
         }
 
         // Split into opcode + args. `limit = 2` keeps the args string intact
         // (no further splitting until each event's own parser decides how
         // many fields it wants).
-        val space = line.indexOf(' ')
-        val opcode = if (space < 0) line else line.substring(0, space)
-        val args = if (space < 0) "" else line.substring(space + 1)
+        val space = controlLine.indexOf(' ')
+        val opcode = if (space < 0) controlLine else controlLine.substring(0, space)
+        val args = if (space < 0) "" else controlLine.substring(space + 1)
 
         return when (opcode) {
             "%session-changed" -> parseSessionChanged(args)
@@ -65,7 +66,7 @@ public class ControlModeParser {
             "%client-detached" -> ControlEvent.ClientDetached
             "%exit" -> ControlEvent.Exit(args.ifEmpty { null })
             else -> {
-                LOG.log(Level.FINE, "Unknown control-mode event: {0}", line)
+                LOG.log(Level.FINE, "Unknown control-mode event: {0}", controlLine)
                 null
             }
         }
@@ -183,6 +184,20 @@ public class ControlModeParser {
         private val LOG: Logger = Logger.getLogger(ControlModeParser::class.java.name)
     }
 }
+
+internal fun normalizeControlLine(line: String): String {
+    if (line.isEmpty()) return line
+    val withoutPrefix = if (line.startsWith(DCS_PREFIX)) {
+        val eventStart = line.indexOf('%', startIndex = DCS_PREFIX.length)
+        if (eventStart < 0) line else line.substring(eventStart)
+    } else {
+        line
+    }
+    return withoutPrefix.removeSuffix(DCS_TERMINATOR)
+}
+
+private const val DCS_PREFIX = "\u001bP"
+private const val DCS_TERMINATOR = "\u001b\\"
 
 /**
  * Decode the escape sequences tmux uses inside `%output` data.

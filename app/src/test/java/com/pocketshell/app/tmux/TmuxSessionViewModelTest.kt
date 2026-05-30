@@ -511,6 +511,7 @@ class TmuxSessionViewModelTest {
         // the prior window's panes with just the new pane and the
         // WindowStrip would never see two entries.
         assertTrue(command.startsWith("list-panes -s -t 'work' -F "))
+        assertTrue(command.contains(LIST_PANES_FIELD_SEPARATOR))
         assertFalse(command.contains(" -a "))
 
         val panes = vm.panes.value
@@ -1767,6 +1768,51 @@ class TmuxSessionViewModelTest {
         )
 
         assertEquals(AgentKind.ClaudeCode, vm.agentForWindow("@0"))
+    }
+
+    @Test
+    fun listPanesParserAcceptsPrintableFieldSeparator() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf(
+                    listOf(
+                        "%0",
+                        "@0",
+                        "\$0",
+                        "work",
+                        "shell",
+                        "0",
+                        "/workspace",
+                        "bash",
+                        "/dev/pts/3",
+                    ).joinToString(LIST_PANES_FIELD_SEPARATOR),
+                ),
+                isError = false,
+            ),
+        )
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        client.emittedEvents.emit(
+            ControlEvent.WindowAdd(sessionId = "\$0", windowId = "@0", name = ""),
+        )
+        advanceUntilIdle()
+
+        val pane = vm.panes.value.single()
+        assertEquals("%0", pane.paneId)
+        assertEquals("/workspace", pane.cwd)
+        assertEquals("bash", pane.currentCommand)
+        assertEquals("/dev/pts/3", pane.paneTty)
     }
 
     @Test

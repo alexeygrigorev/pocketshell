@@ -585,8 +585,11 @@ install_or_fallback_uninstall() {
 '$PYTHON3' - "\$stale_db_host" <<'PY'
 import sqlite3
 import sys
+from pathlib import Path
 
 database_path = sys.argv[1]
+if Path(database_path).exists():
+    Path(database_path).unlink()
 connection = sqlite3.connect(database_path)
 try:
     connection.execute("CREATE TABLE room_master_table (id INTEGER PRIMARY KEY, identity_hash TEXT)")

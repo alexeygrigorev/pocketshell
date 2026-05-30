@@ -3,6 +3,7 @@ package com.pocketshell.app.projects
 import android.graphics.Bitmap
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -226,6 +227,12 @@ class FolderListScreenE2eTest {
             folderStatusDotTestTag("/home/u/code/pocketshell"),
             useUnmergedTree = true,
         ).assertExists()
+        assertAccessibleTouchTarget(folderTreeRootActionsTestTag("/home/u/code"))
+        assertAccessibleTouchTarget(folderTreeRootCreateTestTag("/home/u/code"))
+        assertAccessibleTouchTarget(folderDetailActionsTestTag("/home/u/code/pocketshell"))
+        assertAccessibleTouchTarget(folderDetailEnvTestTag("/home/u/code/pocketshell"))
+        assertAccessibleTouchTarget(folderDetailCreateTestTag("/home/u/code/pocketshell"))
+        compose.onNodeWithText("+ New", useUnmergedTree = true).assertDoesNotExist()
 
         // --- Assertion 3: projects are collapsed by default; expanding
         //    pocketshell reveals agent sessions before idle shell
@@ -333,10 +340,30 @@ class FolderListScreenE2eTest {
         )
     }
 
+    private fun assertAccessibleTouchTarget(tag: String) {
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(tag))
+        val node = compose.onNodeWithTag(tag, useUnmergedTree = true)
+            .assertExists()
+            .assertHasClickAction()
+        val bounds = node.fetchSemanticsNode().boundsInRoot
+        val density = InstrumentationRegistry.getInstrumentation()
+            .targetContext.resources.displayMetrics.density
+        val minPx = 48f * density
+        assertTrue(
+            "control $tag should expose at least a 48dp tap target: ${bounds.width}x${bounds.height}",
+            bounds.width >= minPx && bounds.height >= minPx && bounds.width >= bounds.height * 0.85f,
+        )
+    }
+
     private fun captureFullDevice(name: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.waitForIdleSync()
-        val bitmap: Bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return
+        val bitmap: Bitmap = try {
+            instrumentation.uiAutomation.takeScreenshot() ?: return
+        } catch (t: Throwable) {
+            return
+        }
         val mediaRoot = instrumentation.targetContext.externalMediaDirs
             .firstOrNull { it != null }
             ?: instrumentation.targetContext.getExternalFilesDir(null)

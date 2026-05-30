@@ -15,9 +15,11 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -46,6 +48,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
@@ -1060,12 +1063,14 @@ private fun FolderTreeRootGroup(
         } else {
             Column(
                 modifier = Modifier.padding(start = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                root.folders.forEach { folder ->
+                root.folders.forEachIndexed { index, folder ->
                     FolderGroup(
                         folder = folder,
                         expanded = folder.path in expandedProjectPaths,
+                        showTreeBranch = true,
+                        lastInTree = index == root.folders.lastIndex,
                         onSessionClick = onSessionClick,
                         onCreateInFolder = onCreateInFolder,
                         onFolderActions = onFolderActions,
@@ -1087,9 +1092,8 @@ private fun FolderTreeRootHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
+            .background(PocketShellColors.Surface.copy(alpha = 0.62f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
@@ -1115,28 +1119,20 @@ private fun FolderTreeRootHeader(
             }
         }
         if (root.path != FolderListViewModel.OTHER_ROOT_PATH) {
-            TextButton(
+            CompactTreeIconButton(
+                label = "...",
+                contentDescription = "Root actions",
                 onClick = onRootActions,
-                modifier = Modifier.testTag(folderTreeRootActionsTestTag(root.path)),
-            ) {
-                Text(
-                    text = "Actions",
-                    color = PocketShellColors.Accent,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            TextButton(
+                testTag = folderTreeRootActionsTestTag(root.path),
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            CompactTreeIconButton(
+                label = "+",
+                contentDescription = "Add project",
                 onClick = onCreateInRoot,
-                modifier = Modifier.testTag(folderTreeRootCreateTestTag(root.path)),
-            ) {
-                Text(
-                    text = "+",
-                    color = PocketShellColors.Accent,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
+                testTag = folderTreeRootCreateTestTag(root.path),
+                accent = true,
+            )
         }
     }
 }
@@ -1146,10 +1142,9 @@ private fun EmptyRootHint(candidateCount: Int, onCreate: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 14.dp)
-            .background(PocketShellColors.Surface, RoundedCornerShape(12.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(start = 22.dp)
+            .background(PocketShellColors.Surface.copy(alpha = 0.48f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
     ) {
         Text(
             text = if (candidateCount > 0) {
@@ -1161,9 +1156,12 @@ private fun EmptyRootHint(candidateCount: Int, onCreate: () -> Unit) {
             fontSize = 13.sp,
         )
         Spacer(modifier = Modifier.height(8.dp))
-        TextButton(onClick = onCreate) {
-            Text("+ Add project", color = PocketShellColors.Accent)
-        }
+        CompactTreeIconButton(
+            label = "+",
+            contentDescription = "Add project",
+            onClick = onCreate,
+            accent = true,
+        )
     }
 }
 
@@ -1179,6 +1177,8 @@ private fun EmptyRootHint(candidateCount: Int, onCreate: () -> Unit) {
 private fun FolderGroup(
     folder: FolderRow,
     expanded: Boolean,
+    showTreeBranch: Boolean = false,
+    lastInTree: Boolean = true,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
     onCreateInFolder: (FolderRow) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
@@ -1188,28 +1188,59 @@ private fun FolderGroup(
     Column(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onToggleExpanded)
             .testTag(folderRowTestTag(folder.path)),
-        verticalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        FolderHeader(
-            folder = folder,
-            expanded = expanded,
-            onToggleExpanded = onToggleExpanded,
-            onCreateInFolder = { onCreateInFolder(folder) },
-            onFolderActions = { onFolderActions(folder) },
-            onEditEnv = { onEditEnv(folder) },
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min),
+        ) {
+            if (showTreeBranch) {
+                TreeBranchConnector(
+                    last = lastInTree && !expanded,
+                    modifier = Modifier
+                        .width(22.dp)
+                        .fillMaxHeight(),
+                )
+            }
+            FolderHeader(
+                folder = folder,
+                expanded = expanded,
+                onToggleExpanded = onToggleExpanded,
+                onCreateInFolder = { onCreateInFolder(folder) },
+                onFolderActions = { onFolderActions(folder) },
+                onEditEnv = { onEditEnv(folder) },
+                modifier = Modifier.weight(1f),
+            )
+        }
         if (expanded) {
             Column(
-                modifier = Modifier.padding(start = 26.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.padding(start = if (showTreeBranch) 22.dp else 26.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                folder.sessions.forEach { session ->
-                    WorkspaceSessionRow(
-                        folderPath = folder.path,
-                        session = session,
-                        onClick = { onSessionClick(folder.path, session.sessionName) },
-                    )
+                folder.sessions.forEachIndexed { index, session ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(IntrinsicSize.Min),
+                    ) {
+                        if (showTreeBranch) {
+                            TreeBranchConnector(
+                                last = index == folder.sessions.lastIndex,
+                                modifier = Modifier
+                                    .width(22.dp)
+                                    .fillMaxHeight(),
+                            )
+                        }
+                        WorkspaceSessionRow(
+                            folderPath = folder.path,
+                            session = session,
+                            onClick = { onSessionClick(folder.path, session.sessionName) },
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                 }
             }
         }
@@ -1224,15 +1255,15 @@ private fun FolderHeader(
     onCreateInFolder: () -> Unit,
     onFolderActions: () -> Unit,
     onEditEnv: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(10.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
+            .background(PocketShellColors.Surface.copy(alpha = 0.58f), RoundedCornerShape(8.dp))
             .clickable(role = Role.Button, onClick = onToggleExpanded)
             .testTag(folderHeaderClickTestTag(folder.path))
-            .padding(horizontal = 10.dp, vertical = 10.dp),
+            .padding(horizontal = 9.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         DisclosureIndicator(
@@ -1246,31 +1277,18 @@ private fun FolderHeader(
             active = folder.sessions.any { it.attached || it.agentKind.isAgent() },
             modifier = Modifier.testTag(folderStatusDotTestTag(folder.path)),
         )
-        Spacer(modifier = Modifier.width(10.dp))
+        Spacer(modifier = Modifier.width(9.dp))
         Column(modifier = Modifier.weight(1f)) {
             val countText = projectCountText(folder)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = folder.label,
-                    color = PocketShellColors.Text,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag(folderHeaderLabelTag(folder.path)),
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                CountPill(
-                    text = countText,
-                    minWidth = projectCountPillMinWidth(countText),
-                    modifier = Modifier.testTag(folderCountPillTestTag(folder.path)),
-                )
-            }
+            Text(
+                text = folder.label,
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.testTag(folderHeaderLabelTag(folder.path)),
+            )
             Text(
                 text = folder.path,
                 color = PocketShellColors.TextSecondary,
@@ -1278,45 +1296,40 @@ private fun FolderHeader(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // Issue #264: "Env" entry point — only on real folders (the
-                // synthetic Untracked group has no filesystem path to manage).
-                if (folder.path != FolderListViewModel.UNTRACKED_PATH) {
-                    TextButton(
-                        onClick = onFolderActions,
-                        modifier = Modifier.testTag(folderDetailActionsTestTag(folder.path)),
-                    ) {
-                        Text(
-                            text = "Actions",
-                            color = PocketShellColors.Accent,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    }
-                    TextButton(
-                        onClick = onEditEnv,
-                        modifier = Modifier.testTag(folderDetailEnvTestTag(folder.path)),
-                    ) {
-                        Text(
-                            text = "Env",
-                            color = PocketShellColors.Accent,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    }
-                }
-                TextButton(
-                    onClick = onCreateInFolder,
-                    modifier = Modifier.testTag(folderDetailCreateTestTag(folder.path)),
-                ) {
-                    Text(
-                        text = "+ New",
-                        color = PocketShellColors.Accent,
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
+            Spacer(modifier = Modifier.height(4.dp))
+            CountPill(
+                text = countText,
+                minWidth = projectCountPillMinWidth(countText),
+                modifier = Modifier.testTag(folderCountPillTestTag(folder.path)),
+            )
+        }
+        Spacer(modifier = Modifier.width(6.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            // Issue #264: "Env" entry point — only on real folders (the
+            // synthetic Untracked group has no filesystem path to manage).
+            if (folder.path != FolderListViewModel.UNTRACKED_PATH) {
+                CompactTreeIconButton(
+                    label = "...",
+                    contentDescription = "Project actions",
+                    onClick = onFolderActions,
+                    testTag = folderDetailActionsTestTag(folder.path),
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                CompactTreeIconButton(
+                    label = "E",
+                    contentDescription = "Environment files",
+                    onClick = onEditEnv,
+                    testTag = folderDetailEnvTestTag(folder.path),
+                )
+                Spacer(modifier = Modifier.width(4.dp))
             }
+            CompactTreeIconButton(
+                label = "+",
+                contentDescription = "New session",
+                onClick = onCreateInFolder,
+                testTag = folderDetailCreateTestTag(folder.path),
+                accent = true,
+            )
         }
     }
 }
@@ -1326,22 +1339,26 @@ private fun WorkspaceSessionRow(
     folderPath: String,
     session: FolderSessionEntry,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
+    val isAgent = session.agentKind.isAgent()
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
+            .background(
+                PocketShellColors.SurfaceElev.copy(alpha = if (isAgent) 0.72f else 0.5f),
+                RoundedCornerShape(8.dp),
+            )
             .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 9.dp)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
             .testTag(folderDetailRowTestTag(folderPath, session.sessionName)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
             modifier = Modifier
-                .width(1.dp)
+                .width(2.dp)
                 .height(28.dp)
-                .background(PocketShellColors.Border),
+                .background(if (isAgent) PocketShellColors.Purple else PocketShellColors.Border),
         )
         Spacer(modifier = Modifier.width(10.dp))
         StatusDot(
@@ -1366,7 +1383,77 @@ private fun WorkspaceSessionRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        CountPill(text = sessionKindLabel(session))
+        CountPill(
+            text = sessionKindLabel(session),
+            emphasis = if (isAgent) PocketShellColors.Purple else null,
+        )
+    }
+}
+
+@Composable
+private fun TreeBranchConnector(
+    last: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Canvas(modifier = modifier) {
+        val color = PocketShellColors.Border
+        val stroke = 1.dp.toPx()
+        val x = 10.dp.toPx()
+        val midY = size.height * 0.5f
+        drawLine(
+            color = color,
+            start = Offset(x, 0f),
+            end = Offset(x, if (last) midY else size.height),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+        drawLine(
+            color = color,
+            start = Offset(x, midY),
+            end = Offset(size.width, midY),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+    }
+}
+
+@Composable
+private fun CompactTreeIconButton(
+    label: String,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    testTag: String? = null,
+    accent: Boolean = false,
+) {
+    val background = if (accent) {
+        PocketShellColors.AccentSoft
+    } else {
+        PocketShellColors.SurfaceElev.copy(alpha = 0.72f)
+    }
+    val foreground = if (accent) PocketShellColors.Accent else PocketShellColors.TextSecondary
+    Box(
+        modifier = modifier
+            .size(48.dp)
+            .semantics { this.contentDescription = contentDescription }
+            .clickable(role = Role.Button, onClick = onClick)
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(32.dp)
+                .background(background, CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = label,
+                color = foreground,
+                fontSize = if (label == "+") 18.sp else 12.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
+        }
     }
 }
 
@@ -1412,18 +1499,14 @@ private fun CountPill(
     text: String,
     modifier: Modifier = Modifier,
     minWidth: Dp = 40.dp,
+    emphasis: Color? = null,
 ) {
     Box(
         modifier = Modifier
             .requiredWidthIn(min = minWidth)
             .then(modifier)
             .background(
-                color = PocketShellColors.SurfaceElev,
-                shape = RoundedCornerShape(6.dp),
-            )
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.BorderSoft,
+                color = emphasis?.copy(alpha = 0.14f) ?: PocketShellColors.SurfaceElev.copy(alpha = 0.76f),
                 shape = RoundedCornerShape(6.dp),
             )
             .padding(horizontal = 7.dp, vertical = 2.dp),
@@ -1431,7 +1514,7 @@ private fun CountPill(
     ) {
         Text(
             text = text,
-            color = PocketShellColors.TextSecondary,
+            color = emphasis ?: PocketShellColors.TextSecondary,
             fontSize = 10.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
@@ -1442,7 +1525,7 @@ private fun CountPill(
 }
 
 private fun projectCountPillMinWidth(text: String): Dp =
-    if ("," in text) 144.dp else 88.dp
+    if ("," in text) 128.dp else 72.dp
 
 internal fun projectCountText(folder: FolderRow): String {
     val sessions = folder.sessions.size

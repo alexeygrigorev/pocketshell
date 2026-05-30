@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -40,10 +41,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.app.share.FilenameSanitiser
 import com.pocketshell.app.share.ShareUploader
 import com.pocketshell.uikit.components.SessionRow
@@ -51,6 +56,10 @@ import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.model.Tag
 import com.pocketshell.uikit.model.TagKind
 import com.pocketshell.uikit.theme.PocketShellColors
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.min
+import kotlin.math.sin
 
 /**
  * Per-host folder list — issue #171.
@@ -76,8 +85,8 @@ import com.pocketshell.uikit.theme.PocketShellColors
  *    [SessionTypePickerSheet] without a pre-filled folder (the user
  *    types one). Per the refinement-comment AC: "+ New session"
  *    prompts for type (agent / shell) with an agent CLI sub-picker.
- *  - Tap the app-bar Tree/Flat toggle → switches between the watched
- *    root → project folder tree and the previous flat folder-group list.
+ *  - Tap the app-bar settings gear → opens workspace settings where
+ *    roots and the default tree/flat mode are configured.
  */
 @Composable
 fun FolderListScreen(
@@ -106,6 +115,7 @@ fun FolderListScreen(
      * the same SSH credentials this screen already holds.
      */
     onBrowseRepos: (cloneRoot: String?) -> Unit,
+    onOpenWorkspaceSettings: () -> Unit = {},
     /**
      * Issue #264: open the per-folder `.env` / `.envrc` key manager.
      * Fired with the tapped folder's canonical path + label so the
@@ -118,6 +128,7 @@ fun FolderListScreen(
     modifier: Modifier = Modifier,
     viewModel: FolderListViewModel = hiltViewModel(),
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
+    hostDetailViewMode: HostDetailViewMode = HostDetailViewMode.Tree,
 ) {
     LaunchedEffect(hostId, hostname, port, username, keyPath) {
         viewModel.bind(
@@ -141,7 +152,7 @@ fun FolderListScreen(
     val state by viewModel.state.collectAsState()
     val actionStatus by viewModel.actionStatus.collectAsState()
     val context = LocalContext.current
-    var showFlatFolderList by remember { mutableStateOf(false) }
+    val showFlatFolderList = hostDetailViewMode == HostDetailViewMode.Flat
     var pickerFolder by remember { mutableStateOf<PickerTarget?>(null) }
     var actionFolder by remember { mutableStateOf<PickerTarget?>(null) }
     var emptyProjectFolder by remember { mutableStateOf<PickerTarget?>(null) }
@@ -175,7 +186,7 @@ fun FolderListScreen(
                 showFlatFolderList = showFlatFolderList,
                 onBack = onBack,
                 onBrowseRepos = { onBrowseRepos(null) },
-                onToggleMode = { showFlatFolderList = !showFlatFolderList },
+                onOpenWorkspaceSettings = onOpenWorkspaceSettings,
             )
             when (val s = state) {
                 FolderListUiState.Loading -> LoadingPanel()
@@ -375,7 +386,7 @@ private fun FolderListAppBar(
     showFlatFolderList: Boolean,
     onBack: () -> Unit,
     onBrowseRepos: () -> Unit,
-    onToggleMode: () -> Unit,
+    onOpenWorkspaceSettings: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -402,7 +413,7 @@ private fun FolderListAppBar(
         }
         Column(modifier = Modifier.padding(start = 4.dp).weight(1f)) {
             Text(
-                text = "Folders",
+                text = if (showFlatFolderList) "Folders" else "Workspace",
                 color = PocketShellColors.Text,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -412,17 +423,6 @@ private fun FolderListAppBar(
                 text = hostName,
                 color = PocketShellColors.TextSecondary,
                 fontSize = 12.sp,
-            )
-        }
-        TextButton(
-            onClick = onToggleMode,
-            modifier = Modifier.testTag(FOLDER_LIST_VIEW_TOGGLE_TAG),
-        ) {
-            Text(
-                text = if (showFlatFolderList) "Tree" else "Flat",
-                color = PocketShellColors.Accent,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
             )
         }
         TextButton(
@@ -436,6 +436,68 @@ private fun FolderListAppBar(
                 fontWeight = FontWeight.SemiBold,
             )
         }
+        Spacer(modifier = Modifier.size(8.dp))
+        TopBarIconButton(
+            contentDescription = "Workspace settings",
+            testTag = FOLDER_LIST_WORKSPACE_SETTINGS_TAG,
+            onClick = onOpenWorkspaceSettings,
+        ) {
+            SettingsGearIcon()
+        }
+    }
+}
+
+@Composable
+private fun TopBarIconButton(
+    contentDescription: String,
+    testTag: String,
+    onClick: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(40.dp)
+            .background(color = PocketShellColors.SurfaceElev, shape = CircleShape)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = CircleShape)
+            .semantics { this.contentDescription = contentDescription }
+            .clickable(role = Role.Button, onClick = onClick)
+            .testTag(testTag),
+        contentAlignment = Alignment.Center,
+    ) {
+        content()
+    }
+}
+
+@Composable
+private fun SettingsGearIcon() {
+    val color = PocketShellColors.TextSecondary
+    Canvas(modifier = Modifier.size(20.dp)) {
+        val center = androidx.compose.ui.geometry.Offset(size.width / 2f, size.height / 2f)
+        val minSide = min(size.width, size.height)
+        val toothRadius = minSide * 0.055f
+        val toothDistance = minSide * 0.37f
+        repeat(8) { index ->
+            val angle = index * PI.toFloat() / 4f
+            drawCircle(
+                color = color,
+                radius = toothRadius,
+                center = androidx.compose.ui.geometry.Offset(
+                    x = center.x + cos(angle) * toothDistance,
+                    y = center.y + sin(angle) * toothDistance,
+                ),
+            )
+        }
+        drawCircle(
+            color = color,
+            radius = minSide * 0.28f,
+            center = center,
+            style = Stroke(width = minSide * 0.12f),
+        )
+        drawCircle(
+            color = color,
+            radius = minSide * 0.075f,
+            center = center,
+        )
     }
 }
 
@@ -954,6 +1016,7 @@ const val FOLDER_LIST_FLAT_EMPTY_TAG: String = "folder-list:flat:empty"
 const val FOLDER_LIST_NEW_SESSION_FAB_TAG: String = "folder-list:new-session-fab"
 const val FOLDER_LIST_BROWSE_REPOS_TAG: String = "folder-list:browse-repos"
 const val FOLDER_LIST_VIEW_TOGGLE_TAG: String = "folder-list:view-toggle"
+const val FOLDER_LIST_WORKSPACE_SETTINGS_TAG: String = "folder-list:workspace-settings"
 const val FOLDER_LIST_ACTION_STATUS_TAG: String = "folder-list:action-status"
 const val FOLDER_LIST_ACTION_STATUS_DISMISS_TAG: String = "folder-list:action-status:dismiss"
 

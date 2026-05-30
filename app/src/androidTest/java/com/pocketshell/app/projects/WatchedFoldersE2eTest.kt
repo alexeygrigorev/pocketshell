@@ -7,6 +7,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -229,5 +230,35 @@ class WatchedFoldersE2eTest {
             vm.state.value.roots.none { it.id == insertedId }
         }
         compose.onNodeWithTag(WATCHED_FOLDERS_EMPTY_HINT_TAG).assertExists()
+    }
+
+    @Test
+    fun hostDetailViewModeRowsDispatchPreferenceChanges(): Unit = runBlocking {
+        val vm = WatchedFoldersViewModel(
+            projectRootDao = db.projectRootDao(),
+            hostDao = db.hostDao(),
+        )
+        var selected = HostDetailViewMode.Tree
+
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                WatchedFoldersScreen(
+                    hostId = 7L,
+                    hostName = "h7",
+                    sshCredentials = null,
+                    onBack = {},
+                    hostDetailViewMode = selected,
+                    onHostDetailViewModeSelected = { selected = it },
+                    viewModel = vm,
+                )
+            }
+        }
+
+        compose.onNodeWithTag(WORKSPACE_VIEW_MODE_TREE_TAG).assertExists()
+        compose.onNodeWithTag(WORKSPACE_VIEW_MODE_FLAT_TAG)
+            .assertExists()
+            .performClick()
+
+        assertEquals(HostDetailViewMode.Flat, selected)
     }
 }

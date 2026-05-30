@@ -157,7 +157,12 @@ class WatchedFoldersViewModel @Inject constructor(
                     return@launch
                 }
             }
-            projectRootDao.update(current.copy(label = label, path = path))
+            projectRootDao.update(
+                current.copy(
+                    label = preserveOrderPrefix(current.label, label),
+                    path = path,
+                ),
+            )
             _state.value = _state.value.copy(feedback = "Updated $label.")
         }
     }
@@ -428,6 +433,12 @@ class WatchedFoldersViewModel @Inject constructor(
         internal fun stripOrderPrefix(label: String): String {
             val match = ORDER_PREFIX_REGEX.find(label) ?: return label
             return label.substring(match.range.last + 1).trimStart()
+        }
+
+        internal fun preserveOrderPrefix(existingLabel: String, updatedLabel: String): String {
+            val match = ORDER_PREFIX_REGEX.find(existingLabel) ?: return updatedLabel
+            val prefix = existingLabel.substring(match.range)
+            return "$prefix ${stripOrderPrefix(updatedLabel)}"
         }
 
         private val ORDER_PREFIX_REGEX: Regex = Regex("^\\[\\d{2,3}]")

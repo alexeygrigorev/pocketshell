@@ -177,6 +177,34 @@ class WatchedFoldersViewModelTest {
     }
 
     @Test
+    fun updateFolderAfterReorderPreservesConfiguredOrder() = runTest {
+        val dao = FakeProjectRootDao()
+        dao.roots.value = listOf(
+            ProjectRootEntity(id = 1L, hostId = 1L, label = "alpha", path = "/a"),
+            ProjectRootEntity(id = 2L, hostId = 1L, label = "beta", path = "/b"),
+            ProjectRootEntity(id = 3L, hostId = 1L, label = "gamma", path = "/c"),
+        )
+        val vm = newVm(dao)
+        vm.bind(hostId = 1L, hostName = "h")
+        advanceUntilIdle()
+
+        vm.reorderFolder(fromIndex = 2, delta = -1)
+        advanceUntilIdle()
+
+        val moved = vm.state.value.roots.first { it.id == 3L }
+        vm.updateFolder(id = moved.id, rawLabel = "zeta", rawPath = "/z")
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf("alpha", "zeta", "beta"),
+            vm.state.value.roots.map { WatchedFoldersViewModel.stripOrderPrefix(it.label) },
+        )
+        val updated = dao.roots.value.first { it.id == 3L }
+        assertEquals("[01] zeta", updated.label)
+        assertEquals("/z", updated.path)
+    }
+
+    @Test
     fun stripOrderPrefixRoundTrips() {
         assertEquals("alpha", WatchedFoldersViewModel.stripOrderPrefix("[00] alpha"))
         assertEquals("beta", WatchedFoldersViewModel.stripOrderPrefix("beta"))
@@ -285,19 +313,22 @@ private class FakeProjectRootDao : ProjectRootDao {
     override suspend fun insert(root: ProjectRootEntity): Long {
         val withId = if (root.id == 0L) root.copy(id = nextId++) else root
         inserted += withId
-        roots.value = roots.value + withId
+        roots.value = sorted(roots.value + withId)
         return withId.id
     }
 
     override suspend fun update(root: ProjectRootEntity) {
         updates += root
-        roots.value = roots.value.map { if (it.id == root.id) root else it }
+        roots.value = sorted(roots.value.map { if (it.id == root.id) root else it })
     }
 
     override suspend fun delete(root: ProjectRootEntity) {
         deleted += root.id
         roots.value = roots.value.filterNot { it.id == root.id }
     }
+
+    private fun sorted(rows: List<ProjectRootEntity>): List<ProjectRootEntity> =
+        rows.sortedWith(compareBy<ProjectRootEntity> { it.label }.thenBy { it.path })
 }
 
 private class FakeHostDao : HostDao {

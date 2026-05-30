@@ -169,6 +169,9 @@ class SettingsViewModel @Inject constructor(
      */
     fun setShowSystemNotes(enabled: Boolean) = repository.setShowSystemNotes(enabled)
 
+    fun setHostDetailViewMode(mode: HostDetailViewMode) =
+        repository.setHostDetailViewMode(mode)
+
     /**
      * Persist [percent] as the user's preferred "approaching limit"
      * threshold for the in-app usage warning surfaces (issue #214).

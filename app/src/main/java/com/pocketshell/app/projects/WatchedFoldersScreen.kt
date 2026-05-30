@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.OutlinedTextField
@@ -37,6 +38,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.theme.PocketShellColors
 
@@ -61,6 +63,8 @@ fun WatchedFoldersScreen(
     hostName: String,
     sshCredentials: WatchedFoldersViewModel.SshCredentials? = null,
     onBack: () -> Unit,
+    hostDetailViewMode: HostDetailViewMode = HostDetailViewMode.Tree,
+    onHostDetailViewModeSelected: (HostDetailViewMode) -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: WatchedFoldersViewModel = hiltViewModel(),
 ) {
@@ -89,14 +93,45 @@ fun WatchedFoldersScreen(
             item {
                 SectionCard {
                     Text(
-                        text = "Watched folders for ${state.hostName.ifBlank { "this host" }}",
+                        text = "Host detail",
                         color = PocketShellColors.Text,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = "Quick-access roots offered in the new-session start-folder picker.",
+                        text = "Choose the default layout when opening this host.",
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 12.sp,
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    HostDetailModeRow(
+                        label = "Workspace tree",
+                        detail = "Group active projects under configured roots.",
+                        selected = hostDetailViewMode == HostDetailViewMode.Tree,
+                        onClick = { onHostDetailViewModeSelected(HostDetailViewMode.Tree) },
+                        testTag = WORKSPACE_VIEW_MODE_TREE_TAG,
+                    )
+                    HostDetailModeRow(
+                        label = "Flat folder list",
+                        detail = "Show folders in one recency-sorted list.",
+                        selected = hostDetailViewMode == HostDetailViewMode.Flat,
+                        onClick = { onHostDetailViewModeSelected(HostDetailViewMode.Flat) },
+                        testTag = WORKSPACE_VIEW_MODE_FLAT_TAG,
+                    )
+                }
+            }
+            item {
+                SectionCard {
+                    Text(
+                        text = "Workspace roots for ${state.hostName.ifBlank { "this host" }}",
+                        color = PocketShellColors.Text,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Top-level roots shown on host detail, in the order below.",
                         color = PocketShellColors.TextSecondary,
                         fontSize = 12.sp,
                     )
@@ -230,7 +265,7 @@ private fun WatchedFoldersAppBar(hostName: String, onBack: () -> Unit) {
         }
         Column(modifier = Modifier.padding(start = 4.dp)) {
             Text(
-                text = "Watched folders",
+                text = "Workspace settings",
                 color = PocketShellColors.Text,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold,
@@ -243,6 +278,63 @@ private fun WatchedFoldersAppBar(hostName: String, onBack: () -> Unit) {
                     fontSize = 12.sp,
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun HostDetailModeRow(
+    label: String,
+    detail: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    testTag: String,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.RadioButton, onClick = onClick)
+            .padding(vertical = 8.dp)
+            .testTag(testTag),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioMark(selected = selected)
+        Spacer(modifier = Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = detail,
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun RadioMark(selected: Boolean) {
+    Box(
+        modifier = Modifier
+            .size(20.dp)
+            .border(
+                width = 2.dp,
+                color = if (selected) PocketShellColors.Accent else PocketShellColors.Border,
+                shape = CircleShape,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (selected) {
+            Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .background(color = PocketShellColors.Accent, shape = CircleShape),
+            )
         }
     }
 }
@@ -285,14 +377,14 @@ private fun EmptyWatchedFoldersHint() {
             .testTag(WATCHED_FOLDERS_EMPTY_HINT_TAG),
     ) {
         Text(
-            text = "No watched folders yet",
+            text = "No workspace roots yet",
             color = PocketShellColors.Text,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(
-            text = "Add quick-access roots so a new session can land in them with one tap.",
+            text = "Add roots such as ~/git or ~/tmp to control host-detail tree order.",
             color = PocketShellColors.TextSecondary,
             fontSize = 12.sp,
         )
@@ -556,6 +648,8 @@ const val WATCHED_FOLDERS_DIALOG_LABEL_TAG: String = "watched-folders:dialog:lab
 const val WATCHED_FOLDERS_DIALOG_PATH_TAG: String = "watched-folders:dialog:path"
 const val WATCHED_FOLDERS_DIALOG_CONFIRM_TAG: String = "watched-folders:dialog:confirm"
 const val WATCHED_FOLDERS_FEEDBACK_TAG: String = "watched-folders:feedback"
+const val WORKSPACE_VIEW_MODE_TREE_TAG: String = "workspace-settings:view-mode:tree"
+const val WORKSPACE_VIEW_MODE_FLAT_TAG: String = "workspace-settings:view-mode:flat"
 
 fun watchedFolderRowTestTag(id: Long): String = "watched-folders:row:$id"
 fun watchedFolderUpTestTag(id: Long): String = "watched-folders:row:$id:up"

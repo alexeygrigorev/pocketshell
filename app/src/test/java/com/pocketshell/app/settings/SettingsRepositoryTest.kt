@@ -55,6 +55,7 @@ class SettingsRepositoryTest {
         assertEquals(AppSettings.DEFAULT_SHOW_SYSTEM_NOTES, snap.showSystemNotes)
         assertTrue("expected default to be ON", snap.showSystemNotes)
         assertEquals(null, snap.defaultHostId)
+        assertEquals(HostDetailViewMode.Tree, snap.hostDetailViewMode)
     }
 
     @Test
@@ -116,6 +117,7 @@ class SettingsRepositoryTest {
             .putString("tmux_on_attach_default", "yes")
             .putString("voice_silence_seconds", "soon")
             .putString("show_system_notes", "maybe")
+            .putBoolean("host_detail_view_mode", true)
             .putString("usage_warn_threshold_percent", "eighty")
             .putString("default_host_id", "host-a")
             .commit()
@@ -127,6 +129,7 @@ class SettingsRepositoryTest {
         assertTrue(snap.tmuxOnAttachByDefault)
         assertEquals(AppSettings.DEFAULT_VOICE_SILENCE_SECONDS, snap.voiceSilenceThresholdSeconds, 0f)
         assertEquals(AppSettings.DEFAULT_SHOW_SYSTEM_NOTES, snap.showSystemNotes)
+        assertEquals(HostDetailViewMode.Tree, snap.hostDetailViewMode)
         assertEquals(AppSettings.DEFAULT_USAGE_WARN_PERCENT, snap.usageWarnThresholdPercent)
         assertEquals(null, snap.defaultHostId)
     }
@@ -151,6 +154,30 @@ class SettingsRepositoryTest {
 
         repo.setDefaultHostId(-1L)
         assertEquals(null, repo.settings.value.defaultHostId)
+    }
+
+    @Test
+    fun `setHostDetailViewMode toggles and persists`() {
+        val repo = SettingsRepository(context)
+        repo.setHostDetailViewMode(HostDetailViewMode.Flat)
+        assertEquals(HostDetailViewMode.Flat, repo.settings.value.hostDetailViewMode)
+        assertEquals(HostDetailViewMode.Flat, SettingsRepository(context).settings.value.hostDetailViewMode)
+
+        repo.setHostDetailViewMode(HostDetailViewMode.Tree)
+        assertEquals(HostDetailViewMode.Tree, repo.settings.value.hostDetailViewMode)
+        assertEquals(HostDetailViewMode.Tree, SettingsRepository(context).settings.value.hostDetailViewMode)
+    }
+
+    @Test
+    fun `unknown host detail view mode falls back to Tree`() {
+        context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+            .edit()
+            .putString("host_detail_view_mode", "Timeline")
+            .commit()
+
+        val repo = SettingsRepository(context)
+
+        assertEquals(HostDetailViewMode.Tree, repo.settings.value.hostDetailViewMode)
     }
 
     // -- Issue #125: voice preferences -------------------------------------

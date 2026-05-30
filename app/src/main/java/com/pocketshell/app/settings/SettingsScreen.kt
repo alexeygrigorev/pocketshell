@@ -143,7 +143,7 @@ fun SettingsScreen(
                 )
             }
             item {
-                WatchedFoldersSection(
+                WorkspaceRootsSection(
                     hosts = hosts,
                     onPickHost = onOpenWatchedFoldersForHost,
                 )
@@ -1364,29 +1364,29 @@ private fun DiagnosticsSection(onOpenCrashReports: () -> Unit) {
  * passphrase to authenticate the one-shot SSH session.
  */
 @Composable
-private fun WatchedFoldersSection(
+private fun WorkspaceRootsSection(
     hosts: List<com.pocketshell.core.storage.entity.HostEntity>,
     onPickHost: (Long, String) -> Unit,
 ) {
     Column {
-        SectionLabel("Watched folders")
+        SectionLabel("Workspace roots")
         SectionCard {
             Text(
-                text = "Per-host quick-access roots",
+                text = "Per-host workspace roots",
                 color = PocketShellColors.Text,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
-                text = "Configure folders the new-session sheet offers as cwd chips.",
+                text = "Configure host-detail roots and tree/flat defaults.",
                 color = PocketShellColors.TextSecondary,
                 fontSize = 12.sp,
             )
             Spacer(modifier = Modifier.height(8.dp))
             if (hosts.isEmpty()) {
                 Text(
-                    text = "Add a host first to configure watched folders.",
+                    text = "Add a host first to configure workspace roots.",
                     color = PocketShellColors.TextMuted,
                     fontSize = 12.sp,
                     modifier = Modifier.testTag(WATCHED_FOLDERS_SETTINGS_EMPTY_TAG),

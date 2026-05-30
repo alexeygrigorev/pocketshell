@@ -21,6 +21,20 @@ enum class ThemePreference {
 }
 
 /**
+ * Default presentation for the per-host workspace screen.
+ *
+ * [Tree] groups active projects under the configured workspace roots.
+ * [Flat] keeps the older folder/session list available for users who
+ * prefer a single recency-sorted surface. The host-detail screen reads
+ * this preference directly instead of showing an inline Tree/Flat
+ * segmented control.
+ */
+enum class HostDetailViewMode {
+    Tree,
+    Flat,
+}
+
+/**
  * Snapshot of all PocketShell user-tunable settings exposed by the
  * settings surface introduced in issue #112.
  *
@@ -67,6 +81,7 @@ data class AppSettings(
     val voiceLanguage: String = VOICE_LANGUAGE_AUTO,
     val voiceSilenceThresholdSeconds: Float = DEFAULT_VOICE_SILENCE_SECONDS,
     val showSystemNotes: Boolean = DEFAULT_SHOW_SYSTEM_NOTES,
+    val hostDetailViewMode: HostDetailViewMode = HostDetailViewMode.Tree,
     /**
      * Issue #214: the percent at which the in-app usage warning surfaces
      * start firing ("approaching limit"). Default 80%; configurable

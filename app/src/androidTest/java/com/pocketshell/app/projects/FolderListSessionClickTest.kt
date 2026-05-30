@@ -1,6 +1,9 @@
 package com.pocketshell.app.projects
 
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -13,6 +16,7 @@ import androidx.compose.ui.test.performTextInput
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -151,6 +155,7 @@ class FolderListSessionClickTest {
             hostDao = db.hostDao(),
             projectRootDao = db.projectRootDao(),
         )
+        var mode by mutableStateOf(HostDetailViewMode.Tree)
 
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
@@ -213,7 +218,7 @@ class FolderListSessionClickTest {
     }
 
     @Test
-    fun appBarToggleSwitchesBetweenTreeAndFlatFolderList() {
+    fun defaultViewModeSwitchesBetweenTreeAndFlatFolderList() {
         runBlocking {
             db.projectRootDao().insert(
                 ProjectRootEntity(
@@ -245,6 +250,7 @@ class FolderListSessionClickTest {
             hostDao = db.hostDao(),
             projectRootDao = db.projectRootDao(),
         )
+        var mode by mutableStateOf(HostDetailViewMode.Tree)
 
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
@@ -263,6 +269,7 @@ class FolderListSessionClickTest {
                     onEditEnv = { _, _, _ -> },
                     modifier = Modifier.fillMaxSize(),
                     viewModel = viewModel,
+                    hostDetailViewMode = mode,
                 )
             }
         }
@@ -274,7 +281,7 @@ class FolderListSessionClickTest {
         compose.onNodeWithTag(folderHeaderLabelTag("/root/work/app")).assertIsDisplayed()
         compose.onNodeWithTag(folderHeaderLabelTag("/root/work/empty")).assertIsDisplayed()
 
-        compose.onNodeWithTag(FOLDER_LIST_VIEW_TOGGLE_TAG).performClick()
+        compose.runOnIdle { mode = HostDetailViewMode.Flat }
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithText("service").fetchSemanticsNodes().isNotEmpty()
         }

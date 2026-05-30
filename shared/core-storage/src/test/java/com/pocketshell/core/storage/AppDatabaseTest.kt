@@ -170,6 +170,25 @@ class AppDatabaseTest {
     }
 
     @Test
+    fun projectRoot_orderPrefixesPersistAndControlReadOrder() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(name = "h", hostname = "h", username = "u", keyId = keyId),
+        )
+        db.projectRootDao().insert(
+            ProjectRootEntity(hostId = hostId, label = "[01] git", path = "~/git"),
+        )
+        db.projectRootDao().insert(
+            ProjectRootEntity(hostId = hostId, label = "[00] tmp", path = "~/tmp"),
+        )
+
+        val roots = db.projectRootDao().getByHostId(hostId).first()
+
+        assertEquals(listOf("~/tmp", "~/git"), roots.map { it.path })
+        assertEquals(listOf("[00] tmp", "[01] git"), roots.map { it.label })
+    }
+
+    @Test
     fun aiApiCallLog_insert_then_streams_all() = runTest {
         val dao = db.aiApiCallLogDao()
         val firstId = dao.insert(

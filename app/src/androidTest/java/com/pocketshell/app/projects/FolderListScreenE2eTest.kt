@@ -142,6 +142,7 @@ class FolderListScreenE2eTest {
             hostDao = db.hostDao(),
             projectRootDao = db.projectRootDao(),
         )
+        var openedWorkspaceSettings = false
 
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
@@ -157,6 +158,7 @@ class FolderListScreenE2eTest {
                     onOpenSession = { _, _ -> },
                     onSessionCreated = { _, _ -> },
                     onBrowseRepos = { _ -> },
+                    onOpenWorkspaceSettings = { openedWorkspaceSettings = true },
                     onEditEnv = { _, _, _ -> },
                     modifier = Modifier.fillMaxSize(),
                     viewModel = viewModel,
@@ -177,6 +179,13 @@ class FolderListScreenE2eTest {
         compose.onNodeWithTag(FOLDER_LIST_TITLE_TAG).assertExists()
         compose.onNodeWithText("issue171-host").assertExists()
         compose.onNodeWithTag(folderTreeRootLabelTag("/home/u/code")).assertExists()
+        compose.onAllNodesWithTag(FOLDER_LIST_VIEW_TOGGLE_TAG)
+            .fetchSemanticsNodes()
+            .also { assertTrue("Tree/Flat toggle should not render on host detail", it.isEmpty()) }
+        compose.onNodeWithTag(FOLDER_LIST_WORKSPACE_SETTINGS_TAG)
+            .assertExists()
+            .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { openedWorkspaceSettings }
 
         // --- Assertion 2: two active folder rows — pocketshell and
         //    llm-zoomcamp. The inactive scanned empty-pinned project is

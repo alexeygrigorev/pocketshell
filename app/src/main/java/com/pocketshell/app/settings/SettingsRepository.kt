@@ -127,6 +127,12 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(showSystemNotes = enabled)
     }
 
+    fun setHostDetailViewMode(mode: HostDetailViewMode) {
+        if (_settings.value.hostDetailViewMode == mode) return
+        prefs.edit().putString(KEY_HOST_DETAIL_VIEW_MODE, mode.name).apply()
+        _settings.value = _settings.value.copy(hostDetailViewMode = mode)
+    }
+
     /**
      * Persist the user-configurable "approaching limit" threshold for
      * the in-app usage warning surfaces. Issue #214. Clamped to
@@ -170,6 +176,12 @@ class SettingsRepository @Inject constructor(
             KEY_SHOW_SYSTEM_NOTES,
             AppSettings.DEFAULT_SHOW_SYSTEM_NOTES,
         )
+        val hostDetailViewModeName = prefs.safeString(
+            KEY_HOST_DETAIL_VIEW_MODE,
+            HostDetailViewMode.Tree.name,
+        ) ?: HostDetailViewMode.Tree.name
+        val hostDetailViewMode = runCatching { HostDetailViewMode.valueOf(hostDetailViewModeName) }
+            .getOrDefault(HostDetailViewMode.Tree)
         val usageWarnPercent = snapUsageWarnThreshold(
             prefs.safeInt(
                 KEY_USAGE_WARN_THRESHOLD,
@@ -184,6 +196,7 @@ class SettingsRepository @Inject constructor(
             voiceLanguage = language,
             voiceSilenceThresholdSeconds = silence,
             showSystemNotes = showSystemNotes,
+            hostDetailViewMode = hostDetailViewMode,
             usageWarnThresholdPercent = usageWarnPercent,
         )
     }
@@ -253,6 +266,7 @@ class SettingsRepository @Inject constructor(
         const val KEY_VOICE_LANGUAGE = "voice_language"
         const val KEY_VOICE_SILENCE_SECONDS = "voice_silence_seconds"
         const val KEY_SHOW_SYSTEM_NOTES = "show_system_notes"
+        const val KEY_HOST_DETAIL_VIEW_MODE = "host_detail_view_mode"
         const val KEY_USAGE_WARN_THRESHOLD = "usage_warn_threshold_percent"
     }
 }

@@ -45,8 +45,10 @@ import com.pocketshell.app.session.SessionViewModel
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteRemoteSource
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteTarget
 import com.pocketshell.app.startup.StartupTiming
+import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.settings.SettingsScreen
+import com.pocketshell.app.settings.SettingsViewModel
 import com.pocketshell.app.settings.ThemePreference
 import com.pocketshell.app.systemsurfaces.ForwardingChooserScreen
 import com.pocketshell.app.systemsurfaces.ForwardingTileService
@@ -291,6 +293,7 @@ class MainActivity : FragmentActivity() {
                         usageScheduler = usageScheduler,
                         startDirectoryAutocomplete = startDirectoryAutocomplete,
                         usageWarnPercent = settings.usageWarnThresholdPercent.toDouble(),
+                        hostDetailViewMode = settings.hostDetailViewMode,
                         requestedDestination = requestedDestination,
                         pendingImportPayload = pendingImportPayload,
                         onImportPayloadConsumed = { pendingImportPayload = null },
@@ -371,6 +374,7 @@ private fun AppNavigator(
     usageScheduler: UsageScheduler,
     startDirectoryAutocomplete: StartDirectoryAutocompleteRemoteSource,
     usageWarnPercent: Double,
+    hostDetailViewMode: HostDetailViewMode,
     requestedDestination: AppDestination,
     pendingImportPayload: String? = null,
     onImportPayloadConsumed: () -> Unit = {},
@@ -669,6 +673,8 @@ private fun AppNavigator(
         // arrives with them null and the screen hides the discover
         // button accordingly.
         is AppDestination.WatchedFolders -> {
+            val settingsViewModel = hiltViewModel<SettingsViewModel>()
+            val settings by settingsViewModel.state.collectAsState()
             val creds = if (
                 dest.hostname != null &&
                 dest.port != null &&
@@ -690,6 +696,8 @@ private fun AppNavigator(
                 hostName = dest.hostName,
                 sshCredentials = creds,
                 onBack = ::back,
+                hostDetailViewMode = settings.hostDetailViewMode,
+                onHostDetailViewModeSelected = settingsViewModel::setHostDetailViewMode,
             )
         }
 
@@ -758,6 +766,19 @@ private fun AppNavigator(
                     ),
                 )
             },
+            onOpenWorkspaceSettings = {
+                navigate(
+                    AppDestination.WatchedFolders(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                    ),
+                )
+            },
             // Issue #264: route to the per-folder env-file manager. The
             // discovered folder set is forwarded so the env screen's
             // copy picker stays inside the known folders (D24).
@@ -789,6 +810,7 @@ private fun AppNavigator(
                     typedPrefix = prefix,
                 )
             },
+            hostDetailViewMode = hostDetailViewMode,
         )
 
         // Issue #264: per-folder `.env` / `.envrc` key manager backed by

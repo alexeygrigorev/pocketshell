@@ -3,6 +3,9 @@ package com.pocketshell.app.hosts
 import android.graphics.Bitmap
 import android.os.SystemClock
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasTestTag
@@ -20,7 +23,6 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.projects.FOLDER_LIST_BOTTOM_SPACER_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_CONTENT_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
-import com.pocketshell.app.projects.FOLDER_LIST_VIEW_TOGGLE_TAG
 import com.pocketshell.app.projects.FolderImportPayload
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.projects.FolderListResult
@@ -29,6 +31,7 @@ import com.pocketshell.app.projects.FolderListViewModel
 import com.pocketshell.app.projects.FolderSessionRow
 import com.pocketshell.app.projects.folderDetailRowTestTag
 import com.pocketshell.app.proof.clearLastSessionPrefs
+import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -205,6 +208,7 @@ class FolderListScrollE2eTest {
             projectRootDao = database.projectRootDao(),
         )
         val lastRowTag = folderDetailRowTestTag(folders.first(), rows.first().sessionName)
+        var hostDetailViewMode by mutableStateOf(HostDetailViewMode.Tree)
 
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
@@ -223,6 +227,7 @@ class FolderListScrollE2eTest {
                     onEditEnv = { _, _, _ -> },
                     modifier = Modifier.fillMaxSize(),
                     viewModel = viewModel,
+                    hostDetailViewMode = hostDetailViewMode,
                 )
             }
         }
@@ -240,7 +245,7 @@ class FolderListScrollE2eTest {
         compose.onNodeWithTag(lastRowTag, useUnmergedTree = true).assertIsDisplayed()
         captureFullDevice("04-folder-tree-bottom-viewport.png")
 
-        compose.onNodeWithTag(FOLDER_LIST_VIEW_TOGGLE_TAG, useUnmergedTree = true).performClick()
+        compose.runOnIdle { hostDetailViewMode = HostDetailViewMode.Flat }
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(FOLDER_LIST_CONTENT_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes().isNotEmpty()

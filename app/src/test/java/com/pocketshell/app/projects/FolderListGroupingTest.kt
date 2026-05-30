@@ -390,6 +390,33 @@ class FolderListGroupingTest {
         assertFalse(roots[1].isWatched)
     }
 
+    @Test
+    fun buildFolderTreePreservesConfiguredRootOrder() {
+        val sessions = listOf(
+            entry("tmp-session", 3_000L),
+            entry("git-session", 2_000L),
+        )
+        val cwds = mapOf(
+            "tmp-session" to FolderListViewModel.canonicalisePath("/home/alexey/tmp/scratch"),
+            "git-session" to FolderListViewModel.canonicalisePath("/home/alexey/git/pocketshell"),
+        )
+        val watched = listOf(
+            ProjectRootEntity(id = 2L, hostId = 7L, label = "[00] tmp", path = "/home/alexey/tmp"),
+            ProjectRootEntity(id = 1L, hostId = 7L, label = "[01] git", path = "/home/alexey/git"),
+        )
+
+        val roots = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = cwds,
+            watchedFolders = watched,
+            scannedProjectFoldersByRoot = emptyMap(),
+        )
+
+        assertEquals(listOf("tmp", "git"), roots.map { it.label })
+        assertEquals("scratch", roots[0].folders.single().label)
+        assertEquals("pocketshell", roots[1].folders.single().label)
+    }
+
     private fun entry(
         name: String,
         activity: Long,

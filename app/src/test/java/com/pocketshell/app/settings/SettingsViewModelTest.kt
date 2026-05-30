@@ -159,6 +159,14 @@ class SettingsViewModelTest {
         assertEquals(null, repo.settings.value.defaultHostId)
     }
 
+    @Test
+    fun `setHostDetailViewMode flows through to repository`() {
+        val vm = newVm()
+        vm.setHostDetailViewMode(HostDetailViewMode.Flat)
+        assertEquals(HostDetailViewMode.Flat, repo.settings.value.hostDetailViewMode)
+        assertEquals(HostDetailViewMode.Flat, vm.state.value.hostDetailViewMode)
+    }
+
     // -- Issue #125: Voice section -----------------------------------------
 
     @Test

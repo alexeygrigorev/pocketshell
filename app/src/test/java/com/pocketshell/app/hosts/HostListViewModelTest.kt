@@ -17,11 +17,17 @@ import com.pocketshell.app.usage.UsageRemoteSource
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
 import com.pocketshell.app.usage.worstBadgeRecord
+import com.pocketshell.core.ssh.ExecResult
+import com.pocketshell.core.ssh.SshPortForward
+import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -377,6 +383,8 @@ class HostListViewModelTest {
                 pocketshellCliVersion = "0.2.0",
                 pocketshellExpectedCliVersion = "0.2.0",
                 pocketshellVersionCompatible = true,
+                pocketshellDaemonRunning = true,
+                pocketshellDaemonEnabled = true,
                 lastBootstrapAt = now - 60_000L, // 1 minute ago
             ),
         )
@@ -400,6 +408,74 @@ class HostListViewModelTest {
         // Cache-hit fast path → ready=true immediately.
         assertEquals(true, pending.ready)
         // Sheet stays hidden.
+        assertNull(viewModel.bootstrapState.value)
+    }
+
+    @Test
+    fun bootstrapHost_reprobes_whenFreshToolCacheHasUnknownDaemonState() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val now = System.currentTimeMillis()
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "unknown-daemon",
+                hostname = "127.0.0.1",
+                port = 1,
+                username = "u",
+                keyId = keyId,
+                tmuxInstalled = true,
+                pocketshellInstalled = true,
+                pocketshellLastDetectedAt = now - 60_000L,
+                pocketshellCliVersion = "0.2.0",
+                pocketshellExpectedCliVersion = "0.2.0",
+                pocketshellVersionCompatible = true,
+                pocketshellDaemonRunning = null,
+                pocketshellDaemonEnabled = null,
+                lastBootstrapAt = now - 60_000L,
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = newViewModel(sessionOpener = neverOpeningSession())
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k")
+
+        val pending = viewModel.pendingNavigation.value
+        assertNotNull(pending)
+        assertEquals(hostId, pending!!.host.id)
+        assertEquals(false, pending.ready)
+        assertNull(viewModel.bootstrapState.value)
+    }
+
+    @Test
+    fun bootstrapHost_reprobes_whenFreshToolCacheHasDisabledDaemon() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val now = System.currentTimeMillis()
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "disabled-daemon",
+                hostname = "127.0.0.1",
+                port = 1,
+                username = "u",
+                keyId = keyId,
+                tmuxInstalled = true,
+                pocketshellInstalled = true,
+                pocketshellLastDetectedAt = now - 60_000L,
+                pocketshellCliVersion = "0.2.0",
+                pocketshellExpectedCliVersion = "0.2.0",
+                pocketshellVersionCompatible = true,
+                pocketshellDaemonRunning = true,
+                pocketshellDaemonEnabled = false,
+                lastBootstrapAt = now - 60_000L,
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = newViewModel(sessionOpener = neverOpeningSession())
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k")
+
+        val pending = viewModel.pendingNavigation.value
+        assertNotNull(pending)
+        assertEquals(hostId, pending!!.host.id)
+        assertEquals(false, pending.ready)
         assertNull(viewModel.bootstrapState.value)
     }
 
@@ -456,6 +532,83 @@ class HostListViewModelTest {
             pending.ready,
         )
         assertNull(viewModel.bootstrapState.value)
+    }
+
+    @Test
+    fun bootstrapHost_reprobes_whenFreshPocketshellCacheHasVersionMismatch() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val now = System.currentTimeMillis()
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "cli-update",
+                hostname = "127.0.0.1",
+                port = 1,
+                username = "u",
+                keyId = keyId,
+                tmuxInstalled = true,
+                pocketshellInstalled = true,
+                pocketshellLastDetectedAt = now - 60_000L,
+                pocketshellCliVersion = "0.1.0",
+                pocketshellExpectedCliVersion = "0.2.0",
+                pocketshellVersionCompatible = false,
+                pocketshellDaemonRunning = true,
+                pocketshellDaemonEnabled = true,
+                lastBootstrapAt = now - 60_000L,
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = newViewModel(sessionOpener = neverOpeningSession())
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k")
+
+        val pending = viewModel.pendingNavigation.value
+        assertNotNull(pending)
+        assertEquals(hostId, pending!!.host.id)
+        assertEquals(false, pending.ready)
+        assertNull(viewModel.bootstrapState.value)
+    }
+
+    @Test
+    fun bootstrapHost_refreshesStalePocketshellTimestamp_whenReprobeReturnsSameReadyValues() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val stale = System.currentTimeMillis() - (25L * 60L * 60L * 1000L)
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "stale-pocketshell",
+                hostname = "h.example",
+                username = "u",
+                keyId = keyId,
+                tmuxInstalled = true,
+                pocketshellInstalled = true,
+                pocketshellLastDetectedAt = stale,
+                pocketshellCliVersion = "0.2.0",
+                pocketshellExpectedCliVersion = "0.2.0",
+                pocketshellVersionCompatible = true,
+                pocketshellDaemonRunning = true,
+                pocketshellDaemonEnabled = true,
+                lastBootstrapAt = stale,
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val session = FakeBootstrapSession()
+        val viewModel = newViewModel(
+            sessionOpener = HostSessionOpener { _, _, _ -> session },
+        )
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k").join()
+
+        val pending = viewModel.pendingNavigation.value
+        assertEquals(hostId, pending!!.host.id)
+
+        val persisted = db.hostDao().getById(hostId)!!
+        assertEquals(true, persisted.pocketshellInstalled)
+        assertEquals(true, persisted.pocketshellVersionCompatible)
+        assertEquals(true, persisted.pocketshellDaemonRunning)
+        assertEquals(true, persisted.pocketshellDaemonEnabled)
+        assertTrue(
+            "same-value successful reprobe should refresh stale detection timestamp",
+            persisted.pocketshellLastDetectedAt!! > stale,
+        )
     }
 
     /**
@@ -571,9 +724,42 @@ class HostListViewModelTest {
 
     @Test
     fun deriveSetupState_returnsReady_whenBothFlagsAreTrue() {
-        val host = hostFixture().copy(tmuxInstalled = true, pocketshellInstalled = true)
+        val host = hostFixture().copy(
+            tmuxInstalled = true,
+            pocketshellInstalled = true,
+            pocketshellDaemonRunning = true,
+            pocketshellDaemonEnabled = true,
+        )
         assertEquals(
             com.pocketshell.uikit.model.HostSetupState.Ready,
+            deriveSetupState(host),
+        )
+    }
+
+    @Test
+    fun deriveSetupState_returnsUnknown_whenDaemonStateIsUnknown() {
+        val host = hostFixture().copy(
+            tmuxInstalled = true,
+            pocketshellInstalled = true,
+            pocketshellDaemonRunning = null,
+            pocketshellDaemonEnabled = null,
+        )
+        assertEquals(
+            com.pocketshell.uikit.model.HostSetupState.Unknown,
+            deriveSetupState(host),
+        )
+    }
+
+    @Test
+    fun deriveSetupState_returnsNeedsSetup_whenDaemonIsDisabled() {
+        val host = hostFixture().copy(
+            tmuxInstalled = true,
+            pocketshellInstalled = true,
+            pocketshellDaemonRunning = true,
+            pocketshellDaemonEnabled = false,
+        )
+        assertEquals(
+            com.pocketshell.uikit.model.HostSetupState.NeedsSetup,
             deriveSetupState(host),
         )
     }
@@ -595,6 +781,8 @@ class HostListViewModelTest {
                 keyId = keyId,
                 tmuxInstalled = true,
                 pocketshellInstalled = true,
+                pocketshellDaemonRunning = true,
+                pocketshellDaemonEnabled = true,
             ),
         )
         val needsSetupId = db.hostDao().insert(
@@ -720,6 +908,61 @@ class HostListViewModelTest {
         // The clear hook hides the banner without touching anything else.
         viewModel.clearRecheckMessage()
         assertNull(viewModel.recheckMessage.value)
+    }
+
+    @Test
+    fun bootstrapHost_waitsForSilentReprobeBeforeForegroundDecision() = runTest {
+        val keyFile = File.createTempFile("pocketshell-hostlist", ".key").apply {
+            writeText("not a real key")
+            deleteOnExit()
+        }
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = keyFile.absolutePath))
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "unknown",
+                hostname = "h.example",
+                username = "u",
+                keyId = keyId,
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val tmuxProbeReached = CompletableDeferred<Unit>()
+        val releaseTmuxProbe = CompletableDeferred<Unit>()
+        val session = FakeBootstrapSession(
+            tmuxProbeReached = tmuxProbeReached,
+            releaseTmuxProbe = releaseTmuxProbe,
+        )
+        var openCount = 0
+        val viewModel = newViewModel(
+            sessionOpener = HostSessionOpener { _, _, _ ->
+                openCount += 1
+                session
+            },
+        )
+
+        viewModel.reprobeUnknownHostsOnce()
+        tmuxProbeReached.await()
+
+        val foregroundJob = viewModel.bootstrapHost(host, keyPath = keyFile.absolutePath)
+
+        assertEquals("foreground tap must not open a racing second SSH session", 1, openCount)
+        assertEquals(false, viewModel.pendingNavigation.value!!.ready)
+
+        releaseTmuxProbe.complete(Unit)
+        foregroundJob.join()
+
+        val pending = viewModel.pendingNavigation.value
+        assertNotNull(pending)
+        assertEquals(hostId, pending!!.host.id)
+        assertEquals(true, pending.ready)
+        assertEquals("foreground tap should own the final probe after waiting for silent reprobe", 2, openCount)
+
+        val persisted = db.hostDao().getById(hostId)!!
+        assertEquals(true, persisted.tmuxInstalled)
+        assertEquals(true, persisted.pocketshellInstalled)
+        assertEquals(true, persisted.pocketshellVersionCompatible)
+        assertEquals(true, persisted.pocketshellDaemonRunning)
+        assertEquals(true, persisted.pocketshellDaemonEnabled)
     }
 
     /** Build a minimally-populated host row for the derivation tests. */
@@ -1488,7 +1731,77 @@ class HostListViewModelTest {
         assertEquals("Imported fresh", viewModel.shareMessage.value)
     }
 
+    private class FakeBootstrapSession(
+        private val tmuxProbeReached: CompletableDeferred<Unit>? = null,
+        private val releaseTmuxProbe: CompletableDeferred<Unit>? = null,
+        private val daemonEnabled: Boolean = true,
+    ) : SshSession {
+        val recorded = mutableListOf<String>()
+        override val isConnected: Boolean = true
+
+        override suspend fun exec(command: String): ExecResult {
+            recorded += command
+            if (command == HostBootstrapper().detectBootstrapPathCommand()) {
+                return ExecResult(
+                    "__POCKETSHELL_PATH_BEGIN__\n$DEFAULT_BOOTSTRAP_PATH\n__POCKETSHELL_PATH_END__\n",
+                    "",
+                    0,
+                )
+            }
+            return when {
+                command.contains("command -v tmux") -> {
+                    tmuxProbeReached?.complete(Unit)
+                    releaseTmuxProbe?.await()
+                    ExecResult("/usr/bin/tmux\n", "", 0)
+                }
+                command.contains("command -v") && command.contains("pocketshell") ->
+                    ExecResult("/home/u/.local/bin/pocketshell\n", "", 0)
+                command.contains("pocketshell") && command.contains("--version") ->
+                    ExecResult("pocketshell, version 0.2.0\n", "", 0)
+                command.contains("command -v") && command.contains("uv") ->
+                    ExecResult("/home/u/.local/bin/uv\n", "", 0)
+                command.contains("command -v") && command.contains("systemctl") ->
+                    ExecResult("/usr/bin/systemctl\n", "", 0)
+                command.contains("systemctl --user is-active pocketshell-jobs.service") ->
+                    ExecResult("active\n", "", 0)
+                command.contains("systemctl --user is-enabled pocketshell-jobs.service") ->
+                    if (daemonEnabled) {
+                        ExecResult("enabled\n", "", 0)
+                    } else {
+                        ExecResult("disabled\n", "", 1)
+                    }
+                else -> ExecResult("", "command not stubbed: $command", 127)
+            }
+        }
+
+        override fun tail(path: String, onLine: (String) -> Unit): Job =
+            error("tail not used in this test")
+
+        override fun openLocalPortForward(
+            remoteHost: String,
+            remotePort: Int,
+            localPort: Int,
+        ): SshPortForward = error("port forward not used in this test")
+
+        override fun startShell(): SshShell = error("shell not used in this test")
+
+        override suspend fun uploadFile(file: File, remotePath: String): String =
+            error("uploadFile not used in this test")
+
+        override suspend fun uploadStream(
+            input: java.io.InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String = error("uploadStream not used in this test")
+
+        override fun close() = Unit
+    }
+
     private companion object {
+        const val DEFAULT_BOOTSTRAP_PATH: String =
+            "/home/u/.local/bin:/home/u/bin:/home/u/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
+
         val EncryptedOpenSshPrivateKey = """
             -----BEGIN OPENSSH PRIVATE KEY-----
             b3BlbnNzaC1rZXktdjEAAAAACmFlczI1Ni1jdHIAAAAGYmNyeXB0AAAAGAAAABDy65Wy4J

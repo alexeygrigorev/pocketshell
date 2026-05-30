@@ -9,6 +9,7 @@ import com.pocketshell.app.bootstrap.HostBootstrapSheetState
 import com.pocketshell.app.bootstrap.HostBootstrapper
 import com.pocketshell.app.bootstrap.InstallResult
 import com.pocketshell.app.bootstrap.BootstrapTool
+import com.pocketshell.app.bootstrap.PocketshellDaemonStatus
 import com.pocketshell.app.bootstrap.TmuxStatus
 import com.pocketshell.app.bootstrap.ToolStatus
 import com.pocketshell.app.release.ReleaseChecker
@@ -36,6 +37,7 @@ import com.pocketshell.uikit.model.HostStatus
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -45,6 +47,8 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
@@ -368,6 +372,12 @@ class HostListViewModel internal constructor(
     /** Guard so the cold-launch reprobe only fires once per ViewModel. */
     private var autoReprobeKicked = false
 
+    /** Per-host bootstrap probe coordination across silent reprobes and foreground taps. */
+    private val probeLocks = mutableMapOf<Long, Mutex>()
+
+    /** Incremented by foreground taps so older silent probes cannot persist late results. */
+    private val foregroundProbeGenerations = mutableMapOf<Long, Long>()
+
     init {
         checkForUpdates()
     }
@@ -609,6 +619,8 @@ class HostListViewModel internal constructor(
                     pocketshellCliVersion = null,
                     pocketshellExpectedCliVersion = null,
                     pocketshellVersionCompatible = null,
+                    pocketshellDaemonRunning = null,
+                    pocketshellDaemonEnabled = null,
                 )
                 hostDao.update(updated)
                 _shareMessage.value = "Overwrote ${conflict.existing.name}"
@@ -689,16 +701,17 @@ class HostListViewModel internal constructor(
      * once the bootstrap resolves (immediately on cache hit, or after
      * the user taps Skip / Continue on the sheet).
      */
-    fun bootstrapHost(host: HostEntity, keyPath: String, passphrase: CharArray? = null) {
+    fun bootstrapHost(host: HostEntity, keyPath: String, passphrase: CharArray? = null): Job {
         // Cache: a fresh tmux result skips the bootstrap SSH probe only
         // when the matching server-setup probe also proved the unified
-        // pocketshell CLI is present and app-compatible. NeedsSetup /
-        // CliUpdateNeeded rows must not route immediately off a fresh
-        // tmux-only cache; they need a chance to re-run checkServerSetup
-        // so README-installed CLIs can be upgraded.
-        val skipTmuxProbe = host.tmuxInstalled == true &&
-            host.isBootstrapFresh() &&
-            host.hasFreshCompatiblePocketshellResult()
+        // pocketshell CLI is present and app-compatible and its daemon is
+        // running/enabled. NeedsSetup / CliUpdateNeeded rows must not route
+        // immediately off a partial cache; they need a chance to re-run
+        // checkServerSetup so README-installed CLIs can be upgraded and the
+        // daemon can be enabled.
+        val probeLock = probeLockFor(host.id)
+        markForegroundProbe(host.id)
+        val skipTmuxProbe = !probeLock.isLocked && host.canUseBootstrapCache()
 
         // Probe (re-probe if stale or unknown). For a previously-missing
         // host we still want to re-check because the user may have fixed
@@ -713,55 +726,71 @@ class HostListViewModel internal constructor(
         if (skipTmuxProbe) {
             _bootstrapState.value = null
             _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
-            return
+            return completedJob()
         }
 
-        viewModelScope.launch {
-            val session = openSession(host, keyPath, passphrase)
-            if (session == null) {
-                // Couldn't connect → don't block navigation. The session
-                // screen will surface the same connect failure with its
-                // own retry UX, which is the right place to handle it.
-                _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
-                return@launch
-            }
-            bootstrapSession = session
-
-            // Issue #294: bootstrap probes derive PATH from the remote
-            // user's interactive shell rc, then prepend PocketShell's
-            // default user-bin dirs. No per-host PATH override is needed.
-            when (val status = bootstrapper.checkTmux(session)) {
-                TmuxStatus.Installed -> {
-                    persistResult(host, installed = true)
-                    val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
-                    persistPocketshellResult(host, report)
-                    if (report.isReady) {
-                        closeBootstrapSession()
-                        _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
-                    } else {
-                        _bootstrapState.value = HostBootstrapSheetState.Prompt(
-                            needsTmux = false,
-                            report = report,
-                        )
-                    }
+        return viewModelScope.launch {
+            probeLock.withLock {
+                val currentHost = hostDao.getById(host.id) ?: host
+                if (currentHost.canUseBootstrapCache()) {
+                    _bootstrapState.value = null
+                    _pendingNavigation.value = PendingNavigation(currentHost, keyPath, passphrase, ready = true)
+                    return@withLock
                 }
+                runForegroundBootstrapProbe(currentHost, keyPath, passphrase)
+            }
+        }
+    }
 
-                TmuxStatus.Missing -> {
-                    persistResult(host, installed = false)
-                    val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
-                    persistPocketshellResult(host, report)
+    private suspend fun runForegroundBootstrapProbe(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+    ) {
+        val session = openSession(host, keyPath, passphrase)
+        if (session == null) {
+            // Couldn't connect → don't block navigation. The session
+            // screen will surface the same connect failure with its
+            // own retry UX, which is the right place to handle it.
+            _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
+            return
+        }
+        bootstrapSession = session
+
+        // Issue #294: bootstrap probes derive PATH from the remote
+        // user's interactive shell rc, then prepend PocketShell's
+        // default user-bin dirs. No per-host PATH override is needed.
+        when (val status = bootstrapper.checkTmux(session)) {
+            TmuxStatus.Installed -> {
+                persistResult(host, installed = true)
+                val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
+                persistPocketshellResult(host, report)
+                if (report.isReady) {
+                    closeBootstrapSession()
+                    _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
+                } else {
                     _bootstrapState.value = HostBootstrapSheetState.Prompt(
-                        needsTmux = true,
+                        needsTmux = false,
                         report = report,
                     )
                 }
+            }
 
-                is TmuxStatus.Unknown -> {
-                    // Can't prove missing → continue, don't pester the user.
-                    closeBootstrapSession()
-                    _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
-                    @Suppress("UNUSED_VARIABLE") val reason = status.reason
-                }
+            TmuxStatus.Missing -> {
+                persistResult(host, installed = false)
+                val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
+                persistPocketshellResult(host, report)
+                _bootstrapState.value = HostBootstrapSheetState.Prompt(
+                    needsTmux = true,
+                    report = report,
+                )
+            }
+
+            is TmuxStatus.Unknown -> {
+                // Can't prove missing → continue, don't pester the user.
+                closeBootstrapSession()
+                _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
+                @Suppress("UNUSED_VARIABLE") val reason = status.reason
             }
         }
     }
@@ -773,9 +802,9 @@ class HostListViewModel internal constructor(
      * cache-on-connect behaviour) but here so the cache invalidation
      * acceptance criterion is testable.
      */
-    fun refreshBootstrap(host: HostEntity, keyPath: String) {
+    fun refreshBootstrap(host: HostEntity, keyPath: String): Job {
         val cleared = host.copy(tmuxInstalled = null, lastBootstrapAt = null)
-        bootstrapHost(cleared, keyPath)
+        return bootstrapHost(cleared, keyPath)
     }
 
     /**
@@ -805,27 +834,33 @@ class HostListViewModel internal constructor(
      * session as a side effect of a silent probe.
      */
     private fun recheckHostSilently(host: HostEntity, keyPath: String) {
-        viewModelScope.launch {
-            val session = openSession(host, keyPath, passphrase = null) ?: return@launch
-            try {
-                when (bootstrapper.checkTmux(session)) {
-                    TmuxStatus.Installed -> {
-                        persistResult(host, installed = true)
-                        val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
-                        persistPocketshellResult(host, report)
+        val probeLock = probeLockFor(host.id)
+        val scheduledGeneration = currentForegroundProbeGeneration(host.id)
+        viewModelScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            probeLock.withLock {
+                val session = openSession(host, keyPath, passphrase = null) ?: return@withLock
+                try {
+                    when (bootstrapper.checkTmux(session)) {
+                        TmuxStatus.Installed -> {
+                            val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
+                            if (!isSilentProbeStillCurrent(host.id, scheduledGeneration)) return@withLock
+                            persistResult(host, installed = true)
+                            persistPocketshellResult(host, report)
+                        }
+                        TmuxStatus.Missing -> {
+                            val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
+                            if (!isSilentProbeStillCurrent(host.id, scheduledGeneration)) return@withLock
+                            persistResult(host, installed = false)
+                            persistPocketshellResult(host, report)
+                        }
+                        is TmuxStatus.Unknown -> {
+                            // Cannot prove either way — leave the persisted
+                            // flags untouched. Badge stays Unknown.
+                        }
                     }
-                    TmuxStatus.Missing -> {
-                        persistResult(host, installed = false)
-                        val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
-                        persistPocketshellResult(host, report)
-                    }
-                    is TmuxStatus.Unknown -> {
-                        // Cannot prove either way — leave the persisted
-                        // flags untouched. Badge stays Unknown.
-                    }
+                } finally {
+                    runCatching { session.close() }
                 }
-            } finally {
-                runCatching { session.close() }
             }
         }
     }
@@ -1089,16 +1124,35 @@ class HostListViewModel internal constructor(
             is ToolStatus.VersionMismatch -> false
             else -> null
         }
+        val daemonRunning = when (val daemon = report.daemon) {
+            is PocketshellDaemonStatus.Running -> true
+            is PocketshellDaemonStatus.InstalledStopped -> false
+            PocketshellDaemonStatus.Missing -> false
+            is PocketshellDaemonStatus.Unavailable -> null
+            is PocketshellDaemonStatus.Unknown -> null
+        }
+        val daemonEnabled = when (val daemon = report.daemon) {
+            is PocketshellDaemonStatus.Running -> daemon.enabled
+            is PocketshellDaemonStatus.InstalledStopped -> daemon.enabled
+            PocketshellDaemonStatus.Missing -> false
+            is PocketshellDaemonStatus.Unavailable -> null
+            is PocketshellDaemonStatus.Unknown -> null
+        }
         val now = System.currentTimeMillis()
         val current = hostDao.getById(host.id) ?: host
         // Only write when the cached value would change; avoids a churn
         // on every connect for a row that has not moved.
+        val existingDetectionIsFresh = current.pocketshellLastDetectedAt
+            ?.let { now - it < BOOTSTRAP_CACHE_MS }
+            ?: false
         if (
             current.pocketshellInstalled == pocketshellInstalled &&
             current.pocketshellCliVersion == currentVersion &&
             current.pocketshellExpectedCliVersion == expectedVersion &&
             current.pocketshellVersionCompatible == compatible &&
-            current.pocketshellLastDetectedAt != null
+            current.pocketshellDaemonRunning == daemonRunning &&
+            current.pocketshellDaemonEnabled == daemonEnabled &&
+            existingDetectionIsFresh
         ) {
             return
         }
@@ -1109,6 +1163,8 @@ class HostListViewModel internal constructor(
                 pocketshellCliVersion = currentVersion,
                 pocketshellExpectedCliVersion = expectedVersion,
                 pocketshellVersionCompatible = compatible,
+                pocketshellDaemonRunning = daemonRunning,
+                pocketshellDaemonEnabled = daemonEnabled,
             ),
         )
     }
@@ -1118,6 +1174,12 @@ class HostListViewModel internal constructor(
     private fun closeBootstrapSession() {
         bootstrapSession?.let { runCatching { it.close() } }
         bootstrapSession = null
+    }
+
+    private fun completedJob(): Job {
+        val job = Job()
+        job.complete()
+        return job
     }
 
     override fun onCleared() {
@@ -1187,6 +1249,28 @@ class HostListViewModel internal constructor(
         const val BOOTSTRAP_CACHE_MS: Long = 24L * 60L * 60L * 1000L
     }
 
+    private fun probeLockFor(hostId: Long): Mutex =
+        synchronized(probeLocks) {
+            probeLocks.getOrPut(hostId) { Mutex() }
+        }
+
+    private fun markForegroundProbe(hostId: Long) {
+        synchronized(foregroundProbeGenerations) {
+            foregroundProbeGenerations[hostId] = currentForegroundProbeGenerationLocked(hostId) + 1L
+        }
+    }
+
+    private fun currentForegroundProbeGeneration(hostId: Long): Long =
+        synchronized(foregroundProbeGenerations) {
+            currentForegroundProbeGenerationLocked(hostId)
+        }
+
+    private fun currentForegroundProbeGenerationLocked(hostId: Long): Long =
+        foregroundProbeGenerations[hostId] ?: 0L
+
+    private fun isSilentProbeStillCurrent(hostId: Long, scheduledGeneration: Long): Boolean =
+        currentForegroundProbeGeneration(hostId) == scheduledGeneration
+
     /**
      * Visible extension on the receiver so test code (and
      * [bootstrapHost]) can ask the question without leaking the constant
@@ -1204,6 +1288,19 @@ class HostListViewModel internal constructor(
             pocketshellVersionCompatible == true &&
             now - last < BOOTSTRAP_CACHE_MS
     }
+
+    private fun HostEntity.hasFreshReadyDaemonResult(now: Long = System.currentTimeMillis()): Boolean {
+        val last = pocketshellLastDetectedAt ?: return false
+        return pocketshellDaemonRunning == true &&
+            pocketshellDaemonEnabled == true &&
+            now - last < BOOTSTRAP_CACHE_MS
+    }
+
+    private fun HostEntity.canUseBootstrapCache(now: Long = System.currentTimeMillis()): Boolean =
+        tmuxInstalled == true &&
+            isBootstrapFresh(now) &&
+            hasFreshCompatiblePocketshellResult(now) &&
+            hasFreshReadyDaemonResult(now)
 }
 
 internal fun interface HostSessionOpener {
@@ -1256,11 +1353,14 @@ enum class ImportConflictResolution {
  * - `CliUpdateNeeded` — `pocketshellVersionCompatible == false`.
  * - `NeedsSetup`  — `tmuxInstalled == false`, OR `pocketshellInstalled ==
  *                   false`. At least one required tool is missing.
- * - `Ready`       — `tmuxInstalled == true` AND `pocketshellInstalled == true`.
+ * - `Ready`       — `tmuxInstalled == true`, `pocketshellInstalled == true`,
+ *                   and the pocketshell daemon is known running/enabled.
  */
 internal fun deriveSetupState(host: HostEntity): HostSetupState {
     val tmux = host.tmuxInstalled
     val pocketshell = host.pocketshellInstalled
+    val daemonRunning = host.pocketshellDaemonRunning
+    val daemonEnabled = host.pocketshellDaemonEnabled
     return when {
         tmux == null -> HostSetupState.Unknown
         tmux == false -> HostSetupState.NeedsSetup
@@ -1268,6 +1368,8 @@ internal fun deriveSetupState(host: HostEntity): HostSetupState {
         host.pocketshellVersionCompatible == false -> HostSetupState.CliUpdateNeeded
         pocketshell == null -> HostSetupState.Unknown
         pocketshell == false -> HostSetupState.NeedsSetup
+        daemonRunning == null || daemonEnabled == null -> HostSetupState.Unknown
+        daemonRunning == false || daemonEnabled == false -> HostSetupState.NeedsSetup
         else -> HostSetupState.Ready
     }
 }

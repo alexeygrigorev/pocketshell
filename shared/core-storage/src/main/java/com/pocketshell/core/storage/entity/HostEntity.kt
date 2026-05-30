@@ -52,6 +52,11 @@ import androidx.room.PrimaryKey
  * [pocketshellExpectedCliVersion], and [pocketshellVersionCompatible] so
  * a host with an installed but app-incompatible helper is not collapsed
  * into the generic "needs setup" state.
+ *
+ * Issue #328 adds [pocketshellDaemonRunning] and
+ * [pocketshellDaemonEnabled] to keep the connect cache honest: a fresh,
+ * compatible CLI is not enough to route directly unless the matching probe
+ * also proved the user daemon is running and enabled.
  */
 @Entity(
     tableName = "hosts",
@@ -85,5 +90,7 @@ data class HostEntity(
     val pocketshellCliVersion: String? = null,
     val pocketshellExpectedCliVersion: String? = null,
     val pocketshellVersionCompatible: Boolean? = null,
+    val pocketshellDaemonRunning: Boolean? = null,
+    val pocketshellDaemonEnabled: Boolean? = null,
     val usageCommandOverride: String? = null,
 )

@@ -671,7 +671,7 @@ for attempt in \$(seq 1 '$ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS'); do
   set -e
   pid=""
   if [ "\$pid_status" -eq 0 ]; then
-    pid=\$(printf '%s\n' "\$pid_output" | tr -d '\r')
+    pid=\$(printf '%s\n' "\$pid_output" | tr -d '\r' | awk '/^[[:space:]]*[0-9]+[[:space:]]*$/ { print \$1; exit }')
   fi
   '$ADB' logcat -d -v time -t 5000 > "\$attempt_logcat_file" 2>&1 || true
 

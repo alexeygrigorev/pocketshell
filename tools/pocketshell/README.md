@@ -1,14 +1,10 @@
 # pocketshell
 
 Unified server-side Python utility for the [PocketShell](https://github.com/alexeygrigorev/pocketshell)
-Android client. Replaces the separately-installed `quse` and `tmuxctl`
-utilities the app currently probes for on every remote host.
-
-This first release ships the **skeleton plus the `pocketshell usage`
-subcommand only**. Follow-up rounds will add `jobs`, `agent-log`,
-`sessions`, `repos`, and an optional daemon mode. See
-[issue #170](https://github.com/alexeygrigorev/pocketshell/issues/170) for
-the design spike and phased roll-out plan.
+Android client. The app probes for this single helper on each remote
+host and uses its subcommands for usage, tmux session/job metadata,
+agent conversations, QR host setup, repository discovery, environment
+files, hooks, logs, and daemon lifecycle checks.
 
 ## Install
 
@@ -49,18 +45,38 @@ Without the extra, every other subcommand keeps working; only
 
 ## Usage
 
+Top-level commands in the current helper:
+
+```text
+pocketshell usage [provider] [--json]       # provider quota / usage
+pocketshell sessions list [--by activity]   # tmux session summaries
+pocketshell jobs ...                        # tmux recurring jobs
+pocketshell agent-log ...                   # agent conversation logs
+pocketshell repos list ...                  # local / GitHub repositories
+pocketshell env ...                         # .env / .envrc management
+pocketshell hooks ...                       # Claude/Codex/OpenCode hooks
+pocketshell logs ...                        # server-side trace sink
+pocketshell daemon ...                      # IPC daemon lifecycle
+pocketshell qr-share ...                    # SSH host QR import payloads
+```
+
+Run `pocketshell --help` or `pocketshell <command> --help` for the live
+flag set. Some parity subcommands still proxy through the existing host
+tools internally so their output remains byte-identical to what the app
+already parses.
+
+### `pocketshell usage`
+
 ```text
 pocketshell usage           # human-readable lines, one per provider
 pocketshell usage --json    # machine-readable JSON (consumed by the app)
 pocketshell usage codex     # filter to a single provider
 ```
 
-The output shape is byte-identical to `quse [provider] [--json]` so any
-consumer that already parses `quse` output keeps working when the app
-routes through `pocketshell usage` instead. Under the hood the first
-release delegates to the `quse` CLI via subprocess; later rounds will
-fold the provider-detection logic in directly and drop the subprocess
-hop.
+The output shape is byte-identical to `quse [provider] [--json]`. When
+the IPC daemon is running, `usage --json` dispatches `usage.fetch` over
+the daemon socket and uses the daemon's short TTL cache; otherwise it
+falls through to the one-shot subprocess path.
 
 If `quse` is not installed, `pocketshell usage` exits with code 127 and
 prints an install hint to stderr.
@@ -256,7 +272,7 @@ Run it locally before tagging:
 
 ```bash
 scripts/check-pypi-version.sh                  # local match check
-scripts/check-pypi-version.sh --check-tag v0.3.0
+scripts/check-pypi-version.sh --check-tag vX.Y.Z
 ```
 
 ### Bumping a release
@@ -336,15 +352,11 @@ as a permanent fallback.
 
 ## Why a unified CLI?
 
-The PocketShell app previously probed for two binaries (`quse`,
-`tmuxctl`) on every host. That meant two installs to keep up to date,
-two probes to surface failures from, and two PATH-discovery edge cases.
-A single `pocketshell` binary collapses those into one install, one
-probe, one bootstrap row. The Android bootstrap probe now derives PATH
-from the user's shell rc and prepends `$HOME/.local/bin`, `$HOME/bin`,
-and `$HOME/.cargo/bin` before probing, so cloned-repo or venv installs
-can be discovered without a manual app-side PATH field. The app keeps
-detecting `quse` and `tmuxctl` as a parallel path while `pocketshell`
-ramps up to feature parity; once parity is reached, the legacy probes
-are removed in a hard-cut follow-up (no compat shim — see decision D22
-in `docs/decisions.md`).
+The PocketShell app previously depended on multiple host-side tools.
+That meant separate installs to keep up to date, separate probes to
+surface failures from, and multiple PATH-discovery edge cases. A single
+`pocketshell` binary collapses that app-facing contract into one install,
+one probe, and one bootstrap row. The Android bootstrap probe now derives
+PATH from the user's shell rc and prepends `$HOME/.local/bin`,
+`$HOME/bin`, and `$HOME/.cargo/bin` before probing, so cloned-repo or
+venv installs can be discovered without a manual app-side PATH field.

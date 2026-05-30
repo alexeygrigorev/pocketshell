@@ -1,6 +1,7 @@
 # PocketShell Docs
 
-Conceptual planning. Captured 2026-05-21, before any code is written.
+Product and engineering notes. Some planning docs preserve their original
+context; the README and current feature docs track released behavior.
 
 | File | What it covers |
 |---|---|
@@ -8,8 +9,8 @@ Conceptual planning. Captured 2026-05-21, before any code is written.
 | [architecture.md](architecture.md) | Composition layout, tech stack, three load-bearing decisions |
 | [input-methods.md](input-methods.md) | Voice, key bar, chord palette, snippets — the alternative-to-typing strategy |
 | [ssh-qr-import.md](ssh-qr-import.md) | Versioned SSH host import payload and helper commands for QR generation |
-| [agent-awareness.md](agent-awareness.md) | Detecting Claude Code in a tmux pane and showing a clean conversation view; Codex/OpenCode parsers are present but runtime-disabled |
-| [usage-panel.md](usage-panel.md) | Provider quota / usage tracking via server-side tools (heru) over SSH — zero credentials on the phone |
+| [agent-awareness.md](agent-awareness.md) | Detecting Claude Code, Codex, and OpenCode in a tmux pane and showing a clean conversation view |
+| [usage-panel.md](usage-panel.md) | Provider quota / usage tracking via server-side `pocketshell usage` over SSH — zero credentials on the phone |
 | [design-language.md](design-language.md) | Termius-inspired visual tokens |
 | [ux-rules.md](ux-rules.md) | Placement + transition rules across journeys (codified from #163); cite from every UX-touching issue |
 | [roadmap.md](roadmap.md) | Phased build order with rough sizing |
@@ -26,8 +27,8 @@ Conceptual planning. Captured 2026-05-21, before any code is written.
 | Path | Role |
 |---|---|
 | `../../ssh-auto-forward-android/` | Existing Kotlin/Compose app. Source of extractable SSH + port-forward modules. |
-| `../../tmuxcli/` | Python CLI. PocketShell mirrors its semantics; recurring jobs run server-side via `tmuxctl jobs daemon` on each host. |
+| `../../tmuxcli/` | Python CLI. PocketShell mirrors its job/session semantics through the server-side `pocketshell` helper. |
 | `../../ssh-auto-forward/` | Python TUI. Reference for `ss -tlnp` parsing and reconnect/backoff logic. |
 | `../../agent-log-explorer/` | Separate tool for browsing historical agent conversations. PocketShell does *current session* view directly; agent-log-explorer remains for *all history* search. |
-| `../../heru/` | Provider quota tool. PocketShell invokes `heru usage --json` over SSH to render the usage panel. No credentials in the app. |
+| `../../heru/` | Historical provider quota reference; current app usage polling goes through `pocketshell usage --json`. |
 | `../../litehive/` | Per-engine local invocation counters. Alternative data source for the usage panel. |

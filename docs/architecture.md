@@ -12,8 +12,8 @@ shared/                     (sibling repo or sibling folder, TBD)
   ├── core-portfwd/         # AutoForwarder, PortScanner, SshTunnel
   ├── core-tmux/            # NEW: tmux -CC control-mode client
   ├── core-terminal/        # NEW: vendored Termux terminal-view + Compose adapter
-  ├── core-agents/          # NEW: Claude runtime detection + JSONL/SQLite parsers (Claude Code, Codex, OpenCode)
-  ├── core-usage/           # NEW: parses heru usage --json (or other server-side usage tools) over SSH
+  ├── core-agents/          # NEW: Claude/Codex/OpenCode detection + JSONL/SQLite parsers
+  ├── core-usage/           # NEW: parses pocketshell usage --json over SSH
   ├── core-storage/         # Room entities, DAOs (host, key, snippet, job)
   └── ui-kit/               # NEW: Termius-style components (cards, chips, breadcrumbs, host row)
 ```
@@ -69,15 +69,15 @@ Tmux's native split layout is unreadable on a phone. With control mode we know a
 
 ## Server-side scheduler (locked decision — see decisions.md)
 
-Recurring tmux-send jobs run on each host via `tmuxctl jobs daemon`, not on the phone. Jobs survive phone offline / sleep / network drops.
+Recurring tmux-send jobs run on each host via `pocketshell jobs daemon`, not on the phone. Jobs survive phone offline / sleep / network drops.
 
 Consequence — host bootstrap is now a real UX concern:
 
 When you add a host, PocketShell should:
 
-1. Detect whether `tmuxctl` is installed (`which tmuxctl` over SSH)
-2. If absent, offer one-tap install (`uv tool install tmuxctl` or `pipx install tmuxctl`)
-3. Detect whether `tmuxctl jobs daemon` is running (and ideally enabled via systemd user unit)
+1. Detect whether `pocketshell` is installed (`command -v pocketshell` over SSH)
+2. If absent or version-mismatched, offer one-tap install/upgrade (`uv tool install pocketshell` or `pipx install pocketshell`)
+3. Detect whether `pocketshell jobs daemon` is running (and ideally enabled via systemd user unit)
 4. Offer to install the systemd unit if missing
 
 This needs to be first-class onboarding, not a hidden prerequisite. If we skip this, the Jobs UI silently fails on unconfigured hosts.
@@ -88,7 +88,7 @@ This needs to be first-class onboarding, not a hidden prerequisite. If we skip t
 |---|---|
 | Workspace dashboard (home) | Hosts (favourites + recent), all tmux sessions across connected hosts sorted by activity, running jobs |
 | Session view | Full-screen terminal for one pane. Swipe L/R = next/prev pane. Swipe up = window switcher. Swipe down = session switcher. Top breadcrumb = `host › session › window › pane`. |
-| Quick send panel | Send snippet or schedule recurring (delegates to remote `tmuxctl jobs add`) |
+| Quick send panel | Send snippet or schedule recurring (delegates to remote `pocketshell jobs add`) |
 | Port panel | Slide-in panel on a host — the existing `ssh-auto-forward-android` table, absorbed |
 | Connection setup | SSH config import, key gen + push via paste/QR, biometric unlock for passphrases |
 

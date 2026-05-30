@@ -35,18 +35,18 @@ Goal: the moment it stops being "another SSH client."
 
 - `core-tmux`: `tmux -CC` client (parser for `%output`, `%session-changed`, `%window-add`, `%layout-change`, etc.)
 - Per-pane rendering, swipes between panes/windows
-- Cross-host session dashboard (sorted by recency, à la tmuxctl)
+- Cross-host session dashboard (sorted by recency via the `pocketshell` helper)
 - Session create / attach / detach / rename / kill
 - Host bootstrap flow: detect tmux, prompt to install if missing
 
 ## Phase 3 — Workflow features (3–4 weeks)
 
 - Port forwarding panel (slide-over, reuses `core-portfwd` — the UI already exists in `ssh-auto-forward-android`)
-- Recurring jobs (delegates to remote `tmuxctl jobs add/list/edit`)
-- Host bootstrap: detect `tmuxctl`, offer one-tap install, offer systemd user unit
+- Recurring jobs (delegates to remote `pocketshell jobs add/list/edit`)
+- Host bootstrap: detect `pocketshell`, offer one-tap install/upgrade, offer systemd user unit
 - Quick-send presets per session
-- Agent awareness: `core-agents` module with Claude Code / Codex / OpenCode parsers; runtime detection enabled for Claude Code from tmux pane cwd only, with Codex/OpenCode disabled until safe correlation exists; conversation tab on the session view; hint chip when an agent is detected. See [agent-awareness.md](agent-awareness.md).
-- Usage panel: `core-usage` module wrapping `heru usage --json` over SSH; per-provider cards with short/long windows; dashboard widget; session-row blocked badges. See [usage-panel.md](usage-panel.md).
+- Agent awareness: `core-agents` module with Claude Code / Codex / OpenCode parsers; runtime detection for all three agents from tmux pane cwd plus pane-scoped process confirmation; conversation tab on the session view; hint chip when an agent is detected. See [agent-awareness.md](agent-awareness.md).
+- Usage panel: `core-usage` module wrapping `pocketshell usage --json` over SSH; per-provider cards with short/long windows; dashboard widget; session-row blocked badges. See [usage-panel.md](usage-panel.md).
 - Agent monitoring chips (build/deploy/training status surfaced on dashboard)
 
 ## Phase 4 — Polish (ongoing)

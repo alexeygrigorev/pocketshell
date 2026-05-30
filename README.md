@@ -12,33 +12,35 @@ product direction is captured in [docs/vision.md](docs/vision.md).
 
 PocketShell is under active development; it is not production-ready and
 there is no install base to migrate. The latest GitHub Release is
-**v0.2.9** (2026-05-28). **v0.3.0 is in preparation** as the
-release that closes the open backlog — tmux nav IA polish, dictation/voice
-fixes, the unified `pocketshell` server helper, and the GitHub-aware
-project navigation tracks. Patch versions (v0.2.x) ship in the meantime
-when real-device use surfaces a fix worth cutting.
+**v0.3.8** (2026-05-30). The release builds the Android debug APK and
+publishes the server-side `pocketshell` Python helper from the same tag.
 
-What works today on `main`:
+What works in v0.3.8 / current `main`:
 
 - Multi-host SSH (sshj) with QR-code host import, key generation/import,
   and biometric unlock.
+- Host-first navigation: each host opens into a workspace tree rooted at
+  configured project roots, with active tmux sessions grouped by project.
 - Persistent tmux sessions via `tmux -CC` control mode, with per-pane
   rendering (one pane at a time, swipe between panes/windows).
 - Voice prompt composer (Whisper) + inline dictation, key bar for
   Esc/Tab/Ctrl/Alt/arrows, snippet library, command chips.
 - Agent-aware conversation view for Claude Code, Codex, and OpenCode.
   Codex/OpenCode detection lights up after the agent's first
-  turn-completion flush of its rollout JSONL (the per-pane detector
-  scans within a 2-hour freshness window); real-world OpenCode that
-  persists to SQLite instead of JSONL is still pending a dedicated
-  reader. See [docs/agent-awareness.md](docs/agent-awareness.md).
+  turn-completion flush or SQLite session update, with pane-scoped
+  process matching and a 2-hour freshness window for Codex/OpenCode.
+  See [docs/agent-awareness.md](docs/agent-awareness.md).
 - Usage dashboard surfaced from the server-side `pocketshell usage`
   helper. Zero provider credentials on the phone.
+- Host setup detection for the server-side CLI: PocketShell derives the
+  remote PATH from the user's shell rc, checks `pocketshell --version`,
+  and offers install/upgrade via `uv` or `pipx` when needed.
 - Share-target dispatch: paste from any app into the active session, or
   save into a file on the remote host.
-- Port-forwarding (extracted from `ssh-auto-forward-android`) with the
-  one carve-out from D21's no-background rule — a scoped foreground
-  service while tunnels are active.
+- Port-forwarding (extracted from `ssh-auto-forward-android`) is
+  default-off per host. When enabled, it uses the one carve-out from
+  D21's no-background rule — a scoped foreground service while tunnels
+  are active.
 
 The deterministic Docker host used in CI does not use real provider
 credentials. It ships local shims for `claude`, `codex`, `opencode`,
@@ -84,18 +86,12 @@ APK, so app and helper versions stay in lockstep. See
 helper's full subcommand reference, version-coupling rules, and PyPI
 trusted-publishing setup.
 
-The app's host-bootstrap probe (`command -v pocketshell` over SSH) gates
-the per-host features that depend on the helper. If the helper is absent,
-those features are silently omitted for that host until you install it.
-
-#### Legacy `quse` / `tmuxctl` (going away)
-
-The app still detects standalone `quse` and `tmuxctl` binaries during the
-ramp-up to feature parity with the unified helper. Once
-[issue #231](https://github.com/alexeygrigorev/pocketshell/issues/231)
-lands, the legacy probes are removed in a single hard-cut PR. Don't depend
-on the standalone install path for new hosts — install `pocketshell`
-instead.
+The app's host-bootstrap probe derives the remote PATH from the user's
+interactive shell rc, runs `command -v pocketshell`, checks
+`pocketshell --version` against the app version, and offers an install or
+upgrade path via `uv` / `pipx` when the helper is absent or mismatched.
+Per-host features that depend on the helper stay unavailable until that
+host passes setup.
 
 ## Quickstart
 
@@ -155,15 +151,16 @@ Phone in hand, dev box reachable over SSH at `dev.example.com`:
 
 4. **Connect and attach to a tmux session.** Tap the new host. PocketShell
    runs the bootstrap probe (`command -v pocketshell`, `tmux ls`,
-   per-pane Claude Code detection), then opens the session list. Tap an
-   existing tmux session to attach via `tmux -CC`, or create one from
-   the `+` button.
+   CLI version checks, per-pane agent detection), then opens the workspace
+   tree and session list. Tap an existing tmux session to attach via
+   `tmux -CC`, or create one from the `+` button.
 
 5. **Send your first voice prompt.** With a session attached, tap the
    mic FAB to open the prompt composer. Speak, watch the live
    transcription, tap **Send + ↵** to push the prompt with a newline into
-   the pane. If Claude Code is running in that pane, the **Conversation**
-   tab lights up and tails the agent's structured log.
+   the pane. If Claude Code, Codex, or OpenCode is running in that pane,
+   the **Conversation** tab lights up and tails the agent's conversation
+   source.
 
 Once the host is added, subsequent reconnects are tap-and-attach. tmux on
 the remote keeps state across phone backgrounding (per D21 — no

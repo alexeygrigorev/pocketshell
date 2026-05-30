@@ -286,6 +286,68 @@ class HostBootstrapperTest {
     }
 
     @Test
+    fun parsePocketshellVersion_extractsClickVersionOutput() {
+        assertEquals("0.3.7", bootstrapper.parsePocketshellVersion("pocketshell, version 0.3.7\n"))
+        assertEquals("1.2.3", bootstrapper.parsePocketshellVersion("pocketshell 1.2.3\n"))
+        assertNull(bootstrapper.parsePocketshellVersion("pocketshell dev build\n"))
+    }
+
+    @Test
+    fun checkServerSetup_reportsReady_whenPocketshellVersionMatchesAppExpectation() = runTest {
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'pocketshell'") to ExecResult("/home/u/.local/bin/pocketshell\n", "", 0),
+                pathAware("'pocketshell' --version") to ExecResult("pocketshell, version 0.3.7\n", "", 0),
+                pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
+                pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
+                systemdAware("systemctl --user is-active pocketshell-jobs.service") to ExecResult("active\n", "", 0),
+                systemdAware("systemctl --user is-enabled pocketshell-jobs.service") to ExecResult("enabled\n", "", 0),
+            ),
+        )
+
+        val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion = "0.3.7")
+
+        assertTrue(report.isReady)
+        assertEquals(
+            ToolStatus.Installed(
+                path = "/home/u/.local/bin/pocketshell",
+                version = "0.3.7",
+                expectedVersion = "0.3.7",
+            ),
+            report.tools[BootstrapTool.Pocketshell],
+        )
+        assertTrue(session.recorded.contains(pathAware("'pocketshell' --version")))
+    }
+
+    @Test
+    fun checkServerSetup_reportsMismatch_whenPocketshellVersionDiffersFromAppExpectation() = runTest {
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'pocketshell'") to ExecResult("/home/u/.local/bin/pocketshell\n", "", 0),
+                pathAware("'pocketshell' --version") to ExecResult("pocketshell, version 0.3.6\n", "", 0),
+                pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
+                pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
+                systemdAware("systemctl --user is-active pocketshell-jobs.service") to ExecResult("active\n", "", 0),
+                systemdAware("systemctl --user is-enabled pocketshell-jobs.service") to ExecResult("enabled\n", "", 0),
+            ),
+        )
+
+        val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion = "0.3.7")
+
+        assertTrue(!report.isReady)
+        assertTrue(report.missingTools.isEmpty())
+        assertEquals(listOf(BootstrapTool.Pocketshell), report.versionMismatchedTools)
+        assertEquals(
+            ToolStatus.VersionMismatch(
+                path = "/home/u/.local/bin/pocketshell",
+                currentVersion = "0.3.6",
+                expectedVersion = "0.3.7",
+            ),
+            report.tools[BootstrapTool.Pocketshell],
+        )
+    }
+
+    @Test
     fun checkServerSetup_wrapsBootstrapCommandsInPosixShell() = runTest {
         val session = FakeSshSession(
             mapOf(
@@ -660,6 +722,53 @@ class HostBootstrapperTest {
         assertEquals(InstallResult.Success, result)
         assertTrue(session.recorded.none { it.contains("uv tool install") })
         assertTrue(session.recorded.none { it.contains("systemctl --user enable --now") })
+    }
+
+    @Test
+    fun installServerSetup_upgradesMismatchedPocketshellWithUv() = runTest {
+        var upgraded = false
+        val session = FakeSshSession(
+            dynamic = { command ->
+                when (command) {
+                    pathAware("command -v 'pocketshell'") -> ExecResult("/home/u/.local/bin/pocketshell\n", "", 0)
+                    pathAware("'pocketshell' --version") -> ExecResult(
+                        "pocketshell, version ${if (upgraded) "0.3.7" else "0.3.6"}\n",
+                        "",
+                        0,
+                    )
+                    pathAware("command -v 'uv'") -> ExecResult("/home/u/.local/bin/uv\n", "", 0)
+                    pathAware("uv tool upgrade pocketshell") -> {
+                        upgraded = true
+                        ExecResult("upgraded pocketshell\n", "", 0)
+                    }
+                    pathAware("command -v 'systemctl'") -> ExecResult("/usr/bin/systemctl\n", "", 0)
+                    systemdAware("systemctl --user is-active pocketshell-jobs.service") -> ExecResult("active\n", "", 0)
+                    systemdAware("systemctl --user is-enabled pocketshell-jobs.service") -> ExecResult("enabled\n", "", 0)
+                    else -> null
+                }
+            },
+        )
+        val report = HostBootstrapReport(
+            tools = mapOf(
+                BootstrapTool.Pocketshell to ToolStatus.VersionMismatch(
+                    path = "/home/u/.local/bin/pocketshell",
+                    currentVersion = "0.3.6",
+                    expectedVersion = "0.3.7",
+                ),
+            ),
+            installer = PythonToolInstaller.Uv,
+            daemon = PocketshellDaemonStatus.Running(enabled = true),
+        )
+
+        val result = bootstrapper.installServerSetup(
+            session,
+            report,
+            expectedPocketshellVersion = "0.3.7",
+        )
+
+        assertEquals(InstallResult.Success, result)
+        assertTrue(session.recorded.contains(pathAware("uv tool upgrade pocketshell")))
+        assertTrue(session.recorded.none { it.contains("uv tool install pocketshell") })
     }
 
     /**

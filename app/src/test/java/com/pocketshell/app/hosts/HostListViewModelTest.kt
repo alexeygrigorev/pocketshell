@@ -461,6 +461,21 @@ class HostListViewModelTest {
     }
 
     @Test
+    fun deriveSetupState_returnsCliUpdateNeeded_whenPocketshellVersionIsMismatched() {
+        val host = hostFixture().copy(
+            tmuxInstalled = true,
+            pocketshellInstalled = true,
+            pocketshellCliVersion = "0.3.6",
+            pocketshellExpectedCliVersion = "0.3.7",
+            pocketshellVersionCompatible = false,
+        )
+        assertEquals(
+            com.pocketshell.uikit.model.HostSetupState.CliUpdateNeeded,
+            deriveSetupState(host),
+        )
+    }
+
+    @Test
     fun deriveSetupState_returnsReady_whenBothFlagsAreTrue() {
         val host = hostFixture().copy(tmuxInstalled = true, pocketshellInstalled = true)
         assertEquals(
@@ -507,6 +522,19 @@ class HostListViewModelTest {
                 // tmuxInstalled, pocketshellInstalled both null by default.
             ),
         )
+        val mismatchId = db.hostDao().insert(
+            HostEntity(
+                name = "mismatch",
+                hostname = "h",
+                username = "u",
+                keyId = keyId,
+                tmuxInstalled = true,
+                pocketshellInstalled = true,
+                pocketshellCliVersion = "0.3.6",
+                pocketshellExpectedCliVersion = "0.3.7",
+                pocketshellVersionCompatible = false,
+            ),
+        )
 
         val viewModel = HostListViewModel(
             applicationContext = context,
@@ -534,6 +562,10 @@ class HostListViewModelTest {
         assertEquals(
             com.pocketshell.uikit.model.HostSetupState.Unknown,
             projection[unknownId],
+        )
+        assertEquals(
+            com.pocketshell.uikit.model.HostSetupState.CliUpdateNeeded,
+            projection[mismatchId],
         )
         // Sanity: the ViewModel constructed and exposes a non-null flow.
         assertNotNull(viewModel.setupStates)

@@ -328,7 +328,7 @@ public class UsageScheduler @Inject constructor(
         _tickCount.incrementAndGet()
         StartupTiming.markOnce("usage-fetch-once-start")
         val hosts = hostDao.getAll().first()
-        val pocketshellHosts = hosts.filter { it.pocketshellInstalled == true }
+        val pocketshellHosts = hosts.filter { it.pocketshellInstalled == true && it.pocketshellVersionCompatible != false }
         StartupTiming.markOnce(
             "usage-fetch-hosts",
             "hostCount" to hosts.size,

@@ -23,7 +23,7 @@ import com.pocketshell.core.storage.entity.SessionEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 
-const val APP_DATABASE_SCHEMA_VERSION = 10
+const val APP_DATABASE_SCHEMA_VERSION = 11
 
 /**
  * The PocketShell Room database.
@@ -34,9 +34,9 @@ const val APP_DATABASE_SCHEMA_VERSION = 10
  * carrying migration code forward. That fallback only fires on a version
  * delta, so any entity-schema change MUST bump this number above every
  * shipped version — otherwise upgraded installs hit a Room identity-hash
- * mismatch or downgrade path and crash on launch (#261). Bumped to 10 because
- * issue #294 removes the manual host PATH override column; bootstrap probes
- * now derive PATH from the user's remote shell rc.
+ * mismatch or downgrade path and crash on launch (#261). Bumped to 11 because
+ * issue #315 persists the detected remote pocketshell CLI version and
+ * compatibility result for the host setup badge.
  *
  * `exportSchema = false` matches the reference module. When the schema
  * starts evolving in real users' hands, flip this on and check generated

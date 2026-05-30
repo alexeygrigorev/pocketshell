@@ -501,7 +501,10 @@ fun HostListScreen(
                                 // `combinedClickable` inside `HostCard`.
                                 onLongClick = { menuOpen = true },
                                 setupState = setupState,
-                                onSetupBadgeClick = if (setupState == HostSetupState.NeedsSetup) {
+                                onSetupBadgeClick = if (
+                                    setupState == HostSetupState.NeedsSetup ||
+                                    setupState == HostSetupState.CliUpdateNeeded
+                                ) {
                                     // Issue #120: tapping a `needs setup`
                                     // badge opens the existing bootstrap
                                     // sheet through the standard tap-to-

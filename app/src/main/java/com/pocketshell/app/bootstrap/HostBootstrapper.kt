@@ -62,7 +62,16 @@ public enum class PythonToolInstaller(
 }
 
 public sealed interface ToolStatus {
-    public data class Installed(val path: String) : ToolStatus
+    public data class Installed(
+        val path: String,
+        val version: String? = null,
+        val expectedVersion: String? = null,
+    ) : ToolStatus
+    public data class VersionMismatch(
+        val path: String,
+        val currentVersion: String,
+        val expectedVersion: String,
+    ) : ToolStatus
     public data object Missing : ToolStatus
     public data class Unknown(val reason: String) : ToolStatus
 }
@@ -108,9 +117,16 @@ public data class HostBootstrapReport(
     public val unknownTools: List<BootstrapTool>
         get() = BootstrapTool.entries.filter { tools[it] is ToolStatus.Unknown }
 
+    public val versionMismatchedTools: List<BootstrapTool>
+        get() = BootstrapTool.entries.filter { tools[it] is ToolStatus.VersionMismatch }
+
+    public val pocketshellVersionMismatch: ToolStatus.VersionMismatch?
+        get() = tools[BootstrapTool.Pocketshell] as? ToolStatus.VersionMismatch
+
     public val isReady: Boolean
         get() = missingTools.isEmpty() &&
             unknownTools.isEmpty() &&
+            versionMismatchedTools.isEmpty() &&
             daemon is PocketshellDaemonStatus.Running &&
             daemon.enabled
 }
@@ -178,13 +194,16 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         TmuxStatus.Unknown("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
     }
 
-    public suspend fun checkServerSetup(session: SshSession): HostBootstrapReport {
+    public suspend fun checkServerSetup(
+        session: SshSession,
+        expectedPocketshellVersion: String? = null,
+    ): HostBootstrapReport {
         val bootstrapPath = detectBootstrapPath(session)
         val tools = BootstrapTool.entries.associateWith { tool ->
-            checkToolWithPath(session, tool.binaryName, bootstrapPath)
+            checkBootstrapToolWithPath(session, tool, bootstrapPath, expectedPocketshellVersion)
         }
         val installer = detectPythonToolInstaller(session, bootstrapPath)
-        val daemon = if (tools[BootstrapTool.Pocketshell] is ToolStatus.Installed) {
+        val daemon = if (tools[BootstrapTool.Pocketshell].isPresentOnRemote()) {
             checkPocketshellDaemon(session, bootstrapPath)
         } else {
             PocketshellDaemonStatus.Missing
@@ -200,12 +219,23 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     public suspend fun installServerSetup(
         session: SshSession,
         report: HostBootstrapReport? = null,
+        expectedPocketshellVersion: String? = null,
     ): InstallResult {
         val bootstrapPath = detectBootstrapPath(session)
-        val currentReport = freshenReport(session, report, bootstrapPath)
+        val currentReport = freshenReport(session, report, bootstrapPath, expectedPocketshellVersion)
         if (currentReport.unknownTools.isNotEmpty()) {
             val unknown = currentReport.unknownTools.joinToString { it.binaryName }
             return InstallResult.Error("Could not detect required host tools: $unknown. Reconnect and try again.")
+        }
+        val mismatchedTools = currentReport.versionMismatchedTools
+        if (mismatchedTools.isNotEmpty()) {
+            val installer = currentReport.installer ?: return InstallResult.Error(
+                "PocketShell found pocketshell on the host, but it is not app-compatible. Upgrade it with `uv tool upgrade pocketshell` or `pipx upgrade pocketshell`, then reconnect.",
+            )
+            for (tool in mismatchedTools) {
+                val result = upgradeServerTool(session, installer, tool, bootstrapPath)
+                if (result !is InstallResult.Success) return result
+            }
         }
         val missingTools = currentReport.missingTools
         if (missingTools.isNotEmpty()) {
@@ -218,7 +248,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             }
         }
 
-        val afterTools = checkServerSetup(session)
+        val afterTools = checkServerSetup(session, expectedPocketshellVersion)
         val daemon = afterTools.daemon
         if (daemon is PocketshellDaemonStatus.Unavailable) {
             return InstallResult.Error(daemon.reason)
@@ -236,13 +266,18 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         session: SshSession,
         report: HostBootstrapReport?,
         bootstrapPath: String?,
+        expectedPocketshellVersion: String?,
     ): HostBootstrapReport {
-        if (report == null || report.missingTools.isNotEmpty() || report.unknownTools.isNotEmpty()) {
+        if (report == null ||
+            report.missingTools.isNotEmpty() ||
+            report.unknownTools.isNotEmpty() ||
+            report.versionMismatchedTools.isNotEmpty()
+        ) {
             val tools = BootstrapTool.entries.associateWith { tool ->
-                checkToolWithPath(session, tool.binaryName, bootstrapPath)
+                checkBootstrapToolWithPath(session, tool, bootstrapPath, expectedPocketshellVersion)
             }
             val installer = detectPythonToolInstaller(session, bootstrapPath)
-            val daemon = if (tools[BootstrapTool.Pocketshell] is ToolStatus.Installed) {
+            val daemon = if (tools[BootstrapTool.Pocketshell].isPresentOnRemote()) {
                 checkPocketshellDaemon(session, bootstrapPath)
             } else {
                 PocketshellDaemonStatus.Missing
@@ -255,6 +290,55 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             )
         }
         return report
+    }
+
+    private suspend fun checkBootstrapToolWithPath(
+        session: SshSession,
+        tool: BootstrapTool,
+        bootstrapPath: String?,
+        expectedPocketshellVersion: String?,
+    ): ToolStatus {
+        val status = checkToolWithPath(session, tool.binaryName, bootstrapPath)
+        if (tool != BootstrapTool.Pocketshell || status !is ToolStatus.Installed) {
+            return status
+        }
+        val expected = expectedPocketshellVersion?.trim()?.takeIf { it.isNotEmpty() } ?: return status
+        return checkPocketshellVersion(session, status.path, bootstrapPath, expected)
+    }
+
+    private suspend fun checkPocketshellVersion(
+        session: SshSession,
+        path: String,
+        bootstrapPath: String?,
+        expectedVersion: String,
+    ): ToolStatus {
+        return try {
+        val result = session.exec(pathAwareCommand("${shellQuote(BINARY_POCKETSHELL)} --version", bootstrapPath))
+        if (result.exitCode != 0) {
+            ToolStatus.Unknown("pocketshell --version failed: ${result.stderr.ifBlank { "exit ${result.exitCode}" }}")
+        } else {
+            val current = parsePocketshellVersion(result.stdout.ifBlank { result.stderr })
+                ?: return ToolStatus.Unknown("pocketshell --version did not report a parseable version")
+            if (current == expectedVersion) {
+                ToolStatus.Installed(path = path, version = current, expectedVersion = expectedVersion)
+            } else {
+                ToolStatus.VersionMismatch(
+                    path = path,
+                    currentVersion = current,
+                    expectedVersion = expectedVersion,
+                )
+            }
+        }
+        } catch (e: SshException) {
+            ToolStatus.Unknown(e.message ?: e.javaClass.simpleName)
+        } catch (t: Throwable) {
+            ToolStatus.Unknown("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
+        }
+    }
+
+    internal fun parsePocketshellVersion(output: String): String? {
+        val firstLine = output.lineSequence().firstOrNull { it.isNotBlank() }?.trim() ?: return null
+        return VERSION_PATTERN.find(firstLine)?.groupValues?.get(1)
     }
 
     internal suspend fun checkTool(
@@ -305,6 +389,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     ): PocketshellDaemonStatus {
         when (val systemctl = checkToolWithPath(session, "systemctl", bootstrapPath)) {
             is ToolStatus.Installed -> Unit
+            is ToolStatus.VersionMismatch -> Unit
             ToolStatus.Missing -> return PocketshellDaemonStatus.Unavailable("systemctl is not installed on this host")
             is ToolStatus.Unknown -> return PocketshellDaemonStatus.Unknown("could not locate systemctl: ${systemctl.reason}")
         }
@@ -343,12 +428,25 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         tool: BootstrapTool,
     ): InstallResult = runPythonToolInstall(session, installer, tool, detectBootstrapPath(session))
 
+    public suspend fun upgradeServerTool(
+        session: SshSession,
+        installer: PythonToolInstaller,
+        tool: BootstrapTool,
+    ): InstallResult = upgradeServerTool(session, installer, tool, detectBootstrapPath(session))
+
     private suspend fun installServerTool(
         session: SshSession,
         installer: PythonToolInstaller,
         tool: BootstrapTool,
         bootstrapPath: String?,
     ): InstallResult = runPythonToolInstall(session, installer, tool, bootstrapPath)
+
+    private suspend fun upgradeServerTool(
+        session: SshSession,
+        installer: PythonToolInstaller,
+        tool: BootstrapTool,
+        bootstrapPath: String?,
+    ): InstallResult = runPythonToolUpgrade(session, installer, tool, bootstrapPath)
 
     public suspend fun installPocketshellDaemon(session: SshSession): InstallResult =
         installPocketshellUserDaemon(session, detectBootstrapPath(session))
@@ -475,12 +573,26 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         return runInstall(session, pathAwareCommand(command, bootstrapPath), needsRoot = false)
     }
 
+    private suspend fun runPythonToolUpgrade(
+        session: SshSession,
+        installer: PythonToolInstaller,
+        tool: BootstrapTool,
+        bootstrapPath: String?,
+    ): InstallResult {
+        val command = when (installer) {
+            PythonToolInstaller.Uv -> "uv tool upgrade ${tool.packageName}"
+            PythonToolInstaller.Pipx -> "pipx upgrade ${tool.packageName}"
+        }
+        return runInstall(session, pathAwareCommand(command, bootstrapPath), needsRoot = false)
+    }
+
     private suspend fun installPocketshellUserDaemon(
         session: SshSession,
         bootstrapPath: String?,
     ): InstallResult {
         val pocketshell = when (val status = checkToolWithPath(session, BINARY_POCKETSHELL, bootstrapPath)) {
             is ToolStatus.Installed -> status.path
+            is ToolStatus.VersionMismatch -> status.path
             ToolStatus.Missing -> return InstallResult.Error("pocketshell is not installed; install it before enabling the jobs daemon.")
             is ToolStatus.Unknown -> return InstallResult.Error("could not locate pocketshell: ${status.reason}")
         }
@@ -640,6 +752,9 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             output.contains("transport endpoint is not connected")
     }
 
+    private fun ToolStatus?.isPresentOnRemote(): Boolean =
+        this is ToolStatus.Installed || this is ToolStatus.VersionMismatch
+
     public companion object {
         /**
          * Binary name of the unified `pocketshell` CLI — the single
@@ -650,6 +765,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
          */
         public const val BINARY_POCKETSHELL: String = "pocketshell"
 
+        private val VERSION_PATTERN: Regex = Regex("""\b(\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?)\b""")
         private const val PATH_BEGIN: String = "__POCKETSHELL_PATH_BEGIN__"
         private const val PATH_END: String = "__POCKETSHELL_PATH_END__"
     }

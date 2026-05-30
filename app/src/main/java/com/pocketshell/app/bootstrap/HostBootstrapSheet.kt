@@ -214,6 +214,14 @@ private fun SetupActions(
                 onClick = { onInstallTool(tool) },
             )
         }
+        report.pocketshellVersionMismatch?.let { mismatch ->
+            SetupActionRow(
+                title = "pocketshell CLI update needed",
+                detail = versionMismatchDetail(report.installer, mismatch),
+                actionLabel = "Upgrade",
+                onClick = { onInstallTool(BootstrapTool.Pocketshell) },
+            )
+        }
         if (needsDaemon) {
             when (val daemon = report.daemon) {
                 is PocketshellDaemonStatus.Unavailable -> SetupInfoRow(
@@ -244,11 +252,13 @@ private fun SetupActions(
 
 internal fun HostBootstrapReport.hasBootstrapSheetRows(): Boolean =
     missingTools.isNotEmpty() ||
+        versionMismatchedTools.isNotEmpty() ||
         needsPocketshellDaemonSetup()
 
 internal fun HostBootstrapSheetState.Prompt.hasActionableSetup(): Boolean =
     needsTmux ||
         report?.missingTools?.isNotEmpty() == true ||
+        report?.versionMismatchedTools?.isNotEmpty() == true ||
         report?.needsPocketshellDaemonAction() == true
 
 internal fun HostBootstrapReport.needsPocketshellDaemonSetup(): Boolean {
@@ -431,6 +441,9 @@ private fun bootstrapPromptText(state: HostBootstrapSheetState.Prompt): String {
     val report = state.report
     report?.missingTools
         ?.mapTo(parts) { it.binaryName }
+    if (report?.versionMismatchedTools?.isNotEmpty() == true) {
+        parts += "pocketshell CLI update"
+    }
     if (report != null && report.needsPocketshellDaemonAction()) {
         parts += "pocketshell jobs daemon"
     }
@@ -453,6 +466,18 @@ private fun installCommand(installer: PythonToolInstaller?, tool: BootstrapTool)
     PythonToolInstaller.Pipx -> "pipx install ${tool.packageName}"
     null -> "uv tool install ${tool.packageName} or pipx install ${tool.packageName}"
 }
+
+private fun upgradeCommand(installer: PythonToolInstaller?, tool: BootstrapTool): String = when (installer) {
+    PythonToolInstaller.Uv -> "uv tool upgrade ${tool.packageName}"
+    PythonToolInstaller.Pipx -> "pipx upgrade ${tool.packageName}"
+    null -> "uv tool upgrade ${tool.packageName} or pipx upgrade ${tool.packageName}"
+}
+
+private fun versionMismatchDetail(
+    installer: PythonToolInstaller?,
+    mismatch: ToolStatus.VersionMismatch,
+): String =
+    "remote ${mismatch.currentVersion}, expected ${mismatch.expectedVersion}; ${upgradeCommand(installer, BootstrapTool.Pocketshell)}"
 
 @Composable
 private fun SheetColumn(content: @Composable () -> Unit) {

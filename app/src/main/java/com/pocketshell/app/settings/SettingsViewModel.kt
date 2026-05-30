@@ -67,7 +67,7 @@ class SettingsViewModel @Inject constructor(
      * verbatim so both surfaces agree on whether the panel is useful.
      */
     val hasUsageInstalledHost: StateFlow<Boolean> = hostDao.getAll()
-        .map { rows -> rows.any { it.pocketshellInstalled == true } }
+        .map { rows -> rows.any { it.pocketshellInstalled == true && it.pocketshellVersionCompatible != false } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), false)
 
     /**

@@ -130,6 +130,31 @@ class UsageSchedulerTest {
     }
 
     @Test
+    fun refreshNow_skipsPocketshellHost_whenCliVersionIsIncompatible() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        db.hostDao().insert(
+            HostEntity(
+                name = "mismatch",
+                hostname = "m",
+                username = "u",
+                keyId = keyId,
+                pocketshellInstalled = true,
+                pocketshellCliVersion = "0.3.6",
+                pocketshellExpectedCliVersion = "0.3.7",
+                pocketshellVersionCompatible = false,
+            ),
+        )
+        val scheduler = UsageScheduler(db.hostDao(), db.sshKeyDao(), UsageRemoteSource())
+        val seen = mutableListOf<HostEntity>()
+        scheduler.fetchHost = { host -> seen += host; null }
+
+        scheduler.refreshNow()
+
+        assertTrue("scheduler should not poll app-incompatible pocketshell CLIs", seen.isEmpty())
+        assertTrue(scheduler.snapshots.value.isEmpty())
+    }
+
+    @Test
     fun refreshNow_emitsToolMissingSnapshot_notFailed_whenPocketshellGoneAtRuntime() = runTest {
         val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
         val hostId = db.hostDao().insert(

@@ -157,7 +157,7 @@ class HostListViewModel @Inject constructor(
      * rendered — no empty rail.").
      */
     val hasUsageInstalledHost: StateFlow<Boolean> = hostDao.getAll()
-        .map { rows -> rows.any { it.pocketshellInstalled == true } }
+        .map { rows -> rows.any { it.pocketshellInstalled == true && it.pocketshellVersionCompatible != false } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), false)
 
     /**
@@ -583,6 +583,9 @@ class HostListViewModel @Inject constructor(
                     pocketshellInstalled = null,
                     lastBootstrapAt = null,
                     pocketshellLastDetectedAt = null,
+                    pocketshellCliVersion = null,
+                    pocketshellExpectedCliVersion = null,
+                    pocketshellVersionCompatible = null,
                 )
                 hostDao.update(updated)
                 _shareMessage.value = "Overwrote ${conflict.existing.name}"
@@ -704,7 +707,7 @@ class HostListViewModel @Inject constructor(
             when (val status = bootstrapper.checkTmux(session)) {
                 TmuxStatus.Installed -> {
                     persistResult(host, installed = true)
-                    val report = bootstrapper.checkServerSetup(session)
+                    val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
                     persistPocketshellResult(host, report)
                     if (report.isReady) {
                         closeBootstrapSession()
@@ -719,7 +722,7 @@ class HostListViewModel @Inject constructor(
 
                 TmuxStatus.Missing -> {
                     persistResult(host, installed = false)
-                    val report = bootstrapper.checkServerSetup(session)
+                    val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
                     persistPocketshellResult(host, report)
                     _bootstrapState.value = HostBootstrapSheetState.Prompt(
                         needsTmux = true,
@@ -782,12 +785,12 @@ class HostListViewModel @Inject constructor(
                 when (bootstrapper.checkTmux(session)) {
                     TmuxStatus.Installed -> {
                         persistResult(host, installed = true)
-                        val report = bootstrapper.checkServerSetup(session)
+                        val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
                         persistPocketshellResult(host, report)
                     }
                     TmuxStatus.Missing -> {
                         persistResult(host, installed = false)
-                        val report = bootstrapper.checkServerSetup(session)
+                        val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
                         persistPocketshellResult(host, report)
                     }
                     is TmuxStatus.Unknown -> {
@@ -855,13 +858,14 @@ class HostListViewModel @Inject constructor(
             persistResult(host, installed = true)
             when (val result = bootstrapper.installServerSetup(
                 session,
-                prompt?.report ?: bootstrapper.checkServerSetup(session),
+                prompt?.report ?: bootstrapper.checkServerSetup(session, expectedPocketshellVersion()),
+                expectedPocketshellVersion = expectedPocketshellVersion(),
             )) {
                 InstallResult.Success -> {
                     // Re-probe so the persisted pocketshell flag reflects the
                     // post-install reality, then flip to the success
                     // state so the sheet can offer the Open Usage CTA.
-                    val finalReport = bootstrapper.checkServerSetup(session)
+                    val finalReport = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
                     persistPocketshellResult(host, finalReport)
                     _bootstrapState.value = HostBootstrapSheetState.Success
                 }
@@ -903,7 +907,12 @@ class HostListViewModel @Inject constructor(
         }
         _bootstrapState.value = HostBootstrapSheetState.Installing
         viewModelScope.launch {
-            when (val result = bootstrapper.installServerTool(session, installer, tool)) {
+            val result = if (prompt.report.tools[tool] is ToolStatus.VersionMismatch) {
+                bootstrapper.upgradeServerTool(session, installer, tool)
+            } else {
+                bootstrapper.installServerTool(session, installer, tool)
+            }
+            when (result) {
                 InstallResult.Success -> refreshServerSetupPrompt(session, needsTmux = prompt.needsTmux)
                 is InstallResult.Failed -> _bootstrapState.value = HostBootstrapSheetState.Failed(
                     message = result.stderr.ifBlank { "exit ${result.exitCode}" },
@@ -960,7 +969,7 @@ class HostListViewModel @Inject constructor(
         session: SshSession,
         needsTmux: Boolean,
     ) {
-        val report = bootstrapper.checkServerSetup(session)
+        val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
         bootstrapTargetHost?.let { persistPocketshellResult(it, report) }
         _bootstrapState.value = if (!needsTmux && report.isReady) {
             HostBootstrapSheetState.Success
@@ -1020,21 +1029,48 @@ class HostListViewModel @Inject constructor(
      * re-detects when the cache is stale.
      */
     private suspend fun persistPocketshellResult(host: HostEntity, report: HostBootstrapReport) {
-        val pocketshellInstalled = report.tools[BootstrapTool.Pocketshell] is ToolStatus.Installed
+        val status = report.tools[BootstrapTool.Pocketshell]
+        val pocketshellInstalled = status is ToolStatus.Installed || status is ToolStatus.VersionMismatch
+        val currentVersion = when (status) {
+            is ToolStatus.Installed -> status.version
+            is ToolStatus.VersionMismatch -> status.currentVersion
+            else -> null
+        }
+        val expectedVersion = when (status) {
+            is ToolStatus.Installed -> status.expectedVersion
+            is ToolStatus.VersionMismatch -> status.expectedVersion
+            else -> expectedPocketshellVersion()
+        }
+        val compatible = when (status) {
+            is ToolStatus.Installed -> if (status.expectedVersion != null) true else null
+            is ToolStatus.VersionMismatch -> false
+            else -> null
+        }
         val now = System.currentTimeMillis()
         val current = hostDao.getById(host.id) ?: host
         // Only write when the cached value would change; avoids a churn
         // on every connect for a row that has not moved.
-        if (current.pocketshellInstalled == pocketshellInstalled && current.pocketshellLastDetectedAt != null) {
+        if (
+            current.pocketshellInstalled == pocketshellInstalled &&
+            current.pocketshellCliVersion == currentVersion &&
+            current.pocketshellExpectedCliVersion == expectedVersion &&
+            current.pocketshellVersionCompatible == compatible &&
+            current.pocketshellLastDetectedAt != null
+        ) {
             return
         }
         hostDao.update(
             current.copy(
                 pocketshellInstalled = pocketshellInstalled,
                 pocketshellLastDetectedAt = now,
+                pocketshellCliVersion = currentVersion,
+                pocketshellExpectedCliVersion = expectedVersion,
+                pocketshellVersionCompatible = compatible,
             ),
         )
     }
+
+    private fun expectedPocketshellVersion(): String = currentVersionName().orEmpty()
 
     private fun closeBootstrapSession() {
         bootstrapSession?.let { runCatching { it.close() } }
@@ -1148,6 +1184,7 @@ enum class ImportConflictResolution {
  * - `Unknown`     — `tmuxInstalled == null` (never probed) OR
  *                   `pocketshellInstalled == null` (no usage-tool probe
  *                   recorded yet).
+ * - `CliUpdateNeeded` — `pocketshellVersionCompatible == false`.
  * - `NeedsSetup`  — `tmuxInstalled == false`, OR `pocketshellInstalled ==
  *                   false`. At least one required tool is missing.
  * - `Ready`       — `tmuxInstalled == true` AND `pocketshellInstalled == true`.
@@ -1159,6 +1196,7 @@ internal fun deriveSetupState(host: HostEntity): HostSetupState {
         tmux == null -> HostSetupState.Unknown
         tmux == false -> HostSetupState.NeedsSetup
         // tmux == true past here.
+        host.pocketshellVersionCompatible == false -> HostSetupState.CliUpdateNeeded
         pocketshell == null -> HostSetupState.Unknown
         pocketshell == false -> HostSetupState.NeedsSetup
         else -> HostSetupState.Ready
@@ -1220,7 +1258,7 @@ internal fun deriveHostStatus(
     appAttached: Boolean,
     lastConnectError: Boolean = false,
 ): HostStatus = when {
-    setupState == HostSetupState.NeedsSetup -> HostStatus.NeedsSetup
+    setupState == HostSetupState.NeedsSetup || setupState == HostSetupState.CliUpdateNeeded -> HostStatus.NeedsSetup
     lastConnectError -> HostStatus.ConnectionError
     appAttached -> HostStatus.Attached
     setupState == HostSetupState.Ready && sessionCount != null && sessionCount >= 1 ->

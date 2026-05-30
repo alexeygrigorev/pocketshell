@@ -47,6 +47,11 @@ import androidx.room.PrimaryKey
  * derive PATH from the remote user's shell rc and prepend PocketShell's
  * default user-bin locations automatically. Per D22 this is a hard cut;
  * the destructive rebuild handles the schema change.
+ *
+ * Issue #315 adds [pocketshellCliVersion],
+ * [pocketshellExpectedCliVersion], and [pocketshellVersionCompatible] so
+ * a host with an installed but app-incompatible helper is not collapsed
+ * into the generic "needs setup" state.
  */
 @Entity(
     tableName = "hosts",
@@ -77,5 +82,8 @@ data class HostEntity(
     val lastBootstrapAt: Long? = null,
     val pocketshellInstalled: Boolean? = null,
     val pocketshellLastDetectedAt: Long? = null,
+    val pocketshellCliVersion: String? = null,
+    val pocketshellExpectedCliVersion: String? = null,
+    val pocketshellVersionCompatible: Boolean? = null,
     val usageCommandOverride: String? = null,
 )

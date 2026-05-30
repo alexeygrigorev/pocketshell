@@ -197,7 +197,7 @@ fun HostCard(
         // display, and showing both pills would re-create the
         // ambiguous "needs setup AND idle" combination the issue
         // exists to fix.
-        if (setupState != HostSetupState.NeedsSetup) {
+        if (setupState != HostSetupState.NeedsSetup && setupState != HostSetupState.CliUpdateNeeded) {
             Spacer(modifier = Modifier.width(12.dp))
             HostStatusChip(status = status)
         }
@@ -329,6 +329,7 @@ const val HOST_STATUS_SPINNER_TAG: String = "host-status-chip:spinner"
  *
  * - [HostSetupState.Ready]      -> green, "ready"
  * - [HostSetupState.NeedsSetup] -> amber, "needs setup"
+ * - [HostSetupState.CliUpdateNeeded] -> amber, "CLI update needed"
  * - [HostSetupState.Unknown]    -> muted grey, "unknown"
  *
  * When [onClick] is non-null the entire pill is tappable. Callers wire a
@@ -344,6 +345,7 @@ private fun HostSetupBadge(state: HostSetupState, onClick: (() -> Unit)?) {
     val (color, label) = when (state) {
         HostSetupState.Ready -> PocketShellColors.Green to "ready"
         HostSetupState.NeedsSetup -> PocketShellColors.Amber to "needs setup"
+        HostSetupState.CliUpdateNeeded -> PocketShellColors.Amber to "CLI update needed"
         HostSetupState.Unknown -> PocketShellColors.TextMuted to "unknown"
     }
     val baseModifier = Modifier

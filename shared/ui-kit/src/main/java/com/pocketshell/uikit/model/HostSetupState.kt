@@ -16,6 +16,9 @@ package com.pocketshell.uikit.model
  *   existing bootstrap sheet so the user can fix it without first
  *   touching the host row (which would otherwise re-trigger a session
  *   open).
+ * - [CliUpdateNeeded] — the remote `pocketshell` CLI exists, but its
+ *   version does not match the app-compatible helper version. Tapping
+ *   the badge opens the bootstrap sheet with an upgrade action.
  * - [Unknown] — there is no cached probe result yet (cold launch with
  *   saved hosts) OR the cache is stale and a probe has not landed. The
  *   ViewModel triggers a background re-probe on first composition; the
@@ -28,5 +31,6 @@ package com.pocketshell.uikit.model
 enum class HostSetupState {
     Ready,
     NeedsSetup,
+    CliUpdateNeeded,
     Unknown,
 }

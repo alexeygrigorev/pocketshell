@@ -19,7 +19,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredWidthIn
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -38,6 +40,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
@@ -45,16 +49,15 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.app.share.FilenameSanitiser
 import com.pocketshell.app.share.ShareUploader
-import com.pocketshell.uikit.components.SessionRow
 import com.pocketshell.uikit.model.SessionAgentKind
-import com.pocketshell.uikit.model.Tag
-import com.pocketshell.uikit.model.TagKind
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlin.math.PI
 import kotlin.math.cos
@@ -202,6 +205,7 @@ fun FolderListScreen(
                 is FolderListUiState.Ready -> FolderListContent(
                     folders = s.folders,
                     treeRoots = s.treeRoots,
+                    expandedProjectPaths = s.expandedProjectPaths,
                     showFlatFolderList = showFlatFolderList,
                     actionStatus = actionStatus,
                     onDismissActionStatus = viewModel::clearActionStatus,
@@ -223,6 +227,7 @@ fun FolderListScreen(
                     onRootActions = { root ->
                         actionFolder = PickerTarget(path = root.path, label = root.label)
                     },
+                    onToggleProjectExpanded = { row -> viewModel.toggleProjectExpanded(row.path) },
                     onEditEnv = { row ->
                         // Copy-source set = every real (non-untracked)
                         // discovered folder the user can see, so the env
@@ -537,6 +542,7 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
 private fun FolderListContent(
     folders: List<FolderRow>,
     treeRoots: List<FolderTreeRoot>,
+    expandedProjectPaths: Set<String>,
     showFlatFolderList: Boolean,
     actionStatus: FolderActionStatus,
     onDismissActionStatus: () -> Unit,
@@ -545,6 +551,7 @@ private fun FolderListContent(
     onFolderActions: (FolderRow) -> Unit,
     onCreateInRoot: (FolderTreeRoot) -> Unit,
     onRootActions: (FolderTreeRoot) -> Unit,
+    onToggleProjectExpanded: (FolderRow) -> Unit,
     onEditEnv: (FolderRow) -> Unit,
 ) {
     LazyColumn(
@@ -575,11 +582,13 @@ private fun FolderListContent(
             items(treeRoots) { root ->
                 FolderTreeRootGroup(
                     root = root,
+                    expandedProjectPaths = expandedProjectPaths,
                     onSessionClick = onSessionClick,
                     onCreateInFolder = onCreateInFolder,
                     onFolderActions = onFolderActions,
                     onCreateInRoot = onCreateInRoot,
                     onRootActions = onRootActions,
+                    onToggleProjectExpanded = onToggleProjectExpanded,
                     onEditEnv = onEditEnv,
                 )
             }
@@ -591,9 +600,11 @@ private fun FolderListContent(
             items(folders) { folder ->
                 FolderGroup(
                     folder = folder,
+                    expanded = true,
                     onSessionClick = onSessionClick,
                     onCreateInFolder = onCreateInFolder,
                     onFolderActions = onFolderActions,
+                    onToggleExpanded = {},
                     onEditEnv = onEditEnv,
                 )
             }
@@ -677,11 +688,13 @@ private fun EmptyState() {
 @Composable
 private fun FolderTreeRootGroup(
     root: FolderTreeRoot,
+    expandedProjectPaths: Set<String>,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
     onCreateInFolder: (FolderRow) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onCreateInRoot: (FolderTreeRoot) -> Unit,
     onRootActions: (FolderTreeRoot) -> Unit,
+    onToggleProjectExpanded: (FolderRow) -> Unit,
     onEditEnv: (FolderRow) -> Unit,
 ) {
     Column(
@@ -705,9 +718,11 @@ private fun FolderTreeRootGroup(
                 root.folders.forEach { folder ->
                     FolderGroup(
                         folder = folder,
+                        expanded = folder.path in expandedProjectPaths,
                         onSessionClick = onSessionClick,
                         onCreateInFolder = onCreateInFolder,
                         onFolderActions = onFolderActions,
+                        onToggleExpanded = { onToggleProjectExpanded(folder) },
                         onEditEnv = onEditEnv,
                     )
                 }
@@ -804,21 +819,21 @@ private fun EmptyRootHint(candidateCount: Int, onCreate: () -> Unit) {
 }
 
 /**
- * Folder header + inline session rows.
+ * Active project row plus optional session children.
  *
- * The header reads "folder label" with a small subtitle showing the
- * folder path; below it sit one [SessionRow] per active session in
- * that folder, plus a "+ New session in <folder>" action. Inline
- * rendering is intentional — it keeps the session names visible at the
- * folder-list level so the user can drill straight into a session
- * without an extra tap.
+ * The project row reads as one compact native row: subtle active/idle
+ * dot, folder label, path, counts, and scoped actions. The session list
+ * appears only after expansion in tree mode so configured roots stay
+ * scannable on a phone-sized host-detail screen.
  */
 @Composable
 private fun FolderGroup(
     folder: FolderRow,
+    expanded: Boolean,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
     onCreateInFolder: (FolderRow) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
+    onToggleExpanded: () -> Unit,
     onEditEnv: (FolderRow) -> Unit,
 ) {
     Column(
@@ -829,22 +844,24 @@ private fun FolderGroup(
     ) {
         FolderHeader(
             folder = folder,
+            expanded = expanded,
+            onToggleExpanded = onToggleExpanded,
             onCreateInFolder = { onCreateInFolder(folder) },
             onFolderActions = { onFolderActions(folder) },
             onEditEnv = { onEditEnv(folder) },
         )
-        if (folder.sessions.isEmpty()) {
-            EmptyFolderHint(onCreate = { onCreateInFolder(folder) })
-        } else {
-            folder.sessions.forEach { session ->
-                SessionRow(
-                    modifier = Modifier.testTag(
-                        folderDetailRowTestTag(folder.path, session.sessionName),
-                    ),
-                    name = session.sessionName,
-                    tags = sessionTagsFor(session),
-                    onClick = { onSessionClick(folder.path, session.sessionName) },
-                )
+        if (expanded) {
+            Column(
+                modifier = Modifier.padding(start = 26.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                folder.sessions.forEach { session ->
+                    WorkspaceSessionRow(
+                        folderPath = folder.path,
+                        session = session,
+                        onClick = { onSessionClick(folder.path, session.sessionName) },
+                    )
+                }
             }
         }
     }
@@ -853,6 +870,8 @@ private fun FolderGroup(
 @Composable
 private fun FolderHeader(
     folder: FolderRow,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
     onCreateInFolder: () -> Unit,
     onFolderActions: () -> Unit,
     onEditEnv: () -> Unit,
@@ -860,78 +879,255 @@ private fun FolderHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 4.dp, vertical = 4.dp),
+            .background(PocketShellColors.Surface, RoundedCornerShape(10.dp))
+            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
+            .clickable(role = Role.Button, onClick = onToggleExpanded)
+            .padding(horizontal = 10.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        DisclosureIndicator(
+            expanded = expanded,
+            modifier = Modifier
+                .size(18.dp)
+                .testTag(folderDetailDisclosureTestTag(folder.path)),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        StatusDot(
+            active = folder.sessions.any { it.attached || it.agentKind.isAgent() },
+            modifier = Modifier.testTag(folderStatusDotTestTag(folder.path)),
+        )
+        Spacer(modifier = Modifier.width(10.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            val countText = projectCountText(folder)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Text(
                     text = folder.label,
                     color = PocketShellColors.Text,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.testTag(folderHeaderLabelTag(folder.path)),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(folderHeaderLabelTag(folder.path)),
                 )
-                if (folder.isWatched) {
-                    Spacer(modifier = Modifier.size(8.dp))
-                    WatchedPin()
-                }
-            }
-            val subtitle = buildString {
-                append(folder.path)
-                if (folder.sessions.isNotEmpty()) {
-                    val agents = folder.sessions.count { it.agentKind.isAgent() }
-                    val shells = folder.sessions.size - agents
-                    append(" · ")
-                    if (agents > 0) append("$agents agent")
-                    if (agents > 0 && shells > 0) append(" · ")
-                    if (shells > 0) append("$shells shell")
-                }
+                Spacer(modifier = Modifier.width(8.dp))
+                CountPill(
+                    text = countText,
+                    minWidth = projectCountPillMinWidth(countText),
+                    modifier = Modifier.testTag(folderCountPillTestTag(folder.path)),
+                )
             }
             Text(
-                text = subtitle,
+                text = folder.path,
                 color = PocketShellColors.TextSecondary,
                 fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // Issue #264: "Env" entry point — only on real folders (the
+                // synthetic Untracked group has no filesystem path to manage).
+                if (folder.path != FolderListViewModel.UNTRACKED_PATH) {
+                    TextButton(
+                        onClick = onFolderActions,
+                        modifier = Modifier.testTag(folderDetailActionsTestTag(folder.path)),
+                    ) {
+                        Text(
+                            text = "Actions",
+                            color = PocketShellColors.Accent,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                    TextButton(
+                        onClick = onEditEnv,
+                        modifier = Modifier.testTag(folderDetailEnvTestTag(folder.path)),
+                    ) {
+                        Text(
+                            text = "Env",
+                            color = PocketShellColors.Accent,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+                TextButton(
+                    onClick = onCreateInFolder,
+                    modifier = Modifier.testTag(folderDetailCreateTestTag(folder.path)),
+                ) {
+                    Text(
+                        text = "+ New",
+                        color = PocketShellColors.Accent,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WorkspaceSessionRow(
+    folderPath: String,
+    session: FolderSessionEntry,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
+            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 9.dp)
+            .testTag(folderDetailRowTestTag(folderPath, session.sessionName)),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .width(1.dp)
+                .height(28.dp)
+                .background(PocketShellColors.Border),
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        StatusDot(
+            active = session.attached || session.agentKind.isAgent(),
+            modifier = Modifier.testTag(folderSessionStatusDotTestTag(folderPath, session.sessionName)),
+        )
+        Spacer(modifier = Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = sessionDisplayTitle(session),
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = session.sessionName,
+                color = PocketShellColors.TextMuted,
+                fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
-        // Issue #264: "Env" entry point — only on real folders (the
-        // synthetic Untracked group has no filesystem path to manage).
-        if (folder.path != FolderListViewModel.UNTRACKED_PATH) {
-            TextButton(
-                onClick = onFolderActions,
-                modifier = Modifier.testTag(folderDetailActionsTestTag(folder.path)),
-            ) {
-                Text(
-                    text = "Actions",
-                    color = PocketShellColors.Accent,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            TextButton(
-                onClick = onEditEnv,
-                modifier = Modifier.testTag(folderDetailEnvTestTag(folder.path)),
-            ) {
-                Text(
-                    text = "Env",
-                    color = PocketShellColors.Accent,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-        }
-        TextButton(
-            onClick = onCreateInFolder,
-            modifier = Modifier.testTag(folderDetailCreateTestTag(folder.path)),
-        ) {
-            Text(
-                text = "+ New",
-                color = PocketShellColors.Accent,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold,
+        CountPill(text = sessionKindLabel(session))
+    }
+}
+
+@Composable
+private fun DisclosureIndicator(
+    expanded: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Canvas(modifier = modifier) {
+        val color = PocketShellColors.TextSecondary
+        val stroke = 2.dp.toPx()
+        drawLine(
+            color = color,
+            start = Offset(size.width * 0.25f, size.height * 0.5f),
+            end = Offset(size.width * 0.75f, size.height * 0.5f),
+            strokeWidth = stroke,
+            cap = StrokeCap.Round,
+        )
+        if (!expanded) {
+            drawLine(
+                color = color,
+                start = Offset(size.width * 0.5f, size.height * 0.25f),
+                end = Offset(size.width * 0.5f, size.height * 0.75f),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
             )
         }
     }
+}
+
+@Composable
+private fun StatusDot(active: Boolean, modifier: Modifier = Modifier) {
+    val color = if (active) PocketShellColors.Green else PocketShellColors.Amber
+    Box(
+        modifier = modifier
+            .size(7.dp)
+            .background(color = color.copy(alpha = 0.82f), shape = CircleShape),
+    )
+}
+
+@Composable
+private fun CountPill(
+    text: String,
+    modifier: Modifier = Modifier,
+    minWidth: Dp = 40.dp,
+) {
+    Box(
+        modifier = Modifier
+            .requiredWidthIn(min = minWidth)
+            .then(modifier)
+            .background(
+                color = PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(6.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = RoundedCornerShape(6.dp),
+            )
+            .padding(horizontal = 7.dp, vertical = 2.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = text,
+            color = PocketShellColors.TextSecondary,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Clip,
+            softWrap = false,
+        )
+    }
+}
+
+private fun projectCountPillMinWidth(text: String): Dp =
+    if ("," in text) 144.dp else 88.dp
+
+internal fun projectCountText(folder: FolderRow): String {
+    val sessions = folder.sessions.size
+    val agents = folder.sessions.count { it.agentKind.isAgent() }
+    return when {
+        agents > 0 && agents == sessions -> agents.countLabel("agent")
+        agents > 0 -> "${sessions.countLabel("session")}, ${agents.countLabel("agent")}"
+        else -> sessions.countLabel("session")
+    }
+}
+
+private fun Int.countLabel(noun: String): String =
+    if (this == 1) "$this $noun" else "$this ${noun}s"
+
+private fun sessionKindLabel(session: FolderSessionEntry): String = when (session.agentKind) {
+    SessionAgentKind.Claude -> "Claude"
+    SessionAgentKind.Codex -> "Codex"
+    SessionAgentKind.OpenCode -> "OpenCode"
+    SessionAgentKind.Probing -> "Agent"
+    SessionAgentKind.Exited -> "Agent"
+    SessionAgentKind.Shell -> if (session.attached) "Active" else "Idle"
+}
+
+private fun sessionDisplayTitle(session: FolderSessionEntry): String {
+    val raw = session.sessionName.trim()
+    if (raw.isBlank()) return "Tmux session"
+    val normalised = raw
+        .replace(Regex("[_-]+"), " ")
+        .trim()
+    return normalised
+        .split(Regex("\\s+"))
+        .joinToString(" ") { token ->
+            if (token.all(Char::isDigit)) token else token.replaceFirstChar { char -> char.uppercase() }
+        }
+        .ifBlank { raw }
 }
 
 @Composable
@@ -951,42 +1147,6 @@ private fun WatchedPin() {
             fontWeight = FontWeight.SemiBold,
         )
     }
-}
-
-@Composable
-private fun EmptyFolderHint(onCreate: () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(12.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-    ) {
-        Text(
-            text = "No active sessions in this folder yet.",
-            color = PocketShellColors.Text,
-            fontSize = 13.sp,
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        TextButton(onClick = onCreate) {
-            Text("+ New session", color = PocketShellColors.Accent)
-        }
-    }
-}
-
-private fun sessionTagsFor(session: FolderSessionEntry): List<Tag> = buildList {
-    when (session.agentKind) {
-        SessionAgentKind.Claude -> add(Tag("Claude", TagKind.Agent))
-        SessionAgentKind.Codex -> add(Tag("Codex", TagKind.Agent))
-        SessionAgentKind.OpenCode -> add(Tag("OpenCode", TagKind.Agent))
-        SessionAgentKind.Probing -> add(Tag("Probing", TagKind.Deploy))
-        SessionAgentKind.Exited -> add(Tag("Exited", TagKind.Default))
-        SessionAgentKind.Shell -> add(Tag("Shell", TagKind.Default))
-    }
-    add(
-        if (session.attached) Tag("Attached", TagKind.Attached)
-        else Tag("Detached", TagKind.Detached),
-    )
 }
 
 private fun SessionAgentKind.isAgent(): Boolean = when (this) {
@@ -1022,6 +1182,7 @@ const val FOLDER_LIST_ACTION_STATUS_DISMISS_TAG: String = "folder-list:action-st
 
 fun folderRowTestTag(path: String): String = "folder-list:row:$path"
 fun folderHeaderLabelTag(path: String): String = "folder-list:header:$path"
+fun folderCountPillTestTag(path: String): String = "folder-list:count:$path"
 fun folderListFlatRowTestTag(sessionName: String): String = "folder-list:flat-row:$sessionName"
 fun folderDetailRowTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName"
@@ -1031,6 +1192,12 @@ fun folderDetailActionsTestTag(folderPath: String): String =
     "folder-list:detail:$folderPath:actions"
 fun folderDetailEnvTestTag(folderPath: String): String =
     "folder-list:detail:$folderPath:env"
+fun folderDetailDisclosureTestTag(folderPath: String): String =
+    "folder-list:detail:$folderPath:disclosure"
+fun folderStatusDotTestTag(folderPath: String): String =
+    "folder-list:detail:$folderPath:status"
+fun folderSessionStatusDotTestTag(folderPath: String, sessionName: String): String =
+    "folder-list:detail:$folderPath:$sessionName:status"
 fun folderTreeRootTestTag(path: String): String = "folder-list:tree-root:$path"
 fun folderTreeRootLabelTag(path: String): String = "folder-list:tree-root:$path:label"
 fun folderTreeRootCreateTestTag(path: String): String = "folder-list:tree-root:$path:create"

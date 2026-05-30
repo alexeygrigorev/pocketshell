@@ -259,6 +259,29 @@ Subtle, non-intrusive.
 - Row background: `Surface` + 1 dp `BorderSoft` border, 10 dp radius, 10–12 px padding, 12 px margin top/bottom.
 - Expanded state: full command, output (if available); chevron rotation indicates state.
 
+### 6.5 Workspace tree row (host detail)
+
+Compact active-only hierarchy for the host-detail workspace view.
+
+- Configured roots render first, in configured order. Sessions outside those
+  roots render after them under one neutral group.
+- Project rows are collapsed by default. Expanding reveals active sessions
+  only; inactive scanned folders belong in add/browse flows, not the primary
+  tree.
+- Hierarchy comes from indentation, subtle connector lines, and spacing. Do
+  not put branch glyphs, bullets, or ASCII tree art in row titles.
+- Project rows use `Surface` with a 1 dp `BorderSoft` outline, 8-10 dp radius,
+  and 10-12 dp vertical padding. Session children use `SurfaceElev`, 8 dp
+  radius, and a 1 dp connector line at the left.
+- Active/idle state is a 7-8 dp status dot: green for active/attached or
+  agent-backed sessions, amber for idle detached shells. Do not add prose
+  status labels unless accessibility text is needed.
+- Counts are subtle neutral pills (`SurfaceElev` + `BorderSoft`, 10-11 sp)
+  such as "2 sessions" or "2 sessions, 1 agent". They stay single-line at
+  phone width; truncate the project label before wrapping a count pill.
+- Session children prefer human-readable titles. The raw tmux session name is
+  secondary fallback text when no richer title source exists.
+
 ---
 
 ## 7. Material 3 deltas (the 5 justified divergences)

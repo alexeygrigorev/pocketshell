@@ -417,6 +417,94 @@ class FolderListGroupingTest {
         assertEquals("pocketshell", roots[1].folders.single().label)
     }
 
+    @Test
+    fun sessionsSortAgentsFirstWithinProjectThenByRecency() {
+        val sessions = listOf(
+            entry("new-shell", 4_000L, kind = SessionAgentKind.Shell),
+            entry("older-codex", 1_000L, kind = SessionAgentKind.Codex),
+            entry("newer-claude", 3_000L, kind = SessionAgentKind.Claude),
+            entry("old-shell", 500L, kind = SessionAgentKind.Shell),
+        )
+        val cwds = sessions.associate { session ->
+            session.sessionName to FolderListViewModel.canonicalisePath("/home/alexey/git/pocketshell")
+        }
+        val watched = listOf(
+            ProjectRootEntity(id = 1L, hostId = 7L, label = "git", path = "/home/alexey/git"),
+        )
+
+        val roots = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = cwds,
+            watchedFolders = watched,
+            scannedProjectFoldersByRoot = emptyMap(),
+        )
+
+        assertEquals(
+            listOf("newer-claude", "older-codex", "new-shell", "old-shell"),
+            roots.single().folders.single().sessions.map { it.sessionName },
+        )
+    }
+
+    @Test
+    fun projectExpansionTogglesFromCollapsedDefault() {
+        val projectPath = "/home/alexey/git/pocketshell"
+        val collapsed = emptySet<String>()
+
+        val expanded = FolderListViewModel.toggleProjectExpansion(collapsed, projectPath)
+        val collapsedAgain = FolderListViewModel.toggleProjectExpansion(expanded, "$projectPath/")
+
+        assertEquals(setOf(projectPath), expanded)
+        assertEquals(emptySet<String>(), collapsedAgain)
+    }
+
+    @Test
+    fun projectCountTextPluralisesSessionsAndAgents() {
+        assertEquals(
+            "1 session",
+            projectCountText(folderWithSessions(entry("shell", 1_000L))),
+        )
+        assertEquals(
+            "1 agent",
+            projectCountText(folderWithSessions(entry("claude", 1_000L, kind = SessionAgentKind.Claude))),
+        )
+        assertEquals(
+            "2 sessions, 1 agent",
+            projectCountText(
+                folderWithSessions(
+                    entry("claude", 2_000L, kind = SessionAgentKind.Claude),
+                    entry("shell", 1_000L),
+                ),
+            ),
+        )
+        assertEquals(
+            "3 sessions, 2 agents",
+            projectCountText(
+                folderWithSessions(
+                    entry("claude", 3_000L, kind = SessionAgentKind.Claude),
+                    entry("codex", 2_000L, kind = SessionAgentKind.Codex),
+                    entry("shell", 1_000L),
+                ),
+            ),
+        )
+        assertEquals(
+            "2 agents",
+            projectCountText(
+                folderWithSessions(
+                    entry("claude", 2_000L, kind = SessionAgentKind.Claude),
+                    entry("codex", 1_000L, kind = SessionAgentKind.Codex),
+                ),
+            ),
+        )
+    }
+
+    private fun folderWithSessions(vararg sessions: FolderSessionEntry): FolderRow =
+        FolderRow(
+            path = "/home/alexey/git/pocketshell",
+            label = "pocketshell",
+            sessions = sessions.toList(),
+            isWatched = false,
+        )
+
     private fun entry(
         name: String,
         activity: Long,

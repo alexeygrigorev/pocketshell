@@ -4,12 +4,14 @@ import android.graphics.Bitmap
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.core.graphics.createBitmap
 import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -43,10 +45,10 @@ import java.util.concurrent.atomic.AtomicInteger
  * [FolderListGateway] and asserts:
  *
  *  1. The folder list mounts and shows the host name on the app-bar.
- *  2. Active project folder headers render with their expected agent /
- *     shell rollup chips (1 agent + 1 shell, 1 agent respectively).
- *  3. Session names render inline as tappable SessionRow nodes so
- *     callers can drill straight into a session by its name.
+ *  2. Active project rows render with horizontal count pills and
+ *     inactive scanned folders stay hidden from the main tree.
+ *  3. Projects are collapsed by default; expanding a project reveals
+ *     tappable session rows with compact active/idle indicators.
  *  4. Inactive scanned folders stay out of the main tree and appear in
  *     the root add sheet, which exposes quick actions plus a
  *     start-session path for the selected project.
@@ -172,6 +174,8 @@ class FolderListScreenE2eTest {
                 compose.onAllNodesWithTag(folderTreeRootTestTag("/home/u/code"))
                     .fetchSemanticsNodes().isNotEmpty()
         }
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(folderRowTestTag("/home/u/code/pocketshell")))
 
         // --- Assertion 1: screen mounted with the host name on the
         //    app-bar header.
@@ -190,17 +194,37 @@ class FolderListScreenE2eTest {
         // --- Assertion 2: two active folder rows — pocketshell and
         //    llm-zoomcamp. The inactive scanned empty-pinned project is
         //    intentionally not rendered inline on the main root tree.
-        compose.onNodeWithTag(folderHeaderLabelTag("/home/u/code/pocketshell")).assertExists()
-        compose.onNodeWithTag(folderHeaderLabelTag("/home/u/code/llm-zoomcamp")).assertExists()
-        compose.onNodeWithTag(folderHeaderLabelTag("/home/u/code/empty-pinned")).assertDoesNotExist()
+        compose.onNodeWithTag(folderHeaderLabelTag("/home/u/code/pocketshell"), useUnmergedTree = true).assertExists()
+        compose.onNodeWithTag(folderHeaderLabelTag("/home/u/code/llm-zoomcamp"), useUnmergedTree = true).assertExists()
+        compose.onNodeWithTag(folderHeaderLabelTag("/home/u/code/empty-pinned"), useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithText("2 sessions, 1 agent", useUnmergedTree = true).assertExists()
+        assertCountPillRendersHorizontally("/home/u/code/pocketshell", "2 sessions, 1 agent")
+        compose.onNodeWithText("1 agent", useUnmergedTree = true).assertExists()
+        assertCountPillRendersHorizontally("/home/u/code/llm-zoomcamp", "1 agent")
+        compose.onNodeWithTag(
+            folderStatusDotTestTag("/home/u/code/pocketshell"),
+            useUnmergedTree = true,
+        ).assertExists()
 
-        // --- Assertion 3: session names render inline as tappable nodes
-        //    so callers can drill into a session by its name (the
-        //    behaviour the round-1 review found broken because of the
-        //    HostTmuxSessionPickerSheet deletion).
-        compose.onNodeWithText("claude-main").assertExists()
-        compose.onNodeWithText("build-shell").assertExists()
-        compose.onNodeWithText("codex-llm").assertExists()
+        // --- Assertion 3: projects are collapsed by default; expanding
+        //    pocketshell reveals agent sessions before idle shell
+        //    sessions and keeps the raw tmux name as fallback text.
+        compose.onNodeWithText("claude-main", useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithTag(
+            folderDetailDisclosureTestTag("/home/u/code/pocketshell"),
+            useUnmergedTree = true,
+        ).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            (viewModel.state.value as? FolderListUiState.Ready)
+                ?.expandedProjectPaths
+                ?.contains("/home/u/code/pocketshell") == true
+        }
+        compose.onNodeWithText("claude-main", useUnmergedTree = true).assertExists()
+        compose.onNodeWithTag(
+            folderSessionStatusDotTestTag("/home/u/code/pocketshell", "claude-main"),
+            useUnmergedTree = true,
+        ).assertExists()
+        compose.onNodeWithText("build-shell", useUnmergedTree = true).assertExists()
 
         // Issue #276: per-host session rows stay compact. The retired
         // dashboard badge, empty host separator, and prose status line
@@ -212,10 +236,9 @@ class FolderListScreenE2eTest {
         compose.onNodeWithText("codex conversation active").assertDoesNotExist()
         compose.onNodeWithText("tmux session detached").assertDoesNotExist()
 
-        // Agent / shell rollup chips visible on the pocketshell folder.
+        // Agent / shell rollup labels visible on the expanded project.
         compose.onNodeWithText("Claude").assertExists()
-        compose.onNodeWithText("Codex").assertExists()
-        compose.onNodeWithText("Shell").assertExists()
+        compose.onNodeWithText("Idle").assertExists()
 
         // --- Capture viewport before opening any picker/sheet (artifact
         //    path matches the project's `*-viewport.png` convention so
@@ -272,6 +295,21 @@ class FolderListScreenE2eTest {
         // screenshot taken right after is guaranteed to include it.
         android.os.SystemClock.sleep(250)
         captureFullDevice("issue300-session-type-picker-viewport.png")
+    }
+
+    private fun assertCountPillRendersHorizontally(folderPath: String, countText: String) {
+        compose.onNodeWithText(
+            countText,
+            useUnmergedTree = true,
+        ).assertExists()
+        val bounds = compose.onNodeWithTag(
+            folderCountPillTestTag(folderPath),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        assertTrue(
+            "count pill for $folderPath is too narrow: ${bounds.width}x${bounds.height}",
+            bounds.width > bounds.height * 2.5f,
+        )
     }
 
     private fun captureFullDevice(name: String) {

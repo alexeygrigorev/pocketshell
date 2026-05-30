@@ -101,6 +101,7 @@ sealed interface FolderListUiState {
         val folders: List<FolderRow>,
         val treeRoots: List<FolderTreeRoot>,
         val flatSessions: List<FolderSessionEntry>,
+        val expandedProjectPaths: Set<String>,
     ) : FolderListUiState
 
     data class Failed(val message: String) : FolderListUiState
@@ -159,6 +160,7 @@ class FolderListViewModel @Inject constructor(
     private var lastHistoryProjectFoldersByRoot: Map<String, List<String>> = emptyMap()
     private var lastResolvedWatchedRootPaths: Map<String, String> = emptyMap()
     private var lastCreatedFolders: Map<String, String> = emptyMap()
+    private var expandedProjectPaths: Set<String> = emptySet()
 
     /**
      * Bind to a host and kick a one-shot probe. Re-calling with the same
@@ -324,6 +326,11 @@ class FolderListViewModel @Inject constructor(
         _actionStatus.value = FolderActionStatus.Idle
     }
 
+    fun toggleProjectExpanded(projectPath: String) {
+        expandedProjectPaths = toggleProjectExpansion(expandedProjectPaths, canonicalisePath(projectPath))
+        emitReady()
+    }
+
     private fun startPolling() {
         val params = bound ?: return
         pollingJob?.cancel()
@@ -420,6 +427,11 @@ class FolderListViewModel @Inject constructor(
             resolvedWatchedRootPaths = lastResolvedWatchedRootPaths,
             extraFolders = lastCreatedFolders,
         )
+        val visibleProjectPaths = treeRoots
+            .flatMap { root -> root.folders }
+            .map { folder -> folder.path }
+            .toSet()
+        expandedProjectPaths = expandedProjectPaths.intersect(visibleProjectPaths)
         _state.value = FolderListUiState.Ready(
             folders = folders,
             treeRoots = treeRoots,
@@ -427,6 +439,7 @@ class FolderListViewModel @Inject constructor(
                 compareByDescending<FolderSessionEntry> { it.lastActivity ?: 0L }
                     .thenBy { it.sessionName },
             ),
+            expandedProjectPaths = expandedProjectPaths,
         )
     }
 
@@ -836,8 +849,13 @@ class FolderListViewModel @Inject constructor(
             if (clean.isEmpty()) return candidates
             return candidates.filter { candidate ->
                 candidate.label.contains(clean, ignoreCase = true) ||
-                    candidate.path.contains(clean, ignoreCase = true)
+                candidate.path.contains(clean, ignoreCase = true)
             }
+        }
+
+        fun toggleProjectExpansion(expandedPaths: Set<String>, projectPath: String): Set<String> {
+            val canonical = canonicalisePath(projectPath)
+            return if (canonical in expandedPaths) expandedPaths - canonical else expandedPaths + canonical
         }
 
         private fun rootProjectCandidateSort(
@@ -858,7 +876,8 @@ class FolderListViewModel @Inject constructor(
                 .thenBy { it.path.lowercase() }
 
         private fun sessionEntrySort(): Comparator<FolderSessionEntry> =
-            compareByDescending<FolderSessionEntry> { it.lastActivity ?: 0L }
+            compareByDescending<FolderSessionEntry> { it.agentKind.isAgentSession() }
+                .thenByDescending { it.lastActivity ?: 0L }
                 .thenBy { it.sessionName }
 
         private fun List<FolderRow>.sortedForTree(): List<FolderRow> {
@@ -871,6 +890,16 @@ class FolderListViewModel @Inject constructor(
                 .sortedBy { it.label.lowercase() }
             val untracked = filter { it.path == UNTRACKED_PATH }
             return active + empty + untracked
+        }
+
+        private fun SessionAgentKind.isAgentSession(): Boolean = when (this) {
+            SessionAgentKind.Claude,
+            SessionAgentKind.Codex,
+            SessionAgentKind.OpenCode,
+            SessionAgentKind.Probing,
+            SessionAgentKind.Exited,
+            -> true
+            SessionAgentKind.Shell -> false
         }
     }
 }

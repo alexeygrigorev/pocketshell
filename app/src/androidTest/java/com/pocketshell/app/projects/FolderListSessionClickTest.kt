@@ -38,11 +38,11 @@ import java.util.concurrent.atomic.AtomicInteger
  * Tight unit-level Compose test for FolderListScreen — issue #171 round 2.
  *
  * Verifies the load-bearing behaviour the round-1 review found broken:
- * tapping a session name on the folder list dispatches the click to
- * the SessionRow's `onClick` callback (the parent navigator then
- * routes to TmuxSession). Without this contract, the post-host-tap
- * flow loses the user mid-stream — the regression the connected
- * TmuxAttachPrefillDockerTest detects but at full SSH+tmux cost.
+ * tapping a session name inside an expanded project dispatches the
+ * click callback (the parent navigator then routes to TmuxSession).
+ * Without this contract, the post-host-tap flow loses the user
+ * mid-stream — the regression the connected TmuxAttachPrefillDockerTest
+ * detects but at full SSH+tmux cost.
  */
 @RunWith(AndroidJUnit4::class)
 class FolderListSessionClickTest {
@@ -126,8 +126,9 @@ class FolderListSessionClickTest {
         }
 
         compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText("claude-main").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithTag(folderRowTestTag("/root")).fetchSemanticsNodes().isNotEmpty()
         }
+        compose.onNodeWithTag(folderRowTestTag("/root")).performClick()
         compose.onNodeWithText("claude-main").performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             clickedSession != null
@@ -155,8 +156,6 @@ class FolderListSessionClickTest {
             hostDao = db.hostDao(),
             projectRootDao = db.projectRootDao(),
         )
-        var mode by mutableStateOf(HostDetailViewMode.Tree)
-
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 FolderListScreen(
@@ -179,7 +178,7 @@ class FolderListSessionClickTest {
         }
 
         compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText("shell-main").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithTag(folderDetailActionsTestTag("/root/projects")).fetchSemanticsNodes().isNotEmpty()
         }
 
         compose.onNodeWithTag(folderDetailActionsTestTag("/root/projects")).performClick()
@@ -214,7 +213,7 @@ class FolderListSessionClickTest {
         }
         assertEquals("/root/projects", fakeGateway.lastEmptyParent)
         assertEquals("scratch", fakeGateway.lastEmptyName)
-        compose.onNodeWithTag(folderHeaderLabelTag("/root/projects/scratch")).assertIsDisplayed()
+        compose.onNodeWithTag(folderHeaderLabelTag("/root/projects/scratch"), useUnmergedTree = true).assertIsDisplayed()
     }
 
     @Test
@@ -275,19 +274,33 @@ class FolderListSessionClickTest {
         }
 
         compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText("codex-app").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithTag(
+                folderHeaderLabelTag("/root/work/app"),
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag(folderTreeRootLabelTag("/root/work")).assertIsDisplayed()
-        compose.onNodeWithTag(folderHeaderLabelTag("/root/work/app")).assertIsDisplayed()
-        compose.onNodeWithTag(folderHeaderLabelTag("/root/work/empty")).assertIsDisplayed()
+        compose.onNodeWithTag(folderHeaderLabelTag("/root/work/app"), useUnmergedTree = true).assertIsDisplayed()
+        assertTrue(
+            compose.onAllNodesWithTag(
+                folderHeaderLabelTag("/root/work/empty"),
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isEmpty(),
+        )
+        assertTrue(compose.onAllNodesWithText("codex-app").fetchSemanticsNodes().isEmpty())
 
         compose.runOnIdle { mode = HostDetailViewMode.Flat }
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithText("service").fetchSemanticsNodes().isNotEmpty()
         }
         assertTrue(compose.onAllNodesWithTag(folderTreeRootTestTag("/root/work")).fetchSemanticsNodes().isEmpty())
-        assertTrue(compose.onAllNodesWithTag(folderHeaderLabelTag("/root/work/app")).fetchSemanticsNodes().isEmpty())
-        compose.onNodeWithTag(folderHeaderLabelTag("/root/work/app/service")).assertIsDisplayed()
+        assertTrue(
+            compose.onAllNodesWithTag(
+                folderHeaderLabelTag("/root/work/app"),
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isEmpty(),
+        )
+        compose.onNodeWithTag(folderHeaderLabelTag("/root/work/app/service"), useUnmergedTree = true).assertIsDisplayed()
     }
 }
 

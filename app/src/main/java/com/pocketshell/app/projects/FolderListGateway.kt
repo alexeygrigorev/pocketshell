@@ -20,6 +20,8 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import kotlinx.coroutines.CancellationException
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.io.InputStream
 import javax.inject.Inject
@@ -69,6 +71,7 @@ sealed interface FolderListResult {
     data class Sessions(
         val rows: List<FolderSessionRow>,
         val projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
+        val historyProjectFoldersByRoot: Map<String, List<String>> = emptyMap(),
         val resolvedWatchedRootPaths: Map<String, String> = emptyMap(),
     ) : FolderListResult
     data object ToolUnavailable : FolderListResult
@@ -189,7 +192,9 @@ class SshFolderListGateway @Inject constructor(
         passphrase: CharArray?,
         watchedRoots: List<ProjectRootEntity>,
     ): FolderListResult {
-        listSessionsWithFolderFromLiveClient(host, keyPath)?.let { return it }
+        if (watchedRoots.isEmpty()) {
+            listSessionsWithFolderFromLiveClient(host, keyPath)?.let { return it }
+        }
 
         SshOpenTelemetry.record(
             source = SSH_SOURCE_FOLDER_LIST_PROBE,
@@ -316,6 +321,7 @@ class SshFolderListGateway @Inject constructor(
         return FolderListResult.Sessions(
             rows = rows,
             projectFoldersByRoot = expansion.projectFoldersByRoot,
+            historyProjectFoldersByRoot = expansion.historyProjectFoldersByRoot,
             resolvedWatchedRootPaths = expansion.resolvedWatchedRootPaths,
         )
     }
@@ -333,7 +339,9 @@ class SshFolderListGateway @Inject constructor(
         val remoteHome = if (rootPaths.any(::usesHomeShortcut)) remoteHomeDirectory(session) else null
 
         val projectFoldersByRoot = mutableMapOf<String, List<String>>()
+        val historyProjectFoldersByRoot = mutableMapOf<String, List<String>>()
         val resolvedWatchedRootPaths = mutableMapOf<String, String>()
+        val historyPaths = listProjectHistoryFromPocketshellLogs(session)
         for (rootPath in rootPaths) {
             val resolvedRootPath = expandRemoteHomeShortcut(rootPath, remoteHome)
             resolvedWatchedRootPaths[rootPath] = resolvedRootPath
@@ -352,11 +360,22 @@ class SshFolderListGateway @Inject constructor(
                 -> emptyList()
             }
             projectFoldersByRoot[rootPath] = paths.distinct()
+            historyProjectFoldersByRoot[rootPath] = historyPaths
+                .filter { pathWithinRoot(it, resolvedRootPath) }
+                .map { projectPathUnderRoot(it, resolvedRootPath) }
+                .distinct()
         }
         return WatchedRootProjectExpansion(
             projectFoldersByRoot = projectFoldersByRoot,
+            historyProjectFoldersByRoot = historyProjectFoldersByRoot,
             resolvedWatchedRootPaths = resolvedWatchedRootPaths,
         )
+    }
+
+    private suspend fun listProjectHistoryFromPocketshellLogs(session: SshSession): List<String> {
+        val result = session.exec(pathAware(POCKETSHELL_PROJECT_HISTORY_COMMAND))
+        if (result.exitCode != 0 || result.isPocketshellLogsMissing()) return emptyList()
+        return parsePocketshellProjectHistory(result.stdout)
     }
 
     private suspend fun remoteHomeDirectory(session: SshSession): String? {
@@ -381,6 +400,26 @@ class SshFolderListGateway @Inject constructor(
             clean.startsWith("~/") -> home + "/" + clean.removePrefix("~/")
             else -> clean
         }
+    }
+
+    private fun pathWithinRoot(path: String, root: String): Boolean {
+        val cleanPath = canonicalRemotePath(path)
+        val cleanRoot = canonicalRemotePath(root)
+        return cleanPath == cleanRoot || cleanPath.startsWith(cleanRoot.trimEnd('/') + "/")
+    }
+
+    private fun projectPathUnderRoot(path: String, root: String): String {
+        val cleanPath = canonicalRemotePath(path)
+        val cleanRoot = canonicalRemotePath(root)
+        if (cleanPath == cleanRoot) return cleanRoot
+        val prefix = cleanRoot.trimEnd('/') + "/"
+        val child = cleanPath.removePrefix(prefix).substringBefore('/').ifBlank { return cleanRoot }
+        return prefix + child
+    }
+
+    private fun canonicalRemotePath(path: String): String {
+        val clean = path.trim().trimEnd('/')
+        return clean.ifEmpty { "/" }
     }
 
     override suspend fun createSession(
@@ -672,6 +711,7 @@ class SshFolderListGateway @Inject constructor(
 
     private data class WatchedRootProjectExpansion(
         val projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
+        val historyProjectFoldersByRoot: Map<String, List<String>> = emptyMap(),
         val resolvedWatchedRootPaths: Map<String, String> = emptyMap(),
     )
 
@@ -761,6 +801,8 @@ class SshFolderListGateway @Inject constructor(
                 "#{pane_current_path}$FIELD_SEP#{pane_tty}$FIELD_SEP#{pane_current_command}'"
 
         const val POCKETSHELL_SESSIONS_COMMAND: String = "pocketshell sessions list --by activity"
+        const val POCKETSHELL_PROJECT_HISTORY_COMMAND: String =
+            "pocketshell logs tail --kind agent --json -n 200"
 
         const val CONTROL_LIST_SESSIONS_COMMAND: String =
             "list-sessions -F " +
@@ -798,6 +840,29 @@ class SshFolderListGateway @Inject constructor(
                     agentKind = SessionAgentKind.Shell,
                 )
             }
+
+        internal fun parsePocketshellProjectHistory(stdout: String): List<String> {
+            val array = try {
+                JSONArray(stdout)
+            } catch (_: Throwable) {
+                return emptyList()
+            }
+            val recentFirst = (array.length() - 1 downTo 0)
+            val seen = linkedSetOf<String>()
+            for (index in recentFirst) {
+                val item = array.optJSONObject(index) ?: continue
+                val cwd = item.stringOrNull("cwd")
+                    ?: item.optJSONObject("detail")?.stringOrNull("cwd")
+                    ?: item.stringOrNull("project_path")
+                    ?: item.stringOrNull("worktree")
+                    ?: item.optJSONObject("detail")?.stringOrNull("project_path")
+                    ?: item.optJSONObject("detail")?.stringOrNull("worktree")
+                    ?: continue
+                val clean = cwd.trim().trimEnd('/').takeIf { it.isNotBlank() } ?: continue
+                seen += clean.ifEmpty { "/" }
+            }
+            return seen.toList()
+        }
 
         private fun parseRow(line: String): FolderSessionRow? {
             if (line.isBlank()) return null
@@ -848,5 +913,19 @@ class SshFolderListGateway @Inject constructor(
             }
             return result
         }
+
+        private fun JSONObject.stringOrNull(name: String): String? =
+            when (val value = opt(name)) {
+                null, JSONObject.NULL -> null
+                is String -> value.takeIf { it.isNotBlank() }
+                else -> null
+            }
     }
+}
+
+private fun ExecResult.isPocketshellLogsMissing(): Boolean {
+    if (exitCode == 127) return true
+    val output = "$stderr\n$stdout"
+    return output.contains("No such command 'logs'", ignoreCase = true) ||
+        output.contains("No such command \"logs\"", ignoreCase = true)
 }

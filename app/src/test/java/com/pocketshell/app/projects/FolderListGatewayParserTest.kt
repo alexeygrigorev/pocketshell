@@ -74,6 +74,29 @@ class FolderListGatewayParserTest {
     }
 
     @Test
+    fun parsePocketshellProjectHistoryExtractsRecentUniqueCwds() {
+        val stdout = """
+            [
+              {"ts":"2026-05-30T10:00:00Z","kind":"engine_event","cwd":"/home/alexey/git/old"},
+              {"ts":"2026-05-30T10:05:00Z","kind":"agent_action","detail":{"cwd":"/home/alexey/git/pocketshell/app"}},
+              {"ts":"2026-05-30T10:06:00Z","kind":"engine_event","cwd":"/home/alexey/git/old/"},
+              {"ts":"2026-05-30T10:07:00Z","kind":"engine_event","cwd":""}
+            ]
+        """.trimIndent()
+
+        assertEquals(
+            listOf("/home/alexey/git/old", "/home/alexey/git/pocketshell/app"),
+            SshFolderListGateway.parsePocketshellProjectHistory(stdout),
+        )
+    }
+
+    @Test
+    fun parsePocketshellProjectHistoryToleratesMissingLogsJson() {
+        assertEquals(emptyList<String>(), SshFolderListGateway.parsePocketshellProjectHistory("not-json"))
+        assertEquals(emptyList<String>(), SshFolderListGateway.parsePocketshellProjectHistory("{}"))
+    }
+
+    @Test
     fun parseActivePaneRowsReturnsOnlyActivePaneForEachSession() {
         // Two panes for `claude-main`, only the active one (pane_active=1)
         // wins. A second session `solo` has a single active pane.

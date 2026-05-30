@@ -146,6 +146,7 @@ fun FolderListScreen(
     var actionFolder by remember { mutableStateOf<PickerTarget?>(null) }
     var emptyProjectFolder by remember { mutableStateOf<PickerTarget?>(null) }
     var importFolder by remember { mutableStateOf<PickerTarget?>(null) }
+    var rootAddSheet by remember { mutableStateOf<FolderTreeRoot?>(null) }
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent(),
     ) { uri ->
@@ -206,7 +207,7 @@ fun FolderListScreen(
                         actionFolder = PickerTarget(path = row.path, label = row.label)
                     },
                     onCreateInRoot = { root ->
-                        pickerFolder = PickerTarget(path = root.path, label = root.label)
+                        rootAddSheet = root
                     },
                     onRootActions = { root ->
                         actionFolder = PickerTarget(path = root.path, label = root.label)
@@ -297,6 +298,25 @@ fun FolderListScreen(
             onCreate = { name ->
                 emptyProjectFolder = null
                 viewModel.createEmptyProject(parentPath = target.path, folderName = name)
+            },
+        )
+    }
+
+    rootAddSheet?.let { root ->
+        RootProjectAddSheet(
+            root = root,
+            onDismiss = { rootAddSheet = null },
+            onStartSession = { project ->
+                rootAddSheet = null
+                pickerFolder = PickerTarget(path = project.path, label = project.label)
+            },
+            onCreateEmptyProject = {
+                rootAddSheet = null
+                emptyProjectFolder = PickerTarget(path = root.path, label = root.label)
+            },
+            onCloneGitProject = {
+                rootAddSheet = null
+                onBrowseRepos(root.path)
             },
         )
     }
@@ -614,7 +634,7 @@ private fun FolderTreeRootGroup(
             onRootActions = { onRootActions(root) },
         )
         if (root.folders.isEmpty()) {
-            EmptyRootHint(onCreate = { onCreateInRoot(root) })
+            EmptyRootHint(candidateCount = root.addSheetProjects.size, onCreate = { onCreateInRoot(root) })
         } else {
             Column(
                 modifier = Modifier.padding(start = 14.dp),
@@ -685,9 +705,9 @@ private fun FolderTreeRootHeader(
                 modifier = Modifier.testTag(folderTreeRootCreateTestTag(root.path)),
             ) {
                 Text(
-                    text = "+ New",
+                    text = "+",
                     color = PocketShellColors.Accent,
-                    fontSize = 12.sp,
+                    fontSize = 18.sp,
                     fontWeight = FontWeight.SemiBold,
                 )
             }
@@ -696,7 +716,7 @@ private fun FolderTreeRootHeader(
 }
 
 @Composable
-private fun EmptyRootHint(onCreate: () -> Unit) {
+private fun EmptyRootHint(candidateCount: Int, onCreate: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -706,13 +726,17 @@ private fun EmptyRootHint(onCreate: () -> Unit) {
             .padding(horizontal = 16.dp, vertical = 14.dp),
     ) {
         Text(
-            text = "No project folders found under this watched root.",
+            text = if (candidateCount > 0) {
+                "$candidateCount inactive project folders available."
+            } else {
+                "No project folders found under this watched root."
+            },
             color = PocketShellColors.Text,
             fontSize = 13.sp,
         )
         Spacer(modifier = Modifier.height(8.dp))
         TextButton(onClick = onCreate) {
-            Text("+ New project", color = PocketShellColors.Accent)
+            Text("+ Add project", color = PocketShellColors.Accent)
         }
     }
 }

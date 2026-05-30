@@ -217,12 +217,19 @@ class FolderListGroupingTest {
         assertEquals("git", roots[0].label)
         assertTrue(roots[0].isWatched)
         assertEquals(
-            listOf("pocketshell", "docs", "empty-project"),
+            listOf("pocketshell", "docs"),
             roots[0].folders.map { it.label },
         )
         assertEquals(listOf("codex-api", "shell-api"), roots[0].folders[0].sessions.map { it.sessionName })
         assertEquals(listOf("claude-docs"), roots[0].folders[1].sessions.map { it.sessionName })
-        assertTrue(roots[0].folders[2].isEmpty)
+        assertEquals(
+            listOf("pocketshell", "docs", "empty-project"),
+            roots[0].addSheetProjects.map { it.label },
+        )
+        assertEquals(
+            listOf(RootProjectSource.Active, RootProjectSource.Active, RootProjectSource.Scanned),
+            roots[0].addSheetProjects.map { it.source },
+        )
     }
 
     @Test
@@ -257,12 +264,103 @@ class FolderListGroupingTest {
         assertEquals("~/git", roots[0].path)
         assertEquals("git", roots[0].label)
         assertEquals(
-            listOf("pocketshell", "docs", "empty-project"),
+            listOf("pocketshell", "docs"),
             roots[0].folders.map { it.label },
         )
         assertEquals(listOf("codex-pocketshell"), roots[0].folders[0].sessions.map { it.sessionName })
         assertEquals(listOf("shell-docs"), roots[0].folders[1].sessions.map { it.sessionName })
-        assertTrue(roots[0].folders[2].isEmpty)
+        assertEquals(
+            listOf("pocketshell", "docs", "empty-project"),
+            roots[0].addSheetProjects.map { it.label },
+        )
+    }
+
+    @Test
+    fun rootAddSheetCandidatesPutUsedBeforeInactiveBeforeScannedFolders() {
+        val watched = listOf(
+            ProjectRootEntity(id = 1L, hostId = 7L, label = "git", path = "/home/alexey/git"),
+        )
+
+        val roots = FolderListViewModel.buildFolderTree(
+            sessions = emptyList(),
+            sessionFolderPaths = emptyMap(),
+            watchedFolders = watched,
+            historyProjectFoldersByRoot = mapOf(
+                "/home/alexey/git" to listOf(
+                    "/home/alexey/git/zoomcamp",
+                    "/home/alexey/git/pocketshell",
+                ),
+            ),
+            scannedProjectFoldersByRoot = mapOf(
+                "/home/alexey/git" to listOf(
+                    "/home/alexey/git/alpha",
+                    "/home/alexey/git/pocketshell",
+                    "/home/alexey/git/zoomcamp",
+                    "/home/alexey/git/beta",
+                ),
+            ),
+        )
+
+        assertTrue("inactive scanned folders should not flood the main tree", roots.single().folders.isEmpty())
+        assertEquals(
+            listOf("zoomcamp", "pocketshell", "alpha", "beta"),
+            roots.single().addSheetProjects.map { it.label },
+        )
+        assertEquals(
+            listOf(
+                RootProjectSource.History,
+                RootProjectSource.History,
+                RootProjectSource.Scanned,
+                RootProjectSource.Scanned,
+            ),
+            roots.single().addSheetProjects.map { it.source },
+        )
+    }
+
+    @Test
+    fun rootAddSheetCandidatesKeepActiveProjectsStartableAheadOfInactive() {
+        val sessions = listOf(entry("main", 3_000L), entry("worker", 2_000L))
+        val cwds = mapOf(
+            "main" to FolderListViewModel.canonicalisePath("/home/alexey/git/pocketshell/app"),
+            "worker" to FolderListViewModel.canonicalisePath("/home/alexey/git/pocketshell"),
+        )
+        val watched = listOf(
+            ProjectRootEntity(id = 1L, hostId = 7L, label = "git", path = "/home/alexey/git"),
+        )
+
+        val roots = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = cwds,
+            watchedFolders = watched,
+            historyProjectFoldersByRoot = mapOf("/home/alexey/git" to listOf("/home/alexey/git/old")),
+            scannedProjectFoldersByRoot = mapOf("/home/alexey/git" to listOf("/home/alexey/git/alpha")),
+        )
+
+        assertEquals(listOf("pocketshell"), roots.single().folders.map { it.label })
+        assertEquals(
+            listOf("pocketshell", "old", "alpha"),
+            roots.single().addSheetProjects.map { it.label },
+        )
+        assertEquals(2, roots.single().addSheetProjects.first().activeSessionCount)
+    }
+
+    @Test
+    fun rootAddSheetCandidateFilteringMatchesLabelOrPathCaseInsensitively() {
+        val candidates = listOf(
+            RootProjectCandidate("/home/alexey/git/pocketshell", "pocketshell", RootProjectSource.Active, 1),
+            RootProjectCandidate("/home/alexey/git/llm-zoomcamp", "llm-zoomcamp", RootProjectSource.History, 0),
+            RootProjectCandidate("/srv/tools/beta", "beta", RootProjectSource.Scanned, 0),
+        )
+
+        assertEquals(
+            listOf("llm-zoomcamp"),
+            FolderListViewModel.filterRootProjectCandidates(candidates, "ZOOM").map { it.label },
+        )
+        assertEquals(
+            listOf("beta"),
+            FolderListViewModel.filterRootProjectCandidates(candidates, "/srv").map { it.label },
+        )
+        assertEquals(candidates, FolderListViewModel.filterRootProjectCandidates(candidates, " "))
     }
 
     @Test

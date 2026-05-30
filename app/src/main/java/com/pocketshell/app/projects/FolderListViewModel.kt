@@ -65,10 +65,22 @@ data class FolderTreeRoot(
     val label: String,
     val folders: List<FolderRow>,
     val isWatched: Boolean,
+    val addSheetProjects: List<RootProjectCandidate> = emptyList(),
 ) {
     val isEmpty: Boolean get() = folders.isEmpty()
     val mostRecentActivity: Long get() = folders.maxOfOrNull { it.mostRecentActivity } ?: 0L
 }
+
+data class RootProjectCandidate(
+    val path: String,
+    val label: String,
+    val source: RootProjectSource,
+    val activeSessionCount: Int,
+) {
+    val isActive: Boolean get() = activeSessionCount > 0
+}
+
+enum class RootProjectSource { Active, History, Scanned }
 
 /**
  * One session inside a [FolderRow]. Carries the minimum fields the
@@ -144,6 +156,7 @@ class FolderListViewModel @Inject constructor(
     private var lastSessionFolderPaths: Map<String, String> = emptyMap()
     private var lastWatchedFolders: List<ProjectRootEntity> = emptyList()
     private var lastScannedProjectFoldersByRoot: Map<String, List<String>> = emptyMap()
+    private var lastHistoryProjectFoldersByRoot: Map<String, List<String>> = emptyMap()
     private var lastResolvedWatchedRootPaths: Map<String, String> = emptyMap()
     private var lastCreatedFolders: Map<String, String> = emptyMap()
 
@@ -366,6 +379,7 @@ class FolderListViewModel @Inject constructor(
                     row.sessionName to (row.cwd?.let(::canonicalisePath) ?: UNTRACKED_PATH)
                 }
                 lastScannedProjectFoldersByRoot = result.projectFoldersByRoot
+                lastHistoryProjectFoldersByRoot = result.historyProjectFoldersByRoot
                 lastResolvedWatchedRootPaths = result.resolvedWatchedRootPaths
                 emitReady()
             }
@@ -402,6 +416,7 @@ class FolderListViewModel @Inject constructor(
             sessionFolderPaths = lastSessionFolderPaths,
             watchedFolders = lastWatchedFolders,
             scannedProjectFoldersByRoot = lastScannedProjectFoldersByRoot,
+            historyProjectFoldersByRoot = lastHistoryProjectFoldersByRoot,
             resolvedWatchedRootPaths = lastResolvedWatchedRootPaths,
             extraFolders = lastCreatedFolders,
         )
@@ -598,6 +613,7 @@ class FolderListViewModel @Inject constructor(
             sessionFolderPaths: Map<String, String>,
             watchedFolders: List<ProjectRootEntity>,
             scannedProjectFoldersByRoot: Map<String, List<String>>,
+            historyProjectFoldersByRoot: Map<String, List<String>> = emptyMap(),
             resolvedWatchedRootPaths: Map<String, String> = emptyMap(),
             extraFolders: Map<String, String> = emptyMap(),
         ): List<FolderTreeRoot> {
@@ -645,7 +661,22 @@ class FolderListViewModel @Inject constructor(
                     .filter { pathWithinRoot(it, root.matchPath) }
                 val extraPaths = extraByPath.keys.filter { pathWithinRoot(it, root.matchPath) }
                 val sessionPaths = sessionProjectPaths.keys.filter { pathWithinRoot(it, root.matchPath) }
-                val projectPaths = (scannedPaths + extraPaths + sessionPaths)
+                val historyPaths = historyProjectFoldersByRoot[root.path].orEmpty() +
+                    historyProjectFoldersByRoot[root.matchPath].orEmpty() +
+                    historyProjectFoldersByRoot.entries
+                        .firstOrNull {
+                            val key = canonicalisePath(it.key)
+                            key == root.path || key == root.matchPath
+                        }
+                        ?.value
+                        .orEmpty()
+                val historyProjectPaths = historyPaths
+                    .map(::canonicalisePath)
+                    .filter { pathWithinRoot(it, root.matchPath) }
+                val visibleProjectPaths = (extraPaths + sessionPaths)
+                    .distinct()
+                    .filter { it != UNTRACKED_PATH }
+                val sheetProjectPaths = (sessionPaths + historyProjectPaths + scannedPaths + extraPaths)
                     .distinct()
                     .filter { it != UNTRACKED_PATH }
 
@@ -653,7 +684,7 @@ class FolderListViewModel @Inject constructor(
                     path = root.path,
                     label = root.label,
                     isWatched = true,
-                    folders = projectPaths
+                    folders = visibleProjectPaths
                         .map { path ->
                             folderRowForTreePath(
                                 path = path,
@@ -663,6 +694,13 @@ class FolderListViewModel @Inject constructor(
                             )
                         }
                         .sortedForTree(),
+                    addSheetProjects = buildRootProjectCandidates(
+                        projectPaths = sheetProjectPaths,
+                        activeSessionsByProjectPath = sessionProjectPaths,
+                        historyProjectPaths = historyProjectPaths,
+                        scannedProjectPaths = scannedPaths,
+                        extraByPath = extraByPath,
+                    ),
                 )
             }
 
@@ -746,6 +784,78 @@ class FolderListViewModel @Inject constructor(
             val child = path.removePrefix(prefix).substringBefore('/').ifBlank { return root }
             return prefix + child
         }
+
+        internal fun buildRootProjectCandidates(
+            projectPaths: List<String>,
+            activeSessionsByProjectPath: Map<String, List<FolderSessionEntry>>,
+            historyProjectPaths: List<String>,
+            scannedProjectPaths: List<String>,
+            extraByPath: Map<String, String> = emptyMap(),
+        ): List<RootProjectCandidate> {
+            val historyRank = historyProjectPaths
+                .map(::canonicalisePath)
+                .distinct()
+                .withIndex()
+                .associate { it.value to it.index }
+            val activeRank = activeSessionsByProjectPath.entries
+                .sortedWith(
+                    compareByDescending<Map.Entry<String, List<FolderSessionEntry>>> {
+                        it.value.maxOfOrNull { session -> session.lastActivity ?: 0L } ?: 0L
+                    }.thenBy { defaultLabelForPath(it.key).lowercase() },
+                )
+                .mapIndexed { index, entry -> canonicalisePath(entry.key) to index }
+                .toMap()
+            val scannedSet = scannedProjectPaths.map(::canonicalisePath).toSet()
+            return projectPaths
+                .map(::canonicalisePath)
+                .distinct()
+                .filter { it != UNTRACKED_PATH }
+                .map { path ->
+                    val active = activeSessionsByProjectPath[path].orEmpty()
+                    val source = when {
+                        active.isNotEmpty() -> RootProjectSource.Active
+                        path in historyRank -> RootProjectSource.History
+                        else -> RootProjectSource.Scanned
+                    }
+                    RootProjectCandidate(
+                        path = path,
+                        label = extraByPath[path] ?: defaultLabelForPath(path),
+                        source = source,
+                        activeSessionCount = active.size,
+                    )
+                }
+                .filter { it.source != RootProjectSource.Scanned || it.path in scannedSet || it.path in extraByPath }
+                .sortedWith(rootProjectCandidateSort(activeRank, historyRank))
+        }
+
+        internal fun filterRootProjectCandidates(
+            candidates: List<RootProjectCandidate>,
+            query: String,
+        ): List<RootProjectCandidate> {
+            val clean = query.trim()
+            if (clean.isEmpty()) return candidates
+            return candidates.filter { candidate ->
+                candidate.label.contains(clean, ignoreCase = true) ||
+                    candidate.path.contains(clean, ignoreCase = true)
+            }
+        }
+
+        private fun rootProjectCandidateSort(
+            activeRank: Map<String, Int>,
+            historyRank: Map<String, Int>,
+        ): Comparator<RootProjectCandidate> =
+            compareBy<RootProjectCandidate> {
+                when (it.source) {
+                    RootProjectSource.Active -> 0
+                    RootProjectSource.History -> 1
+                    RootProjectSource.Scanned -> 2
+                }
+            }.thenBy {
+                if (it.source == RootProjectSource.Active) activeRank[it.path] ?: Int.MAX_VALUE else Int.MAX_VALUE
+            }.thenBy {
+                if (it.source == RootProjectSource.History) historyRank[it.path] ?: Int.MAX_VALUE else Int.MAX_VALUE
+            }.thenBy { it.label.lowercase() }
+                .thenBy { it.path.lowercase() }
 
         private fun sessionEntrySort(): Comparator<FolderSessionEntry> =
             compareByDescending<FolderSessionEntry> { it.lastActivity ?: 0L }

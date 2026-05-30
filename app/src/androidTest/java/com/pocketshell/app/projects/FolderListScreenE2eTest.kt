@@ -43,12 +43,13 @@ import java.util.concurrent.atomic.AtomicInteger
  * [FolderListGateway] and asserts:
  *
  *  1. The folder list mounts and shows the host name on the app-bar.
- *  2. Three folder headers render with their expected agent / shell
- *     rollup chips (1 agent + 1 shell, 1 agent, 0 shell respectively).
+ *  2. Active project folder headers render with their expected agent /
+ *     shell rollup chips (1 agent + 1 shell, 1 agent respectively).
  *  3. Session names render inline as tappable SessionRow nodes so
  *     callers can drill straight into a session by its name.
- *  4. The watched-but-empty folder row carries the "Watched" pin chip
- *     and the "+ New session" affordance.
+ *  4. Inactive scanned folders stay out of the main tree and appear in
+ *     the root add sheet, which exposes quick actions plus a
+ *     start-session path for the selected project.
  *  5. The SessionTypePickerSheet opens on the FAB tap and the agent /
  *     shell segments + agent CLI radio buttons are present.
  *
@@ -177,14 +178,12 @@ class FolderListScreenE2eTest {
         compose.onNodeWithText("issue171-host").assertExists()
         compose.onNodeWithTag(folderTreeRootLabelTag("/home/u/code")).assertExists()
 
-        // --- Assertion 2: three folder rows — pocketshell, llm-zoomcamp,
-        //    empty-pinned. The pocketshell row groups two sessions
-        //    (claude-main + build-shell); the llm-zoomcamp row groups
-        //    one (codex-llm); the empty-pinned row carries the Watched
-        //    chip with no sessions.
+        // --- Assertion 2: two active folder rows — pocketshell and
+        //    llm-zoomcamp. The inactive scanned empty-pinned project is
+        //    intentionally not rendered inline on the main root tree.
         compose.onNodeWithTag(folderHeaderLabelTag("/home/u/code/pocketshell")).assertExists()
         compose.onNodeWithTag(folderHeaderLabelTag("/home/u/code/llm-zoomcamp")).assertExists()
-        compose.onNodeWithTag(folderHeaderLabelTag("/home/u/code/empty-pinned")).assertExists()
+        compose.onNodeWithTag(folderHeaderLabelTag("/home/u/code/empty-pinned")).assertDoesNotExist()
 
         // --- Assertion 3: session names render inline as tappable nodes
         //    so callers can drill into a session by its name (the
@@ -209,18 +208,39 @@ class FolderListScreenE2eTest {
         compose.onNodeWithText("Codex").assertExists()
         compose.onNodeWithText("Shell").assertExists()
 
-        // --- Assertion 4: watched-but-empty folder row carries the
-        //    Watched pin chip + the "+ New" action.
+        // --- Capture viewport before opening any picker/sheet (artifact
+        //    path matches the project's `*-viewport.png` convention so
+        //    the reviewer's artifact-driven check picks it up).
+        captureViewport("issue300-folder-tree-rendered-viewport.png")
+
+        // --- Assertion 4: inactive scanned folders are sheet-only.
+        //    The watched root still carries the pin chip and the small
+        //    plus opens RootProjectAddSheet with quick actions and a
+        //    candidate row that starts a session in the inactive folder.
         compose.onNodeWithText("Watched").assertExists()
         compose.onAllNodesWithTag(folderDetailCreateTestTag("/home/u/code/empty-pinned"))
             .fetchSemanticsNodes().also {
-                assertTrue("expected empty-pinned folder to expose '+ New'", it.isNotEmpty())
+                assertTrue("expected empty-pinned folder to stay out of the main tree", it.isEmpty())
             }
 
-        // --- Capture viewport before opening the picker (artifact path
-        //    matches the project's `*-viewport.png` convention so the
-        //    reviewer's artifact-driven check picks it up).
-        captureViewport("issue300-folder-tree-rendered-viewport.png")
+        compose.onNodeWithTag(folderTreeRootCreateTestTag("/home/u/code")).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(ROOT_PROJECT_ADD_SHEET_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(ROOT_PROJECT_ADD_EMPTY_PROJECT_TAG).assertExists()
+        compose.onNodeWithTag(ROOT_PROJECT_ADD_CLONE_TAG).assertExists()
+        compose.onNodeWithTag(rootProjectCandidateTestTag("/home/u/code/empty-pinned")).assertExists()
+        compose.onNodeWithTag(rootProjectCandidateTestTag("/home/u/code/empty-pinned")).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(SESSION_TYPE_PICKER_SHELL_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("in empty-pinned").assertExists()
+        compose.onNodeWithTag(SESSION_TYPE_PICKER_CWD_TAG).assertExists()
+        compose.onNodeWithText("/home/u/code/empty-pinned").assertExists()
+        compose.onNodeWithTag(SESSION_TYPE_PICKER_CANCEL_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(SESSION_TYPE_PICKER_SHELL_TAG).fetchSemanticsNodes().isEmpty()
+        }
 
         // --- Assertion 5: SessionTypePickerSheet opens on FAB tap and
         //    shows the agent / shell segments + agent CLI radio rows.

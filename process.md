@@ -619,9 +619,14 @@ Release build steps:
    - visual-audit screenshot capture, then inspect the screenshots
 6. Prefer the wrapper that runs that sequence and writes the required summary:
    `scripts/release-emulator-validation.sh`.
-7. Push the matching tag with the guarded tag helper, for example
+7. For terminal/tmux-heavy releases, opt into the long-running evidence before
+   tagging:
+   `TERMINAL_RELEASE_GATE=1 LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh`.
+   Link `build/long-running-session/<run-id>-long-running/` from the release
+   issue or PR. The hold remains optional for unrelated small releases.
+8. Push the matching tag with the guarded tag helper, for example
    `scripts/push-release-tag.sh --visual-audit-inspected v0.2.1 build/release-emulator-validation/<run-id>/summary.md`.
-8. Watch the tag-triggered Build workflow and verify the uploaded APK artifact.
+9. Watch the tag-triggered Build workflow and verify the uploaded APK artifact.
 
 Manual Release Emulator Validation can also be run from GitHub Actions when a
 local emulator is unavailable:
@@ -653,6 +658,19 @@ directories:
 - `build/phone-walkthrough/<run-id>-tmux-existing-session/`
 - `build/phone-walkthrough/<run-id>-setup-detection/`
 - `build/walkthrough-visual-pass/<run-id>-visual-audit/`
+
+For terminal/tmux-heavy releases, also attach or link:
+
+- `build/terminal-workbench/<run-id>-terminal-release/`
+- `build/real-agent-release-gate/<run-id>-real-agent-release-gate/`
+- `build/long-running-session/<run-id>-long-running/`
+
+Accept the 10-minute long-running hold only when
+`artifacts/long-running-session/long-running-summary.txt` shows
+`tick_count=6`, `reconnect_events=0`, and `memory_growth_kb` below the recorded
+50 MB budget, and the final visible transcript still contains the last tick.
+If any threshold fails, treat it as release-blocking for terminal/tmux-heavy
+changes unless a follow-up rerun produces clean evidence.
 
 Release tags must come from stable `main`. Do not create release commits from a
 detached HEAD, a tag checkout, or a temporary worktree that is not first pushed

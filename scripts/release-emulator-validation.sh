@@ -78,8 +78,9 @@ Environment overrides:
       `agents` service on host port 2222, attaches a tmux session through the
       emulator, sends a tick every 2 minutes for the full 10 minutes, and
       asserts on zero SSH transport teardown events plus < 50 MB memory growth
-      via dumpsys meminfo. The test alone adds ~11 minutes of wall time, hence
-      the opt-in.
+      via dumpsys meminfo. Use this for terminal/tmux-heavy releases that need
+      long-running stability evidence. The test alone adds ~11 minutes of wall
+      time, hence the opt-in.
 
 Artifacts:
   build/release-emulator-validation/<run-id>/summary.md
@@ -475,9 +476,9 @@ publish_validated_apk
     printf -- '- [ ] Optional terminal release gate was skipped. Run `TERMINAL_RELEASE_GATE=1 scripts/release-emulator-validation.sh` when terminal usability is in release scope.\n'
   fi
   if [[ "$LONG_RUNNING_TEST" == "1" ]]; then
-    printf -- '- [ ] Inspect `build/long-running-session/%s/artifacts/long-running-session/long-running-summary.txt` for reconnect counters, memory growth, and per-tick latencies before treating extended-foreground stability as release-ready.\n' "$LONG_RUNNING_TEST_RUN_ID"
+    printf -- '- [ ] Inspect `build/long-running-session/%s/artifacts/long-running-session/long-running-summary.txt` for `reconnect_events=0`, `memory_growth_kb` under the 50 MB budget, six visible tick latencies, and the final visible transcript before treating terminal/tmux stability as release-ready.\n' "$LONG_RUNNING_TEST_RUN_ID"
   else
-    printf -- '- [ ] Optional long-running session hold was skipped. Run `LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh` when extended-foreground stability is in release scope.\n'
+    printf -- '- [ ] Optional long-running session hold was skipped. Run `LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh`, or combine it with `TERMINAL_RELEASE_GATE=1`, when terminal/tmux-heavy release evidence needs a 10-minute stability hold.\n'
   fi
   printf -- '- [ ] Download the tested debug APK from `release-emulator-validation/%s/app-debug.apk` inside the validation artifact, or `build/release-emulator-validation/%s/app-debug.apk` locally.\n' "$RUN_ID" "$RUN_ID"
   printf -- '- [ ] Inspect `build/walkthrough-visual-pass/%s-visual-audit/screenshots/walkthrough-visual-pass/` for release blockers.\n' "$RUN_ID"

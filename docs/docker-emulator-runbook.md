@@ -334,6 +334,20 @@ is not part of every local or CI release validation run unless
 is enabled. Use it before release candidates that include terminal input,
 viewport rendering, SSH/PTY, or agent CLI usability changes.
 
+When the release also needs long-running terminal/tmux stability evidence, add
+the opt-in 10-minute hold:
+
+```bash
+TERMINAL_RELEASE_GATE=1 LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh
+```
+
+The long-running hold remains optional for unrelated small releases. Link
+`build/long-running-session/<run-id>-long-running/` from the release issue or
+PR, and inspect
+`artifacts/long-running-session/long-running-summary.txt` for `tick_count=6`,
+`reconnect_events=0`, memory growth below the recorded 50 MB budget, and a
+final visible transcript that still contains the last tick marker.
+
 For release tagging, use the guarded emulator-only wrapper from clean pushed
 `main`:
 

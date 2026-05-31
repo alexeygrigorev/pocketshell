@@ -411,6 +411,26 @@ artifacts, and writes
 is manual/optional unless explicitly enabled through the environment or the
 GitHub Actions workflow input.
 
+For terminal/tmux-heavy releases where short connected tests are not enough
+evidence, add the opt-in 10-minute stability hold:
+
+```bash
+TERMINAL_RELEASE_GATE=1 LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh
+```
+
+This remains optional for unrelated small releases. The long-running hold writes
+its artifact bundle under
+`build/long-running-session/<run-id>-long-running/`; the primary file to inspect
+and link is
+`build/long-running-session/<run-id>-long-running/artifacts/long-running-session/long-running-summary.txt`.
+Treat the hold as acceptable only when the wrapper passes, the summary reports
+`tick_count=6`, `reconnect_events=0`, `memory_growth_kb` under the recorded
+50 MB budget, and the final visible transcript still contains the last tick.
+Failures should be evaluated from `long-running-summary.txt` first, then the
+same directory's `long-running-logcat-tail.txt`,
+`long-running-visible-terminal.txt`, `instrumentation.log`, and
+`docker-agents.log`.
+
 #### Real-agent CLI interaction test (issue #146)
 
 When `TERMINAL_RELEASE_GATE=1` is set, the release validation also runs

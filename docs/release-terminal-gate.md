@@ -23,6 +23,19 @@ RUN_ID=preflight-$(date +%Y%m%d-%H%M%S) scripts/release-terminal-gate.sh
 Artifacts land under `build/release-terminal-gate/<run-id>/` with the
 top-level summary at `build/release-terminal-gate/<run-id>/summary.md`.
 
+For terminal/tmux-heavy releases that need long-running stability evidence,
+run the release validation wrapper with both optional gates enabled:
+
+```bash
+RUN_ID=release-v0.3.11 TERMINAL_RELEASE_GATE=1 LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh
+```
+
+The 10-minute stability hold is opt-in and remains skipped for unrelated small
+releases. Its artifacts land under
+`build/long-running-session/<run-id>-long-running/`, with the primary audit file
+at
+`build/long-running-session/<run-id>-long-running/artifacts/long-running-session/long-running-summary.txt`.
+
 ## What it runs
 
 After the normal Gradle build/unit checks
@@ -102,6 +115,50 @@ When reviewing a failed run:
 4. If the failure is in `step-01-ssh-smoke`, inspect
    `docker-ssh-readiness.log`, the instrumentation log, and the Docker
    compose logs for the agents service.
+
+## Long-running stability evidence
+
+The terminal release gate proves short interactive terminal, SSH, tmux, and
+real-agent behavior. It does not by itself prove that a foreground terminal/tmux
+session stays healthy across a longer hold. For release candidates that change
+terminal input, tmux attachment/repaint, SSH transport behavior, PTY sizing, or
+agent CLI terminal workflows, add the opt-in 10-minute stability hold:
+
+```bash
+RUN_ID=release-v0.3.11 TERMINAL_RELEASE_GATE=1 LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh
+```
+
+Evidence to link from the release PR/issue:
+
+- Release wrapper summary:
+  `build/release-emulator-validation/<run-id>/summary.md`
+- Terminal workbench artifacts:
+  `build/terminal-workbench/<run-id>-terminal-release/`
+- Real-agent release-gate artifacts:
+  `build/real-agent-release-gate/<run-id>-real-agent-release-gate/`
+- Long-running stability artifacts:
+  `build/long-running-session/<run-id>-long-running/`
+
+Acceptable long-running result:
+
+- `LongRunningSessionStabilityTest` exits successfully and the wrapper summary
+  marks the optional long-running session hold as passed.
+- `long-running-summary.txt` records `tick_count=6` with tick latency lines for
+  ticks 0 through 5.
+- `reconnect_events=0`; any `ssh-read-eof` or `ssh-read-failed` event is a
+  release-blocking SSH/tmux stability failure unless independently explained
+  and rerun cleanly.
+- `memory_growth_kb` is below the recorded `memory_growth_budget_mb=50.0`
+  budget.
+- `long-running-visible-terminal.txt` still contains the final tick marker,
+  proving the pane is live at the end of the hold.
+
+If the hold fails, evaluate `long-running-summary.txt` first, then inspect
+`long-running-logcat-tail.txt`, `long-running-visible-terminal.txt`,
+`instrumentation.log`, and `docker-agents.log` in the same artifact root. Link
+the failed bundle in the release issue if the release is paused or the failure
+drives follow-up work. Do not make this gate mandatory for unrelated small
+releases; use it when the release risk is terminal/tmux stability.
 
 ## How long it takes
 

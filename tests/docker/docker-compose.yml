@@ -187,3 +187,21 @@ services:
     # (like the `true` healthcheck) skip the watcher entirely, so the
     # standard SSH healthcheck still settles to `healthy` reliably.
     healthcheck: *ssh-healthcheck
+
+  # Issue #342: opt-in network fault proxy for connected Android proof tests.
+  # The emulator reaches the proxy at 10.0.2.2:2228, while the proxy forwards
+  # to the normal `agents` SSH fixture on the compose network. Tests control
+  # toxics through the HTTP API exposed on 10.0.2.2:8474.
+  #
+  # The default GitHub workflow does not start this service, so the Android
+  # tests that use it are gated with `pocketshellNetworkFaultProofs=true` and
+  # skipped on CI unless the workflow is explicitly expanded later.
+  network-fault-proxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    container_name: pocketshell-test-network-fault-proxy
+    command: ["-host", "0.0.0.0"]
+    depends_on:
+      - agents
+    ports:
+      - "2228:2228"
+      - "8474:8474"

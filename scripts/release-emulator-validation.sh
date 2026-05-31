@@ -414,7 +414,7 @@ write_summary_header
 run_required \
   "pre-release confidence gate" \
   "build/pre-release-confidence-gate/$PRE_RELEASE_RUN_ID/" \
-  env LOG_ROOT="$PRE_RELEASE_GATE_LOG_ROOT" RUN_ID="$PRE_RELEASE_RUN_ID" scripts/pre-release-confidence-gate.sh
+  env LOG_ROOT="$PRE_RELEASE_GATE_LOG_ROOT" RUN_ID="$PRE_RELEASE_RUN_ID" PRE_RELEASE_MANAGE_EMULATOR=1 scripts/pre-release-confidence-gate.sh
 
 if [[ "$TERMINAL_RELEASE_GATE" == "1" ]]; then
   run_required \

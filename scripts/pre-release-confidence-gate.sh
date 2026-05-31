@@ -29,6 +29,8 @@ APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS="${APP_WALKTHROUGH_INSTRUMENTATION_ATTE
 APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS="${APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS:-3}"
 ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS="${ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS:-3}"
 CORE_TERMINAL_CONNECTED_ATTEMPTS="${CORE_TERMINAL_CONNECTED_ATTEMPTS:-2}"
+PRE_RELEASE_MANAGE_EMULATOR="${PRE_RELEASE_MANAGE_EMULATOR:-0}"
+PRE_RELEASE_EMULATOR_START_ARGS="${PRE_RELEASE_EMULATOR_START_ARGS:--no-window -no-audio -no-boot-anim -gpu swiftshader_indirect}"
 
 APP_WALKTHROUGH_TESTS=(
   "com.pocketshell.app.composer.PromptComposerSmokeTest#recordingAndTranscribingStatesAreVisible"
@@ -74,6 +76,8 @@ Environment overrides:
   APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS=3
   ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS=3
   CORE_TERMINAL_CONNECTED_ATTEMPTS=2
+  PRE_RELEASE_MANAGE_EMULATOR=0
+  PRE_RELEASE_EMULATOR_START_ARGS="-no-window -no-audio -no-boot-anim -gpu swiftshader_indirect"
 USAGE
 }
 
@@ -303,6 +307,10 @@ run_step() {
     FAILING_LOG_PATH="$log_file"
     FAILURE_MESSAGE="step '$name' failed with status $status"
     case "$name" in
+      emulator-readiness)
+        FAILURE_MESSAGE="infrastructure readiness failed before connected tests; see emulator-readiness diagnostics"
+        FAILURE_DIAGNOSTICS_PATH="$RUN_DIR/emulator-readiness-diagnostics.log"
+        ;;
       install-app-walkthrough-apks)
         APP_WALKTHROUGH_INSTALL_STATUS="failed"
         ;;
@@ -391,6 +399,93 @@ for attempt in \$(seq 1 '$CORE_TERMINAL_CONNECTED_ATTEMPTS'); do
   exit "\$status"
 done
 CORE_TERMINAL_SCRIPT
+}
+
+emulator_readiness_script() {
+  cat <<READINESS_SCRIPT
+set -euo pipefail
+
+diagnostics='$RUN_DIR/emulator-readiness-diagnostics.log'
+managed_emulator_log='$RUN_DIR/emulator-readiness-managed-emulator.log'
+manage_emulator='$PRE_RELEASE_MANAGE_EMULATOR'
+avd_name='$AVD_NAME'
+emulator_process_pattern="emulator.*-avd[ =]\$avd_name|qemu-system.*\$avd_name|qemu-system"
+
+record_diagnostics() {
+  {
+    printf 'timestamp=%s\n' "\$(date -Is)"
+    printf 'adb=%s\n' '$ADB'
+    printf 'emulator=%s\n' '$EMULATOR'
+    printf 'avd=%s\n' "\$avd_name"
+    printf 'manage_emulator=%s\n' "\$manage_emulator"
+    printf '\n== adb devices ==\n'
+    '$ADB' devices -l || true
+    printf '\n== adb get-state ==\n'
+    '$ADB' get-state || true
+    printf '\n== adb get-serialno ==\n'
+    '$ADB' get-serialno || true
+    printf '\n== emulator processes ==\n'
+    pgrep -af "\$emulator_process_pattern" || true
+    printf '\n== managed emulator log tail ==\n'
+    if [ -f "\$managed_emulator_log" ]; then
+      tail -n 120 "\$managed_emulator_log" || true
+    else
+      printf 'no managed emulator log at %s\n' "\$managed_emulator_log"
+    fi
+  } > "\$diagnostics" 2>&1
+}
+
+has_adb_device() {
+  '$ADB' devices | awk 'NR > 1 && \$2 == "device" { found = 1 } END { exit found ? 0 : 1 }'
+}
+
+has_emulator_process() {
+  pgrep -af "\$emulator_process_pattern" >/dev/null 2>&1
+}
+
+boot_completed() {
+  state=\$('$ADB' shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+  [ "\$state" = 1 ]
+}
+
+start_managed_emulator() {
+  if [ "\$manage_emulator" != "1" ]; then
+    return 1
+  fi
+  if has_adb_device || has_emulator_process; then
+    return 0
+  fi
+
+  printf 'No ADB devices and no emulator process for AVD %s; starting managed emulator.\n' "\$avd_name" >&2
+  printf '[%s] starting managed emulator for AVD %s\n' "\$(date -Is)" "\$avd_name" >> "\$managed_emulator_log"
+  nohup '$EMULATOR' -avd "\$avd_name" $PRE_RELEASE_EMULATOR_START_ARGS >> "\$managed_emulator_log" 2>&1 &
+}
+
+'$ADB' devices -l || true
+start_managed_emulator || true
+
+for i in {1..90}; do
+  if boot_completed; then
+    record_diagnostics
+    printf 'Emulator readiness confirmed: sys.boot_completed=1\n'
+    exit 0
+  fi
+  if ! has_adb_device && ! has_emulator_process; then
+    if ! start_managed_emulator; then
+      record_diagnostics
+      printf 'Infrastructure readiness failure: no ADB devices and no emulator process for AVD %s before connected tests.\n' "\$avd_name" >&2
+      printf 'Diagnostics: %s\n' "\$diagnostics" >&2
+      exit 2
+    fi
+  fi
+  sleep 2
+done
+
+record_diagnostics
+printf 'Infrastructure readiness failure: AVD %s did not report sys.boot_completed=1 before connected tests.\n' "\$avd_name" >&2
+printf 'Diagnostics: %s\n' "\$diagnostics" >&2
+exit 2
+READINESS_SCRIPT
 }
 
 fail() {
@@ -957,6 +1052,7 @@ printf 'AVD: %s\n' "$AVD_NAME"
 printf 'App versionName: %s\n' "$APP_VERSION_NAME"
 printf 'Gradle user home: %s\n' "$GRADLE_USER_HOME"
 printf 'Gradle flags: %s\n' "$GRADLE_FLAGS"
+printf 'Manage emulator during readiness: %s\n' "$PRE_RELEASE_MANAGE_EMULATOR"
 
 require_executable "$ADB" "adb"
 require_executable "$EMULATOR" "emulator"
@@ -994,7 +1090,7 @@ run_bash_step "docker-agents-ssh-sanity" \
   "chmod 600 '$SSH_KEY' && ssh -i '$SSH_KEY' -p 2222 -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null testuser@127.0.0.1 'for tool in claude codex opencode quse tmuxctl uv; do command -v \"\$tool\"; done && quse --json >/dev/null && tmuxctl jobs list --session codex >/dev/null'"
 
 run_bash_step "emulator-readiness" \
-  "'$ADB' devices && for i in {1..90}; do state=\$('$ADB' shell getprop sys.boot_completed 2>/dev/null | tr -d '\r'); if [ \"\$state\" = 1 ]; then exit 0; fi; sleep 2; done; '$ADB' devices; exit 1"
+  "$(emulator_readiness_script)"
 update_emulator_serial
 
 run_bash_step "connected-terminal-input" "$(core_terminal_connected_input_script)"

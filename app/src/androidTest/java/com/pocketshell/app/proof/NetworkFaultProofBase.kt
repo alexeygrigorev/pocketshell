@@ -51,7 +51,7 @@ import java.net.URL
 import java.nio.charset.StandardCharsets
 
 /**
- * Shared harness for issue #342's opt-in network-fault proof tests.
+ * Shared harness for opt-in network-fault proof tests.
  *
  * The tests route PocketShell through the Docker `network-fault-proxy`
  * service on host port 2228. Control traffic uses Toxiproxy's HTTP API
@@ -79,7 +79,7 @@ abstract class NetworkFaultProofBase {
 
     protected fun assumeNetworkFaultProofsEnabled() {
         Assume.assumeFalse(
-            "Issue #342 network-fault proofs require the Docker proxy fixture; tests.yml does not start it.",
+            "Network-fault proofs require opt-in Docker proxy fixtures; tests.yml does not start them.",
             TerminalTestTimeouts.isRunningOnCi(),
         )
         val enabled = InstrumentationRegistry.getArguments()
@@ -87,7 +87,8 @@ abstract class NetworkFaultProofBase {
             ?.toBooleanStrictOrNull() == true
         Assume.assumeTrue(
             "Enable with -Pandroid.testInstrumentationRunnerArguments.$NETWORK_FAULT_ARG=true " +
-                "after starting `docker compose -f tests/docker/docker-compose.yml up -d --build agents network-fault-proxy`.",
+                "after starting `docker compose -f tests/docker/docker-compose.yml up -d --build " +
+                "agents network-fault-proxy packet-loss-proxy`.",
             enabled,
         )
         networkFaultProofEnabled = true
@@ -115,7 +116,21 @@ abstract class NetworkFaultProofBase {
         waitForSshFixtureReady(SshKey.Pem(key), port = NETWORK_FAULT_SSH_PORT)
     }
 
-    protected suspend fun seedNetworkFaultHost(key: String, hostName: String): String {
+    protected suspend fun preparePacketLossProxyAndRemoteSession(
+        key: String,
+        sessionName: String,
+        readyText: String,
+    ) {
+        waitForSshFixtureReady(SshKey.Pem(key), port = DEFAULT_PORT)
+        seedTmuxSession(key, sessionName, readyText)
+        waitForSshFixtureReady(SshKey.Pem(key), port = PACKET_LOSS_SSH_PORT)
+    }
+
+    protected suspend fun seedNetworkFaultHost(
+        key: String,
+        hostName: String,
+        port: Int = NETWORK_FAULT_SSH_PORT,
+    ): String {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
             .fallbackToDestructiveMigration(dropAllTables = true)
@@ -136,7 +151,7 @@ abstract class NetworkFaultProofBase {
                 HostEntity(
                     name = hostName,
                     hostname = DEFAULT_HOST,
-                    port = NETWORK_FAULT_SSH_PORT,
+                    port = port,
                     username = DEFAULT_USER,
                     keyId = storedKey.id,
                     tmuxInstalled = true,
@@ -248,6 +263,29 @@ abstract class NetworkFaultProofBase {
         recordTiming("${label}_reconnect_ms", SystemClock.elapsedRealtime() - start)
     }
 
+    protected fun disconnectBandCount(): Int =
+        compose.onAllNodesWithTag(TMUX_SESSION_ERROR_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .size
+
+    protected fun assertNoDisconnectBand(label: String) {
+        val count = disconnectBandCount()
+        assertTrue("expected no disconnect band for $label, found $count", count == 0)
+    }
+
+    protected fun waitForNoDisconnectBandDuring(label: String, durationMillis: Long) {
+        val start = SystemClock.elapsedRealtime()
+        var maxCount = 0
+        while (SystemClock.elapsedRealtime() - start < durationMillis) {
+            val count = disconnectBandCount()
+            maxCount = maxOf(maxCount, count)
+            assertTrue("expected no disconnect band during $label, found $count", count == 0)
+            SystemClock.sleep(250)
+        }
+        recordTiming("${label}_stable_no_disconnect_ms", SystemClock.elapsedRealtime() - start)
+        recordTiming("${label}_max_disconnect_bands", maxCount.toLong())
+    }
+
     protected suspend fun listClientsCount(key: String, sessionName: String): Int =
         listClientsRaw(key, sessionName).lines().count { it.isNotBlank() }
 
@@ -342,6 +380,7 @@ abstract class NetworkFaultProofBase {
             buildString {
                 appendLine("test=$testName")
                 appendLine("proxy_port=$NETWORK_FAULT_SSH_PORT")
+                appendLine("packet_loss_proxy_port=$PACKET_LOSS_SSH_PORT")
                 appendLine("toxiproxy_api_port=$TOXIPROXY_API_PORT")
                 appendLine("timings:")
                 timings.forEach { appendLine(it) }
@@ -488,6 +527,7 @@ abstract class NetworkFaultProofBase {
     protected companion object {
         const val NETWORK_FAULT_ARG: String = "pocketshellNetworkFaultProofs"
         const val NETWORK_FAULT_SSH_PORT: Int = 2228
+        const val PACKET_LOSS_SSH_PORT: Int = 2229
         const val TOXIPROXY_API_PORT: Int = 8474
         const val DATABASE_NAME: String = "pocketshell.db"
         const val DEVICE_DIR_NAME: String = "issue342-network-faults"

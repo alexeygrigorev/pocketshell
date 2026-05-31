@@ -205,3 +205,30 @@ services:
     ports:
       - "2228:2228"
       - "8474:8474"
+
+  # Issue #346: true packet-loss proxy for opt-in connected Android proofs.
+  # The emulator reaches this proxy at 10.0.2.2:2229. Linux `tc netem loss`
+  # runs inside the Docker proxy container, not on the host or emulator
+  # network, which avoids the instrumentation process-kill behavior reproduced
+  # by the earlier host/Android netem attempt.
+  #
+  # This service is intentionally not part of the default GitHub workflow. The
+  # proof test is gated by `pocketshellNetworkFaultProofs=true` and skipped on
+  # CI unless the workflow starts this service explicitly in a future change.
+  packet-loss-proxy:
+    build:
+      context: .
+      dockerfile: packet-loss-proxy/Dockerfile
+    image: pocketshell-test:packet-loss-proxy
+    container_name: pocketshell-test-packet-loss-proxy
+    cap_add:
+      - NET_ADMIN
+    environment:
+      PACKET_LOSS_RATE: "5%"
+      PACKET_LOSS_LISTEN_PORT: "2229"
+      PACKET_LOSS_TARGET_HOST: agents
+      PACKET_LOSS_TARGET_PORT: "22"
+    depends_on:
+      - agents
+    ports:
+      - "2229:2229"

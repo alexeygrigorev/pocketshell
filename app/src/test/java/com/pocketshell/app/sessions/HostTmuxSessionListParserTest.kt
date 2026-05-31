@@ -129,11 +129,83 @@ class HostTmuxSessionListParserTest {
     }
 
     @Test
-    fun parseTmuxListSessionsStillAcceptsLegacyTabDelimitedRows() {
+    fun parseTmuxListSessionsAcceptsTabDelimitedRows() {
         val rows = parser.parseTmuxListSessions("codex\t1779520800\t1779521400\t1\n")
 
         assertEquals(listOf("codex"), rows.map { it.name })
+        assertEquals(1779520800L, rows[0].createdAt)
+        assertEquals(1779521400L, rows[0].lastActivity)
         assertTrue(rows[0].attached)
+    }
+
+    @Test
+    fun parseTmuxListSessionsAcceptsLiteralBackslashTDelimitedRows() {
+        val rows = parser.parseTmuxListSessions("""codex\t1779520800\t1779521400\t1""" + "\n")
+
+        assertEquals(listOf("codex"), rows.map { it.name })
+        assertEquals(1779520800L, rows[0].createdAt)
+        assertEquals(1779521400L, rows[0].lastActivity)
+        assertTrue(rows[0].attached)
+    }
+
+    @Test
+    fun parseTmuxListSessionsPrefersDoubleColonDelimiterWhenNameContainsEscapedTabs() {
+        val rows = parser.parseTmuxListSessions("""a\tb\tc\td::1780253919::1780253920::0""" + "\n")
+
+        assertEquals(listOf("""a\tb\tc\td"""), rows.map { it.name })
+        assertEquals(1780253919L, rows[0].createdAt)
+        assertEquals(1780253920L, rows[0].lastActivity)
+        assertFalse(rows[0].attached)
+    }
+
+    @Test
+    fun parseTmuxListSessionsKeepsEscapedAndUnusualNames() {
+        val rows = parser.parseTmuxListSessions(
+            """
+            codex::feature::1779520800::1779521400::1
+            weird\040name [${'$'}HOME] 'quoted'::1779520000::1779520500::0
+            """.trimIndent(),
+        )
+
+        assertEquals(
+            listOf(
+                "codex::feature",
+                """weird\040name [${'$'}HOME] 'quoted'""",
+            ),
+            rows.map { it.name },
+        )
+        assertTrue(rows[0].attached)
+        assertFalse(rows[1].attached)
+    }
+
+    @Test
+    fun parseTmuxListSessionsSkipsMalformedRowsIntentionally() {
+        val rows = parser.parseTmuxListSessions(
+            """
+            valid::1779520800::1779521400::0
+            missing-created::1779521400::0
+            ::1779520800::1779521400::1
+            missing-attached::1779520800::1779521400
+            """.trimIndent(),
+        )
+
+        assertEquals(listOf("valid"), rows.map { it.name })
+    }
+
+    @Test
+    fun parseTmuxListSessionsAcceptsFallbackOutputWithoutTimestamps() {
+        val rows = parser.parseTmuxListSessions(
+            """
+            codex: 1 windows (created Sun May 31 10:00:00 2026) [80x24] (attached)
+            idle work: 2 windows (created Sun May 31 09:00:00 2026) [120x40]
+            """.trimIndent(),
+        )
+
+        assertEquals(listOf("codex", "idle work"), rows.map { it.name })
+        assertNull(rows[0].createdAt)
+        assertNull(rows[0].lastActivity)
+        assertTrue(rows[0].attached)
+        assertFalse(rows[1].attached)
     }
 
     @Test

@@ -31,10 +31,8 @@ import javax.inject.Inject
  * Observes [ActiveTmuxClients.clients]: whenever a host registers a
  * live `tmux -CC` client, the view model spawns a per-host coroutine
  * that periodically issues
- * `list-sessions -F "#{session_name}::#{session_activity}::#{session_attached}"`
- * (the `::` separator chosen because session names can contain `\t`
- * and ` ` but cannot contain `:` — see `man tmux`'s NAMES, WINDOWS, AND
- * PANES section). The parsed rows are folded into [sessions], a
+ * `list-sessions -F "#{session_name}::#{session_created}::#{session_activity}::#{session_attached}"`.
+ * The parsed rows are folded into [sessions], a
  * flat list across every host, sorted by [SessionSummary.lastActivity].
  *
  * Issue #298 removed the old flat all-host Sessions dashboard from the
@@ -83,6 +81,7 @@ import javax.inject.Inject
 @HiltViewModel
 class SessionsDashboardViewModel @Inject constructor(
     private val activeClients: ActiveTmuxClients,
+    private val sessionListParser: HostTmuxSessionListParser = HostTmuxSessionListParser(),
     @ApplicationContext private val appContext: Context? = null,
 ) : ViewModel() {
 
@@ -527,14 +526,11 @@ class SessionsDashboardViewModel @Inject constructor(
 
     /**
      * Parse one row of
-     * `list-sessions -F "#{session_name}::#{session_activity}::#{session_attached}"`.
+     * `list-sessions -F "#{session_name}::#{session_created}::#{session_activity}::#{session_attached}"`.
      *
-     * `tmux` emits these tokens with no quoting — session names cannot
-     * contain `:` (the colon is reserved in tmux's target-pane syntax),
-     * so splitting on `::` is unambiguous. We split into at most three
-     * pieces so a hypothetical future tmux that adds a stray `::` in
-     * the name field still surfaces as a parseable row with a slightly
-     * truncated name.
+     * Dashboard parsing delegates to [HostTmuxSessionListParser] so
+     * picker and active-session surfaces share delimiter handling,
+     * malformed-row behavior, and tmux fallback-output handling.
      *
      * `session_activity` is a Unix timestamp in **seconds** (a tmux
      * convention since 1.9 — see `format.c`). We keep it as seconds in
@@ -549,19 +545,14 @@ class SessionsDashboardViewModel @Inject constructor(
         hostId: Long,
         hostName: String,
     ): SessionSummary? {
-        if (line.isBlank()) return null
-        val parts = line.split(SESSION_FIELD_SEP, limit = 3)
-        if (parts.size < 3) return null
-        val name = parts[0]
-        if (name.isEmpty()) return null
-        val activity = parts[1].trim().toLongOrNull() ?: return null
-        val attached = (parts[2].trim().toLongOrNull() ?: 0L) > 0L
+        val row = sessionListParser.parseTmuxListSessionsRow(line) ?: return null
+        val activity = row.lastActivity ?: return null
         return SessionSummary(
             hostId = hostId,
             hostName = hostName,
-            sessionName = name,
+            sessionName = row.name,
             lastActivity = activity,
-            attached = attached,
+            attached = row.attached,
         )
     }
 
@@ -602,16 +593,13 @@ class SessionsDashboardViewModel @Inject constructor(
          */
         const val DEFAULT_POLL_INTERVAL_MS: Long = 10_000L
 
-        /** `::` is unambiguous because tmux session names cannot contain a colon. */
-        const val SESSION_FIELD_SEP: String = "::"
-
         /**
          * `-F "..."` rather than newline-delimited multi-field output:
          * the format string keeps the parser scoped to a single line
          * per session and matches the issue body's contract verbatim.
          */
         const val LIST_SESSIONS_COMMAND: String =
-            "list-sessions -F '#{session_name}::#{session_activity}::#{session_attached}'"
+            "list-sessions -F '#{session_name}::#{session_created}::#{session_activity}::#{session_attached}'"
 
         /**
          * Max time we wait for tmux to emit the post-kill

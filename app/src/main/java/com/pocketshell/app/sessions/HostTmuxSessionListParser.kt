@@ -60,20 +60,59 @@ class HostTmuxSessionListParser @Inject constructor() {
 
     internal fun parseTmuxListSessionsRow(line: String): HostTmuxSessionRow? {
         if (line.isBlank()) return null
-        val parts = if (line.contains("::")) {
-            line.split("::")
-        } else {
-            line.split('\t')
-        }
-        if (parts.size < 4) return null
-        val name = parts[0].trim()
+        val fields = parseStructuredTmuxListSessionsFields(line)
+            ?: parseFallbackTmuxListSessionsFields(line)
+            ?: return null
+        val name = fields.name.trim()
         if (name.isEmpty()) return null
         return HostTmuxSessionRow(
             name = name,
-            createdAt = parts[1].trim().toLongOrNull(),
-            lastActivity = parts[2].trim().toLongOrNull(),
-            attached = (parts[3].trim().toLongOrNull() ?: 0L) > 0L,
+            createdAt = fields.createdAt?.trim()?.toLongOrNull(),
+            lastActivity = fields.lastActivity?.trim()?.toLongOrNull(),
+            attached = (fields.attached?.trim()?.toLongOrNull() ?: fields.fallbackAttachedCount) > 0L,
         )
+    }
+
+    private fun parseStructuredTmuxListSessionsFields(line: String): TmuxListSessionsFields? {
+        for (separator in STRUCTURED_SEPARATORS) {
+            val fields = line.splitFromRight(separator, expectedTailFields = 3) ?: continue
+            if (fields[1].trim().toLongOrNull() == null || fields[2].trim().toLongOrNull() == null) {
+                continue
+            }
+            return TmuxListSessionsFields(
+                name = fields[0],
+                createdAt = fields[1],
+                lastActivity = fields[2],
+                attached = fields[3],
+            )
+        }
+        return null
+    }
+
+    private fun parseFallbackTmuxListSessionsFields(line: String): TmuxListSessionsFields? {
+        val match = FALLBACK_TMUX_LIST_SESSIONS.matchEntire(line.trim()) ?: return null
+        val name = match.groupValues[1]
+        val attached = if (line.contains("(attached)", ignoreCase = true)) 1L else 0L
+        return TmuxListSessionsFields(
+            name = name,
+            createdAt = null,
+            lastActivity = null,
+            attached = null,
+            fallbackAttachedCount = attached,
+        )
+    }
+
+    private fun String.splitFromRight(separator: String, expectedTailFields: Int): List<String>? {
+        val parts = ArrayDeque<String>()
+        var endExclusive = length
+        repeat(expectedTailFields) {
+            val separatorIndex = lastIndexOf(separator, startIndex = endExclusive - 1)
+            if (separatorIndex < 0) return null
+            parts.addFirst(substring(separatorIndex + separator.length, endExclusive))
+            endExclusive = separatorIndex
+        }
+        parts.addFirst(substring(0, endExclusive))
+        return parts.toList()
     }
 
     private fun parseDisplayTimestamp(value: String): Long? =
@@ -82,6 +121,14 @@ class HostTmuxSessionListParser @Inject constructor() {
                 .atZone(ZoneId.systemDefault())
                 .toEpochSecond()
         }.getOrNull()
+
+    private data class TmuxListSessionsFields(
+        val name: String,
+        val createdAt: String?,
+        val lastActivity: String?,
+        val attached: String?,
+        val fallbackAttachedCount: Long = 0L,
+    )
 
     private companion object {
         /**
@@ -101,5 +148,9 @@ class HostTmuxSessionListParser @Inject constructor() {
         val LEADING_IDX: Regex = Regex("""^\s*\d+\s+""")
 
         val DISPLAY_TIMESTAMP: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+
+        val STRUCTURED_SEPARATORS: List<String> = listOf("\t", """\t""", "::")
+
+        val FALLBACK_TMUX_LIST_SESSIONS: Regex = Regex("""^([^:]+):\s+.*$""")
     }
 }

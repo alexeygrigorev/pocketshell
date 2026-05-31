@@ -57,9 +57,9 @@ class SshHostTmuxSessionsGateway @Inject constructor(
 
             val tmux = session.exec(
                 pathAware(
-                    // tmux renders literal tab characters in -F output as
-                    // underscores on the Docker fixture, so use the same
-                    // delimiter shape as the dashboard parser.
+                    // Keep this in the same structured wire shape as
+                    // the live-client dashboard poller; the shared
+                    // parser also accepts tab and fallback variants.
                     "tmux list-sessions -F '#{session_name}::#{session_created}::#{session_activity}::#{session_attached}'",
                 ),
             )

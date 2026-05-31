@@ -73,7 +73,7 @@ class SessionsDashboardViewModelTest {
 
     /** Build a tmux `list-sessions` response line in the wire format. */
     private fun row(name: String, activitySec: Long, attached: Boolean = false): String =
-        "$name::$activitySec::${if (attached) 1 else 0}"
+        "$name::1::$activitySec::${if (attached) 1 else 0}"
 
     private fun register(
         registry: ActiveTmuxClients,
@@ -104,7 +104,7 @@ class SessionsDashboardViewModelTest {
     fun parseListSessionsRowExtractsAllFields() {
         val vm = newVm()
         val parsed = vm.parseListSessionsRow(
-            line = "agent-main::1716300000::1",
+            line = "agent-main::1716290000::1716300000::1",
             hostId = 7L,
             hostName = "hetzner",
         )
@@ -119,10 +119,24 @@ class SessionsDashboardViewModelTest {
     fun parseListSessionsRowAttachedFalseWhenZero() {
         val vm = newVm()
         val parsed = vm.parseListSessionsRow(
-            line = "idle::100::0",
+            line = "idle::1::100::0",
             hostId = 1L,
             hostName = "h",
         )
+        assertFalse(parsed!!.attached)
+    }
+
+    @Test
+    fun parseListSessionsRowKeepsEscapedTabNameFromDoubleColonOutput() {
+        val vm = newVm()
+        val parsed = vm.parseListSessionsRow(
+            line = """a\tb\tc\td::1780253919::1780253920::0""",
+            hostId = 1L,
+            hostName = "h",
+        )
+
+        assertEquals("""a\tb\tc\td""", parsed?.sessionName)
+        assertEquals(1780253920L, parsed?.lastActivity)
         assertFalse(parsed!!.attached)
     }
 
@@ -135,15 +149,15 @@ class SessionsDashboardViewModelTest {
         assertNull(vm.parseListSessionsRow("only-name", 1L, "h"))
         assertNull(vm.parseListSessionsRow("a::b", 1L, "h"))
         // Non-numeric activity.
-        assertNull(vm.parseListSessionsRow("name::notanumber::0", 1L, "h"))
+        assertNull(vm.parseListSessionsRow("name::1::notanumber::0", 1L, "h"))
         // Empty name.
-        assertNull(vm.parseListSessionsRow("::100::0", 1L, "h"))
+        assertNull(vm.parseListSessionsRow("::1::100::0", 1L, "h"))
     }
 
     @Test
     fun parseListSessionsRowAttachedDefaultsFalseWhenFieldUnparseable() {
         val vm = newVm()
-        val parsed = vm.parseListSessionsRow("s::100::garbage", 1L, "h")
+        val parsed = vm.parseListSessionsRow("s::1::100::garbage", 1L, "h")
         // attached parses to 0 → false; the row stays parseable so
         // we don't lose visibility because of a tmux quirk.
         assertFalse(parsed!!.attached)

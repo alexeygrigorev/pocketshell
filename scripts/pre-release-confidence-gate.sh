@@ -26,6 +26,7 @@ SSH_KEY="${SSH_KEY:-tests/docker/test_key}"
 APK_PATH="${APK_PATH:-app/build/outputs/apk/debug/app-debug.apk}"
 TEST_APK_PATH="${TEST_APK_PATH:-app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"
 APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS="${APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS:-3}"
+APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS="${APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS:-3}"
 ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS="${ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS:-3}"
 
 APP_WALKTHROUGH_TESTS=(
@@ -69,6 +70,7 @@ Environment overrides:
   APK_PATH=app/build/outputs/apk/debug/app-debug.apk
   TEST_APK_PATH=app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
   APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS=3
+  APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS=3
   ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS=3
 USAGE
 }
@@ -776,7 +778,12 @@ should_retry_interrupted_instrumentation() {
 }
 
 '$ADB' logcat -c || true
-for attempt in \$(seq 1 '$APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS'); do
+attempt=1
+transport_recovery_attempts=0
+app_walkthrough_instrumentation_attempts='$APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS'
+max_transport_recovery_attempts='$APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS'
+max_instrumentation_runs=\$(( app_walkthrough_instrumentation_attempts + max_transport_recovery_attempts ))
+while [ "\$attempt" -le "\$max_instrumentation_runs" ]; do
   '$ADB' logcat -c || true
   set +e
   output=\$('$ADB' shell am instrument -w -r -e class '$selector' com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner 2>&1)
@@ -803,24 +810,32 @@ for attempt in \$(seq 1 '$APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS'); do
     '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
     '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
     sleep 2
+    attempt=\$((attempt + 1))
     continue
   fi
-  if should_retry_interrupted_instrumentation && [ "\$attempt" -lt '$APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS' ]; then
+  if should_retry_interrupted_instrumentation &&
+    [ "\$transport_recovery_attempts" -lt "\$max_transport_recovery_attempts" ]; then
+    transport_recovery_attempts=\$((transport_recovery_attempts + 1))
     cp "\$full_logcat_file" "\$full_logcat_file.attempt\$attempt" || true
     printf '%s\n' "\$output" > "\$diagnostics_file.attempt\$attempt-output" || true
-    printf 'Focused instrumentation interrupted by adb transport drop on attempt %s; retrying selector.\n' "\$attempt" >&2
+    printf 'Focused instrumentation interrupted by adb transport drop on attempt %s; recovery %s/%s; retrying selector without treating it as an app/test retry.\n' "\$attempt" "\$transport_recovery_attempts" "\$max_transport_recovery_attempts" >&2
     '$ADB' reconnect >/dev/null 2>&1 || true
-    '$ADB' wait-for-device >/dev/null 2>&1 || true
+    timeout 60s '$ADB' wait-for-device >/dev/null 2>&1 || true
     for package in com.pocketshell.app.test com.pocketshell.app; do
       '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
     done
     '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
     '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
     sleep 2
+    attempt=\$((attempt + 1))
     continue
   fi
   if [ "\$instrument_status" -ne 0 ]; then
-    dump_instrumentation_diagnostics "adb shell am instrument exited with status \$instrument_status"
+    if should_retry_interrupted_instrumentation; then
+      dump_instrumentation_diagnostics "adb shell am instrument exited with status \$instrument_status after \$transport_recovery_attempts transport-only recoveries"
+    else
+      dump_instrumentation_diagnostics "adb shell am instrument exited with status \$instrument_status"
+    fi
     exit "\$instrument_status"
   fi
   if printf '%s\n' "\$output" | grep -q 'INSTRUMENTATION_CODE: -1' &&
@@ -831,6 +846,9 @@ for attempt in \$(seq 1 '$APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS'); do
   dump_instrumentation_diagnostics "instrumentation did not report INSTRUMENTATION_CODE: -1"
   exit 1
 done
+
+dump_instrumentation_diagnostics "instrumentation exhausted \$max_instrumentation_runs attempts including \$transport_recovery_attempts transport-only recoveries"
+exit 1
 RUN_SCRIPT
 }
 
@@ -876,6 +894,9 @@ require_command_or_executable "$PYTHON3" "python3"
 
 if ! [[ "$APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
   fail "APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS must be a positive integer"
+fi
+if ! [[ "$APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS" =~ ^[0-9]+$ ]]; then
+  fail "APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS must be a non-negative integer"
 fi
 if ! [[ "$ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
   fail "ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS must be a positive integer"

@@ -374,6 +374,10 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
             waitForTerminalViewAttached()
             waitForTerminalText(SESSION_A_MARKER)
 
+            prewarmRuntimeCacheForBenchmark()
+            SshOpenTelemetry.resetForTest()
+            TmuxSessionLatencyTelemetry.resetForTest()
+
             val staleFrameSamples = mutableListOf<Long>()
             val firstNewFrameSamples = mutableListOf<Long>()
             var currentMarker = SESSION_A_MARKER
@@ -403,6 +407,12 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
                 prefix = "warm_switch_first_new_frame",
                 samples = firstNewFrameSamples,
             )
+            val cacheActivationStats = recordTimingStats(
+                prefix = "warm_switch_runtime_cache_activate",
+                samples = TmuxSessionLatencyTelemetry.snapshot()
+                    .filter { it.name == "runtime_cache_activate" }
+                    .map { it.durationMs },
+            )
             recordTiming("warm_switch_local_p95_budget_ms", TMUX_WARM_SWITCH_LOCAL_P95_BUDGET_MS)
             recordTiming("warm_switch_ci_advisory_p95_ms", TMUX_WARM_SWITCH_CI_ADVISORY_P95_MS)
             recordTiming("warm_switch_iterations", WARM_SWITCH_BENCHMARK_ITERATIONS.toLong())
@@ -410,10 +420,18 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
                 timings += event.toArtifactLine(prefix = "warm_switch")
             }
 
-            // Local physical-device runs are the hard #337 p95 gate. Emulator
-            // and CI runs still publish the same p50/p95/max artifact lines
-            // plus the 100 ms target, but stay advisory until the #338 runtime
-            // cache architecture exists.
+            assertTrue(
+                "cached pointer-swap activation p95 must stay under " +
+                    "${TMUX_WARM_SWITCH_LOCAL_P95_BUDGET_MS}ms; " +
+                    "stats=$cacheActivationStats",
+                cacheActivationStats.p95Ms < TMUX_WARM_SWITCH_LOCAL_P95_BUDGET_MS,
+            )
+
+            // Local physical-device runs are the hard visible-frame p95 gate.
+            // Emulator and CI runs publish the same visible p50/p95/max lines
+            // plus the 100 ms target, but stay advisory because the emulator's
+            // visible-terminal polling path has proven too noisy to validate
+            // the actual cached pointer-swap display latency.
             val budgetMs = if (TerminalTestTimeouts.isRunningOnCi() || isRunningOnEmulator()) {
                 TMUX_WARM_SWITCH_CI_ADVISORY_P95_MS
             } else {
@@ -431,6 +449,22 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
     }
 
     // ---------------------------------------------------------------- Helpers
+
+    private fun prewarmRuntimeCacheForBenchmark() {
+        openMoreMenu()
+        compose.onNodeWithText("Switch session").performClick()
+        waitForSessionPagerReady(timeoutMs = pickerWaitMs)
+        val toBConnectBefore = TMUX_CONNECT_ATTEMPTS.get()
+        switchToNextSameHostSession(toBConnectBefore, timeoutMs = pickerWaitMs)
+        waitForTerminalText(SESSION_B_MARKER)
+
+        openMoreMenu()
+        compose.onNodeWithText("Switch session").performClick()
+        waitForSessionPagerReady(timeoutMs = pickerWaitMs)
+        val toAConnectBefore = TMUX_CONNECT_ATTEMPTS.get()
+        switchToNextSameHostSession(toAConnectBefore, timeoutMs = pickerWaitMs)
+        waitForTerminalText(SESSION_A_MARKER)
+    }
 
     private fun readFixtureKey(): String =
         InstrumentationRegistry.getInstrumentation()
@@ -762,6 +796,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         val handshakeBefore = SSH_HANDSHAKE_ATTEMPTS.get()
         val tmuxConnectBefore = TMUX_CONNECT_ATTEMPTS.get()
         val sshOpenBefore = SshOpenTelemetry.snapshot()
+        val telemetryBefore = TmuxSessionLatencyTelemetry.snapshot()
 
         openMoreMenu()
         compose.onNodeWithText("Switch session").performClick()
@@ -779,8 +814,20 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         val handshakeAfter = SSH_HANDSHAKE_ATTEMPTS.get()
         val tmuxConnectAfter = TMUX_CONNECT_ATTEMPTS.get()
         val sshOpenDeltas = sshOpenDeltasSince(sshOpenBefore)
+        val telemetryAfter = TmuxSessionLatencyTelemetry.snapshot()
+        val switchTelemetry = telemetryAfter.drop(telemetryBefore.size)
+        val forbiddenTmuxWork = switchTelemetry.filter {
+            it.name == "tmux_control_attach_count" ||
+                it.name == "list_panes" ||
+                it.name == "capture_pane"
+        }
+        val cacheActivations = switchTelemetry.filter { it.name == "runtime_cache_activate" }
         recordTiming("warm_switch_${iteration}_ssh_handshakes_during_switch", (handshakeAfter - handshakeBefore).toLong())
-        recordTiming("warm_switch_${iteration}_tmux_connects_during_switch", (tmuxConnectAfter - tmuxConnectBefore).toLong())
+        recordTiming("warm_switch_${iteration}_logical_tmux_connects_during_switch", (tmuxConnectAfter - tmuxConnectBefore).toLong())
+        recordTiming("warm_switch_${iteration}_runtime_cache_activations", cacheActivations.size.toLong())
+        recordTiming("warm_switch_${iteration}_tmux_control_attaches_during_cached_switch", forbiddenTmuxWork.count { it.name == "tmux_control_attach_count" }.toLong())
+        recordTiming("warm_switch_${iteration}_tmux_list_panes_during_cached_switch", forbiddenTmuxWork.count { it.name == "list_panes" }.toLong())
+        recordTiming("warm_switch_${iteration}_tmux_capture_pane_during_cached_switch", forbiddenTmuxWork.count { it.name == "capture_pane" }.toLong())
         SSH_SWITCH_SOURCES.forEach { source ->
             recordTiming("warm_switch_${iteration}_ssh_opens_${source}_during_switch", (sshOpenDeltas[source] ?: 0).toLong())
         }
@@ -790,8 +837,20 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
             handshakeAfter,
         )
         assertTrue(
-            "warm same-host switch must attach a new tmux control client",
+            "warm same-host switch gesture must be accepted by connect(); " +
+                "this logical counter is not used as tmux-control attach proof",
             tmuxConnectAfter > tmuxConnectBefore,
+        )
+        assertTrue(
+            "cached same-host switch must activate exactly one cached runtime; " +
+                "events=$switchTelemetry",
+            cacheActivations.size == 1,
+        )
+        assertTrue(
+            "cached same-host switch must not attach a tmux control client, " +
+                "run list-panes, or run capture-pane; forbidden=$forbiddenTmuxWork " +
+                "events=$switchTelemetry",
+            forbiddenTmuxWork.isEmpty(),
         )
         assertEquals(
             "warm same-host switch must not open fresh SSH from switch sources; deltas=$sshOpenDeltas",

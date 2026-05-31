@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import android.os.Looper
+import android.os.SystemClock
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
@@ -69,9 +70,11 @@ class TmuxSessionViewModelTest {
 
     private fun newVm(
         registry: ActiveTmuxClients = ActiveTmuxClients(),
+        runtimeCache: TmuxSessionRuntimeCache = TmuxSessionRuntimeCache(),
     ): TmuxSessionViewModel = TmuxSessionViewModel(
         tmuxClientFactory = TmuxClientFactory(factoryScope),
         activeTmuxClients = registry,
+        runtimeCache = runtimeCache,
     )
 
     @After
@@ -2752,9 +2755,10 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun fastSwitchClosesOldClientAndReusesSshSession() = runTest {
+    fun fastSwitchCachesOldRuntimeAndReusesSshSession() = runTest {
         val registry = ActiveTmuxClients()
-        val vm = newVm(registry = registry)
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val vm = newVm(registry = registry, runtimeCache = runtimeCache)
         val session = FakeSshSession()
         val oldClient = FakeTmuxClient()
         val newClient = FakeTmuxClient()
@@ -2787,9 +2791,15 @@ class TmuxSessionViewModelTest {
         )
         advanceUntilIdle()
 
-        // Old tmux client must be closed; SSH session is reused
-        // (NOT closed). Registry now points at the new client.
-        assertTrue("old tmux client must be closed by fast switch", oldClient.closed)
+        // Old tmux client stays warm in the runtime cache; SSH session is
+        // reused (NOT closed). Registry now points at the new client.
+        assertFalse("old tmux client must stay warm after fast switch", oldClient.closed)
+        assertTrue(
+            "old runtime must be cached by host/session key",
+            runtimeCache.contains(
+                TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "work"),
+            ),
+        )
         assertFalse(
             "fast switch must NOT close the underlying SSH session",
             session.closed,
@@ -2808,6 +2818,228 @@ class TmuxSessionViewModelTest {
                 sessionName = "third",
             ),
         )
+    }
+
+    @Test
+    fun activatingCachedRuntimePublishesPanesSynchronouslyWithoutTmuxCommands() = runTest {
+        val registry = ActiveTmuxClients()
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val vm = newVm(registry = registry, runtimeCache = runtimeCache)
+        val session = FakeSshSession()
+        val clientA = FakeTmuxClient()
+        val clientB = FakeTmuxClient()
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = clientA,
+            session = session,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "cached-work",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        val cachedTerminalState = vm.panes.value.single().terminalState
+
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = clientB,
+            session = session,
+        )
+        runCurrent()
+        clientA.sentCommands.clear()
+        clientB.sentCommands.clear()
+
+        val activateStartedAtMs = SystemClock.elapsedRealtime()
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        val activateMs = SystemClock.elapsedRealtime() - activateStartedAtMs
+
+        val panes = vm.panes.value
+        assertTrue(
+            "cached pointer-swap activation must publish visible pane state under 100ms; " +
+                "activateMs=$activateMs",
+            activateMs < TMUX_WARM_SWITCH_LOCAL_P95_BUDGET_MS,
+        )
+        assertEquals(listOf("%0"), panes.map { it.paneId })
+        assertSame(cachedTerminalState, panes.single().terminalState)
+        assertSame(clientA, registry.clients.value[1L]?.client)
+        assertFalse("cached activation must not create a new tmux client", clientA.connectCalled)
+        assertTrue(
+            "cached activation must avoid tmux list/capture commands, got ${clientA.sentCommands}",
+            clientA.sentCommands.none {
+                it.startsWith("list-panes") || it.startsWith("capture-pane")
+            },
+        )
+        assertTrue(
+            "previous active runtime should now be cached",
+            runtimeCache.contains(
+                TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "other"),
+            ),
+        )
+    }
+
+    @Test
+    fun activatingCachedRuntimeReinstallsDisconnectedObserver() = runTest {
+        val registry = ActiveTmuxClients()
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val vm = newVm(registry = registry, runtimeCache = runtimeCache)
+        val session = FakeSshSession()
+        val clientA = FakeTmuxClient()
+        val clientB = FakeTmuxClient()
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = clientA,
+            session = session,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "work", paneIndex = 0)),
+        )
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = clientB,
+            session = session,
+        )
+        runCurrent()
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        runCurrent()
+        clientA.disconnectedSignal.value = true
+        runCurrent()
+
+        assertTrue(
+            "restored cached client must use the normal disconnected observer",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertNull(registry.clients.value[1L])
+    }
+
+    @Test
+    fun activatingCachedRuntimeRestartsAgentConversationTail() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val vm = newVm(runtimeCache = runtimeCache)
+        val session = FakeSshSession()
+        val clientA = FakeTmuxClient()
+        val clientB = FakeTmuxClient()
+        val detection = newClaudeDetection()
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = clientA,
+            session = session,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "work", paneIndex = 0)),
+        )
+        vm.startAgentConversationForTest("%0", detection)
+        vm.startAgentTailForTest("%0", session, detection, fromLineExclusive = 0L)
+        assertEquals(1, session.tailCalls)
+
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = clientB,
+            session = session,
+        )
+        runCurrent()
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        advanceUntilIdle()
+
+        assertEquals(
+            "cached restore must restart the conversation tail producer",
+            2,
+            session.tailCalls,
+        )
+        assertEquals(AgentConversationSyncStatus.Live, vm.agentConversations.value["%0"]?.syncStatus)
+    }
+
+    @Test
+    fun runtimeCacheEvictsLeastRecentlyUsedRuntime() = runTest {
+        val cache = TmuxSessionRuntimeCache(maxEntries = 2)
+        val first = cachedRuntimeForTest("one")
+        val second = cachedRuntimeForTest("two")
+        val third = cachedRuntimeForTest("three")
+
+        assertNull(cache.put(first))
+        assertNull(cache.put(second))
+        assertSame(first, cache.activate(first.key))
+        assertNull(cache.put(first))
+        val evicted = cache.put(third)
+
+        assertSame("second should be the least recently used runtime", second, evicted)
+        assertTrue(cache.contains(first.key))
+        assertTrue(cache.contains(third.key))
+        assertFalse(cache.contains(second.key))
     }
 
     @Test
@@ -2868,23 +3100,13 @@ class TmuxSessionViewModelTest {
         )
     }
 
-    /**
-     * Issue #257 (perf): a same-host fast switch must NOT block on the
-     * previous tmux client's clean `detach-client` round-trip. The old
-     * client owns its own SSH shell channel, so the new session can attach
-     * on the shared transport while the old client's detach drains in the
-     * background. We gate the old client's [FakeTmuxClient.detachCleanly]
-     * so it cannot complete, run the switch to the point where the
-     * coroutine yields, and assert the new client is already connected and
-     * registered while the old detach is still in flight.
-     */
     @Test
-    fun fastSwitchDoesNotBlockOnPreviousClientDetach() = runTest {
+    fun fastSwitchDoesNotDetachPreviousClientOnCriticalPath() = runTest {
         val registry = ActiveTmuxClients()
-        val vm = newVm(registry = registry)
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val vm = newVm(registry = registry, runtimeCache = runtimeCache)
         val session = FakeSshSession()
-        val detachGate = CompletableDeferred<Unit>()
-        val oldClient = FakeTmuxClient().apply { detachCleanlyGate = detachGate }
+        val oldClient = FakeTmuxClient()
         val newClient = FakeTmuxClient()
 
         vm.replaceClientForTest(
@@ -2910,44 +3132,30 @@ class TmuxSessionViewModelTest {
             client = newClient,
             session = session,
         )
-        // Let the launched background-detach coroutine reach the gate, but
-        // do NOT release it.
         runCurrent()
 
-        assertTrue(
-            "old client's clean detach must have been started",
+        assertFalse(
+            "warm runtime caching must not detach the old client on the switch path",
             oldClient.detachCleanlyCalled,
         )
-        assertTrue(
-            "fast switch must leave the old detach in flight, not awaited",
-            vm.hasInFlightOrphanDetachForTest(),
-        )
-        // Critical: the switch reached the new session WITHOUT waiting for
-        // the gated detach to finish — the new client is connected and the
-        // registry already points at it.
+        assertFalse(vm.hasInFlightOrphanDetachForTest())
         assertTrue("new tmux client must be connect()ed", newClient.connectCalled)
         assertSame(newClient, registry.clients.value[1L]?.client)
         assertTrue(
             vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
         )
         assertFalse(
-            "old client must not be closed while its detach is gated",
+            "old client must stay open as a warm cached runtime",
             oldClient.closed,
         )
-
-        // Releasing the gate lets the background detach finish and close
-        // the old client — the #215 clean-server contract still holds, it
-        // just ran off the critical path.
-        detachGate.complete(Unit)
-        advanceUntilIdle()
-        assertTrue("old tmux client must be closed once the gate releases", oldClient.closed)
+        assertTrue(
+            runtimeCache.contains(
+                TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "work"),
+            ),
+        )
         assertFalse(
             "SSH session must be reused, never closed by a fast switch",
             session.closed,
-        )
-        assertFalse(
-            "orphan detach must no longer be in flight after it completes",
-            vm.hasInFlightOrphanDetachForTest(),
         )
     }
 
@@ -3103,6 +3311,52 @@ class TmuxSessionViewModelTest {
             client.detachCleanlyCalled,
         )
         assertTrue("client must be closed after backgrounded detach", client.closed)
+    }
+
+    @Test
+    fun onAppBackgroundedClosesInactiveCachedRuntimesForHost() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val vm = newVm(runtimeCache = runtimeCache)
+        val session = FakeSshSession()
+        val cachedClient = FakeTmuxClient()
+        val foregroundClient = FakeTmuxClient()
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = cachedClient,
+            session = session,
+        )
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = foregroundClient,
+            session = session,
+        )
+        runCurrent()
+        assertTrue(
+            runtimeCache.contains(TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "work")),
+        )
+
+        vm.onAppBackgrounded()
+        advanceUntilIdle()
+
+        assertTrue("foreground runtime must detach on background", foregroundClient.detachCleanlyCalled)
+        assertTrue("inactive cached runtime must also detach on background", cachedClient.detachCleanlyCalled)
+        assertFalse(
+            "background detach must remove inactive cached runtimes for the host",
+            runtimeCache.contains(TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "work")),
+        )
     }
 
     /**
@@ -3387,6 +3641,34 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    private fun cachedRuntimeForTest(sessionName: String): CachedTmuxRuntime {
+        val key = TmuxRuntimeKey(
+            hostId = 1L,
+            hostname = "alpha.example",
+            port = 22,
+            username = "alex",
+            keyPath = "/keys/a",
+            sessionName = sessionName,
+        )
+        return CachedTmuxRuntime(
+            key = key,
+            hostName = "alpha",
+            startDirectory = null,
+            session = FakeSshSession(),
+            client = FakeTmuxClient(),
+            panes = emptyList(),
+            paneRows = emptyMap(),
+            paneProducerJobs = emptyMap(),
+            paneInputQueues = emptyMap(),
+            paneInputJobs = emptyMap(),
+            paneAgentJobs = emptyMap(),
+            paneAgentInputs = emptyMap(),
+            agentConversations = emptyMap(),
+            remoteColumns = 0,
+            remoteRows = 0,
+        )
+    }
+
     /**
      * Issue #178: minimal in-memory [SshSession] double for the
      * fast-switch unit tests. Mirrors the same shape as
@@ -3410,8 +3692,13 @@ class TmuxSessionViewModelTest {
         override suspend fun exec(command: String): com.pocketshell.core.ssh.ExecResult =
             com.pocketshell.core.ssh.ExecResult(stdout = "", stderr = "", exitCode = 0)
 
-        override fun tail(path: String, onLine: (String) -> Unit): kotlinx.coroutines.Job =
-            tailJob
+        var tailCalls: Int = 0
+            private set
+
+        override fun tail(path: String, onLine: (String) -> Unit): kotlinx.coroutines.Job {
+            tailCalls += 1
+            return tailJob
+        }
 
         override fun openLocalPortForward(
             remoteHost: String,

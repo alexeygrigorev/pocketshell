@@ -143,6 +143,7 @@ public class TmuxSessionViewModel @Inject constructor(
     @ApplicationContext private val applicationContext: Context? = null,
     private val projectRootDao: ProjectRootDao? = null,
     private val warmSshConnections: WarmSshConnections = WarmSshConnections(),
+    private val runtimeCache: TmuxSessionRuntimeCache = TmuxSessionRuntimeCache(),
 ) : ViewModel() {
 
     /** SSH executor seam for assistant tools; tests substitute it. */
@@ -241,6 +242,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var connectingTarget: ConnectionTarget? = null
     private var connectJob: Job? = null
     private var eventsJob: Job? = null
+    private var disconnectedJob: Job? = null
 
     // Issue #145: whether [reconnect] would result in a new connect
     // attempt. The screen surfaces a Reconnect button only when this is
@@ -371,6 +373,10 @@ public class TmuxSessionViewModel @Inject constructor(
                 targetLogFields(target),
         )
 
+        if (tryActivateCachedRuntime(target, attempt, effectiveTrigger)) {
+            return
+        }
+
         // Issue #151: a tap on "Attach" for a different tmux session
         // re-enters `connect()` while the previous connection's event-loop
         // coroutine is still mid-processing a `ControlEvent`. The old
@@ -439,9 +445,11 @@ public class TmuxSessionViewModel @Inject constructor(
                 // keeping the check explicit here documents the
                 // contract.
                 if (willFastSwitch) {
-                    // Fast path: keep the SSH session, swap the tmux
-                    // client. No new handshake fires.
-                    closeCurrentClientKeepSession()
+                    // Fast path: keep the SSH session and keep the
+                    // previous tmux/UI runtime warm in the cache. If the
+                    // user switches back, activation is a pointer swap
+                    // rather than a fresh tmux attach.
+                    deactivateCurrentRuntimeToCache()
                     runFastSessionSwitch(target, previousSession, attempt, effectiveTrigger)
                 } else {
                     // Slow path: full teardown of both the tmux client
@@ -486,6 +494,16 @@ public class TmuxSessionViewModel @Inject constructor(
             left.keyPath == right.keyPath &&
             left.sessionName == right.sessionName &&
             left.startDirectory == right.startDirectory
+
+    private fun ConnectionTarget.toRuntimeKey(): TmuxRuntimeKey =
+        TmuxRuntimeKey(
+            hostId = hostId,
+            hostname = host,
+            port = port,
+            username = user,
+            keyPath = keyPath,
+            sessionName = sessionName,
+        )
 
     private fun nextConnectGeneration(): Long {
         connectGeneration += 1L
@@ -862,6 +880,149 @@ public class TmuxSessionViewModel @Inject constructor(
             ),
         )
         lifecycleHookHostId = hostId
+    }
+
+    private fun tryActivateCachedRuntime(
+        target: ConnectionTarget,
+        attempt: Int,
+        trigger: TmuxConnectTrigger,
+    ): Boolean {
+        val cached = runtimeCache.activate(target.toRuntimeKey()) ?: return false
+        if (cached.client.disconnected.value || cached.session?.isConnected == false) {
+            viewModelScope.launch {
+                cached.closeCachedRuntime()
+            }
+            return false
+        }
+        val startedAtMs = SystemClock.elapsedRealtime()
+        deactivateCurrentRuntimeToCache()
+        restoreCachedRuntime(target, cached)
+        StartupTiming.mark(
+            "tmux-runtime-cache-hit",
+            "attempt" to attempt,
+            "hostId" to target.hostId,
+            "host" to target.host,
+            "port" to target.port,
+            "session" to target.sessionName,
+            "trigger" to trigger.logValue,
+        )
+        TmuxSessionLatencyTelemetry.record(
+            name = "runtime_cache_activate",
+            durationMs = SystemClock.elapsedRealtime() - startedAtMs,
+            sessionName = target.sessionName,
+            trigger = trigger,
+        )
+        Log.i(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-runtime-cache-hit trigger=${trigger.logValue} " +
+                "attempt=$attempt " + targetLogFields(target),
+        )
+        logAttachMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = startedAtMs,
+            event = "tmux-runtime-cache-ready",
+            trigger = trigger,
+            detail = "paneCount=${cached.panes.size}",
+        )
+        return true
+    }
+
+    private fun deactivateCurrentRuntimeToCache() {
+        val target = activeTarget ?: return
+        val client = clientRef ?: return
+        eventsJob?.cancel()
+        eventsJob = null
+        disconnectedJob?.cancel()
+        disconnectedJob = null
+        projectRootsJob?.cancel()
+        projectRootsJob = null
+        val runtime = CachedTmuxRuntime(
+            key = target.toRuntimeKey(),
+            hostName = target.hostName,
+            startDirectory = target.startDirectory,
+            session = sessionRef,
+            client = client,
+            panes = _panes.value.ifEmpty { paneRows.values.toList() },
+            paneRows = paneRows.toMap(),
+            paneProducerJobs = paneProducerJobs.toMap(),
+            paneInputQueues = paneInputQueues.toMap(),
+            paneInputJobs = paneInputJobs.toMap(),
+            paneAgentJobs = paneAgentJobs.toMap(),
+            paneAgentInputs = paneAgentInputs.toMap(),
+            agentConversations = _agentConversations.value,
+            remoteColumns = remoteColumns,
+            remoteRows = remoteRows,
+        )
+        runtimeCache.put(runtime)?.let { evicted ->
+            viewModelScope.launch {
+                evicted.closeCachedRuntime()
+            }
+        }
+        clientRef = null
+        paneRows.clear()
+        paneProducerJobs.clear()
+        paneInputQueues.clear()
+        paneInputJobs.clear()
+        paneAgentJobs.values.forEach { it.cancel() }
+        paneAgentJobs.clear()
+        paneAgentInputs.clear()
+        _agentConversations.value = emptyMap()
+        _panes.value = emptyList()
+        registeredHostId?.let { activeTmuxClients.unregister(it) }
+        registeredHostId = null
+        activeTarget = null
+        activeAttachMilestone = null
+    }
+
+    private fun restoreCachedRuntime(
+        target: ConnectionTarget,
+        runtime: CachedTmuxRuntime,
+    ) {
+        clientRef = runtime.client
+        sessionRef = runtime.session
+        activeTarget = target
+        connectingTarget = null
+        activeAttachMilestone = null
+        paneRows.clear()
+        paneRows.putAll(runtime.paneRows)
+        paneProducerJobs.clear()
+        paneProducerJobs.putAll(runtime.paneProducerJobs)
+        paneInputQueues.clear()
+        paneInputQueues.putAll(runtime.paneInputQueues)
+        paneInputJobs.clear()
+        paneInputJobs.putAll(runtime.paneInputJobs)
+        paneAgentJobs.clear()
+        paneAgentInputs.clear()
+        paneAgentInputs.putAll(runtime.paneAgentInputs)
+        _agentConversations.value = runtime.agentConversations
+        remoteColumns = runtime.remoteColumns
+        remoteRows = runtime.remoteRows
+        resetControlClientSizeForAttach()
+        bindClientObservers(runtime.client)
+        _panes.value = runtime.panes
+        restartAgentConversationsForRestoredRuntime(runtime)
+        activeTmuxClients.register(
+            hostId = target.hostId,
+            hostName = target.hostName,
+            hostname = target.host,
+            port = target.port,
+            username = target.user,
+            keyPath = target.keyPath,
+            client = runtime.client,
+            startDirectoryExists = runtime.session?.let { session ->
+                { directory -> remoteStartDirectoryExists(session, directory) }
+            },
+        )
+        registeredHostId = target.hostId
+        installLifecycleHooks(target.hostId)
+        bindProjectRootsForHost(target.hostId)
+        refreshReconnectAvailability()
+        _connectionStatus.value = ConnectionStatus.Connected(
+            target.host,
+            target.port,
+            target.user,
+        )
     }
 
     private suspend fun runConnect(
@@ -1381,6 +1542,10 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun attachClient(client: TmuxClient) {
         resetControlClientSizeForAttach()
         clientRef = client
+        bindClientObservers(client)
+    }
+
+    private fun bindClientObservers(client: TmuxClient) {
         // Cancel any previous subscription before re-binding (idempotency
         // for tests that swap clients on the same ViewModel instance).
         eventsJob?.cancel()
@@ -1406,7 +1571,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // (TmuxSessionViewModel.connect against a different host /
         // session) does not race: only the disconnected-signal of the
         // client we attached just now is acted on.
-        bridgeScope.launch {
+        disconnectedJob?.cancel()
+        disconnectedJob = bridgeScope.launch {
             client.disconnected.collect { dead ->
                 if (!dead) return@collect
                 val current = _connectionStatus.value
@@ -1544,9 +1710,9 @@ public class TmuxSessionViewModel @Inject constructor(
         connectingTarget = target
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
-        // Mirror production's ordering: tear down the previous tmux
-        // client (keeping the session) before binding the new one.
-        closeCurrentClientKeepSession()
+        // Mirror production's ordering: deactivate the previous tmux/UI
+        // runtime into the warm cache before binding the new one.
+        deactivateCurrentRuntimeToCache()
         sessionRef = session
         // Inline a simplified runFastSessionSwitch: we cannot call the
         // real method directly because it pulls tmuxClientFactory in,
@@ -2091,6 +2257,55 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #160: OpenCode now tails its JSONL via `session.tail`
         // identically to Claude and Codex. No more polling branch — the
         // tmux pane gets the same real-time refresh as the raw-SSH route.
+        val followJob = agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
+            appendAgentEvents(paneId, listOf(event))
+        }
+        if (followJob != null) {
+            paneAgentJobs[paneId] = followJob
+            followJob.invokeOnCompletion { cause ->
+                if (cause is CancellationException) return@invokeOnCompletion
+                bridgeScope.launch {
+                    markAgentTailStopped(paneId, detection, cause)
+                }
+            }
+        } else {
+            markAgentTailUnavailable(paneId, detection)
+        }
+    }
+
+    private fun restartAgentConversationsForRestoredRuntime(runtime: CachedTmuxRuntime) {
+        val session = runtime.session ?: return
+        runtime.agentConversations.forEach { (paneId, state) ->
+            val detection = state.detection ?: return@forEach
+            paneAgentJobs.remove(paneId)?.cancel()
+            paneAgentJobs[paneId] = bridgeScope.launch {
+                restartAgentConversationTailForPane(
+                    session = session,
+                    paneId = paneId,
+                    detection = detection,
+                    restored = state,
+                )
+            }
+        }
+    }
+
+    private suspend fun restartAgentConversationTailForPane(
+        session: SshSession,
+        paneId: String,
+        detection: AgentDetection,
+        restored: AgentConversationUiState,
+    ) {
+        val lineCount = runCatching { agentRepository.lineCount(session, detection) }.getOrDefault(0L)
+        val initialEvents = runCatching {
+            agentRepository.readInitialEvents(session, detection)
+        }.getOrDefault(restored.events)
+        setAgentConversation(
+            paneId,
+            restored.copy(
+                events = boundedDistinctEvents(initialEvents),
+                syncStatus = AgentConversationSyncStatus.Live,
+            ),
+        )
         val followJob = agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
             appendAgentEvents(paneId, listOf(event))
         }
@@ -3057,6 +3272,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private suspend fun closeCurrentConnectionAndJoin(
         preserveConnectingTarget: ConnectionTarget? = null,
     ) {
+        val closingHostId = activeTarget?.hostId ?: registeredHostId
         // Issue #257: drain any background detach left in flight by a
         // prior same-host fast-switch before we tear the rest down, so a
         // full teardown (background-detach / cross-host reconnect) never
@@ -3065,6 +3281,8 @@ public class TmuxSessionViewModel @Inject constructor(
         orphanDetachJob = null
         eventsJob?.cancelAndJoin()
         eventsJob = null
+        disconnectedJob?.cancelAndJoin()
+        disconnectedJob = null
         projectRootsJob?.cancelAndJoin()
         projectRootsJob = null
         _projectRoots.value = emptyList()
@@ -3106,6 +3324,11 @@ public class TmuxSessionViewModel @Inject constructor(
         clientRef = null
         registeredHostId?.let { activeTmuxClients.unregister(it) }
         registeredHostId = null
+        closingHostId?.let { hostId ->
+            runtimeCache.removeHost(hostId).forEach { cached ->
+                cached.closeCachedRuntime()
+            }
+        }
         // `RealSshSession.close()` now swallows the already-disconnected
         // `BY_APPLICATION` TransportException (#151), but we keep the
         // `runCatching` here too because the session may be a non-real
@@ -3149,6 +3372,8 @@ public class TmuxSessionViewModel @Inject constructor(
     private suspend fun closeCurrentClientKeepSession() {
         eventsJob?.cancelAndJoin()
         eventsJob = null
+        disconnectedJob?.cancelAndJoin()
+        disconnectedJob = null
         projectRootsJob?.cancelAndJoin()
         projectRootsJob = null
         _projectRoots.value = emptyList()
@@ -3255,6 +3480,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * activity teardown beyond a fraction of a second.
      */
     private fun closeCurrentConnection() {
+        val closingHostId = activeTarget?.hostId ?: registeredHostId
         // Issue #257: cancel any in-flight background detach from a prior
         // fast-switch. This path runs from [onCleared] (and the sync test
         // seam), where [viewModelScope] is about to be cancelled anyway;
@@ -3263,6 +3489,8 @@ public class TmuxSessionViewModel @Inject constructor(
         orphanDetachJob = null
         eventsJob?.cancel()
         eventsJob = null
+        disconnectedJob?.cancel()
+        disconnectedJob = null
         projectRootsJob?.cancel()
         projectRootsJob = null
         _projectRoots.value = emptyList()
@@ -3315,6 +3543,20 @@ public class TmuxSessionViewModel @Inject constructor(
         clientRef = null
         registeredHostId?.let { activeTmuxClients.unregister(it) }
         registeredHostId = null
+        closingHostId?.let { hostId ->
+            val cached = runtimeCache.removeHost(hostId)
+            if (cached.isNotEmpty()) {
+                runCatching {
+                    runBlocking(Dispatchers.IO) {
+                        cached.forEach { runtime ->
+                            withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS) {
+                                runtime.closeCachedRuntime()
+                            }
+                        }
+                    }
+                }
+            }
+        }
         runCatching { sessionRef?.close() }
         sessionRef = null
         activeTarget = null
@@ -3481,18 +3723,18 @@ internal data class TmuxInputStressMetrics(
     val maxSendLatencyMs: Double,
 )
 
-private data class TmuxPaneInputSegment(
+internal data class TmuxPaneInputSegment(
     val bytes: ByteArray,
     val enqueuedAtNs: Long,
 )
 
-private data class TmuxPaneInputBatch(
+internal data class TmuxPaneInputBatch(
     val bytes: ByteArray,
     val chunks: Int,
     val firstEnqueuedAtNs: Long,
 )
 
-private class TmuxPaneInputQueue(
+internal class TmuxPaneInputQueue(
     private val maxPendingBytes: Int,
     private val maxBatchBytes: Int,
 ) {

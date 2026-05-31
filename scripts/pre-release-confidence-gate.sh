@@ -409,7 +409,35 @@ diagnostics='$RUN_DIR/emulator-readiness-diagnostics.log'
 managed_emulator_log='$RUN_DIR/emulator-readiness-managed-emulator.log'
 manage_emulator='$PRE_RELEASE_MANAGE_EMULATOR'
 avd_name='$AVD_NAME'
-emulator_process_pattern="emulator.*-avd[ =]\$avd_name|qemu-system.*\$avd_name|qemu-system"
+
+list_emulator_processes() {
+  ps -eo pid=,comm=,args= |
+    awk -v avd="\$avd_name" '
+      {
+        command_name = \$2
+      }
+      command_name == "emulator" {
+        for (i = 3; i <= NF; i++) {
+          if (\$i == "-avd" && (i + 1) <= NF && \$(i + 1) == avd) {
+            print
+            next
+          }
+          if (\$i == ("-avd=" avd)) {
+            print
+            next
+          }
+        }
+      }
+      command_name ~ /^qemu-system/ {
+        for (i = 3; i <= NF; i++) {
+          if (index(\$i, avd) > 0) {
+            print
+            next
+          }
+        }
+      }
+    '
+}
 
 record_diagnostics() {
   {
@@ -425,7 +453,7 @@ record_diagnostics() {
     printf '\n== adb get-serialno ==\n'
     '$ADB' get-serialno || true
     printf '\n== emulator processes ==\n'
-    pgrep -af "\$emulator_process_pattern" || true
+    list_emulator_processes || true
     printf '\n== managed emulator log tail ==\n'
     if [ -f "\$managed_emulator_log" ]; then
       tail -n 120 "\$managed_emulator_log" || true
@@ -440,7 +468,7 @@ has_adb_device() {
 }
 
 has_emulator_process() {
-  pgrep -af "\$emulator_process_pattern" >/dev/null 2>&1
+  [ -n "\$(list_emulator_processes)" ]
 }
 
 boot_completed() {

@@ -43,6 +43,14 @@ class DockerAgentFixtureContractTest {
     }
 
     @Test
+    fun pocketshellVersionFixtureMatchesAndroidVersionName() {
+        assertEquals(
+            "pocketshell fixture ${androidVersionName()}\n",
+            runFixtureCommand("pocketshell", "--version"),
+        )
+    }
+
+    @Test
     fun pocketshellJobsMutationFixturesReturnStableShapes() {
         assertTrue(
             runFixtureCommand("pocketshell", "jobs", "add", "codex", "--every", "5m").contains("Created job 4"),
@@ -88,7 +96,10 @@ class DockerAgentFixtureContractTest {
         val process = ProcessBuilder(listOf(command.toString()) + args.drop(1))
             .directory(projectRoot.toFile())
             .redirectErrorStream(true)
-            .also { it.environment()["POCKETSHELL_AGENT_FIXTURE_DIR"] = fixtureDir.toString() }
+            .also {
+                it.environment()["POCKETSHELL_AGENT_FIXTURE_DIR"] = fixtureDir.toString()
+                it.environment()["POCKETSHELL_PROJECT_ROOT"] = projectRoot.toString()
+            }
             .start()
 
         val output = process.inputStream.bufferedReader().use { it.readText() }
@@ -107,5 +118,16 @@ class DockerAgentFixtureContractTest {
             dir = dir.parent
         }
         error("Could not locate tests/docker/docker-compose.yml from user.dir=${System.getProperty("user.dir")}")
+    }
+
+    private fun androidVersionName(): String {
+        val versionRegex = Regex("^\\s*versionName\\s*=\\s*\"([^\"]+)\"")
+        return projectRoot.resolve("app/build.gradle.kts").toFile()
+            .useLines { lines ->
+                lines.firstNotNullOfOrNull { line ->
+                    versionRegex.find(line)?.groupValues?.get(1)
+                }
+            }
+            ?: error("Could not parse app versionName")
     }
 }

@@ -16,6 +16,29 @@ set -eu
 #   - `pocketshell agent-log --json ...`    -> AgentConversationRepository
 
 fixture_dir="${POCKETSHELL_AGENT_FIXTURE_DIR:-/opt/pocketshell-agent-fixtures}"
+version_file="${POCKETSHELL_AGENT_FIXTURE_VERSION_FILE:-/opt/pocketshell-agent-fixture-version}"
+
+fixture_version() {
+  if [ -n "${POCKETSHELL_AGENT_FIXTURE_VERSION:-}" ]; then
+    printf '%s\n' "$POCKETSHELL_AGENT_FIXTURE_VERSION"
+    return 0
+  fi
+  if [ -r "$version_file" ]; then
+    cat "$version_file"
+    return 0
+  fi
+  if [ -r "${POCKETSHELL_PROJECT_ROOT:-.}/app/build.gradle.kts" ]; then
+    parsed_version="$(
+      sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' \
+        "${POCKETSHELL_PROJECT_ROOT:-.}/app/build.gradle.kts" | head -n 1
+    )"
+    if [ -n "$parsed_version" ]; then
+      printf '%s\n' "$parsed_version"
+      return 0
+    fi
+  fi
+  printf '0.0.0\n'
+}
 
 json_escape_awk='
 function esc(s) {
@@ -38,7 +61,7 @@ END {
 
 case "${1:-}" in
   --version)
-    printf 'pocketshell fixture 0.0.0\n'
+    printf 'pocketshell fixture %s\n' "$(fixture_version)"
     exit 0
     ;;
   usage)

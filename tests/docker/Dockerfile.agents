@@ -12,14 +12,15 @@ RUN apk add --no-cache openssh-server openssh-client tmux procps bash sqlite \
     && mkdir -p /home/testuser/.ssh \
     && chmod 700 /home/testuser/.ssh
 
-COPY sshd_config /etc/ssh/sshd_config
-COPY test_key.pub /home/testuser/.ssh/authorized_keys
+COPY tests/docker/sshd_config /etc/ssh/sshd_config
+COPY tests/docker/test_key.pub /home/testuser/.ssh/authorized_keys
 # Issue #150: see Dockerfile.ssh — same rationale for the in-container
 # compose healthcheck. The private key is a committed test fixture.
-COPY test_key /root/test_key
-COPY agent-bin/ /usr/local/bin/
-COPY agent-fixtures/ /opt/pocketshell-agent-fixtures/
-COPY agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
+COPY tests/docker/test_key /root/test_key
+COPY tests/docker/agent-bin/ /usr/local/bin/
+COPY tests/docker/agent-fixtures/ /opt/pocketshell-agent-fixtures/
+COPY tests/docker/agent-entrypoint.sh /usr/local/bin/pocketshell-agent-entrypoint
+COPY app/build.gradle.kts /opt/pocketshell-app-build.gradle.kts
 
 RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
     && chmod +x /usr/local/bin/claude \
@@ -34,6 +35,9 @@ RUN chmod 600 /home/testuser/.ssh/authorized_keys /root/test_key \
         /usr/local/bin/systemctl \
         /usr/local/bin/pocketshell-tui-smoke \
         /usr/local/bin/pocketshell-agent-entrypoint \
+    && version="$(sed -n 's/^[[:space:]]*versionName[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' /opt/pocketshell-app-build.gradle.kts | head -n 1)" \
+    && test -n "$version" \
+    && printf '%s\n' "$version" > /opt/pocketshell-agent-fixture-version \
     && chown -R testuser:testuser /home/testuser/.ssh
 
 EXPOSE 22

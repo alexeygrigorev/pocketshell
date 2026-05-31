@@ -94,6 +94,10 @@ if [[ "$GATE_ISOLATED_WORKTREE" != "0" && -z "${POCKETSHELL_GATE_ISOLATED_COPY:-
   exec "$isolated_root/scripts/pre-release-confidence-gate.sh" "$@"
 fi
 
+source "$ROOT_DIR/scripts/lib/app-version.sh"
+APP_VERSION_NAME="$(pocketshell_app_version_name "$ROOT_DIR")"
+export POCKETSHELL_AGENT_FIXTURE_VERSION="$APP_VERSION_NAME"
+
 SUMMARY_PATH="$RUN_DIR/summary.txt"
 SUMMARY_WRITTEN=0
 GATE_RESULT="FAIL"
@@ -830,6 +834,28 @@ done
 RUN_SCRIPT
 }
 
+docker_agents_pocketshell_version_script() {
+  local expected_version="$1"
+  local expected_output
+  local quoted_ssh_key
+  local quoted_expected_output
+  expected_output="$(pocketshell_agent_fixture_version_output "$expected_version")"
+  printf -v quoted_ssh_key '%q' "$SSH_KEY"
+  printf -v quoted_expected_output '%q' "$expected_output"
+
+  cat <<SCRIPT
+set -euo pipefail
+chmod 600 $quoted_ssh_key
+output=\$(ssh -i $quoted_ssh_key -p 2222 -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null testuser@127.0.0.1 'pocketshell --version')
+printf '%s\n' "\$output"
+expected_output=$quoted_expected_output
+if [ "\$output" != "\$expected_output" ]; then
+  printf 'expected Docker pocketshell fixture version output exactly: %s\n' "\$expected_output" >&2
+  exit 1
+fi
+SCRIPT
+}
+
 printf 'PocketShell pre-release confidence gate\n'
 printf 'Run directory: %s\n' "$RUN_DIR"
 if [[ -n "${POCKETSHELL_GATE_SOURCE_ROOT:-}" ]]; then
@@ -840,6 +866,7 @@ printf 'Android SDK: %s\n' "$ANDROID_SDK"
 printf 'ADB: %s\n' "$ADB"
 printf 'Emulator: %s\n' "$EMULATOR"
 printf 'AVD: %s\n' "$AVD_NAME"
+printf 'App versionName: %s\n' "$APP_VERSION_NAME"
 printf 'Gradle user home: %s\n' "$GRADLE_USER_HOME"
 printf 'Gradle flags: %s\n' "$GRADLE_FLAGS"
 
@@ -870,6 +897,8 @@ run_step "docker-agents-up" docker compose -f "$COMPOSE_FILE" up -d --build agen
 # the readiness poll itself is event-based, not retry-sleep.
 run_bash_step "docker-agents-health" \
   "source '$ROOT_DIR/tests/docker/lib/wait-for-healthy.sh' && wait_for_container_healthy '$COMPOSE_FILE' agents '$RUN_DIR/docker-agents-health.log' 60"
+run_bash_step "docker-agents-pocketshell-version" \
+  "$(docker_agents_pocketshell_version_script "$APP_VERSION_NAME")"
 run_bash_step "docker-agents-ssh-sanity" \
   "chmod 600 '$SSH_KEY' && ssh -i '$SSH_KEY' -p 2222 -o BatchMode=yes -o ConnectTimeout=3 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null testuser@127.0.0.1 'for tool in claude codex opencode quse tmuxctl uv; do command -v \"\$tool\"; done && quse --json >/dev/null && tmuxctl jobs list --session codex >/dev/null'"
 

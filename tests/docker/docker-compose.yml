@@ -65,8 +65,8 @@ services:
   #   docker compose -f tests/docker/docker-compose.yml up -d --build agents
   agents:
     build:
-      context: .
-      dockerfile: Dockerfile.agents
+      context: ../..
+      dockerfile: tests/docker/Dockerfile.agents
     image: pocketshell-test:agents
     container_name: pocketshell-test-agents
     ports:

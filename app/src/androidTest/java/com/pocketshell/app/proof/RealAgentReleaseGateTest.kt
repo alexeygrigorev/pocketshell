@@ -103,6 +103,38 @@ class RealAgentReleaseGateTest {
     }
 
     @Test
+    fun seedDockerHostWritesCompleteReadyBootstrapCache() = runBlocking {
+        assumeReleaseGateEnabled()
+        val key = readFixtureKey()
+        val hostRowTag = seedDockerHost(key, "Real Agent Ready Cache")
+        val hostId = hostRowTag.removePrefix(HOST_ROW_TAG_PREFIX).toLong()
+        val host = readSeededHost(hostId) ?: error("seeded host $hostId was not persisted")
+        val appVersion = targetAppVersionName()
+
+        assertTrue("expected seeded host to cache tmux as installed", host.tmuxInstalled == true)
+        assertTrue("expected seeded host to cache bootstrap timestamp", host.lastBootstrapAt != null)
+        assertTrue("expected seeded host to cache pocketshell as installed", host.pocketshellInstalled == true)
+        assertTrue("expected seeded host to cache pocketshell timestamp", host.pocketshellLastDetectedAt != null)
+        assertTrue("expected seeded host to cache app-compatible CLI", host.pocketshellVersionCompatible == true)
+        assertTrue(
+            "expected seeded host CLI version to match target app version $appVersion",
+            host.pocketshellCliVersion == appVersion,
+        )
+        assertTrue(
+            "expected seeded host expected CLI version to match target app version $appVersion",
+            host.pocketshellExpectedCliVersion == appVersion,
+        )
+        assertTrue(
+            "expected release-gate seed to model a running pocketshell daemon",
+            host.pocketshellDaemonRunning == true,
+        )
+        assertTrue(
+            "expected release-gate seed to model an enabled pocketshell daemon",
+            host.pocketshellDaemonEnabled == true,
+        )
+    }
+
+    @Test
     fun realClaudeCliRunsInTmuxPaneAndProducesJsonlConversationLog() = runBlocking {
         assumeReleaseGateEnabled()
         val key = readFixtureKey()
@@ -240,9 +272,8 @@ class RealAgentReleaseGateTest {
                 name = "real-agent-release-gate-${System.currentTimeMillis()}",
                 content = key,
             )
-            val appVersion = appContext.packageManager
-                .getPackageInfo(appContext.packageName, 0)
-                .versionName ?: error("target app versionName is missing")
+            val appVersion = targetAppVersionName()
+            val now = System.currentTimeMillis()
             val hostId = db.hostDao().insert(
                 HostEntity(
                     name = hostName,
@@ -251,15 +282,36 @@ class RealAgentReleaseGateTest {
                     username = DEFAULT_USER,
                     keyId = storedKey.id,
                     tmuxInstalled = true,
-                    lastBootstrapAt = System.currentTimeMillis(),
+                    lastBootstrapAt = now,
                     pocketshellInstalled = true,
-                    pocketshellLastDetectedAt = System.currentTimeMillis(),
+                    pocketshellLastDetectedAt = now,
                     pocketshellCliVersion = appVersion,
                     pocketshellExpectedCliVersion = appVersion,
                     pocketshellVersionCompatible = true,
+                    pocketshellDaemonRunning = true,
+                    pocketshellDaemonEnabled = true,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId
+        } finally {
+            db.close()
+        }
+    }
+
+    private fun targetAppVersionName(): String {
+        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
+        return appContext.packageManager
+            .getPackageInfo(appContext.packageName, 0)
+            .versionName ?: error("target app versionName is missing")
+    }
+
+    private suspend fun readSeededHost(hostId: Long): HostEntity? {
+        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
+        val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
+            .fallbackToDestructiveMigration(dropAllTables = true)
+            .build()
+        return try {
+            db.hostDao().getById(hostId)
         } finally {
             db.close()
         }

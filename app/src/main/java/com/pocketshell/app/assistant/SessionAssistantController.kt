@@ -27,6 +27,7 @@ internal class SessionAssistantController(
     private val scope: CoroutineScope,
     /** Build (client, actions, traceSink, installId) for a run, or null when unconfigured. */
     private val sessionFactory: () -> AssistantRunDeps?,
+    private val modelTurnTimeoutMs: Long = AssistantAgentLoop.DEFAULT_MODEL_TURN_TIMEOUT_MS,
 ) {
 
     /** Per-run dependencies resolved lazily so each run sees fresh config. */
@@ -66,12 +67,19 @@ internal class SessionAssistantController(
                 traceSink = deps.traceSink,
                 installId = deps.installId,
                 sessionId = deps.sessionId,
+                modelTurnTimeoutMs = modelTurnTimeoutMs,
             )
             val outcome = loop.run(cleaned, confirmGate = ::awaitDecision)
             _state.value = when (outcome) {
                 is AssistantAgentLoop.Outcome.Answer -> AssistantUiState.Done(outcome.text)
                 is AssistantAgentLoop.Outcome.Cancelled -> AssistantUiState.Done(outcome.text)
                 is AssistantAgentLoop.Outcome.Failed -> AssistantUiState.Error(outcome.message)
+                is AssistantAgentLoop.Outcome.RetryableError ->
+                    AssistantUiState.Error(
+                        message = outcome.message,
+                        reason = outcome.reason,
+                        retryable = outcome.reason.retryable,
+                    )
             }
         }
     }
@@ -130,5 +138,9 @@ internal sealed interface AssistantUiState {
     data class Done(val message: String) : AssistantUiState
 
     /** The run failed. */
-    data class Error(val message: String) : AssistantUiState
+    data class Error(
+        val message: String,
+        val reason: AssistantFailureReason? = null,
+        val retryable: Boolean = false,
+    ) : AssistantUiState
 }

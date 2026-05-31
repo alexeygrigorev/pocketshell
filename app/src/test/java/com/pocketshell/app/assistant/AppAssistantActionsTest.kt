@@ -53,13 +53,17 @@ class AppAssistantActionsTest {
 
     private class RecordingBridge : SessionActionBridge {
         var host: String? = "dev"
+        var sendResult: Result<Unit> = Result.success(Unit)
         val sent = mutableListOf<String>()
         val navigated = mutableListOf<AppDestination>()
         override fun activeHostName(): String? = host
         override fun activeCwd(): String? = "/home/dev/proj"
         override fun activeSessionName(): String? = "main"
         override fun currentScreenLabel(): String = "tmux"
-        override fun sendCommand(command: String) { sent += command }
+        override suspend fun sendCommand(command: String): Result<Unit> {
+            sent += command
+            return sendResult
+        }
         override fun navigate(destination: AppDestination) { navigated += destination }
     }
 
@@ -190,6 +194,21 @@ class AppAssistantActionsTest {
         val result = actions.runCommand("git status")
         assertFalse(result.ok)
         assertTrue(bridge.sent.isEmpty())
+    }
+
+    @Test
+    fun runCommand_paneSendFailureReturnsToolError() = runTest {
+        val bridge = RecordingBridge().apply {
+            sendResult = Result.failure(IllegalStateException("failed to write tmux command `send-keys`"))
+        }
+        val actions = actions(bridge = bridge, responder = { ExecResult("", "", 0) })
+
+        val result = actions.runCommand("git status")
+
+        assertFalse(result.ok)
+        assertEquals(listOf("git status"), bridge.sent)
+        assertTrue(result.message.contains("Failed to send command to the active terminal"))
+        assertTrue(result.message.contains("send-keys"))
     }
 
     @Test

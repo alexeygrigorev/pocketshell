@@ -265,8 +265,14 @@ internal class AppAssistantActions(
         if (bridge.activeHostName() == null) {
             return ActionResult.error("No active terminal to run the command in.")
         }
-        bridge.sendCommand(command)
-        return ActionResult.ok("Ran: $command")
+        return bridge.sendCommand(command).fold(
+            onSuccess = { ActionResult.ok("Ran: $command") },
+            onFailure = {
+                ActionResult.error(
+                    "Failed to send command to the active terminal: ${it.message ?: it.javaClass.simpleName}",
+                )
+            },
+        )
     }
 
     override suspend fun createFile(path: String, content: String): ActionResult {

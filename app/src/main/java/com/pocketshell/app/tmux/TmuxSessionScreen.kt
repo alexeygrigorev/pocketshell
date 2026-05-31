@@ -92,6 +92,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.core.content.ContextCompat
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.composer.PromptComposerSheet
+import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.session.KeyBarWithMic
@@ -751,6 +752,7 @@ public fun TmuxSessionScreen(
                         initialDraft = consumeRestoredDraft(),
                         onDraftChanged = onComposerDraftChanged,
                         agentName = visibleConversation.detection.agent.displayName,
+                        syncStatus = visibleConversation.syncStatus,
                     )
                 } else if (panes.isEmpty()) {
                     EmptyPanesPlaceholder()
@@ -2288,6 +2290,7 @@ internal fun TmuxConversationPane(
     initialDraft: String = "",
     onDraftChanged: (String) -> Unit = {},
     agentName: String = "agent",
+    syncStatus: AgentConversationSyncStatus = AgentConversationSyncStatus.Live,
 ) {
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     var composerText by rememberSaveable { mutableStateOf(initialDraft) }
@@ -2345,6 +2348,7 @@ internal fun TmuxConversationPane(
                 .fillMaxWidth()
                 .testTag(TMUX_CONVERSATION_SEARCH_TAG),
         )
+        ConversationSyncStatusRow(syncStatus = syncStatus)
         // Wrap the LazyColumn in a Box so the jump-to-latest FAB can
         // overlay the bottom-end of the scrollable area. The Box claims
         // the flex weight; the FAB is a sibling pinned to BottomEnd.
@@ -2442,6 +2446,40 @@ private fun rememberHoistedQuery(
 }
 
 private val NoOpStringChange: (String) -> Unit = {}
+
+@Composable
+private fun ConversationSyncStatusRow(syncStatus: AgentConversationSyncStatus) {
+    val (label, color) = when (syncStatus) {
+        AgentConversationSyncStatus.Live -> conversationSyncStatusLabel(syncStatus) to PocketShellColors.Green
+        AgentConversationSyncStatus.Stale -> conversationSyncStatusLabel(syncStatus) to PocketShellColors.Amber
+        AgentConversationSyncStatus.LogUnavailable -> conversationSyncStatusLabel(syncStatus) to PocketShellColors.Red
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .background(color = color, shape = RoundedCornerShape(50)),
+        )
+        Text(
+            text = "Conversation: $label",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+        )
+    }
+}
+
+internal fun conversationSyncStatusLabel(syncStatus: AgentConversationSyncStatus): String =
+    when (syncStatus) {
+        AgentConversationSyncStatus.Live -> "Live"
+        AgentConversationSyncStatus.Stale -> "Stale"
+        AgentConversationSyncStatus.LogUnavailable -> "Log unavailable"
+    }
 
 /**
  * Issue #154: jump-to-latest affordance. A small accent-tinted pill that

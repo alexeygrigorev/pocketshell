@@ -1,12 +1,17 @@
 package com.pocketshell.app.assistant
 
 import com.pocketshell.core.assistant.AssistantLlmClient
+import com.pocketshell.core.assistant.AssistantLlmException
 import com.pocketshell.core.assistant.LlmMessage
 import com.pocketshell.core.assistant.LlmResponse
 import com.pocketshell.core.assistant.LlmToolCall
 import com.pocketshell.core.assistant.StopReason
 import com.pocketshell.core.assistant.ToolChoice
 import com.pocketshell.core.assistant.ToolSpec
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -17,6 +22,7 @@ import org.junit.Test
  * driven by a fake [AssistantLlmClient] that scripts tool calls — including a
  * reject → correct → confirm sequence and the safety gate.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class AssistantAgentLoopTest {
 
     /**
@@ -260,5 +266,52 @@ class AssistantAgentLoopTest {
         val outcome = loop.run("loop forever") { AssistantAgentLoop.Decision.Confirm }
 
         assertTrue(outcome is AssistantAgentLoop.Outcome.Failed)
+    }
+
+    @Test
+    fun neverReturningModelCall_timesOutAsRetryableFailure() = runTest {
+        val neverReturns = object : AssistantLlmClient {
+            override suspend fun complete(
+                messages: List<LlmMessage>,
+                tools: List<ToolSpec>,
+                toolChoice: ToolChoice?,
+            ): Result<LlmResponse> = awaitCancellation()
+        }
+        val loop = AssistantAgentLoop(
+            neverReturns,
+            RecordingActions(),
+            modelTurnTimeoutMs = 1_000,
+        )
+
+        val pending = async {
+            loop.run("hang forever") { AssistantAgentLoop.Decision.Confirm }
+        }
+        advanceTimeBy(1_001)
+
+        val outcome = pending.await()
+        assertTrue(outcome is AssistantAgentLoop.Outcome.RetryableError)
+        outcome as AssistantAgentLoop.Outcome.RetryableError
+        assertEquals(AssistantFailureReason.ModelTimeout, outcome.reason)
+        assertTrue(outcome.reason.retryable)
+    }
+
+    @Test
+    fun modelTransportFailure_isRetryableFailure() = runTest {
+        val transportFails = object : AssistantLlmClient {
+            override suspend fun complete(
+                messages: List<LlmMessage>,
+                tools: List<ToolSpec>,
+                toolChoice: ToolChoice?,
+            ): Result<LlmResponse> =
+                Result.failure(AssistantLlmException.Transport("network read failed"))
+        }
+        val loop = AssistantAgentLoop(transportFails, RecordingActions())
+
+        val outcome = loop.run("use model") { AssistantAgentLoop.Decision.Confirm }
+
+        assertTrue(outcome is AssistantAgentLoop.Outcome.RetryableError)
+        outcome as AssistantAgentLoop.Outcome.RetryableError
+        assertEquals(AssistantFailureReason.ModelTransport, outcome.reason)
+        assertTrue(outcome.reason.retryable)
     }
 }

@@ -443,7 +443,8 @@ class FolderListViewModel @Inject constructor(
             override fun activeCwd(): String? = null
             override fun activeSessionName(): String? = null
             override fun currentScreenLabel(): String = "host detail for ${params.hostName}"
-            override fun sendCommand(command: String) = Unit
+            override suspend fun sendCommand(command: String): Result<Unit> =
+                Result.failure(IllegalStateException("No active terminal pane on the host detail screen."))
             override fun navigate(destination: AppDestination) {
                 _assistantNavRequests.tryEmit(destination)
             }

@@ -20,6 +20,7 @@ import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.session.AgentConversationRepository
+import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
@@ -798,6 +799,8 @@ public class TmuxSessionViewModel @Inject constructor(
 
     internal fun connectingSessionNameForTest(): String? = connectingTarget?.sessionName
 
+    internal fun activeSessionNameForTest(): String? = activeTarget?.sessionName
+
     public fun latestRestoreIntentSnapshot(): TmuxRestoreIntentSnapshot? =
         latestConnectIntent?.let { intent ->
             TmuxRestoreIntentSnapshot(
@@ -1429,6 +1432,8 @@ public class TmuxSessionViewModel @Inject constructor(
                     "tmux-mid-session-disconnect host=${current.host} " +
                         "port=${current.port} user=${current.user}",
                 )
+                registeredHostId?.let { activeTmuxClients.unregister(it) }
+                registeredHostId = null
                 _connectionStatus.value = ConnectionStatus.Failed(
                     "Disconnected from ${current.user}@${current.host}:${current.port}. " +
                         "Tap Reconnect to retry.",
@@ -1494,6 +1499,7 @@ public class TmuxSessionViewModel @Inject constructor(
         registeredHostId = hostId
         installLifecycleHooks(hostId)
         activeTarget = target
+        refreshReconnectAvailability()
         bindProjectRootsForHost(hostId)
         _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
         maybeRefreshControlClientSize()
@@ -2079,6 +2085,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 detection = detection,
                 events = boundedDistinctEvents(initialEvents),
                 selectedTab = SessionTab.Terminal,
+                syncStatus = AgentConversationSyncStatus.Live,
             ),
         )
         // Issue #160: OpenCode now tails its JSONL via `session.tail`
@@ -2089,6 +2096,14 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         if (followJob != null) {
             paneAgentJobs[paneId] = followJob
+            followJob.invokeOnCompletion { cause ->
+                if (cause is CancellationException) return@invokeOnCompletion
+                bridgeScope.launch {
+                    markAgentTailStopped(paneId, detection, cause)
+                }
+            }
+        } else {
+            markAgentTailUnavailable(paneId, detection)
         }
     }
 
@@ -2149,6 +2164,37 @@ public class TmuxSessionViewModel @Inject constructor(
         setAgentConversation(paneId, current.copy(events = boundedDistinctEvents(current.events + events)))
     }
 
+    private fun markAgentTailStopped(
+        paneId: String,
+        detection: AgentDetection,
+        cause: Throwable?,
+    ) {
+        val nextStatus = if (cause == null) {
+            AgentConversationSyncStatus.Stale
+        } else {
+            AgentConversationSyncStatus.LogUnavailable
+        }
+        markAgentConversationSyncStatus(paneId, detection, nextStatus)
+    }
+
+    private fun markAgentTailUnavailable(paneId: String, detection: AgentDetection) {
+        markAgentConversationSyncStatus(
+            paneId = paneId,
+            detection = detection,
+            syncStatus = AgentConversationSyncStatus.LogUnavailable,
+        )
+    }
+
+    private fun markAgentConversationSyncStatus(
+        paneId: String,
+        detection: AgentDetection,
+        syncStatus: AgentConversationSyncStatus,
+    ) {
+        val current = _agentConversations.value[paneId] ?: return
+        if (current.detection != detection || current.syncStatus == syncStatus) return
+        setAgentConversation(paneId, current.copy(syncStatus = syncStatus))
+    }
+
     private fun setAgentConversation(paneId: String, state: AgentConversationUiState) {
         _agentConversations.value = _agentConversations.value + (paneId to state)
     }
@@ -2171,8 +2217,32 @@ public class TmuxSessionViewModel @Inject constructor(
                 detection = detection,
                 events = boundedDistinctEvents(initialEvents),
                 selectedTab = SessionTab.Terminal,
+                syncStatus = AgentConversationSyncStatus.Live,
             ),
         )
+    }
+
+    internal fun startAgentTailForTest(
+        paneId: String,
+        session: SshSession,
+        detection: AgentDetection,
+        fromLineExclusive: Long,
+    ): Job? {
+        val job = agentRepository.tailEventsFromLine(session, detection, fromLineExclusive) { event ->
+            appendAgentEvents(paneId, listOf(event))
+        }
+        if (job != null) {
+            paneAgentJobs[paneId] = job
+            job.invokeOnCompletion { cause ->
+                if (cause is CancellationException) return@invokeOnCompletion
+                bridgeScope.launch {
+                    markAgentTailStopped(paneId, detection, cause)
+                }
+            }
+        } else {
+            markAgentTailUnavailable(paneId, detection)
+        }
+        return job
     }
 
     /**
@@ -2217,10 +2287,23 @@ public class TmuxSessionViewModel @Inject constructor(
         if (bytes.isEmpty()) return
         val client = clientRef ?: return
         bridgeScope.launch {
-            runCatching {
-                sendInputBytesToPane(client, paneId, bytes)
-            }
+            writeInputToPaneResult(client, paneId, bytes)
         }
+    }
+
+    internal suspend fun writeInputToPaneResult(paneId: String, bytes: ByteArray): Result<Unit> {
+        if (bytes.isEmpty()) return Result.success(Unit)
+        val client = clientRef
+            ?: return Result.failure(IllegalStateException("No active tmux client for pane input."))
+        return writeInputToPaneResult(client, paneId, bytes)
+    }
+
+    private suspend fun writeInputToPaneResult(
+        client: TmuxClient,
+        paneId: String,
+        bytes: ByteArray,
+    ): Result<Unit> = runCatching {
+        sendInputBytesToPane(client, paneId, bytes)
     }
 
     internal fun sendControlInputToPane(paneId: String, byte: Int, repeatCount: Int = 1) {
@@ -2276,10 +2359,11 @@ public class TmuxSessionViewModel @Inject constructor(
             override fun activeSessionName(): String? = target.sessionName
             override fun currentScreenLabel(): String =
                 "tmux session ${target.sessionName} on ${target.hostName}"
-            override fun sendCommand(command: String) {
-                val pane = focusedPaneId ?: return
+            override suspend fun sendCommand(command: String): Result<Unit> {
+                val pane = focusedPaneId
+                    ?: return Result.failure(IllegalStateException("No focused pane for assistant command."))
                 val payload = command + "\r"
-                writeInputToPane(pane, payload.toByteArray(Charsets.UTF_8))
+                return writeInputToPaneResult(pane, payload.toByteArray(Charsets.UTF_8))
             }
             override fun navigate(destination: AppDestination) {
                 _assistantNavRequests.tryEmit(destination)

@@ -33,7 +33,7 @@ internal interface SessionActionBridge {
      * (the `run_command` execution path). Mirrors the byte path chip taps
      * and snippet picks already use.
      */
-    fun sendCommand(command: String)
+    suspend fun sendCommand(command: String): Result<Unit>
 
     /** Request navigation to [destination] via the app's nav state machine. */
     fun navigate(destination: AppDestination)

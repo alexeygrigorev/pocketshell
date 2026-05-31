@@ -693,7 +693,10 @@ public class SessionViewModel @Inject constructor(
             override fun activeCwd(): String? = recentDir
             override fun activeSessionName(): String? = null
             override fun currentScreenLabel(): String = "raw-ssh session on $activeHostName"
-            override fun sendCommand(command: String) = sendText(command, withEnter = true)
+            override suspend fun sendCommand(command: String): Result<Unit> {
+                sendText(command, withEnter = true)
+                return Result.success(Unit)
+            }
             override fun navigate(destination: AppDestination) {
                 _assistantNavRequests.tryEmit(destination)
             }
@@ -1049,10 +1052,17 @@ public class SessionViewModel @Inject constructor(
 
 public enum class SessionTab { Terminal, Conversation }
 
+public enum class AgentConversationSyncStatus {
+    Live,
+    Stale,
+    LogUnavailable,
+}
+
 public data class AgentConversationUiState(
     val detection: AgentDetection? = null,
     val events: List<ConversationEvent> = emptyList(),
     val selectedTab: SessionTab = SessionTab.Terminal,
+    val syncStatus: AgentConversationSyncStatus = AgentConversationSyncStatus.Live,
     /**
      * Issue #154: persisted search query for the conversation pane. The
      * value lives on the ViewModel state (not as a local `remember` in

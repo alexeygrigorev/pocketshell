@@ -335,7 +335,7 @@ class SessionsDashboardViewModelTest {
     }
 
     @Test
-    fun listSessionsErrorLeavesPreviousSnapshotIntact() = runTest {
+    fun listSessionsErrorMarksPreviousSnapshotStale() = runTest {
         val registry = newRegistry()
         val vm = newVm(registry = registry, pollMs = 50L)
 
@@ -343,7 +343,7 @@ class SessionsDashboardViewModelTest {
             responses.addLast(
                 CommandResponse(
                     number = 0L,
-                    output = listOf(row("s1", activitySec = 100L)),
+                    output = listOf(row("s1", activitySec = 100L, attached = true)),
                     isError = false,
                 ),
             )
@@ -366,15 +366,10 @@ class SessionsDashboardViewModelTest {
         val entry = vm.entryFor(1L)!!
         vm.cancelPollersForTest()
         vm.refreshEntryForTest(entry)
-        // Error reply currently treated as "no sessions on this host" —
-        // contract: per-host snapshot is overwritten only on a
-        // successful (non-error) poll, so the previous snapshot
-        // survives.
-        assertEquals(
-            "previous snapshot survives transient list-sessions error",
-            1,
-            vm.sessions.value.size,
-        )
+        val stale = vm.sessions.value.single()
+        assertEquals("s1", stale.sessionName)
+        assertTrue("previous snapshot survives transient list-sessions error as stale", stale.stale)
+        assertFalse("stale snapshot must not retain live attached hint", stale.attached)
         vm.stopForTest()
     }
 

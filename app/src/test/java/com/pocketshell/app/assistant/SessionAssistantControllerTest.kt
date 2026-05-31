@@ -7,9 +7,13 @@ import com.pocketshell.core.assistant.LlmToolCall
 import com.pocketshell.core.assistant.StopReason
 import com.pocketshell.core.assistant.ToolChoice
 import com.pocketshell.core.assistant.ToolSpec
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.runCurrent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -19,6 +23,7 @@ import org.junit.Test
  * (issue #266): a mutating candidate parks in [AssistantUiState.Confirming],
  * a correction re-prompts with a revised candidate, and confirm runs it.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class SessionAssistantControllerTest {
 
     private class ScriptedClient(private val q: ArrayDeque<LlmResponse>) : AssistantLlmClient {
@@ -113,5 +118,43 @@ class SessionAssistantControllerTest {
         controller.start("do something")
         advanceUntilIdle()
         assertTrue(controller.state.value is AssistantUiState.Error)
+    }
+
+    @Test
+    fun modelTimeout_surfacesRetryableErrorState() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val neverReturns = object : AssistantLlmClient {
+            override suspend fun complete(
+                messages: List<LlmMessage>,
+                tools: List<ToolSpec>,
+                toolChoice: ToolChoice?,
+            ): Result<LlmResponse> = awaitCancellation()
+        }
+        val controller = SessionAssistantController(
+            scope = kotlinx.coroutines.CoroutineScope(dispatcher),
+            sessionFactory = {
+                SessionAssistantController.AssistantRunDeps(
+                    client = neverReturns,
+                    actions = RecordingActions(),
+                    traceSink = NoOpAssistantTraceSink,
+                    installId = "i",
+                    sessionId = null,
+                )
+            },
+            modelTurnTimeoutMs = 1_000,
+        )
+
+        controller.start("do something")
+        assertTrue(controller.state.value is AssistantUiState.Thinking)
+
+        runCurrent()
+        advanceTimeBy(1_001)
+        advanceUntilIdle()
+
+        val state = controller.state.value
+        assertTrue(state is AssistantUiState.Error)
+        state as AssistantUiState.Error
+        assertEquals(AssistantFailureReason.ModelTimeout, state.reason)
+        assertTrue(state.retryable)
     }
 }

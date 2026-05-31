@@ -26,6 +26,9 @@ package com.pocketshell.app.sessions
  *   visually in v1 but parsed so a future visual hint (e.g. a dot, or
  *   bumping attached sessions above idle ones at equal recency) is a
  *   pure UI change.
+ * @property stale true when this row is retained from the last successful
+ *   poll after a later poll failed. Stale rows are preserved for
+ *   continuity, but must not look like a current live snapshot.
  */
 data class SessionSummary(
     val hostId: Long,
@@ -33,4 +36,5 @@ data class SessionSummary(
     val sessionName: String,
     val lastActivity: Long,
     val attached: Boolean,
+    val stale: Boolean = false,
 )

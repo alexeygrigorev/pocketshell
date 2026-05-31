@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import android.os.Looper
+import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
@@ -15,6 +16,7 @@ import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CompletableJob
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -43,6 +45,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import java.io.File
+import java.io.IOException
 
 /**
  * Unit tests for [TmuxSessionViewModel] that exercise the per-pane
@@ -764,6 +767,44 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun eofDisconnectUnregistersDeadClientAndPreservesReconnectTarget() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        runCurrent()
+        assertSame(client, registry.clients.value[7L]?.client)
+
+        client.disconnectedSignal.value = true
+        runCurrent()
+
+        assertTrue(
+            "dead active tmux client must be removed from dashboard registry",
+            registry.clients.value.isEmpty(),
+        )
+        assertEquals("work", vm.activeSessionNameForTest())
+        assertTrue("Reconnect must remain available after EOF disconnect", vm.canReconnect.value)
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "expected Failed after EOF disconnect, got $status",
+            status is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertEquals(
+            "Disconnected from alex@alpha.example:22. Tap Reconnect to retry.",
+            (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+        )
+    }
+
+    @Test
     fun writeInputToPaneSeparatesLeadingDashLiteralFromTmuxOptions() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()
@@ -959,6 +1000,25 @@ class TmuxSessionViewModelTest {
             "empty input must not produce a send-keys command",
             client.sentCommands.none { it.startsWith("send-keys") },
         )
+    }
+
+    @Test
+    fun writeInputToPaneResultPropagatesFailedPaneWrite() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            closeAndThrowOnCommandPrefix = "send-keys"
+            closeAndThrowException = TmuxClientException("failed to write tmux command `send-keys`")
+        }
+        vm.attachClientForTest(client)
+
+        val result = vm.writeInputToPaneResult("%0", "hello".toByteArray(Charsets.UTF_8))
+
+        assertTrue(result.isFailure)
+        val error = result.exceptionOrNull()
+        assertTrue("expected TmuxClientException, got ${error?.javaClass?.name}", error is TmuxClientException)
+        assertTrue(error?.message?.contains("send-keys") == true)
+        assertEquals(listOf("send-keys -l -t %0 -- 'hello'"), client.sentCommands.filter { it.startsWith("send-keys") })
+        assertTrue("failed pane write must close the dead tmux client", client.closed)
     }
 
     // ------------------------------------------------------------- Issue #209
@@ -1838,6 +1898,59 @@ class TmuxSessionViewModelTest {
             "unknown pane must not be silently created",
             vm.agentConversations.value.isEmpty(),
         )
+    }
+
+    @Test
+    fun stoppedAgentLogTailMarksConversationStaleWhileTmuxStaysConnected() = runTest {
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        val detection = newClaudeDetection()
+        val tailJob = Job()
+        vm.startAgentConversationForTest("%0", detection)
+
+        val started = vm.startAgentTailForTest(
+            paneId = "%0",
+            session = FakeSshSession(tailJob = tailJob),
+            detection = detection,
+            fromLineExclusive = 0L,
+        )
+
+        assertSame(tailJob, started)
+        assertEquals(AgentConversationSyncStatus.Live, vm.agentConversations.value["%0"]!!.syncStatus)
+
+        tailJob.complete()
+        advanceUntilIdle()
+
+        assertEquals(
+            "normal tail exit means the conversation feed is stale, not that tmux disconnected",
+            AgentConversationSyncStatus.Stale,
+            vm.agentConversations.value["%0"]!!.syncStatus,
+        )
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
+    @Test
+    fun failedAgentLogTailMarksConversationLogUnavailableWhileTmuxStaysConnected() = runTest {
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        val detection = newClaudeDetection()
+        val tailJob = Job()
+        vm.startAgentConversationForTest("%0", detection)
+        vm.startAgentTailForTest(
+            paneId = "%0",
+            session = FakeSshSession(tailJob = tailJob),
+            detection = detection,
+            fromLineExclusive = 0L,
+        )
+
+        tailJob.completeExceptionally(IOException("tail failed"))
+        advanceUntilIdle()
+
+        assertEquals(
+            AgentConversationSyncStatus.LogUnavailable,
+            vm.agentConversations.value["%0"]!!.syncStatus,
+        )
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
     }
 
     // ─── Issue #186: per-window agent detection state ──────────────────
@@ -3286,6 +3399,7 @@ class TmuxSessionViewModelTest {
      */
     private class FakeSshSession(
         private val isConnectedValue: Boolean = true,
+        private val tailJob: CompletableJob = Job(),
     ) : com.pocketshell.core.ssh.SshSession {
         @Volatile
         var closed: Boolean = false
@@ -3297,7 +3411,7 @@ class TmuxSessionViewModelTest {
             com.pocketshell.core.ssh.ExecResult(stdout = "", stderr = "", exitCode = 0)
 
         override fun tail(path: String, onLine: (String) -> Unit): kotlinx.coroutines.Job =
-            kotlinx.coroutines.Job()
+            tailJob
 
         override fun openLocalPortForward(
             remoteHost: String,

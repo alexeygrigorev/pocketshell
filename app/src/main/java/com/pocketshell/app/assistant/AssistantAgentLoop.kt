@@ -1,10 +1,15 @@
 package com.pocketshell.app.assistant
 
 import com.pocketshell.core.assistant.AssistantLlmClient
+import com.pocketshell.core.assistant.AssistantLlmException
 import com.pocketshell.core.assistant.LlmMessage
+import com.pocketshell.core.assistant.LlmResponse
 import com.pocketshell.core.assistant.LlmToolCall
 import com.pocketshell.core.assistant.LlmToolResult
 import com.pocketshell.core.assistant.StopReason
+import com.pocketshell.core.assistant.ToolSpec
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.withTimeout
 import org.json.JSONException
 import org.json.JSONObject
 
@@ -39,6 +44,8 @@ import org.json.JSONObject
  * @property traceSink #270 trace emission (no-op on absent binary).
  * @property installId stable per-install UUID for the trace `install_id`.
  * @property maxSteps hard cap on model turns to avoid runaway loops.
+ * @property modelTurnTimeoutMs per-model-call timeout; a hung provider must
+ *   fail this run instead of leaving the UI in Thinking forever.
  */
 internal class AssistantAgentLoop(
     private val client: AssistantLlmClient,
@@ -47,6 +54,7 @@ internal class AssistantAgentLoop(
     private val installId: String = "unknown",
     private val sessionId: String? = null,
     private val maxSteps: Int = 12,
+    private val modelTurnTimeoutMs: Long = DEFAULT_MODEL_TURN_TIMEOUT_MS,
 ) {
 
     /**
@@ -75,6 +83,10 @@ internal class AssistantAgentLoop(
         data class Answer(val text: String) : Outcome
         data class Cancelled(val text: String) : Outcome
         data class Failed(val message: String) : Outcome
+        data class RetryableError(
+            val reason: AssistantFailureReason,
+            val message: String,
+        ) : Outcome
     }
 
     /**
@@ -96,11 +108,14 @@ internal class AssistantAgentLoop(
         var step = 0
         while (step < maxSteps) {
             step++
-            val response = client.complete(
+            val response = runModelTurn(
                 messages = messages,
                 tools = AssistantTools.ALL,
             ).getOrElse { error ->
-                return Outcome.Failed(error.message ?: "The assistant request failed.")
+                return when (val reason = error.retryableReason()) {
+                    null -> Outcome.Failed(error.message ?: "The assistant request failed.")
+                    else -> Outcome.RetryableError(reason, error.retryableMessage(reason))
+                }
             }
 
             if (!response.hasToolCalls) {
@@ -135,6 +150,20 @@ internal class AssistantAgentLoop(
             messages += LlmMessage.toolResults(results)
         }
         return Outcome.Failed("The assistant reached its step limit before finishing.")
+    }
+
+    private suspend fun runModelTurn(
+        messages: List<LlmMessage>,
+        tools: List<ToolSpec>,
+    ): Result<LlmResponse> = try {
+        withTimeout(modelTurnTimeoutMs) {
+            client.complete(
+                messages = messages,
+                tools = tools,
+            )
+        }
+    } catch (timeout: TimeoutCancellationException) {
+        Result.failure(AssistantModelTurnException(AssistantFailureReason.ModelTimeout, timeout))
     }
 
     private sealed interface DispatchOutcome {
@@ -358,6 +387,8 @@ internal class AssistantAgentLoop(
     }
 
     companion object {
+        const val DEFAULT_MODEL_TURN_TIMEOUT_MS: Long = 60_000L
+
         const val REDACTED = "<redacted>"
 
         const val SYSTEM_PROMPT: String =
@@ -370,4 +401,27 @@ internal class AssistantAgentLoop(
                 "Keep shell commands short and non-interactive. When the task is complete, reply " +
                 "with a brief confirmation and stop calling tools."
     }
+}
+
+internal enum class AssistantFailureReason(val retryable: Boolean) {
+    ModelTimeout(retryable = true),
+    ModelTransport(retryable = true),
+}
+
+private class AssistantModelTurnException(
+    val reason: AssistantFailureReason,
+    cause: Throwable,
+) : RuntimeException("Assistant model call timed out.", cause)
+
+private fun Throwable.retryableReason(): AssistantFailureReason? = when (this) {
+    is AssistantModelTurnException -> reason
+    is AssistantLlmException.Transport -> AssistantFailureReason.ModelTransport
+    else -> null
+}
+
+private fun Throwable.retryableMessage(reason: AssistantFailureReason): String = when (reason) {
+    AssistantFailureReason.ModelTimeout ->
+        "The assistant model call timed out. Check the network or try again."
+    AssistantFailureReason.ModelTransport ->
+        message?.takeIf { it.isNotBlank() } ?: "The assistant model transport failed. Try again."
 }

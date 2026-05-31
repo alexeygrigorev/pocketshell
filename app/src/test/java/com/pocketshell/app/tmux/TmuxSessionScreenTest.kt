@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import com.pocketshell.app.session.AgentConversationUiState
+import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
@@ -186,6 +187,16 @@ class TmuxSessionScreenTest {
         assertEquals(listOf("Terminal", "Conversation"), state.labels)
         assertEquals(1, state.selectedIndex)
         assertTrue(state.showsConversationTab)
+    }
+
+    @Test
+    fun conversationSyncStatusLabelsExposeLiveStaleAndUnavailable() {
+        assertEquals("Live", conversationSyncStatusLabel(AgentConversationSyncStatus.Live))
+        assertEquals("Stale", conversationSyncStatusLabel(AgentConversationSyncStatus.Stale))
+        assertEquals(
+            "Log unavailable",
+            conversationSyncStatusLabel(AgentConversationSyncStatus.LogUnavailable),
+        )
     }
 
     // ─── Issues #177 / #249: breadcrumb status mapping ──────────────────

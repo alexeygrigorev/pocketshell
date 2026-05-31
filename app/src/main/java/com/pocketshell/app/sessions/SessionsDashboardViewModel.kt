@@ -182,10 +182,10 @@ class SessionsDashboardViewModel @Inject constructor(
     /**
      * Poll `list-sessions` against [entry]'s client on a fixed cadence.
      *
-     * Failures (transport drop, tmux error) leave the existing per-host
-     * snapshot intact rather than blanking the row — the UI prefers a
-     * slightly-stale row to a flicker. The next successful poll
-     * overwrites the stale entry.
+     * Failures (transport drop, tmux error) keep the existing per-host
+     * snapshot visible, but mark it stale and clear attached/live hints
+     * so the UI does not present an old snapshot as current. The next
+     * successful poll overwrites the stale entry.
      */
     private suspend fun pollLoop(entry: ActiveTmuxClients.Entry) {
         // Immediate first poll so the section populates as fast as
@@ -196,6 +196,8 @@ class SessionsDashboardViewModel @Inject constructor(
             if (rows != null) {
                 perHostSnapshots[entry.hostId] = rows
                 emitAggregate()
+            } else {
+                markHostSnapshotStale(entry.hostId)
             }
             delay(pollIntervalMs)
         }
@@ -569,8 +571,19 @@ class SessionsDashboardViewModel @Inject constructor(
     }
 
     private suspend fun refreshEntry(entry: ActiveTmuxClients.Entry) {
-        val rows = fetchSessions(entry) ?: return
+        val rows = fetchSessions(entry) ?: run {
+            markHostSnapshotStale(entry.hostId)
+            return
+        }
         perHostSnapshots[entry.hostId] = rows
+        emitAggregate()
+    }
+
+    private fun markHostSnapshotStale(hostId: Long) {
+        val existing = perHostSnapshots[hostId] ?: return
+        perHostSnapshots[hostId] = existing.map { row ->
+            row.copy(attached = false, stale = true)
+        }
         emitAggregate()
     }
 

@@ -422,6 +422,61 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun attachReadinessRecordsTmuxLatencyMetrics() = runTest {
+        TmuxSessionLatencyTelemetry.resetForTest()
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\twork\tshell\t0"),
+                isError = false,
+            ),
+        )
+        client.capturePaneResponses.addLast(
+            CommandResponse(
+                number = 2L,
+                output = listOf("issue337-visible-output"),
+                isError = false,
+            ),
+        )
+        client.cursorQueryResponses.addLast(
+            CommandResponse(number = 3L, output = listOf("0,0"), isError = false),
+        )
+
+        vm.attachClientWithReadinessForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        client.emittedEvents.emit(ControlEvent.Output("%0", "live".toByteArray()))
+        advanceUntilIdle()
+
+        val names = TmuxSessionLatencyTelemetry.snapshot().map { it.name }
+        assertTrue("expected list-panes timing in $names", "list_panes" in names)
+        assertTrue("expected capture-pane timing in $names", "capture_pane" in names)
+        assertTrue("expected cursor-query timing in $names", "cursor_query" in names)
+        assertTrue(
+            "expected append-to-buffer timing in $names",
+            "terminal_output_append_to_buffer" in names,
+        )
+        assertTrue("expected first visible output timing in $names", "first_visible_output" in names)
+
+        val artifactLines = TmuxSessionLatencyTelemetry.snapshot().map { it.toArtifactLine() }
+        artifactLines.forEach(::println)
+        assertTrue(
+            "CI unit test reports should contain artifact-shaped timing lines, got $artifactLines",
+            artifactLines.any { it.startsWith("tmux_latency_list_panes_ms=") },
+        )
+        TmuxSessionLatencyTelemetry.resetForTest()
+    }
+
+    @Test
     fun parseTmuxPaneCursorReadsWellFormedReply() {
         // Issue #259: the cursor reply is `cursor_x,cursor_y` (0-based).
         assertEquals(TmuxPaneCursor(column = 0, row = 2), parseTmuxPaneCursor("0,2"))

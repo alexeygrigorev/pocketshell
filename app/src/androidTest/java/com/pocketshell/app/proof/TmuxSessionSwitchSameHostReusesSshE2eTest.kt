@@ -2,6 +2,7 @@ package com.pocketshell.app.proof
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import android.view.View
@@ -33,9 +34,12 @@ import com.pocketshell.app.tmux.TMUX_FULL_CHROME_BACK_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_FULL_CHROME_MORE_BUTTON_TAG
 import com.pocketshell.app.tmux.SSH_HANDSHAKE_ATTEMPTS
 import com.pocketshell.app.tmux.TMUX_CONNECT_ATTEMPTS
+import com.pocketshell.app.tmux.TMUX_WARM_SWITCH_CI_ADVISORY_P95_MS
+import com.pocketshell.app.tmux.TMUX_WARM_SWITCH_LOCAL_P95_BUDGET_MS
 import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_PAGE_TAG_PREFIX
 import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TmuxSessionLatencyTelemetry
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -53,6 +57,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
 import java.io.FileOutputStream
+import kotlin.math.ceil
 
 /**
  * Issue #178 — verifies that switching tmux sessions on the SAME host
@@ -123,6 +128,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
 
         seedTmuxSessions(key)
         val hostRowTag = seedDockerHost(key, "Issue178 Same Host")
+        forceFlatHostDetailViewMode()
 
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
         SshOpenTelemetry.resetForTest()
@@ -134,7 +140,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
                 .isNotEmpty()
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        waitForText(SESSION_A, timeoutMs = pickerWaitMs)
+        waitForFolderListReady()
         compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
@@ -269,6 +275,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
 
         seedTmuxSessions(key)
         val hostRowTag = seedDockerHost(key, "Issue278 Dashboard Same Host")
+        forceFlatHostDetailViewMode()
 
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
 
@@ -338,6 +345,88 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         )
 
         writeTimings()
+        Unit
+    }
+
+    @Test
+    fun sameHostWarmSwitchBenchmarkReportsRepeatedStats() = runBlocking {
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        seedTmuxSessions(key)
+        val hostRowTag = seedDockerHost(key, "Issue337 Warm Switch Budget")
+        forceFlatHostDetailViewMode()
+
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+        SshOpenTelemetry.resetForTest()
+        TmuxSessionLatencyTelemetry.resetForTest()
+
+        try {
+            compose.waitUntil(timeoutMillis = 10_000) {
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+            waitForFolderListReady()
+            compose.onNodeWithText(SESSION_A, useUnmergedTree = true).performClick()
+            compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+            waitForTerminalViewAttached()
+            waitForTerminalText(SESSION_A_MARKER)
+
+            val staleFrameSamples = mutableListOf<Long>()
+            val firstNewFrameSamples = mutableListOf<Long>()
+            var currentMarker = SESSION_A_MARKER
+            repeat(WARM_SWITCH_BENCHMARK_ITERATIONS) { iteration ->
+                val expectedMarker = if (currentMarker == SESSION_A_MARKER) {
+                    SESSION_B_MARKER
+                } else {
+                    SESSION_A_MARKER
+                }
+                val sample = performWarmSwitchBenchmarkSample(
+                    iteration = iteration + 1,
+                    staleMarker = currentMarker,
+                    expectedMarker = expectedMarker,
+                )
+                staleFrameSamples += sample.staleFrameClearedMs
+                firstNewFrameSamples += sample.firstNewFrameMs
+                recordTiming("warm_switch_${iteration + 1}_stale_frame_cleared_ms", sample.staleFrameClearedMs)
+                recordTiming("warm_switch_${iteration + 1}_first_new_frame_ms", sample.firstNewFrameMs)
+                currentMarker = expectedMarker
+            }
+
+            recordTimingStats(
+                prefix = "warm_switch_stale_frame_cleared",
+                samples = staleFrameSamples,
+            )
+            val firstNewStats = recordTimingStats(
+                prefix = "warm_switch_first_new_frame",
+                samples = firstNewFrameSamples,
+            )
+            recordTiming("warm_switch_local_p95_budget_ms", TMUX_WARM_SWITCH_LOCAL_P95_BUDGET_MS)
+            recordTiming("warm_switch_ci_advisory_p95_ms", TMUX_WARM_SWITCH_CI_ADVISORY_P95_MS)
+            recordTiming("warm_switch_iterations", WARM_SWITCH_BENCHMARK_ITERATIONS.toLong())
+            TmuxSessionLatencyTelemetry.snapshot().forEach { event ->
+                timings += event.toArtifactLine(prefix = "warm_switch")
+            }
+
+            // Local physical-device runs are the hard #337 p95 gate. Emulator
+            // and CI runs still publish the same p50/p95/max artifact lines
+            // plus the 100 ms target, but stay advisory until the #338 runtime
+            // cache architecture exists.
+            val budgetMs = if (TerminalTestTimeouts.isRunningOnCi() || isRunningOnEmulator()) {
+                TMUX_WARM_SWITCH_CI_ADVISORY_P95_MS
+            } else {
+                TMUX_WARM_SWITCH_LOCAL_P95_BUDGET_MS
+            }
+            assertTrue(
+                "warm same-host switch p95 should stay under ${budgetMs}ms; " +
+                    "stats=$firstNewStats samples=$firstNewFrameSamples",
+                firstNewStats.p95Ms < budgetMs,
+            )
+        } finally {
+            writeTimings()
+        }
         Unit
     }
 
@@ -533,6 +622,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
     private fun switchToNextSameHostSession(tmuxConnectBefore: Int, timeoutMs: Long): Long {
         val deadline = SystemClock.elapsedRealtime() + timeoutMs
         var index = 1
+        var dispatchAt: Long? = null
         while (SystemClock.elapsedRealtime() < deadline &&
             TMUX_CONNECT_ATTEMPTS.get() == tmuxConnectBefore
         ) {
@@ -540,6 +630,9 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
                     .fetchSemanticsNodes().isNotEmpty()
             ) {
                 runCatching {
+                    if (dispatchAt == null) {
+                        dispatchAt = SystemClock.elapsedRealtime()
+                    }
                     compose.onNodeWithTag(TMUX_SESSION_PAGER_TAG, useUnmergedTree = true)
                         .performScrollToIndex(index)
                 }
@@ -551,7 +644,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         check(TMUX_CONNECT_ATTEMPTS.get() > tmuxConnectBefore) {
             "session switch never fired in the pager within ${timeoutMs}ms"
         }
-        return SystemClock.elapsedRealtime()
+        return dispatchAt ?: SystemClock.elapsedRealtime()
     }
 
     private fun openMoreMenu() {
@@ -650,6 +743,84 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         }
     }
 
+    private data class SwitchSample(
+        val staleFrameClearedMs: Long,
+        val firstNewFrameMs: Long,
+    )
+
+    private data class TimingStats(
+        val p50Ms: Long,
+        val p95Ms: Long,
+        val maxMs: Long,
+    )
+
+    private fun performWarmSwitchBenchmarkSample(
+        iteration: Int,
+        staleMarker: String,
+        expectedMarker: String,
+    ): SwitchSample {
+        val handshakeBefore = SSH_HANDSHAKE_ATTEMPTS.get()
+        val tmuxConnectBefore = TMUX_CONNECT_ATTEMPTS.get()
+        val sshOpenBefore = SshOpenTelemetry.snapshot()
+
+        openMoreMenu()
+        compose.onNodeWithText("Switch session").performClick()
+        waitForSessionPagerReady(timeoutMs = pickerWaitMs)
+        val switchAt = switchToNextSameHostSession(tmuxConnectBefore, timeoutMs = pickerWaitMs)
+        compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
+
+        waitForTerminalTextAbsent(staleMarker)
+        val staleFrameClearedMs = SystemClock.elapsedRealtime() - switchAt
+        waitForTerminalViewAttached()
+        waitForTmuxConnectCountAbove(tmuxConnectBefore)
+        waitForTerminalText(expectedMarker)
+        val firstNewFrameMs = SystemClock.elapsedRealtime() - switchAt
+
+        val handshakeAfter = SSH_HANDSHAKE_ATTEMPTS.get()
+        val tmuxConnectAfter = TMUX_CONNECT_ATTEMPTS.get()
+        val sshOpenDeltas = sshOpenDeltasSince(sshOpenBefore)
+        recordTiming("warm_switch_${iteration}_ssh_handshakes_during_switch", (handshakeAfter - handshakeBefore).toLong())
+        recordTiming("warm_switch_${iteration}_tmux_connects_during_switch", (tmuxConnectAfter - tmuxConnectBefore).toLong())
+        SSH_SWITCH_SOURCES.forEach { source ->
+            recordTiming("warm_switch_${iteration}_ssh_opens_${source}_during_switch", (sshOpenDeltas[source] ?: 0).toLong())
+        }
+        assertEquals(
+            "warm same-host switch must not perform a fresh SSH handshake",
+            handshakeBefore,
+            handshakeAfter,
+        )
+        assertTrue(
+            "warm same-host switch must attach a new tmux control client",
+            tmuxConnectAfter > tmuxConnectBefore,
+        )
+        assertEquals(
+            "warm same-host switch must not open fresh SSH from switch sources; deltas=$sshOpenDeltas",
+            emptyMap<String, Int>(),
+            sshOpenDeltas.filterValues { it != 0 },
+        )
+        return SwitchSample(staleFrameClearedMs, firstNewFrameMs)
+    }
+
+    private fun recordTimingStats(prefix: String, samples: List<Long>): TimingStats {
+        val sorted = samples.sorted()
+        check(sorted.isNotEmpty()) { "cannot record stats for an empty sample set" }
+        val stats = TimingStats(
+            p50Ms = percentile(sorted, 0.50),
+            p95Ms = percentile(sorted, 0.95),
+            maxMs = sorted.last(),
+        )
+        recordTiming("${prefix}_p50_ms", stats.p50Ms)
+        recordTiming("${prefix}_p95_ms", stats.p95Ms)
+        recordTiming("${prefix}_max_ms", stats.maxMs)
+        return stats
+    }
+
+    private fun percentile(sortedSamples: List<Long>, percentile: Double): Long {
+        val index = (ceil(sortedSamples.size * percentile).toInt() - 1)
+            .coerceIn(0, sortedSamples.lastIndex)
+        return sortedSamples[index]
+    }
+
     private fun captureViewport(name: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         instrumentation.waitForIdleSync()
@@ -721,6 +892,23 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         println("ISSUE178_TIMING $line")
     }
 
+    private fun forceFlatHostDetailViewMode() {
+        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
+        appContext
+            .getSharedPreferences("app_settings", android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString("host_detail_view_mode", "Flat")
+            .commit()
+    }
+
+    private fun isRunningOnEmulator(): Boolean =
+        Build.FINGERPRINT.contains("generic", ignoreCase = true) ||
+            Build.FINGERPRINT.contains("emulator", ignoreCase = true) ||
+            Build.MODEL.contains("sdk", ignoreCase = true) ||
+            Build.MODEL.contains("emulator", ignoreCase = true) ||
+            Build.HARDWARE.contains("goldfish", ignoreCase = true) ||
+            Build.HARDWARE.contains("ranchu", ignoreCase = true)
+
     private fun View.findTerminalView(): TerminalView? {
         if (this is TerminalView) return this
         if (this !is ViewGroup) return null
@@ -749,6 +937,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         const val LOCAL_SWITCH_BUDGET_MS: Long = 1_000L
         const val LOCAL_DASHBOARD_SWITCH_BUDGET_MS: Long = 1_000L
         const val CI_SWITCH_BUDGET_MS: Long = 5_000L
+        const val WARM_SWITCH_BENCHMARK_ITERATIONS: Int = 5
         // Upper bound on session-pager page tags we probe when matching a
         // session by name (the pager is index-tagged from 1).
         const val MAX_PAGER_PAGES: Int = 12

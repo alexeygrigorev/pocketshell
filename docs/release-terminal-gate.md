@@ -53,6 +53,52 @@ artifact validator fires per step:
 | `step-04-tmux-external-update` | `TmuxExternalUpdateDockerTest#externalTmuxWriteRepaintsAttachedPocketShellViewport` | External write to the attached pane; prove PocketShell repaints. |
 | `step-05-real-agent-cli` | `TerminalLabDockerTest#terminalWorkbenchCapturesRealAgentCliScreens` | Real-agent Docker fixture (host port 2240). Drives at least one interactive Claude/Codex/OpenCode CLI screen. The terminal-workbench validator enforces `Ask anything`/`Welcome to Codex`/`Welcome to Claude Code` visible-text presence. |
 
+## Warm switch latency budget
+
+Issue #337 adds an explicit same-host warm-switch timing budget to the
+terminal release evidence. Run this connected benchmark when release risk
+includes tmux session switching, SSH reuse, or terminal first-frame latency:
+
+```bash
+./gradlew :app:connectedDebugAndroidTest \
+  -Pandroid.testInstrumentationRunnerArguments.class=com.pocketshell.app.proof.TmuxSessionSwitchSameHostReusesSshE2eTest#sameHostWarmSwitchBenchmarkReportsRepeatedStats
+```
+
+The benchmark repeatedly switches between two tmux sessions on the same Docker
+host and writes `timings.txt` under the device artifact directory
+`additional_test_output/issue178-same-host-switch/`. Pull it with `adb pull` or
+from the connected-test artifact bundle.
+
+Interpret the key lines as follows:
+
+- `warm_switch_first_new_frame_p50_ms`, `warm_switch_first_new_frame_p95_ms`,
+  and `warm_switch_first_new_frame_max_ms`: selection dispatch to the first
+  visible terminal frame from the new session.
+- `warm_switch_stale_frame_cleared_p50_ms`,
+  `warm_switch_stale_frame_cleared_p95_ms`, and
+  `warm_switch_stale_frame_cleared_max_ms`: selection dispatch to the old
+  session frame disappearing.
+- `warm_switch_local_p95_budget_ms=100`: the local budget for an
+  already-warmed target runtime display. This is the release target for p95.
+- `warm_switch_ci_advisory_p95_ms=5000`: CI/emulator advisory ceiling while
+  emulator variance and the uncached runtime path remain noisy.
+- `tmux_latency_list_panes_ms`, `tmux_latency_capture_pane_ms`,
+  `tmux_latency_cursor_query_ms`, `tmux_latency_first_visible_output_ms`, and
+  `tmux_latency_terminal_output_append_to_buffer_ms`: command-path timings
+  emitted by `TmuxSessionViewModel`.
+
+Structural failures are the hard gate: a warm same-host switch must not
+increase `SSH_HANDSHAKE_ATTEMPTS` and must not record new SSH opens from tmux
+connect, warm-host connect, session-picker list, folder-list probe, or start
+directory autocomplete sources. A new tmux control attach is expected on each
+switch until the runtime-cache work lands separately.
+
+CI records the same ViewModel command-path timing lines through
+`TmuxSessionViewModelTest#attachReadinessRecordsTmuxLatencyMetrics`; those
+lines live in the uploaded unit-test reports. Connected warm-switch timing
+thresholds are advisory on CI until emulator variance is low enough to make the
+100 ms local p95 budget a stable hard assertion.
+
 Step ordering note: `step-01-ssh-smoke` is numbered first by acceptance-
 criterion intent (SSH must work) but runs second after the terminal-lab
 step builds and installs the debug APK pair. Numbering is preserved in

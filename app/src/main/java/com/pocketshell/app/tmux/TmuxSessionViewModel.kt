@@ -969,6 +969,12 @@ public class TmuxSessionViewModel @Inject constructor(
             activeTarget = target
             refreshReconnectAvailability()
             attachClient(client)
+            TmuxSessionLatencyTelemetry.record(
+                name = "tmux_control_attach_count",
+                durationMs = 1L,
+                sessionName = target.sessionName,
+                trigger = trigger,
+            )
             client.connect()
             activeAttachMilestone = AttachMilestone(
                 attempt = attempt,
@@ -1117,6 +1123,12 @@ public class TmuxSessionViewModel @Inject constructor(
             activeTarget = target
             refreshReconnectAvailability()
             attachClient(client)
+            TmuxSessionLatencyTelemetry.record(
+                name = "tmux_control_attach_count",
+                durationMs = 1L,
+                sessionName = target.sessionName,
+                trigger = trigger,
+            )
             client.connect()
             activeAttachMilestone = AttachMilestone(
                 attempt = attempt,
@@ -1339,6 +1351,14 @@ public class TmuxSessionViewModel @Inject constructor(
                 "trigger=${milestone.trigger.logValue} session=${milestone.sessionName} " +
                 "pane=${event.paneId} bytes=${event.data.size} " +
                 "elapsedMs=${SystemClock.elapsedRealtime() - milestone.startedAtMs}",
+        )
+        TmuxSessionLatencyTelemetry.record(
+            name = "first_visible_output",
+            durationMs = SystemClock.elapsedRealtime() - milestone.startedAtMs,
+            sessionName = milestone.sessionName,
+            paneId = event.paneId,
+            trigger = milestone.trigger,
+            detail = "bytes=${event.data.size}",
         )
     }
 
@@ -1578,6 +1598,12 @@ public class TmuxSessionViewModel @Inject constructor(
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
         attachClient(client)
+        TmuxSessionLatencyTelemetry.record(
+            name = "tmux_control_attach_count",
+            durationMs = 1L,
+            sessionName = sessionName,
+            trigger = trigger,
+        )
         client.connect()
         activeAttachMilestone = AttachMilestone(
             attempt = attempt,
@@ -1730,6 +1756,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private suspend fun reconcilePanes(): PaneReconcileResult {
         val client = clientRef ?: return PaneReconcileResult.NoClient
         val target = activeTarget
+        val listPanesStartedAtMs = SystemClock.elapsedRealtime()
         val response = try {
             client.sendCommand(
                 buildListPanesCommand(target),
@@ -1738,6 +1765,13 @@ public class TmuxSessionViewModel @Inject constructor(
             if (t is CancellationException) throw t
             return PaneReconcileResult.Failed(t)
         }
+        TmuxSessionLatencyTelemetry.record(
+            name = "list_panes",
+            durationMs = SystemClock.elapsedRealtime() - listPanesStartedAtMs,
+            sessionName = target?.sessionName,
+            trigger = activeAttachMilestone?.trigger,
+            detail = "isError=${response.isError}",
+        )
         if (response.isError) {
             return PaneReconcileResult.Failed(
                 TmuxAttachPanesReadyException(
@@ -1877,9 +1911,18 @@ public class TmuxSessionViewModel @Inject constructor(
     private suspend fun preloadVisibleContentForNewPanes(newPanes: List<TmuxPaneState>) {
         val client = clientRef ?: return
         for (pane in newPanes) {
+            val captureStartedAtMs = SystemClock.elapsedRealtime()
             val response = runCatching {
                 client.sendCommand("capture-pane -p -e -S -200 -t ${pane.paneId}")
             }.getOrNull()
+            TmuxSessionLatencyTelemetry.record(
+                name = "capture_pane",
+                durationMs = SystemClock.elapsedRealtime() - captureStartedAtMs,
+                sessionName = activeTarget?.sessionName,
+                paneId = pane.paneId,
+                trigger = activeAttachMilestone?.trigger,
+                detail = "success=${response != null && !response.isError}",
+            )
             if (response == null || response.isError || response.output.isEmpty()) continue
             // Issue #259: ask tmux for the pane's true cursor position so the
             // seed can restore it after replaying the capture. Without this the
@@ -1889,17 +1932,36 @@ public class TmuxSessionViewModel @Inject constructor(
             // above the live one and mashing fragments of different frames
             // together (the reported garble). A missing/old/malformed reply
             // degrades to a seed with no explicit cursor restore.
+            val cursorStartedAtMs = SystemClock.elapsedRealtime()
             val cursor = runCatching {
                 client.sendCommand(
                     "display-message -p -t ${pane.paneId} '#{cursor_x},#{cursor_y}'",
                 )
             }.getOrNull()
+                .also { cursorResponse ->
+                    TmuxSessionLatencyTelemetry.record(
+                        name = "cursor_query",
+                        durationMs = SystemClock.elapsedRealtime() - cursorStartedAtMs,
+                        sessionName = activeTarget?.sessionName,
+                        paneId = pane.paneId,
+                        trigger = activeAttachMilestone?.trigger,
+                        detail = "success=${cursorResponse != null && !cursorResponse.isError}",
+                    )
+                }
                 ?.takeUnless { it.isError }
                 ?.output
                 ?.firstOrNull()
                 .let { parseTmuxPaneCursor(it) }
+            val appendStartedAtMs = SystemClock.elapsedRealtime()
             pane.terminalState.appendRemoteOutput(
                 response.output.toTerminalViewportBytes(cursor),
+            )
+            TmuxSessionLatencyTelemetry.record(
+                name = "terminal_output_append_to_buffer",
+                durationMs = SystemClock.elapsedRealtime() - appendStartedAtMs,
+                sessionName = activeTarget?.sessionName,
+                paneId = pane.paneId,
+                trigger = activeAttachMilestone?.trigger,
             )
         }
     }

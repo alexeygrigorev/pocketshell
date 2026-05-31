@@ -838,12 +838,6 @@ private fun FolderListContent(
                 )
             }
         }
-        item {
-            PortForwardingSummaryCard(
-                summary = portForwarding,
-                onOpen = onOpenPortForwarding,
-            )
-        }
         if (!showFlatFolderList && treeRoots.isEmpty()) {
             item {
                 EmptyState()
@@ -879,6 +873,14 @@ private fun FolderListContent(
                 )
             }
         }
+        if (portForwarding.shouldShowSummary) {
+            item {
+                PortForwardingSummaryCard(
+                    summary = portForwarding,
+                    onOpen = onOpenPortForwarding,
+                )
+            }
+        }
         item {
             Spacer(
                 modifier = Modifier
@@ -888,6 +890,9 @@ private fun FolderListContent(
         }
     }
 }
+
+private val HostPortForwardingSummary.shouldShowSummary: Boolean
+    get() = active || activeTunnelCount > 0 || discoveredPorts.isNotEmpty()
 
 @Composable
 private fun PortForwardingSummaryCard(

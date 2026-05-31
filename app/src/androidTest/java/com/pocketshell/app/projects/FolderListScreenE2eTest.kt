@@ -22,6 +22,7 @@ import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.session.InlineDictationViewModel
+import com.pocketshell.core.portfwd.RemotePort
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -192,6 +193,11 @@ class FolderListScreenE2eTest {
         compose.onNodeWithTag(FOLDER_LIST_TITLE_TAG).assertExists()
         compose.onNodeWithText("issue171-host").assertExists()
         compose.onNodeWithTag(folderTreeRootLabelTag("/home/u/code")).assertExists()
+        compose.onAllNodesWithTag(FOLDER_LIST_PORT_FORWARDING_TAG)
+            .fetchSemanticsNodes()
+            .also {
+                assertTrue("off/empty forwarding summary should not render above the tree", it.isEmpty())
+            }
         compose.onAllNodesWithTag(FOLDER_LIST_VIEW_TOGGLE_TAG)
             .fetchSemanticsNodes()
             .also { assertTrue("Tree/Flat toggle should not render on host detail", it.isEmpty()) }
@@ -325,6 +331,67 @@ class FolderListScreenE2eTest {
         captureFullDevice("issue300-session-type-picker-viewport.png")
     }
 
+    @Test
+    fun discoveredPortForwardingSummaryStaysBelowWorkspaceTree() {
+        val fakeGateway = FakeFolderListGateway(
+            rows = emptyList(),
+            discoveredPorts = listOf(RemotePort(port = 3000, processName = "node")),
+        )
+        val viewModel = FolderListViewModel(
+            gateway = fakeGateway,
+            hostDao = db.hostDao(),
+            projectRootDao = db.projectRootDao(),
+            forwardingController = ForwardingController(InstrumentationRegistry.getInstrumentation().targetContext),
+        )
+        var openedPortForwarding = false
+
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "issue171-host",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue171",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onOpenPortForwarding = { openedPortForwarding = true },
+                    onOpenWorkspaceSettings = {},
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            fakeGateway.callCount.get() >= 1 &&
+                compose.onAllNodesWithTag(folderTreeRootTestTag("/home/u/code"))
+                    .fetchSemanticsNodes().isNotEmpty() &&
+                compose.onAllNodesWithTag(FOLDER_LIST_PORT_FORWARDING_TAG)
+                    .fetchSemanticsNodes().isNotEmpty()
+        }
+
+        val rootBounds = compose.onNodeWithTag(folderTreeRootTestTag("/home/u/code"))
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val forwardingBounds = compose.onNodeWithTag(FOLDER_LIST_PORT_FORWARDING_TAG)
+            .assertHasClickAction()
+            .fetchSemanticsNode()
+            .boundsInRoot
+        assertTrue(
+            "workspace tree should remain above discovered forwarding summary",
+            rootBounds.top < forwardingBounds.top,
+        )
+
+        compose.onNodeWithTag(FOLDER_LIST_PORT_FORWARDING_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { openedPortForwarding }
+    }
+
     private fun assertCountPillRendersHorizontally(folderPath: String, countText: String) {
         compose.onNodeWithText(
             countText,
@@ -438,6 +505,7 @@ private fun noopAssistantDictationViewModel(): InlineDictationViewModel =
 private class FakeFolderListGateway(
     private val rows: List<FolderSessionRow>,
     private val projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
+    private val discoveredPorts: List<RemotePort> = emptyList(),
 ) : FolderListGateway {
 
     val callCount: AtomicInteger = AtomicInteger(0)
@@ -452,6 +520,7 @@ private class FakeFolderListGateway(
         return FolderListResult.Sessions(
             rows = rows,
             projectFoldersByRoot = projectFoldersByRoot,
+            discoveredPorts = discoveredPorts,
         )
     }
 

@@ -37,6 +37,7 @@ LONG_RUNNING_TEST_RUN_ID="$RUN_ID-long-running"
 LONG_RUNNING_TEST_LOG_ROOT="$ROOT_DIR/build/long-running-session"
 LONG_RUNNING_TEST_RUN_DIR="$LONG_RUNNING_TEST_LOG_ROOT/$LONG_RUNNING_TEST_RUN_ID"
 LONG_RUNNING_TEST_CLASS="com.pocketshell.app.proof.LongRunningSessionStabilityTest"
+LONG_RUNNING_TEST_INSTRUMENTATION_ATTEMPTS="${LONG_RUNNING_TEST_INSTRUMENTATION_ATTEMPTS:-2}"
 LONG_RUNNING_COMPOSE_FILE="${LONG_RUNNING_COMPOSE_FILE:-tests/docker/docker-compose.yml}"
 ANDROID_SDK="${ANDROID_SDK:-/home/alexey/Android/Sdk}"
 ADB="${ADB:-$ANDROID_SDK/platform-tools/adb}"
@@ -204,6 +205,10 @@ real_agent_release_gate_should_retry_interrupted_instrumentation() {
   real_agent_release_gate_logcat_has_adb_transport_drop_markers "$logcat_file"
 }
 
+long_running_session_should_retry_interrupted_instrumentation() {
+  real_agent_release_gate_should_retry_interrupted_instrumentation "$@"
+}
+
 # Run RealAgentReleaseGateTest against the same real-agent Docker fixture the
 # terminal-workbench step exercises. The workbench step covers
 # viewport/visible-text capture; this additional step asserts on real-agent CLI
@@ -346,6 +351,11 @@ run_long_running_session_instrumentation() {
   local docker_log="$run_dir/docker-agents.log"
   local logcat="$run_dir/logcat.txt"
   local artifacts_dir="$run_dir/artifacts/long-running-session"
+  local instrumentation_status=0
+  local attempt=1
+  local attempt_instrumentation_log
+  local attempt_logcat
+  local attempt_docker_log
   mkdir -p "$run_dir" "$artifacts_dir"
 
   printf '\n[long-running session stability instrumentation]\n'
@@ -356,33 +366,62 @@ run_long_running_session_instrumentation() {
   docker compose -f "$LONG_RUNNING_COMPOSE_FILE" up -d agents \
     2>&1 | tee "$run_dir/docker-up.log"
 
-  # Clear logcat on the device before the test starts so the captured slice is
-  # exclusively the run window. The instrumentation also clears logcat
-  # internally for the reconnect-counter parse, but pre-clearing here keeps the
-  # post-run pull short.
-  "$ADB" logcat -c >/dev/null 2>&1 || true
+  for attempt in $(seq 1 "$LONG_RUNNING_TEST_INSTRUMENTATION_ATTEMPTS"); do
+    attempt_instrumentation_log="$run_dir/instrumentation-attempt-$attempt.log"
+    attempt_logcat="$run_dir/logcat-attempt-$attempt.txt"
+    attempt_docker_log="$run_dir/docker-agents-attempt-$attempt.log"
 
-  set +e
-  # The on-device test gates picker round-trips on
-  # TerminalTestTimeouts.terminalVisibilityTimeoutMs(), which is 60 s
-  # locally and 180 s when `pocketshellCi=true` is set. The long-running
-  # gate runs unattended for ~11 minutes, so we always opt into the
-  # generous deadline — under heavy worktree contention the host picker
-  # probe alone has been observed to exceed 30 s, and the 10-minute hold
-  # alone is far more expensive than the extra slack on the picker.
-  "$ADB" shell am instrument -w -r \
-    -e class "$LONG_RUNNING_TEST_CLASS" \
-    -e pocketshellLongRunningTest 1 \
-    -e pocketshellCi true \
-    com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner \
-    2>&1 | tee "$instrumentation_log"
-  local instrumentation_status="${PIPESTATUS[0]}"
-  set -e
+    # Clear logcat on the device before each attempt so the captured slice is
+    # exclusively that run window. The instrumentation also clears logcat
+    # internally for the reconnect-counter parse, but pre-clearing here keeps
+    # the post-run pull short.
+    "$ADB" logcat -c >/dev/null 2>&1 || true
 
-  # Capture diagnostics regardless of outcome so reviewers can audit.
-  docker compose -f "$LONG_RUNNING_COMPOSE_FILE" logs --no-color --timestamps agents \
-    > "$docker_log" 2>&1 || true
-  "$ADB" logcat -d -v threadtime -t 60000 > "$logcat" 2>&1 || true
+    set +e
+    # The on-device test gates picker round-trips on
+    # TerminalTestTimeouts.terminalVisibilityTimeoutMs(), which is 60 s
+    # locally and 180 s when `pocketshellCi=true` is set. The long-running
+    # gate runs unattended for ~11 minutes, so we always opt into the
+    # generous deadline — under heavy worktree contention the host picker
+    # probe alone has been observed to exceed 30 s, and the 10-minute hold
+    # alone is far more expensive than the extra slack on the picker.
+    "$ADB" shell am instrument -w -r \
+      -e class "$LONG_RUNNING_TEST_CLASS" \
+      -e pocketshellLongRunningTest 1 \
+      -e pocketshellCi true \
+      com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner \
+      2>&1 | tee "$attempt_instrumentation_log"
+    instrumentation_status="${PIPESTATUS[0]}"
+    set -e
+
+    # Capture diagnostics regardless of outcome so reviewers can audit.
+    docker compose -f "$LONG_RUNNING_COMPOSE_FILE" logs --no-color --timestamps agents \
+      > "$attempt_docker_log" 2>&1 || true
+    "$ADB" logcat -d -v threadtime -t 60000 > "$attempt_logcat" 2>&1 || true
+    cp "$attempt_instrumentation_log" "$instrumentation_log" || true
+    cp "$attempt_docker_log" "$docker_log" || true
+    cp "$attempt_logcat" "$logcat" || true
+
+    if [[ "$instrumentation_status" -eq 0 ]] ||
+      real_agent_release_gate_instrumentation_log_has_success "$attempt_instrumentation_log"; then
+      break
+    fi
+
+    if long_running_session_should_retry_interrupted_instrumentation \
+      "$instrumentation_status" "$attempt_instrumentation_log" "$attempt_logcat" &&
+      [[ "$attempt" -lt "$LONG_RUNNING_TEST_INSTRUMENTATION_ATTEMPTS" ]]; then
+      printf 'LongRunningSessionStabilityTest instrumentation interrupted by adb transport drop on attempt %s; retrying.\n' "$attempt" >&2
+      "$ADB" reconnect >/dev/null 2>&1 || true
+      "$ADB" wait-for-device >/dev/null 2>&1 || true
+      "$ADB" shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true
+      "$ADB" shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+      "$ADB" shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
+      "$ADB" shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
+      sleep 2
+      continue
+    fi
+    break
+  done
 
   # Pull the device artifact bundle written by the instrumentation
   # (long-running-summary.txt, captured logcat tail, final visible
@@ -392,6 +431,15 @@ run_long_running_session_instrumentation() {
     "/sdcard/Android/media/com.pocketshell.app/additional_test_output/long-running-session" \
     "$artifacts_dir" \
     >/dev/null 2>&1 || true
+
+  {
+    printf 'instrumentation_exit_code=%s\n' "$instrumentation_status"
+    printf 'instrumentation_attempts=%s\n' "$attempt"
+    printf 'instrumentation_max_attempts=%s\n' "$LONG_RUNNING_TEST_INSTRUMENTATION_ATTEMPTS"
+    printf 'final_instrumentation_log=%s\n' "$instrumentation_log"
+    printf 'final_logcat=%s\n' "$logcat"
+    printf 'final_docker_log=%s\n' "$docker_log"
+  } > "$run_dir/instrumentation-status.txt"
 
   if [[ "$instrumentation_status" -ne 0 ]]; then
     printf 'FAIL: LongRunningSessionStabilityTest instrumentation exited %s\n' "$instrumentation_status" >&2

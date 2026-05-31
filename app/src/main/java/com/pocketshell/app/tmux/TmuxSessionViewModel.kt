@@ -60,6 +60,7 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.trySendBlocking
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -76,6 +77,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.io.IOException
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -265,7 +267,7 @@ public class TmuxSessionViewModel @Inject constructor(
     // (cwd, command) would treat that as already-seen and skip the
     // round-trip, leaving the cached "no agent" verdict in place.
     private val paneAgentInputs: MutableMap<String, Triple<String, String, String>> = ConcurrentHashMap()
-    private val paneInputChannels: MutableMap<String, Channel<ByteArray>> = ConcurrentHashMap()
+    private val paneInputQueues: MutableMap<String, TmuxPaneInputQueue> = ConcurrentHashMap()
     private val paneInputJobs: MutableMap<String, Job> = ConcurrentHashMap()
 
     // Bridge scope: a child of viewModelScope (parented via the
@@ -1898,7 +1900,7 @@ public class TmuxSessionViewModel @Inject constructor(
             paneAgentJobs.remove(paneId)?.cancel()
             paneAgentInputs.remove(paneId)
             paneInputJobs.remove(paneId)?.cancel()
-            paneInputChannels.remove(paneId)?.close()
+            paneInputQueues.remove(paneId)?.close()
             paneRows[paneId]?.terminalState?.detachExternalProducer()
             paneRows.remove(paneId)
         }
@@ -2315,17 +2317,25 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun inputSinkForPane(paneId: String): OutputStream {
-        val channel = paneInputChannels.getOrPut(paneId) {
-            Channel<ByteArray>(Channel.UNLIMITED).also { newChannel ->
+        val queue = paneInputQueues.getOrPut(paneId) {
+            TmuxPaneInputQueue(
+                maxPendingBytes = TMUX_INPUT_MAX_PENDING_BYTES,
+                maxBatchBytes = TMUX_INPUT_MAX_BATCH_BYTES,
+            ).also { newQueue ->
                 paneInputJobs[paneId] = bridgeScope.launch {
-                    for (bytes in newChannel) {
+                    while (true) {
+                        val batch = newQueue.takeBatch() ?: break
                         val client = clientRef ?: continue
-                        runCatching { sendInputBytesToPane(client, paneId, bytes) }
+                        val sendStartedNs = System.nanoTime()
+                        runCatching { sendInputBytesToPane(client, paneId, batch.bytes) }
+                            .onSuccess {
+                                newQueue.recordSent(batch, System.nanoTime() - sendStartedNs)
+                            }
                     }
                 }
             }
         }
-        return TmuxPaneInputStream(channel)
+        return TmuxPaneInputStream(queue)
     }
 
     private suspend fun sendInputBytesToPane(
@@ -2916,6 +2926,14 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun containsLineBreakForTest(bytes: ByteArray): Boolean =
         containsLineBreak(bytes)
 
+    internal fun tmuxInputMetricsForTest(paneId: String): TmuxInputStressMetrics? =
+        paneInputQueues[paneId]?.snapshot()
+
+    internal fun tmuxInputSinkForTest(paneId: String): OutputStream =
+        inputSinkForPane(paneId)
+
+    internal fun tmuxInputCapacityBytesForTest(): Int = TMUX_INPUT_MAX_PENDING_BYTES
+
     override fun onCleared() {
         connectJob?.cancel()
         connectJob = null
@@ -2972,13 +2990,13 @@ public class TmuxSessionViewModel @Inject constructor(
         for (job in producerJobsToJoin) job.cancelAndJoin()
         for (job in agentJobsToJoin) job.cancelAndJoin()
         for (job in inputJobsToJoin) job.cancelAndJoin()
-        for ((_, channel) in paneInputChannels) {
-            channel.close()
+        for ((_, queue) in paneInputQueues) {
+            queue.close()
         }
         paneAgentJobs.clear()
         paneAgentInputs.clear()
         paneInputJobs.clear()
-        paneInputChannels.clear()
+        paneInputQueues.clear()
         _agentConversations.value = emptyMap()
         paneProducerJobs.clear()
         for ((_, row) in paneRows) {
@@ -3056,13 +3074,13 @@ public class TmuxSessionViewModel @Inject constructor(
         for (job in producerJobsToJoin) job.cancelAndJoin()
         for (job in agentJobsToJoin) job.cancelAndJoin()
         for (job in inputJobsToJoin) job.cancelAndJoin()
-        for ((_, channel) in paneInputChannels) {
-            channel.close()
+        for ((_, queue) in paneInputQueues) {
+            queue.close()
         }
         paneAgentJobs.clear()
         paneAgentInputs.clear()
         paneInputJobs.clear()
-        paneInputChannels.clear()
+        paneInputQueues.clear()
         _agentConversations.value = emptyMap()
         paneProducerJobs.clear()
         for ((_, row) in paneRows) {
@@ -3174,13 +3192,13 @@ public class TmuxSessionViewModel @Inject constructor(
         for ((_, job) in paneInputJobs) {
             job.cancel()
         }
-        for ((_, channel) in paneInputChannels) {
-            channel.close()
+        for ((_, queue) in paneInputQueues) {
+            queue.close()
         }
         paneAgentJobs.clear()
         paneAgentInputs.clear()
         paneInputJobs.clear()
-        paneInputChannels.clear()
+        paneInputQueues.clear()
         _agentConversations.value = emptyMap()
         paneProducerJobs.clear()
         for ((_, row) in paneRows) {
@@ -3337,7 +3355,7 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private class TmuxPaneInputStream(
-        private val channel: Channel<ByteArray>,
+        private val queue: TmuxPaneInputQueue,
     ) : OutputStream() {
         override fun write(b: Int) {
             write(byteArrayOf(b.toByte()))
@@ -3345,8 +3363,11 @@ public class TmuxSessionViewModel @Inject constructor(
 
         override fun write(buffer: ByteArray, offset: Int, length: Int) {
             if (length <= 0) return
-            val copy = buffer.copyOfRange(offset, offset + length)
-            channel.trySend(copy)
+            queue.write(buffer, offset, length)
+        }
+
+        override fun close() {
+            queue.close()
         }
     }
 
@@ -3364,6 +3385,125 @@ public class TmuxSessionViewModel @Inject constructor(
 
 private fun boundedDistinctEvents(events: List<ConversationEvent>): List<ConversationEvent> =
     reconcileAgentEvents(events, maxEvents = MaxAgentEvents)
+
+internal data class TmuxInputStressMetrics(
+    val totalEnqueuedBytes: Long,
+    val totalSentBytes: Long,
+    val maxPendingBytes: Int,
+    val maxPendingChunks: Int,
+    val maxBatchBytes: Int,
+    val maxBatchChunks: Int,
+    val sentBatchCount: Long,
+    val maxSendLatencyMs: Double,
+)
+
+private data class TmuxPaneInputSegment(
+    val bytes: ByteArray,
+    val enqueuedAtNs: Long,
+)
+
+private data class TmuxPaneInputBatch(
+    val bytes: ByteArray,
+    val chunks: Int,
+    val firstEnqueuedAtNs: Long,
+)
+
+private class TmuxPaneInputQueue(
+    private val maxPendingBytes: Int,
+    private val maxBatchBytes: Int,
+) {
+    private val channel = Channel<TmuxPaneInputSegment>(TMUX_INPUT_MAX_PENDING_CHUNKS)
+    private val lock = Any()
+    private var pendingBytes: Int = 0
+    private var totalEnqueuedBytes: Long = 0L
+    private var totalSentBytes: Long = 0L
+    private var maxObservedPendingBytes: Int = 0
+    private var maxObservedPendingChunks: Int = 0
+    private var maxObservedBatchBytes: Int = 0
+    private var maxObservedBatchChunks: Int = 0
+    private var sentBatchCount: Long = 0L
+    private var maxObservedSendLatencyNs: Long = 0L
+
+    fun write(buffer: ByteArray, offset: Int, length: Int) {
+        var written = 0
+        while (written < length) {
+            val chunkLength = minOf(maxPendingBytes, TMUX_INPUT_CHUNK_BYTES, length - written)
+            val copy = buffer.copyOfRange(offset + written, offset + written + chunkLength)
+            enqueue(copy)
+            written += chunkLength
+        }
+    }
+
+    suspend fun takeBatch(): TmuxPaneInputBatch? {
+        val first = channel.receiveCatching().getOrNull() ?: return null
+        onDequeued(first.bytes.size)
+        val out = java.io.ByteArrayOutputStream(maxBatchBytes)
+        out.write(first.bytes)
+        var chunks = 1
+        val firstEnqueuedAtNs = first.enqueuedAtNs
+
+        while (out.size() + TMUX_INPUT_CHUNK_BYTES <= maxBatchBytes) {
+            val next = channel.tryReceive().getOrNull() ?: break
+            onDequeued(next.bytes.size)
+            out.write(next.bytes)
+            chunks += 1
+        }
+        return TmuxPaneInputBatch(
+            bytes = out.toByteArray(),
+            chunks = chunks,
+            firstEnqueuedAtNs = firstEnqueuedAtNs,
+        )
+    }
+
+    fun recordSent(batch: TmuxPaneInputBatch, @Suppress("UNUSED_PARAMETER") sendDurationNs: Long) = synchronized(lock) {
+        totalSentBytes += batch.bytes.size.toLong()
+        sentBatchCount += 1
+        maxObservedBatchBytes = maxOf(maxObservedBatchBytes, batch.bytes.size)
+        maxObservedBatchChunks = maxOf(maxObservedBatchChunks, batch.chunks)
+        val latencyNs = System.nanoTime() - batch.firstEnqueuedAtNs
+        maxObservedSendLatencyNs = maxOf(maxObservedSendLatencyNs, latencyNs)
+    }
+
+    fun snapshot(): TmuxInputStressMetrics = synchronized(lock) {
+        TmuxInputStressMetrics(
+            totalEnqueuedBytes = totalEnqueuedBytes,
+            totalSentBytes = totalSentBytes,
+            maxPendingBytes = maxObservedPendingBytes,
+            maxPendingChunks = maxObservedPendingChunks,
+            maxBatchBytes = maxObservedBatchBytes,
+            maxBatchChunks = maxObservedBatchChunks,
+            sentBatchCount = sentBatchCount,
+            maxSendLatencyMs = maxObservedSendLatencyNs.toDouble() / 1_000_000.0,
+        )
+    }
+
+    fun close() {
+        channel.close()
+    }
+
+    private fun enqueue(bytes: ByteArray) {
+        val segment = TmuxPaneInputSegment(bytes, System.nanoTime())
+        synchronized(lock) {
+            pendingBytes += bytes.size
+            totalEnqueuedBytes += bytes.size.toLong()
+            maxObservedPendingBytes = maxOf(maxObservedPendingBytes, pendingBytes)
+            maxObservedPendingChunks = maxOf(
+                maxObservedPendingChunks,
+                (pendingBytes + maxBatchBytes - 1) / maxBatchBytes,
+            )
+        }
+        val result = channel.trySendBlocking(segment)
+        if (result.isFailure) {
+            onDequeued(bytes.size)
+            throw IOException("tmux pane input queue is closed")
+        }
+    }
+
+    private fun onDequeued(bytes: Int) = synchronized(lock) {
+        pendingBytes -= bytes
+    }
+
+}
 
 /**
  * Issue #209: true when [bytes] contains a `\n` (0x0A) byte. Used by
@@ -3707,6 +3847,11 @@ internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
 internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 30_000L
 internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
 internal const val LIST_PANES_FIELD_SEPARATOR: String = "|PS|"
+internal const val TMUX_INPUT_MAX_PENDING_BYTES: Int = 64 * 1024
+internal const val TMUX_INPUT_MAX_BATCH_BYTES: Int = 4 * 1024
+internal const val TMUX_INPUT_CHUNK_BYTES: Int = 512
+internal const val TMUX_INPUT_MAX_PENDING_CHUNKS: Int =
+    TMUX_INPUT_MAX_PENDING_BYTES / TMUX_INPUT_CHUNK_BYTES - 1
 
 /**
  * Issue #145: logcat tag used by the disconnect observer + connect-attempt

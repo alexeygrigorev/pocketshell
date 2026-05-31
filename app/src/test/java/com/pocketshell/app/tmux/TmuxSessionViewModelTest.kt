@@ -42,6 +42,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import java.io.File
 
 /**
  * Unit tests for [TmuxSessionViewModel] that exercise the per-pane
@@ -813,6 +814,60 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun tmuxHighRateInputStressBatchesWithBoundedBacklogAndNoContentLoss() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            sendCommandDelayMs = 3L
+        }
+        vm.attachClientForTest(client)
+        val sink = vm.tmuxInputSinkForTest("%0")
+        val chunks = List(2_000) { index ->
+            ("stress-${index.toString().padStart(4, '0')}-" + "x".repeat(51))
+                .toByteArray(Charsets.US_ASCII)
+        }
+        val expected = chunks.fold(ByteArray(0)) { acc, bytes -> acc + bytes }
+
+        val writer = Thread({
+            chunks.forEach { sink.write(it) }
+        }, "tmux-input-stress-writer")
+        writer.start()
+
+        waitForTmuxInputBytes(vm, paneId = "%0", expectedBytes = expected.size.toLong(), writer = writer)
+        writer.join(1_000)
+        sink.close()
+
+        val metrics = vm.tmuxInputMetricsForTest("%0")
+            ?: error("stress metrics should be recorded")
+        assertEquals(expected.size.toLong(), metrics.totalEnqueuedBytes)
+        assertEquals(expected.size.toLong(), metrics.totalSentBytes)
+        assertTrue(
+            "stress should build real backlog; metrics=$metrics",
+            metrics.maxPendingBytes > TMUX_INPUT_MAX_BATCH_BYTES,
+        )
+        assertTrue(
+            "backlog must stay within bounded queue capacity; metrics=$metrics",
+            metrics.maxPendingBytes <= vm.tmuxInputCapacityBytesForTest(),
+        )
+        assertTrue("input should be batched; metrics=$metrics", metrics.sentBatchCount < chunks.size)
+        assertTrue("batch size metric should be recorded; metrics=$metrics", metrics.maxBatchBytes > chunks.first().size)
+        assertTrue("batch size must remain bounded; metrics=$metrics", metrics.maxBatchBytes <= TMUX_INPUT_MAX_BATCH_BYTES)
+        assertTrue("send latency metric should be recorded; metrics=$metrics", metrics.maxSendLatencyMs > 0.0)
+        writeTmuxInputStressReport(metrics, expectedBytes = expected.size, chunks = chunks.size)
+
+        val reconstructed = client.sentCommands
+            .filter { it.startsWith("send-keys -l -t %0 -- '") }
+            .joinToString(separator = "") { command ->
+                command.substringAfter("-- '").removeSuffix("'")
+            }
+            .toByteArray(Charsets.US_ASCII)
+        assertEquals(
+            "high-rate stress must not lose or reorder input bytes",
+            expected.toList(),
+            reconstructed.toList(),
+        )
+    }
+
+    @Test
     fun terminalDaQueryResponsesSuppressedInBridgeMode() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()
@@ -1146,6 +1201,63 @@ class TmuxSessionViewModelTest {
         assertTrue(
             "expected at least $expectedCount send-keys commands, got ${client.sentCommands}",
             client.sentCommands.count { it.startsWith("send-keys") } >= expectedCount,
+        )
+    }
+
+    private fun TestScope.waitForTmuxInputBytes(
+        vm: TmuxSessionViewModel,
+        paneId: String,
+        expectedBytes: Long,
+        writer: Thread,
+    ) {
+        repeat(10_000) {
+            advanceTimeBy(3L)
+            runCurrent()
+            val metrics = vm.tmuxInputMetricsForTest(paneId)
+            if (metrics?.totalSentBytes == expectedBytes && !writer.isAlive) return
+            Thread.sleep(1)
+        }
+        val metrics = vm.tmuxInputMetricsForTest(paneId)
+        assertEquals(
+            "timed out waiting for tmux input stress drain; metrics=$metrics writerAlive=${writer.isAlive}",
+            expectedBytes,
+            metrics?.totalSentBytes,
+        )
+    }
+
+    private fun writeTmuxInputStressReport(
+        metrics: TmuxInputStressMetrics,
+        expectedBytes: Int,
+        chunks: Int,
+    ) {
+        val outputDir = if (File("settings.gradle.kts").isFile) {
+            File("app/build/reports/tmux-input-stress")
+        } else {
+            File("build/reports/tmux-input-stress")
+        }
+        val report = File(outputDir, "high-rate-input.json")
+        report.parentFile?.mkdirs()
+        report.writeText(
+            """
+            {
+              "stress": "tmux-high-rate-input",
+              "input_chunks": $chunks,
+              "expected_bytes": $expectedBytes,
+              "max_pending_capacity_bytes": $TMUX_INPUT_MAX_PENDING_BYTES,
+              "max_batch_capacity_bytes": $TMUX_INPUT_MAX_BATCH_BYTES,
+              "metrics": {
+                "total_enqueued_bytes": ${metrics.totalEnqueuedBytes},
+                "total_sent_bytes": ${metrics.totalSentBytes},
+                "max_pending_bytes": ${metrics.maxPendingBytes},
+                "max_pending_chunks": ${metrics.maxPendingChunks},
+                "max_batch_bytes": ${metrics.maxBatchBytes},
+                "max_batch_chunks": ${metrics.maxBatchChunks},
+                "sent_batch_count": ${metrics.sentBatchCount},
+                "max_send_latency_ms": ${metrics.maxSendLatencyMs}
+              },
+              "no_content_loss": ${metrics.totalEnqueuedBytes == expectedBytes.toLong() && metrics.totalSentBytes == expectedBytes.toLong()}
+            }
+            """.trimIndent(),
         )
     }
 

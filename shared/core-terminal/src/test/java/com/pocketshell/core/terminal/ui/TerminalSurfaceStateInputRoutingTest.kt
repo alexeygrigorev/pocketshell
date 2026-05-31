@@ -272,6 +272,46 @@ class TerminalSurfaceStateInputRoutingTest {
         }
     }
 
+    @Test
+    fun attachDetachCyclesLeaveNoInputDrainerThreads() = runBlocking {
+        assertEquals(
+            "test must start without leaked input drainers",
+            0,
+            liveInputDrainerThreadCount(),
+        )
+
+        repeat(25) {
+            val state = TerminalSurfaceState()
+            val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+            val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            val producerJob = state.attachExternalProducer(
+                scope = producerScope,
+                stdout = stdout,
+                remoteStdin = RecordingOutputStream(),
+            )
+
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+
+        withTimeout(2_000) {
+            while (liveInputDrainerThreadCount() != 0) {
+                delay(10)
+            }
+        }
+        assertEquals(
+            "attach/detach must close the terminal input queue so PocketShellInputDrainer exits",
+            0,
+            liveInputDrainerThreadCount(),
+        )
+    }
+
+    private fun liveInputDrainerThreadCount(): Int =
+        Thread.getAllStackTraces().keys.count { thread ->
+            thread.name == "PocketShellInputDrainer" && thread.isAlive
+        }
+
     private class RecordingOutputStream : OutputStream() {
         private val bytes = mutableListOf<Byte>()
 

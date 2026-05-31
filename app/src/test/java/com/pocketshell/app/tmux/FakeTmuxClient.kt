@@ -5,6 +5,7 @@ import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -80,6 +81,8 @@ internal class FakeTmuxClient : TmuxClient {
 
     var suspendForeverOnCommandPrefix: String? = null
 
+    var sendCommandDelayMs: Long = 0L
+
     @Volatile
     var closed: Boolean = false
 
@@ -92,6 +95,9 @@ internal class FakeTmuxClient : TmuxClient {
 
     override suspend fun sendCommand(cmd: String): CommandResponse {
         sentCommands += cmd
+        if (sendCommandDelayMs > 0L && cmd.startsWith("send-keys")) {
+            delay(sendCommandDelayMs)
+        }
         suspendForeverOnCommandPrefix?.let { prefix ->
             if (cmd.startsWith(prefix)) {
                 CompletableDeferred<Unit>().await()

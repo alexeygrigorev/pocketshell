@@ -171,6 +171,7 @@ public class SshTerminalBridge(
      */
     public fun stop() {
         if (!stopped.compareAndSet(false, true)) return
+        SessionReflection.closeTerminalToProcessQueue(session)
         inputDrainerThread?.interrupt()
         inputDrainerThread = null
         remoteStdin = null
@@ -316,6 +317,13 @@ private object SessionReflection {
             .apply { isAccessible = true }
     }
 
+    private val byteQueueCloseMethod by lazy {
+        // `ByteQueue.close()`: wakes a blocking `read(..., block = true)`.
+        Class.forName("com.termux.terminal.ByteQueue")
+            .getDeclaredMethod("close")
+            .apply { isAccessible = true }
+    }
+
     fun setEmulator(session: TerminalSession, emulator: TerminalEmulator) {
         mEmulatorField.set(session, emulator)
     }
@@ -350,6 +358,11 @@ private object SessionReflection {
     fun readTerminalToProcessQueue(session: TerminalSession, buffer: ByteArray): Int {
         val queue = mTerminalToProcessIOQueueField.get(session)
         return byteQueueReadMethod.invoke(queue, buffer, true) as Int
+    }
+
+    fun closeTerminalToProcessQueue(session: TerminalSession) {
+        val queue = mTerminalToProcessIOQueueField.get(session)
+        byteQueueCloseMethod.invoke(queue)
     }
 
     private fun resolveField(cls: Class<*>, name: String): Field {

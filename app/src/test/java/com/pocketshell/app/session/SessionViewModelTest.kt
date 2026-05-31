@@ -1,5 +1,6 @@
 package com.pocketshell.app.session
 
+import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.session.SessionViewModel.Modifier
 import com.pocketshell.core.storage.entity.SnippetEntity
@@ -10,14 +11,17 @@ import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.ssh.ExecResult
+import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.uikit.model.KeyModifierState
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -28,7 +32,10 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -37,6 +44,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 
 /**
@@ -894,8 +902,10 @@ class SessionViewModelTest {
     }
 
     private suspend fun waitUntil(predicate: () -> Boolean) {
+        val mainLooper = shadowOf(Looper.getMainLooper())
         withTimeout(5_000) {
             while (!predicate()) {
+                mainLooper.idle()
                 delay(25)
             }
         }
@@ -966,6 +976,192 @@ class SessionViewModelTest {
         assertFalse("cancelConnect() must no-op when status is Idle", fired)
         assertTrue(vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Idle)
     }
+
+    @Test
+    fun cancelConnectDuringRealConnectKeepsUserCancelledState() = runBlocking {
+        val vm = newVm()
+        val connectStarted = CompletableDeferred<Unit>()
+        val connectorCancelled = CompletableDeferred<Unit>()
+        vm.setRawSshConnectorForTest { host, port, user, _, _, knownHosts ->
+            assertEquals("alpha.example", host)
+            assertEquals(2222, port)
+            assertEquals("alex", user)
+            assertEquals(KnownHostsPolicy.AcceptAll, knownHosts)
+            connectStarted.complete(Unit)
+            try {
+                awaitCancellation()
+            } finally {
+                connectorCancelled.complete(Unit)
+            }
+        }
+
+        vm.connect(host = "alpha.example", port = 2222, user = "alex", keyPath = "/tmp/test-key")
+        withTimeout(5_000) { connectStarted.await() }
+        assertTrue(
+            "precondition: real connect() must enter Connecting",
+            vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Connecting,
+        )
+
+        val fired = vm.cancelConnect()
+
+        assertTrue("cancelConnect() must report success during real connect()", fired)
+        withTimeout(5_000) { connectorCancelled.await() }
+        shadowOf(Looper.getMainLooper()).idle()
+        delay(50)
+        shadowOf(Looper.getMainLooper()).idle()
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "status must remain Failed after runConnect cancellation unwinds, was $status",
+            status is SessionViewModel.ConnectionStatus.Failed,
+        )
+        assertEquals(
+            "Connect cancelled by user.",
+            (status as SessionViewModel.ConnectionStatus.Failed).message,
+        )
+        assertFalse(
+            "user-cancelled raw connect must not become a retryable reconnect failure",
+            vm.canReconnect.value,
+        )
+    }
+
+    @Test
+    fun rawSshStdoutCompletionDisconnectCanReconnectAndStartsFreshSession() = runBlocking {
+        val vm = newVm()
+        val sessions = mutableListOf<FakeRawSshSession>()
+        vm.setRawSshConnectorForTest { host, port, user, _, _, knownHosts ->
+            assertEquals("alpha.example", host)
+            assertEquals(2222, port)
+            assertEquals("alex", user)
+            assertEquals(KnownHostsPolicy.AcceptAll, knownHosts)
+            Result.success(FakeRawSshSession("session-${sessions.size + 1}").also { sessions += it })
+        }
+
+        try {
+            vm.connect(host = "alpha.example", port = 2222, user = "alex", keyPath = "/tmp/test-key")
+
+            waitUntil { vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Connected }
+            assertEquals(1, sessions.size)
+            assertEquals(1, sessions.single().startedShells.size)
+            waitUntil { sessions.single().startedShells.single().stdinText() == "\r" }
+
+            sessions.single().startedShells.single().finishStdout()
+
+            waitUntil { vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Failed }
+            val disconnected = vm.connectionStatus.value as SessionViewModel.ConnectionStatus.Failed
+            assertEquals(
+                "Disconnected from alex@alpha.example:2222. Tap Reconnect to retry.",
+                disconnected.message,
+            )
+            assertTrue("raw SSH reconnect target must remain available after socket death", vm.canReconnect.value)
+
+            assertTrue("reconnect() must accept the retained raw SSH target", vm.reconnect())
+
+            waitUntil {
+                sessions.size == 2 &&
+                    vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Connected &&
+                    sessions[0].startedShells.single().closed &&
+                    sessions[0].closed
+            }
+            assertTrue("dead raw shell must be closed before reconnect", sessions[0].startedShells.single().closed)
+            assertTrue("dead raw session must be closed before reconnect", sessions[0].closed)
+            assertEquals(1, sessions[1].startedShells.size)
+            waitUntil { sessions[1].startedShells.single().stdinText() == "\r" }
+        } finally {
+            sessions.flatMap { it.startedShells }.forEach { it.close() }
+            sessions.forEach { it.close() }
+            vm.terminalState.detachExternalProducer()
+        }
+    }
+}
+
+private class FakeRawSshSession(
+    private val id: String,
+) : SshSession {
+    val startedShells = mutableListOf<FakeRawSshShell>()
+    var closed: Boolean = false
+        private set
+
+    override val isConnected: Boolean get() = !closed
+
+    override suspend fun exec(command: String): ExecResult =
+        ExecResult(stdout = "", stderr = "", exitCode = 0)
+
+    override fun tail(path: String, onLine: (String) -> Unit): Job = Job()
+
+    override fun openLocalPortForward(
+        remoteHost: String,
+        remotePort: Int,
+        localPort: Int,
+    ): SshPortForward {
+        throw NotImplementedError()
+    }
+
+    override fun startShell(): SshShell =
+        FakeRawSshShell(id).also { startedShells += it }
+
+    override suspend fun uploadFile(file: java.io.File, remotePath: String): String =
+        error("uploadFile not used in this test")
+
+    override suspend fun uploadStream(
+        input: java.io.InputStream,
+        length: Long,
+        name: String,
+        remotePath: String,
+    ): String = error("uploadStream not used in this test")
+
+    override fun close() {
+        closed = true
+    }
+}
+
+private class FakeRawSshShell(
+    private val id: String,
+) : SshShell {
+    private val stdoutReader = FinishableInputStream()
+    private val stdinBuffer = ByteArrayOutputStream()
+
+    var closed: Boolean = false
+        private set
+
+    override val stdin: OutputStream = stdinBuffer
+    override val stdout: InputStream = stdoutReader
+    override val stderr: InputStream = ByteArrayInputStream(ByteArray(0))
+
+    fun stdinText(): String = stdinBuffer.toString(Charsets.UTF_8.name())
+
+    fun finishStdout() {
+        stdoutReader.finish()
+    }
+
+    override fun close() {
+        closed = true
+        stdoutReader.finish()
+    }
+
+    override fun toString(): String = "FakeRawSshShell($id)"
+}
+
+private class FinishableInputStream : InputStream() {
+    private val lock = Object()
+    private var finished: Boolean = false
+
+    fun finish() {
+        synchronized(lock) {
+            finished = true
+            lock.notifyAll()
+        }
+    }
+
+    override fun read(): Int {
+        synchronized(lock) {
+            while (!finished) {
+                lock.wait()
+            }
+        }
+        return -1
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int = read()
 }
 
 private class FakeProjectRootDao : ProjectRootDao {

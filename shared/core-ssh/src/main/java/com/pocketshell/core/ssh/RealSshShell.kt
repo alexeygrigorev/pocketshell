@@ -3,6 +3,7 @@ package com.pocketshell.core.ssh
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import net.schmizz.sshj.connection.channel.direct.Session
+import net.schmizz.sshj.connection.channel.direct.SessionChannel
 import java.io.InputStream
 import java.io.OutputStream
 
@@ -58,6 +59,14 @@ internal class RealSshShell(
         runBlocking(Dispatchers.IO) {
             runCatching { shell.close() }
             runCatching { sessionChannel.close() }
+        }
+    }
+
+    override fun resizePty(columns: Int, rows: Int) {
+        if (columns <= 0 || rows <= 0) return
+        val channel = sessionChannel as? SessionChannel ?: return
+        runBlocking(Dispatchers.IO) {
+            runCatching { channel.changeWindowDimensions(columns, rows, 0, 0) }
         }
     }
 }

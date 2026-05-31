@@ -52,4 +52,10 @@ public interface SshShell : AutoCloseable {
      * remains usable for further exec / tail / port-forward / shell calls.
      */
     override fun close()
+
+    /**
+     * Resize the remote PTY for this shell. Implementations that do not own
+     * a PTY may ignore the request.
+     */
+    public fun resizePty(columns: Int, rows: Int) {}
 }

@@ -109,6 +109,8 @@ internal const val SESSION_CONNECTING_PROGRESS_TAG = "session:connecting"
 internal const val SESSION_CONNECTING_PROGRESS_BAR_TAG = "session:connecting:bar"
 internal const val SESSION_CONNECTING_SLOW_HINT_TAG = "session:connecting:slow-hint"
 internal const val SESSION_CONNECTING_CANCEL_TAG = "session:connecting:cancel"
+internal const val SESSION_ERROR_TAG = "session:error"
+internal const val SESSION_RECONNECT_TAG = "session:error:reconnect"
 internal const val SESSION_ARMED_MODIFIER_STRIP_TAG = "session:armed-modifiers"
 
 /**
@@ -185,6 +187,7 @@ public fun SessionScreen(
     }
 
     val status by viewModel.connectionStatus.collectAsState()
+    val canReconnect by viewModel.canReconnect.collectAsState()
     // Issue #249: gate the composer / send / dictation surfaces on a live
     // SSH session. Off the live state a chip / key / dictation would be
     // written into a dead PTY and silently lost.
@@ -293,7 +296,11 @@ public fun SessionScreen(
                 )
             }
             (status as? ConnectionStatus.Failed)?.let {
-                StatusLine(it.message)
+                FailedConnectionRow(
+                    message = it.message,
+                    onReconnect = { viewModel.reconnect() },
+                    canReconnect = canReconnect,
+                )
             }
             // Issue #116 (usage-panel Fix B): in-session blocked /
             // near-limit chip for the active host. Rendered in the
@@ -1009,6 +1016,37 @@ private fun StatusLine(text: String) {
             .background(color = PocketShellColors.Surface)
             .padding(horizontal = 12.dp, vertical = 6.dp),
     )
+}
+
+@Composable
+private fun FailedConnectionRow(
+    message: String,
+    onReconnect: () -> Unit,
+    canReconnect: Boolean,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .testTag(SESSION_ERROR_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodySmall,
+            color = PocketShellColors.Red,
+            modifier = Modifier.weight(1f),
+        )
+        if (canReconnect) {
+            TextButton(
+                onClick = onReconnect,
+                modifier = Modifier.testTag(SESSION_RECONNECT_TAG),
+            ) {
+                Text("Reconnect")
+            }
+        }
+    }
 }
 
 /**

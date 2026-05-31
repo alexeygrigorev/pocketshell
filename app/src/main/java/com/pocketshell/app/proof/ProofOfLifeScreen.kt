@@ -38,6 +38,7 @@ import net.schmizz.sshj.common.SSHException
 import net.schmizz.sshj.connection.channel.direct.Session
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import java.io.IOException
+import java.io.InputStream
 import java.io.OutputStream
 
 /**
@@ -313,9 +314,11 @@ internal const val INTERACTIVE_PTY_INITIAL_ROWS: Int = 24
  * user re-establishes via the reconnect path rather than us keeping the
  * socket alive in the background).
  */
-internal fun createStdoutFlow(shell: Session.Shell): Flow<ByteArray> {
+internal fun createStdoutFlow(shell: Session.Shell): Flow<ByteArray> =
+    createStdoutFlow(shell.inputStream)
+
+internal fun createStdoutFlow(input: InputStream): Flow<ByteArray> {
     return flow {
-        val input = shell.inputStream
         val buffer = ByteArray(4096)
         while (true) {
             val n = try {

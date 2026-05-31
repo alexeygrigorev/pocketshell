@@ -1,7 +1,12 @@
 package com.pocketshell.core.ssh
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import net.schmizz.sshj.DefaultConfig
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
@@ -10,6 +15,8 @@ import net.schmizz.sshj.userauth.password.PasswordUtils
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import java.io.IOException
 import java.security.Security
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.resume
 
 /**
  * Entry point for the `core-ssh` module.
@@ -35,7 +42,10 @@ public object SshConnection {
      *
      * Returns a [Result] wrapping either a live [SshSession] or an
      * [SshException] explaining the failure (DNS, transport, auth, ...).
-     * Never throws — all paths land in `Result`.
+     * Ordinary connect/auth failures land in `Result.failure`. Coroutine
+     * cancellation is preserved as cancellation; if the caller cancels before
+     * the live [SshSession] is delivered, the underlying client is
+     * disconnected.
      *
      * The host key policy defaults to [KnownHostsPolicy.AcceptAll]. Production
      * callers should pass [KnownHostsPolicy.KnownHostsFile] explicitly.
@@ -51,7 +61,29 @@ public object SshConnection {
         knownHosts: KnownHostsPolicy = KnownHostsPolicy.AcceptAll,
         timeoutMs: Int = DEFAULT_TIMEOUT_MS,
         keepAliveSeconds: Int = DEFAULT_KEEP_ALIVE_SECONDS,
-    ): Result<SshSession> = withContext(Dispatchers.IO) {
+    ): Result<SshSession> = connect(
+        host = host,
+        port = port,
+        user = user,
+        key = key,
+        passphrase = passphrase,
+        knownHosts = knownHosts,
+        timeoutMs = timeoutMs,
+        keepAliveSeconds = keepAliveSeconds,
+        connector = RealSshConnector,
+    )
+
+    internal suspend fun <C : Any> connect(
+        host: String,
+        port: Int,
+        user: String,
+        key: SshKey,
+        passphrase: CharArray? = null,
+        knownHosts: KnownHostsPolicy = KnownHostsPolicy.AcceptAll,
+        timeoutMs: Int = DEFAULT_TIMEOUT_MS,
+        keepAliveSeconds: Int = DEFAULT_KEEP_ALIVE_SECONDS,
+        connector: SshConnector<C>,
+    ): Result<SshSession> = coroutineScope {
         // Issue #173 round-2: install the process-wide
         // UncaughtExceptionHandler guard BEFORE we spawn any sshj
         // background threads. sshj's `SSHClient.connect` starts the
@@ -66,22 +98,49 @@ public object SshConnection {
         // disconnect machinery instead. Idempotent — only the first
         // call wraps a real handler. See [SshjTransportThreadGuard].
         SshjTransportThreadGuard.installIfNecessary()
-        val client = SSHClient(createSshConfig())
-        try {
-            applyKnownHostsPolicy(client, knownHosts)
-            client.connectTimeout = timeoutMs
-            client.timeout = timeoutMs
-            client.connect(host, port)
-            client.connection.keepAlive.keepAliveInterval = keepAliveSeconds
+        suspendCancellableCoroutine { continuation ->
+            val liveClient = AtomicReference<C?>(null)
+            var worker: Job? = null
 
-            val keyProvider = loadKeyProvider(client, key, passphrase)
-            client.authPublickey(user, keyProvider)
+            fun disconnectClient() {
+                liveClient.getAndSet(null)?.let { client ->
+                    runCatching { connector.disconnect(client) }
+                }
+            }
 
-            Result.success(RealSshSession(client) as SshSession)
-        } catch (e: Throwable) {
-            // Best-effort cleanup on the partially-initialised client.
-            runCatching { client.disconnect() }
-            Result.failure(wrap(e, host, port, user))
+            continuation.invokeOnCancellation {
+                disconnectClient()
+                worker?.cancel()
+            }
+
+            worker = launch(Dispatchers.IO) {
+                try {
+                    val client = connector.createClient()
+                    liveClient.set(client)
+                    connector.applyKnownHostsPolicy(client, knownHosts)
+                    connector.connect(client, host, port, timeoutMs, keepAliveSeconds)
+                    connector.authenticate(client, user, key, passphrase)
+
+                    val session = connector.toSession(client)
+                    val result = Result.success(session)
+                    if (continuation.isActive) {
+                        liveClient.set(null)
+                        continuation.resume(result) { _, undeliveredResult, _ ->
+                            undeliveredResult.getOrNull()?.close()
+                        }
+                    } else {
+                        session.close()
+                    }
+                } catch (e: CancellationException) {
+                    disconnectClient()
+                    continuation.cancel(e)
+                } catch (e: Throwable) {
+                    disconnectClient()
+                    if (continuation.isActive) {
+                        continuation.resume(Result.failure(wrap(e, host, port, user)))
+                    }
+                }
+            }
         }
     }
 
@@ -171,5 +230,57 @@ public object SshConnection {
             "SSH connect to $user@$host:$port failed: ${t.javaClass.simpleName}: ${t.message}",
             t,
         )
+    }
+
+    internal interface SshConnector<C : Any> {
+        fun createClient(): C
+        fun applyKnownHostsPolicy(client: C, policy: KnownHostsPolicy)
+        suspend fun connect(
+            client: C,
+            host: String,
+            port: Int,
+            timeoutMs: Int,
+            keepAliveSeconds: Int,
+        )
+        suspend fun authenticate(client: C, user: String, key: SshKey, passphrase: CharArray?)
+        fun toSession(client: C): SshSession
+        fun disconnect(client: C)
+    }
+
+    private object RealSshConnector : SshConnector<SSHClient> {
+        override fun createClient(): SSHClient = SSHClient(createSshConfig())
+
+        override fun applyKnownHostsPolicy(client: SSHClient, policy: KnownHostsPolicy) {
+            SshConnection.applyKnownHostsPolicy(client, policy)
+        }
+
+        override suspend fun connect(
+            client: SSHClient,
+            host: String,
+            port: Int,
+            timeoutMs: Int,
+            keepAliveSeconds: Int,
+        ) {
+            client.connectTimeout = timeoutMs
+            client.timeout = timeoutMs
+            client.connect(host, port)
+            client.connection.keepAlive.keepAliveInterval = keepAliveSeconds
+        }
+
+        override suspend fun authenticate(
+            client: SSHClient,
+            user: String,
+            key: SshKey,
+            passphrase: CharArray?,
+        ) {
+            val keyProvider = loadKeyProvider(client, key, passphrase)
+            client.authPublickey(user, keyProvider)
+        }
+
+        override fun toSession(client: SSHClient): SshSession = RealSshSession(client)
+
+        override fun disconnect(client: SSHClient) {
+            client.disconnect()
+        }
     }
 }

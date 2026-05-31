@@ -19,14 +19,13 @@ import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.storage.dao.HostDao
-import com.pocketshell.app.proof.SshShellHandle
 import com.pocketshell.app.proof.createStdoutFlow
-import com.pocketshell.app.proof.openShell
 import com.pocketshell.app.proof.readKeyFromRawResource
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.storage.entity.SnippetEntity
@@ -46,8 +45,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.launch
-import net.schmizz.sshj.connection.channel.direct.SessionChannel
 import javax.inject.Inject
 
 /**
@@ -129,6 +128,44 @@ public class SessionViewModel @Inject constructor(
         assistantSshExecutor = executor
     }
 
+    private fun interface RawSshConnector {
+        suspend fun connect(
+            host: String,
+            port: Int,
+            user: String,
+            key: SshKey,
+            passphrase: CharArray?,
+            knownHosts: KnownHostsPolicy,
+        ): Result<SshSession>
+    }
+
+    private var rawSshConnector: RawSshConnector = RawSshConnector { host, port, user, key, passphrase, knownHosts ->
+        SshConnection.connect(
+            host = host,
+            port = port,
+            user = user,
+            key = key,
+            passphrase = passphrase,
+            knownHosts = knownHosts,
+        )
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setRawSshConnectorForTest(
+        connector: suspend (
+            host: String,
+            port: Int,
+            user: String,
+            key: SshKey,
+            passphrase: CharArray?,
+            knownHosts: KnownHostsPolicy,
+        ) -> Result<SshSession>,
+    ) {
+        rawSshConnector = RawSshConnector { host, port, user, key, passphrase, knownHosts ->
+            connector(host, port, user, key, passphrase, knownHosts)
+        }
+    }
+
     /**
      * The terminal surface state hosted by the session screen. Created
      * inside the ViewModel so the SSH producer can be torn down when the
@@ -195,7 +232,7 @@ public class SessionViewModel @Inject constructor(
         _projectNavigation.asStateFlow()
 
     private var sessionRef: SshSession? = null
-    private var shellRef: SshShellHandle? = null
+    private var shellRef: SshShell? = null
     private var remoteColumns: Int = 0
     private var remoteRows: Int = 0
     private var producerJob: Job? = null
@@ -203,6 +240,11 @@ public class SessionViewModel @Inject constructor(
     private var agentDetectJob: Job? = null
     private var agentTailJob: Job? = null
     private var projectRootsJob: Job? = null
+    private var activeTarget: RawSshTarget? = null
+    private var connectingTarget: RawSshTarget? = null
+
+    private val _canReconnect: MutableStateFlow<Boolean> = MutableStateFlow(false)
+    public val canReconnect: StateFlow<Boolean> = _canReconnect.asStateFlow()
 
     /**
      * Connect to the given host (idempotent — re-calling with the same
@@ -222,12 +264,32 @@ public class SessionViewModel @Inject constructor(
         keyPath: String? = null,
         passphrase: CharArray? = null,
     ) {
+        val target = RawSshTarget(host, port, user, keyPath, passphrase?.copyOf())
         if (connectJob?.isActive == true) return
-        if (_connectionStatus.value is ConnectionStatus.Connected) return
+        if (_connectionStatus.value is ConnectionStatus.Connected && activeTarget == target) return
+        closeCurrentConnection(clearActiveTarget = activeTarget != target)
+        connectingTarget = target
+        refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
         connectJob = viewModelScope.launch {
             runConnect(host, port, user, keyPath, passphrase, viewModelScope)
         }
+    }
+
+    public fun reconnect(): Boolean {
+        val target = activeTarget ?: connectingTarget ?: return false
+        connect(
+            host = target.host,
+            port = target.port,
+            user = target.user,
+            keyPath = target.keyPath,
+            passphrase = target.passphrase,
+        )
+        return true
+    }
+
+    private fun refreshReconnectAvailability() {
+        _canReconnect.value = activeTarget != null || connectingTarget != null
     }
 
     /**
@@ -254,6 +316,8 @@ public class SessionViewModel @Inject constructor(
         if (current !is ConnectionStatus.Connecting) return false
         connectJob?.cancel()
         connectJob = null
+        connectingTarget = null
+        refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Failed(
             "Connect cancelled by user.",
         )
@@ -286,7 +350,7 @@ public class SessionViewModel @Inject constructor(
             } else {
                 SshKey.Pem(readKeyFromRawResource(applicationContext))
             }
-            val sessionResult = SshConnection.connect(
+            val sessionResult = rawSshConnector.connect(
                 host = host,
                 port = port,
                 user = user,
@@ -300,56 +364,36 @@ public class SessionViewModel @Inject constructor(
             }
             sessionRef = session
 
-            val handle = openShell(host, port, user, key, passphrase?.copyOf())
-            shellRef = handle
+            val shell = session.startShell()
+            shellRef = shell
 
-            val outputFlow = createStdoutFlow(handle.shell)
+            val outputFlow = createStdoutFlow(shell.stdout)
+                .onCompletion { cause -> markDisconnectedFromProducer(cause, host, port, user) }
             producerJob = terminalState.attachExternalProducer(
                 scope = producerScope,
                 stdout = outputFlow,
-                remoteStdin = handle.shell.outputStream,
+                remoteStdin = shell.stdin,
             )
-
-            // Issue #173: when the SSH stdout flow ends — e.g. because
-            // Android tore down the socket while the app was backgrounded for
-            // a screenshot, and [createStdoutFlow] swallowed the resulting
-            // SSHException — flip the connection state to Failed so the UI
-            // surfaces a clear "connection lost" line instead of looking
-            // still-Connected with a dead transport. Bare-completion (e.g.
-            // remote `exit`) gets the same treatment; the user reconnects
-            // explicitly via the host picker. We only flip from Connected so
-            // an already-Failed state (from the catch below or a teardown)
-            // is not overwritten.
-            producerJob?.invokeOnCompletion { cause ->
-                if (_connectionStatus.value is ConnectionStatus.Connected) {
-                    // Reason strings all share the "connection lost"
-                    // prefix so the screen's status line phrasing is
-                    // consistent regardless of whether the SSH stdout
-                    // flow terminated cleanly (EOF / null cause) or
-                    // because [createStdoutFlow] swallowed an SSHException
-                    // / IOException from the OS tearing the socket down
-                    // (Issue #173). The phrasing also matches the
-                    // tmux-CC [TmuxSessionViewModel.attachClient]
-                    // path's invokeOnCompletion so both UI surfaces
-                    // align in feedback reports.
-                    val reason = when (cause) {
-                        null -> "connection lost: remote shell closed"
-                        is CancellationException -> return@invokeOnCompletion
-                        else -> "connection lost: ${cause.javaClass.simpleName}: ${cause.message}"
-                    }
-                    _connectionStatus.value = ConnectionStatus.Failed(reason)
-                }
-            }
+            observeProducerCompletion(producerJob, host, port, user)
 
             // Kick the shell through the terminal bridge so sshj network I/O
             // stays on the bridge's background input-drainer thread.
             sendTerminalInput("\r".toByteArray())
 
             _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+            activeTarget = RawSshTarget(host, port, user, keyPath, passphrase?.copyOf())
+            connectingTarget = null
+            refreshReconnectAvailability()
             startAgentDetection(session)
+        } catch (e: CancellationException) {
+            throw e
         } catch (t: Throwable) {
+            connectingTarget = RawSshTarget(host, port, user, keyPath, passphrase?.copyOf())
+            refreshReconnectAvailability()
             _connectionStatus.value =
-                ConnectionStatus.Failed("error: ${t.javaClass.simpleName}: ${t.message}")
+                ConnectionStatus.Failed(
+                    "error: ${t.javaClass.simpleName}: ${t.message}. Tap Reconnect to retry.",
+                )
         }
     }
 
@@ -378,7 +422,22 @@ public class SessionViewModel @Inject constructor(
     ): Job {
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
         connectJob = job
+        connectingTarget = RawSshTarget(host, port, user, keyPath = null, passphrase = null)
+        refreshReconnectAvailability()
         return job
+    }
+
+    internal fun markRawShellDisconnectedForTest(
+        host: String,
+        port: Int,
+        user: String,
+        cause: Throwable? = null,
+    ) {
+        activeTarget = RawSshTarget(host, port, user, keyPath = null, passphrase = null)
+        connectingTarget = null
+        refreshReconnectAvailability()
+        _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+        markDisconnectedFromProducer(cause, host, port, user)
     }
 
     internal fun startAgentConversationForTest(
@@ -732,14 +791,56 @@ public class SessionViewModel @Inject constructor(
         if (columns == remoteColumns && rows == remoteRows) return
         remoteColumns = columns
         remoteRows = rows
-        val channel = shellRef?.sessionChannel as? SessionChannel ?: return
+        val shell = shellRef ?: return
         viewModelScope.launch(Dispatchers.IO) {
-            runCatching { channel.changeWindowDimensions(columns, rows, 0, 0) }
+            shell.resizePty(columns, rows)
         }
+    }
+
+    private fun closeCurrentConnection(clearActiveTarget: Boolean = true) {
+        producerJob?.cancel()
+        terminalState.detachExternalProducer()
+        val shell = shellRef
+        val session = sessionRef
+        sessionRef = null
+        shellRef = null
+        producerJob = null
+        if (clearActiveTarget) {
+            activeTarget = null
+        }
+        refreshReconnectAvailability()
+        closeSshResourcesAsync(shell, session)
     }
 
     private fun sendTerminalInput(bytes: ByteArray) {
         terminalState.writeInput(bytes)
+    }
+
+    private fun observeProducerCompletion(
+        job: Job?,
+        host: String,
+        port: Int,
+        user: String,
+    ) {
+        job?.invokeOnCompletion { cause ->
+            markDisconnectedFromProducer(cause, host, port, user)
+        }
+    }
+
+    private fun markDisconnectedFromProducer(
+        cause: Throwable?,
+        host: String,
+        port: Int,
+        user: String,
+    ) {
+        if (_connectionStatus.value !is ConnectionStatus.Connected) return
+        val reason = when (cause) {
+            null -> "Disconnected from $user@$host:$port. Tap Reconnect to retry."
+            is CancellationException -> return
+            else -> "Disconnected from $user@$host:$port: ${cause.javaClass.simpleName}: ${cause.message}. " +
+                "Tap Reconnect to retry."
+        }
+        _connectionStatus.value = ConnectionStatus.Failed(reason)
     }
 
     private fun sendProjectCommand(result: Result<String>, successMessage: String, recentPath: String) {
@@ -903,27 +1004,15 @@ public class SessionViewModel @Inject constructor(
         projectRootsJob?.cancel()
         producerJob?.cancel()
         terminalState.detachExternalProducer()
-        val shell = shellRef
-        val session = sessionRef
-        sessionRef = null
-        shellRef = null
-        producerJob = null
-        closeSshResourcesAsync(shell, session)
+        closeCurrentConnection()
         super.onCleared()
     }
 
-    private fun closeSshResourcesAsync(shell: SshShellHandle?, session: SshSession?) {
+    private fun closeSshResourcesAsync(shell: SshShell?, session: SshSession?) {
         if (shell == null && session == null) return
         Thread(
             {
-                closeIgnoringFailure { shell?.shell?.close() }
-                closeIgnoringFailure { shell?.sessionChannel?.close() }
-                // The SSHJ transport can throw a BY_APPLICATION disconnect
-                // exception during Activity teardown even when the close is
-                // intentional. Keep explicit transport cleanup, but keep it
-                // off the lifecycle callback thread and suppress teardown
-                // noise locally.
-                closeIgnoringFailure { shell?.client?.disconnect() }
+                closeIgnoringFailure { shell?.close() }
                 closeIgnoringFailure { session?.close() }
             },
             "PocketShellSshCleanup",
@@ -975,6 +1064,39 @@ public data class AgentConversationUiState(
      */
     val searchQuery: String = "",
 )
+
+private data class RawSshTarget(
+    val host: String,
+    val port: Int,
+    val user: String,
+    val keyPath: String?,
+    val passphrase: CharArray?,
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is RawSshTarget) return false
+        return host == other.host &&
+            port == other.port &&
+            user == other.user &&
+            keyPath == other.keyPath &&
+            passphrasesEqual(passphrase, other.passphrase)
+    }
+
+    override fun hashCode(): Int {
+        var result = host.hashCode()
+        result = 31 * result + port
+        result = 31 * result + user.hashCode()
+        result = 31 * result + (keyPath?.hashCode() ?: 0)
+        result = 31 * result + (passphrase?.contentHashCode() ?: 0)
+        return result
+    }
+}
+
+private fun passphrasesEqual(left: CharArray?, right: CharArray?): Boolean = when {
+    left == null && right == null -> true
+    left == null || right == null -> false
+    else -> left.contentEquals(right)
+}
 
 private const val MaxAgentEvents: Int = 500
 

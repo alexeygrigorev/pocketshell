@@ -43,6 +43,10 @@ set -euo pipefail
 
 state_file="${FAKE_ADB_STATE:?}"
 mode="${FAKE_ADB_MODE:?}"
+run_dir="$(dirname "$state_file")"
+device_log="$run_dir/device-instrumentation.log"
+device_status="$run_dir/device-instrumentation.status"
+device_done="$run_dir/device-instrumentation.done"
 
 if [[ "$*" == "logcat -c" ]]; then
   exit 0
@@ -61,27 +65,62 @@ if [[ "$*" == "logcat -d -v threadtime -t 60000" ]]; then
   exit 0
 fi
 
-if [[ "$*" == "shell am instrument"* ]]; then
+if [[ "$*" == shell\ rm\ -f\ /data/local/tmp/pocketshell-long-running-*nohup*am\ instrument* ]]; then
   count="$(cat "$state_file" 2>/dev/null || printf '0')"
   count=$((count + 1))
   printf '%s' "$count" > "$state_file"
+  rm -f "$device_log" "$device_status" "$device_done"
 
   if [[ "$mode" == "transport_then_success" && "$count" == "1" ]]; then
-    printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.app.proof.LongRunningSessionStabilityTest\n'
-    printf 'INSTRUMENTATION_STATUS: current=1\n'
-    printf 'INSTRUMENTATION_STATUS: numtests=1\n'
-    printf 'INSTRUMENTATION_STATUS_CODE: 1\n'
-    exit 255
+    {
+      printf 'INSTRUMENTATION_STATUS: class=com.pocketshell.app.proof.LongRunningSessionStabilityTest\n'
+      printf 'INSTRUMENTATION_STATUS: current=1\n'
+      printf 'INSTRUMENTATION_STATUS: numtests=1\n'
+      printf 'INSTRUMENTATION_STATUS_CODE: 1\n'
+    } > "$device_log"
+    printf '255\n' > "$device_status"
+    : > "$device_done"
+    exit 0
   fi
 
   if [[ "$mode" == "assertion_failure" ]]; then
-    printf 'INSTRUMENTATION_STATUS: stack=java.lang.AssertionError: expected no teardown events\n'
-    printf 'FAILURES!!!\n'
-    exit 1
+    {
+      printf 'INSTRUMENTATION_STATUS: stack=java.lang.AssertionError: expected no teardown events\n'
+      printf 'FAILURES!!!\n'
+    } > "$device_log"
+    printf '1\n' > "$device_status"
+    : > "$device_done"
+    exit 0
   fi
 
-  printf 'INSTRUMENTATION_CODE: -1\n'
-  printf 'OK (1 test)\n'
+  {
+    printf 'INSTRUMENTATION_STATUS: stream=LONG_RUNNING_HEARTBEAT elapsed_ms=15000 next_tick_index=1 label=hold\n'
+    printf 'INSTRUMENTATION_STATUS_CODE: 0\n'
+    printf 'INSTRUMENTATION_CODE: -1\n'
+    printf 'OK (1 test)\n'
+  } > "$device_log"
+  printf '0\n' > "$device_status"
+  : > "$device_done"
+  exit 0
+fi
+
+if [[ "$*" == shell\ cat\ /data/local/tmp/pocketshell-long-running-*.log* ]]; then
+  cat "$device_log" 2>/dev/null || true
+  exit 0
+fi
+
+if [[ "$*" == shell\ cat\ /data/local/tmp/pocketshell-long-running-*.status* ]]; then
+  cat "$device_status" 2>/dev/null || true
+  exit 0
+fi
+
+if [[ "$*" == shell\ test\ -f\ /data/local/tmp/pocketshell-long-running-*.done* ]]; then
+  [[ -f "$device_done" ]]
+  exit $?
+fi
+
+if [[ "$*" == shell\ rm\ -f\ /data/local/tmp/pocketshell-long-running-* ]]; then
+  rm -f "$device_log" "$device_status" "$device_done"
   exit 0
 fi
 

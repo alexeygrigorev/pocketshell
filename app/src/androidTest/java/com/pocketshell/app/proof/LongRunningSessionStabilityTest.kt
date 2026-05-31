@@ -96,13 +96,19 @@ import java.util.Locale
  *     The matcher is the same wrap-tolerant matcher the other connected
  *     tests use; it survives the tmux pane wrapping the line at the
  *     emulator's grid width.
- *  3. Reconnect-loop assertion is signal-based: we read `adb logcat`
+ *  3. During the quiet hold between visible terminal ticks, emit an
+ *     instrumentation stream heartbeat and run a lightweight
+ *     UiAutomation shell no-op every 15 seconds. This keeps both the
+ *     host-side `adb shell am instrument -w -r` output stream and the
+ *     shell-command path used for meminfo/logcat active without touching
+ *     the app/session state that the test asserts on.
+ *  4. Reconnect-loop assertion is signal-based: we read `adb logcat`
  *     filtered to the `issue105-diag` tag and count occurrences of
  *     `ssh-read-eof` / `ssh-read-failed`. Each one indicates the SSH
  *     transport feeding `TmuxClient` tore down. A healthy 10-minute hold
  *     produces ZERO of these — that is the signal, not a wall-clock
  *     heuristic.
- *  4. Production SSH keep-alive interval is
+ *  5. Production SSH keep-alive interval is
  *     [SshConnection.DEFAULT_KEEP_ALIVE_SECONDS] = 15 seconds (4 cycles
  *     per minute, NOT the "≤ 1 cycle per minute" the issue body suggested).
  *     The cycles are emitted by sshj's `KeepAlive` thread internally and
@@ -112,7 +118,7 @@ import java.util.Locale
  *     succeeded: zero `ssh-read-eof`/`ssh-read-failed` events across
  *     the 10-minute hold. The keep-alive interval is recorded in the
  *     summary artifact for traceability.
- *  5. Memory growth is asserted via a deterministic parse of
+ *  6. Memory growth is asserted via a deterministic parse of
  *     `dumpsys meminfo <package>` ("TOTAL PSS" line). Baseline is
  *     captured after the session is attached and one tick has landed.
  *     Final is captured at the end of the hold. Growth must be < 50 MB.
@@ -194,6 +200,15 @@ class LongRunningSessionStabilityTest {
                 "ssh_keep_alive_interval_seconds",
                 PRODUCTION_SSH_KEEP_ALIVE_SECONDS.toLong(),
             )
+            recordTiming(
+                "instrumentation_heartbeat_interval_ms",
+                LongRunningInstrumentationHeartbeat.DEFAULT_INTERVAL_MS,
+            )
+            emitInstrumentationHeartbeat(
+                testStart = testStart,
+                nextTickIndex = 1,
+                label = "baseline-complete",
+            )
 
             // --- Five further ticks, ~2 minutes apart -------------------------
             //
@@ -205,11 +220,19 @@ class LongRunningSessionStabilityTest {
             // schedule.
             for (tickIndex in 1..LAST_TICK_INDEX) {
                 val nextDeadline = testStart + tickIndex.toLong() * TICK_INTERVAL_MS
-                val now = SystemClock.elapsedRealtime()
-                if (nextDeadline > now) {
-                    SystemClock.sleep(nextDeadline - now)
-                }
+                sleepUntilWithInstrumentationHeartbeats(
+                    deadlineMs = nextDeadline,
+                    testStart = testStart,
+                    nextTickIndex = tickIndex,
+                )
                 tickLatencies += sendTickAndAssertVisible(tickIndex)
+                if (tickIndex < LAST_TICK_INDEX) {
+                    emitInstrumentationHeartbeat(
+                        testStart = testStart,
+                        nextTickIndex = tickIndex + 1,
+                        label = "tick-$tickIndex-complete",
+                    )
+                }
             }
 
             // --- Final memory capture + reconnect counter --------------------
@@ -468,6 +491,60 @@ class LongRunningSessionStabilityTest {
         val latency = SystemClock.elapsedRealtime() - tickStart
         recordTiming("tick_${tickIndex}_latency_ms", latency)
         return latency
+    }
+
+    private fun sleepUntilWithInstrumentationHeartbeats(
+        deadlineMs: Long,
+        testStart: Long,
+        nextTickIndex: Int,
+    ) {
+        while (true) {
+            val now = SystemClock.elapsedRealtime()
+            val sleepMs = LongRunningInstrumentationHeartbeat.sleepSliceMs(
+                nowMs = now,
+                deadlineMs = deadlineMs,
+            )
+            if (sleepMs == 0L) return
+
+            SystemClock.sleep(sleepMs)
+
+            if (SystemClock.elapsedRealtime() < deadlineMs) {
+                emitInstrumentationHeartbeat(
+                    testStart = testStart,
+                    nextTickIndex = nextTickIndex,
+                    label = "hold",
+                )
+            }
+        }
+    }
+
+    private fun emitInstrumentationHeartbeat(
+        testStart: Long,
+        nextTickIndex: Int,
+        label: String,
+    ) {
+        touchUiAutomationShellHeartbeat()
+        val line = LongRunningInstrumentationHeartbeat.line(
+            elapsedMs = SystemClock.elapsedRealtime() - testStart,
+            nextTickIndex = nextTickIndex,
+            label = label,
+        )
+        println(line)
+        InstrumentationRegistry.getInstrumentation().sendStatus(
+            0,
+            LongRunningInstrumentationHeartbeat.streamBundle(line),
+        )
+    }
+
+    private fun touchUiAutomationShellHeartbeat() {
+        try {
+            execShellCommand("true")
+        } catch (error: Throwable) {
+            throw AssertionError(
+                "UiAutomation shell heartbeat failed during long-running hold",
+                error,
+            )
+        }
     }
 
     /**

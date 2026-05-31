@@ -345,6 +345,78 @@ run_real_agent_release_gate_instrumentation() {
 # Artifact bundle includes the captured logcat slice, the meminfo summary, and
 # the run docker logs so the reviewer can audit reconnect counters and
 # memory growth without needing to rerun the 10-minute hold.
+run_long_running_session_detached_instrumentation_attempt() {
+  local attempt="$1"
+  local attempt_instrumentation_log="$2"
+  local run_dir="$3"
+  local poll_interval_seconds="${LONG_RUNNING_TEST_POLL_INTERVAL_SECONDS:-15}"
+  local timeout_seconds="${LONG_RUNNING_TEST_INSTRUMENTATION_TIMEOUT_SECONDS:-900}"
+  local device_prefix="/data/local/tmp/pocketshell-long-running-${$}-${attempt}"
+  local device_log="$device_prefix.log"
+  local device_status="$device_prefix.status"
+  local device_done="$device_prefix.done"
+  local poll_log="$run_dir/instrumentation-attempt-$attempt.poll"
+  local status_file="$run_dir/instrumentation-attempt-$attempt.status"
+  local last_streamed_line=0
+  local start_seconds
+  start_seconds="$(date +%s)"
+
+  : > "$attempt_instrumentation_log"
+  rm -f "$poll_log" "$status_file"
+
+  if ! "$ADB" shell "rm -f $device_log $device_status $device_done; nohup sh -c 'am instrument -w -r -e class $LONG_RUNNING_TEST_CLASS -e pocketshellLongRunningTest 1 -e pocketshellCi true com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner > $device_log 2>&1; echo \$? > $device_status; touch $device_done' >/dev/null 2>&1 &"; then
+    printf 'LongRunningSessionStabilityTest detached instrumentation failed to launch\n' |
+      tee -a "$attempt_instrumentation_log" >&2
+    return 1
+  fi
+
+  while true; do
+    if "$ADB" shell "cat $device_log 2>/dev/null" > "$poll_log" 2>/dev/null; then
+      local total_lines
+      total_lines="$(wc -l < "$poll_log" | tr -d ' ')"
+      if [[ "$total_lines" =~ ^[0-9]+$ ]] && (( total_lines > last_streamed_line )); then
+        sed -n "$((last_streamed_line + 1)),${total_lines}p" "$poll_log" |
+          tee -a "$attempt_instrumentation_log"
+        last_streamed_line="$total_lines"
+      fi
+    else
+      "$ADB" reconnect >/dev/null 2>&1 || true
+      "$ADB" wait-for-device >/dev/null 2>&1 || true
+    fi
+
+    if "$ADB" shell "test -f $device_done" >/dev/null 2>&1; then
+      "$ADB" shell "cat $device_status 2>/dev/null" > "$status_file" 2>/dev/null || true
+      "$ADB" shell "cat $device_log 2>/dev/null" > "$poll_log" 2>/dev/null || true
+      local total_lines
+      total_lines="$(wc -l < "$poll_log" | tr -d ' ')"
+      if [[ "$total_lines" =~ ^[0-9]+$ ]] && (( total_lines > last_streamed_line )); then
+        sed -n "$((last_streamed_line + 1)),${total_lines}p" "$poll_log" |
+          tee -a "$attempt_instrumentation_log"
+      fi
+      "$ADB" shell "rm -f $device_log $device_status $device_done" >/dev/null 2>&1 || true
+      local status
+      status="$(tr -cd '0-9' < "$status_file" 2>/dev/null || true)"
+      if [[ "$status" =~ ^[0-9]+$ ]]; then
+        return "$status"
+      fi
+      return 1
+    fi
+
+    local now_seconds
+    now_seconds="$(date +%s)"
+    if (( now_seconds - start_seconds > timeout_seconds )); then
+      printf 'LongRunningSessionStabilityTest detached instrumentation timed out after %s seconds\n' "$timeout_seconds" |
+        tee -a "$attempt_instrumentation_log" >&2
+      "$ADB" shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true
+      "$ADB" shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
+      "$ADB" shell "rm -f $device_log $device_status $device_done" >/dev/null 2>&1 || true
+      return 124
+    fi
+
+    sleep "$poll_interval_seconds"
+  done
+}
+
 run_long_running_session_instrumentation() {
   local run_dir="$LONG_RUNNING_TEST_RUN_DIR"
   local instrumentation_log="$run_dir/instrumentation.log"
@@ -377,7 +449,6 @@ run_long_running_session_instrumentation() {
     # the post-run pull short.
     "$ADB" logcat -c >/dev/null 2>&1 || true
 
-    set +e
     # The on-device test gates picker round-trips on
     # TerminalTestTimeouts.terminalVisibilityTimeoutMs(), which is 60 s
     # locally and 180 s when `pocketshellCi=true` is set. The long-running
@@ -385,13 +456,16 @@ run_long_running_session_instrumentation() {
     # generous deadline — under heavy worktree contention the host picker
     # probe alone has been observed to exceed 30 s, and the 10-minute hold
     # alone is far more expensive than the extra slack on the picker.
-    "$ADB" shell am instrument -w -r \
-      -e class "$LONG_RUNNING_TEST_CLASS" \
-      -e pocketshellLongRunningTest 1 \
-      -e pocketshellCi true \
-      com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner \
-      2>&1 | tee "$attempt_instrumentation_log"
-    instrumentation_status="${PIPESTATUS[0]}"
+    # Run the long hold detached on the device and poll its output with
+    # short adb calls. Issue #352 showed that a single long-lived host-side
+    # `adb shell am instrument -w -r` can lose the ADB/UiAutomation owner
+    # during the quiet hold even when retrying the whole selector; polling
+    # keeps release evidence and final assertions without binding the
+    # ten-minute test lifetime to one adb transport.
+    set +e
+    run_long_running_session_detached_instrumentation_attempt \
+      "$attempt" "$attempt_instrumentation_log" "$run_dir"
+    instrumentation_status="$?"
     set -e
 
     # Capture diagnostics regardless of outcome so reviewers can audit.

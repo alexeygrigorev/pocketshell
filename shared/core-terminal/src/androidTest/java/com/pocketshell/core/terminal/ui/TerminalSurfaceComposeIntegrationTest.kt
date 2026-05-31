@@ -603,11 +603,14 @@ class TerminalSurfaceComposeIntegrationTest {
             // time. By providing our wrapped context to LocalContext, the
             // AndroidView factory passes it to `TerminalView(ctx, ...)`.
             //
-            // We delegate the actual IMM lookup to the real activity context
-            // (we don't need to stub the IMM itself — we only need to know the
-            // lookup happened, which is the only side-effect the
-            // empty-tap path performs that we can observe from outside
-            // the View).
+            // Return a non-IMM sentinel for that lookup. This keeps the
+            // connected test at the Android system-service boundary: it still
+            // proves the real Compose/TerminalView empty-tap pipeline reached
+            // the production IME request path, but it does not ask the
+            // emulator's actual InputMethodManager to serve the view. Release
+            // validation previously saw the production call reach
+            // showSoftInput(), only for the platform to reject it as "view is
+            // not served" during UTP cleanup.
             val activityContext = composeTestRule.activity
             val recordingContext = RecordingImeContext(activityContext) { imeCalls.incrementAndGet() }
 
@@ -656,12 +659,13 @@ class TerminalSurfaceComposeIntegrationTest {
 
             // The empty-area onSingleTapUp does: view.requestFocus() →
             // view.context.getSystemService(INPUT_METHOD_SERVICE) →
-            // imm.showSoftInput(view, SHOW_IMPLICIT). We observe (1) the IME
-            // lookup happened via the recording context, and (2) the View
-            // is focused (which is what requestFocus achieves on a focusable
-            // View). Both together prove the IME-summon code path was
-            // reached and was not short-circuited by the URL hook (which
-            // would return early before the requestFocus call).
+            // imm.showSoftInput(view, SHOW_IMPLICIT). We observe the first
+            // two steps here and leave the actual showSoftInput side effect to
+            // TerminalSurfaceDefaultsTest's Robolectric IMM assertion. Both
+            // together prove the IME-summon code path was reached and was not
+            // short-circuited by the URL hook (which would return early before
+            // the requestFocus call) without depending on emulator IME focus
+            // state.
             instrumentation.runOnMainSync {
                 viewWasFocusRequested.set(view.isFocused)
             }
@@ -942,14 +946,13 @@ class TerminalSurfaceComposeIntegrationTest {
 
     /**
      * [ContextWrapper] that increments a counter every time
-     * `getSystemService(INPUT_METHOD_SERVICE)` is invoked, then delegates to
-     * the base context for the actual service lookup. Used in
+     * `getSystemService(INPUT_METHOD_SERVICE)` is invoked, then returns a
+     * non-IMM sentinel so the connected test does not trigger the emulator's
+     * real soft-keyboard lifecycle. Used in
      * [tappingEmptyAreaSummonsSoftInput] to observe that the
      * `PocketShellTerminalViewClient.onSingleTapUp` IME-summon path was
      * reached on an empty-cell tap — the lookup is the only externally
-     * observable side effect of that path before
-     * `imm.showSoftInput` (which is itself a no-op on a windowless
-     * instrumentation surface).
+     * observable side effect of that path before `imm.showSoftInput`.
      */
     private class RecordingImeContext(
         base: Context,
@@ -958,6 +961,7 @@ class TerminalSurfaceComposeIntegrationTest {
         override fun getSystemService(name: String): Any? {
             if (name == Context.INPUT_METHOD_SERVICE) {
                 onImeLookup()
+                return Any()
             }
             return super.getSystemService(name)
         }

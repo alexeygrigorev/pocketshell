@@ -28,6 +28,7 @@ TEST_APK_PATH="${TEST_APK_PATH:-app/build/outputs/apk/androidTest/debug/app-debu
 APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS="${APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS:-3}"
 APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS="${APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS:-3}"
 ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS="${ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS:-3}"
+CORE_TERMINAL_CONNECTED_ATTEMPTS="${CORE_TERMINAL_CONNECTED_ATTEMPTS:-2}"
 
 APP_WALKTHROUGH_TESTS=(
   "com.pocketshell.app.composer.PromptComposerSmokeTest#recordingAndTranscribingStatesAreVisible"
@@ -72,6 +73,7 @@ Environment overrides:
   APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS=3
   APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS=3
   ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS=3
+  CORE_TERMINAL_CONNECTED_ATTEMPTS=2
 USAGE
 }
 
@@ -321,6 +323,74 @@ run_bash_step() {
   local name="$1"
   local script="$2"
   run_step "$name" bash -lc "$script"
+}
+
+core_terminal_connected_input_script() {
+  cat <<CORE_TERMINAL_SCRIPT
+set -euo pipefail
+
+wait_for_android_media_storage() {
+  for i in {1..60}; do
+    if '$ADB' shell 'mkdir -p /sdcard/Android/media && test -d /sdcard/Android/media' >/dev/null 2>&1; then
+      printf 'Android shared media storage is ready: /sdcard/Android/media\n'
+      return 0
+    fi
+    sleep 1
+  done
+  printf 'Android shared media storage did not become ready: /sdcard/Android/media\n' >&2
+  '$ADB' devices >&2 || true
+  '$ADB' shell 'ls -ld /sdcard /sdcard/Android /sdcard/Android/media' >&2 || true
+  return 1
+}
+
+core_terminal_connected_should_retry() {
+  local attempt_log="\$1"
+  local logcat_file="\$2"
+  grep -q 'Starting 0 tests' "\$attempt_log" || return 1
+  grep -q 'Test run failed to complete[.] No test results' "\$attempt_log" || return 1
+  {
+    grep -qi 'Connection refused' "\$attempt_log" ||
+      grep -Eq 'adbd[[:space:]].*(connection terminated|offline|read failed)|host-[0-9]+: read failed' "\$logcat_file"
+  }
+}
+
+wait_for_android_media_storage
+
+for attempt in \$(seq 1 '$CORE_TERMINAL_CONNECTED_ATTEMPTS'); do
+  attempt_log='$RUN_DIR/connected-terminal-input-attempt-'\$attempt'.log'
+  attempt_logcat='$RUN_DIR/connected-terminal-input-attempt-'\$attempt'-logcat.log'
+  printf 'Core-terminal connected test attempt %s/%s\n' "\$attempt" '$CORE_TERMINAL_CONNECTED_ATTEMPTS'
+  '$ADB' logcat -c >/dev/null 2>&1 || true
+
+  set +e
+  ./gradlew $GRADLE_FLAGS :shared:core-terminal:connectedDebugAndroidTest --stacktrace 2>&1 | tee "\$attempt_log"
+  status=\${PIPESTATUS[0]}
+  set -e
+
+  '$ADB' logcat -d -v time -t 5000 > "\$attempt_logcat" 2>&1 || true
+
+  if [ "\$status" -eq 0 ]; then
+    exit 0
+  fi
+
+  if [ "\$attempt" -lt '$CORE_TERMINAL_CONNECTED_ATTEMPTS' ] &&
+    core_terminal_connected_should_retry "\$attempt_log" "\$attempt_logcat"; then
+    printf 'Core-terminal connected test produced UTP no-results/transport cleanup failure on attempt %s; retrying.\n' "\$attempt" >&2
+    '$ADB' reconnect >/dev/null 2>&1 || true
+    '$ADB' wait-for-device >/dev/null 2>&1 || true
+    for package in com.termux.view.test com.pocketshell.app.test com.pocketshell.app; do
+      '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
+    done
+    '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
+    '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
+    wait_for_android_media_storage
+    sleep 2
+    continue
+  fi
+
+  exit "\$status"
+done
+CORE_TERMINAL_SCRIPT
 }
 
 fail() {
@@ -927,8 +997,7 @@ run_bash_step "emulator-readiness" \
   "'$ADB' devices && for i in {1..90}; do state=\$('$ADB' shell getprop sys.boot_completed 2>/dev/null | tr -d '\r'); if [ \"\$state\" = 1 ]; then exit 0; fi; sleep 2; done; '$ADB' devices; exit 1"
 update_emulator_serial
 
-run_step "connected-terminal-input" \
-  ./gradlew $GRADLE_FLAGS :shared:core-terminal:connectedDebugAndroidTest --stacktrace
+run_bash_step "connected-terminal-input" "$(core_terminal_connected_input_script)"
 
 run_step "build-app-test-apks" \
   ./gradlew $GRADLE_FLAGS :app:assembleDebug :app:assembleDebugAndroidTest --stacktrace

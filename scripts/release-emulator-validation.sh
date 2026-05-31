@@ -395,16 +395,34 @@ run_long_running_session_detached_instrumentation_attempt() {
       fi
       "$ADB" shell "rm -f $device_log $device_status $device_done" >/dev/null 2>&1 || true
       local status
-      status="$(tr -cd '0-9' < "$status_file" 2>/dev/null || true)"
+      status="$(tr -d '[:space:]' < "$status_file" 2>/dev/null || true)"
       if [[ "$status" =~ ^[0-9]+$ ]]; then
         return "$status"
       fi
+
+      local final_tail_file="$run_dir/instrumentation-attempt-$attempt.final-tail"
+      tail -n 80 "$attempt_instrumentation_log" > "$final_tail_file" 2>/dev/null || true
+      {
+        printf 'FAIL: LongRunningSessionStabilityTest detached instrumentation completed but result status was missing, empty, or corrupt\n'
+        printf 'device_status_path=%s\n' "$device_status"
+        printf 'device_done_path=%s\n' "$device_done"
+        printf 'device_log_path=%s\n' "$device_log"
+        printf 'host_status_file=%s\n' "$status_file"
+        printf 'host_poll_log=%s\n' "$poll_log"
+        if [[ -s "$status_file" ]]; then
+          printf 'status_contents=%s\n' "$(tr '\n' ' ' < "$status_file")"
+        else
+          printf 'status_contents=<missing-or-empty>\n'
+        fi
+        printf 'final_instrumentation_log_tail:\n'
+        cat "$final_tail_file" 2>/dev/null || true
+      } | tee -a "$attempt_instrumentation_log" >&2
       return 1
     fi
 
     local now_seconds
     now_seconds="$(date +%s)"
-    if (( now_seconds - start_seconds > timeout_seconds )); then
+    if (( now_seconds - start_seconds >= timeout_seconds )); then
       printf 'LongRunningSessionStabilityTest detached instrumentation timed out after %s seconds\n' "$timeout_seconds" |
         tee -a "$attempt_instrumentation_log" >&2
       "$ADB" shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true

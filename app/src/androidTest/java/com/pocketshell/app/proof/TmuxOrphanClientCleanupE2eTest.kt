@@ -237,6 +237,7 @@ class TmuxOrphanClientCleanupE2eTest {
 
     private suspend fun seedDockerHost(key: String): String {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
+        seedFlatHostDetailMode()
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
             .fallbackToDestructiveMigration(dropAllTables = true)
             .build()
@@ -248,6 +249,8 @@ class TmuxOrphanClientCleanupE2eTest {
                 name = "issue215-key-${System.currentTimeMillis()}",
                 content = key,
             )
+            val appVersion = targetAppVersionName()
+            val now = System.currentTimeMillis()
             val hostId = db.hostDao().insert(
                 HostEntity(
                     name = "Issue215 OrphanClient",
@@ -256,12 +259,39 @@ class TmuxOrphanClientCleanupE2eTest {
                     username = DEFAULT_USER,
                     keyId = storedKey.id,
                     tmuxInstalled = true,
-                    lastBootstrapAt = System.currentTimeMillis(),
+                    lastBootstrapAt = now,
+                    pocketshellInstalled = true,
+                    pocketshellLastDetectedAt = now,
+                    pocketshellCliVersion = appVersion,
+                    pocketshellExpectedCliVersion = appVersion,
+                    pocketshellVersionCompatible = true,
+                    pocketshellDaemonRunning = true,
+                    pocketshellDaemonEnabled = true,
                 ),
             )
             HOST_ROW_TAG_PREFIX + hostId
         } finally {
             db.close()
+        }
+    }
+
+    private fun targetAppVersionName(): String {
+        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
+        return appContext.packageManager
+            .getPackageInfo(appContext.packageName, 0)
+            .versionName ?: error("target app versionName is missing")
+    }
+
+    private fun seedFlatHostDetailMode() {
+        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
+        check(
+            appContext
+                .getSharedPreferences(APP_SETTINGS_PREFS_NAME, android.content.Context.MODE_PRIVATE)
+                .edit()
+                .putString(HOST_DETAIL_VIEW_MODE_PREF_KEY, HOST_DETAIL_VIEW_MODE_FLAT)
+                .commit(),
+        ) {
+            "failed to seed flat host-detail mode"
         }
     }
 
@@ -546,6 +576,9 @@ class TmuxOrphanClientCleanupE2eTest {
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
+        const val APP_SETTINGS_PREFS_NAME: String = "app_settings"
+        const val HOST_DETAIL_VIEW_MODE_PREF_KEY: String = "host_detail_view_mode"
+        const val HOST_DETAIL_VIEW_MODE_FLAT: String = "Flat"
         const val LOG_TAG: String = "Issue215OrphanClient"
         const val DEVICE_DIR_NAME: String = "issue215-orphan-client-cleanup"
         // Same seeded-session name pattern as the other connected tmux

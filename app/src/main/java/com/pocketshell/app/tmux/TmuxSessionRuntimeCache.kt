@@ -1,5 +1,6 @@
 package com.pocketshell.app.tmux
 
+import android.os.SystemClock
 import com.pocketshell.core.ssh.SshLease
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.tmux.TmuxClient
@@ -21,34 +22,50 @@ import javax.inject.Singleton
  * republishes the cached pane list and terminal states without opening SSH,
  * starting tmux -CC, listing panes, capturing panes, or creating terminal
  * state on the switch path.
+ *
+ * The cache is deliberately small: it retains only the most recently used
+ * inactive runtimes per host and expires entries by monotonic time on cache
+ * operations. Callers own closing returned evictions off the visible switch
+ * path.
  */
 @Singleton
 public class TmuxSessionRuntimeCache @Inject constructor() {
-    private var maxEntries: Int = DEFAULT_MAX_ENTRIES
+    private var maxEntriesPerHost: Int = DEFAULT_MAX_ENTRIES_PER_HOST
+    private var ttlMs: Long = DEFAULT_TTL_MS
+    private var nowMs: () -> Long = SystemClock::elapsedRealtime
 
-    internal constructor(maxEntries: Int) : this() {
-        this.maxEntries = maxEntries
+    internal constructor(
+        maxEntries: Int,
+        ttlMs: Long = DEFAULT_TTL_MS,
+        nowMs: () -> Long = SystemClock::elapsedRealtime,
+    ) : this() {
+        this.maxEntriesPerHost = maxEntries
+        this.ttlMs = ttlMs
+        this.nowMs = nowMs
     }
 
-    private val runtimes = object : LinkedHashMap<TmuxRuntimeKey, CachedTmuxRuntime>(
-        maxEntries,
+    private val runtimes = object : LinkedHashMap<TmuxRuntimeKey, CacheEntry>(
+        maxEntriesPerHost,
         0.75f,
         true,
     ) {}
 
-    internal fun put(runtime: CachedTmuxRuntime): CachedTmuxRuntime? = synchronized(this) {
+    internal fun put(runtime: CachedTmuxRuntime): List<CachedTmuxRuntime> = synchronized(this) {
+        val now = nowMs()
         val evicted = mutableListOf<CachedTmuxRuntime>()
-        runtimes.put(runtime.key, runtime)?.let { evicted += it }
-        while (runtimes.size > maxEntries) {
-            val eldest = runtimes.entries.iterator().next()
-            runtimes.remove(eldest.key)
-            evicted += eldest.value
-        }
-        evicted.firstOrNull()
+        evicted += evictExpiredLocked(now)
+        runtimes.put(runtime.key, CacheEntry(runtime, now))?.let { evicted += it.runtime }
+        evicted += evictHostOverflowLocked(runtime.key.hostId)
+        evicted
     }
 
-    internal fun activate(key: TmuxRuntimeKey): CachedTmuxRuntime? = synchronized(this) {
-        runtimes.remove(key)
+    internal fun activate(key: TmuxRuntimeKey): CacheActivation = synchronized(this) {
+        val now = nowMs()
+        val evicted = evictExpiredLocked(now)
+        CacheActivation(
+            runtime = runtimes.remove(key)?.runtime,
+            evicted = evicted,
+        )
     }
 
     internal fun contains(key: TmuxRuntimeKey): Boolean = synchronized(this) {
@@ -68,22 +85,57 @@ public class TmuxSessionRuntimeCache @Inject constructor() {
             val entry = iterator.next()
             if (entry.key.hostId == hostId) {
                 iterator.remove()
-                removed += entry.value
+                removed += entry.value.runtime
             }
         }
         removed
     }
 
     internal fun clear(): List<CachedTmuxRuntime> = synchronized(this) {
-        val removed = runtimes.values.toList()
+        val removed = runtimes.values.map { it.runtime }
         runtimes.clear()
         removed
     }
 
+    private fun evictExpiredLocked(now: Long): List<CachedTmuxRuntime> {
+        if (ttlMs == Long.MAX_VALUE) return emptyList()
+        val removed = mutableListOf<CachedTmuxRuntime>()
+        val iterator = runtimes.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (now - entry.value.cachedAtMs >= ttlMs) {
+                iterator.remove()
+                removed += entry.value.runtime
+            }
+        }
+        return removed
+    }
+
+    private fun evictHostOverflowLocked(hostId: Long): List<CachedTmuxRuntime> {
+        val removed = mutableListOf<CachedTmuxRuntime>()
+        while (runtimes.keys.count { it.hostId == hostId } > maxEntriesPerHost) {
+            val eldestForHost = runtimes.entries.first { it.key.hostId == hostId }
+            runtimes.remove(eldestForHost.key)
+            removed += eldestForHost.value.runtime
+        }
+        return removed
+    }
+
     companion object {
-        const val DEFAULT_MAX_ENTRIES: Int = 4
+        const val DEFAULT_MAX_ENTRIES_PER_HOST: Int = 2
+        const val DEFAULT_TTL_MS: Long = 5 * 60 * 1000L
     }
 }
+
+internal data class CacheActivation(
+    val runtime: CachedTmuxRuntime?,
+    val evicted: List<CachedTmuxRuntime>,
+)
+
+private data class CacheEntry(
+    val runtime: CachedTmuxRuntime,
+    val cachedAtMs: Long,
+)
 
 internal data class TmuxRuntimeKey(
     val hostId: Long,

@@ -993,9 +993,7 @@ public class TmuxSessionViewModel @Inject constructor(
             lease = null
             client = null
             paneRuntime = null
-            runtimeCache.put(runtime)?.let { evicted ->
-                bridgeScope.launch { evicted.closeCachedRuntime() }
-            }
+            closeCachedRuntimesAsync(runtimeCache.put(runtime))
             TmuxSessionLatencyTelemetry.record(
                 name = "runtime_prewarm_ready",
                 durationMs = 1L,
@@ -1130,7 +1128,9 @@ public class TmuxSessionViewModel @Inject constructor(
         trigger: TmuxConnectTrigger,
         visibleSwitchStartedAtMs: Long,
     ): Boolean {
-        val cached = runtimeCache.activate(target.toRuntimeKey()) ?: run {
+        val activation = runtimeCache.activate(target.toRuntimeKey())
+        closeCachedRuntimesAsync(activation.evicted)
+        val cached = activation.runtime ?: run {
             val startedAtMs = visibleSwitchStartedAtMs.takeIf { it > 0L }
                 ?: SystemClock.elapsedRealtime()
             recordWarmSwitchMilestone(
@@ -1264,11 +1264,7 @@ public class TmuxSessionViewModel @Inject constructor(
             remoteColumns = remoteColumns,
             remoteRows = remoteRows,
         )
-        runtimeCache.put(runtime)?.let { evicted ->
-            viewModelScope.launch {
-                evicted.closeCachedRuntime()
-            }
-        }
+        closeCachedRuntimesAsync(runtimeCache.put(runtime))
         leaseRef = null
         sessionRef = null
         clientRef = null
@@ -1286,6 +1282,15 @@ public class TmuxSessionViewModel @Inject constructor(
         registeredHostId = null
         activeTarget = null
         activeAttachMilestone = null
+    }
+
+    private fun closeCachedRuntimesAsync(runtimes: List<CachedTmuxRuntime>) {
+        if (runtimes.isEmpty()) return
+        viewModelScope.launch {
+            runtimes.forEach { runtime ->
+                runtime.closeCachedRuntime()
+            }
+        }
     }
 
     private fun restoreCachedRuntime(

@@ -16,7 +16,8 @@ import com.termux.view.TerminalView
  * Callers convert to pixel rectangles by multiplying columns by the renderer's
  * `mFontWidth` and rows by `mFontLineSpacing`, anchored to the
  * [com.termux.view.TerminalView]'s current `mTopRow`. See
- * [UrlOverlay] for the full conversion path.
+ * [SmartSelectionAffordanceOverlay] for the visible affordance conversion
+ * path.
  *
  * @property url the literal URL substring as it appears on screen, with any
  *   trailing sentence punctuation already stripped. Safe to pass to
@@ -55,7 +56,7 @@ public data class UrlRegion(
  * The trade-off is that this scanner duplicates the URL regex shape from
  * [DefaultTerminalMatcher]. We accept the duplication because the consumers
  * differ — the matcher feeds smart-selection chips (any kind of token), the
- * scanner feeds the URL-tap overlay (URLs only). Keeping them separate makes
+ * scanner feeds URL tap-routing (URLs only). Keeping them separate makes
  * each consumer simpler.
  *
  * ## URL detection

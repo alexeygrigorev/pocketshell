@@ -452,8 +452,8 @@ class TerminalSurfaceComposeIntegrationTest {
             // Wait for the composable's DisposableEffect to install the
             // viewClient.onTapMaybeUrl hook. The DisposableEffect re-runs
             // every time `visibleUrls` changes, which is when the
-            // UrlOverlay's LaunchedEffect re-scans on a renderRequests
-            // emission. Cast view.mClient (`public` field on the
+            // surface URL scanner re-scans on a renderRequests emission.
+            // Cast view.mClient (`public` field on the
             // vendored TerminalView) to PocketShellTerminalViewClient —
             // the only concrete impl in this module — so the test can
             // verify the hook is non-null and then invoke it via the
@@ -487,10 +487,10 @@ class TerminalSurfaceComposeIntegrationTest {
             }
             // Drive one more recomposition / wait-for-idle so the
             // DisposableEffect that captures the freshest `visibleUrls`
-            // snapshot has run. The previous `LaunchedEffect` inside
-            // UrlOverlay calls `onUrlsChanged(fresh)` which schedules a
-            // state change; the DisposableEffect re-runs in the *next*
-            // recomposition. waitForIdle blocks until that next pass.
+            // snapshot has run. The URL scanner LaunchedEffect updates
+            // `visibleUrls`, and the DisposableEffect re-runs in the
+            // *next* recomposition. waitForIdle blocks until that next
+            // pass.
             composeTestRule.waitForIdle()
             val client = requireNotNull(clientRef[0]) {
                 "view.mClient must be a PocketShellTerminalViewClient — that's the only impl installed by applyPocketShellDefaults"
@@ -508,9 +508,9 @@ class TerminalSurfaceComposeIntegrationTest {
             // Retry-with-wait pattern: even after `waitForIdle()`, the
             // DisposableEffect that wires the URL snapshot into the
             // client's `onTapMaybeUrl` closure can lag behind the URL
-            // scanner by one recomposition (the LaunchedEffect inside
-            // UrlOverlay -> onUrlsChanged -> visibleUrls state change ->
-            // recomposition -> DisposableEffect runs with new snapshot).
+            // scanner by one recomposition (URL scan -> visibleUrls state
+            // change -> recomposition -> DisposableEffect runs with new
+            // snapshot).
             // We retry the tap up to 50 times (1s) until the production
             // path records the ACTION_VIEW intent. Each retry is cheap.
             // The hook is *idempotent* against repeated invocation

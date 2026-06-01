@@ -26,11 +26,11 @@ import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import com.pocketshell.core.terminal.selection.SelectionOverlay
+import com.pocketshell.core.terminal.selection.SmartSelectionAffordanceOverlay
 import com.pocketshell.core.terminal.selection.TerminalMatch
 import com.pocketshell.core.terminal.selection.TerminalMatchRegion
-import com.pocketshell.core.terminal.selection.UrlOverlay
 import com.pocketshell.core.terminal.selection.UrlRegion
-import com.pocketshell.core.terminal.selection.findVisibleTerminalMatches
+import com.pocketshell.core.terminal.selection.findVisibleUrls
 import com.pocketshell.core.terminal.selection.hitTestUrl
 import com.termux.terminal.TextStyle
 import com.termux.terminal.TerminalSessionClient
@@ -298,24 +298,24 @@ fun TerminalSurface(
     }
 
     // The list of URL regions currently visible on the embedded TerminalView.
-    // Updated by UrlOverlay on each render request. The state holder lives in
+    // Updated on each render request. The state holder lives in
     // this composable (and not in TerminalSurfaceState) because URLs are a
     // view-coordinate concept, not a transcript-bytes concept — the same
     // session can render different URL sets at different sizes.
     var visibleUrls by remember { mutableStateOf<List<UrlRegion>>(emptyList()) }
     var visibleMatchRegions by remember { mutableStateOf<List<TerminalMatchRegion>>(emptyList()) }
 
-    LaunchedEffect(state, terminalView, matchListener, viewportTick) {
+    LaunchedEffect(state, terminalView, effectiveUrlTap, viewportTick) {
         val view = terminalView
-        if (view == null || matchListener == null) {
-            visibleMatchRegions = emptyList()
+        if (view == null || effectiveUrlTap == null) {
+            visibleUrls = emptyList()
             return@LaunchedEffect
         }
-        visibleMatchRegions = findVisibleTerminalMatches(view, state.currentMatcher())
+        visibleUrls = findVisibleUrls(view)
         state.renderRequests.collect {
-            val fresh = findVisibleTerminalMatches(view, state.currentMatcher())
-            if (fresh != visibleMatchRegions) {
-                visibleMatchRegions = fresh
+            val fresh = findVisibleUrls(view)
+            if (fresh != visibleUrls) {
+                visibleUrls = fresh
             }
         }
     }
@@ -347,16 +347,17 @@ fun TerminalSurface(
     }
 
     // Layer the vendored TerminalView under the optional SelectionOverlay
-    // and UrlOverlay. We use `androidx.compose.ui.layout.Layout` rather than
+    // and smart-selection affordance overlay. We use
+    // `androidx.compose.ui.layout.Layout` rather than
     // `Box` because this module does not depend on `compose-foundation`. The
     // Layout measures each child with the incoming constraints and places
     // them at origin so they perfectly overlap. Painting order matches
     // source order: AndroidView paints first (background), then any
-    // SelectionOverlay (above the View), then the UrlOverlay on top so the
-    // URL underlines are visible above other overlays. URL tap-routing
+    // SelectionOverlay (above the View), then the affordance overlay on top
+    // so token hairlines are visible above other overlays. URL tap-routing
     // happens inside the View's gesture pipeline via
     // [PocketShellTerminalViewClient.onTapMaybeUrl], not in the overlay —
-    // see [UrlOverlay]'s KDoc for the rationale.
+    // see [SmartSelectionAffordanceOverlay]'s KDoc for the rationale.
     Layout(
         modifier = keyAwareModifier,
         content = {
@@ -397,12 +398,13 @@ fun TerminalSurface(
                     onTap = matchListener,
                 )
             }
-            if (effectiveUrlTap != null) {
-                UrlOverlay(
+            if (matchListener != null || effectiveUrlTap != null) {
+                SmartSelectionAffordanceOverlay(
                     view = terminalView,
                     renderRequests = state.renderRequests,
                     viewportChangeKey = viewportTick,
-                    onUrlsChanged = { visibleUrls = it },
+                    matcher = state.currentMatcher(),
+                    onMatchesChanged = { visibleMatchRegions = it },
                 )
             }
         },

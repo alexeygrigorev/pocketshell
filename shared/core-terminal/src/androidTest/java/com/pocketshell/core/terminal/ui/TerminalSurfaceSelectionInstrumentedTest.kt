@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.SystemClock
 import android.view.MotionEvent
 import android.view.View
+import androidx.compose.ui.graphics.Color
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.core.terminal.selection.UrlRegion
@@ -15,6 +16,9 @@ import com.pocketshell.core.terminal.selection.findVisibleUrls
 import com.pocketshell.core.terminal.selection.findVisibleTerminalMatches
 import com.pocketshell.core.terminal.selection.hitTestUrl
 import com.pocketshell.core.terminal.selection.hitTestTerminalMatch
+import com.pocketshell.core.terminal.selection.smartSelectionAffordanceSegments
+import com.pocketshell.core.terminal.selection.URL_UNDERLINE_THICKNESS_PX
+import com.pocketshell.core.terminal.selection.HAIRLINE_THICKNESS_PX
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -441,6 +445,96 @@ class TerminalSurfaceSelectionInstrumentedTest {
 
             val bottomBoundaryHit = hitTestTerminalMatch(view, regions, rightMidX, bottomY)
             assertNull("row bottom boundary should not hit the right path", bottomBoundaryHit)
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun visibleSmartSelectionAffordancesUseQuietChromeForPathAndError() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = null,
+        )
+        val client = PocketShellTerminalViewClient()
+        val url = "https://example.com/docs"
+        val path = "/var/log/pocketshell.log"
+        val error = "Error: failed to parse config"
+
+        try {
+            val viewRef = arrayOfNulls<TerminalView>(1)
+            instrumentation.runOnMainSync {
+                val view = TerminalView(context, null)
+                view.applyPocketShellDefaults(client)
+                view.attachSession(requireNotNull(state.session))
+                val widthSpec = View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY)
+                val heightSpec = View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+                view.measure(widthSpec, heightSpec)
+                view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+                viewRef[0] = view
+            }
+            val view = requireNotNull(viewRef[0])
+            state.appendRemoteOutput("open $url and inspect $path\r\n$error".toByteArray(Charsets.US_ASCII))
+
+            val regionsRef = arrayOfNulls<List<TerminalMatchRegion>>(1)
+            withTimeout(2_000) {
+                while (regionsRef[0]?.let { regions ->
+                        regions.any { it.match.value == url } &&
+                            regions.any { it.match.value == path } &&
+                            regions.any { it.match.value == error }
+                    } != true) {
+                    delay(20)
+                    instrumentation.runOnMainSync {
+                        regionsRef[0] = findVisibleTerminalMatches(view)
+                    }
+                }
+            }
+
+            val regions = requireNotNull(regionsRef[0])
+            val segments = smartSelectionAffordanceSegments(
+                view = view,
+                regions = regions,
+                canvasWidthPx = view.measuredWidth.toFloat(),
+                canvasHeightPx = view.measuredHeight.toFloat(),
+            )
+            val urlSegment = segments.single { it.match.value == url }
+            val pathSegment = segments.single { it.match.value == path }
+            val errorSegment = segments.single { it.match.value == error }
+
+            assertEquals(
+                "URL affordance should keep the existing 2 px underline",
+                URL_UNDERLINE_THICKNESS_PX,
+                urlSegment.thicknessPx,
+            )
+            assertEquals(
+                "Path affordance should render as a quiet 1 px hairline",
+                HAIRLINE_THICKNESS_PX,
+                pathSegment.thicknessPx,
+            )
+            assertEquals(
+                "Error affordance should render as a quiet 1 px hairline",
+                HAIRLINE_THICKNESS_PX,
+                errorSegment.thicknessPx,
+            )
+            assertEquals(
+                "Error affordance should use neutral chrome, not amber status color",
+                Color(0x66E6EDF3),
+                errorSegment.color,
+            )
+            assertTrue("URL affordance should have positive width", urlSegment.right > urlSegment.left)
+            assertTrue("Path affordance should have positive width", pathSegment.right > pathSegment.left)
+            assertTrue("Error affordance should have positive width", errorSegment.right > errorSegment.left)
+            assertTrue("URL affordance should stay inside the viewport", urlSegment.top >= 0f)
+            assertTrue("Path affordance should stay inside the viewport", pathSegment.top >= 0f)
+            assertTrue("Error affordance should stay inside the viewport", errorSegment.top >= 0f)
         } finally {
             producerJob.cancel()
             producerScope.cancel()

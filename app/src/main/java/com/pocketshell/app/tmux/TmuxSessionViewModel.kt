@@ -372,6 +372,16 @@ public class TmuxSessionViewModel @Inject constructor(
                 "requestedTrigger=${trigger.logValue} generation=$generation " +
                 targetLogFields(target),
         )
+        val fastSwitchStartedAtMs = if (willFastSwitch) SystemClock.elapsedRealtime() else 0L
+        if (willFastSwitch) {
+            recordWarmSwitchMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = fastSwitchStartedAtMs,
+                name = "warm_switch_start",
+                trigger = effectiveTrigger,
+            )
+        }
 
         if (tryActivateCachedRuntime(target, attempt, effectiveTrigger)) {
             return
@@ -420,6 +430,16 @@ public class TmuxSessionViewModel @Inject constructor(
         // only the rendered StateFlow is race-free: it is the same flow the
         // teardown sets to empty a moment later.
         _panes.value = emptyList()
+        if (willFastSwitch) {
+            recordWarmSwitchMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = fastSwitchStartedAtMs,
+                name = "warm_switch_selected_session_state",
+                trigger = effectiveTrigger,
+                detail = "paneCount=0",
+            )
+        }
         connectJob = viewModelScope.launch {
             // First: drain any in-flight connect() coroutine. `cancelAndJoin`
             // sends cancel and suspends until the prior job actually exits.
@@ -450,7 +470,13 @@ public class TmuxSessionViewModel @Inject constructor(
                     // user switches back, activation is a pointer swap
                     // rather than a fresh tmux attach.
                     deactivateCurrentRuntimeToCache()
-                    runFastSessionSwitch(target, previousSession, attempt, effectiveTrigger)
+                    runFastSessionSwitch(
+                        target,
+                        previousSession,
+                        attempt,
+                        effectiveTrigger,
+                        fastSwitchStartedAtMs,
+                    )
                 } else {
                     // Slow path: full teardown of both the tmux client
                     // and the SSH session before the fresh
@@ -1268,8 +1294,8 @@ public class TmuxSessionViewModel @Inject constructor(
         session: SshSession,
         attempt: Int,
         trigger: TmuxConnectTrigger,
+        startedAtMs: Long,
     ) {
-        val startedAtMs = SystemClock.elapsedRealtime()
         try {
             if (!session.isConnected) {
                 // The previously-live session died between the
@@ -1300,6 +1326,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 attempt = attempt,
                 sessionName = target.sessionName,
                 startedAtMs = startedAtMs,
+                trigger = trigger,
+            )
+            recordWarmSwitchMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                name = "warm_switch_tmux_shell_attached",
                 trigger = trigger,
             )
             logAttachMilestone(
@@ -1345,6 +1378,14 @@ public class TmuxSessionViewModel @Inject constructor(
                 startedAtMs = startedAtMs,
                 event = "tmux-connect-ready",
                 trigger = trigger,
+            )
+            recordWarmSwitchMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                name = "warm_switch_connect_ready",
+                trigger = trigger,
+                detail = "paneCount=${_panes.value.size}",
             )
             maybeRefreshControlClientSize()
             Log.i(
@@ -1421,6 +1462,14 @@ public class TmuxSessionViewModel @Inject constructor(
             trigger = trigger,
             detail = "paneCount=${result.paneCount}",
         )
+        recordWarmSwitchMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = startedAtMs,
+            name = "warm_switch_panes_ready",
+            trigger = trigger,
+            detail = "paneCount=${result.paneCount}",
+        )
     }
 
     private suspend fun failConnectAttempt(
@@ -1481,6 +1530,57 @@ public class TmuxSessionViewModel @Inject constructor(
                 trigger = trigger,
                 detail = detail,
             ),
+        )
+    }
+
+    private fun recordWarmSwitchMilestone(
+        attempt: Int,
+        target: ConnectionTarget,
+        startedAtMs: Long,
+        name: String,
+        trigger: TmuxConnectTrigger,
+        paneId: String? = null,
+        detail: String = "",
+    ) {
+        if (trigger != TmuxConnectTrigger.FastSwitch) return
+        val elapsedMs = SystemClock.elapsedRealtime() - startedAtMs
+        val eventDetail = buildString {
+            append("attempt=").append(attempt)
+            if (detail.isNotBlank()) append(' ').append(detail)
+        }
+        TmuxSessionLatencyTelemetry.record(
+            name = name,
+            durationMs = elapsedMs,
+            sessionName = target.sessionName,
+            paneId = paneId,
+            trigger = trigger,
+            detail = eventDetail,
+        )
+        Log.i(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-$name attempt=$attempt trigger=${trigger.logValue} " +
+                targetLogFields(target) +
+                " elapsedMs=$elapsedMs" +
+                if (paneId != null) " pane=$paneId" else "" +
+                if (detail.isNotBlank()) " $detail" else "",
+        )
+    }
+
+    private fun recordWarmSwitchMilestone(
+        milestone: AttachMilestone,
+        name: String,
+        paneId: String? = null,
+        detail: String = "",
+    ) {
+        val target = activeTarget ?: return
+        recordWarmSwitchMilestone(
+            attempt = milestone.attempt,
+            target = target,
+            startedAtMs = milestone.startedAtMs,
+            name = name,
+            trigger = milestone.trigger,
+            paneId = paneId,
+            detail = detail,
         )
     }
 
@@ -1695,6 +1795,7 @@ public class TmuxSessionViewModel @Inject constructor(
         sessionName: String,
         client: TmuxClient,
         session: SshSession,
+        startedAtMs: Long = SystemClock.elapsedRealtime(),
     ) {
         val target = ConnectionTarget(
             hostId = hostId,
@@ -1707,9 +1808,25 @@ public class TmuxSessionViewModel @Inject constructor(
             sessionName = sessionName,
             startDirectory = null,
         )
+        val attempt = TMUX_CONNECT_ATTEMPTS.incrementAndGet()
+        recordWarmSwitchMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = startedAtMs,
+            name = "warm_switch_start",
+            trigger = TmuxConnectTrigger.FastSwitch,
+        )
         connectingTarget = target
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+        recordWarmSwitchMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = startedAtMs,
+            name = "warm_switch_selected_session_state",
+            trigger = TmuxConnectTrigger.FastSwitch,
+            detail = "paneCount=${_panes.value.size}",
+        )
         // Mirror production's ordering: deactivate the previous tmux/UI
         // runtime into the warm cache before binding the new one.
         deactivateCurrentRuntimeToCache()
@@ -1721,6 +1838,19 @@ public class TmuxSessionViewModel @Inject constructor(
         refreshReconnectAvailability()
         attachClient(client)
         client.connect()
+        activeAttachMilestone = AttachMilestone(
+            attempt = attempt,
+            sessionName = sessionName,
+            startedAtMs = startedAtMs,
+            trigger = TmuxConnectTrigger.FastSwitch,
+        )
+        recordWarmSwitchMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = startedAtMs,
+            name = "warm_switch_tmux_shell_attached",
+            trigger = TmuxConnectTrigger.FastSwitch,
+        )
         activeTmuxClients.register(
             hostId = hostId,
             hostName = hostName,
@@ -1736,6 +1866,14 @@ public class TmuxSessionViewModel @Inject constructor(
         connectingTarget = null
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+        recordWarmSwitchMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = startedAtMs,
+            name = "warm_switch_connect_ready",
+            trigger = TmuxConnectTrigger.FastSwitch,
+            detail = "paneCount=${_panes.value.size}",
+        )
         maybeRefreshControlClientSize()
     }
 
@@ -1752,6 +1890,7 @@ public class TmuxSessionViewModel @Inject constructor(
         keyPath: String,
         sessionName: String,
         client: TmuxClient,
+        trigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
     ) {
         val target = ConnectionTarget(
             hostId = hostId,
@@ -1766,11 +1905,25 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         val attempt = TMUX_CONNECT_ATTEMPTS.incrementAndGet()
         val startedAtMs = SystemClock.elapsedRealtime()
-        val trigger = TmuxConnectTrigger.UserTap
+        recordWarmSwitchMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = startedAtMs,
+            name = "warm_switch_start",
+            trigger = trigger,
+        )
         connectingTarget = target
         activeTarget = target
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+        recordWarmSwitchMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = startedAtMs,
+            name = "warm_switch_selected_session_state",
+            trigger = trigger,
+            detail = "paneCount=${_panes.value.size}",
+        )
         attachClient(client)
         TmuxSessionLatencyTelemetry.record(
             name = "tmux_control_attach_count",
@@ -1785,11 +1938,26 @@ public class TmuxSessionViewModel @Inject constructor(
             startedAtMs = startedAtMs,
             trigger = trigger,
         )
+        recordWarmSwitchMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = startedAtMs,
+            name = "warm_switch_tmux_shell_attached",
+            trigger = trigger,
+        )
         try {
             awaitPanesReadyForAttach(target, attempt, startedAtMs, trigger)
             connectingTarget = null
             refreshReconnectAvailability()
             _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
+            recordWarmSwitchMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                name = "warm_switch_connect_ready",
+                trigger = trigger,
+                detail = "paneCount=${_panes.value.size}",
+            )
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
             failConnectAttempt(
@@ -1956,6 +2124,16 @@ public class TmuxSessionViewModel @Inject constructor(
         }
 
         val parsed: List<ParsedPane> = response.output.mapNotNull { parsePaneRow(it) }
+        activeAttachMilestone?.let { milestone ->
+            if (!milestone.firstPaneListReadyLogged) {
+                milestone.firstPaneListReadyLogged = true
+                recordWarmSwitchMilestone(
+                    milestone = milestone,
+                    name = "warm_switch_pane_list_ready",
+                    detail = "paneCount=${parsed.size}",
+                )
+            }
+        }
         val newPanes = applyParsedPanes(parsed)
         preloadVisibleContentForNewPanes(newPanes)
         return PaneReconcileResult.Ready(_panes.value.size)
@@ -2047,6 +2225,16 @@ public class TmuxSessionViewModel @Inject constructor(
                         suppressQueryResponses = true,
                     )
                     paneProducerJobs[p.paneId] = job
+                    activeAttachMilestone?.let { milestone ->
+                        if (!milestone.firstTerminalBridgeLogged) {
+                            milestone.firstTerminalBridgeLogged = true
+                            recordWarmSwitchMilestone(
+                                milestone = milestone,
+                                name = "warm_switch_terminal_bridge_ready",
+                                paneId = p.paneId,
+                            )
+                        }
+                    }
                 }
                 TmuxPaneState(
                     paneId = p.paneId,
@@ -2130,6 +2318,17 @@ public class TmuxSessionViewModel @Inject constructor(
             pane.terminalState.appendRemoteOutput(
                 response.output.toTerminalViewportBytes(cursor),
             )
+            activeAttachMilestone?.let { milestone ->
+                if (!milestone.firstCaptureReadyLogged) {
+                    milestone.firstCaptureReadyLogged = true
+                    recordWarmSwitchMilestone(
+                        milestone = milestone,
+                        name = "warm_switch_terminal_capture_ready",
+                        paneId = pane.paneId,
+                        detail = "lines=${response.output.size}",
+                    )
+                }
+            }
             TmuxSessionLatencyTelemetry.record(
                 name = "terminal_output_append_to_buffer",
                 durationMs = SystemClock.elapsedRealtime() - appendStartedAtMs,
@@ -2907,6 +3106,16 @@ public class TmuxSessionViewModel @Inject constructor(
                     rows = rows,
                 ),
             )
+            activeAttachMilestone?.let { milestone ->
+                if (!milestone.firstRemoteRefreshLogged) {
+                    milestone.firstRemoteRefreshLogged = true
+                    recordWarmSwitchMilestone(
+                        milestone = milestone,
+                        name = "warm_switch_remote_refresh_complete",
+                        detail = "cols=$cols rows=$rows",
+                    )
+                }
+            }
         }
     }
 
@@ -3662,6 +3871,10 @@ public class TmuxSessionViewModel @Inject constructor(
         val startedAtMs: Long,
         val trigger: TmuxConnectTrigger,
         var firstPaneOutputLogged: Boolean = false,
+        var firstPaneListReadyLogged: Boolean = false,
+        var firstTerminalBridgeLogged: Boolean = false,
+        var firstCaptureReadyLogged: Boolean = false,
+        var firstRemoteRefreshLogged: Boolean = false,
     )
 
     private sealed interface PaneReconcileResult {

@@ -484,6 +484,92 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun warmSwitchReadinessTelemetryFollowsAttachOrdering() = runTest {
+        TmuxSessionLatencyTelemetry.resetForTest()
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        client.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("%0\t@0\t\$0\tother\tshell\t0"),
+                isError = false,
+            ),
+        )
+        client.responses.addLast(
+            CommandResponse(
+                number = 4L,
+                output = listOf("%0\t@0\t\$0\tother\tshell\t0"),
+                isError = false,
+            ),
+        )
+        client.capturePaneResponses.addLast(
+            CommandResponse(
+                number = 2L,
+                output = listOf("warm switch seed"),
+                isError = false,
+            ),
+        )
+        client.cursorQueryResponses.addLast(
+            CommandResponse(number = 3L, output = listOf("0,0"), isError = false),
+        )
+
+        vm.attachClientWithReadinessForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = client,
+            trigger = TmuxConnectTrigger.FastSwitch,
+        )
+        vm.resizeRemotePty(columns = 100, rows = 30)
+        advanceUntilIdle()
+        client.emittedEvents.emit(
+            ControlEvent.LayoutChange(sessionId = "", windowId = "@0", layout = "bf3d,80x24"),
+        )
+        advanceUntilIdle()
+
+        val warmEvents = TmuxSessionLatencyTelemetry.snapshot()
+            .filter { it.name.startsWith("warm_switch_") }
+        val names = warmEvents.map { it.name }
+        val expectedOrder = listOf(
+            "warm_switch_start",
+            "warm_switch_selected_session_state",
+            "warm_switch_tmux_shell_attached",
+            "warm_switch_pane_list_ready",
+            "warm_switch_terminal_bridge_ready",
+            "warm_switch_terminal_capture_ready",
+            "warm_switch_panes_ready",
+            "warm_switch_connect_ready",
+            "warm_switch_remote_refresh_complete",
+        )
+        var previousIndex = -1
+        var previousEvent = "start"
+        for (event in expectedOrder) {
+            val index = names.indexOf(event)
+            assertTrue("expected $event in warm switch telemetry $names", index >= 0)
+            assertTrue(
+                "expected $event after $previousEvent in $names",
+                index > previousIndex,
+            )
+            previousIndex = index
+            previousEvent = event
+        }
+        assertTrue(
+            "warm switch telemetry should be tagged with fast-switch: $warmEvents",
+            warmEvents.all { it.trigger == TmuxConnectTrigger.FastSwitch.logValue },
+        )
+        assertEquals(
+            "pane-list readiness must be a one-shot milestone after attach",
+            1,
+            names.count { it == "warm_switch_pane_list_ready" },
+        )
+        TmuxSessionLatencyTelemetry.resetForTest()
+    }
+
+    @Test
     fun parseTmuxPaneCursorReadsWellFormedReply() {
         // Issue #259: the cursor reply is `cursor_x,cursor_y` (0-based).
         assertEquals(TmuxPaneCursor(column = 0, row = 2), parseTmuxPaneCursor("0,2"))
@@ -3202,6 +3288,62 @@ class TmuxSessionViewModelTest {
             handshakesBefore,
             handshakesAfter,
         )
+    }
+
+    @Test
+    fun fastSwitchTelemetryUsesVisibleSwitchBaseline() = runTest {
+        TmuxSessionLatencyTelemetry.resetForTest()
+        val vm = newVm()
+        val session = FakeSshSession()
+        val oldClient = FakeTmuxClient()
+        val newClient = FakeTmuxClient()
+        val visibleSwitchStartedAtMs = SystemClock.elapsedRealtime() - 250L
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+            session = session,
+        )
+
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = newClient,
+            session = session,
+            startedAtMs = visibleSwitchStartedAtMs,
+        )
+        advanceUntilIdle()
+
+        val warmEvents = TmuxSessionLatencyTelemetry.snapshot()
+            .filter { it.name.startsWith("warm_switch_") }
+        val start = warmEvents.single { it.name == "warm_switch_start" }
+        val shellAttached = warmEvents.single { it.name == "warm_switch_tmux_shell_attached" }
+        val connectReady = warmEvents.single { it.name == "warm_switch_connect_ready" }
+
+        assertTrue(
+            "start should use the caller's visible-switch baseline: $warmEvents",
+            start.durationMs >= 250L,
+        )
+        assertTrue(
+            "shell-attached must keep the same baseline instead of restarting after teardown",
+            shellAttached.durationMs >= start.durationMs,
+        )
+        assertTrue(
+            "connect-ready must keep the same baseline instead of restarting after teardown",
+            connectReady.durationMs >= shellAttached.durationMs,
+        )
+        TmuxSessionLatencyTelemetry.resetForTest()
     }
 
     @Test

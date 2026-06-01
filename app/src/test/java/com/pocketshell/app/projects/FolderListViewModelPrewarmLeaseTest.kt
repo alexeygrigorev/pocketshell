@@ -1,5 +1,6 @@
 package com.pocketshell.app.projects
 
+import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.portfwd.ForwardingController
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -40,6 +42,14 @@ class FolderListViewModelPrewarmLeaseTest {
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
 
+    private val viewModelStore = ViewModelStore()
+    private var nextViewModelKey: Int = 0
+
+    @After
+    fun tearDown() {
+        viewModelStore.clear()
+    }
+
     @Test
     fun stopPollingReleasesPrewarmLeaseIntoLeaseManagerTtl() = runTest {
         val session = FakeSshSession()
@@ -49,12 +59,11 @@ class FolderListViewModelPrewarmLeaseTest {
             scope = this,
             idleTtlMillis = 1_000L,
         )
-        val vm = FolderListViewModel(
+        val vm = newViewModel(
             gateway = EmptyFolderListGateway(),
             hostDao = FakeHostDao(HOST),
             projectRootDao = FakeProjectRootDao(),
             sshLeaseManager = manager,
-            forwardingController = ForwardingController(ApplicationProvider.getApplicationContext()),
         )
 
         vm.bind(
@@ -99,12 +108,11 @@ class FolderListViewModelPrewarmLeaseTest {
             scope = this,
             idleTtlMillis = 0L,
         )
-        val vm = FolderListViewModel(
+        val vm = newViewModel(
             gateway = EmptyFolderListGateway(),
             hostDao = FakeHostDao(HOST),
             projectRootDao = FakeProjectRootDao(),
             sshLeaseManager = manager,
-            forwardingController = ForwardingController(ApplicationProvider.getApplicationContext()),
         )
         vm.warmLeaseAcquiredForTest = {
             throw CancellationException("cancelled after prewarm acquire")
@@ -124,6 +132,20 @@ class FolderListViewModelPrewarmLeaseTest {
         assertEquals(1, connector.connectCount)
         assertTrue("unassigned prewarm lease should be released on cancellation", session.closed)
     }
+
+    private fun newViewModel(
+        gateway: FolderListGateway,
+        hostDao: HostDao,
+        projectRootDao: ProjectRootDao,
+        sshLeaseManager: SshLeaseManager,
+    ): FolderListViewModel =
+        FolderListViewModel(
+            gateway = gateway,
+            hostDao = hostDao,
+            projectRootDao = projectRootDao,
+            sshLeaseManager = sshLeaseManager,
+            forwardingController = ForwardingController(ApplicationProvider.getApplicationContext()),
+        ).also { viewModelStore.put("FolderListViewModel-${nextViewModelKey++}", it) }
 
     private class CountingLeaseConnector(
         private val session: FakeSshSession,

@@ -12,7 +12,9 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.printToString
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -20,7 +22,12 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
-import com.pocketshell.app.projects.FolderListViewModel
+import com.pocketshell.app.projects.FOLDER_LIST_EMPTY_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_ERROR_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_LOADING_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_NEW_SESSION_FAB_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_TITLE_TAG
 import com.pocketshell.app.projects.folderDetailRowTestTag
 import com.pocketshell.app.projects.folderHeaderClickTestTag
 import com.pocketshell.app.projects.folderRowTestTag
@@ -294,7 +301,11 @@ class EmulatorDockerSshSmokeTest {
             "expected SSH connection to Docker target before launching app, got ${setupCheck.exceptionOrNull()}",
             setupCheck.isSuccess,
         )
-        cleanupRemoteWalkthroughArtifacts(key, tmpDir, sessionName)
+        cleanupRemoteWalkthroughArtifacts(
+            key = key,
+            tmpDir = tmpDir,
+            sessionNames = listOf(sessionName, existingTmuxSessionName),
+        )
         resetRemoteTmuxServer(key)
         prepareRemoteWalkthroughScript(
             key = key,
@@ -302,6 +313,11 @@ class EmulatorDockerSshSmokeTest {
             shellVisibleMarker = shellVisibleMarker,
             tmuxVisibleMarker = tmuxVisibleMarker,
             completedMarker = completedMarker,
+        )
+        prepareExistingTmuxSession(
+            key = key,
+            sessionName = existingTmuxSessionName,
+            cwd = tmpDir,
         )
 
         try {
@@ -315,27 +331,49 @@ class EmulatorDockerSshSmokeTest {
             compose.onNodeWithText("Walkthrough Docker", useUnmergedTree = true).assertExists()
             compose.onNodeWithText(DEFAULT_HOST, substring = true, useUnmergedTree = true).assertExists()
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-            compose.waitUntil(timeoutMillis = 45_000) {
-                compose.onAllNodesWithTag(
-                    folderRowTestTag(FolderListViewModel.UNTRACKED_PATH),
-                    useUnmergedTree = true,
-                ).fetchSemanticsNodes().isNotEmpty()
+            waitUntilWithDiagnostics(
+                label = "ready host detail screen for Walkthrough Docker",
+                timeoutMillis = 45_000,
+                textProbes = listOf(
+                    "Walkthrough Docker",
+                    DEFAULT_HOST,
+                    tmpDir.substringAfterLast('/'),
+                    existingTmuxSessionName,
+                    "No active sessions",
+                ),
+                tagProbes = hostDetailDiagnosticTags(tmpDir, existingTmuxSessionName),
+            ) {
+                hasTag(FOLDER_LIST_SCREEN_TAG) &&
+                    hasTag(FOLDER_LIST_TITLE_TAG) &&
+                    hasTag(FOLDER_LIST_NEW_SESSION_FAB_TAG) &&
+                    hasText("Walkthrough Docker")
             }
-            compose.onNodeWithTag(
-                folderHeaderClickTestTag(FolderListViewModel.UNTRACKED_PATH),
-                useUnmergedTree = true,
-            ).performClick()
-            compose.waitUntil(timeoutMillis = 20_000) {
-                compose.onAllNodesWithTag(
-                    folderDetailRowTestTag(FolderListViewModel.UNTRACKED_PATH, existingTmuxSessionName),
-                    useUnmergedTree = true,
-                ).fetchSemanticsNodes().isNotEmpty()
+            waitUntilWithDiagnostics(
+                label = "deterministic tmux cwd row $tmpDir",
+                timeoutMillis = 45_000,
+                textProbes = listOf(
+                    "Walkthrough Docker",
+                    tmpDir.substringAfterLast('/'),
+                    existingTmuxSessionName,
+                    "No active sessions",
+                ),
+                tagProbes = hostDetailDiagnosticTags(tmpDir, existingTmuxSessionName),
+            ) {
+                hasTag(folderRowTestTag(tmpDir)) &&
+                    hasTag(folderHeaderClickTestTag(tmpDir))
+            }
+            compose.onNodeWithTag(folderHeaderClickTestTag(tmpDir), useUnmergedTree = true).performClick()
+            waitUntilWithDiagnostics(
+                label = "existing tmux session $existingTmuxSessionName under $tmpDir",
+                timeoutMillis = 20_000,
+                textProbes = listOf("Walkthrough Docker", tmpDir.substringAfterLast('/'), existingTmuxSessionName),
+                tagProbes = hostDetailDiagnosticTags(tmpDir, existingTmuxSessionName),
+            ) {
+                hasTag(folderDetailRowTestTag(tmpDir, existingTmuxSessionName))
             }
             val attachTapAt = SystemClock.elapsedRealtime()
-            compose.onNodeWithTag(
-                folderDetailRowTestTag(FolderListViewModel.UNTRACKED_PATH, existingTmuxSessionName),
-                useUnmergedTree = true,
-            ).performClick()
+            compose.onNodeWithTag(folderDetailRowTestTag(tmpDir, existingTmuxSessionName), useUnmergedTree = true)
+                .performClick()
             // Issue #216: the visible "Terminal" tab label is only
             // rendered when the consolidated tab pill (#189) has 2+
             // entries — i.e. an agent has been detected. For a
@@ -430,10 +468,91 @@ class EmulatorDockerSshSmokeTest {
                 ),
             )
         } finally {
-            cleanupRemoteWalkthroughArtifacts(key, tmpDir, sessionName)
+            cleanupRemoteWalkthroughArtifacts(
+                key = key,
+                tmpDir = tmpDir,
+                sessionNames = listOf(sessionName, existingTmuxSessionName),
+            )
         }
         Unit
     }
+
+    private fun waitUntilWithDiagnostics(
+        label: String,
+        timeoutMillis: Long,
+        textProbes: List<String> = emptyList(),
+        tagProbes: List<String> = emptyList(),
+        condition: () -> Boolean,
+    ) {
+        try {
+            compose.waitUntil(timeoutMillis = timeoutMillis, condition = condition)
+        } catch (error: Throwable) {
+            throw AssertionError(
+                buildString {
+                    appendLine("Timed out after ${timeoutMillis}ms waiting for $label.")
+                    appendLine(screenDiagnostics(textProbes = textProbes, tagProbes = tagProbes))
+                },
+                error,
+            )
+        }
+    }
+
+    private fun hasTag(tag: String): Boolean =
+        compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+
+    private fun hasText(text: String): Boolean =
+        compose.onAllNodesWithText(text, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+
+    private fun screenDiagnostics(textProbes: List<String>, tagProbes: List<String>): String = buildString {
+        appendLine("Tag probe counts:")
+        tagProbes.distinct().forEach { tag ->
+            appendLine("  $tag=${nodeCountForTag(tag)}")
+        }
+        appendLine("Text probe counts:")
+        textProbes.distinct().forEach { text ->
+            appendLine("  \"$text\"=${nodeCountForText(text)}")
+        }
+        appendLine("Compose semantics tree:")
+        appendLine(
+            runCatching {
+                compose.waitForIdle()
+                compose.onRoot(useUnmergedTree = true).printToString()
+            }.getOrElse { diagnosticsError ->
+                "  <failed to capture semantics tree: ${diagnosticsError.javaClass.simpleName}: " +
+                    "${diagnosticsError.message.orEmpty()}>"
+            },
+        )
+    }
+
+    private fun nodeCountForTag(tag: String): Int =
+        runCatching {
+            compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+        }.getOrDefault(-1)
+
+    private fun nodeCountForText(text: String): Int =
+        runCatching {
+            compose.onAllNodesWithText(text, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+        }.getOrDefault(-1)
+
+    private fun hostDetailDiagnosticTags(folderPath: String, sessionName: String): List<String> = listOf(
+        FOLDER_LIST_SCREEN_TAG,
+        FOLDER_LIST_TITLE_TAG,
+        FOLDER_LIST_NEW_SESSION_FAB_TAG,
+        FOLDER_LIST_LOADING_TAG,
+        FOLDER_LIST_ERROR_TAG,
+        FOLDER_LIST_EMPTY_TAG,
+        folderRowTestTag(folderPath),
+        folderHeaderClickTestTag(folderPath),
+        folderDetailRowTestTag(folderPath, sessionName),
+    )
 
     private fun waitForSessionConnectUiToSettle() {
         compose.waitUntil(timeoutMillis = 20_000) {
@@ -573,9 +692,14 @@ class EmulatorDockerSshSmokeTest {
     private suspend fun cleanupRemoteWalkthroughArtifacts(
         key: String,
         tmpDir: String,
-        sessionName: String,
+        sessionNames: List<String>,
     ) {
         var lastError = "cleanup did not run"
+        val killSessionsCommand = sessionNames
+            .distinct()
+            .joinToString(separator = "; ") { name ->
+                "tmux kill-session -t ${shellQuote(name)} 2>/dev/null || true"
+            }
         val cleaned = runCatching {
             withTimeout(20_000) {
                 while (true) {
@@ -589,8 +713,7 @@ class EmulatorDockerSshSmokeTest {
                     ).mapCatching { session ->
                         session.use {
                             it.exec(
-                                "rm -rf ${shellQuote(tmpDir)}; " +
-                                    "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true",
+                                "$killSessionsCommand; rm -rf ${shellQuote(tmpDir)}",
                             )
                         }
                     }
@@ -651,6 +774,38 @@ class EmulatorDockerSshSmokeTest {
         val result = prepared.getOrNull()
         assertTrue(
             "expected remote issue #78 script setup to succeed, got ${prepared.exceptionOrNull()} " +
+                "stdout='${result?.stdout}' stderr='${result?.stderr}'",
+            result?.exitCode == 0,
+        )
+    }
+
+    private suspend fun prepareExistingTmuxSession(
+        key: String,
+        sessionName: String,
+        cwd: String,
+    ) {
+        val setupCommand = listOf(
+            "mkdir -p ${shellQuote(cwd)}",
+            "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true",
+            "tmux new-session -d -s ${shellQuote(sessionName)} -c ${shellQuote(cwd)} " +
+                shellQuote("printf 'existing tmux walkthrough ready\\n'; exec sh -i"),
+            "test \"$(tmux display-message -p -t ${shellQuote(sessionName)} '#{pane_current_path}')\" = ${shellQuote(cwd)}",
+        ).joinToString(separator = "; ")
+        val prepared = withTimeout(20_000) {
+            SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+                timeoutMs = 15_000,
+            ).mapCatching { session ->
+                session.use { it.exec(setupCommand) }
+            }
+        }
+        val result = prepared.getOrNull()
+        assertTrue(
+            "expected existing tmux session $sessionName in $cwd, got ${prepared.exceptionOrNull()} " +
                 "stdout='${result?.stdout}' stderr='${result?.stderr}'",
             result?.exitCode == 0,
         )

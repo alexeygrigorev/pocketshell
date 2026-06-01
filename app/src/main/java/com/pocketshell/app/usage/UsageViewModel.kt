@@ -58,15 +58,44 @@ public sealed interface HostUsageFetch {
  * call. Fix C may pass a passphrase through from an open session in
  * memory, but Fix A simply leaves the host out of the panel.
  */
-public class SshHostUsageFetcher @Inject constructor(
-    private val sshKeyDao: SshKeyDao,
-) : HostUsageFetcher {
+internal fun interface SshHostUsageConnector {
+    suspend fun connect(host: HostEntity, keyFile: File): Result<SshSession>
+}
+
+public class SshHostUsageFetcher : HostUsageFetcher {
+    private val sshKeyDao: SshKeyDao
+    private val remoteSource: UsageRemoteSource
+    private val connector: SshHostUsageConnector
+
     // `UsageRemoteSource` carries a default-arg constructor that, combined
     // with its `@Inject` annotation, generates two constructors at the
     // bytecode level — Hilt refuses to bind it directly. Instantiating it
     // here keeps the source unmodified (out of scope for this issue) while
     // still letting Hilt own the `SshHostUsageFetcher` graph.
-    private val remoteSource: UsageRemoteSource = UsageRemoteSource()
+    @Inject
+    public constructor(sshKeyDao: SshKeyDao) : this(
+        sshKeyDao = sshKeyDao,
+        remoteSource = UsageRemoteSource(),
+        connector = SshHostUsageConnector { host, keyFile ->
+            SshConnection.connect(
+                host = host.hostname,
+                port = host.port,
+                user = host.username,
+                key = SshKey.Path(keyFile),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+            )
+        },
+    )
+
+    internal constructor(
+        sshKeyDao: SshKeyDao,
+        remoteSource: UsageRemoteSource,
+        connector: SshHostUsageConnector,
+    ) {
+        this.sshKeyDao = sshKeyDao
+        this.remoteSource = remoteSource
+        this.connector = connector
+    }
 
     override suspend fun fetch(host: HostEntity): HostUsageFetch {
         val key = sshKeyDao.getById(host.keyId) ?: return HostUsageFetch.Skipped
@@ -75,13 +104,7 @@ public class SshHostUsageFetcher @Inject constructor(
         if (key.hasPassphrase) return HostUsageFetch.Skipped
 
         val session: SshSession = try {
-            SshConnection.connect(
-                host = host.hostname,
-                port = host.port,
-                user = host.username,
-                key = SshKey.Path(keyFile),
-                knownHosts = KnownHostsPolicy.AcceptAll,
-            ).getOrNull() ?: return HostUsageFetch.Skipped
+            connector.connect(host, keyFile).getOrNull() ?: return HostUsageFetch.Skipped
         } catch (e: CancellationException) {
             throw e
         } catch (_: Throwable) {
@@ -91,7 +114,7 @@ public class SshHostUsageFetcher @Inject constructor(
         return try {
             when (remoteSource.detectPocketshell(session)) {
                 UsageToolStatus.Installed -> {
-                    when (val fetch = remoteSource.fetchUsage(session)) {
+                    when (val fetch = remoteSource.fetchUsage(session, commandOverride = host.usageCommandOverride)) {
                         is UsageFetchResult.Success -> HostUsageFetch.Records(
                             records = fetch.records,
                             syncedAt = Instant.now(),

@@ -4,11 +4,16 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import com.pocketshell.core.ssh.ExecResult
+import com.pocketshell.core.ssh.SshPortForward
+import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.usage.PocketshellUsageJsonParser
 import com.pocketshell.core.usage.UsageProviderRecord
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -22,6 +27,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import java.io.InputStream
+import java.nio.file.Files
 import java.time.Instant
 
 /**
@@ -213,6 +220,46 @@ class UsageViewModelTest {
         assertNotNull(state)
     }
 
+    @Test
+    fun sshHostUsageFetcher_forwardsHostUsageCommandOverrideToRemoteSource() = runTest {
+        val keyFile = Files.createTempFile("pocketshell-usage-fetcher", ".key").toFile()
+        keyFile.deleteOnExit()
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = keyFile.absolutePath),
+        )
+        val host = HostEntity(
+            name = "custom",
+            hostname = "custom.example",
+            username = "u",
+            keyId = keyId,
+            usageCommandOverride = "mycorp-usage --json",
+        )
+        val session = FakeSshSession(
+            canned = mapOf(
+                UsageRemoteSource.DETECT_POCKETSHELL_COMMAND to ExecResult("/usr/bin/pocketshell\n", "", 0),
+                "mycorp-usage --json" to ExecResult(
+                    stdout = """{"provider":"codex","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+                    stderr = "",
+                    exitCode = 0,
+                ),
+            ),
+        )
+        val fetcher = SshHostUsageFetcher(
+            sshKeyDao = db.sshKeyDao(),
+            remoteSource = UsageRemoteSource(),
+            connector = SshHostUsageConnector { _, _ -> Result.success(session) },
+        )
+
+        val result = fetcher.fetch(host)
+
+        assertTrue(result is HostUsageFetch.Records)
+        assertEquals(
+            listOf(UsageRemoteSource.DETECT_POCKETSHELL_COMMAND, "mycorp-usage --json"),
+            session.recorded,
+        )
+        assertTrue("session should be closed after fetch", session.closed)
+    }
+
     private class FakeFetcher(
         private val scripts: Map<String, HostUsageFetch>,
     ) : HostUsageFetcher {
@@ -224,6 +271,43 @@ class UsageViewModelTest {
             callCount += 1
             fetchedHostnames += host.hostname
             return scripts[host.hostname] ?: HostUsageFetch.Skipped
+        }
+    }
+
+    private class FakeSshSession(
+        private val canned: Map<String, ExecResult>,
+    ) : SshSession {
+        val recorded = mutableListOf<String>()
+        var closed: Boolean = false
+            private set
+
+        override val isConnected: Boolean = true
+
+        override suspend fun exec(command: String): ExecResult {
+            recorded += command
+            return canned[command] ?: ExecResult("", "missing stub", 127)
+        }
+
+        override fun tail(path: String, onLine: (String) -> Unit): Job =
+            error("tail not used")
+
+        override fun openLocalPortForward(remoteHost: String, remotePort: Int, localPort: Int): SshPortForward =
+            error("port forward not used")
+
+        override fun startShell(): SshShell = error("shell not used")
+
+        override suspend fun uploadFile(file: java.io.File, remotePath: String): String =
+            error("uploadFile not used in this test")
+
+        override suspend fun uploadStream(
+            input: InputStream,
+            length: Long,
+            name: String,
+            remotePath: String,
+        ): String = error("uploadStream not used in this test")
+
+        override fun close() {
+            closed = true
         }
     }
 

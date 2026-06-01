@@ -27,6 +27,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_MORE_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_FULL_CHROME_MORE_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_PAGE_TAG_PREFIX
@@ -112,6 +113,7 @@ class TmuxSessionSwitchE2eTest {
         seedTmuxSessions(key)
 
         val hostRowTag = seedDockerHost(key, "Issue151 Tmux Switch")
+        forceFlatHostDetailViewMode()
 
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
 
@@ -123,6 +125,7 @@ class TmuxSessionSwitchE2eTest {
         }
         val tapHostAt = SystemClock.elapsedRealtime()
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+        waitForFolderListReady()
         waitForText(SESSION_CLAUDE, timeoutMs = 20_000)
         compose.onNodeWithText(SESSION_CLAUDE).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
@@ -315,6 +318,26 @@ class TmuxSessionSwitchE2eTest {
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
+    }
+
+    private fun waitForFolderListReady() {
+        compose.waitUntil(timeoutMillis = 20_000) {
+            compose.onAllNodesWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty() &&
+                compose.onAllNodesWithText(SESSION_CLAUDE, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+        }
+    }
+
+    private fun forceFlatHostDetailViewMode() {
+        val appContext = InstrumentationRegistry.getInstrumentation().targetContext
+        appContext
+            .getSharedPreferences("app_settings", android.content.Context.MODE_PRIVATE)
+            .edit()
+            .putString("host_detail_view_mode", "Flat")
+            .commit()
     }
 
     private fun openMoreMenu() {

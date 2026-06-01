@@ -3637,6 +3637,185 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun sessionSwitcherPrewarmCachesOnlyBoundedLikelyTargets() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
+        val connector = QueueLeaseConnector(FakeSshSession(), FakeSshSession(), FakeSshSession())
+        val vm = newVm(
+            runtimeCache = runtimeCache,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        val activeSession = FakeSshSession()
+        val prewarmClients = listOf(
+            FakeTmuxClient().withSinglePane("recent-a", "%1"),
+            FakeTmuxClient().withSinglePane("recent-b", "%2"),
+            FakeTmuxClient().withSinglePane("recent-c", "%3"),
+        )
+        val clients = ArrayDeque(prewarmClients)
+        vm.setTmuxClientFactoryForTest { _, _, _ -> clients.removeFirst() }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = activeSession,
+        )
+
+        vm.prewarmLikelySwitchTargets(listOf("work", "recent-a", "recent-b", "recent-c"))
+        advanceUntilIdle()
+
+        assertTrue(runtimeCache.contains(TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "recent-a")))
+        assertTrue(runtimeCache.contains(TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "recent-b")))
+        assertFalse(runtimeCache.contains(TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "recent-c")))
+        assertEquals(
+            "prewarm must stay capped to likely switch targets",
+            TMUX_SESSION_PREWARM_MAX_TARGETS,
+            prewarmClients.count { it.connectCalled },
+        )
+        assertEquals(
+            "prewarm should reuse the warm SSH lease when possible",
+            1,
+            connector.connectCount,
+        )
+    }
+
+    @Test
+    fun switchingToPrewarmedTargetUsesCachedRuntimeFirstFramePath() = runTest {
+        TmuxSessionLatencyTelemetry.resetForTest()
+        val registry = ActiveTmuxClients()
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            runtimeCache = runtimeCache,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        val activeClient = FakeTmuxClient()
+        val prewarmClient = FakeTmuxClient().withSinglePane("recent", "%4")
+        vm.setTmuxClientFactoryForTest { _, _, _ -> prewarmClient }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = activeClient,
+            session = FakeSshSession(),
+        )
+
+        vm.prewarmLikelySwitchTargets(listOf("recent"))
+        advanceUntilIdle()
+        prewarmClient.sentCommands.clear()
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "recent",
+        )
+
+        assertEquals(listOf("%4"), vm.panes.value.map { it.paneId })
+        assertSame(prewarmClient, registry.clients.value[1L]?.client)
+        assertTrue(
+            TmuxSessionLatencyTelemetry.snapshot().any { it.name == "warm_switch_first_cached_frame" },
+        )
+        assertTrue(
+            "cached activation must not attach a second tmux client",
+            prewarmClient.sentCommands.none { it.startsWith("list-panes") },
+        )
+        TmuxSessionLatencyTelemetry.resetForTest()
+    }
+
+    @Test
+    fun cancelledSessionPrewarmClosesPartialRuntimeWithoutCachingIt() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            runtimeCache = runtimeCache,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        val gate = CompletableDeferred<Unit>()
+        val prewarmClient = FakeTmuxClient().withSinglePane("recent", "%5").apply {
+            sendCommandGatePrefix = "list-panes"
+            sendCommandGate = gate
+        }
+        vm.setTmuxClientFactoryForTest { _, _, _ -> prewarmClient }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = FakeSshSession(),
+        )
+
+        vm.prewarmLikelySwitchTargets(listOf("recent"))
+        runCurrent()
+        vm.cancelTmuxSessionPrewarm()
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertFalse(runtimeCache.contains(TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "recent")))
+        assertTrue("cancelled prewarm must detach its tmux client", prewarmClient.detachCleanlyCalled)
+    }
+
+    @Test
+    fun switchingToColdTargetStillFallsBackToFastAttach() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
+        val session = FakeSshSession()
+        val connector = QueueLeaseConnector(session)
+        val vm = newVm(
+            runtimeCache = runtimeCache,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        val coldClient = FakeTmuxClient().withSinglePane("cold", "%6")
+        vm.setTmuxClientFactoryForTest { _, _, _ -> coldClient }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+
+        vm.prewarmLikelySwitchTargets(emptyList())
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "cold",
+        )
+        advanceUntilIdle()
+
+        assertTrue("cold fallback must attach a tmux client", coldClient.connectCalled)
+        assertEquals(listOf("%6"), vm.panes.value.map { it.paneId })
+        assertTrue(
+            "cold fallback should still use normal list-panes attach",
+            coldClient.sentCommands.any { it.startsWith("list-panes") },
+        )
+    }
+
+    @Test
     fun closeCachedRuntimeDetachesClientBeforeReleasingLease() = runTest {
         val session = FakeSshSession()
         val manager = SshLeaseManager(
@@ -4390,6 +4569,25 @@ class TmuxSessionViewModelTest {
             remoteColumns = 0,
             remoteRows = 0,
             lease = lease,
+        )
+    }
+
+    private fun FakeTmuxClient.withSinglePane(
+        sessionName: String,
+        paneId: String,
+    ): FakeTmuxClient = apply {
+        responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf("$paneId\t@0\t\$0\t$sessionName\t$sessionName\t0"),
+                isError = false,
+            ),
+        )
+        capturePaneResponses.addLast(
+            CommandResponse(number = 2L, output = listOf("$sessionName ready"), isError = false),
+        )
+        cursorQueryResponses.addLast(
+            CommandResponse(number = 3L, output = listOf("0,0"), isError = false),
         )
     }
 

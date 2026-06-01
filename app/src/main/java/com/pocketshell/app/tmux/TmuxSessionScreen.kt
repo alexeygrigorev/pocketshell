@@ -1030,6 +1030,15 @@ public fun TmuxSessionScreen(
             sessionPickerViewModel.load(sessionPickerRequest)
         }
     }
+    LaunchedEffect(showSessionSwitcher, showSessionDrawer, sessionPickerState) {
+        val pickerVisible = showSessionSwitcher || showSessionDrawer
+        val ready = sessionPickerState as? HostTmuxSessionPickerState.Ready
+        if (pickerVisible && ready != null) {
+            viewModel.prewarmLikelySwitchTargets(ready.rows.map { it.name })
+        } else {
+            viewModel.cancelTmuxSessionPrewarm()
+        }
+    }
 
     if (showMicSheet) {
         // PromptComposerSheet drives dictation + the one-field API-key

@@ -65,6 +65,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.trySendBlocking
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -77,6 +78,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -160,6 +162,16 @@ public class TmuxSessionViewModel @Inject constructor(
     @androidx.annotation.VisibleForTesting
     internal fun setAssistantSshExecutor(executor: AssistantSshExecutor) {
         assistantSshExecutor = executor
+    }
+
+    private var tmuxClientFactoryOverride:
+        ((SshSession, String, String?) -> TmuxClient)? = null
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setTmuxClientFactoryForTest(
+        factory: (SshSession, String, String?) -> TmuxClient,
+    ) {
+        tmuxClientFactoryOverride = factory
     }
 
     private val _panes: MutableStateFlow<List<TmuxPaneState>> =
@@ -397,6 +409,7 @@ public class TmuxSessionViewModel @Inject constructor(
         if (tryActivateCachedRuntime(target, attempt, effectiveTrigger, fastSwitchStartedAtMs)) {
             return
         }
+        cancelTmuxSessionPrewarm()
 
         // Issue #151: a tap on "Attach" for a different tmux session
         // re-enters `connect()` while the previous connection's event-loop
@@ -518,6 +531,18 @@ public class TmuxSessionViewModel @Inject constructor(
             left.sessionName == right.sessionName &&
             left.startDirectory == right.startDirectory
 
+    private fun createTmuxClient(
+        session: SshSession,
+        sessionName: String,
+        startDirectory: String?,
+    ): TmuxClient =
+        tmuxClientFactoryOverride?.invoke(session, sessionName, startDirectory)
+            ?: tmuxClientFactory.create(
+                session,
+                sessionName = sessionName,
+                startDirectory = startDirectory,
+            )
+
     private fun isCurrentRuntime(guard: RuntimeRefreshGuard): Boolean {
         val currentTarget = activeTarget ?: return false
         return connectGeneration == guard.generation &&
@@ -637,6 +662,7 @@ public class TmuxSessionViewModel @Inject constructor(
     // would not work because [closeCurrentConnectionAndJoin] clears it.
     private var pendingReattach: PendingReattach? = null
     private var backgroundDetachJob: Job? = null
+    private var sessionPrewarmJob: Job? = null
     private var foregroundReattachForTest: (() -> Unit)? = null
     private var latestConnectIntent: ConnectIntent? = null
     private var connectGeneration: Long = 0L
@@ -889,6 +915,192 @@ public class TmuxSessionViewModel @Inject constructor(
     internal suspend fun onAppBackgroundedAndAwait() {
         onAppBackgrounded()
         backgroundDetachJob?.join()
+    }
+
+    /**
+     * Best-effort background warmup for same-host session-switch targets.
+     *
+     * The caller invokes this only after the switcher/drawer has rendered a
+     * Ready list. Work is bounded to the first two non-current sessions from
+     * that activity-ordered list and populates [runtimeCache] without touching
+     * the visible foreground runtime.
+     */
+    public fun prewarmLikelySwitchTargets(sessionNames: List<String>) {
+        val baseTarget = activeTarget ?: return
+        val foregroundSession = sessionRef?.takeIf { it.isConnected } ?: return
+        val targets = sessionNames
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && it != baseTarget.sessionName }
+            .distinct()
+            .map { sessionName -> baseTarget.copy(sessionName = sessionName, startDirectory = null) }
+            .filterNot { runtimeCache.contains(it.toRuntimeKey()) }
+            .take(TMUX_SESSION_PREWARM_MAX_TARGETS)
+            .toList()
+        if (targets.isEmpty()) return
+
+        sessionPrewarmJob?.cancel()
+        sessionPrewarmJob = bridgeScope.launch {
+            for (target in targets) {
+                if (!isActive) return@launch
+                if (activeTarget?.let { isSameHost(it, target) } != true) return@launch
+                if (runtimeCache.contains(target.toRuntimeKey())) continue
+                prewarmRuntime(target, foregroundSession)
+            }
+        }
+    }
+
+    public fun cancelTmuxSessionPrewarm() {
+        sessionPrewarmJob?.cancel()
+        sessionPrewarmJob = null
+    }
+
+    private suspend fun prewarmRuntime(
+        target: ConnectionTarget,
+        foregroundSession: SshSession,
+    ) {
+        var lease: SshLease? = null
+        var client: TmuxClient? = null
+        var paneRuntime: PrewarmedPaneRuntime? = null
+        try {
+            lease = sshLeaseManager.acquire(target.toSshLeaseTarget()).getOrThrow()
+            val session = lease.session
+            if (!session.isConnected) return
+            client = createTmuxClient(session, target.sessionName, target.startDirectory)
+            client.connect()
+            val panes = buildPrewarmedPaneRuntime(target, client).also { paneRuntime = it }
+            if (!currentCoroutineContext().isActive || !session.isConnected) return
+            if (activeTarget?.let { isSameHost(it, target) } != true) return
+            if (foregroundSession !== sessionRef && sessionRef != session) return
+            val runtime = CachedTmuxRuntime(
+                key = target.toRuntimeKey(),
+                hostName = target.hostName,
+                startDirectory = target.startDirectory,
+                lease = lease,
+                session = session,
+                client = client,
+                panes = panes.panes,
+                paneRows = panes.paneRows,
+                paneProducerJobs = panes.paneProducerJobs,
+                paneInputQueues = panes.paneInputQueues,
+                paneInputJobs = panes.paneInputJobs,
+                paneAgentJobs = emptyMap(),
+                paneAgentInputs = emptyMap(),
+                agentConversations = emptyMap(),
+                remoteColumns = remoteColumns,
+                remoteRows = remoteRows,
+            )
+            lease = null
+            client = null
+            paneRuntime = null
+            runtimeCache.put(runtime)?.let { evicted ->
+                bridgeScope.launch { evicted.closeCachedRuntime() }
+            }
+            TmuxSessionLatencyTelemetry.record(
+                name = "runtime_prewarm_ready",
+                durationMs = 1L,
+                sessionName = target.sessionName,
+                trigger = TmuxConnectTrigger.FastSwitch,
+                detail = "paneCount=${panes.panes.size}",
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            TmuxSessionLatencyTelemetry.record(
+                name = "runtime_prewarm_failed",
+                durationMs = 1L,
+                sessionName = target.sessionName,
+                trigger = TmuxConnectTrigger.FastSwitch,
+                detail = t.javaClass.simpleName,
+            )
+        } finally {
+            if (client != null || lease != null) {
+                withContext(NonCancellable) {
+                    paneRuntime?.closePartialPrewarm()
+                    runCatching { client?.detachCleanly() }
+                    runCatching { lease?.release() }
+                }
+            }
+        }
+    }
+
+    private suspend fun buildPrewarmedPaneRuntime(
+        target: ConnectionTarget,
+        client: TmuxClient,
+    ): PrewarmedPaneRuntime {
+        val response = client.sendCommand(buildListPanesCommand(target))
+        if (response.isError) {
+            throw TmuxAttachPanesReadyException(
+                "tmux list-panes failed during prewarm: " +
+                    response.output.joinToString(separator = " ").ifBlank { "unknown error" },
+            )
+        }
+        val paneInputQueues = LinkedHashMap<String, TmuxPaneInputQueue>()
+        val paneInputJobs = LinkedHashMap<String, Job>()
+        val paneProducerJobs = LinkedHashMap<String, Job>()
+        val paneRows = LinkedHashMap<String, TmuxPaneState>()
+        try {
+            val parsed = response.output
+                .mapNotNull { parsePaneRow(it) }
+                .filter { it.sessionName == target.sessionName }
+                .sortedWith(compareBy({ it.windowId }, { it.paneIndex }, { it.paneId }))
+            for (pane in parsed) {
+                val state = TerminalSurfaceState()
+                val producerJob = state.attachExternalProducer(
+                    scope = bridgeScope,
+                    stdout = client.outputFor(pane.paneId).map { it.data },
+                    remoteStdin = inputSinkForPane(
+                        paneId = pane.paneId,
+                        client = client,
+                        queues = paneInputQueues,
+                        jobs = paneInputJobs,
+                    ),
+                    suppressQueryResponses = true,
+                )
+                val row = TmuxPaneState(
+                    paneId = pane.paneId,
+                    windowId = pane.windowId,
+                    sessionId = pane.sessionId,
+                    title = pane.title,
+                    cwd = pane.cwd,
+                    currentCommand = pane.currentCommand,
+                    paneTty = pane.paneTty,
+                    terminalState = state,
+                )
+                paneRows[pane.paneId] = row
+                paneProducerJobs[pane.paneId] = producerJob
+                seedPrewarmedPane(client, row)
+            }
+            return PrewarmedPaneRuntime(
+                panes = paneRows.values.toList(),
+                paneRows = paneRows,
+                paneProducerJobs = paneProducerJobs,
+                paneInputQueues = paneInputQueues,
+                paneInputJobs = paneInputJobs,
+            )
+        } catch (t: Throwable) {
+            PrewarmedPaneRuntime(
+                panes = paneRows.values.toList(),
+                paneRows = paneRows,
+                paneProducerJobs = paneProducerJobs,
+                paneInputQueues = paneInputQueues,
+                paneInputJobs = paneInputJobs,
+            ).closePartialPrewarm()
+            throw t
+        }
+    }
+
+    private suspend fun seedPrewarmedPane(client: TmuxClient, pane: TmuxPaneState) {
+        val capture = client.sendCommand("capture-pane -p -e -S -200 -t ${pane.paneId}")
+        if (capture.isError || capture.output.isEmpty()) return
+        val cursor = runCatching {
+            client.sendCommand("display-message -p -t ${pane.paneId} '#{cursor_x},#{cursor_y}'")
+        }.getOrNull()
+            ?.takeUnless { it.isError }
+            ?.output
+            ?.firstOrNull()
+            .let { parseTmuxPaneCursor(it) }
+        pane.terminalState.appendRemoteOutput(capture.output.toTerminalViewportBytes(cursor))
     }
 
     /**
@@ -1269,11 +1481,7 @@ public class TmuxSessionViewModel @Inject constructor(
             leaseRef = lease
             sessionRef = session
 
-            val client = tmuxClientFactory.create(
-                session,
-                sessionName = target.sessionName,
-                startDirectory = target.startDirectory,
-            )
+            val client = createTmuxClient(session, target.sessionName, target.startDirectory)
             activeTarget = target
             refreshReconnectAvailability()
             attachClient(client)
@@ -1396,11 +1604,7 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             leaseRef = lease
             sessionRef = session
-            val client = tmuxClientFactory.create(
-                session,
-                sessionName = target.sessionName,
-                startDirectory = target.startDirectory,
-            )
+            val client = createTmuxClient(session, target.sessionName, target.startDirectory)
             activeTarget = target
             refreshReconnectAvailability()
             attachClient(client)
@@ -3149,17 +3353,31 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun inputSinkForPane(paneId: String): OutputStream {
-        val queue = paneInputQueues.getOrPut(paneId) {
+        return inputSinkForPane(
+            paneId = paneId,
+            client = null,
+            queues = paneInputQueues,
+            jobs = paneInputJobs,
+        )
+    }
+
+    private fun inputSinkForPane(
+        paneId: String,
+        client: TmuxClient?,
+        queues: MutableMap<String, TmuxPaneInputQueue>,
+        jobs: MutableMap<String, Job>,
+    ): OutputStream {
+        val queue = queues.getOrPut(paneId) {
             TmuxPaneInputQueue(
                 maxPendingBytes = TMUX_INPUT_MAX_PENDING_BYTES,
                 maxBatchBytes = TMUX_INPUT_MAX_BATCH_BYTES,
             ).also { newQueue ->
-                paneInputJobs[paneId] = bridgeScope.launch {
+                jobs[paneId] = bridgeScope.launch {
                     while (true) {
                         val batch = newQueue.takeBatch() ?: break
-                        val client = clientRef ?: continue
+                        val targetClient = client ?: clientRef ?: continue
                         val sendStartedNs = System.nanoTime()
-                        runCatching { sendInputBytesToPane(client, paneId, batch.bytes) }
+                        runCatching { sendInputBytesToPane(targetClient, paneId, batch.bytes) }
                             .onSuccess {
                                 newQueue.recordSent(batch, System.nanoTime() - sendStartedNs)
                             }
@@ -3782,6 +4000,7 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun tmuxInputCapacityBytesForTest(): Int = TMUX_INPUT_MAX_PENDING_BYTES
 
     override fun onCleared() {
+        cancelTmuxSessionPrewarm()
         connectJob?.cancel()
         connectJob = null
         assistant.dismiss()
@@ -3853,6 +4072,8 @@ public class TmuxSessionViewModel @Inject constructor(
         // races a lingering `detach-client` from the previous switch.
         orphanDetachJob?.cancelAndJoin()
         orphanDetachJob = null
+        sessionPrewarmJob?.cancelAndJoin()
+        sessionPrewarmJob = null
         eventsJob?.cancelAndJoin()
         eventsJob = null
         disconnectedJob?.cancelAndJoin()
@@ -4319,6 +4540,23 @@ internal data class TmuxPaneInputBatch(
     val firstEnqueuedAtNs: Long,
 )
 
+private data class PrewarmedPaneRuntime(
+    val panes: List<TmuxPaneState>,
+    val paneRows: Map<String, TmuxPaneState>,
+    val paneProducerJobs: Map<String, Job>,
+    val paneInputQueues: Map<String, TmuxPaneInputQueue>,
+    val paneInputJobs: Map<String, Job>,
+)
+
+private suspend fun PrewarmedPaneRuntime.closePartialPrewarm() {
+    paneProducerJobs.values.forEach { it.cancelAndJoin() }
+    paneInputJobs.values.forEach { it.cancelAndJoin() }
+    paneInputQueues.values.forEach { it.close() }
+    panes.forEach { pane ->
+        runCatching { pane.terminalState.detachExternalProducer() }
+    }
+}
+
 internal class TmuxPaneInputQueue(
     private val maxPendingBytes: Int,
     private val maxBatchBytes: Int,
@@ -4758,6 +4996,7 @@ internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
 internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 30_000L
 internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
 internal const val CACHED_RUNTIME_REMOTE_REFRESH_DELAY_MS: Long = 1L
+internal const val TMUX_SESSION_PREWARM_MAX_TARGETS: Int = 2
 internal const val LIST_PANES_FIELD_SEPARATOR: String = "|PS|"
 internal const val TMUX_INPUT_MAX_PENDING_BYTES: Int = 64 * 1024
 internal const val TMUX_INPUT_MAX_BATCH_BYTES: Int = 4 * 1024

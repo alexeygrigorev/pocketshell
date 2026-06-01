@@ -171,14 +171,22 @@ class SshTerminalBridgeTest {
             assertEquals(expectedChunks(payload.bytes.size), trace.feedCompletions.single().chunks)
             assertEquals(expectedChunks(payload.bytes.size), trace.queueWrites.size)
             assertEquals(expectedChunks(payload.bytes.size), trace.scheduledDrains.size)
-            assertEquals(expectedDrainSlices(payload.bytes.size), trace.screenUpdates.size)
+            val screenDrains = trace.screenUpdates.filter { it.bytes > 0 }
+            assertEquals(expectedDrainSlices(payload.bytes.size), screenDrains.size)
+            assertEquals(payload.bytes.size, screenDrains.sumOf { it.bytes })
+            assertTrue(
+                "screen-update traces should stay within the main-thread drain budget",
+                screenDrains.all {
+                    it.bytes in 1..SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES
+                },
+            )
             assertTrue(
                 "all queue write timings should be captured",
                 trace.queueWrites.all { it.bytes > 0 && it.durationNanos >= 0L },
             )
             assertTrue(
-                "all scheduled drains should reach the screen-update callback",
-                trace.screenUpdates.all { it.bytes > 0 && it.scheduleToCallbackNanos >= 0L },
+                "all non-empty scheduled drains should reach the screen-update callback",
+                screenDrains.all { it.scheduleToCallbackNanos >= 0L },
             )
         } finally {
             executor.shutdownNow()

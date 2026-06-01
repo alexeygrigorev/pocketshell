@@ -28,7 +28,9 @@ Install methods (any one works):
 PocketShell's host-bootstrap probe checks for `command -v pocketshell`,
 validates `pocketshell --version` against the app version, and uses
 whichever Python tool installer the host has (`uv` or `pipx`) for
-install/upgrade.
+install/upgrade. App-driven `uv` installs add
+`--exclude-newer-package pocketshell=2099-12-31` so host-level uv
+`exclude-newer` settings do not hold back the PocketShell helper.
 
 ## What we show
 

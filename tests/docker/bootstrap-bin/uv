@@ -3,14 +3,17 @@ set -eu
 
 if [ "${1:-}" = "tool" ] && [ "${2:-}" = "install" ]; then
   action="install"
-  if [ "${3:-}" = "--upgrade" ]; then
+  shift 2
+  if [ "${1:-}" = "--upgrade" ]; then
     action="install --upgrade"
-    package="${4:-}"
-  else
-    package="${3:-}"
+    shift
   fi
+  if [ "${1:-}" = "--exclude-newer-package" ]; then
+    shift 2
+  fi
+  package="${1:-}"
   if [ -z "$package" ]; then
-    printf 'uv bootstrap fixture supports: tool install [--upgrade] <package>\n' >&2
+    printf 'uv bootstrap fixture supports: tool install [--upgrade] [--exclude-newer-package <package=date>] <package>\n' >&2
     exit 64
   fi
   target_dir="${HOME}/.local/bin"
@@ -61,5 +64,5 @@ if [ "${1:-}" = "tool" ] && [ "${2:-}" = "upgrade" ] && [ -n "${3:-}" ]; then
   exit 0
 fi
 
-printf 'uv bootstrap fixture supports: tool install [--upgrade] <package> and managed tool upgrade <package>\n' >&2
+printf 'uv bootstrap fixture supports: tool install [--upgrade] [--exclude-newer-package <package=date>] <package> and managed tool upgrade <package>\n' >&2
 exit 64

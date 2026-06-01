@@ -434,15 +434,15 @@ private fun bootstrapPromptText(state: HostBootstrapSheetState.Prompt): String {
 }
 
 private fun installCommand(installer: PythonToolInstaller?, tool: BootstrapTool): String = when (installer) {
-    PythonToolInstaller.Uv -> "uv tool install ${tool.packageName}"
+    PythonToolInstaller.Uv -> uvToolInstallCommand(tool, upgrade = false)
     PythonToolInstaller.Pipx -> "pipx install ${tool.packageName}"
-    null -> "uv tool install ${tool.packageName} or pipx install ${tool.packageName}"
+    null -> "${uvToolInstallCommand(tool, upgrade = false)} or pipx install ${tool.packageName}"
 }
 
 internal fun upgradeCommand(installer: PythonToolInstaller?, tool: BootstrapTool): String = when (installer) {
-    PythonToolInstaller.Uv -> "uv tool install --upgrade ${tool.packageName}"
+    PythonToolInstaller.Uv -> uvToolInstallCommand(tool, upgrade = true)
     PythonToolInstaller.Pipx -> "pipx upgrade ${tool.packageName}"
-    null -> "uv tool install --upgrade ${tool.packageName} or pipx upgrade ${tool.packageName}"
+    null -> "${uvToolInstallCommand(tool, upgrade = true)} or pipx upgrade ${tool.packageName}"
 }
 
 internal fun versionMismatchDetail(

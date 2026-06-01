@@ -94,6 +94,9 @@ The app's host-bootstrap probe derives the remote PATH from the user's
 interactive shell rc, runs `command -v pocketshell`, checks
 `pocketshell --version` against the app version, and offers an install or
 upgrade path via `uv` / `pipx` when the helper is absent or mismatched.
+When the app drives `uv`, it adds
+`--exclude-newer-package pocketshell=2099-12-31` so a host-level uv
+cutoff does not pin PocketShell behind the app version.
 Per-host features that depend on the helper stay unavailable until that
 host passes setup.
 

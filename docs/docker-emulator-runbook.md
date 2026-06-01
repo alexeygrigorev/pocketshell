@@ -99,12 +99,14 @@ Reusable compose services:
 - `bootstrap-uv-install`: builds `pocketshell-test:bootstrap-uv-install`, maps
   host port `2231`, and contains the shared bootstrap base plus `uv` and
   `systemctl` shims in `/usr/local/bin`; `pocketshell` starts absent and can be copied into
-  `/home/testuser/.local/bin` by the `uv tool install <package>` shim. The
-  `systemctl` shim reports `pocketshell-jobs.service` as active and enabled. Used
-  by `HostBootstrapScenarioSuiteTest#uvInstall`.
+  `/home/testuser/.local/bin` by the
+  `uv tool install --exclude-newer-package <package=date> <package>` shim.
+  The `systemctl` shim reports `pocketshell-jobs.service` as active and
+  enabled. Used by `HostBootstrapScenarioSuiteTest#uvInstall`.
 - `bootstrap-uv-upgrade`: builds `pocketshell-test:bootstrap-uv-upgrade`, maps
   host port `2236`, and contains a stale `pocketshell` fixture plus `uv` and
-  `systemctl` shims in `/usr/local/bin`; `uv tool install --upgrade pocketshell`
+  `systemctl` shims in `/usr/local/bin`;
+  `uv tool install --upgrade --exclude-newer-package pocketshell=2099-12-31 pocketshell`
   refreshes the fixture version under `/home/testuser/.local/bin`. Used by
   `HostBootstrapScenarioSuiteTest#uvUpgrade`.
 - `bootstrap-unsupported`: builds `pocketshell-test:bootstrap-unsupported`,

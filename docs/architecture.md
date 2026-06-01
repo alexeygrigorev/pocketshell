@@ -76,7 +76,7 @@ Consequence — host bootstrap is now a real UX concern:
 When you add a host, PocketShell should:
 
 1. Detect whether `pocketshell` is installed (`command -v pocketshell` over SSH)
-2. If absent or version-mismatched, offer one-tap install/upgrade (`uv tool install pocketshell` or `pipx install pocketshell`)
+2. If absent or version-mismatched, offer one-tap install/upgrade (`uv tool install --exclude-newer-package pocketshell=2099-12-31 pocketshell`, `uv tool install --upgrade --exclude-newer-package pocketshell=2099-12-31 pocketshell`, or the matching `pipx` command)
 3. Detect whether `pocketshell jobs daemon` is running (and ideally enabled via systemd user unit)
 4. Offer to install the systemd unit if missing
 

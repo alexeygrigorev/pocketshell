@@ -65,6 +65,21 @@ public enum class PythonToolInstaller(
     Pipx("pipx"),
 }
 
+internal const val UV_POCKETSHELL_EXCLUDE_NEWER_PACKAGE: String = "pocketshell=2099-12-31"
+
+internal fun uvToolInstallCommand(tool: BootstrapTool, upgrade: Boolean): String =
+    "uv ${uvToolInstallArgs(tool, upgrade)}"
+
+internal fun uvToolInstallArgs(tool: BootstrapTool, upgrade: Boolean): String =
+    buildString {
+        append("tool install")
+        if (upgrade) append(" --upgrade")
+        if (tool == BootstrapTool.Pocketshell) {
+            append(" --exclude-newer-package $UV_POCKETSHELL_EXCLUDE_NEWER_PACKAGE")
+        }
+        append(" ${tool.packageName}")
+    }
+
 public sealed interface ToolStatus {
     public data class Installed(
         val path: String,
@@ -595,7 +610,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     ): InstallResult {
         val executable = installerExecutable(installer, installerPath)
         val command = when (installer) {
-            PythonToolInstaller.Uv -> "$executable tool install ${tool.packageName}"
+            PythonToolInstaller.Uv -> "$executable ${uvToolInstallArgs(tool, upgrade = false)}"
             PythonToolInstaller.Pipx -> "$executable install ${tool.packageName}"
         }
         return runInstall(session, pathAwareCommand(command, bootstrapPath), needsRoot = false)
@@ -610,7 +625,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     ): InstallResult {
         val executable = installerExecutable(installer, installerPath)
         val command = when (installer) {
-            PythonToolInstaller.Uv -> "$executable tool install --upgrade ${tool.packageName}"
+            PythonToolInstaller.Uv -> "$executable ${uvToolInstallArgs(tool, upgrade = true)}"
             PythonToolInstaller.Pipx -> "$executable upgrade ${tool.packageName}"
         }
         return runInstall(session, pathAwareCommand(command, bootstrapPath), needsRoot = false)
@@ -799,14 +814,14 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             "PocketShell found pocketshell at ${mismatch.path}, but it is not app-compatible: remote ${mismatch.currentVersion}, expected ${mismatch.expectedVersion}."
         }
         return "$versionLine\n\nAutomatic update needs uv or pipx on the host. Run one of these over SSH, then reconnect:\n" +
-            "uv tool install --upgrade pocketshell\n" +
+            "${uvToolInstallCommand(BootstrapTool.Pocketshell, upgrade = true)}\n" +
             "pipx upgrade pocketshell\n\n" +
             "If the command succeeds but PocketShell still cannot find it, make sure ~/.local/bin is on the remote PATH."
     }
 
     internal fun missingInstallerGuidance(): String =
         "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install pocketshell.\n\n" +
-            "Recommended:\nuv tool install pocketshell\n\n" +
+            "Recommended:\n${uvToolInstallCommand(BootstrapTool.Pocketshell, upgrade = false)}\n\n" +
             "Alternative:\npipx install pocketshell\n\n" +
             "Make sure ~/.local/bin is on the remote PATH."
 
@@ -840,7 +855,6 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
          * install paths agree on the spelling.
          */
         public const val BINARY_POCKETSHELL: String = "pocketshell"
-
         private val VERSION_PATTERN: Regex = Regex("""\b(\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?)\b""")
         private const val PATH_BEGIN: String = "__POCKETSHELL_PATH_BEGIN__"
         private const val PATH_END: String = "__POCKETSHELL_PATH_END__"

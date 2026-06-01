@@ -18,6 +18,12 @@ import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
 import com.pocketshell.app.usage.worstBadgeRecord
 import com.pocketshell.core.ssh.ExecResult
+import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
@@ -35,6 +41,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -706,6 +713,52 @@ class HostListViewModelTest {
             "same-value successful reprobe should refresh stale detection timestamp",
             persisted.pocketshellLastDetectedAt!! > stale,
         )
+    }
+
+    @Test
+    fun leaseBackedHostSessionOpenerReleasesWarmLeaseInsteadOfClosingTransport() = runTest {
+        val keyFile = File.createTempFile("pocketshell-host-lease", ".key").apply {
+            writeText("fake key")
+            deleteOnExit()
+        }
+        val host = HostEntity(
+            id = 42L,
+            name = "warm",
+            hostname = "warm.example",
+            port = 2222,
+            username = "alex",
+            keyId = 7L,
+        )
+        val session = FakeBootstrapSession()
+        var connectCount = 0
+        val manager = SshLeaseManager(
+            connector = SshLeaseConnector {
+                connectCount += 1
+                Result.success(session)
+            },
+            scope = this,
+            idleTtlMillis = 60_000L,
+        )
+        val opener = LeaseBackedHostSessionOpener(manager)
+
+        val opened = opener.open(host, keyFile.absolutePath, passphrase = null)
+        assertSame(session, opened)
+
+        opener.close(session)
+
+        assertEquals(
+            "host bootstrap should release the lease, not close the SSH transport",
+            0,
+            session.closeCount,
+        )
+        val reacquired = manager.acquire(host.toLeaseTargetForTest(keyFile.absolutePath)).getOrThrow()
+        assertSame(
+            "tmux attach should be able to reacquire the same warm host SSH session",
+            session,
+            reacquired.session,
+        )
+        assertEquals("reacquire should not perform a second SSH connect", 1, connectCount)
+        reacquired.release()
     }
 
     /**
@@ -1857,6 +1910,8 @@ class HostListViewModelTest {
         private val tmuxInstalled: Boolean = true,
     ) : SshSession {
         val recorded = mutableListOf<String>()
+        var closeCount: Int = 0
+            private set
         override val isConnected: Boolean = true
 
         override suspend fun exec(command: String): ExecResult {
@@ -1919,8 +1974,23 @@ class HostListViewModelTest {
             remotePath: String,
         ): String = error("uploadStream not used in this test")
 
-        override fun close() = Unit
+        override fun close() {
+            closeCount += 1
+        }
     }
+
+    private fun HostEntity.toLeaseTargetForTest(keyPath: String): SshLeaseTarget =
+        SshLeaseTarget(
+            leaseKey = SshLeaseKey(
+                host = hostname,
+                port = port,
+                user = username,
+                credentialId = "$id:$keyPath",
+                knownHostsId = "accept-all",
+            ),
+            key = SshKey.Path(File(keyPath)),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        )
 
     private companion object {
         const val DEFAULT_BOOTSTRAP_PATH: String =

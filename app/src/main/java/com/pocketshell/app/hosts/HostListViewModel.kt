@@ -17,6 +17,8 @@ import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.SessionSummary
+import com.pocketshell.app.sessions.SSH_SOURCE_WARM_HOST_CONNECT
+import com.pocketshell.app.sessions.SshOpenTelemetry
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.startup.StartupTiming
@@ -25,8 +27,12 @@ import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
 import com.pocketshell.app.usage.worstBadgeRecord
 import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLease
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
@@ -48,10 +54,12 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.IdentityHashMap
 import javax.inject.Inject
 
 /**
@@ -121,7 +129,12 @@ class HostListViewModel internal constructor(
     // the right place to start surfacing warnings. The repository is
     // hot-cached and reading `.value` from it costs no I/O.
     private val settingsRepository: SettingsRepository,
-    private val sessionOpener: HostSessionOpener,
+    private val sshLeaseManager: SshLeaseManager = SshLeaseManager(
+        connector = SshLeaseConnector { target ->
+            com.pocketshell.core.ssh.DefaultSshLeaseConnector().connect(target)
+        },
+    ),
+    private val sessionOpener: HostSessionOpener = HostSessionOpener { _, _, _ -> null },
 ) : ViewModel() {
 
     @Inject
@@ -134,6 +147,7 @@ class HostListViewModel internal constructor(
         usageScheduler: UsageScheduler,
         activeClients: ActiveTmuxClients,
         settingsRepository: SettingsRepository,
+        sshLeaseManager: SshLeaseManager,
     ) : this(
         applicationContext = applicationContext,
         hostDao = hostDao,
@@ -143,7 +157,8 @@ class HostListViewModel internal constructor(
         usageScheduler = usageScheduler,
         activeClients = activeClients,
         settingsRepository = settingsRepository,
-        sessionOpener = RealHostSessionOpener,
+        sshLeaseManager = sshLeaseManager,
+        sessionOpener = LeaseBackedHostSessionOpener(sshLeaseManager),
     )
 
     /** Live list of saved hosts, sorted by name (DAO query). */
@@ -877,7 +892,7 @@ class HostListViewModel internal constructor(
                         }
                     }
                 } finally {
-                    runCatching { session.close() }
+                    closeSession(session)
                 }
             }
         }
@@ -1270,8 +1285,14 @@ class HostListViewModel internal constructor(
     private fun expectedPocketshellVersion(): String = currentVersionName().orEmpty()
 
     private fun closeBootstrapSession() {
-        bootstrapSession?.let { runCatching { it.close() } }
+        bootstrapSession?.let { closeSession(it) }
         bootstrapSession = null
+    }
+
+    private fun closeSession(session: SshSession) {
+        runCatching {
+            runBlocking { sessionOpener.close(session) }
+        }
     }
 
     private fun completedJob(): Job {
@@ -1408,20 +1429,62 @@ class HostListViewModel internal constructor(
 
 internal fun interface HostSessionOpener {
     suspend fun open(host: HostEntity, keyPath: String, passphrase: CharArray?): SshSession?
+
+    suspend fun close(session: SshSession) {
+        session.close()
+    }
 }
 
-private object RealHostSessionOpener : HostSessionOpener {
+internal class LeaseBackedHostSessionOpener(
+    private val sshLeaseManager: SshLeaseManager,
+) : HostSessionOpener {
+    private val leasesBySession: MutableMap<SshSession, ArrayDeque<SshLease>> =
+        java.util.Collections.synchronizedMap(IdentityHashMap())
+
     override suspend fun open(host: HostEntity, keyPath: String, passphrase: CharArray?): SshSession? {
         val file = File(keyPath)
         if (!file.exists()) return null
-        return SshConnection.connect(
-            host = host.hostname,
-            port = host.port,
-            user = host.username,
+        val target = SshLeaseTarget(
+            leaseKey = SshLeaseKey(
+                host = host.hostname,
+                port = host.port,
+                user = host.username,
+                credentialId = "${host.id}:$keyPath",
+                knownHostsId = "accept-all",
+            ),
             key = SshKey.Path(file),
             passphrase = passphrase?.copyOf(),
             knownHosts = KnownHostsPolicy.AcceptAll,
-        ).getOrNull()
+        )
+        val lease = sshLeaseManager.acquire(target).getOrNull() ?: return null
+        if (lease.isNewConnection) {
+            SshOpenTelemetry.record(
+                source = SSH_SOURCE_WARM_HOST_CONNECT,
+                host = host.hostname,
+                port = host.port,
+                user = host.username,
+            )
+        }
+        synchronized(leasesBySession) {
+            leasesBySession.getOrPut(lease.session) { ArrayDeque() }.addLast(lease)
+        }
+        return lease.session
+    }
+
+    override suspend fun close(session: SshSession) {
+        val lease = synchronized(leasesBySession) {
+            val leases = leasesBySession[session] ?: return@synchronized null
+            val lease = leases.removeLastOrNull()
+            if (leases.isEmpty()) {
+                leasesBySession.remove(session)
+            }
+            lease
+        }
+        if (lease != null) {
+            lease.release()
+        } else {
+            session.close()
+        }
     }
 }
 

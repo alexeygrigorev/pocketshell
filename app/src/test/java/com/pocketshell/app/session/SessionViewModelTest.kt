@@ -848,6 +848,7 @@ class SessionViewModelTest {
 
     private class FakeSshSession(
         private val execStdout: String = "/wrong/fresh/exec/cwd\n",
+        private val tailJob: Job = Job(),
     ) : SshSession {
         val recordedExecCommands = mutableListOf<String>()
 
@@ -859,6 +860,9 @@ class SessionViewModelTest {
         }
 
         override fun tail(path: String, onLine: (String) -> Unit): Job = Job()
+
+        override fun tail(path: String, fromLineExclusive: Long, onLine: (String) -> Unit): Job =
+            tailJob
 
         override fun openLocalPortForward(
             remoteHost: String,
@@ -935,6 +939,95 @@ class SessionViewModelTest {
         assertEquals(detection, state.detection)
         assertEquals(SessionTab.Conversation, state.selectedTab)
         assertEquals(listOf(event), state.events)
+    }
+
+    @Test
+    fun stoppedRawSshAgentLogTailMarksConversationStale() = runTest {
+        val vm = newVm()
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/u/.claude/sessions/abc.jsonl",
+            sessionId = "abc",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+        val tailJob = Job()
+        vm.startAgentConversationForTest(detection, emptyList())
+
+        val started = vm.startAgentTailForTest(
+            session = FakeSshSession(tailJob = tailJob),
+            detection = detection,
+            fromLineExclusive = 0L,
+        )
+
+        assertEquals(tailJob, started)
+        assertEquals(AgentConversationSyncStatus.Live, vm.agentConversation.value.syncStatus)
+
+        tailJob.complete()
+        advanceUntilIdle()
+
+        assertEquals(
+            "normal raw SSH tail exit means the conversation feed is stale",
+            AgentConversationSyncStatus.Stale,
+            vm.agentConversation.value.syncStatus,
+        )
+    }
+
+    @Test
+    fun stoppedRawSshAgentLogTailPreservesConversationUpdates() = runTest {
+        val vm = newVm()
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/u/.claude/sessions/abc.jsonl",
+            sessionId = "abc",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+        val tailJob = Job()
+        vm.startAgentConversationForTest(detection, emptyList())
+        vm.startAgentTailForTest(
+            session = FakeSshSession(tailJob = tailJob),
+            detection = detection,
+            fromLineExclusive = 0L,
+        )
+
+        vm.selectSessionTab(SessionTab.Conversation)
+        vm.setAgentSearchQuery("deploy")
+        vm.sendToAgent("deploy staging")
+        val eventsBeforeStop = vm.agentConversation.value.events
+
+        tailJob.complete()
+        advanceUntilIdle()
+
+        val state = vm.agentConversation.value
+        assertEquals(AgentConversationSyncStatus.Stale, state.syncStatus)
+        assertEquals(SessionTab.Conversation, state.selectedTab)
+        assertEquals("deploy", state.searchQuery)
+        assertEquals(eventsBeforeStop, state.events)
+    }
+
+    @Test
+    fun failedRawSshAgentLogTailMarksConversationLogUnavailable() = runTest {
+        val vm = newVm()
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/u/.claude/sessions/abc.jsonl",
+            sessionId = "abc",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+        val tailJob = Job()
+        vm.startAgentConversationForTest(detection, emptyList())
+        vm.startAgentTailForTest(
+            session = FakeSshSession(tailJob = tailJob),
+            detection = detection,
+            fromLineExclusive = 0L,
+        )
+
+        tailJob.completeExceptionally(RuntimeException("tail failed"))
+        advanceUntilIdle()
+
+        assertEquals(
+            AgentConversationSyncStatus.LogUnavailable,
+            vm.agentConversation.value.syncStatus,
+        )
     }
 
     // Issue #165 — cancelConnect tests. The progress overlay's 15s

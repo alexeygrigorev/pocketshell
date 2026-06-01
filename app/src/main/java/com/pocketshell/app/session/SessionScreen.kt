@@ -347,6 +347,7 @@ public fun SessionScreen(
                         // Issue #249: don't deliver-then-clear while down.
                         sendEnabled = sessionLive,
                         agentName = detection.agent.displayName,
+                        syncStatus = agentConversation.syncStatus,
                     )
                 } else {
                     TerminalSurface(
@@ -576,6 +577,7 @@ internal fun ConversationPane(
     // running with the always-enabled behaviour.
     sendEnabled: Boolean = true,
     agentName: String = "agent",
+    syncStatus: AgentConversationSyncStatus = AgentConversationSyncStatus.Live,
 ) {
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     var composerText by remember { mutableStateOf("") }
@@ -693,6 +695,7 @@ internal fun ConversationPane(
             sendEnabled = sendEnabled,
             placeholder = "Message ${agentName.ifBlank { "agent" }}",
         )
+        ConversationSyncStatusRow(syncStatus = syncStatus)
     }
 }
 
@@ -716,6 +719,40 @@ private fun rememberHoistedQuery(
 }
 
 private val NoOpStringChange: (String) -> Unit = {}
+
+@Composable
+private fun ConversationSyncStatusRow(syncStatus: AgentConversationSyncStatus) {
+    val (label, color) = when (syncStatus) {
+        AgentConversationSyncStatus.Live -> rawConversationSyncStatusLabel(syncStatus) to PocketShellColors.Green
+        AgentConversationSyncStatus.Stale -> rawConversationSyncStatusLabel(syncStatus) to PocketShellColors.Amber
+        AgentConversationSyncStatus.LogUnavailable -> rawConversationSyncStatusLabel(syncStatus) to PocketShellColors.Red
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .background(color = color, shape = RoundedCornerShape(50)),
+        )
+        Text(
+            text = "Conversation: $label",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+        )
+    }
+}
+
+internal fun rawConversationSyncStatusLabel(syncStatus: AgentConversationSyncStatus): String =
+    when (syncStatus) {
+        AgentConversationSyncStatus.Live -> "Live"
+        AgentConversationSyncStatus.Stale -> "Stale"
+        AgentConversationSyncStatus.LogUnavailable -> "Log unavailable"
+    }
 
 /**
  * Issue #154: raw-SSH mirror of the tmux jump-to-latest pill.

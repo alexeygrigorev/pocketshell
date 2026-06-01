@@ -46,6 +46,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -478,6 +479,7 @@ public class SessionViewModel @Inject constructor(
             appendAgentEvents(listOf(event))
         }
         agentTailJob = job
+        observeAgentTailCompletion(job, detection)
         return job
     }
 
@@ -493,27 +495,67 @@ public class SessionViewModel @Inject constructor(
             detection = detection,
             events = boundedDistinctEvents(initialEvents),
             selectedTab = SessionTab.Terminal,
+            syncStatus = AgentConversationSyncStatus.Live,
         )
         // Issue #160: OpenCode now uses the same `session.tail` route
         // Claude + Codex already use — no special polling branch.
         agentTailJob = agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
             appendAgentEvents(listOf(event))
         }
+        observeAgentTailCompletion(agentTailJob, detection)
     }
 
     private fun appendAgentEvents(events: List<ConversationEvent>) {
         if (events.isEmpty()) return
-        val current = _agentConversation.value
-        _agentConversation.value = current.copy(events = boundedDistinctEvents(current.events + events))
+        _agentConversation.update { current ->
+            current.copy(events = boundedDistinctEvents(current.events + events))
+        }
+    }
+
+    private fun observeAgentTailCompletion(job: Job?, detection: AgentDetection) {
+        if (job == null) {
+            markAgentConversationSyncStatus(detection, AgentConversationSyncStatus.LogUnavailable)
+            return
+        }
+        job.invokeOnCompletion { cause ->
+            if (cause is CancellationException) return@invokeOnCompletion
+            markAgentTailStopped(detection, cause)
+        }
+    }
+
+    private fun markAgentTailStopped(detection: AgentDetection, cause: Throwable?) {
+        val nextStatus = if (cause == null) {
+            AgentConversationSyncStatus.Stale
+        } else {
+            AgentConversationSyncStatus.LogUnavailable
+        }
+        markAgentConversationSyncStatus(detection, nextStatus)
+    }
+
+    private fun markAgentConversationSyncStatus(
+        detection: AgentDetection,
+        syncStatus: AgentConversationSyncStatus,
+    ) {
+        _agentConversation.update { current ->
+            if (current.detection != detection || current.syncStatus == syncStatus) {
+                current
+            } else {
+                current.copy(syncStatus = syncStatus)
+            }
+        }
     }
 
     private fun boundedDistinctEvents(events: List<ConversationEvent>): List<ConversationEvent> =
         reconcileAgentEvents(events, maxEvents = MaxAgentEvents)
 
     public fun selectSessionTab(tab: SessionTab) {
-        val current = _agentConversation.value
-        if (tab == SessionTab.Conversation && current.detection == null) return
-        _agentConversation.value = current.copy(selectedTab = tab)
+        _agentConversation.update { current ->
+            if (tab == SessionTab.Conversation && current.detection == null) {
+                current
+            } else {
+                current.copy(selectedTab = tab)
+            }
+        }
     }
 
     /**
@@ -523,9 +565,13 @@ public class SessionViewModel @Inject constructor(
      * `onValueChange` inside [ConversationPane].
      */
     public fun setAgentSearchQuery(query: String) {
-        val current = _agentConversation.value
-        if (current.searchQuery == query) return
-        _agentConversation.value = current.copy(searchQuery = query)
+        _agentConversation.update { current ->
+            if (current.searchQuery == query) {
+                current
+            } else {
+                current.copy(searchQuery = query)
+            }
+        }
     }
 
     /**

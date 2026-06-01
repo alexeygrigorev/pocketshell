@@ -284,6 +284,10 @@ class EmulatorDockerSshSmokeTest {
                     pocketshellCliVersion = appVersion,
                     pocketshellExpectedCliVersion = appVersion,
                     pocketshellVersionCompatible = true,
+                    // Keep the host bootstrap cache ready while making
+                    // UsageScheduler emit no host-list banners/strip in
+                    // this tmux-only walkthrough.
+                    usageCommandOverride = "printf ''",
                 ),
             )
             hostRowTag = HOST_ROW_TAG_PREFIX + hostId
@@ -327,7 +331,7 @@ class EmulatorDockerSshSmokeTest {
         try {
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
             waitUntilWithDiagnostics(
-                label = "host list with walkthrough host and settled usage strip",
+                label = "host list with walkthrough host and no usage surfaces",
                 timeoutMillis = 20_000,
                 textProbes = listOf(
                     "PocketShell",
@@ -341,21 +345,14 @@ class EmulatorDockerSshSmokeTest {
                 hasTag(HOST_LIST_CONTENT_TAG) &&
                     hasTag(hostRowTag) &&
                     hasText("Walkthrough Docker") &&
-                    // The seeded host is marked pocketshell-ready, so the
-                    // process-wide UsageScheduler immediately inserts the
-                    // host-list warning/strip after the first SSH poll. The
-                    // release failure showed the old test could tap the row
-                    // while that insertion was racing, causing the physical
-                    // click to land on the Usage surface. Wait for one usage
-                    // surface first, then scroll/click the row at its final
-                    // position.
-                    (hasTag(USAGE_DASHBOARD_STRIP_TAG) || hasTag(usageBannerTagFor("claude")))
+                    !hasHostListUsageSurface()
             }
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).assertExists()
             compose.onNodeWithText("Walkthrough Docker", useUnmergedTree = true).assertExists()
             compose.onNodeWithText(DEFAULT_HOST, substring = true, useUnmergedTree = true).assertExists()
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performScrollTo()
             compose.waitForIdle()
+            assertNoHostListUsageSurface(hostRowTag)
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
             waitUntilWithDiagnostics(
                 label = "ready host detail screen for Walkthrough Docker",
@@ -568,9 +565,35 @@ class EmulatorDockerSshSmokeTest {
                 .size
         }.getOrDefault(-1)
 
+    private fun hasHostListUsageSurface(): Boolean =
+        hostListUsageDiagnosticTags().any { hasTag(it) }
+
+    private fun assertNoHostListUsageSurface(hostRowTag: String) {
+        val present = hostListUsageDiagnosticTags()
+            .filter { nodeCountForTag(it) > 0 }
+        assertTrue(
+            buildString {
+                appendLine(
+                    "tmux walkthrough should not render Usage surfaces before tapping the host row; " +
+                        "present=$present",
+                )
+                appendLine(
+                    screenDiagnostics(
+                        textProbes = listOf("PocketShell", "Walkthrough Docker", "Usage", "Claude Code usage"),
+                        tagProbes = hostListDiagnosticTags(hostRowTag),
+                    ),
+                )
+            },
+            present.isEmpty(),
+        )
+    }
+
     private fun hostListDiagnosticTags(hostRowTag: String): List<String> = listOf(
         HOST_LIST_CONTENT_TAG,
         hostRowTag,
+    ) + hostListUsageDiagnosticTags()
+
+    private fun hostListUsageDiagnosticTags(): List<String> = listOf(
         USAGE_DASHBOARD_STRIP_TAG,
         usageBannerTagFor("claude"),
         usageBannerTagFor("codex"),

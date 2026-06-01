@@ -57,14 +57,17 @@ class SshTerminalBridgeTest {
                 "expected producer write timing to record at least one wait behind a full queue; trace=$trace",
                 trace.queueWrites.any { it.waitedForDrain },
             )
-            assertEquals(payload.bytes.size, trace.screenUpdates.sumOf { it.bytes })
+            val outputDrains = trace.outputDrainSnapshot()
+            assertEquals(payload.bytes.size, outputDrains.sum())
             assertTrue(
                 "bounded drain slices should split at least one queue-sized write; trace=$trace",
-                trace.screenUpdates.size > trace.scheduledDrains.size,
+                outputDrains.size > trace.scheduledDrains.size,
             )
             assertTrue(
-                "screen update traces should stay within the main-thread drain budget",
-                trace.screenUpdates.all { it.bytes in 1..SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES },
+                "terminal drains should stay within the main-thread drain budget",
+                outputDrains.all {
+                    it in 1..SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES
+                },
             )
         } finally {
             executor.shutdownNow()
@@ -171,18 +174,19 @@ class SshTerminalBridgeTest {
             assertEquals(expectedChunks(payload.bytes.size), trace.feedCompletions.single().chunks)
             assertEquals(expectedChunks(payload.bytes.size), trace.queueWrites.size)
             assertEquals(expectedChunks(payload.bytes.size), trace.scheduledDrains.size)
-            val screenDrains = trace.screenUpdateSnapshot().filter { it.bytes > 0 }
-            assertEquals(payload.bytes.size, screenDrains.sumOf { it.bytes })
+            val outputDrains = trace.outputDrainSnapshot()
+            assertEquals(payload.bytes.size, outputDrains.sum())
             assertTrue(
-                "raw burst should be drained in multiple bounded screen updates",
-                screenDrains.size > trace.scheduledDrains.size,
+                "raw burst should be drained in multiple bounded terminal drains",
+                outputDrains.size > trace.scheduledDrains.size,
             )
             assertTrue(
-                "screen-update traces should stay within the main-thread drain budget",
-                screenDrains.all {
-                    it.bytes in 1..SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES
+                "terminal drains should stay within the main-thread drain budget",
+                outputDrains.all {
+                    it in 1..SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES
                 },
             )
+            val screenDrains = trace.screenUpdateSnapshot().filter { it.bytes > 0 }
             assertTrue(
                 "all queue write timings should be captured",
                 trace.queueWrites.all { it.bytes > 0 && it.durationNanos >= 0L },
@@ -228,16 +232,33 @@ class SshTerminalBridgeTest {
             assertEquals(chunks.size, trace.feedCompletions.size)
             assertEquals(chunks.sumOf { expectedChunks(it.size) }, trace.queueWrites.size)
             assertEquals(trace.queueWrites.size, trace.scheduledDrains.size)
-            assertTrue(trace.screenUpdates.isNotEmpty())
-            assertTrue(trace.screenUpdates.size <= trace.scheduledDrains.size)
-            assertEquals(chunks.sumOf { it.size }, trace.screenUpdates.sumOf { it.bytes })
             assertTrue(
-                "many small tmux-style feeds should coalesce redundant drain/render callbacks",
-                trace.screenUpdates.size < trace.scheduledDrains.size,
+                "tmux-style feed completions should retain per-feed timing; trace=$trace",
+                trace.feedCompletions.all { it.chunks == 1 && it.durationNanos >= 0L },
             )
             assertTrue(
-                "tmux-style burst should capture screen update latency for every emitted chunk",
-                trace.screenUpdates.filter { it.bytes > 0 }.all { it.scheduleToCallbackNanos >= 0L },
+                "tmux-style queue writes should retain per-feed timing; trace=$trace",
+                trace.queueWrites.all { it.bytes > 0 && it.durationNanos >= 0L },
+            )
+            val outputDrains = trace.outputDrainSnapshot()
+            assertTrue(outputDrains.isNotEmpty())
+            assertEquals(chunks.sumOf { it.size }, outputDrains.sum())
+            assertTrue(
+                "tmux-style terminal drains should stay within the main-thread drain budget",
+                outputDrains.all {
+                    it in 1..SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES
+                },
+            )
+            val screenUpdates = trace.screenUpdateSnapshot()
+            assertTrue(screenUpdates.isNotEmpty())
+            assertTrue(screenUpdates.size <= trace.scheduledDrains.size)
+            assertTrue(
+                "many small tmux-style feeds should coalesce redundant drain/render callbacks",
+                screenUpdates.size < trace.scheduledDrains.size,
+            )
+            assertTrue(
+                "tmux-style burst should capture screen update latency for every mapped terminal drain",
+                screenUpdates.filter { it.bytes > 0 }.all { it.scheduleToCallbackNanos >= 0L },
             )
         } finally {
             executor.shutdownNow()
@@ -314,6 +335,7 @@ class SshTerminalBridgeTest {
         val queueWrites = Collections.synchronizedList(mutableListOf<QueueWrite>())
         val scheduledDrains = Collections.synchronizedList(mutableListOf<ScheduledDrain>())
         val directDrains = Collections.synchronizedList(mutableListOf<DirectDrain>())
+        val outputDrains = Collections.synchronizedList(mutableListOf<Int>())
         val screenUpdates = Collections.synchronizedList(mutableListOf<ScreenUpdate>())
         val feedCompletions = Collections.synchronizedList(mutableListOf<FeedCompletion>())
 
@@ -323,6 +345,10 @@ class SshTerminalBridgeTest {
 
         override fun onDrainMessageScheduled(bytes: Int, pendingMessages: Int, directDispatch: Boolean) {
             scheduledDrains += ScheduledDrain(bytes, pendingMessages, directDispatch)
+        }
+
+        override fun onProcessOutputDrained(bytes: Int) {
+            outputDrains += bytes
         }
 
         override fun onDirectDrainDispatched(bytes: Int, durationNanos: Long) {
@@ -339,7 +365,13 @@ class SshTerminalBridgeTest {
 
         override fun toString(): String =
             "RecordingTraceSink(queueWrites=$queueWrites, scheduledDrains=$scheduledDrains, " +
-                "directDrains=$directDrains, screenUpdates=$screenUpdates, feedCompletions=$feedCompletions)"
+                "directDrains=$directDrains, outputDrains=$outputDrains, screenUpdates=$screenUpdates, " +
+                "feedCompletions=$feedCompletions)"
+
+        fun outputDrainSnapshot(): List<Int> =
+            synchronized(outputDrains) {
+                outputDrains.toList()
+            }
 
         fun screenUpdateSnapshot(): List<ScreenUpdate> =
             synchronized(screenUpdates) {

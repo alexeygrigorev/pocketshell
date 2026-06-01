@@ -343,6 +343,7 @@ fun FolderListScreen(
                 onConfirm = viewModel::confirmAssistantAction,
                 onCorrect = viewModel::correctAssistantAction,
                 onCancel = viewModel::cancelAssistantAction,
+                onRetry = viewModel::retryAssistantAction,
                 onDismiss = {
                     viewModel.dismissAssistant()
                     showAssistant = false
@@ -574,6 +575,7 @@ private fun HostDetailAssistantPanel(
     onConfirm: () -> Unit,
     onCorrect: (String) -> Unit,
     onCancel: () -> Unit,
+    onRetry: () -> Unit,
     onDismiss: () -> Unit,
     dictationState: InlineDictationViewModel.UiState,
     promptDictation: AssistantDictationTextEvent?,
@@ -620,6 +622,7 @@ private fun HostDetailAssistantPanel(
                 onCorrect = onCorrect,
                 onCancel = onCancel,
                 onDismiss = onDismiss,
+                onRetry = onRetry,
                 correctionDictation = correctionDictation,
             )
         }

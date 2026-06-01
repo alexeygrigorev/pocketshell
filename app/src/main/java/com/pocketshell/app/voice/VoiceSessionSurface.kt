@@ -101,6 +101,7 @@ internal fun AssistantStrip(
     onCorrect: (String) -> Unit,
     onCancel: () -> Unit,
     onDismiss: () -> Unit,
+    onRetry: () -> Unit = {},
     correctionDictation: AssistantCorrectionDictation? = null,
 ) {
     if (state is AssistantUiState.Idle) return
@@ -201,7 +202,15 @@ internal fun AssistantStrip(
             }
             is AssistantUiState.Error -> {
                 Text(text = state.message, color = PocketShellColors.Accent, fontSize = 12.sp)
-                TextButton(onClick = onDismiss) { Text("Dismiss") }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (state.retryable) {
+                        TextButton(
+                            onClick = onRetry,
+                            modifier = Modifier.testTag(ASSISTANT_RETRY_TAG),
+                        ) { Text("Retry") }
+                    }
+                    TextButton(onClick = onDismiss) { Text("Dismiss") }
+                }
             }
             AssistantUiState.Idle -> Unit
         }
@@ -241,6 +250,7 @@ internal const val ASSISTANT_CORRECT_TAG: String = "assistant:correct"
 internal const val ASSISTANT_CORRECTION_FIELD_TAG: String = "assistant:correction-field"
 internal const val ASSISTANT_CORRECTION_MIC_TAG: String = "assistant:correction-mic"
 internal const val ASSISTANT_SEND_CORRECTION_TAG: String = "assistant:send-correction"
+internal const val ASSISTANT_RETRY_TAG: String = "assistant:retry"
 
 /**
  * Scrollable strip of secondary command chips. Only the chips here are

@@ -44,13 +44,26 @@ internal class SessionAssistantController(
 
     private var runJob: Job? = null
     private var pendingDecision: CompletableDeferred<AssistantAgentLoop.Decision>? = null
+    private var lastTranscript: String? = null
 
     /** Start a fresh assistant run for [transcript]. No-op while one is active. */
     fun start(transcript: String) {
         val cleaned = transcript.trim()
         if (cleaned.isEmpty()) return
         if (runJob?.isActive == true) return
+        startCleaned(cleaned)
+    }
 
+    /** Retry the last assistant request after a retryable model failure. */
+    fun retry() {
+        if (runJob?.isActive == true) return
+        val error = _state.value as? AssistantUiState.Error ?: return
+        if (!error.retryable) return
+        val transcript = lastTranscript ?: return
+        startCleaned(transcript)
+    }
+
+    private fun startCleaned(cleaned: String) {
         val deps = sessionFactory()
         if (deps == null) {
             _state.value = AssistantUiState.Error(
@@ -59,6 +72,7 @@ internal class SessionAssistantController(
             return
         }
 
+        lastTranscript = cleaned
         _state.value = AssistantUiState.Thinking(cleaned)
         runJob = scope.launch {
             val loop = AssistantAgentLoop(

@@ -442,6 +442,8 @@ class FolderListViewModel @Inject constructor(
 
     fun cancelAssistantAction() = assistant.cancel()
 
+    fun retryAssistantAction() = assistant.retry()
+
     fun dismissAssistant() = assistant.dismiss()
 
     private fun buildAssistantDeps(): SessionAssistantController.AssistantRunDeps? {

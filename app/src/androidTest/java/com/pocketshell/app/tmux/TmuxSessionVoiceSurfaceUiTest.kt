@@ -21,6 +21,7 @@ import com.pocketshell.app.session.KeyBarWithMic
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.ADD_PROMPT_CHIP_LABEL
 import com.pocketshell.app.voice.ASSISTANT_CORRECTION_MIC_TAG
+import com.pocketshell.app.voice.ASSISTANT_RETRY_TAG
 import com.pocketshell.app.voice.AssistantCorrectionDictation
 import com.pocketshell.app.voice.AssistantDictationTextEvent
 import com.pocketshell.app.voice.AssistantStrip
@@ -249,6 +250,34 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         compose.onNodeWithTag("assistant:confirm").performClick()
         assertEquals(listOf("confirm"), events)
+    }
+
+    @Test
+    fun assistantStripShowsRetryOnlyForRetryableErrors() {
+        val events = mutableListOf<String>()
+        val retryableState = mutableStateOf(true)
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                AssistantStrip(
+                    state = AssistantUiState.Error(
+                        message = "The assistant model transport failed. Try again.",
+                        reason = com.pocketshell.app.assistant.AssistantFailureReason.ModelTransport,
+                        retryable = retryableState.value,
+                    ),
+                    onConfirm = { events += "confirm" },
+                    onCorrect = { events += "correct:$it" },
+                    onCancel = { events += "cancel" },
+                    onDismiss = { events += "dismiss" },
+                    onRetry = { events += "retry" },
+                )
+            }
+        }
+
+        compose.onNodeWithTag(ASSISTANT_RETRY_TAG).assertIsDisplayed().performClick()
+        assertEquals(listOf("retry"), events)
+
+        compose.runOnIdle { retryableState.value = false }
+        compose.onNodeWithTag(ASSISTANT_RETRY_TAG).assertDoesNotExist()
     }
 
     @Test

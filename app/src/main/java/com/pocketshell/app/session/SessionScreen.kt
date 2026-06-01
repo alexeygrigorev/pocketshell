@@ -377,6 +377,7 @@ public fun SessionScreen(
                 onCorrect = viewModel::correctAssistantAction,
                 onCancel = viewModel::cancelAssistantAction,
                 onDismiss = viewModel::dismissAssistant,
+                onRetry = viewModel::retryAssistantAction,
             )
 
             if (isImeVisible) {

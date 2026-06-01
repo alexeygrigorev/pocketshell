@@ -794,6 +794,7 @@ public fun TmuxSessionScreen(
                 onCorrect = viewModel::correctAssistantAction,
                 onCancel = viewModel::cancelAssistantAction,
                 onDismiss = viewModel::dismissAssistant,
+                onRetry = viewModel::retryAssistantAction,
             )
 
             if (isImeVisible && currentPane != null) {

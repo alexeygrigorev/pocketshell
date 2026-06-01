@@ -719,6 +719,9 @@ public class SessionViewModel @Inject constructor(
     /** Cancel the pending mutating candidate. */
     public fun cancelAssistantAction() = assistant.cancel()
 
+    /** Retry the last assistant request after a retryable model failure. */
+    public fun retryAssistantAction() = assistant.retry()
+
     /** Dismiss the assistant surface and reset to idle. */
     public fun dismissAssistant() = assistant.dismiss()
 

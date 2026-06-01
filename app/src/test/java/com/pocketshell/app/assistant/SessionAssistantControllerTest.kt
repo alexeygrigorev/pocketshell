@@ -1,6 +1,7 @@
 package com.pocketshell.app.assistant
 
 import com.pocketshell.core.assistant.AssistantLlmClient
+import com.pocketshell.core.assistant.AssistantLlmException
 import com.pocketshell.core.assistant.LlmMessage
 import com.pocketshell.core.assistant.LlmResponse
 import com.pocketshell.core.assistant.LlmToolCall
@@ -156,5 +157,91 @@ class SessionAssistantControllerTest {
         state as AssistantUiState.Error
         assertEquals(AssistantFailureReason.ModelTimeout, state.reason)
         assertTrue(state.retryable)
+    }
+
+    @Test
+    fun retryAfterTransportFailureReusesLastTranscript() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val attempts = mutableListOf<String>()
+        val client = object : AssistantLlmClient {
+            override suspend fun complete(
+                messages: List<LlmMessage>,
+                tools: List<ToolSpec>,
+                toolChoice: ToolChoice?,
+            ): Result<LlmResponse> {
+                attempts += messages.last { it.role == LlmMessage.Role.User }.text.orEmpty()
+                return if (attempts.size == 1) {
+                    Result.failure(AssistantLlmException.Transport("network read failed"))
+                } else {
+                    Result.success(LlmResponse("done", stopReason = StopReason.EndTurn))
+                }
+            }
+        }
+        val controller = SessionAssistantController(
+            scope = kotlinx.coroutines.CoroutineScope(dispatcher),
+            sessionFactory = {
+                SessionAssistantController.AssistantRunDeps(
+                    client = client,
+                    actions = RecordingActions(),
+                    traceSink = NoOpAssistantTraceSink,
+                    installId = "i",
+                    sessionId = null,
+                )
+            },
+        )
+
+        controller.start("  do something  ")
+        advanceUntilIdle()
+
+        val error = controller.state.value
+        assertTrue(error is AssistantUiState.Error)
+        error as AssistantUiState.Error
+        assertEquals(AssistantFailureReason.ModelTransport, error.reason)
+        assertTrue(error.retryable)
+
+        controller.retry()
+        assertEquals(AssistantUiState.Thinking("do something"), controller.state.value)
+        advanceUntilIdle()
+
+        assertEquals(listOf("do something", "do something"), attempts)
+        assertEquals(AssistantUiState.Done("done"), controller.state.value)
+    }
+
+    @Test
+    fun retryDoesNothingForNonRetryableError() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        var attempts = 0
+        val client = object : AssistantLlmClient {
+            override suspend fun complete(
+                messages: List<LlmMessage>,
+                tools: List<ToolSpec>,
+                toolChoice: ToolChoice?,
+            ): Result<LlmResponse> {
+                attempts += 1
+                return Result.failure(AssistantLlmException.Auth("bad key"))
+            }
+        }
+        val controller = SessionAssistantController(
+            scope = kotlinx.coroutines.CoroutineScope(dispatcher),
+            sessionFactory = {
+                SessionAssistantController.AssistantRunDeps(
+                    client = client,
+                    actions = RecordingActions(),
+                    traceSink = NoOpAssistantTraceSink,
+                    installId = "i",
+                    sessionId = null,
+                )
+            },
+        )
+
+        controller.start("do something")
+        advanceUntilIdle()
+        val before = controller.state.value
+        assertTrue(before is AssistantUiState.Error)
+        controller.retry()
+        advanceUntilIdle()
+
+        assertEquals(1, attempts)
+        assertEquals(before, controller.state.value)
     }
 }

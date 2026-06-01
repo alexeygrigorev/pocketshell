@@ -42,14 +42,19 @@ object ShareUploadNotifications {
     private const val NOTIFICATION_ID_SUCCESS: Int = 26_101
     private const val NOTIFICATION_ID_FAILURE: Int = 26_102
 
-    fun showSuccess(context: Context, hostName: String, remotePath: String) {
+    fun showSuccess(
+        context: Context,
+        hostName: String,
+        remotePath: String,
+        copyText: String = remotePath,
+    ) {
         val appContext = context.applicationContext
         ensureChannel(appContext)
         if (!canPostNotifications(appContext)) return
 
         val copyIntent = Intent(appContext, CopyRemotePathReceiver::class.java).apply {
             action = CopyRemotePathReceiver.ACTION_COPY_PATH
-            putExtra(CopyRemotePathReceiver.EXTRA_REMOTE_PATH, remotePath)
+            putExtra(CopyRemotePathReceiver.EXTRA_REMOTE_PATH, copyText)
             putExtra(CopyRemotePathReceiver.EXTRA_HOST_NAME, hostName)
         }
         val pendingIntent = PendingIntent.getBroadcast(

@@ -452,6 +452,15 @@ class ShareViewModelTest {
         val success = vm.uploadState.first { it is UploadState.Success } as UploadState.Success
         assertEquals(3, success.totalCount)
         assertEquals(3, success.successCount)
+        assertEquals(
+            "clipboard payload must contain only the target remote paths",
+            listOf(
+                "~/inbox/pocketshell/a.png",
+                "~/inbox/pocketshell/b.png",
+                "~/inbox/pocketshell/c.png",
+            ).joinToString("\n"),
+            success.copyText,
+        )
         assertTrue(
             "expected the multi-file success detail to list every remote path, got '${success.remotePath}'",
             success.remotePath.contains("a.png") &&
@@ -478,6 +487,11 @@ class ShareViewModelTest {
             "single-file success detail must be just the one remote path",
             "~/inbox/pocketshell/only.png",
             success.remotePath,
+        )
+        assertEquals(
+            "single-file copy payload must be the exact target remote path",
+            "~/inbox/pocketshell/only.png",
+            success.copyText,
         )
     }
 

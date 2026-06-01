@@ -1,6 +1,7 @@
 package com.pocketshell.app.share
 
 import android.content.Context
+import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
@@ -183,6 +184,11 @@ class ShareTargetE2eTest {
                 "expected the remote filename to carry the marker '$marker' but got $remotePath",
                 remotePath.contains(marker),
             )
+            compose.onNodeWithTag(SHARE_RESULT_COPY_TAG, useUnmergedTree = true)
+                .performClick()
+            compose.waitUntil(timeoutMillis = 5_000) {
+                clipboardText(targetContext) == remotePath
+            }
 
             val readBack = SshConnection.connect(
                 host = DEFAULT_HOST,
@@ -420,6 +426,14 @@ class ShareTargetE2eTest {
         } finally {
             db.close()
         }
+    }
+
+    private fun clipboardText(context: Context): String? {
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        return clipboard.primaryClip
+            ?.getItemAt(0)
+            ?.coerceToText(context)
+            ?.toString()
     }
 
     private fun stageSharedFile(context: Context, marker: String): Pair<File, String> {

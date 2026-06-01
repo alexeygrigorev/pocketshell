@@ -1,11 +1,16 @@
 package com.pocketshell.app.share
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -25,6 +30,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -138,6 +144,8 @@ internal fun HostPickerScreen(
                         else -> "Uploaded to ${state.hostName}"
                     },
                     detail = state.remotePath,
+                    copyText = if (isPaste) null else state.copyText,
+                    copyLabel = if (state.totalCount > 1) "Copy paths" else "Copy path",
                     isError = false,
                     onDismiss = {
                         viewModel.clearUploadState()
@@ -160,6 +168,8 @@ internal fun HostPickerScreen(
                         else -> "Could not upload to ${state.hostName}"
                     },
                     detail = state.message,
+                    copyText = null,
+                    copyLabel = null,
                     isError = true,
                     onDismiss = {
                         viewModel.clearUploadState()
@@ -278,9 +288,12 @@ private fun UploadingSurface(hostName: String) {
 private fun UploadResultSurface(
     title: String,
     detail: String,
+    copyText: String?,
+    copyLabel: String?,
     isError: Boolean,
     onDismiss: () -> Unit,
 ) {
+    val context = LocalContext.current
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -313,8 +326,25 @@ private fun UploadResultSurface(
             )
         }
         Spacer(Modifier.height(24.dp))
-        TextButton(onClick = onDismiss) {
-            Text(text = "Done")
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (!copyText.isNullOrBlank() && copyLabel != null) {
+                TextButton(
+                    onClick = {
+                        val clipboard = context
+                            .getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                        clipboard.setPrimaryClip(
+                            ClipData.newPlainText("Remote inbox path", copyText),
+                        )
+                        Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                    },
+                    modifier = Modifier.testTag(SHARE_RESULT_COPY_TAG),
+                ) {
+                    Text(text = copyLabel)
+                }
+            }
+            TextButton(onClick = onDismiss) {
+                Text(text = "Done")
+            }
         }
     }
 }
@@ -378,6 +408,7 @@ internal const val SHARE_HOST_ROW_TAG_PREFIX: String = "share:host:row:"
 internal const val SHARE_RESULT_SUCCESS_TAG: String = "share:result:success"
 internal const val SHARE_RESULT_FAILURE_TAG: String = "share:result:failure"
 internal const val SHARE_RESULT_DETAIL_TAG: String = "share:result:detail"
+internal const val SHARE_RESULT_COPY_TAG: String = "share:result:copy"
 internal const val SHARE_TEXT_PASTE_TAG: String = "share:text:paste"
 internal const val SHARE_TEXT_SAVE_TAG: String = "share:text:save"
 internal const val SHARE_EMPTY_STATE_TAG: String = "share:picker:empty"

@@ -240,18 +240,25 @@ internal class ShareViewModel @Inject constructor(
         val successCount = succeededPaths.size
         when {
             failedNames.isEmpty() -> {
+                val copyText = succeededPaths.joinToString("\n")
                 val detail = if (total > 1) {
-                    "$successCount files uploaded:\n" + succeededPaths.joinToString("\n")
+                    "$successCount files uploaded:\n$copyText"
                 } else {
                     succeededPaths.firstOrNull().orEmpty()
                 }
                 _uploadState.value = UploadState.Success(
                     hostName = host.name,
                     remotePath = detail,
+                    copyText = copyText,
                     successCount = successCount,
                     totalCount = total,
                 )
-                ShareUploadNotifications.showSuccess(applicationContext, host.name, detail)
+                ShareUploadNotifications.showSuccess(
+                    context = applicationContext,
+                    hostName = host.name,
+                    remotePath = detail,
+                    copyText = copyText,
+                )
             }
             successCount == 0 -> {
                 val message = lastError ?: "Upload failed"
@@ -469,11 +476,14 @@ internal sealed interface UploadState {
     /**
      * Operation succeeded.
      *
-     * For file uploads, [remotePath] is the absolute remote path (e.g.
+     * For file uploads, [remotePath] is the display detail and [copyText]
+     * is the exact clipboard payload. Single-file uploads use the same
+     * absolute remote path (e.g.
      * `$HOME/inbox/pocketshell/<filename>`). For a multi-file share
-     * (issue #258) it is a newline-joined summary of every uploaded
-     * path; [successCount]/[totalCount] carry the counts so the result
-     * surface and toast can say "uploaded N/N".
+     * (issue #258), [remotePath] includes a count header for readability
+     * while [copyText] is just the newline-joined uploaded paths;
+     * [successCount]/[totalCount] carry the counts so the result surface
+     * and toast can say "uploaded N/N".
      *
      * For send-keys paste (issue #193), [remotePath] holds a short
      * preview of the pasted text — the field name is preserved for
@@ -482,6 +492,7 @@ internal sealed interface UploadState {
     data class Success(
         val hostName: String,
         val remotePath: String,
+        val copyText: String = remotePath,
         val successCount: Int = 1,
         val totalCount: Int = 1,
     ) : UploadState

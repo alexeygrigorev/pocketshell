@@ -2,10 +2,16 @@ package com.pocketshell.app.sessions
 
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
+import com.pocketshell.core.ssh.DefaultSshLeaseConnector
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.storage.entity.HostEntity
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import java.io.File
 import javax.inject.Inject
 
@@ -20,6 +26,11 @@ interface HostTmuxSessionsGateway {
 class SshHostTmuxSessionsGateway @Inject constructor(
     private val parser: HostTmuxSessionListParser,
     private val activeTmuxClients: ActiveTmuxClients,
+    private val sshLeaseManager: SshLeaseManager = SshLeaseManager(
+        connector = SshLeaseConnector { target ->
+            DefaultSshLeaseConnector().connect(target)
+        },
+    ),
 ) : HostTmuxSessionsGateway {
     override suspend fun listSessions(
         host: HostEntity,
@@ -34,22 +45,26 @@ class SshHostTmuxSessionsGateway @Inject constructor(
             port = host.port,
             user = host.username,
         )
-        val session = SshConnection.connect(
-            host = host.hostname,
-            port = host.port,
-            user = host.username,
-            key = SshKey.Path(File(keyPath)),
-            passphrase = passphrase?.copyOf(),
-            knownHosts = KnownHostsPolicy.AcceptAll,
-        ).getOrElse { error ->
+        val lease = try {
+            sshLeaseManager.acquire(host.toSshLeaseTarget(keyPath, passphrase)).getOrElse { error ->
+                // Issue #109: surface the throwable up to the view-model so
+                // the user-facing summary path (HostConnectError) can run.
+                // Concatenating `error.message` into the sheet body was what
+                // produced the raw "ECONNREFUSED" stack trace.
+                return HostTmuxSessionListResult.ConnectFailed(error)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
             // Issue #109: surface the throwable up to the view-model so
             // the user-facing summary path (HostConnectError) can run.
             // Concatenating `error.message` into the sheet body was what
             // produced the raw "ECONNREFUSED" stack trace.
-            return HostTmuxSessionListResult.ConnectFailed(error)
+            return HostTmuxSessionListResult.ConnectFailed(t)
         }
 
         return try {
+            val session = lease.session
             val pocketshell = session.exec(pathAware("pocketshell sessions list --by activity"))
             if (pocketshell.exitCode == 0) {
                 return HostTmuxSessionListResult.Sessions(parser.parsePocketshellSessionsList(pocketshell.stdout))
@@ -80,9 +95,28 @@ class SshHostTmuxSessionsGateway @Inject constructor(
         } catch (t: Throwable) {
             HostTmuxSessionListResult.Failed("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
         } finally {
-            session.close()
+            withContext(NonCancellable) {
+                lease.release()
+            }
         }
     }
+
+    private fun HostEntity.toSshLeaseTarget(
+        keyPath: String,
+        passphrase: CharArray?,
+    ): SshLeaseTarget =
+        SshLeaseTarget(
+            leaseKey = SshLeaseKey(
+                host = hostname,
+                port = port,
+                user = username,
+                credentialId = "$id:$keyPath",
+                knownHostsId = "accept-all",
+            ),
+            key = SshKey.Path(File(keyPath)),
+            passphrase = passphrase?.copyOf(),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        )
 
     private fun pathAware(command: String): String =
         ReposRemoteSource.pathAwareCommand(command)

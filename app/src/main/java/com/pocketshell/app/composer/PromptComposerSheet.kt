@@ -2,6 +2,7 @@ package com.pocketshell.app.composer
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.LinearEasing
@@ -124,6 +125,7 @@ public fun PromptComposerSheet(
     onSend: suspend (text: String, withEnter: Boolean) -> Boolean,
     modifier: Modifier = Modifier,
     hostId: Long? = null,
+    onStageAttachments: (suspend (List<Uri>) -> Result<List<String>>)? = null,
     viewModel: PromptComposerViewModel = hiltViewModel(),
     // Issue #234: the composer is partial-expand by default so the terminal
     // viewport behind it stays visible. With `skipPartiallyExpanded = false`,
@@ -194,6 +196,16 @@ public fun PromptComposerSheet(
             // pushy with a second OS dialog. The user can re-tap the mic
             // to be re-prompted, or proceed by typing.
             viewModel.surfacePermissionDenied()
+        }
+    }
+    val attachmentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    ) { uris ->
+        val stageAttachments = onStageAttachments ?: return@rememberLauncherForActivityResult
+        if (uris.isNotEmpty()) {
+            viewModel.attachFiles(uris.size) {
+                stageAttachments(uris)
+            }
         }
     }
 
@@ -285,6 +297,9 @@ public fun PromptComposerSheet(
             onSnippets = if (hostId != null) {
                 { showSnippetPicker = true }
             } else null,
+            onAttachFiles = if (onStageAttachments != null) {
+                { attachmentLauncher.launch(arrayOf("*/*")) }
+            } else null,
             pendingItems = pendingItems,
             pendingListExpanded = pendingListExpanded,
             onTogglePendingList = { pendingListExpanded = !pendingListExpanded },
@@ -363,6 +378,7 @@ internal fun SheetContent(
     onSend: (withEnter: Boolean) -> Unit,
     modifier: Modifier = Modifier,
     onSnippets: (() -> Unit)? = null,
+    onAttachFiles: (() -> Unit)? = null,
     // Issue #174: dispatched by the cancel `X` chip rendered next to
     // the mic FAB while [PromptComposerViewModel.RecordingState] is
     // [PromptComposerViewModel.RecordingState.Recording]. Defaults to a
@@ -381,6 +397,8 @@ internal fun SheetContent(
     onAcknowledgeSavedAudio: () -> Unit = {},
 ) {
     val isTranscribing = state.recording == PromptComposerViewModel.RecordingState.Transcribing
+    val attachmentUploading =
+        state.attachmentUpload as? PromptComposerViewModel.AttachmentUploadState.Uploading
 
     // Issue #169 Part 1: hold the screen on while we are actively
     // capturing audio or waiting for Whisper. Without this, the system's
@@ -473,6 +491,31 @@ internal fun SheetContent(
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             ) {
                 Text(text = msg, color = PocketShellColors.Accent, fontSize = 12.sp)
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        attachmentUploading?.let { upload ->
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        color = PocketShellColors.SurfaceElev,
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = PocketShellColors.BorderSoft,
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .testTag(COMPOSER_ATTACHMENT_PROGRESS_TAG),
+            ) {
+                Text(
+                    text = "Uploading ${upload.count} attachment${if (upload.count == 1) "" else "s"}...",
+                    color = PocketShellColors.Text,
+                    fontSize = 12.sp,
+                )
             }
             Spacer(modifier = Modifier.height(8.dp))
         }
@@ -641,67 +684,85 @@ internal fun SheetContent(
         val isRecording = state.recording == PromptComposerViewModel.RecordingState.Recording
         val hasQueuedAffordance = isRecording || isTranscribing
         val sendEnabled = hasQueuedAffordance || state.draft.isNotEmpty()
+        val attachmentBusy = attachmentUploading != null
         // Action row: Snippets (ghost) / Insert / Send (primary).
         // Matches `.composer-actions` in the mockup. Snippets stays
         // disabled while a Whisper round-trip is in flight (browsing
         // snippets during transcription is at best a UX paper-cut and
         // at worst lands a stale snippet over the about-to-arrive
         // transcript) but the Send buttons stay live.
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            GhostButton(
-                label = "Snippets",
-                onClick = {
-                    // Issue #17 wired the snippet picker. When the sheet
-                    // is hosted from a context without a known host id
-                    // (e.g. a non-session entry point), [onSnippets] is
-                    // null and tapping the ghost button stays a no-op so
-                    // the row's visual proportion still matches the mockup.
-                    onSnippets?.invoke()
-                },
-                modifier = Modifier.weight(1f),
-                enabled = !isTranscribing,
-            )
-            // Issue #196: the Insert / Send buttons are shared with the
-            // agent-pane composer via [ComposerSendButton] /
-            // [ComposerSendEnterButton] in `UnifiedComposer.kt` so both
-            // surfaces use the identical tier-differentiated treatment:
-            //  - "Insert" → outline-only (transparent fill, accent
-            //    border + accent text) and writes the draft without Enter.
-            //  - "Send" → solid accent fill + on-accent text — stays
-            //    the primary action (matches the same colour token the
-            //    mic FAB uses, so the user sees one "do the thing"
-            //    coloured affordance per row).
-            //
-            // Each button surfaces a long-press tooltip (the #153 "explain
-            // this control" affordance) via the shared
-            // [ComposerTooltipButton], whose [Modifier.combinedClickable]
-            // keeps `performClick()` in connected tests firing the same
-            // onClick lambda the user's finger does.
-            //
-            // Issue #211: label flips while a queued Whisper round-trip
-            // is in flight so the user knows the tap was registered but
-            // the bytes are not yet flying.
-            ComposerSendButton(
-                label = if (hasQueuedAffordance) "Insert after transcribe" else "Insert",
-                tooltipLabel = SEND_TOOLTIP_LABEL,
-                onClick = { onSend(false) },
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag(COMPOSER_SEND_TAG),
-                enabled = sendEnabled,
-            )
-            ComposerSendEnterButton(
-                label = if (hasQueuedAffordance) "Send after transcribe" else "Send",
-                tooltipLabel = SEND_ENTER_TOOLTIP_LABEL,
-                onClick = { onSend(true) },
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag(COMPOSER_SEND_ENTER_TAG),
-                enabled = sendEnabled,
-            )
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                GhostButton(
+                    label = "Snippets",
+                    onClick = {
+                        // Issue #17 wired the snippet picker. When the sheet
+                        // is hosted from a context without a known host id
+                        // (e.g. a non-session entry point), [onSnippets] is
+                        // null and tapping the ghost button stays a no-op so
+                        // the row's visual proportion still matches the mockup.
+                        onSnippets?.invoke()
+                    },
+                    modifier = Modifier.weight(1f),
+                    enabled = !isTranscribing && !attachmentBusy,
+                )
+                GhostButton(
+                    label = "Attach",
+                    onClick = {
+                        onAttachFiles?.invoke()
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(COMPOSER_ATTACH_TAG),
+                    enabled = !isTranscribing && !attachmentBusy && onAttachFiles != null,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                // Issue #196: the Insert / Send buttons are shared with the
+                // agent-pane composer via [ComposerSendButton] /
+                // [ComposerSendEnterButton] in `UnifiedComposer.kt` so both
+                // surfaces use the identical tier-differentiated treatment:
+                //  - "Insert" → outline-only (transparent fill, accent
+                //    border + accent text) and writes the draft without Enter.
+                //  - "Send" → solid accent fill + on-accent text — stays
+                //    the primary action (matches the same colour token the
+                //    mic FAB uses, so the user sees one "do the thing"
+                //    coloured affordance per row).
+                //
+                // Each button surfaces a long-press tooltip (the #153 "explain
+                // this control" affordance) via the shared
+                // [ComposerTooltipButton], whose [Modifier.combinedClickable]
+                // keeps `performClick()` in connected tests firing the same
+                // onClick lambda the user's finger does.
+                //
+                // Issue #211: label flips while a queued Whisper round-trip
+                // is in flight so the user knows the tap was registered but
+                // the bytes are not yet flying.
+                ComposerSendButton(
+                    label = if (hasQueuedAffordance) "Insert after transcribe" else "Insert",
+                    tooltipLabel = SEND_TOOLTIP_LABEL,
+                    onClick = { onSend(false) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(COMPOSER_SEND_TAG),
+                    enabled = sendEnabled && !attachmentBusy,
+                )
+                ComposerSendEnterButton(
+                    label = if (hasQueuedAffordance) "Send after transcribe" else "Send",
+                    tooltipLabel = SEND_ENTER_TOOLTIP_LABEL,
+                    onClick = { onSend(true) },
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(COMPOSER_SEND_ENTER_TAG),
+                    enabled = sendEnabled && !attachmentBusy,
+                )
+            }
         }
     }
 }
@@ -1329,6 +1390,8 @@ internal const val COMPOSER_SEND_TAG = "prompt-composer-send"
 internal const val COMPOSER_SEND_ENTER_TAG = "prompt-composer-send-enter"
 internal const val COMPOSER_STATUS_TAG = "prompt-composer-status"
 internal const val COMPOSER_WAVEFORM_TAG = "prompt-composer-waveform"
+internal const val COMPOSER_ATTACH_TAG = "prompt-composer-attach"
+internal const val COMPOSER_ATTACHMENT_PROGRESS_TAG = "prompt-composer-attachment-progress"
 
 /**
  * Issue #153 fix 2: test tag for the in-flight transcribing spinner

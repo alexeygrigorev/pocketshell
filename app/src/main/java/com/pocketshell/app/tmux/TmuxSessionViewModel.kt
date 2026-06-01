@@ -1,6 +1,7 @@
 package com.pocketshell.app.tmux
 
 import android.content.Context
+import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
 import androidx.lifecycle.ViewModel
@@ -16,6 +17,7 @@ import com.pocketshell.app.assistant.ExecutorTraceSink
 import com.pocketshell.app.assistant.RealAssistantSshExecutor
 import com.pocketshell.app.assistant.SessionActionBridge
 import com.pocketshell.app.assistant.SessionAssistantController
+import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.repos.ReposRemoteSource
@@ -3028,6 +3030,25 @@ public class TmuxSessionViewModel @Inject constructor(
         bridgeScope.launch {
             sendToAgentPaneResult(paneId, text)
         }
+    }
+
+    public suspend fun stagePromptAttachments(uris: List<Uri>): Result<List<String>> {
+        val context = applicationContext
+            ?: return Result.failure(IllegalStateException("Attachment staging unavailable."))
+        val session = sessionRef?.takeIf { it.isConnected }
+            ?: return Result.failure(IllegalStateException("No live SSH session for attachment upload."))
+        if (_connectionStatus.value !is ConnectionStatus.Connected) {
+            return Result.failure(IllegalStateException("Reconnect before attaching files."))
+        }
+        val target = activeTarget
+        val scopeKey = when (target) {
+            null -> "tmux-session"
+            else -> "host-${target.hostId}-${target.sessionName}"
+        }
+        return PromptAttachmentStager(
+            resolver = context.contentResolver,
+            cacheDir = context.cacheDir,
+        ).stage(session, scopeKey, uris)
     }
 
     internal suspend fun sendToAgentPaneResult(paneId: String, text: String): Result<Unit> {

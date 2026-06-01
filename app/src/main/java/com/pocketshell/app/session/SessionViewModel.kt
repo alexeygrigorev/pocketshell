@@ -1,6 +1,7 @@
 package com.pocketshell.app.session
 
 import android.content.Context
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.R
@@ -14,6 +15,7 @@ import com.pocketshell.app.assistant.ExecutorTraceSink
 import com.pocketshell.app.assistant.RealAssistantSshExecutor
 import com.pocketshell.app.assistant.SessionAssistantController
 import com.pocketshell.app.assistant.SessionActionBridge
+import com.pocketshell.app.composer.PromptAttachmentStager
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.repos.ReposRemoteSource
@@ -977,6 +979,24 @@ public class SessionViewModel @Inject constructor(
         if (text.isEmpty() && !withEnter) return
         val payload = if (withEnter) text + "\r" else text
         sendTerminalInput(payload.toByteArray(Charsets.UTF_8))
+    }
+
+    public suspend fun stagePromptAttachments(uris: List<Uri>): Result<List<String>> {
+        val session = sessionRef?.takeIf { it.isConnected }
+            ?: return Result.failure(IllegalStateException("No live SSH session for attachment upload."))
+        if (_connectionStatus.value !is ConnectionStatus.Connected) {
+            return Result.failure(IllegalStateException("Reconnect before attaching files."))
+        }
+        val target = activeTarget
+        val scopeKey = when {
+            target?.hostId != null -> "host-${target.hostId}"
+            target != null -> "${target.user}-${target.host}-${target.port}"
+            else -> "session"
+        }
+        return PromptAttachmentStager(
+            resolver = applicationContext.contentResolver,
+            cacheDir = applicationContext.cacheDir,
+        ).stage(session, scopeKey, uris)
     }
 
     public fun resizeRemotePty(columns: Int, rows: Int) {

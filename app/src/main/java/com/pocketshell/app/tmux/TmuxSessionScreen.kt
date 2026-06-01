@@ -1076,6 +1076,13 @@ public fun TmuxSessionScreen(
                 }
             },
             hostId = hostId.takeIf { it != 0L },
+            onStageAttachments = { uris ->
+                if (!sessionLive) {
+                    Result.failure(IllegalStateException("Reconnect before attaching files."))
+                } else {
+                    viewModel.stagePromptAttachments(uris)
+                }
+            },
         )
     }
 

@@ -237,6 +237,60 @@ class PromptComposerViewModelTest {
         assertEquals("Tell me from the agent", vm.uiState.value.draft)
     }
 
+    @Test
+    fun attachFilesAppendsRemotePathsToDraft() = runTest {
+        val vm = newVm()
+        vm.onDraftChange("Review these")
+
+        vm.attachFiles(count = 2) {
+            Result.success(
+                listOf(
+                    "~/.pocketshell/attachments/host-1/20260601-120000-01-report.txt",
+                    "~/.pocketshell/attachments/host-1/20260601-120000-02-data.csv",
+                ),
+            )
+        }
+        advanceUntilIdle()
+
+        assertEquals(
+            """
+            Review these
+
+            Attached files:
+            - ~/.pocketshell/attachments/host-1/20260601-120000-01-report.txt
+            - ~/.pocketshell/attachments/host-1/20260601-120000-02-data.csv
+            """.trimIndent(),
+            vm.uiState.value.draft,
+        )
+        assertNull(vm.uiState.value.error)
+        assertEquals(
+            PromptComposerViewModel.AttachmentUploadState.Idle,
+            vm.uiState.value.attachmentUpload,
+        )
+    }
+
+    @Test
+    fun attachFilesFailureKeepsDraftAndShowsError() = runTest {
+        val vm = newVm()
+        vm.onDraftChange("Do not lose this draft")
+
+        vm.attachFiles(count = 1) {
+            Result.failure(IllegalStateException("Permission denied"))
+        }
+        advanceUntilIdle()
+
+        assertEquals("Do not lose this draft", vm.uiState.value.draft)
+        assertEquals(
+            PromptComposerViewModel.AttachmentUploadState.Idle,
+            vm.uiState.value.attachmentUpload,
+        )
+        val error = vm.uiState.value.error
+        assertNotNull(error)
+        assertTrue(error!!.contains("Attachment upload failed"))
+        assertTrue(error.contains("Permission denied"))
+        assertTrue(error.contains("draft was kept"))
+    }
+
     // -- Configured silence auto-stop ---------------------------------------
 
     @Test

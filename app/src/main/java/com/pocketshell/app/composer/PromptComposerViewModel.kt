@@ -191,6 +191,7 @@ public class PromptComposerViewModel @Inject constructor(
      */
     private var pendingSendOnTranscribeSuccess: Boolean = false
     private var pendingSendWithEnter: Boolean = false
+    private var attachmentJob: Job? = null
 
     /**
      * Issue #180: live snapshot of the failed / offline-queued
@@ -245,6 +246,58 @@ public class PromptComposerViewModel @Inject constructor(
         // the dictated text deserves to come back either way.
         savedStateHandle[KEY_DRAFT] = newText
         _uiState.update { it.copy(draft = newText, error = null) }
+    }
+
+    /**
+     * Stage selected files through the host screen's uploader and append
+     * the resulting remote paths to the draft. The existing draft is
+     * never cleared before the upload finishes, so a failed upload leaves
+     * the user's prompt intact and actionable error copy visible.
+     */
+    public fun attachFiles(
+        count: Int,
+        stage: suspend () -> Result<List<String>>,
+    ) {
+        if (count <= 0 || attachmentJob?.isActive == true) return
+        attachmentJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    attachmentUpload = AttachmentUploadState.Uploading(count),
+                    error = null,
+                )
+            }
+            val result = runCatching { stage() }.getOrElse { Result.failure(it) }
+            result.fold(
+                onSuccess = { paths ->
+                    if (paths.isEmpty()) {
+                        _uiState.update {
+                            it.copy(
+                                attachmentUpload = AttachmentUploadState.Idle,
+                                error = "No files were attached.",
+                            )
+                        }
+                        return@fold
+                    }
+                    val newDraft = appendAttachmentPaths(_uiState.value.draft, paths)
+                    savedStateHandle[KEY_DRAFT] = newDraft
+                    _uiState.update {
+                        it.copy(
+                            draft = newDraft,
+                            attachmentUpload = AttachmentUploadState.Idle,
+                            error = null,
+                        )
+                    }
+                },
+                onFailure = { error ->
+                    _uiState.update {
+                        it.copy(
+                            attachmentUpload = AttachmentUploadState.Idle,
+                            error = attachmentErrorMessage(error),
+                        )
+                    }
+                },
+            )
+        }
     }
 
     /**
@@ -985,6 +1038,7 @@ public class PromptComposerViewModel @Inject constructor(
     override fun onCleared() {
         recordingJob?.cancel()
         transcribeJob?.cancel()
+        attachmentJob?.cancel()
         // If we were mid-recording, best-effort drop the mic. We swallow
         // any AudioRecorderException because there's no UI to surface it
         // to at this point in the lifecycle.
@@ -996,6 +1050,11 @@ public class PromptComposerViewModel @Inject constructor(
 
     /** Coarse-grained recording state — drives both the mic FAB and the waveform. */
     public enum class RecordingState { Idle, Recording, Transcribing }
+
+    public sealed interface AttachmentUploadState {
+        public data object Idle : AttachmentUploadState
+        public data class Uploading(val count: Int) : AttachmentUploadState
+    }
 
     /**
      * UI state surfaced to [PromptComposerSheet].
@@ -1040,6 +1099,7 @@ public class PromptComposerViewModel @Inject constructor(
         val error: String? = null,
         val savedAudioPath: String? = null,
         val silenceThresholdSeconds: Float = 0f,
+        val attachmentUpload: AttachmentUploadState = AttachmentUploadState.Idle,
     )
 
     /**
@@ -1252,6 +1312,30 @@ public class PromptComposerViewModel @Inject constructor(
         public const val RECORDING_INTERRUPTED_MESSAGE: String =
             "Recording was interrupted. Tap the mic to record again."
     }
+}
+
+internal fun appendAttachmentPaths(draft: String, paths: List<String>): String {
+    if (paths.isEmpty()) return draft
+    val block = buildString {
+        append("Attached files:")
+        paths.forEach { path ->
+            append('\n')
+            append("- ")
+            append(path)
+        }
+    }
+    return when {
+        draft.isBlank() -> block
+        draft.endsWith("\n\n") -> draft + block
+        draft.endsWith("\n") -> draft + "\n" + block
+        else -> draft + "\n\n" + block
+    }
+}
+
+private fun attachmentErrorMessage(error: Throwable): String {
+    val raw = error.message?.lineSequence()?.firstOrNull()?.trim().orEmpty()
+    val detail = raw.ifBlank { error.javaClass.simpleName }
+    return "Attachment upload failed: $detail. Your draft was kept; reconnect or choose a smaller/readable file."
 }
 
 /**

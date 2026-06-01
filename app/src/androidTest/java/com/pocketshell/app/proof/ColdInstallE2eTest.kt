@@ -31,6 +31,7 @@ import com.pocketshell.app.hosts.HOST_LIST_EMPTY_STATE_TAG
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SETTINGS_BUTTON_TAG
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.settings.ABOUT_FOOTER_TAG
 import com.pocketshell.app.settings.ABOUT_VERSION_TAG
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SETTINGS_LAZY_COLUMN_TAG
@@ -388,14 +389,16 @@ class ColdInstallE2eTest {
         )
 
         // Visually confirm the Settings surface mounted and renders the
-        // about-version row from the same fresh state. We scroll the
-        // version row into view because Settings is a LazyColumn and the
-        // About section lives below the fold on a Pixel 7 viewport. The
-        // same pattern is used by `UsageScreenE2eTest` for the Usage row.
+        // subtle about-version footer from the same fresh state. We scroll
+        // the footer into view because Settings is a LazyColumn and the
+        // About footer lives below the fold on a Pixel 7 viewport. The same
+        // pattern is used by `UsageScreenE2eTest` for the Usage row.
         compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG).assertExists()
         compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG)
-            .performScrollToNode(hasTestTag(ABOUT_VERSION_TAG))
+            .performScrollToNode(hasTestTag(ABOUT_FOOTER_TAG))
+        compose.onNodeWithTag(ABOUT_FOOTER_TAG, useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(ABOUT_VERSION_TAG, useUnmergedTree = true).assertExists()
+        compose.onNodeWithText("build", substring = true, useUnmergedTree = true).assertExists()
 
         // Keep the host-row tag prefix referenced so static analysis
         // doesn't flag it as unused; the prefix is what host rows in the

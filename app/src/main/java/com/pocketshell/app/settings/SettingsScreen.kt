@@ -1,6 +1,7 @@
 package com.pocketshell.app.settings
 
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -69,9 +70,9 @@ import kotlin.math.roundToInt
  *    `CrashReportsScreen`. The actual relocation of the Crashes top-bar
  *    affordance is left to a follow-up (so as not to clash with the
  *    parallel #110 tab work).
- *  - **About** — installed `versionName` read from `PackageManager`,
- *    matching the lookup pattern already used by
- *    [com.pocketshell.app.hosts.HostListScreen]'s footer.
+ *  - **About footer** — installed `versionName` / build code read from
+ *    `PackageManager`, kept at the bottom so debug metadata stays
+ *    discoverable without competing with primary Settings controls.
  *
  * The screen draws its own chrome (no `Scaffold`) to stay consistent
  * with the rest of the app's hand-rolled bars (`HostsAppBar`,
@@ -110,11 +111,20 @@ fun SettingsScreen(
         ActivityResultContracts.GetContent(),
     ) { uri -> uri?.let(onChooseHostImportFile) }
 
-    val versionName = remember {
+    val appBuildInfo = remember {
         try {
-            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown"
+            val packageInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+            AppBuildInfo(
+                versionName = packageInfo.versionName ?: "unknown",
+                versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    packageInfo.longVersionCode
+                } else {
+                    @Suppress("DEPRECATION")
+                    packageInfo.versionCode.toLong()
+                },
+            )
         } catch (_: Exception) {
-            "unknown"
+            AppBuildInfo(versionName = "unknown", versionCode = null)
         }
     }
 
@@ -199,7 +209,7 @@ fun SettingsScreen(
                 DiagnosticsSection(onOpenCrashReports = onOpenCrashReports)
             }
             item {
-                AboutSection(versionName = versionName)
+                AboutFooter(appBuildInfo = appBuildInfo)
             }
         }
     }
@@ -1550,33 +1560,41 @@ private fun WorkspaceRootsSection(
 }
 
 @Composable
-private fun AboutSection(versionName: String) {
-    Column {
-        SectionLabel("About")
-        SectionCard {
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "PocketShell",
-                        color = PocketShellColors.Text,
-                        fontSize = 14.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = "Voice-first, tmux-native, agent-aware SSH client.",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
-                    )
-                }
-                Text(
-                    text = "v$versionName",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.testTag(ABOUT_VERSION_TAG),
-                )
-            }
+internal fun AboutFooter(appBuildInfo: AppBuildInfo) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 22.dp, end = 22.dp, top = 4.dp, bottom = 12.dp)
+            .testTag(ABOUT_FOOTER_TAG),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = "About",
+            color = PocketShellColors.TextMuted,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = appBuildInfo.displayText(),
+            color = PocketShellColors.TextMuted,
+            fontSize = 11.sp,
+            modifier = Modifier.testTag(ABOUT_VERSION_TAG),
+        )
+    }
+}
+
+internal data class AppBuildInfo(
+    val versionName: String,
+    val versionCode: Long?,
+) {
+    fun displayText(): String = buildString {
+        append("PocketShell v")
+        append(versionName)
+        versionCode?.let {
+            append(" (build ")
+            append(it)
+            append(")")
         }
     }
 }
@@ -1618,6 +1636,7 @@ internal const val USAGE_WARN_THRESHOLD_VALUE_TAG = "settings:usage:warn-thresho
  */
 internal const val USAGE_DOCS_URL: String =
     "https://github.com/alexeygrigorev/pocketshell/blob/main/docs/usage-panel.md"
+internal const val ABOUT_FOOTER_TAG = "settings:about:footer"
 internal const val ABOUT_VERSION_TAG = "settings:about:version"
 internal const val VOICE_API_KEY_ROW_TAG = "settings:voice:api-key-row"
 internal const val VOICE_API_KEY_CLEAR_TAG = "settings:voice:api-key-clear"

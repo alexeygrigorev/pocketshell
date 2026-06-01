@@ -103,19 +103,16 @@ data class FolderTreeRoot(
     val displayPath: String? get() = path.takeUnless { it == FolderListViewModel.OTHER_ROOT_PATH }
     val activeProjectCount: Int get() = folders.count { it.sessions.isNotEmpty() }
     val sessionCount: Int get() = folders.sumOf { it.sessions.size }
-    val inactiveProjectCount: Int get() = addSheetProjects.count { !it.isActive }
+    val inactiveProjectCount: Int get() = addSheetProjects.size
 }
 
 data class RootProjectCandidate(
     val path: String,
     val label: String,
     val source: RootProjectSource,
-    val activeSessionCount: Int,
-) {
-    val isActive: Boolean get() = activeSessionCount > 0
-}
+)
 
-enum class RootProjectSource { Active, History, Scanned }
+enum class RootProjectSource { History, Scanned }
 
 data class HostDiscoveredPort(
     val remotePort: Int,
@@ -995,10 +992,10 @@ class FolderListViewModel @Inject constructor(
                 val historyProjectPaths = historyPaths
                     .map(::canonicalisePath)
                     .filter { pathWithinRoot(it, root.matchPath) }
-                val visibleProjectPaths = (extraPaths + sessionPaths)
+                val visibleProjectPaths = sessionPaths
                     .distinct()
                     .filter { it != UNTRACKED_PATH }
-                val sheetProjectPaths = (sessionPaths + historyProjectPaths + scannedPaths + extraPaths)
+                val sheetProjectPaths = (historyProjectPaths + scannedPaths + extraPaths)
                     .distinct()
                     .filter { it != UNTRACKED_PATH }
 
@@ -1119,23 +1116,16 @@ class FolderListViewModel @Inject constructor(
                 .distinct()
                 .withIndex()
                 .associate { it.value to it.index }
-            val activeRank = activeSessionsByProjectPath.entries
-                .sortedWith(
-                    compareByDescending<Map.Entry<String, List<FolderSessionEntry>>> {
-                        it.value.maxOfOrNull { session -> session.lastActivity ?: 0L } ?: 0L
-                    }.thenBy { defaultLabelForPath(it.key).lowercase() },
-                )
-                .mapIndexed { index, entry -> canonicalisePath(entry.key) to index }
-                .toMap()
+            val activeProjectPaths = activeSessionsByProjectPath.keys
+                .map(::canonicalisePath)
+                .toSet()
             val scannedSet = scannedProjectPaths.map(::canonicalisePath).toSet()
             return projectPaths
                 .map(::canonicalisePath)
                 .distinct()
-                .filter { it != UNTRACKED_PATH }
+                .filter { it != UNTRACKED_PATH && it !in activeProjectPaths }
                 .map { path ->
-                    val active = activeSessionsByProjectPath[path].orEmpty()
                     val source = when {
-                        active.isNotEmpty() -> RootProjectSource.Active
                         path in historyRank -> RootProjectSource.History
                         else -> RootProjectSource.Scanned
                     }
@@ -1143,11 +1133,10 @@ class FolderListViewModel @Inject constructor(
                         path = path,
                         label = extraByPath[path] ?: defaultLabelForPath(path),
                         source = source,
-                        activeSessionCount = active.size,
                     )
                 }
                 .filter { it.source != RootProjectSource.Scanned || it.path in scannedSet || it.path in extraByPath }
-                .sortedWith(rootProjectCandidateSort(activeRank, historyRank))
+                .sortedWith(rootProjectCandidateSort(historyRank))
         }
 
         internal fun filterRootProjectCandidates(
@@ -1194,17 +1183,13 @@ class FolderListViewModel @Inject constructor(
         }
 
         private fun rootProjectCandidateSort(
-            activeRank: Map<String, Int>,
             historyRank: Map<String, Int>,
         ): Comparator<RootProjectCandidate> =
             compareBy<RootProjectCandidate> {
                 when (it.source) {
-                    RootProjectSource.Active -> 0
-                    RootProjectSource.History -> 1
-                    RootProjectSource.Scanned -> 2
+                    RootProjectSource.History -> 0
+                    RootProjectSource.Scanned -> 1
                 }
-            }.thenBy {
-                if (it.source == RootProjectSource.Active) activeRank[it.path] ?: Int.MAX_VALUE else Int.MAX_VALUE
             }.thenBy {
                 if (it.source == RootProjectSource.History) historyRank[it.path] ?: Int.MAX_VALUE else Int.MAX_VALUE
             }.thenBy { it.label.lowercase() }

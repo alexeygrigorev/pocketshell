@@ -1,6 +1,7 @@
 package com.pocketshell.app.projects
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
@@ -24,22 +25,14 @@ class RootProjectAddSheetTest {
         )
         val candidates = listOf(
             RootProjectCandidate(
-                path = "/home/alexey/git/pocketshell",
-                label = "pocketshell",
-                source = RootProjectSource.Active,
-                activeSessionCount = 1,
-            ),
-            RootProjectCandidate(
                 path = "/home/alexey/git/llm-zoomcamp",
                 label = "llm-zoomcamp",
                 source = RootProjectSource.History,
-                activeSessionCount = 0,
             ),
             RootProjectCandidate(
                 path = "/home/alexey/git/alpha",
                 label = "alpha",
                 source = RootProjectSource.Scanned,
-                activeSessionCount = 0,
             ),
         )
         val events = mutableListOf<String>()
@@ -58,6 +51,10 @@ class RootProjectAddSheetTest {
 
         compose.onNodeWithTag(ROOT_PROJECT_ADD_EMPTY_PROJECT_TAG).performClick()
         compose.onNodeWithTag(ROOT_PROJECT_ADD_CLONE_TAG).performClick()
+        compose.onNodeWithTag(
+            rootProjectCandidateSourceTestTag("/home/alexey/git/llm-zoomcamp"),
+            useUnmergedTree = true,
+        ).assertTextEquals("Used before")
         compose.onNodeWithTag(rootProjectCandidateTestTag("/home/alexey/git/llm-zoomcamp"))
             .assertIsDisplayed()
             .performClick()

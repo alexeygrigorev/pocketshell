@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -194,34 +193,23 @@ private fun RootProjectCandidateRow(
             )
         }
         Spacer(modifier = Modifier.size(10.dp))
-        RootProjectSourcePill(candidate)
+        RootProjectSourceLabel(candidate)
     }
 }
 
 @Composable
-private fun RootProjectSourcePill(candidate: RootProjectCandidate) {
+private fun RootProjectSourceLabel(candidate: RootProjectCandidate) {
     val label = when (candidate.source) {
-        RootProjectSource.Active -> if (candidate.activeSessionCount == 1) "Active" else "${candidate.activeSessionCount} active"
         RootProjectSource.History -> "Used before"
         RootProjectSource.Scanned -> "Folder"
     }
-    val fg = when (candidate.source) {
-        RootProjectSource.Active -> PocketShellColors.Green
-        RootProjectSource.History -> PocketShellColors.Accent
-        RootProjectSource.Scanned -> PocketShellColors.TextSecondary
-    }
-    Box(
-        modifier = Modifier
-            .background(fg.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 10.dp, vertical = 5.dp),
-    ) {
-        Text(
-            text = label,
-            color = fg,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
+    Text(
+        text = label,
+        color = PocketShellColors.TextMuted,
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Medium,
+        modifier = Modifier.testTag(rootProjectCandidateSourceTestTag(candidate.path)),
+    )
 }
 
 @Composable
@@ -256,3 +244,4 @@ const val ROOT_PROJECT_ADD_LIST_TAG: String = "root-project-add:list"
 const val ROOT_PROJECT_ADD_EMPTY_TAG: String = "root-project-add:empty"
 
 fun rootProjectCandidateTestTag(path: String): String = "root-project-add:project:$path"
+fun rootProjectCandidateSourceTestTag(path: String): String = "root-project-add:project:$path:source"

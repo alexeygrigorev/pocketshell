@@ -369,7 +369,14 @@ class FolderListScreenE2eTest {
         }
         compose.onNodeWithTag(ROOT_PROJECT_ADD_EMPTY_PROJECT_TAG).assertExists()
         compose.onNodeWithTag(ROOT_PROJECT_ADD_CLONE_TAG).assertExists()
+        compose.onNodeWithTag(rootProjectCandidateTestTag("/home/u/git/pocketshell")).assertDoesNotExist()
+        compose.onNodeWithTag(rootProjectCandidateTestTag("/home/u/git/llm-zoomcamp")).assertDoesNotExist()
         compose.onNodeWithTag(rootProjectCandidateTestTag("/home/u/git/empty-pinned")).assertExists()
+        compose.onNodeWithTag(
+            rootProjectCandidateSourceTestTag("/home/u/git/empty-pinned"),
+            useUnmergedTree = true,
+        )
+            .assertTextEquals("Folder")
         compose.onNodeWithTag(rootProjectCandidateTestTag("/home/u/git/empty-pinned")).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(SESSION_TYPE_PICKER_SHELL_TAG).fetchSemanticsNodes().isNotEmpty()

@@ -6,6 +6,7 @@ import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasNoClickAction
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
@@ -39,6 +40,8 @@ class InlineDictationUiTest {
             .assert(hasContentDescription("Inline dictation recording waveform"))
         compose.onNodeWithTag(INLINE_DICTATION_WAVEFORM_TAG, useUnmergedTree = true)
             .assertIsDisplayed()
+        compose.onNodeWithTag(INLINE_DICTATION_STATUS_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Recording").assertIsDisplayed()
     }
 
     @Test
@@ -55,12 +58,29 @@ class InlineDictationUiTest {
             .assert(hasNoClickAction())
         compose.onNodeWithTag(INLINE_DICTATION_TRANSCRIBING_TAG)
             .assertExists()
+        compose.onNodeWithTag(INLINE_DICTATION_STATUS_TAG).assertIsDisplayed()
+        compose.onNodeWithText("Transcribing").assertIsDisplayed()
         assertEquals(0, micTaps)
+    }
+
+    @Test
+    fun failedStateShowsInlineStatusInSpeechCaptureArea() {
+        renderKeyBar(
+            micState = InlineDictationViewModel.RecordingState.Idle,
+            micAmplitude = 0f,
+            dictationError = "Network error: no DNS",
+        )
+
+        compose.onNodeWithTag(INLINE_DICTATION_STATUS_TAG)
+            .assertIsDisplayed()
+        compose.onNodeWithText("Failed").assertIsDisplayed()
+        compose.onNodeWithText("Network error: no DNS").assertIsDisplayed()
     }
 
     private fun renderKeyBar(
         micState: InlineDictationViewModel.RecordingState,
         micAmplitude: Float,
+        dictationError: String? = null,
         onMicTap: () -> Unit = {},
     ) {
         compose.setContent {
@@ -70,6 +90,7 @@ class InlineDictationUiTest {
                     onKey = {},
                     micState = micState,
                     micAmplitude = micAmplitude,
+                    dictationError = dictationError,
                     dictationMode = InlineDictationViewModel.DictationMode.Prompt,
                     onDictationModeSelected = {},
                     onMicTap = onMicTap,

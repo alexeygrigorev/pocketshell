@@ -31,6 +31,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -463,6 +464,7 @@ public fun KeyBarWithMic(
     onModifierStateChange: (KeyBinding, KeyModifierState) -> Unit = { _, _ -> },
     micState: InlineDictationViewModel.RecordingState,
     micAmplitude: Float = 0f,
+    dictationError: String? = null,
     dictationMode: InlineDictationViewModel.DictationMode,
     onDictationModeSelected: (InlineDictationViewModel.DictationMode) -> Unit,
     onMicTap: () -> Unit,
@@ -486,6 +488,11 @@ public fun KeyBarWithMic(
         InlineDictationModeSelector(
             selectedMode = dictationMode,
             onModeSelected = onDictationModeSelected,
+        )
+        InlineDictationStatusRow(
+            state = micState,
+            error = dictationError,
+            inputEnabled = inputEnabled,
         )
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -515,6 +522,59 @@ public fun KeyBarWithMic(
                 enabled = inputEnabled,
             )
         }
+    }
+}
+
+@Composable
+private fun InlineDictationStatusRow(
+    state: InlineDictationViewModel.RecordingState,
+    error: String?,
+    inputEnabled: Boolean,
+) {
+    val failed = error != null
+    val label = when {
+        failed -> "Failed"
+        !inputEnabled -> "Idle"
+        state == InlineDictationViewModel.RecordingState.Idle -> "Ready"
+        state == InlineDictationViewModel.RecordingState.Recording -> "Recording"
+        state == InlineDictationViewModel.RecordingState.Transcribing -> "Transcribing"
+        else -> "Idle"
+    }
+    val detail = error ?: when {
+        !inputEnabled -> "Session input unavailable"
+        state == InlineDictationViewModel.RecordingState.Idle -> "Speech capture ready"
+        state == InlineDictationViewModel.RecordingState.Recording -> "Listening..."
+        state == InlineDictationViewModel.RecordingState.Transcribing -> "Transcribing dictation..."
+        else -> ""
+    }
+    val accent = if (failed) PocketShellColors.Accent else when (state) {
+        InlineDictationViewModel.RecordingState.Idle -> PocketShellColors.TextSecondary
+        InlineDictationViewModel.RecordingState.Recording -> PocketShellColors.Accent
+        InlineDictationViewModel.RecordingState.Transcribing -> PocketShellColors.Accent
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(20.dp)
+            .testTag(INLINE_DICTATION_STATUS_TAG),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = accent,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            text = detail,
+            color = if (failed) PocketShellColors.Accent else PocketShellColors.TextMuted,
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
     }
 }
 
@@ -724,3 +784,4 @@ private const val INLINE_WAVEFORM_BARS: Int = 8
 internal const val INLINE_DICTATION_MIC_SLOT_TAG: String = "inline-dictation-mic-slot"
 internal const val INLINE_DICTATION_WAVEFORM_TAG: String = "inline-dictation-waveform"
 internal const val INLINE_DICTATION_TRANSCRIBING_TAG: String = "inline-dictation-transcribing"
+internal const val INLINE_DICTATION_STATUS_TAG: String = "inline-dictation-status"

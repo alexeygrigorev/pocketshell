@@ -68,7 +68,6 @@ import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
-import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ToolCallSummary
@@ -381,13 +380,6 @@ public fun SessionScreen(
                 ArmedModifierStrip(modifierStates)
             }
 
-            // The inline-dictation error banner sits between the armed-
-            // modifier strip and the key bar so it is visible while the
-            // IME is up. Tapping anywhere on the bar clears it (the next
-            // mic tap also clears it via the FSM).
-            dictationState.error?.let { msg ->
-                InlineDictationErrorStrip(msg, onDismiss = inlineDictationViewModel::clearError)
-            }
             AssistantStrip(
                 state = assistantState,
                 onConfirm = viewModel::confirmAssistantAction,
@@ -407,6 +399,7 @@ public fun SessionScreen(
                     },
                     micState = dictationState.recording,
                     micAmplitude = dictationState.amplitude,
+                    dictationError = dictationState.error,
                     dictationMode = dictationState.mode,
                     onDictationModeSelected = inlineDictationViewModel::selectMode,
                     onMicTap = {

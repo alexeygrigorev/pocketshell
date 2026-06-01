@@ -117,7 +117,6 @@ import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.ADD_PROMPT_CHIP_LABEL
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
-import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ToolCallSummary
@@ -791,13 +790,9 @@ public fun TmuxSessionScreen(
                 }
             }
 
-            // Voice-related strips sit above the input band so they remain
-            // visible while the IME is up. Tapping the error strip clears
-            // it; the planner review strip's buttons route through the
-            // currently focused pane.
-            dictationState.error?.let { msg ->
-                InlineDictationErrorStrip(msg, onDismiss = inlineDictationViewModel::clearError)
-            }
+            // Assistant review sits above the input band; dictation
+            // recording/transcribing/failure state is rendered inline by
+            // KeyBarWithMic in the speech capture area.
             AssistantStrip(
                 state = assistantState,
                 onConfirm = viewModel::confirmAssistantAction,
@@ -817,6 +812,7 @@ public fun TmuxSessionScreen(
                     },
                     micState = dictationState.recording,
                     micAmplitude = dictationState.amplitude,
+                    dictationError = dictationState.error,
                     dictationMode = dictationState.mode,
                     onDictationModeSelected = inlineDictationViewModel::selectMode,
                     onMicTap = ::onInlineMicTap,

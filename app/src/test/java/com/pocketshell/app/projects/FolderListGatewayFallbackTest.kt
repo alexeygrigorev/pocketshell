@@ -49,6 +49,28 @@ class FolderListGatewayFallbackTest {
         assertTrue(session.execCommands.any { it.contains(SshFolderListGateway.POCKETSHELL_SESSIONS_COMMAND) })
     }
 
+    @Test
+    fun nativeAndPocketshellTmuxSocketMissingReturnsEmptySessions() = runTest {
+        val socketMissing = ExecResult(
+            stdout = "",
+            stderr = "error connecting to /tmp/tmux-1000/default (No such file or directory)",
+            exitCode = 1,
+        )
+        val session = FakeSshSession(pocketshellResult = socketMissing)
+        val gateway = SshFolderListGateway()
+
+        val result = gateway.listSessionsFromNativeOrPocketshell(
+            session = session,
+            host = HOST,
+            watchedRoots = emptyList(),
+            listSessions = socketMissing,
+        )
+
+        assertTrue(result is FolderListResult.Sessions)
+        assertEquals(emptyList<FolderSessionRow>(), (result as FolderListResult.Sessions).rows)
+        assertTrue(session.execCommands.any { it.contains(SshFolderListGateway.POCKETSHELL_SESSIONS_COMMAND) })
+    }
+
     private class FakeSshSession(
         private val pocketshellResult: ExecResult,
     ) : SshSession {

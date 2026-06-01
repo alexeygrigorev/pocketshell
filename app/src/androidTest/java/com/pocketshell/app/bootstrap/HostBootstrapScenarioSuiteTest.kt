@@ -3,6 +3,7 @@ package com.pocketshell.app.bootstrap
 import android.graphics.Bitmap
 import android.os.SystemClock
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
@@ -14,6 +15,8 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.projects.FOLDER_LIST_NEW_SESSION_FAB_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -375,15 +378,49 @@ class HostBootstrapScenarioSuiteTest {
 
     private fun waitForReadyNavigation() {
         // Issue #171: post-bootstrap navigation now lands on FolderListScreen
-        // instead of the inline HostTmuxSessionPickerSheet.
+        // instead of the inline HostTmuxSessionPickerSheet. Wait on the merged
+        // visible screen contract so the screenshot proves the user sees
+        // FolderList chrome, not a pre-visible destination node while the host
+        // list still says "Checking setup".
         compose.waitUntil(timeoutMillis = 20_000) {
-            compose.onAllNodesWithText("Folders").fetchSemanticsNodes().isNotEmpty() ||
-                compose.onAllNodesWithText("Workspace").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithTag(FOLDER_LIST_SCREEN_TAG)
+                .fetchSemanticsNodes()
+                .isNotEmpty() &&
+                compose.onAllNodesWithTag(FOLDER_LIST_NEW_SESSION_FAB_TAG)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty() &&
+                compose.onAllNodesWithText("Checking setup")
+                    .fetchSemanticsNodes()
+                    .isEmpty() &&
+                compose.onAllNodesWithText("PocketShell")
+                    .fetchSemanticsNodes()
+                    .isEmpty() &&
+                compose.onAllNodesWithText("HOSTS")
+                    .fetchSemanticsNodes()
+                    .isEmpty()
         }
+        compose.waitForIdle()
         compose.onNodeWithTag(HOST_BOOTSTRAP_SHEET_TAG).assertDoesNotExist()
-        val folderTitleVisible = compose.onAllNodesWithText("Folders").fetchSemanticsNodes().isNotEmpty()
-        val workspaceTitleVisible = compose.onAllNodesWithText("Workspace").fetchSemanticsNodes().isNotEmpty()
-        assertTrue("expected FolderListScreen title", folderTitleVisible || workspaceTitleVisible)
+        compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FOLDER_LIST_NEW_SESSION_FAB_TAG).assertIsDisplayed()
+        assertTrue(
+            "expected host-list Checking setup surface to be gone before capturing ready navigation",
+            compose.onAllNodesWithText("Checking setup")
+                .fetchSemanticsNodes()
+                .isEmpty(),
+        )
+        assertTrue(
+            "expected host list app bar to be gone before capturing ready navigation",
+            compose.onAllNodesWithText("PocketShell")
+                .fetchSemanticsNodes()
+                .isEmpty(),
+        )
+        assertTrue(
+            "expected host list section header to be gone before capturing ready navigation",
+            compose.onAllNodesWithText("HOSTS")
+                .fetchSemanticsNodes()
+                .isEmpty(),
+        )
     }
 
     private fun assertSetupRows(vararg rows: String) {

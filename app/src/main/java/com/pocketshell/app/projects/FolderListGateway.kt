@@ -307,7 +307,7 @@ class SshFolderListGateway @Inject constructor(
                 listSessions.stderr.contains("not found", ignoreCase = true) ->
                 listSessionsWithFolderFromPocketshell(session, host, watchedRoots)
                     ?: FolderListResult.ToolUnavailable
-            listSessions.stderr.contains("no server running", ignoreCase = true) ->
+            listSessions.isTmuxServerAbsent() ->
                 listSessionsWithFolderFromPocketshell(session, host, watchedRoots)
                     ?: sessionsWithWatchedRootExpansion(
                         session = session,
@@ -377,13 +377,33 @@ class SshFolderListGateway @Inject constructor(
         watchedRoots: List<ProjectRootEntity>,
     ): FolderListResult.Sessions? {
         val pocketshell = session.exec(pathAware(POCKETSHELL_SESSIONS_COMMAND))
-        if (pocketshell.exitCode != 0) return null
+        if (pocketshell.exitCode != 0) {
+            if (pocketshell.isTmuxServerAbsent()) {
+                return sessionsWithWatchedRootExpansion(
+                    session = session,
+                    host = host,
+                    watchedRoots = watchedRoots,
+                    rows = emptyList(),
+                )
+            }
+            return null
+        }
         return sessionsWithWatchedRootExpansion(
             session = session,
             host = host,
             watchedRoots = watchedRoots,
             rows = parsePocketshellSessionsRows(pocketshell.stdout, sessionListParser),
         )
+    }
+
+    private fun ExecResult.isTmuxServerAbsent(): Boolean {
+        val output = "$stdout\n$stderr"
+        return output.contains("no server running", ignoreCase = true) ||
+            (
+                output.contains("error connecting to", ignoreCase = true) &&
+                    output.contains("tmux-", ignoreCase = true) &&
+                    output.contains("No such file or directory", ignoreCase = true)
+                )
     }
 
     private suspend fun sessionsWithWatchedRootExpansion(

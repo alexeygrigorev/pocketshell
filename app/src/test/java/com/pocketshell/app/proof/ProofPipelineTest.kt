@@ -4,6 +4,8 @@ import android.os.Looper
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.terminal.bridge.SshTerminalBridge
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import kotlinx.coroutines.CoroutineScope
@@ -18,9 +20,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import net.schmizz.sshj.DefaultConfig
-import net.schmizz.sshj.SSHClient
-import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import org.junit.AfterClass
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -42,7 +41,8 @@ import java.nio.file.Paths
  * Two surfaces under test, one per acceptance criterion line in issue #9:
  *
  * 1. **SSH layer roundtrips real bytes** — spin up the `pocketshell-test:ssh`
- *    Docker container, open an interactive shell via sshj, send
+ *    Docker container, open an interactive shell via `SshSession.startShell`,
+ *    send
  *    `echo phase0-echoed-back\n`, and confirm the marker comes back via
  *    stdout.
  * 2. **The complete pipeline reaches `TerminalSurfaceState.output`** —
@@ -156,9 +156,10 @@ class ProofPipelineTest {
     /**
      * Opens an interactive shell against the container and confirms the
      * literal marker `phase0-echoed-back` comes back via the channel's
-     * `inputStream`. This is the same primitive `ProofOfLifeScreen.openShell`
-     * uses, so a green here proves the Compose screen will see real shell
-     * output once it is on the emulator.
+     * [SshShell.stdout]. This exercises the same public
+     * [SshSession.startShell] path used by app shell entry points, so a
+     * green here proves the proof pipeline sees real shell output without
+     * bypassing `core-ssh`'s shell wrapper.
      */
     @Test
     fun interactiveShellPipesEchoBackThroughStdout() {
@@ -173,7 +174,7 @@ class ProofPipelineTest {
                     val readerJob = launch(Dispatchers.IO) {
                         val buf = ByteArray(4096)
                         while (isActive()) {
-                            val n = handle.shell.inputStream.read(buf)
+                            val n = handle.shell.stdout.read(buf)
                             if (n == -1) break
                             if (n > 0) {
                                 synchronized(received) { received.append(String(buf, 0, n)) }
@@ -183,8 +184,8 @@ class ProofPipelineTest {
                     }
                     // Give the prompt a moment to settle, then drive it.
                     delay(200)
-                    handle.shell.outputStream.write("echo phase0-echoed-back\n".toByteArray())
-                    handle.shell.outputStream.flush()
+                    handle.shell.stdin.write("echo phase0-echoed-back\n".toByteArray())
+                    handle.shell.stdin.flush()
                     readerJob.join()
                     assertTrue(
                         "expected `phase0-echoed-back` in shell stdout; got:\n$received",
@@ -193,8 +194,7 @@ class ProofPipelineTest {
                 }
             } finally {
                 runCatching { handle.shell.close() }
-                runCatching { handle.sessionChannel.close() }
-                runCatching { handle.client.disconnect() }
+                runCatching { handle.session.close() }
             }
         }
     }
@@ -320,24 +320,27 @@ class ProofPipelineTest {
     }
 
     private suspend fun openInteractiveShell(): SshShellHandle = withContext(Dispatchers.IO) {
-        val client = SSHClient(DefaultConfig())
-        client.addHostKeyVerifier(PromiscuousVerifier())
-        client.connectTimeout = 15_000
-        client.timeout = 15_000
-        client.connect(sshHost, sshPort)
-        val provider = client.loadKeys(privateKeyText, null, null)
-        client.authPublickey("testuser", provider)
-        val sessionChannel = client.startSession()
-        sessionChannel.allocateDefaultPTY()
-        val shell = sessionChannel.startShell()
-        SshShellHandle(client, sessionChannel, shell)
+        val session = SshConnection.connect(
+            host = sshHost,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Pem(privateKeyText),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        ).getOrThrow()
+        val shell = try {
+            session.startShell()
+        } catch (t: Throwable) {
+            runCatching { session.close() }
+            throw t
+        }
+        SshShellHandle(session = session, shell = shell)
     }
 
     private fun isActive(): Boolean = !Thread.currentThread().isInterrupted
 
     private data class SshShellHandle(
-        val client: SSHClient,
-        val sessionChannel: net.schmizz.sshj.connection.channel.direct.Session,
-        val shell: net.schmizz.sshj.connection.channel.direct.Session.Shell,
+        val session: SshSession,
+        val shell: SshShell,
     )
 }

@@ -21,9 +21,14 @@ import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.app.proof.createStdoutFlow
 import com.pocketshell.app.proof.readKeyFromRawResource
+import com.pocketshell.core.ssh.DefaultSshLeaseConnector
 import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLease
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.agents.AgentDetection
@@ -39,6 +44,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -48,7 +54,10 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
+import java.io.File
 
 /**
  * Holds the live SSH session, the terminal surface state, and the sticky
@@ -116,6 +125,11 @@ public class SessionViewModel @Inject constructor(
     private val folderListGateway: FolderListGateway? = null,
     private val reposRemoteSource: ReposRemoteSource? = null,
     private val projectRootDao: ProjectRootDao? = null,
+    private var sshLeaseManager: SshLeaseManager = SshLeaseManager(
+        connector = SshLeaseConnector { target ->
+            DefaultSshLeaseConnector().connect(target)
+        },
+    ),
 ) : ViewModel() {
 
     /**
@@ -129,28 +143,6 @@ public class SessionViewModel @Inject constructor(
         assistantSshExecutor = executor
     }
 
-    private fun interface RawSshConnector {
-        suspend fun connect(
-            host: String,
-            port: Int,
-            user: String,
-            key: SshKey,
-            passphrase: CharArray?,
-            knownHosts: KnownHostsPolicy,
-        ): Result<SshSession>
-    }
-
-    private var rawSshConnector: RawSshConnector = RawSshConnector { host, port, user, key, passphrase, knownHosts ->
-        SshConnection.connect(
-            host = host,
-            port = port,
-            user = user,
-            key = key,
-            passphrase = passphrase,
-            knownHosts = knownHosts,
-        )
-    }
-
     @androidx.annotation.VisibleForTesting
     internal fun setRawSshConnectorForTest(
         connector: suspend (
@@ -162,9 +154,19 @@ public class SessionViewModel @Inject constructor(
             knownHosts: KnownHostsPolicy,
         ) -> Result<SshSession>,
     ) {
-        rawSshConnector = RawSshConnector { host, port, user, key, passphrase, knownHosts ->
-            connector(host, port, user, key, passphrase, knownHosts)
-        }
+        sshLeaseManager = SshLeaseManager(
+            connector = SshLeaseConnector { target ->
+                connector(
+                    target.leaseKey.host,
+                    target.leaseKey.port,
+                    target.leaseKey.user,
+                    target.key,
+                    target.passphrase,
+                    target.knownHosts,
+                )
+            },
+            idleTtlMillis = 0,
+        )
     }
 
     /**
@@ -234,6 +236,7 @@ public class SessionViewModel @Inject constructor(
 
     private var sessionRef: SshSession? = null
     private var shellRef: SshShell? = null
+    private var leaseRef: SshLease? = null
     private var remoteColumns: Int = 0
     private var remoteRows: Int = 0
     private var producerJob: Job? = null
@@ -264,8 +267,9 @@ public class SessionViewModel @Inject constructor(
         user: String,
         keyPath: String? = null,
         passphrase: CharArray? = null,
+        hostId: Long? = null,
     ) {
-        val target = RawSshTarget(host, port, user, keyPath, passphrase?.copyOf())
+        val target = RawSshTarget(host, port, user, keyPath, passphrase?.copyOf(), hostId)
         if (connectJob?.isActive == true) return
         if (_connectionStatus.value is ConnectionStatus.Connected && activeTarget == target) return
         closeCurrentConnection(clearActiveTarget = activeTarget != target)
@@ -273,7 +277,7 @@ public class SessionViewModel @Inject constructor(
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
         connectJob = viewModelScope.launch {
-            runConnect(host, port, user, keyPath, passphrase, viewModelScope)
+            runConnect(host, port, user, keyPath, passphrase, hostId, viewModelScope)
         }
     }
 
@@ -285,6 +289,7 @@ public class SessionViewModel @Inject constructor(
             user = target.user,
             keyPath = target.keyPath,
             passphrase = target.passphrase,
+            hostId = target.hostId,
         )
         return true
     }
@@ -343,26 +348,37 @@ public class SessionViewModel @Inject constructor(
         user: String,
         keyPath: String?,
         passphrase: CharArray?,
+        hostId: Long?,
         producerScope: CoroutineScope,
     ) {
+        var acquiredLease: SshLease? = null
         try {
             val key: SshKey = if (keyPath != null) {
-                SshKey.Path(java.io.File(keyPath))
+                SshKey.Path(File(keyPath))
             } else {
                 SshKey.Pem(readKeyFromRawResource(applicationContext))
             }
-            val sessionResult = rawSshConnector.connect(
-                host = host,
-                port = port,
-                user = user,
-                key = key,
-                passphrase = passphrase?.copyOf(),
-                knownHosts = KnownHostsPolicy.AcceptAll,
+            val leaseResult = sshLeaseManager.acquire(
+                SshLeaseTarget(
+                    leaseKey = SshLeaseKey(
+                        host = host,
+                        port = port,
+                        user = user,
+                        credentialId = rawCredentialId(hostId, keyPath),
+                        knownHostsId = "accept-all",
+                    ),
+                    key = key,
+                    passphrase = passphrase?.copyOf(),
+                    knownHosts = KnownHostsPolicy.AcceptAll,
+                ),
             )
-            val session = sessionResult.getOrElse { e ->
+            val lease = leaseResult.getOrElse { e ->
                 _connectionStatus.value = ConnectionStatus.Failed("connect failed: ${e.message}")
                 return
             }
+            acquiredLease = lease
+            val session = lease.session
+            leaseRef = lease
             sessionRef = session
 
             val shell = session.startShell()
@@ -382,20 +398,41 @@ public class SessionViewModel @Inject constructor(
             sendTerminalInput("\r".toByteArray())
 
             _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
-            activeTarget = RawSshTarget(host, port, user, keyPath, passphrase?.copyOf())
+            activeTarget = RawSshTarget(host, port, user, keyPath, passphrase?.copyOf(), hostId)
+            acquiredLease = null
             connectingTarget = null
             refreshReconnectAvailability()
             startAgentDetection(session)
         } catch (e: CancellationException) {
+            clearUninstalledLeaseRefs(acquiredLease)
             throw e
         } catch (t: Throwable) {
-            connectingTarget = RawSshTarget(host, port, user, keyPath, passphrase?.copyOf())
+            clearUninstalledLeaseRefs(acquiredLease)
+            connectingTarget = RawSshTarget(host, port, user, keyPath, passphrase?.copyOf(), hostId)
             refreshReconnectAvailability()
             _connectionStatus.value =
                 ConnectionStatus.Failed(
                     "error: ${t.javaClass.simpleName}: ${t.message}. Tap Reconnect to retry.",
                 )
+        } finally {
+            val uninstalledLease = acquiredLease
+            if (uninstalledLease != null) {
+                withContext(NonCancellable) {
+                    uninstalledLease.release()
+                }
+            }
         }
+    }
+
+    private fun clearUninstalledLeaseRefs(lease: SshLease?) {
+        if (lease == null) return
+        val shell = shellRef
+        shellRef = null
+        if (leaseRef === lease) {
+            leaseRef = null
+            sessionRef = null
+        }
+        closeIgnoringFailure { shell?.close() }
     }
 
     private fun startAgentDetection(session: SshSession) {
@@ -423,7 +460,7 @@ public class SessionViewModel @Inject constructor(
     ): Job {
         _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
         connectJob = job
-        connectingTarget = RawSshTarget(host, port, user, keyPath = null, passphrase = null)
+        connectingTarget = RawSshTarget(host, port, user, keyPath = null, passphrase = null, hostId = null)
         refreshReconnectAvailability()
         return job
     }
@@ -434,7 +471,7 @@ public class SessionViewModel @Inject constructor(
         user: String,
         cause: Throwable? = null,
     ) {
-        activeTarget = RawSshTarget(host, port, user, keyPath = null, passphrase = null)
+        activeTarget = RawSshTarget(host, port, user, keyPath = null, passphrase = null, hostId = null)
         connectingTarget = null
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
@@ -853,15 +890,16 @@ public class SessionViewModel @Inject constructor(
         producerJob?.cancel()
         terminalState.detachExternalProducer()
         val shell = shellRef
-        val session = sessionRef
+        val lease = leaseRef
         sessionRef = null
         shellRef = null
+        leaseRef = null
         producerJob = null
         if (clearActiveTarget) {
             activeTarget = null
         }
         refreshReconnectAvailability()
-        closeSshResourcesAsync(shell, session)
+        closeSshResourcesAsync(shell, lease)
     }
 
     private fun sendTerminalInput(bytes: ByteArray) {
@@ -1060,12 +1098,20 @@ public class SessionViewModel @Inject constructor(
         super.onCleared()
     }
 
-    private fun closeSshResourcesAsync(shell: SshShell?, session: SshSession?) {
-        if (shell == null && session == null) return
+    private fun closeSshResourcesAsync(shell: SshShell?, lease: SshLease?) {
+        if (shell == null && lease == null) return
         Thread(
             {
                 closeIgnoringFailure { shell?.close() }
-                closeIgnoringFailure { session?.close() }
+                closeIgnoringFailure {
+                    if (lease != null) {
+                        runBlocking(Dispatchers.IO) {
+                            withContext(NonCancellable) {
+                                lease.release()
+                            }
+                        }
+                    }
+                }
             },
             "PocketShellSshCleanup",
         ).apply {
@@ -1130,6 +1176,7 @@ private data class RawSshTarget(
     val user: String,
     val keyPath: String?,
     val passphrase: CharArray?,
+    val hostId: Long?,
 ) {
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
@@ -1138,6 +1185,7 @@ private data class RawSshTarget(
             port == other.port &&
             user == other.user &&
             keyPath == other.keyPath &&
+            hostId == other.hostId &&
             passphrasesEqual(passphrase, other.passphrase)
     }
 
@@ -1147,6 +1195,7 @@ private data class RawSshTarget(
         result = 31 * result + user.hashCode()
         result = 31 * result + (keyPath?.hashCode() ?: 0)
         result = 31 * result + (passphrase?.contentHashCode() ?: 0)
+        result = 31 * result + (hostId?.hashCode() ?: 0)
         return result
     }
 }
@@ -1156,6 +1205,13 @@ private fun passphrasesEqual(left: CharArray?, right: CharArray?): Boolean = whe
     left == null || right == null -> false
     else -> left.contentEquals(right)
 }
+
+private fun rawCredentialId(hostId: Long?, keyPath: String?): String =
+    when {
+        hostId != null && keyPath != null -> "$hostId:$keyPath"
+        keyPath != null -> "raw-path:$keyPath"
+        else -> "raw-bundled-proof-key"
+    }
 
 private const val MaxAgentEvents: Int = 500
 

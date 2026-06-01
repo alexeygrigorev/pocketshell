@@ -13,6 +13,9 @@ import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshPortForward
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.uikit.model.KeyModifierState
@@ -72,9 +75,15 @@ class SessionViewModelTest {
 
     private fun newVm(
         projectRootDao: ProjectRootDao? = null,
+        sshLeaseManager: SshLeaseManager? = null,
     ): SessionViewModel = SessionViewModel(
         applicationContext = ApplicationProvider.getApplicationContext(),
         projectRootDao = projectRootDao,
+        sshLeaseManager = sshLeaseManager ?: SshLeaseManager(
+            connector = SshLeaseConnector {
+                error("unexpected raw SSH lease acquire in this test")
+            },
+        ),
     )
 
     // -- Unmodified byte mapping --------------------------------------------
@@ -1118,7 +1127,7 @@ class SessionViewModelTest {
     }
 
     @Test
-    fun rawSshStdoutCompletionDisconnectCanReconnectAndStartsFreshSession() = runBlocking {
+    fun rawSshStdoutCompletionDisconnectCanReconnectAndStartsFreshShell() = runBlocking {
         val vm = newVm()
         val sessions = mutableListOf<FakeRawSshSession>()
         vm.setRawSshConnectorForTest { host, port, user, _, _, knownHosts ->
@@ -1150,34 +1159,111 @@ class SessionViewModelTest {
             assertTrue("reconnect() must accept the retained raw SSH target", vm.reconnect())
 
             waitUntil {
-                sessions.size == 2 &&
-                    vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Connected &&
-                    sessions[0].startedShells.single().closed &&
-                    sessions[0].closed
+                vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Connected &&
+                    sessions[0].startedShells.size == 2 &&
+                    sessions[0].startedShells.first().closed
             }
-            assertTrue("dead raw shell must be closed before reconnect", sessions[0].startedShells.single().closed)
-            assertTrue("dead raw session must be closed before reconnect", sessions[0].closed)
-            assertEquals(1, sessions[1].startedShells.size)
-            waitUntil { sessions[1].startedShells.single().stdinText() == "\r" }
+            assertTrue("dead raw shell must be closed before reconnect", sessions[0].startedShells.first().closed)
+            assertFalse("warm raw SSH transport may stay open across reconnect", sessions[0].closed)
+            waitUntil { sessions[0].startedShells[1].stdinText() == "\r" }
         } finally {
             sessions.flatMap { it.startedShells }.forEach { it.close() }
             sessions.forEach { it.close() }
             vm.terminalState.detachExternalProducer()
         }
     }
+
+    @Test
+    fun rawSshConnectReusesWarmLeaseForShell() = runBlocking {
+        val sharedSession = FakeRawSshSession(
+            id = "shared",
+            execStdout = "claude|1710000000|/home/alexey/git/pocketshell|/home/alexey/.claude/sessions/abc.jsonl\n",
+        )
+        val connector = QueueRawLeaseConnector(sharedSession)
+        val manager = SshLeaseManager(connector = connector, idleTtlMillis = 30_000)
+        val first = newVm(sshLeaseManager = manager)
+        val second = newVm(sshLeaseManager = manager)
+
+        try {
+            first.connect(
+                host = "alpha.example",
+                port = 2222,
+                user = "alex",
+                keyPath = "/tmp/test-key",
+                hostId = 7,
+            )
+            waitUntil { first.connectionStatus.value is SessionViewModel.ConnectionStatus.Connected }
+
+            second.connect(
+                host = "alpha.example",
+                port = 2222,
+                user = "alex",
+                keyPath = "/tmp/test-key",
+                hostId = 7,
+            )
+            waitUntil { second.connectionStatus.value is SessionViewModel.ConnectionStatus.Connected }
+
+            assertEquals("same raw target must reuse one SSH transport", 1, connector.connectCount)
+            assertEquals("raw leases must use the saved-host credential identity", "7:/tmp/test-key", connector.targets.single().leaseKey.credentialId)
+            assertEquals("both raw terminals open shells on the leased session", 2, sharedSession.startedShells.size)
+        } finally {
+            first.terminalState.detachExternalProducer()
+            second.terminalState.detachExternalProducer()
+            sharedSession.startedShells.forEach { it.close() }
+            manager.close()
+        }
+    }
+
+    @Test
+    fun closingOneRawTerminalReleasesLeaseWithoutClosingSharedActiveSession() = runBlocking {
+        val sharedSession = FakeRawSshSession("shared")
+        val nextSession = FakeRawSshSession("next")
+        val connector = QueueRawLeaseConnector(sharedSession, nextSession)
+        val manager = SshLeaseManager(connector = connector, idleTtlMillis = 30_000)
+        val first = newVm(sshLeaseManager = manager)
+        val second = newVm(sshLeaseManager = manager)
+
+        try {
+            first.connect("alpha.example", 2222, "alex", "/tmp/test-key", hostId = 7)
+            second.connect("alpha.example", 2222, "alex", "/tmp/test-key", hostId = 7)
+            waitUntil {
+                first.connectionStatus.value is SessionViewModel.ConnectionStatus.Connected &&
+                    second.connectionStatus.value is SessionViewModel.ConnectionStatus.Connected &&
+                    sharedSession.startedShells.size == 2
+            }
+
+            first.connect("beta.example", 2222, "alex", "/tmp/test-key", hostId = 8)
+
+            waitUntil { sharedSession.startedShells.first().closed }
+            assertFalse(
+                "releasing one raw terminal lease must not close a transport still leased by another terminal",
+                sharedSession.closed,
+            )
+            assertEquals(2, connector.connectCount)
+        } finally {
+            first.terminalState.detachExternalProducer()
+            second.terminalState.detachExternalProducer()
+            sharedSession.startedShells.forEach { it.close() }
+            nextSession.startedShells.forEach { it.close() }
+            manager.close()
+        }
+    }
 }
 
 private class FakeRawSshSession(
     private val id: String,
+    private val execStdout: String = "",
 ) : SshSession {
     val startedShells = mutableListOf<FakeRawSshShell>()
+    val recordedExecCommands = mutableListOf<String>()
     var closed: Boolean = false
         private set
 
     override val isConnected: Boolean get() = !closed
 
     override suspend fun exec(command: String): ExecResult =
-        ExecResult(stdout = "", stderr = "", exitCode = 0)
+        ExecResult(stdout = execStdout, stderr = "", exitCode = 0)
+            .also { recordedExecCommands += command }
 
     override fun tail(path: String, onLine: (String) -> Unit): Job = Job()
 
@@ -1204,6 +1290,22 @@ private class FakeRawSshSession(
 
     override fun close() {
         closed = true
+    }
+}
+
+private class QueueRawLeaseConnector(
+    private vararg val sessions: FakeRawSshSession,
+) : SshLeaseConnector {
+    var connectCount: Int = 0
+        private set
+    val targets = mutableListOf<SshLeaseTarget>()
+
+    override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
+        targets += target
+        val session = sessions.getOrNull(connectCount)
+            ?: error("unexpected raw lease connect $connectCount for ${target.leaseKey}")
+        connectCount += 1
+        return Result.success(session)
     }
 }
 

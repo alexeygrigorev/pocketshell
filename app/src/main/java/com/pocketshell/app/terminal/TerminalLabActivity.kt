@@ -28,11 +28,13 @@ import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.lifecycleScope
-import com.pocketshell.app.proof.SshShellHandle
-import com.pocketshell.app.proof.openShell
 import com.pocketshell.app.proof.readKeyFromRawResource
 import com.pocketshell.app.session.SessionDefaults
+import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.terminal.ui.DefaultTerminalBackground
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
@@ -51,8 +53,6 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import net.schmizz.sshj.connection.channel.direct.Session
-import net.schmizz.sshj.connection.channel.direct.SessionChannel
 
 class TerminalLabActivity : FragmentActivity() {
 
@@ -155,7 +155,8 @@ class TerminalLabController(
     private val transcript = StringBuilder()
     private var connectJob: Job? = null
     private var producerJob: Job? = null
-    private var shellRef: SshShellHandle? = null
+    private var sessionRef: SshSession? = null
+    private var shellRef: SshShell? = null
     private var connectStartedAtMs: Long = 0L
     private var pendingSendStartedAtMs: Long? = null
     private var remoteColumns: Int = 0
@@ -166,24 +167,27 @@ class TerminalLabController(
         connectStartedAtMs = SystemClock.elapsedRealtime()
         connectJob = scope.launch {
             try {
-                val handle = openShell(
+                val session = SshConnection.connect(
                     host = target.host,
                     port = target.port,
                     user = target.user,
                     key = target.key,
-                )
-                shellRef = handle
+                    knownHosts = KnownHostsPolicy.AcceptAll,
+                ).getOrThrow()
+                sessionRef = session
+                val shell = session.startShell()
+                shellRef = shell
                 producerJob = terminalState.attachExternalProducer(
                     scope = scope,
-                    stdout = shellStdoutFlow(handle.shell).onEach(::recordOutput),
-                    remoteStdin = handle.shell.outputStream,
+                    stdout = shellStdoutFlow(shell.stdout).onEach(::recordOutput),
+                    remoteStdin = shell.stdin,
                 )
                 _uiState.value = _uiState.value.copy(
                     status = "connected to ${target.user}@${target.host}:${target.port}",
                 )
                 withContext(Dispatchers.IO) {
-                    handle.shell.outputStream.write("\r".toByteArray())
-                    handle.shell.outputStream.flush()
+                    shell.stdin.write("\r".toByteArray())
+                    shell.stdin.flush()
                 }
             } catch (t: Throwable) {
                 _uiState.value = _uiState.value.copy(
@@ -207,9 +211,9 @@ class TerminalLabController(
         if (columns == remoteColumns && rows == remoteRows) return
         remoteColumns = columns
         remoteRows = rows
-        val channel = shellRef?.sessionChannel as? SessionChannel ?: return
+        val shell = shellRef ?: return
         Thread({
-            runCatching { channel.changeWindowDimensions(columns, rows, 0, 0) }
+            runCatching { shell.resizePty(columns, rows) }
         }, "PocketShellTerminalResize").apply {
             isDaemon = true
             start()
@@ -302,14 +306,15 @@ class TerminalLabController(
     }
 
     override fun close() {
-        val handle = shellRef
+        val shell = shellRef
+        val session = sessionRef
         shellRef = null
+        sessionRef = null
         connectJob?.cancel()
         producerJob?.cancel()
         terminalState.detachExternalProducer()
-        ignoreClose { handle?.shell?.close() }
-        ignoreClose { handle?.sessionChannel?.close() }
-        ignoreClose { handle?.client?.disconnect() }
+        ignoreClose { shell?.close() }
+        ignoreClose { session?.close() }
     }
 
     private companion object {
@@ -334,8 +339,7 @@ private inline fun ignoreClose(block: () -> Unit) {
     }
 }
 
-private fun shellStdoutFlow(shell: Session.Shell): Flow<ByteArray> = flow {
-    val input = shell.inputStream
+private fun shellStdoutFlow(input: java.io.InputStream): Flow<ByteArray> = flow {
     val buffer = ByteArray(4096)
     while (true) {
         val read = try {

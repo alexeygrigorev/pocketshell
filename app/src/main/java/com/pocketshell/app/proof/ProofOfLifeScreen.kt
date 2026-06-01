@@ -24,6 +24,7 @@ import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshSession
+import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.terminal.ui.TerminalSurface
 import com.pocketshell.core.terminal.ui.rememberTerminalSurfaceState
 import kotlinx.coroutines.Dispatchers
@@ -32,11 +33,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.SSHException
 import net.schmizz.sshj.connection.channel.direct.Session
-import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
@@ -81,7 +79,7 @@ public fun ProofOfLifeScreen(
         // returned DisposableEffect's `onDispose` so leaving the composition
         // tears everything down.
         var sessionRef: SshSession? = null
-        var shellRef: Session.Shell? = null
+        var shellRef: SshShell? = null
         var producerJob: Job? = null
 
         val launchJob = scope.launch {
@@ -100,31 +98,21 @@ public fun ProofOfLifeScreen(
                 }
                 sessionRef = session
 
-                // sshj's high-level `SshSession` does not currently expose a
-                // `startShell()` — the public interface only has `exec` and
-                // `tail`. For the proof-of-life we need a long-lived
-                // interactive shell, so we open one directly via the sshj
-                // primitives. The shell channel's stdin and stdout are
-                // exposed as ordinary blocking JDK streams.
-                //
-                // A follow-up issue ("expose interactive shell on
-                // SshSession") will wrap this neatly inside `core-ssh`; for
-                // now we crack it open here to keep #9 scope small.
-                val shellPair = openShell(host, port, user, key)
-                shellRef = shellPair.shell
+                val shell = session.startShell()
+                shellRef = shell
 
-                val outputFlow = createStdoutFlow(shellPair.shell)
+                val outputFlow = createStdoutFlow(shell.stdout)
                 producerJob = state.attachExternalProducer(
                     scope = scope,
                     stdout = outputFlow,
-                    remoteStdin = shellPair.shell.outputStream,
+                    remoteStdin = shell.stdin,
                 )
 
                 // Kick the shell so we have something rendered before the
                 // user types anything. `\r` triggers a fresh prompt from
                 // the remote sh.
-                shellPair.shell.outputStream.write("\r".toByteArray())
-                shellPair.shell.outputStream.flush()
+                shell.stdin.write("\r".toByteArray())
+                shell.stdin.flush()
 
                 status = "connected ($user@$host:$port)"
             } catch (t: Throwable) {
@@ -173,87 +161,6 @@ internal fun readKeyFromRawResource(context: Context): String {
     return context.resources.openRawResource(R.raw.proof_test_key)
         .bufferedReader()
         .use { it.readText() }
-}
-
-/**
- * Holder for the live SSH shell + the underlying [SSHClient]. We surface the
- * client so the caller can close it; `sshj`'s `Shell.close()` does not tear
- * down the connection.
- */
-internal data class SshShellHandle(
-    val client: SSHClient,
-    val sessionChannel: net.schmizz.sshj.connection.channel.direct.Session,
-    val shell: Session.Shell,
-)
-
-/**
- * Open a fresh interactive shell. Bypasses `core-ssh`'s public surface for
- * now (which only knows `exec` + `tail`) and uses sshj directly. The same
- * primitives `SshConnection.connect` uses are exposed here so the proof
- * screen and `ProofPipelineTest` can share the helper.
- */
-internal suspend fun openShell(
-    host: String,
-    port: Int,
-    user: String,
-    key: SshKey,
-    passphrase: CharArray? = null,
-): SshShellHandle = withContext(Dispatchers.IO) {
-    val client = SshConnection.createClient()
-    client.addHostKeyVerifier(PromiscuousVerifier())
-    client.connect(host, port)
-
-    val keyProvider = when (key) {
-        is SshKey.Path -> if (passphrase != null) {
-            client.loadKeys(
-                key.file.absolutePath,
-                net.schmizz.sshj.userauth.password.PasswordUtils.createOneOff(passphrase.copyOf()),
-            )
-        } else {
-            client.loadKeys(key.file.absolutePath)
-        }
-        is SshKey.Pem -> client.loadKeys(
-            key.content,
-            null,
-            passphrase?.let {
-                net.schmizz.sshj.userauth.password.PasswordUtils.createOneOff(it.copyOf())
-            },
-        )
-    }
-    client.authPublickey(user, keyProvider)
-
-    val sessionChannel = client.startSession()
-    // Allocate a PTY that real interactive agent CLIs (opencode, Codex,
-    // Claude Code) recognise. Issue #102: `allocateDefaultPTY()` in sshj 0.40
-    // advertises `TERM=vt100` at 80x24. opencode / Codex / Claude Code
-    // inspect TERM at startup; with `vt100` they fall back to a degraded
-    // line-mode rendering where the prompt input drops to the bottom of
-    // the scrolling shell instead of using the alternate-screen buffer
-    // with proper cursor positioning. Typed bytes already reach the remote
-    // PTY via the existing input bridge — what was wrong was the *visible*
-    // app cursor placement, because the remote app would not draw its
-    // input box at the cursor row when it thought it was talking to a
-    // bare VT100.
-    //
-    // `xterm-256color` is the AOSP / Termux baseline that those TUIs are
-    // designed against. We keep the initial cols/rows at the same 80x24
-    // defaults sshj used so the boot-time PTY allocation matches the
-    // pre-fix behaviour for shells that do not care about TERM; once the
-    // TerminalView lays out, [SessionViewModel.resizeRemotePty] /
-    // [TerminalLabController.resizeRemotePty] call `changeWindowDimensions`
-    // with the real grid so the application re-flows to the phone viewport.
-    // The empty mode map preserves the kernel defaults — which is what
-    // `allocateDefaultPTY` does too.
-    sessionChannel.allocatePTY(
-        /* term = */ INTERACTIVE_PTY_TERM,
-        /* cols = */ INTERACTIVE_PTY_INITIAL_COLUMNS,
-        /* rows = */ INTERACTIVE_PTY_INITIAL_ROWS,
-        /* widthPx = */ 0,
-        /* heightPx = */ 0,
-        /* modes = */ emptyMap(),
-    )
-    val shell = sessionChannel.startShell()
-    SshShellHandle(client = client, sessionChannel = sessionChannel, shell = shell)
 }
 
 /**

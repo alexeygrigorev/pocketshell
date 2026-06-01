@@ -171,8 +171,8 @@ public fun SessionScreen(
     // without restarting.
     settingsViewModel: com.pocketshell.app.settings.SettingsViewModel = hiltViewModel(),
 ) {
-    LaunchedEffect(host, port, user, keyPath, passphrase) {
-        viewModel.connect(host, port, user, keyPath, passphrase)
+    LaunchedEffect(host, port, user, keyPath, passphrase, hostId) {
+        viewModel.connect(host, port, user, keyPath, passphrase, hostId)
     }
     LaunchedEffect(hostId) {
         viewModel.bindProjectNavigationHost(hostId)

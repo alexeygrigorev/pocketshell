@@ -1,9 +1,12 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.core.ssh.SshLease
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.tmux.TmuxClient
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.withContext
 import java.util.LinkedHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -107,6 +110,7 @@ internal data class CachedTmuxRuntime(
     val agentConversations: Map<String, com.pocketshell.app.session.AgentConversationUiState>,
     val remoteColumns: Int,
     val remoteRows: Int,
+    val lease: SshLease? = null,
 )
 
 internal suspend fun CachedTmuxRuntime.closeCachedRuntime() {
@@ -118,4 +122,7 @@ internal suspend fun CachedTmuxRuntime.closeCachedRuntime() {
         runCatching { pane.terminalState.detachExternalProducer() }
     }
     runCatching { client.detachCleanly() }
+    withContext(NonCancellable) {
+        runCatching { lease?.release() }
+    }
 }

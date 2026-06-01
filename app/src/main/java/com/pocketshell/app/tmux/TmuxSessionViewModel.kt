@@ -41,8 +41,12 @@ import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.core.ssh.KnownHostsPolicy
-import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLease
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -101,7 +105,7 @@ import javax.inject.Inject
  * ## Lifecycle
  *
  * 1. The screen calls [connect] with the host triple + key path + tmux
- *    session name. We open an [SshSession] via [SshConnection.connect],
+ *    session name. We acquire an [SshLease] via [SshLeaseManager],
  *    build a [TmuxClient] via the injected [TmuxClientFactory], subscribe
  *    to its [TmuxClient.events] *before* calling [TmuxClient.connect] so we
  *    don't miss the opening events tmux fires on session attach.
@@ -112,7 +116,7 @@ import javax.inject.Inject
  *    closed rows are dropped (the bridge tears down with the state
  *    holder).
  * 3. [onCleared] tears the client down (which cancels its internal scope)
- *    and closes the SSH session.
+ *    and releases the SSH lease.
  *
  * ## Why we re-query rather than parse the layout string
  *
@@ -129,7 +133,7 @@ import javax.inject.Inject
  *
  * The SSH-connection path is awkward to fake (live network, key loading);
  * for unit tests we expose [attachClientForTest] which skips
- * [SshConnection.connect] / [TmuxClientFactory.create] and binds the view
+ * SSH lease acquisition / [TmuxClientFactory.create] and binds the view
  * model to a caller-supplied [TmuxClient] directly. Production code goes
  * through [connect].
  */
@@ -143,8 +147,13 @@ public class TmuxSessionViewModel @Inject constructor(
     private val reposRemoteSource: ReposRemoteSource? = null,
     @ApplicationContext private val applicationContext: Context? = null,
     private val projectRootDao: ProjectRootDao? = null,
-    private val warmSshConnections: WarmSshConnections = WarmSshConnections(),
     private val runtimeCache: TmuxSessionRuntimeCache = TmuxSessionRuntimeCache(),
+    private val warmSshConnections: WarmSshConnections? = WarmSshConnections(),
+    private val sshLeaseManager: SshLeaseManager = SshLeaseManager(
+        connector = SshLeaseConnector { target ->
+            com.pocketshell.core.ssh.DefaultSshLeaseConnector().connect(target)
+        },
+    ),
 ) : ViewModel() {
 
     /** SSH executor seam for assistant tools; tests substitute it. */
@@ -227,6 +236,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var projectRootsJob: Job? = null
 
     private var sessionRef: SshSession? = null
+    private var leaseRef: SshLease? = null
     private var clientRef: TmuxClient? = null
     private var registeredHostId: Long? = null
     // Issue #235: hostId under which we registered application-scoped
@@ -418,7 +428,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // Issue #257 (scope F): drop the previous session's panes from the
         // rendered list SYNCHRONOUSLY, before the teardown coroutine even
         // gets a turn. The actual per-pane producer/scrollback teardown
-        // still happens inside [closeCurrentClientKeepSession] /
+        // still happens inside [deactivateCurrentRuntimeToCache] /
         // [closeCurrentConnectionAndJoin] under the #151 cancel-and-join
         // ordering (so the SSH transport is never touched while the event
         // loop is mid-write). But the screen collects [panes] directly, so
@@ -473,17 +483,11 @@ public class TmuxSessionViewModel @Inject constructor(
                     // user switches back, activation is a pointer swap
                     // rather than a fresh tmux attach.
                     deactivateCurrentRuntimeToCache()
-                    runFastSessionSwitch(
-                        target,
-                        previousSession,
-                        attempt,
-                        effectiveTrigger,
-                        fastSwitchStartedAtMs,
-                    )
+                    runFastSessionSwitch(target, attempt, effectiveTrigger, fastSwitchStartedAtMs)
                 } else {
                     // Slow path: full teardown of both the tmux client
                     // and the SSH session before the fresh
-                    // [SshConnection.connect] handshake.
+                    // SSH lease acquisition.
                     closeCurrentConnectionAndJoin(preserveConnectingTarget = target)
                     runConnect(target, attempt, effectiveTrigger)
                 }
@@ -501,19 +505,11 @@ public class TmuxSessionViewModel @Inject constructor(
      * switching.
      */
     private fun isSameHost(previous: ConnectionTarget, target: ConnectionTarget): Boolean =
-        previous.host == target.host &&
+        previous.hostId == target.hostId &&
+            previous.host == target.host &&
             previous.port == target.port &&
             previous.user == target.user &&
             previous.keyPath == target.keyPath
-
-    private fun ConnectionTarget.toWarmSshTarget(): WarmSshTarget =
-        WarmSshTarget(
-            hostId = hostId,
-            hostname = host,
-            port = port,
-            username = user,
-            keyPath = keyPath,
-        )
 
     private fun sameSessionIdentity(left: ConnectionTarget, right: ConnectionTarget): Boolean =
         left.hostId == right.hostId &&
@@ -1014,6 +1010,7 @@ public class TmuxSessionViewModel @Inject constructor(
             key = target.toRuntimeKey(),
             hostName = target.hostName,
             startDirectory = target.startDirectory,
+            lease = leaseRef,
             session = sessionRef,
             client = client,
             panes = _panes.value.ifEmpty { paneRows.values.toList() },
@@ -1032,6 +1029,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 evicted.closeCachedRuntime()
             }
         }
+        leaseRef = null
+        sessionRef = null
         clientRef = null
         paneRows.clear()
         paneProducerJobs.clear()
@@ -1054,6 +1053,7 @@ public class TmuxSessionViewModel @Inject constructor(
         runtime: CachedTmuxRuntime,
     ) {
         clientRef = runtime.client
+        leaseRef = runtime.lease
         sessionRef = runtime.session
         activeTarget = target
         connectingTarget = null
@@ -1137,91 +1137,106 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    private suspend fun acquireLeaseForTmux(
+        target: ConnectionTarget,
+        attempt: Int,
+        trigger: TmuxConnectTrigger,
+        startedAtMs: Long,
+        preferReuseLog: Boolean = false,
+    ): SshLease? {
+        val leaseTarget = target.toSshLeaseTarget()
+        val warmedSession = warmSshConnections?.take(target.toWarmSshTarget())
+        val leaseResult = if (warmedSession != null) {
+            sshLeaseManager.adopt(leaseTarget, warmedSession)
+        } else {
+            sshLeaseManager.acquire(leaseTarget)
+        }
+        val lease = leaseResult.getOrElse { e ->
+            failConnectAttempt(
+                target = target,
+                attempt = attempt,
+                startedAtMs = startedAtMs,
+                message = "connect failed: ${e.message}",
+                cause = e,
+                preserveReconnectTarget = false,
+            )
+            return null
+        }
+        if (preferReuseLog || warmedSession != null || !lease.isNewConnection) {
+            StartupTiming.mark(
+                "tmux-ssh-lease-reused",
+                "attempt" to attempt,
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "session" to target.sessionName,
+                "trigger" to trigger.logValue,
+            )
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-ssh-lease-reused trigger=${trigger.logValue} " +
+                    "${targetLogFields(target)} attempt=$attempt",
+            )
+        } else {
+            val handshakeNumber = SSH_HANDSHAKE_ATTEMPTS.incrementAndGet()
+            StartupTiming.mark(
+                "tmux-ssh-handshake",
+                "attempt" to attempt,
+                "handshake" to handshakeNumber,
+                "hostId" to target.hostId,
+                "host" to target.host,
+                "port" to target.port,
+                "session" to target.sessionName,
+                "trigger" to trigger.logValue,
+            )
+            Log.i(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-ssh-handshake count=$handshakeNumber trigger=${trigger.logValue} " +
+                    "${targetLogFields(target)} attempt=$attempt",
+            )
+            SshOpenTelemetry.record(
+                source = SSH_SOURCE_TMUX_CONNECT,
+                host = target.host,
+                port = target.port,
+                user = target.user,
+            )
+        }
+        return lease
+    }
+
+    private fun ConnectionTarget.toWarmSshTarget(): WarmSshTarget =
+        WarmSshTarget(
+            hostId = hostId,
+            hostname = host,
+            port = port,
+            username = user,
+            keyPath = keyPath,
+        )
+
+    private fun ConnectionTarget.toSshLeaseTarget(): SshLeaseTarget =
+        SshLeaseTarget(
+            leaseKey = SshLeaseKey(
+                host = host,
+                port = port,
+                user = user,
+                credentialId = "$hostId:$keyPath",
+                knownHostsId = "accept-all",
+            ),
+            key = SshKey.Path(File(keyPath)),
+            passphrase = passphrase?.copyOf(),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        )
+
     private suspend fun runConnect(
         target: ConnectionTarget,
         attempt: Int,
         trigger: TmuxConnectTrigger,
-        allowWarmSshReuse: Boolean = true,
     ) {
         val startedAtMs = SystemClock.elapsedRealtime()
-        var reusedWarmSsh = false
         try {
-            val warmSession = if (allowWarmSshReuse) {
-                warmSshConnections.take(target.toWarmSshTarget())
-            } else {
-                null
-            }
-            val session = if (warmSession != null && warmSession.isConnected) {
-                reusedWarmSsh = true
-                StartupTiming.mark(
-                    "tmux-warm-ssh-reused",
-                    "attempt" to attempt,
-                    "hostId" to target.hostId,
-                    "host" to target.host,
-                    "port" to target.port,
-                    "session" to target.sessionName,
-                    "trigger" to trigger.logValue,
-                )
-                Log.i(
-                    ISSUE_145_RECONNECT_TAG,
-                    "tmux-warm-ssh-reused trigger=${trigger.logValue} " +
-                        "${targetLogFields(target)} attempt=$attempt",
-                )
-                warmSession
-            } else {
-                warmSession?.let { runCatching { it.close() } }
-                // Issue #178: instrument the actual SSH handshake call so a
-                // connected test (and humans reading logcat) can see whether
-                // the slow path or the fast tmux-only swap path was taken.
-                // The counter is process-wide so tests can snapshot it
-                // before/after a session-switch and assert "no new
-                // handshake" without grepping logcat. We log under the same
-                // tag the slow-path test already greps for, with a distinct
-                // event prefix so a `grep` matches either.
-                val handshakeNumber = SSH_HANDSHAKE_ATTEMPTS.incrementAndGet()
-                StartupTiming.mark(
-                    "tmux-ssh-handshake",
-                    "attempt" to attempt,
-                    "handshake" to handshakeNumber,
-                    "hostId" to target.hostId,
-                    "host" to target.host,
-                    "port" to target.port,
-                    "session" to target.sessionName,
-                    "trigger" to trigger.logValue,
-                )
-                Log.i(
-                    ISSUE_145_RECONNECT_TAG,
-                    "tmux-ssh-handshake count=$handshakeNumber trigger=${trigger.logValue} " +
-                        "${targetLogFields(target)} " +
-                        "attempt=$attempt",
-                )
-                SshOpenTelemetry.record(
-                    source = SSH_SOURCE_TMUX_CONNECT,
-                    host = target.host,
-                    port = target.port,
-                    user = target.user,
-                )
-                val key: SshKey = SshKey.Path(File(target.keyPath))
-                val sessionResult = SshConnection.connect(
-                    host = target.host,
-                    port = target.port,
-                    user = target.user,
-                    key = key,
-                    passphrase = target.passphrase?.copyOf(),
-                    knownHosts = KnownHostsPolicy.AcceptAll,
-                )
-                sessionResult.getOrElse { e ->
-                    failConnectAttempt(
-                        target = target,
-                        attempt = attempt,
-                        startedAtMs = startedAtMs,
-                        message = "connect failed: ${e.message}",
-                        cause = e,
-                        preserveReconnectTarget = false,
-                    )
-                    return
-                }
-            }
+            val lease = acquireLeaseForTmux(target, attempt, trigger, startedAtMs)
+                ?: return
+            val session = lease.session
             StartupTiming.mark(
                 "ssh-connected",
                 "attempt" to attempt,
@@ -1237,6 +1252,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 event = "ssh-connected",
                 trigger = trigger,
             )
+            leaseRef = lease
             sessionRef = session
 
             val client = tmuxClientFactory.create(
@@ -1315,39 +1331,6 @@ public class TmuxSessionViewModel @Inject constructor(
             maybeRefreshControlClientSize()
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
-            if (reusedWarmSsh && t is TmuxAttachPanesReadyException) {
-                StartupTiming.mark(
-                    "tmux-warm-ssh-retry-cold",
-                    "attempt" to attempt,
-                    "hostId" to target.hostId,
-                    "host" to target.host,
-                    "port" to target.port,
-                    "session" to target.sessionName,
-                    "trigger" to trigger.logValue,
-                )
-                Log.w(
-                    ISSUE_145_RECONNECT_TAG,
-                    attachMilestoneMessage(
-                        attempt = attempt,
-                        target = target,
-                        startedAtMs = startedAtMs,
-                        event = "tmux-warm-ssh-retry-cold",
-                        trigger = trigger,
-                        detail = "cause=${t.javaClass.simpleName}: ${t.message}",
-                    ),
-                    t,
-                )
-                withContext(NonCancellable) {
-                    closeCurrentConnectionAndJoin(preserveConnectingTarget = target)
-                }
-                runConnect(
-                    target = target,
-                    attempt = attempt,
-                    trigger = trigger,
-                    allowWarmSshReuse = false,
-                )
-                return
-            }
             failConnectAttempt(
                 target = target,
                 attempt = attempt,
@@ -1364,34 +1347,40 @@ public class TmuxSessionViewModel @Inject constructor(
      * against the already-connected [session] (no new SSH handshake),
      * attaches it, and updates the registry / target state. Mirrors the
      * tmux-side wiring inside [runConnect] but skips the entire
-     * [SshConnection.connect] round-trip and reuses [sessionRef].
+     * raw SSH connect round-trip and reuses a lease from [SshLeaseManager].
      *
-     * Pre-conditions: caller already ran
-     * [closeCurrentClientKeepSession] so the previous tmux client and its
-     * per-pane state are torn down and [clientRef] is null. The caller
-     * also verified [session.isConnected]; we assert it here too because
-     * the SSH socket may have died asynchronously between the eligibility
-     * check and this call (rare but possible — the
-     * [TmuxClient.disconnected] observer in [attachClient] catches the
-     * common case, but a race window of a few ms is unavoidable).
+     * Pre-condition: caller already moved the previous tmux/UI runtime
+     * into [runtimeCache] via [deactivateCurrentRuntimeToCache], so the
+     * cached runtime owns its own lease and [clientRef] is null.
      */
     private suspend fun runFastSessionSwitch(
         target: ConnectionTarget,
-        session: SshSession,
         attempt: Int,
         trigger: TmuxConnectTrigger,
         startedAtMs: Long,
     ) {
         try {
+            val lease = acquireLeaseForTmux(
+                target = target,
+                attempt = attempt,
+                trigger = trigger,
+                startedAtMs = startedAtMs,
+                preferReuseLog = true,
+            ) ?: return
+            val session = lease.session
             if (!session.isConnected) {
                 // The previously-live session died between the
                 // eligibility check and now. Fall back to the full
                 // teardown + reconnect path so the user still ends up on
                 // the requested session instead of a Failed state.
+                withContext(NonCancellable) {
+                    runCatching { lease.release() }
+                }
                 sessionRef = null
                 runConnect(target, attempt, trigger)
                 return
             }
+            leaseRef = lease
             sessionRef = session
             val client = tmuxClientFactory.create(
                 session,
@@ -1967,6 +1956,34 @@ public class TmuxSessionViewModel @Inject constructor(
         attachPanesReadyTimeoutMs = timeoutMs
     }
 
+    internal suspend fun acquireLeaseForTmuxForTest(
+        hostId: Long,
+        hostName: String,
+        host: String,
+        port: Int,
+        user: String,
+        keyPath: String,
+        sessionName: String,
+    ): SshLease? {
+        val target = ConnectionTarget(
+            hostId = hostId,
+            hostName = hostName,
+            host = host,
+            port = port,
+            user = user,
+            keyPath = keyPath,
+            passphrase = null,
+            sessionName = sessionName,
+            startDirectory = null,
+        )
+        return acquireLeaseForTmux(
+            target = target,
+            attempt = TMUX_CONNECT_ATTEMPTS.incrementAndGet(),
+            trigger = TmuxConnectTrigger.UserTap,
+            startedAtMs = SystemClock.elapsedRealtime(),
+        )
+    }
+
     internal suspend fun attachClientWithReadinessForTest(
         hostId: Long,
         hostName: String,
@@ -2111,12 +2128,13 @@ public class TmuxSessionViewModel @Inject constructor(
         user: String,
         keyPath: String,
         sessionName: String,
+        hostId: Long? = null,
     ): Boolean {
         val previous = activeTarget ?: return false
         val previousSession = sessionRef ?: return false
         if (!previousSession.isConnected) return false
         val target = ConnectionTarget(
-            hostId = 0L,
+            hostId = hostId ?: previous.hostId,
             hostName = "",
             host = host,
             port = port,
@@ -3679,6 +3697,32 @@ public class TmuxSessionViewModel @Inject constructor(
         super.onCleared()
     }
 
+    private suspend fun releaseCurrentLeaseOrCloseRawSession() {
+        val lease = leaseRef
+        if (lease != null) {
+            withContext(NonCancellable) {
+                runCatching { lease.release() }
+            }
+        } else {
+            runCatching { sessionRef?.close() }
+        }
+    }
+
+    private fun releaseCurrentLeaseOrCloseRawSessionBlocking() {
+        val lease = leaseRef
+        if (lease != null) {
+            runCatching {
+                runBlocking(Dispatchers.IO) {
+                    withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS) {
+                        lease.release()
+                    }
+                }
+            }
+        } else {
+            runCatching { sessionRef?.close() }
+        }
+    }
+
     /**
      * Suspending teardown of the current SSH/tmux connection.
      *
@@ -3756,12 +3800,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 cached.closeCachedRuntime()
             }
         }
-        // `RealSshSession.close()` now swallows the already-disconnected
-        // `BY_APPLICATION` TransportException (#151), but we keep the
-        // `runCatching` here too because the session may be a non-real
-        // implementation in tests.
-        runCatching { sessionRef?.close() }
+        releaseCurrentLeaseOrCloseRawSession()
         sessionRef = null
+        leaseRef = null
         activeTarget = null
         connectingTarget = connectingTarget?.takeIf { current ->
             preserveConnectingTarget?.let { sameSessionIdentity(current, it) } == true
@@ -3986,8 +4027,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
             }
         }
-        runCatching { sessionRef?.close() }
+        releaseCurrentLeaseOrCloseRawSessionBlocking()
         sessionRef = null
+        leaseRef = null
         activeTarget = null
         connectingTarget = null
         // Issue #145: a sync teardown (onCleared / test-replacement seam)

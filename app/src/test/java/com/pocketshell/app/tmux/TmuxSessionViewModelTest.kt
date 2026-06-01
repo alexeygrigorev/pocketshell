@@ -7,10 +7,19 @@ import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.ActiveTmuxClients
+import com.pocketshell.app.sessions.SshConnector
+import com.pocketshell.app.sessions.WarmSshConnections
+import com.pocketshell.app.sessions.WarmSshTarget
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
+import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLease
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxClientFactory
@@ -71,10 +80,19 @@ class TmuxSessionViewModelTest {
     private fun newVm(
         registry: ActiveTmuxClients = ActiveTmuxClients(),
         runtimeCache: TmuxSessionRuntimeCache = TmuxSessionRuntimeCache(),
+        warmSshConnections: WarmSshConnections? = WarmSshConnections(),
+        sshLeaseManager: SshLeaseManager = SshLeaseManager(
+            connector = SshLeaseConnector { target ->
+                error("unexpected SSH lease connect for ${target.leaseKey}")
+            },
+            idleTtlMillis = 0L,
+        ),
     ): TmuxSessionViewModel = TmuxSessionViewModel(
         tmuxClientFactory = TmuxClientFactory(factoryScope),
         activeTmuxClients = registry,
         runtimeCache = runtimeCache,
+        warmSshConnections = warmSshConnections,
+        sshLeaseManager = sshLeaseManager,
     )
 
     @After
@@ -3485,6 +3503,117 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun closeCachedRuntimeDetachesClientBeforeReleasingLease() = runTest {
+        val session = FakeSshSession()
+        val manager = SshLeaseManager(
+            connector = SshLeaseConnector { Result.success(session) },
+            idleTtlMillis = 0L,
+        )
+        val lease = manager.acquire(testLeaseTarget()).getOrThrow()
+        val client = FakeTmuxClient()
+        val runtime = cachedRuntimeForTest(
+            sessionName = "work",
+            client = client,
+            session = session,
+            lease = lease,
+        )
+
+        runtime.closeCachedRuntime()
+
+        assertTrue(
+            "cached tmux client must detach before lease release completes",
+            client.detachCleanlyCalled,
+        )
+        assertTrue("final cached lease release should close the idle SSH session", session.closed)
+    }
+
+    @Test
+    fun tmuxLeaseAcquisitionConsumesMatchingWarmSshSession() = runTest {
+        val warmedSession = FakeSshSession()
+        val warm = WarmSshConnections(
+            connector = SshConnector { _, _ -> Result.success(warmedSession) },
+            reuseTtlMs = 30_000L,
+        )
+        val target = WarmSshTarget(
+            hostId = 1L,
+            hostname = "alpha.example",
+            port = 22,
+            username = "alex",
+            keyPath = "/keys/a",
+        )
+        warm.warm(target, passphrase = null).getOrThrow()
+        val manager = SshLeaseManager(
+            connector = SshLeaseConnector { leaseTarget ->
+                error("tmux should consume the warmed session, not cold-connect $leaseTarget")
+            },
+            idleTtlMillis = 0L,
+        )
+        val vm = newVm(warmSshConnections = warm, sshLeaseManager = manager)
+
+        val lease = vm.acquireLeaseForTmuxForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+        ) ?: error("expected adopted lease")
+
+        assertSame(
+            "tmux must adopt the folder-prewarmed SSH session",
+            warmedSession,
+            lease.session,
+        )
+        assertFalse("adopted warm session stays open while leased", warmedSession.closed)
+        lease.release()
+        assertTrue("released adopted lease follows lease-manager idle policy", warmedSession.closed)
+    }
+
+    @Test
+    fun fastSwitchDeadSessionFallbackReleasesAcquiredLeaseBeforeRetry() = runTest {
+        val deadLeaseSession = FakeSshSession(isConnectedValue = false)
+        val fallbackSession = FakeSshSession()
+        val connector = QueueLeaseConnector(deadLeaseSession, fallbackSession)
+        val manager = SshLeaseManager(
+            connector = connector,
+            scope = this,
+            idleTtlMillis = 0L,
+        )
+        val vm = newVm(sshLeaseManager = manager)
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = FakeSshSession(),
+        )
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "other",
+        )
+        advanceUntilIdle()
+
+        assertEquals(
+            "dead fast-switch lease should be released before the fallback reacquires",
+            2,
+            connector.connectCount,
+        )
+        assertTrue("dead fast-switch lease must be closed by release", deadLeaseSession.closed)
+    }
+
+    @Test
     fun fastSwitchClearsPaneStateBeforeNewSession() = runTest {
         val vm = newVm()
         val session = FakeSshSession()
@@ -4139,7 +4268,12 @@ class TmuxSessionViewModelTest {
         )
     }
 
-    private fun cachedRuntimeForTest(sessionName: String): CachedTmuxRuntime {
+    private fun cachedRuntimeForTest(
+        sessionName: String,
+        client: FakeTmuxClient = FakeTmuxClient(),
+        session: FakeSshSession = FakeSshSession(),
+        lease: SshLease? = null,
+    ): CachedTmuxRuntime {
         val key = TmuxRuntimeKey(
             hostId = 1L,
             hostname = "alpha.example",
@@ -4152,8 +4286,8 @@ class TmuxSessionViewModelTest {
             key = key,
             hostName = "alpha",
             startDirectory = null,
-            session = FakeSshSession(),
-            client = FakeTmuxClient(),
+            session = session,
+            client = client,
             panes = emptyList(),
             paneRows = emptyMap(),
             paneProducerJobs = emptyMap(),
@@ -4164,7 +4298,33 @@ class TmuxSessionViewModelTest {
             agentConversations = emptyMap(),
             remoteColumns = 0,
             remoteRows = 0,
+            lease = lease,
         )
+    }
+
+    private fun testLeaseTarget(): SshLeaseTarget =
+        SshLeaseTarget(
+            leaseKey = SshLeaseKey(
+                host = "alpha.example",
+                port = 22,
+                user = "alex",
+                credentialId = "1:/keys/a",
+            ),
+            key = SshKey.Path(File("/keys/a")),
+        )
+
+    private class QueueLeaseConnector(
+        private vararg val sessions: FakeSshSession,
+    ) : SshLeaseConnector {
+        var connectCount: Int = 0
+            private set
+
+        override suspend fun connect(target: SshLeaseTarget): Result<com.pocketshell.core.ssh.SshSession> {
+            val next = sessions.getOrNull(connectCount)
+                ?: error("unexpected lease connect $connectCount for ${target.leaseKey}")
+            connectCount += 1
+            return Result.success(next)
+        }
     }
 
     /**

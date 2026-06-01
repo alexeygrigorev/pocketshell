@@ -9,6 +9,7 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.portfwd.AutoForwardConfig
 import com.pocketshell.core.portfwd.AutoForwarderSupervisor
 import com.pocketshell.core.portfwd.PortScanner
+import com.pocketshell.core.portfwd.RemotePort
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.dao.HostDao
@@ -497,14 +498,8 @@ class PortForwardPanelViewModel @Inject constructor(
                     portRemappingDao.getByHostId(host.id).first()
                         .associate { it.remotePort to it.localPort }
                 }.getOrElse { emptyMap() }
-                val discovered = PortScanner.scan(sshSession).map { port ->
-                    TunnelInfo(
-                        remotePort = port.port,
-                        localPort = remappings[port.port] ?: port.port,
-                        process = port.processName,
-                        status = TunnelInfo.Status.AVAILABLE,
-                    )
-                }.sortedBy { it.remotePort }
+                val discovered = PortScanner.scan(sshSession)
+                    .toAvailableTunnels(remappings)
                 if (
                     requestGeneration == discoveryGeneration &&
                     requestLoadGeneration == loadGeneration &&
@@ -560,6 +555,18 @@ class PortForwardPanelViewModel @Inject constructor(
             AutoForwarderSupervisor.ConnectionState.Lost -> PortForwardConnectionState.Error
         }
 }
+
+private fun List<RemotePort>.toAvailableTunnels(remappings: Map<Int, Int>): List<TunnelInfo> =
+    groupBy { it.port }
+        .toSortedMap()
+        .map { (remotePort, ports) ->
+            TunnelInfo(
+                remotePort = remotePort,
+                localPort = remappings[remotePort] ?: remotePort,
+                process = ports.firstOrNull { it.processName.isNotBlank() }?.processName.orEmpty(),
+                status = TunnelInfo.Status.AVAILABLE,
+            )
+        }
 
 private infix fun CharArray?.contentEquals(other: CharArray?): Boolean =
     when {

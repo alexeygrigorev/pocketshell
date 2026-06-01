@@ -160,6 +160,31 @@ class PortForwardPanelViewModelTest {
     }
 
     @Test
+    fun discoveryCollapsesDuplicateListenersToOneRowPerRemotePort() = runTest {
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1)
+        val session = FakeSshSession(
+            ssOutput = """
+                0.0.0.0:22 users:(("sshd",pid=1,fd=3))
+                :::22 users:(("sshd",pid=1,fd=4))
+                127.0.0.1:3000 users:(("node",pid=42,fd=3))
+            """.trimIndent(),
+        )
+        val viewModel = newViewModel(FakeConnector(Result.success(session)))
+
+        viewModel.load(hostId, "/tmp/key", discoverPorts = true)
+        runCurrent()
+
+        val state = viewModel.state.value
+        assertFalse("discovery must leave auto-forward off", state.autoForwardEnabled)
+        assertEquals(PortForwardConnectionState.Connected, state.connectionState)
+        assertEquals(listOf(22, 3000), state.tunnels.map { it.remotePort })
+        assertEquals(2, state.tunnels.size)
+        assertEquals("sshd", state.tunnels.first { it.remotePort == 22 }.process)
+        assertEquals(emptyList<FakePortForward>(), session.openedForwards)
+        assertTrue("passive discovery SSH session should close after scan", session.closed)
+    }
+
+    @Test
     fun startPortFromDiscoveredStateEnablesForwardingExplicitly() = runTest {
         val hostId = insertHost(maxAutoPort = 2000, skipPortsBelow = 1000)
         val discoverySession = FakeSshSession(

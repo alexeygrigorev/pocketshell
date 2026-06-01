@@ -302,6 +302,17 @@ class AppDatabaseTest {
     }
 
     @Test
+    fun destructiveFallbackVersionsDoNotOverlapSupportedMigrationStarts() {
+        val supportedMigrationStarts = APP_DATABASE_MIGRATIONS.map { it.startVersion }.toSet()
+
+        assertTrue(
+            APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS.none {
+                it in supportedMigrationStarts
+            },
+        )
+    }
+
+    @Test
     fun migrationFromVersionEightToCurrent_preservesUserRowsAndDropsPathOverride() = runTest {
         val databaseName = "v8-to-current-${System.nanoTime()}.db"
         seedVersionEightDatabaseWithUserRows(databaseName)

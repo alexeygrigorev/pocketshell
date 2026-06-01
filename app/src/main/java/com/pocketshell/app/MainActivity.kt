@@ -572,25 +572,33 @@ private fun AppNavigator(
 
         AppDestination.CrashReports -> CrashReportsScreen(onBack = ::back)
 
-        AppDestination.Settings -> SettingsScreen(
-            onBack = ::back,
-            onOpenCrashReports = { navigate(AppDestination.CrashReports) },
-            onOpenUsage = { navigate(AppDestination.Usage) },
-            onOpenAiCosts = { navigate(AppDestination.AiCosts) },
-            // Issue #206: Settings → Watched folders host picker routes
-            // here without SSH credentials. The destination's SSH
-            // fields stay null so the discover-from-remote button is
-            // hidden — the user can still add / edit / delete / reorder
-            // folders manually.
-            onOpenWatchedFoldersForHost = { hostId, hostName ->
-                navigate(
-                    AppDestination.WatchedFolders(
-                        hostId = hostId,
-                        hostName = hostName,
-                    ),
-                )
-            },
-        )
+        AppDestination.Settings -> {
+            val hostListViewModel: HostListViewModel = hiltViewModel()
+            SettingsScreen(
+                onBack = ::back,
+                onOpenCrashReports = { navigate(AppDestination.CrashReports) },
+                onOpenUsage = { navigate(AppDestination.Usage) },
+                onOpenAiCosts = { navigate(AppDestination.AiCosts) },
+                onScanHostImport = { navigate(AppDestination.Scan) },
+                onChooseHostImportFile = { uri ->
+                    hostListViewModel.importSharedHostUri(uri)
+                    popToHostList()
+                },
+                // Issue #206: Settings → Watched folders host picker routes
+                // here without SSH credentials. The destination's SSH
+                // fields stay null so the discover-from-remote button is
+                // hidden — the user can still add / edit / delete / reorder
+                // folders manually.
+                onOpenWatchedFoldersForHost = { hostId, hostName ->
+                    navigate(
+                        AppDestination.WatchedFolders(
+                            hostId = hostId,
+                            hostName = hostName,
+                        ),
+                    )
+                },
+            )
+        }
 
         // Issue #181: AI Costs screen — client-side OpenAI spend
         // tracker. Sister of the Usage screen but sourced from the

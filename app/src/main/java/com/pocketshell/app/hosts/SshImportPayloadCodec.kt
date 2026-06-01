@@ -31,11 +31,15 @@ object SshImportPayloadCodec {
     fun decode(payload: String): Result<SshImportConfig> = runCatching {
         val trimmed = payload.trim()
         if (trimmed.toByteArray(Charsets.UTF_8).size > MaxPayloadBytes) {
-            throw IllegalArgumentException("SSH import payload is too large")
+            throw IllegalArgumentException(
+                "PocketShell SSH host payload (pocketshell.ssh-import.v1) is too large",
+            )
         }
         val json = JSONObject(trimmed)
         if (json.optString("type") != Type) {
-            throw IllegalArgumentException("Not a PocketShell SSH import payload")
+            throw IllegalArgumentException(
+                "Expected PocketShell SSH host payload (pocketshell.ssh-import.v1)",
+            )
         }
         if (json.optInt("version", -1) != Version) {
             throw IllegalArgumentException("Unsupported SSH import payload version")
@@ -52,7 +56,10 @@ object SshImportPayloadCodec {
         config
     }.recoverCatching { error ->
         if (error is JSONException) {
-            throw IllegalArgumentException("SSH import payload is not valid JSON", error)
+            throw IllegalArgumentException(
+                "Expected PocketShell SSH host payload (pocketshell.ssh-import.v1) JSON",
+                error,
+            )
         }
         throw error
     }

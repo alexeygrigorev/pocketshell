@@ -1,5 +1,9 @@
 package com.pocketshell.app.settings
 
+import android.net.Uri
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -79,6 +83,8 @@ fun SettingsScreen(
     onOpenCrashReports: () -> Unit,
     onOpenUsage: () -> Unit = {},
     onOpenAiCosts: () -> Unit = {},
+    onScanHostImport: () -> Unit = {},
+    onChooseHostImportFile: (Uri) -> Unit = {},
     /**
      * Issue #206: per-host watched-folders config entry. The Settings
      * surface routes through a host picker (no decrypted passphrase
@@ -91,6 +97,8 @@ fun SettingsScreen(
     modifier: Modifier = Modifier,
     viewModel: SettingsViewModel = hiltViewModel(),
 ) {
+    BackHandler(onBack = onBack)
+
     val settings by viewModel.state.collectAsState()
     val keyStatus by viewModel.keyStatus.collectAsState()
     val assistantState by viewModel.assistantState.collectAsState()
@@ -98,6 +106,9 @@ fun SettingsScreen(
     val hosts by viewModel.hosts.collectAsState()
     val usageProviderRecords by viewModel.usageProviderRecords.collectAsState()
     val context = LocalContext.current
+    val hostImportFilePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent(),
+    ) { uri -> uri?.let(onChooseHostImportFile) }
 
     val versionName = remember {
         try {
@@ -133,6 +144,12 @@ fun SettingsScreen(
                     onFontSizeChange = viewModel::setTerminalFontSizeSp,
                     tmuxOnAttach = settings.tmuxOnAttachByDefault,
                     onTmuxOnAttachChange = viewModel::setTmuxOnAttachByDefault,
+                )
+            }
+            item {
+                HostImportSection(
+                    onScanQr = onScanHostImport,
+                    onChooseFile = { hostImportFilePicker.launch("*/*") },
                 )
             }
             item {
@@ -185,6 +202,92 @@ fun SettingsScreen(
                 AboutSection(versionName = versionName)
             }
         }
+    }
+}
+
+@Composable
+private fun HostImportSection(
+    onScanQr: () -> Unit,
+    onChooseFile: () -> Unit,
+) {
+    var showImportDialog by remember { mutableStateOf(false) }
+
+    Column {
+        SectionLabel("Host import")
+        SectionCard {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(role = Role.Button, onClick = { showImportDialog = true })
+                    .padding(vertical = 8.dp)
+                    .testTag(HOST_IMPORT_ROW_TAG),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Import host",
+                        color = PocketShellColors.Text,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = HOST_IMPORT_SETTINGS_COPY,
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 12.sp,
+                    )
+                }
+                Text(
+                    text = "›",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+    }
+
+    if (showImportDialog) {
+        AlertDialog(
+            onDismissRequest = { showImportDialog = false },
+            title = { Text("Import host", color = PocketShellColors.Text) },
+            text = {
+                Text(
+                    text = HOST_IMPORT_DIALOG_COPY,
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 13.sp,
+                    modifier = Modifier.testTag(HOST_IMPORT_DIALOG_COPY_TAG),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showImportDialog = false
+                        onScanQr()
+                    },
+                    modifier = Modifier.testTag(HOST_IMPORT_SCAN_QR_TAG),
+                ) {
+                    Text("Scan QR", color = PocketShellColors.Accent)
+                }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(
+                        onClick = {
+                            showImportDialog = false
+                            onChooseFile()
+                        },
+                        modifier = Modifier.testTag(HOST_IMPORT_CHOOSE_FILE_TAG),
+                    ) {
+                        Text("Choose file", color = PocketShellColors.Accent)
+                    }
+                    TextButton(onClick = { showImportDialog = false }) {
+                        Text("Cancel", color = PocketShellColors.TextSecondary)
+                    }
+                }
+            },
+            containerColor = PocketShellColors.Surface,
+        )
     }
 }
 
@@ -1464,6 +1567,14 @@ private fun AboutSection(versionName: String) {
 internal const val SETTINGS_LAZY_COLUMN_TAG = "settings:lazy-column"
 internal const val SETTINGS_BACK_TAG = "settings:back"
 internal const val SETTINGS_TITLE_TAG = "settings:title"
+internal const val HOST_IMPORT_ROW_TAG = "settings:host-import:row"
+internal const val HOST_IMPORT_DIALOG_COPY_TAG = "settings:host-import:dialog-copy"
+internal const val HOST_IMPORT_SCAN_QR_TAG = "settings:host-import:scan-qr"
+internal const val HOST_IMPORT_CHOOSE_FILE_TAG = "settings:host-import:choose-file"
+internal const val HOST_IMPORT_SETTINGS_COPY =
+    "Import an SSH host QR/text payload generated by pocketshell qr-share or a compatible pocketshell.ssh-import.v1 file."
+internal const val HOST_IMPORT_DIALOG_COPY =
+    "This imports one PocketShell SSH host payload generated by pocketshell qr-share or a compatible pocketshell.ssh-import.v1 file. It does not import app settings, costs, sessions, or backups."
 internal const val TERMINAL_FONT_SLIDER_TAG = "settings:terminal:font-slider"
 internal const val TMUX_SWITCH_TAG = "settings:terminal:tmux-switch"
 internal const val DEFAULT_HOST_NONE_TAG = "settings:startup:default-host:none"

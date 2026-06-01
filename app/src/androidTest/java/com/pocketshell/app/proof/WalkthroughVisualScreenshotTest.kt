@@ -7,21 +7,26 @@ import androidx.core.content.getSystemService
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.click
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTouchInput
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
-import com.pocketshell.app.hosts.HOST_ACTIONS_BUTTON_TAG
-import com.pocketshell.app.hosts.HOST_IMPORT_ACTION_TAG
 import com.pocketshell.app.hosts.HOST_LIST_ADD_FAB_TAG
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SETTINGS_BUTTON_TAG
+import com.pocketshell.app.settings.HOST_IMPORT_CHOOSE_FILE_TAG
+import com.pocketshell.app.settings.HOST_IMPORT_DIALOG_COPY_TAG
+import com.pocketshell.app.settings.HOST_IMPORT_ROW_TAG
+import com.pocketshell.app.settings.HOST_IMPORT_SCAN_QR_TAG
+import com.pocketshell.app.settings.SETTINGS_BACK_TAG
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_NEW_SESSION_FAB_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
@@ -100,10 +105,9 @@ class WalkthroughVisualScreenshotTest {
             )
             // Issue #299 collapsed the old Hosts / Settings / Import /
             // Scan / Keys pseudo-tab row into a title row with a
-            // Settings gear and an actions overflow. Issue #290 moves
-            // Scan into Add host.
+            // Settings gear. Issue #388 moves host import into Settings
+            // so it cannot be mistaken for a generic app import.
             compose.onNodeWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true).assertExists()
-            compose.onNodeWithTag(HOST_ACTIONS_BUTTON_TAG, useUnmergedTree = true).assertExists()
             listOf("Settings", "Import", "Scan", "Keys").forEach { oldTabLabel ->
                 assertTrue(
                     "old $oldTabLabel pseudo-tab text should not be visible on the host list",
@@ -112,41 +116,40 @@ class WalkthroughVisualScreenshotTest {
                         .isEmpty(),
                 )
             }
-            compose.onNodeWithTag(HOST_ACTIONS_BUTTON_TAG, useUnmergedTree = true).performClick()
-            compose.onNodeWithTag(HOST_IMPORT_ACTION_TAG, useUnmergedTree = true).assertExists()
-            assertTrue(
-                "host actions menu must not expose key management as a top-level action",
-                compose.onAllNodesWithText("Keys", useUnmergedTree = true)
+            compose.onNodeWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true).performClick()
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(HOST_IMPORT_ROW_TAG, useUnmergedTree = true)
                     .fetchSemanticsNodes()
-                    .isEmpty(),
-            )
-            assertTrue(
-                "host actions menu must not expose Scan as a top-level action",
-                compose.onAllNodesWithText("Scan", useUnmergedTree = true)
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag(HOST_IMPORT_ROW_TAG, useUnmergedTree = true).performClick()
+            compose.onNodeWithTag(HOST_IMPORT_DIALOG_COPY_TAG, useUnmergedTree = true).assertExists()
+            compose.onNodeWithText("Scan QR", useUnmergedTree = true).assertExists()
+            compose.onNodeWithText("Choose file", useUnmergedTree = true).assertExists()
+            compose.onNodeWithTag(HOST_IMPORT_SCAN_QR_TAG, useUnmergedTree = true).assertExists()
+            compose.onNodeWithTag(HOST_IMPORT_CHOOSE_FILE_TAG, useUnmergedTree = true).assertExists()
+            compose.onNodeWithText("Cancel", useUnmergedTree = true).performClick()
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(HOST_IMPORT_DIALOG_COPY_TAG, useUnmergedTree = true)
                     .fetchSemanticsNodes()
-                    .isEmpty(),
-            )
-            instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_BACK").close()
-            compose.waitForIdle()
+                    .isEmpty()
+            }
+            compose.onNodeWithTag(SETTINGS_BACK_TAG, useUnmergedTree = true).performClick()
+            compose.waitUntil(timeoutMillis = 5_000) {
+                compose.onAllNodesWithTag(HOST_LIST_ADD_FAB_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
             assertTextsClearOfStatusBar(
                 texts = listOf("PocketShell"),
                 screenshotName = "01-host-list.png",
                 artifact = hostListScreenshot,
             )
-            compose.onNodeWithTag(HOST_LIST_ADD_FAB_TAG, useUnmergedTree = true).performClick()
-            compose.waitUntil(timeoutMillis = 5_000) {
-                compose.onAllNodesWithText("Add host", useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
-            instrumentation.uiAutomation.executeShellCommand("input keyevent KEYCODE_BACK").close()
-            compose.waitUntil(timeoutMillis = 5_000) {
-                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-            }
+            compose.waitForIdle()
 
-            compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
+            compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performTouchInput {
+                click(center)
+            }
             // Issue #171 + #299: post-tap surface is the tree-mode
             // FolderListScreen ("Workspace" title). The seeded session
             // lives in its session_path and is visible after expanding the
@@ -237,6 +240,8 @@ class WalkthroughVisualScreenshotTest {
                     lastBootstrapAt = System.currentTimeMillis(),
                     pocketshellInstalled = true,
                     pocketshellLastDetectedAt = System.currentTimeMillis(),
+                    pocketshellDaemonRunning = true,
+                    pocketshellDaemonEnabled = true,
                     pocketshellVersionCompatible = true,
                 ),
             )

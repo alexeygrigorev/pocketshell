@@ -2,8 +2,6 @@ package com.pocketshell.app.hosts
 
 import android.content.Intent
 import android.net.Uri
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -175,10 +173,6 @@ fun HostListScreen(
     val dismissedBanners by viewModel.dismissedBanners.collectAsState()
     val context = LocalContext.current
     val activity = context as? FragmentActivity
-    val hostSharePicker = rememberLauncherForActivityResult(
-        ActivityResultContracts.GetContent(),
-    ) { uri -> uri?.let { viewModel.importSharedHostUri(it) } }
-
     // Read the installed `versionName` once and cache it for the lifetime
     // of this composable — `versionName` is a build-time constant for the
     // running APK, so `remember` without a key is correct.
@@ -340,7 +334,6 @@ fun HostListScreen(
             // chrome and host-list actions that must remain reachable
             // while the content below scrolls.
             HostsAppBar(
-                onImportHostClick = { hostSharePicker.launch("*/*") },
                 onSettingsClick = onOpenSettings,
             )
 
@@ -829,15 +822,15 @@ private fun VersionFooter(versionName: String) {
 
 /**
  * Top app bar matching the original 60dp dashboard chrome: the
- * "PocketShell" wordmark stays on the left, Settings is the rightmost
- * gear button, and host-list import lives under a compact overflow menu.
+ * "PocketShell" wordmark stays on the left and Settings is the rightmost
+ * gear button.
  * Issue #299 removes the previous pseudo-tab row because only "Hosts"
- * was a real selected destination; issue #290 moves QR scanning into
- * Add host.
+ * was a real selected destination; issue #290 moved QR scanning into
+ * Add host, and issue #388 moved host import into Settings so it is not
+ * mistaken for a generic app import.
  */
 @Composable
 private fun HostsAppBar(
-    onImportHostClick: () -> Unit,
     onSettingsClick: () -> Unit = {},
 ) {
     Row(
@@ -856,10 +849,6 @@ private fun HostsAppBar(
             fontWeight = FontWeight.Bold,
             modifier = Modifier.weight(1f),
         )
-        HostListActionsMenu(
-            onImportClick = onImportHostClick,
-        )
-        Spacer(modifier = Modifier.width(8.dp))
         TopBarIconButton(
             contentDescription = "Settings",
             testTag = SETTINGS_BUTTON_TAG,
@@ -874,39 +863,6 @@ private fun HostsAppBar(
 // from the old pseudo-tab so existing connected tests can keep targeting
 // Settings without churn.
 internal const val SETTINGS_BUTTON_TAG = "hosts:tab:settings"
-
-/**
- * Overflow for host-list actions that used to sit in the pseudo-tab row.
- * QR scanning and key management live inside Add/Edit host.
- */
-@Composable
-private fun HostListActionsMenu(
-    onImportClick: () -> Unit,
-) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        TopBarIconButton(
-            contentDescription = "Host actions",
-            testTag = HOST_ACTIONS_BUTTON_TAG,
-            onClick = { expanded = true },
-        ) {
-            KebabIcon()
-        }
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-        ) {
-            DropdownMenuItem(
-                text = { Text("Import") },
-                onClick = {
-                    expanded = false
-                    onImportClick()
-                },
-                modifier = Modifier.testTag(HOST_IMPORT_ACTION_TAG),
-            )
-        }
-    }
-}
 
 @Composable
 private fun TopBarIconButton(
@@ -961,9 +917,6 @@ private fun SettingsGearIcon() {
         )
     }
 }
-
-internal const val HOST_ACTIONS_BUTTON_TAG: String = "hosts:actions:button"
-internal const val HOST_IMPORT_ACTION_TAG: String = "hosts:actions:import"
 
 /**
  * Trailing kebab (vertical three-dot) button + the [DropdownMenu] it

@@ -101,6 +101,33 @@ class SshImportPayloadCodecTest {
     }
 
     @Test
+    fun decode_rejectsUnsupportedTypeWithExpectedPocketShellHostPayload() {
+        val result = SshImportPayloadCodec.decode(
+            """
+                {
+                  "type": "pocketshell.settings.v1",
+                  "version": 1
+                }
+            """.trimIndent(),
+        )
+
+        assertTrue(result.isFailure)
+        val message = result.exceptionOrNull()!!.message!!
+        assertTrue(message.contains("PocketShell SSH host payload"))
+        assertTrue(message.contains("pocketshell.ssh-import.v1"))
+    }
+
+    @Test
+    fun decode_rejectsNonJsonWithExpectedPocketShellHostPayload() {
+        val result = SshImportPayloadCodec.decode("not a JSON import file")
+
+        assertTrue(result.isFailure)
+        val message = result.exceptionOrNull()!!.message!!
+        assertTrue(message.contains("PocketShell SSH host payload"))
+        assertTrue(message.contains("pocketshell.ssh-import.v1"))
+    }
+
+    @Test
     fun decode_rejectsInvalidPort() {
         val result = SshImportPayloadCodec.decode(
             """

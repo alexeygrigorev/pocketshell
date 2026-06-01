@@ -1082,6 +1082,28 @@ class HostListViewModelTest {
     }
 
     @Test
+    fun importSharedHostPayload_reportsExpectedPocketShellHostPayloadForUnsupportedPayload() = runTest {
+        val viewModel = newViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
+            settingsRepository = newSettingsRepository(),
+        )
+
+        viewModel.importSharedHostPayload("""{"type":"pocketshell.settings.v1","version":1}""").join()
+
+        assertEquals(0, db.hostDao().getAll().first().size)
+        val message = viewModel.shareMessage.value
+        assertNotNull(message)
+        assertTrue(message!!.contains("PocketShell SSH host payload"))
+        assertTrue(message.contains("pocketshell.ssh-import.v1"))
+    }
+
+    @Test
     fun importSharedHostPayload_insertsHostAndKey_forSshImportPrivateKeyPayload() = runTest {
         File(context.filesDir, "ssh-keys").deleteRecursively()
         val viewModel = newViewModel(

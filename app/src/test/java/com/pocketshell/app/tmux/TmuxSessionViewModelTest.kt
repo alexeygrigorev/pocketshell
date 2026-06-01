@@ -872,6 +872,7 @@ class TmuxSessionViewModelTest {
     fun eofDisconnectUnregistersDeadClientAndPreservesReconnectTarget() = runTest {
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
         val client = FakeTmuxClient()
         vm.replaceClientForTest(
             hostId = 7L,
@@ -897,13 +898,132 @@ class TmuxSessionViewModelTest {
         assertTrue("Reconnect must remain available after EOF disconnect", vm.canReconnect.value)
         val status = vm.connectionStatus.value
         assertTrue(
-            "expected Failed after EOF disconnect, got $status",
-            status is TmuxSessionViewModel.ConnectionStatus.Failed,
+            "expected Reconnecting after EOF disconnect, got $status",
+            status is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
         )
         assertEquals(
             "Disconnected from alex@alpha.example:22. Tap Reconnect to retry.",
-            (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+            (status as TmuxSessionViewModel.ConnectionStatus.Reconnecting).reason,
         )
+    }
+
+    @Test
+    fun eofDisconnectAutoReconnectsTmuxSession() = runTest {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        val deadClient = FakeTmuxClient()
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            reconnectClient
+        }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+        )
+
+        deadClient.disconnectedSignal.value = true
+        advanceUntilIdle()
+
+        assertEquals(1, connector.connectCount)
+        assertSame(reconnectClient, registry.clients.value[7L]?.client)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals("work", vm.activeSessionNameForTest())
+    }
+
+    @Test
+    fun eofDisconnectAutoReconnectStopsAfterBoundedFailures() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        vm.setAutoReconnectDelaysForTest(listOf(0L, 0L))
+        val deadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+        )
+
+        deadClient.disconnectedSignal.value = true
+        advanceUntilIdle()
+
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "expected bounded auto reconnect failure, got $status",
+            status is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertTrue(
+            (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+            status.message.contains("Auto reconnect failed after 2 attempts."),
+        )
+        assertEquals("work", vm.connectingSessionNameForTest())
+        assertTrue("manual reconnect must remain available after bounded auto failure", vm.canReconnect.value)
+    }
+
+    @Test
+    fun tmuxAutoReconnectDelayIsCancelledWhenAppBackgrounds() = runTest {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        val deadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+        )
+
+        deadClient.disconnectedSignal.value = true
+        runCurrent()
+        assertTrue(
+            "disconnect must enter retry delay before background",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+        )
+
+        vm.onAppBackgrounded()
+        advanceUntilIdle()
+        advanceTimeBy(60_000L)
+        advanceUntilIdle()
+
+        assertEquals(
+            "backgrounding during retry delay must cancel tmux reconnect attempts",
+            0,
+            connector.connectCount,
+        )
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "backgrounded reconnect should settle in a manual retry state, got $status",
+            status is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertTrue(
+            (status as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+            status.message.contains("Auto reconnect paused while PocketShell is in the background."),
+        )
+        assertEquals("work", vm.connectingSessionNameForTest())
+        assertTrue("manual reconnect remains available after background pause", vm.canReconnect.value)
     }
 
     @Test
@@ -2001,6 +2121,7 @@ class TmuxSessionViewModelTest {
     @Test
     fun sendToAgentPaneResultFailureDuringLargePasteKeepsConversationAndReconnectAvailable() = runTest {
         val vm = newVm()
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
         val client = FakeTmuxClient().apply {
             closeAndThrowOnCommandPrefix = "send-keys -H"
             closeAndThrowException = TmuxClientException("failed to write tmux command `send-keys`")
@@ -3567,6 +3688,7 @@ class TmuxSessionViewModelTest {
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(registry = registry, runtimeCache = runtimeCache)
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
         val session = FakeSshSession()
         val clientA = FakeTmuxClient()
         val clientB = FakeTmuxClient()
@@ -3623,7 +3745,7 @@ class TmuxSessionViewModelTest {
 
         assertTrue(
             "restored cached client must use the normal disconnected observer",
-            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed,
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
         )
         assertNull(registry.clients.value[1L])
     }

@@ -58,6 +58,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.UnsentPromptBanner
@@ -173,6 +175,12 @@ public fun SessionScreen(
     // without restarting.
     settingsViewModel: com.pocketshell.app.settings.SettingsViewModel = hiltViewModel(),
 ) {
+    LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        viewModel.onAppForegrounded()
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        viewModel.onAppBackgrounded()
+    }
     LaunchedEffect(host, port, user, keyPath, passphrase, hostId) {
         viewModel.connect(host, port, user, keyPath, passphrase, hostId)
     }
@@ -294,6 +302,12 @@ public fun SessionScreen(
                     user = it.user,
                     host = it.host,
                     port = it.port,
+                    onCancel = { viewModel.cancelConnect() },
+                )
+            }
+            (status as? ConnectionStatus.Reconnecting)?.let {
+                ReconnectingProgressRow(
+                    status = it,
                     onCancel = { viewModel.cancelConnect() },
                 )
             }
@@ -1172,6 +1186,57 @@ internal fun ConnectingProgressOverlay(
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = "Still working, this may be slow…",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 11.sp,
+                modifier = Modifier.testTag(SESSION_CONNECTING_SLOW_HINT_TAG),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReconnectingProgressRow(
+    status: ConnectionStatus.Reconnecting,
+    onCancel: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .testTag(SESSION_CONNECTING_PROGRESS_TAG),
+    ) {
+        LinearProgressIndicator(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .testTag(SESSION_CONNECTING_PROGRESS_BAR_TAG),
+            color = PocketShellColors.Accent,
+            trackColor = PocketShellColors.SurfaceElev,
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Reconnecting to ${status.user}@${status.host}:${status.port} " +
+                    "(${status.attempt}/${status.maxAttempts})…",
+                color = PocketShellColors.Text,
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = onCancel,
+                modifier = Modifier.testTag(SESSION_CONNECTING_CANCEL_TAG),
+            ) {
+                Text("Cancel")
+            }
+        }
+        if (status.retryDelayMs > 0) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Retrying in ${status.retryDelayMs / 1_000}s",
                 color = PocketShellColors.TextSecondary,
                 fontSize = 11.sp,
                 modifier = Modifier.testTag(SESSION_CONNECTING_SLOW_HINT_TAG),

@@ -205,6 +205,7 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private var attachPanesReadyTimeoutMs: Long = ATTACH_PANES_READY_TIMEOUT_MS
     private var activeAttachMilestone: AttachMilestone? = null
+    private var autoReconnectDelaysMs: List<Long> = DEFAULT_AUTO_RECONNECT_DELAYS_MS
 
     /**
      * Issue #188: one-shot user-facing message for a failed `kill-window`
@@ -262,6 +263,8 @@ public class TmuxSessionViewModel @Inject constructor(
     private var activeTarget: ConnectionTarget? = null
     private var connectingTarget: ConnectionTarget? = null
     private var connectJob: Job? = null
+    private var autoReconnectJob: Job? = null
+    private var appActive: Boolean = true
     private var eventsJob: Job? = null
     private var disconnectedJob: Job? = null
 
@@ -343,6 +346,8 @@ public class TmuxSessionViewModel @Inject constructor(
         startDirectory: String? = null,
         trigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
     ) {
+        autoReconnectJob?.cancel()
+        autoReconnectJob = null
         val target = ConnectionTarget(
             hostId = hostId,
             hostName = hostName,
@@ -598,6 +603,8 @@ public class TmuxSessionViewModel @Inject constructor(
      * for direct programmatic callers.
      */
     public fun reconnect(): Boolean {
+        autoReconnectJob?.cancel()
+        autoReconnectJob = null
         val target = activeTarget ?: connectingTarget ?: return false
         connect(
             hostId = target.hostId,
@@ -612,6 +619,11 @@ public class TmuxSessionViewModel @Inject constructor(
             trigger = TmuxConnectTrigger.Reconnect,
         )
         return true
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setAutoReconnectDelaysForTest(delaysMs: List<Long>) {
+        autoReconnectDelaysMs = delaysMs
     }
 
     private fun refreshReconnectAvailability() {
@@ -645,7 +657,9 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun cancelConnect(): Boolean {
         val current = _connectionStatus.value
-        if (current !is ConnectionStatus.Connecting) return false
+        if (current !is ConnectionStatus.Connecting && current !is ConnectionStatus.Reconnecting) return false
+        autoReconnectJob?.cancel()
+        autoReconnectJob = null
         connectJob?.cancel()
         connectJob = null
         connectingTarget = null
@@ -702,6 +716,19 @@ public class TmuxSessionViewModel @Inject constructor(
      * to.
      */
     public fun onAppBackgrounded() {
+        appActive = false
+        val reconnecting = _connectionStatus.value as? ConnectionStatus.Reconnecting
+        if (reconnecting != null) {
+            autoReconnectJob?.cancel()
+            autoReconnectJob = null
+            val target = activeTarget ?: connectingTarget
+            connectingTarget = target
+            refreshReconnectAvailability()
+            _connectionStatus.value = ConnectionStatus.Failed(
+                "${reconnecting.reason} Auto reconnect paused while PocketShell is in the background.",
+            )
+            return
+        }
         val target = activeTarget ?: connectingTarget
         if (target == null) return
         if (clientRef == null && sessionRef == null) return
@@ -763,6 +790,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * and pane reconcile all fire identically to a cold attach.
      */
     public fun onAppForegrounded() {
+        appActive = true
         if (pendingReattach == null) {
             latestConnectIntent?.let { intent ->
                 Log.i(
@@ -1998,11 +2026,85 @@ public class TmuxSessionViewModel @Inject constructor(
                 )
                 registeredHostId?.let { activeTmuxClients.unregister(it) }
                 registeredHostId = null
-                _connectionStatus.value = ConnectionStatus.Failed(
-                    "Disconnected from ${current.user}@${current.host}:${current.port}. " +
-                        "Tap Reconnect to retry.",
-                )
+                val reason = "Disconnected from ${current.user}@${current.host}:${current.port}. " +
+                    "Tap Reconnect to retry."
+                val target = activeTarget ?: connectingTarget
+                if (target == null) {
+                    _connectionStatus.value = ConnectionStatus.Failed(reason)
+                } else {
+                    scheduleAutoReconnect(target, reason)
+                }
             }
+        }
+    }
+
+    private fun scheduleAutoReconnect(target: ConnectionTarget, reason: String) {
+        if (!appActive) {
+            activeTarget = target
+            connectingTarget = null
+            refreshReconnectAvailability()
+            _connectionStatus.value = ConnectionStatus.Failed(reason)
+            return
+        }
+        if (autoReconnectJob?.isActive == true) return
+        activeTarget = target
+        connectingTarget = null
+        refreshReconnectAvailability()
+        val delays = autoReconnectDelaysMs.ifEmpty { listOf(0L) }
+        autoReconnectJob = viewModelScope.launch {
+            for ((index, delayMs) in delays.withIndex()) {
+                val generation = nextConnectGeneration()
+                latestConnectIntent = ConnectIntent(
+                    target = target,
+                    trigger = TmuxConnectTrigger.AutoReconnect,
+                    generation = generation,
+                )
+                _connectionStatus.value = ConnectionStatus.Reconnecting(
+                    host = target.host,
+                    port = target.port,
+                    user = target.user,
+                    attempt = index + 1,
+                    maxAttempts = delays.size,
+                    retryDelayMs = delayMs,
+                    reason = reason,
+                )
+                if (delayMs > 0) delay(delayMs)
+                if (!appActive) return@launch
+                val attempt = TMUX_CONNECT_ATTEMPTS.incrementAndGet()
+                StartupTiming.mark(
+                    "tmux-connect-attempt",
+                    "attempt" to attempt,
+                    "hostId" to target.hostId,
+                    "host" to target.host,
+                    "port" to target.port,
+                    "session" to target.sessionName,
+                    "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
+                    "requestedTrigger" to TmuxConnectTrigger.AutoReconnect.logValue,
+                    "generation" to generation,
+                )
+                Log.i(
+                    ISSUE_145_RECONNECT_TAG,
+                    "tmux-connect-attempt count=$attempt trigger=${TmuxConnectTrigger.AutoReconnect.logValue} " +
+                        "requestedTrigger=${TmuxConnectTrigger.AutoReconnect.logValue} generation=$generation " +
+                        targetLogFields(target),
+                )
+                withContext(NonCancellable) {
+                    closeCurrentConnectionAndJoin(preserveConnectingTarget = target)
+                }
+                connectingTarget = target
+                refreshReconnectAvailability()
+                runConnect(target, attempt, TmuxConnectTrigger.AutoReconnect)
+                if (_connectionStatus.value is ConnectionStatus.Connected) {
+                    autoReconnectJob = null
+                    return@launch
+                }
+            }
+            connectingTarget = target
+            refreshReconnectAvailability()
+            _connectionStatus.value = ConnectionStatus.Failed(
+                "$reason Auto reconnect failed after ${delays.size} attempts.",
+            )
+            autoReconnectJob = null
         }
     }
 
@@ -4560,6 +4662,15 @@ public class TmuxSessionViewModel @Inject constructor(
             ConnectionStatus
         public data class Connected(val host: String, val port: Int, val user: String) :
             ConnectionStatus
+        public data class Reconnecting(
+            val host: String,
+            val port: Int,
+            val user: String,
+            val attempt: Int,
+            val maxAttempts: Int,
+            val retryDelayMs: Long,
+            val reason: String,
+        ) : ConnectionStatus
         public data class Failed(val message: String) : ConnectionStatus
     }
 
@@ -5111,12 +5222,15 @@ internal const val ISSUE_235_LIFECYCLE_TAG: String = "PsTmuxLifecycle"
  */
 internal const val ISSUE_188_DIAG_TAG: String = "issue188-killwindow"
 
+private val DEFAULT_AUTO_RECONNECT_DELAYS_MS: List<Long> = listOf(0L, 1_000L, 2_000L, 5_000L)
+
 public enum class TmuxConnectTrigger(public val logValue: String) {
     UserTap("user-tap"),
     LifecycleReattach("lifecycle-reattach"),
     ColdRestore("cold-restore"),
     FastSwitch("fast-switch"),
     Reconnect("reconnect"),
+    AutoReconnect("auto-reconnect"),
 }
 
 public data class TmuxRestoreIntentSnapshot(

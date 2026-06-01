@@ -52,6 +52,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -241,15 +242,19 @@ public class SessionViewModel @Inject constructor(
     private var remoteRows: Int = 0
     private var producerJob: Job? = null
     private var connectJob: Job? = null
+    private var autoReconnectJob: Job? = null
     private var agentDetectJob: Job? = null
     private var agentTailJob: Job? = null
     private var agentRetryJob: Job? = null
     private var projectRootsJob: Job? = null
     private var activeTarget: RawSshTarget? = null
     private var connectingTarget: RawSshTarget? = null
+    private var appActive: Boolean = true
 
     private val _canReconnect: MutableStateFlow<Boolean> = MutableStateFlow(false)
     public val canReconnect: StateFlow<Boolean> = _canReconnect.asStateFlow()
+
+    private var autoReconnectDelaysMs: List<Long> = DEFAULT_AUTO_RECONNECT_DELAYS_MS
 
     /**
      * Connect to the given host (idempotent — re-calling with the same
@@ -270,6 +275,8 @@ public class SessionViewModel @Inject constructor(
         passphrase: CharArray? = null,
         hostId: Long? = null,
     ) {
+        autoReconnectJob?.cancel()
+        autoReconnectJob = null
         val target = RawSshTarget(host, port, user, keyPath, passphrase?.copyOf(), hostId)
         if (connectJob?.isActive == true) return
         if (_connectionStatus.value is ConnectionStatus.Connected && activeTarget == target) return
@@ -283,6 +290,8 @@ public class SessionViewModel @Inject constructor(
     }
 
     public fun reconnect(): Boolean {
+        autoReconnectJob?.cancel()
+        autoReconnectJob = null
         val target = activeTarget ?: connectingTarget ?: return false
         connect(
             host = target.host,
@@ -295,8 +304,30 @@ public class SessionViewModel @Inject constructor(
         return true
     }
 
+    @androidx.annotation.VisibleForTesting
+    internal fun setAutoReconnectDelaysForTest(delaysMs: List<Long>) {
+        autoReconnectDelaysMs = delaysMs
+    }
+
     private fun refreshReconnectAvailability() {
         _canReconnect.value = activeTarget != null || connectingTarget != null
+    }
+
+    public fun onAppForegrounded() {
+        appActive = true
+    }
+
+    public fun onAppBackgrounded() {
+        appActive = false
+        autoReconnectJob?.cancel()
+        autoReconnectJob = null
+        val reconnecting = _connectionStatus.value as? ConnectionStatus.Reconnecting ?: return
+        val target = activeTarget ?: connectingTarget
+        connectingTarget = target
+        refreshReconnectAvailability()
+        _connectionStatus.value = ConnectionStatus.Failed(
+            "${reconnecting.reason} Auto reconnect paused while PocketShell is in the background.",
+        )
     }
 
     /**
@@ -320,7 +351,9 @@ public class SessionViewModel @Inject constructor(
      */
     public fun cancelConnect(): Boolean {
         val current = _connectionStatus.value
-        if (current !is ConnectionStatus.Connecting) return false
+        if (current !is ConnectionStatus.Connecting && current !is ConnectionStatus.Reconnecting) return false
+        autoReconnectJob?.cancel()
+        autoReconnectJob = null
         connectJob?.cancel()
         connectJob = null
         connectingTarget = null
@@ -472,8 +505,9 @@ public class SessionViewModel @Inject constructor(
         port: Int,
         user: String,
         cause: Throwable? = null,
+        keyPath: String? = null,
     ) {
-        activeTarget = RawSshTarget(host, port, user, keyPath = null, passphrase = null, hostId = null)
+        activeTarget = RawSshTarget(host, port, user, keyPath = keyPath, passphrase = null, hostId = null)
         connectingTarget = null
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Connected(host, port, user)
@@ -1000,7 +1034,66 @@ public class SessionViewModel @Inject constructor(
             else -> "Disconnected from $user@$host:$port: ${cause.javaClass.simpleName}: ${cause.message}. " +
                 "Tap Reconnect to retry."
         }
-        _connectionStatus.value = ConnectionStatus.Failed(reason)
+        val target = activeTarget ?: connectingTarget ?: RawSshTarget(
+            host = host,
+            port = port,
+            user = user,
+            keyPath = null,
+            passphrase = null,
+            hostId = null,
+        )
+        scheduleAutoReconnect(target, reason)
+    }
+
+    private fun scheduleAutoReconnect(target: RawSshTarget, reason: String) {
+        if (!appActive) {
+            activeTarget = target
+            connectingTarget = null
+            refreshReconnectAvailability()
+            _connectionStatus.value = ConnectionStatus.Failed(reason)
+            return
+        }
+        if (autoReconnectJob?.isActive == true) return
+        activeTarget = target
+        connectingTarget = null
+        refreshReconnectAvailability()
+        val delays = autoReconnectDelaysMs.ifEmpty { listOf(0L) }
+        autoReconnectJob = viewModelScope.launch {
+            for ((index, delayMs) in delays.withIndex()) {
+                _connectionStatus.value = ConnectionStatus.Reconnecting(
+                    host = target.host,
+                    port = target.port,
+                    user = target.user,
+                    attempt = index + 1,
+                    maxAttempts = delays.size,
+                    retryDelayMs = delayMs,
+                    reason = reason,
+                )
+                if (delayMs > 0) delay(delayMs)
+                closeCurrentConnection(clearActiveTarget = false)
+                connectingTarget = target
+                refreshReconnectAvailability()
+                runConnect(
+                    host = target.host,
+                    port = target.port,
+                    user = target.user,
+                    keyPath = target.keyPath,
+                    passphrase = target.passphrase,
+                    hostId = target.hostId,
+                    producerScope = viewModelScope,
+                )
+                if (_connectionStatus.value is ConnectionStatus.Connected) {
+                    autoReconnectJob = null
+                    return@launch
+                }
+            }
+            connectingTarget = target
+            refreshReconnectAvailability()
+            _connectionStatus.value = ConnectionStatus.Failed(
+                "$reason Auto reconnect failed after ${delays.size} attempts.",
+            )
+            autoReconnectJob = null
+        }
     }
 
     private fun sendProjectCommand(result: Result<String>, successMessage: String, recentPath: String) {
@@ -1211,9 +1304,20 @@ public class SessionViewModel @Inject constructor(
             ConnectionStatus
         public data class Connected(val host: String, val port: Int, val user: String) :
             ConnectionStatus
+        public data class Reconnecting(
+            val host: String,
+            val port: Int,
+            val user: String,
+            val attempt: Int,
+            val maxAttempts: Int,
+            val retryDelayMs: Long,
+            val reason: String,
+        ) : ConnectionStatus
         public data class Failed(val message: String) : ConnectionStatus
     }
 }
+
+private val DEFAULT_AUTO_RECONNECT_DELAYS_MS: List<Long> = listOf(0L, 1_000L, 2_000L, 5_000L)
 
 public enum class SessionTab { Terminal, Conversation }
 

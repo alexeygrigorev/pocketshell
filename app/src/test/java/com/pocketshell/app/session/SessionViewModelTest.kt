@@ -1240,8 +1240,9 @@ class SessionViewModelTest {
     }
 
     @Test
-    fun rawSshStdoutCompletionDisconnectCanReconnectAndStartsFreshShell() = runBlocking {
+    fun rawSshStdoutCompletionAutoReconnectsAndStartsFreshShell() = runBlocking {
         val vm = newVm()
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
         val sessions = mutableListOf<FakeRawSshSession>()
         vm.setRawSshConnectorForTest { host, port, user, _, _, knownHosts ->
             assertEquals("alpha.example", host)
@@ -1261,16 +1262,6 @@ class SessionViewModelTest {
 
             sessions.single().startedShells.single().finishStdout()
 
-            waitUntil { vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Failed }
-            val disconnected = vm.connectionStatus.value as SessionViewModel.ConnectionStatus.Failed
-            assertEquals(
-                "Disconnected from alex@alpha.example:2222. Tap Reconnect to retry.",
-                disconnected.message,
-            )
-            assertTrue("raw SSH reconnect target must remain available after socket death", vm.canReconnect.value)
-
-            assertTrue("reconnect() must accept the retained raw SSH target", vm.reconnect())
-
             waitUntil {
                 vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Connected &&
                     sessions[0].startedShells.size == 2 &&
@@ -1284,6 +1275,58 @@ class SessionViewModelTest {
             sessions.forEach { it.close() }
             vm.terminalState.detachExternalProducer()
         }
+    }
+
+    @Test
+    fun rawSshAutoReconnectStopsAfterBoundedFailures() = runBlocking {
+        val vm = newVm()
+        vm.setAutoReconnectDelaysForTest(listOf(0L, 0L))
+        var connects = 0
+        vm.setRawSshConnectorForTest { _, _, _, _, _, _ ->
+            connects += 1
+            Result.failure(IllegalStateException("network still down"))
+        }
+
+        try {
+            vm.markRawShellDisconnectedForTest(
+                host = "alpha.example",
+                port = 2222,
+                user = "alex",
+                keyPath = "/tmp/test-key",
+            )
+
+            waitUntil {
+                val status = vm.connectionStatus.value
+                status is SessionViewModel.ConnectionStatus.Failed &&
+                    status.message.contains("Auto reconnect failed after 2 attempts.")
+            }
+            assertEquals("two auto retries", 2, connects)
+            assertTrue("manual reconnect must remain available after bounded auto failure", vm.canReconnect.value)
+        } finally {
+            vm.terminalState.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun rawSshDisconnectWhileBackgroundedDoesNotAutoReconnect() = runBlocking {
+        val vm = newVm()
+        var connects = 0
+        vm.setRawSshConnectorForTest { _, _, _, _, _, _ ->
+            connects += 1
+            Result.failure(IllegalStateException("must not reconnect in background"))
+        }
+        vm.onAppBackgrounded()
+
+        vm.markRawShellDisconnectedForTest(
+            host = "alpha.example",
+            port = 2222,
+            user = "alex",
+            keyPath = "/tmp/test-key",
+        )
+        waitUntil { vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Failed }
+
+        assertEquals("background disconnect must not start reconnect attempts", 0, connects)
+        assertTrue("manual reconnect target remains available", vm.canReconnect.value)
     }
 
     @Test

@@ -660,6 +660,13 @@ public fun TmuxSessionScreen(
                     onCancel = { viewModel.cancelConnect() },
                 )
             }
+            (status as? ConnectionStatus.Reconnecting)?.let {
+                ReconnectingProgressRow(
+                    status = it,
+                    sessionLabel = "tmux $sessionName",
+                    onCancel = { viewModel.cancelConnect() },
+                )
+            }
             // Issue #145: render a user-facing error band (status text +
             // Reconnect affordance) when the SSH transport drops
             // mid-session. The view model's `client.disconnected`
@@ -2055,6 +2062,58 @@ internal fun ConnectingProgressOverlay(
             Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = "Still working, this may be slow…",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 11.sp,
+                modifier = Modifier.testTag(TMUX_CONNECTING_SLOW_HINT_TAG),
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReconnectingProgressRow(
+    status: ConnectionStatus.Reconnecting,
+    sessionLabel: String,
+    onCancel: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .testTag(TMUX_CONNECTING_PROGRESS_TAG),
+    ) {
+        LinearProgressIndicator(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .testTag(TMUX_CONNECTING_PROGRESS_BAR_TAG),
+            color = PocketShellColors.Accent,
+            trackColor = PocketShellColors.SurfaceElev,
+        )
+        Spacer(modifier = Modifier.height(6.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Reconnecting to ${status.user}@${status.host}:${status.port} " +
+                    "($sessionLabel, ${status.attempt}/${status.maxAttempts})…",
+                color = PocketShellColors.Text,
+                fontSize = 13.sp,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = onCancel,
+                modifier = Modifier.testTag(TMUX_CONNECTING_CANCEL_TAG),
+            ) {
+                Text("Cancel")
+            }
+        }
+        if (status.retryDelayMs > 0) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Retrying in ${status.retryDelayMs / 1_000}s",
                 color = PocketShellColors.TextSecondary,
                 fontSize = 11.sp,
                 modifier = Modifier.testTag(TMUX_CONNECTING_SLOW_HINT_TAG),
@@ -3530,6 +3589,7 @@ internal fun ConnectionStatus.toUiStatus(): com.pocketshell.uikit.model.Connecti
     when (this) {
         is ConnectionStatus.Connected -> com.pocketshell.uikit.model.ConnectionStatus.Connected
         is ConnectionStatus.Connecting -> com.pocketshell.uikit.model.ConnectionStatus.Connecting
+        is ConnectionStatus.Reconnecting -> com.pocketshell.uikit.model.ConnectionStatus.Connecting
         is ConnectionStatus.Failed -> com.pocketshell.uikit.model.ConnectionStatus.Error
         ConnectionStatus.Idle -> com.pocketshell.uikit.model.ConnectionStatus.Idle
     }

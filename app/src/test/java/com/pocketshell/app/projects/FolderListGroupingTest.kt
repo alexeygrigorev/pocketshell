@@ -3,17 +3,24 @@ package com.pocketshell.app.projects
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.portfwd.ForwardingController
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.test.setMain
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -643,6 +650,8 @@ class FolderListGroupingTest {
 
     @Test
     fun rebindingToSecondHostStartsSecondHostProbe() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        Dispatchers.setMain(dispatcher)
         val firstHostProbeStarted = CompletableDeferred<Unit>()
         val secondHostProbeStarted = CompletableDeferred<Unit>()
         val gateway = RebindRecordingFolderListGateway(
@@ -652,34 +661,65 @@ class FolderListGroupingTest {
         val vm = FolderListViewModel(
             gateway = gateway,
             hostDao = MapHostDao(FIRST_HOST, SECOND_HOST),
-            projectRootDao = EmptyProjectRootDao(),
+            projectRootDao = MapProjectRootDao(
+                FIRST_HOST.id to listOf(
+                    ProjectRootEntity(
+                        id = 1L,
+                        hostId = FIRST_HOST.id,
+                        label = "first-only",
+                        path = "/home/alexey/first",
+                    ),
+                ),
+                SECOND_HOST.id to emptyList(),
+            ),
+            sshLeaseManager = SshLeaseManager(
+                connector = SshLeaseConnector {
+                    Result.failure(IllegalStateException("prewarm disabled for rebind test"))
+                },
+                scope = this,
+                idleTtlMillis = 0L,
+            ),
             forwardingController = ForwardingController(ApplicationProvider.getApplicationContext()),
-        )
+        ).also { it.ioDispatcher = dispatcher }
 
-        vm.bind(
-            hostId = FIRST_HOST.id,
-            hostName = FIRST_HOST.name,
-            hostname = FIRST_HOST.hostname,
-            port = FIRST_HOST.port,
-            username = FIRST_HOST.username,
-            keyPath = KEY_PATH,
-            passphrase = null,
-        )
-        withTimeout(1_000L) { firstHostProbeStarted.await() }
+        try {
+            vm.bind(
+                hostId = FIRST_HOST.id,
+                hostName = FIRST_HOST.name,
+                hostname = FIRST_HOST.hostname,
+                port = FIRST_HOST.port,
+                username = FIRST_HOST.username,
+                keyPath = KEY_PATH,
+                passphrase = null,
+            )
+            runCurrent()
+            assertTrue("first host probe should start", firstHostProbeStarted.isCompleted)
 
-        vm.bind(
-            hostId = SECOND_HOST.id,
-            hostName = SECOND_HOST.name,
-            hostname = SECOND_HOST.hostname,
-            port = SECOND_HOST.port,
-            username = SECOND_HOST.username,
-            keyPath = KEY_PATH,
-            passphrase = null,
-        )
-        withTimeout(1_000L) { secondHostProbeStarted.await() }
+            vm.bind(
+                hostId = SECOND_HOST.id,
+                hostName = SECOND_HOST.name,
+                hostname = SECOND_HOST.hostname,
+                port = SECOND_HOST.port,
+                username = SECOND_HOST.username,
+                keyPath = KEY_PATH,
+                passphrase = null,
+            )
+            runCurrent()
+            assertTrue("first host probe should be cancelled on rebind", gateway.firstHostProbeCancelled.isCompleted)
+            assertTrue("second host probe should start", secondHostProbeStarted.isCompleted)
 
-        assertEquals(listOf(FIRST_HOST.id, SECOND_HOST.id), gateway.probedHostIds)
-        assertTrue("first host probe should be cancelled on rebind", gateway.firstHostProbeCancelled)
+            assertEquals(listOf(FIRST_HOST.id, SECOND_HOST.id), gateway.probedHostIds)
+            assertEquals(
+                listOf(FIRST_HOST.id to listOf("/home/alexey/first"), SECOND_HOST.id to emptyList<String>()),
+                gateway.watchedRootsByProbe,
+            )
+            assertEquals(
+                listOf("second-host-session"),
+                (vm.state.value as FolderListUiState.Ready).flatSessions.map { it.sessionName },
+            )
+        } finally {
+            vm.stopPolling()
+        }
     }
 
     private fun folderWithSessions(vararg sessions: FolderSessionEntry): FolderRow =
@@ -708,7 +748,8 @@ class FolderListGroupingTest {
         private val secondHostProbeStarted: CompletableDeferred<Unit>,
     ) : FolderListGateway {
         val probedHostIds: MutableList<Long> = mutableListOf()
-        var firstHostProbeCancelled: Boolean = false
+        val watchedRootsByProbe: MutableList<Pair<Long, List<String>>> = mutableListOf()
+        val firstHostProbeCancelled: CompletableDeferred<Unit> = CompletableDeferred()
 
         override suspend fun listSessionsWithFolder(
             host: HostEntity,
@@ -717,18 +758,43 @@ class FolderListGroupingTest {
             watchedRoots: List<ProjectRootEntity>,
         ): FolderListResult {
             probedHostIds += host.id
+            watchedRootsByProbe += host.id to watchedRoots.map { it.path }
             return if (host.id == FIRST_HOST.id) {
                 firstHostProbeStarted.complete(Unit)
                 try {
                     CompletableDeferred<Nothing>().await()
-                } finally {
-                    firstHostProbeCancelled = true
+                } catch (_: CancellationException) {
+                    firstHostProbeCancelled.complete(Unit)
+                    staleFirstHostResult()
                 }
             } else {
                 secondHostProbeStarted.complete(Unit)
-                FolderListResult.Sessions(rows = emptyList())
+                FolderListResult.Sessions(
+                    rows = listOf(
+                        FolderSessionRow(
+                            sessionName = "second-host-session",
+                            lastActivity = 2L,
+                            attached = false,
+                            cwd = "/home/alexey/second",
+                            agentKind = SessionAgentKind.Shell,
+                        ),
+                    ),
+                )
             }
         }
+
+        private fun staleFirstHostResult(): FolderListResult.Sessions =
+            FolderListResult.Sessions(
+                rows = listOf(
+                    FolderSessionRow(
+                        sessionName = "stale-first-host-session",
+                        lastActivity = 1L,
+                        attached = false,
+                        cwd = "/home/alexey/first",
+                        agentKind = SessionAgentKind.Shell,
+                    ),
+                ),
+            )
 
         override suspend fun createSession(
             host: HostEntity,
@@ -770,6 +836,19 @@ class FolderListGroupingTest {
 
     private class EmptyProjectRootDao : ProjectRootDao {
         override fun getByHostId(hostId: Long): Flow<List<ProjectRootEntity>> = flowOf(emptyList())
+        override suspend fun insert(root: ProjectRootEntity): Long = error("not used")
+        override suspend fun update(root: ProjectRootEntity) = error("not used")
+        override suspend fun delete(root: ProjectRootEntity) = error("not used")
+    }
+
+    private class MapProjectRootDao(
+        vararg entries: Pair<Long, List<ProjectRootEntity>>,
+    ) : ProjectRootDao {
+        private val rootsByHost = entries.toMap()
+
+        override fun getByHostId(hostId: Long): Flow<List<ProjectRootEntity>> =
+            MutableStateFlow(rootsByHost[hostId].orEmpty())
+
         override suspend fun insert(root: ProjectRootEntity): Long = error("not used")
         override suspend fun update(root: ProjectRootEntity) = error("not used")
         override suspend fun delete(root: ProjectRootEntity) = error("not used")

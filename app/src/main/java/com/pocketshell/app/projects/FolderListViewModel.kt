@@ -17,6 +17,7 @@ import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.portfwd.ForwardingHostSnapshot
 import com.pocketshell.app.repos.ReposRemoteSource
+import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLease
@@ -27,10 +28,10 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
-import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.uikit.model.SessionAgentKind
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
@@ -230,6 +231,8 @@ class FolderListViewModel @Inject constructor(
     private var warmLease: SshLease? = null
     @androidx.annotation.VisibleForTesting
     internal var warmLeaseAcquiredForTest: (() -> Unit)? = null
+    @androidx.annotation.VisibleForTesting
+    internal var ioDispatcher: CoroutineDispatcher = Dispatchers.IO
     private var watchedFoldersJob: Job? = null
     private var pollingJob: Job? = null
     private var lastSessions: List<FolderSessionEntry> = emptyList()
@@ -354,7 +357,7 @@ class FolderListViewModel @Inject constructor(
     ) {
         val params = bound ?: return
         viewModelScope.launch {
-            val host = withContext(Dispatchers.IO) { hostDao.getById(params.hostId) } ?: run {
+            val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
                 _state.value = FolderListUiState.Failed("Host not found.")
                 return@launch
             }
@@ -384,7 +387,7 @@ class FolderListViewModel @Inject constructor(
         val params = bound ?: return
         viewModelScope.launch {
             _actionStatus.value = FolderActionStatus.Running("Creating $folderName")
-            val host = withContext(Dispatchers.IO) { hostDao.getById(params.hostId) } ?: run {
+            val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
                 _actionStatus.value = FolderActionStatus.Failed("Host not found.")
                 return@launch
             }
@@ -415,7 +418,7 @@ class FolderListViewModel @Inject constructor(
         val params = bound ?: return
         viewModelScope.launch {
             _actionStatus.value = FolderActionStatus.Running("Importing ${payload.remoteName}")
-            val host = withContext(Dispatchers.IO) { hostDao.getById(params.hostId) } ?: run {
+            val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
                 _actionStatus.value = FolderActionStatus.Failed("Host not found.")
                 return@launch
             }
@@ -590,7 +593,7 @@ class FolderListViewModel @Inject constructor(
     }
 
     private suspend fun runProbe(params: BoundParams) {
-        val host = withContext(Dispatchers.IO) { hostDao.getById(params.hostId) } ?: run {
+        val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
             _state.value = FolderListUiState.Failed("Host not found.")
             return
         }

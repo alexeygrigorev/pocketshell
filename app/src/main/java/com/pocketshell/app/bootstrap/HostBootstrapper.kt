@@ -112,6 +112,7 @@ public const val MOSH_UNSUPPORTED_REASON: String =
 public data class HostBootstrapReport(
     val tools: Map<BootstrapTool, ToolStatus>,
     val installer: PythonToolInstaller?,
+    val installerPath: String? = null,
     val daemon: PocketshellDaemonStatus,
     val mosh: MoshStatus = MoshStatus.Unsupported(MOSH_UNSUPPORTED_REASON),
 ) {
@@ -207,7 +208,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         val tools = BootstrapTool.entries.associateWith { tool ->
             checkBootstrapToolWithPath(session, tool, bootstrapPath, expectedPocketshellVersion)
         }
-        val installer = detectPythonToolInstaller(session, bootstrapPath)
+        val installer = detectPythonToolInstallerInfo(session, bootstrapPath)
         val daemon = if (tools[BootstrapTool.Pocketshell].isPresentOnRemote()) {
             checkPocketshellDaemon(session, bootstrapPath)
         } else {
@@ -215,7 +216,8 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         }
         return HostBootstrapReport(
             tools = tools,
-            installer = installer,
+            installer = installer?.installer,
+            installerPath = installer?.path,
             daemon = daemon,
             mosh = MoshStatus.Unsupported(MOSH_UNSUPPORTED_REASON),
         )
@@ -235,20 +237,18 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         val mismatchedTools = currentReport.versionMismatchedTools
         if (mismatchedTools.isNotEmpty()) {
             val installer = currentReport.installer ?: return InstallResult.Error(
-                "PocketShell found pocketshell on the host, but it is not app-compatible. Upgrade it with `uv tool install --upgrade pocketshell` or `pipx upgrade pocketshell`, then reconnect.",
+                cliMismatchManualGuidance(currentReport.pocketshellVersionMismatch),
             )
             for (tool in mismatchedTools) {
-                val result = upgradeServerTool(session, installer, tool, bootstrapPath)
+                val result = upgradeServerTool(session, installer, currentReport.installerPath, tool, bootstrapPath)
                 if (result !is InstallResult.Success) return result
             }
         }
         val missingTools = currentReport.missingTools
         if (missingTools.isNotEmpty()) {
-            val installer = currentReport.installer ?: return InstallResult.Error(
-                "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install pocketshell.",
-            )
+            val installer = currentReport.installer ?: return InstallResult.Error(missingInstallerGuidance())
             for (tool in missingTools) {
-                val result = installServerTool(session, installer, tool, bootstrapPath)
+                val result = installServerTool(session, installer, currentReport.installerPath, tool, bootstrapPath)
                 if (result !is InstallResult.Success) return result
             }
         }
@@ -291,7 +291,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             val tools = BootstrapTool.entries.associateWith { tool ->
                 checkBootstrapToolWithPath(session, tool, bootstrapPath, expectedPocketshellVersion)
             }
-            val installer = detectPythonToolInstaller(session, bootstrapPath)
+            val installer = detectPythonToolInstallerInfo(session, bootstrapPath)
             val daemon = if (tools[BootstrapTool.Pocketshell].isPresentOnRemote()) {
                 checkPocketshellDaemon(session, bootstrapPath)
             } else {
@@ -299,7 +299,8 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
             }
             return HostBootstrapReport(
                 tools = tools,
-                installer = installer,
+                installer = installer?.installer,
+                installerPath = installer?.path,
                 daemon = daemon,
                 mosh = MoshStatus.Unsupported(MOSH_UNSUPPORTED_REASON),
             )
@@ -328,7 +329,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         expectedVersion: String,
     ): ToolStatus {
         return try {
-        val result = session.exec(pathAwareCommand("${shellQuote(BINARY_POCKETSHELL)} --version", bootstrapPath))
+        val result = session.exec(pathAwareCommand("${shellQuote(path)} --version", bootstrapPath))
         if (result.exitCode != 0) {
             ToolStatus.Unknown("pocketshell --version failed: ${result.stderr.ifBlank { "exit ${result.exitCode}" }}")
         } else {
@@ -369,7 +370,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         val result = session.exec(pathAwareCommand("command -v ${shellQuote(binaryName)}", bootstrapPath))
         when {
             result.exitCode == 0 && result.stdout.isNotBlank() -> ToolStatus.Installed(result.stdout.trim())
-            result.exitCode != 0 -> ToolStatus.Missing
+            result.exitCode != 0 -> detectCommonToolPath(session, binaryName, bootstrapPath) ?: ToolStatus.Missing
             else -> ToolStatus.Missing
         }
     } catch (e: SshException) {
@@ -385,10 +386,16 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     private suspend fun detectPythonToolInstaller(
         session: SshSession,
         bootstrapPath: String?,
-    ): PythonToolInstaller? {
+    ): PythonToolInstaller? = detectPythonToolInstallerInfo(session, bootstrapPath)?.installer
+
+    private suspend fun detectPythonToolInstallerInfo(
+        session: SshSession,
+        bootstrapPath: String?,
+    ): PythonToolInstallerInfo? {
         PythonToolInstaller.entries.forEach { installer ->
-            if (checkToolWithPath(session, installer.binaryName, bootstrapPath) is ToolStatus.Installed) {
-                return installer
+            val status = checkToolWithPath(session, installer.binaryName, bootstrapPath)
+            if (status is ToolStatus.Installed) {
+                return PythonToolInstallerInfo(installer = installer, path = status.path)
             }
         }
         return null
@@ -441,27 +448,31 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         session: SshSession,
         installer: PythonToolInstaller,
         tool: BootstrapTool,
-    ): InstallResult = runPythonToolInstall(session, installer, tool, detectBootstrapPath(session))
+        installerPath: String? = null,
+    ): InstallResult = runPythonToolInstall(session, installer, installerPath, tool, detectBootstrapPath(session))
 
     public suspend fun upgradeServerTool(
         session: SshSession,
         installer: PythonToolInstaller,
         tool: BootstrapTool,
-    ): InstallResult = upgradeServerTool(session, installer, tool, detectBootstrapPath(session))
+        installerPath: String? = null,
+    ): InstallResult = upgradeServerTool(session, installer, installerPath, tool, detectBootstrapPath(session))
 
     private suspend fun installServerTool(
         session: SshSession,
         installer: PythonToolInstaller,
+        installerPath: String?,
         tool: BootstrapTool,
         bootstrapPath: String?,
-    ): InstallResult = runPythonToolInstall(session, installer, tool, bootstrapPath)
+    ): InstallResult = runPythonToolInstall(session, installer, installerPath, tool, bootstrapPath)
 
     private suspend fun upgradeServerTool(
         session: SshSession,
         installer: PythonToolInstaller,
+        installerPath: String?,
         tool: BootstrapTool,
         bootstrapPath: String?,
-    ): InstallResult = runPythonToolUpgrade(session, installer, tool, bootstrapPath)
+    ): InstallResult = runPythonToolUpgrade(session, installer, installerPath, tool, bootstrapPath)
 
     public suspend fun installPocketshellDaemon(session: SshSession): InstallResult =
         installPocketshellUserDaemon(session, detectBootstrapPath(session))
@@ -578,12 +589,14 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     private suspend fun runPythonToolInstall(
         session: SshSession,
         installer: PythonToolInstaller,
+        installerPath: String?,
         tool: BootstrapTool,
         bootstrapPath: String?,
     ): InstallResult {
+        val executable = installerExecutable(installer, installerPath)
         val command = when (installer) {
-            PythonToolInstaller.Uv -> "uv tool install ${tool.packageName}"
-            PythonToolInstaller.Pipx -> "pipx install ${tool.packageName}"
+            PythonToolInstaller.Uv -> "$executable tool install ${tool.packageName}"
+            PythonToolInstaller.Pipx -> "$executable install ${tool.packageName}"
         }
         return runInstall(session, pathAwareCommand(command, bootstrapPath), needsRoot = false)
     }
@@ -591,12 +604,14 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     private suspend fun runPythonToolUpgrade(
         session: SshSession,
         installer: PythonToolInstaller,
+        installerPath: String?,
         tool: BootstrapTool,
         bootstrapPath: String?,
     ): InstallResult {
+        val executable = installerExecutable(installer, installerPath)
         val command = when (installer) {
-            PythonToolInstaller.Uv -> "uv tool install --upgrade ${tool.packageName}"
-            PythonToolInstaller.Pipx -> "pipx upgrade ${tool.packageName}"
+            PythonToolInstaller.Uv -> "$executable tool install --upgrade ${tool.packageName}"
+            PythonToolInstaller.Pipx -> "$executable upgrade ${tool.packageName}"
         }
         return runInstall(session, pathAwareCommand(command, bootstrapPath), needsRoot = false)
     }
@@ -650,6 +665,11 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     internal data class PackageManager(
         val command: String,
         val needsRoot: Boolean,
+    )
+
+    private data class PythonToolInstallerInfo(
+        val installer: PythonToolInstaller,
+        val path: String,
     )
 
     /**
@@ -746,8 +766,49 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     private fun posixShellCommand(command: String): String =
         "/bin/sh -lc ${shellQuote(command)}"
 
+    private suspend fun detectCommonToolPath(
+        session: SshSession,
+        binaryName: String,
+        bootstrapPath: String?,
+    ): ToolStatus.Installed? {
+        val command = COMMON_TOOL_DIRS.joinToString(separator = " ") { dir ->
+            "\"$dir/${binaryName.replace("\"", "\\\"")}\""
+        }.let { candidates ->
+            "for p in $candidates; do [ -x \"\$p\" ] && { printf '%s\\n' \"\$p\"; exit 0; }; done; exit 1"
+        }
+        val result = session.exec(pathAwareCommand(command, bootstrapPath))
+        return if (result.exitCode == 0 && result.stdout.isNotBlank()) {
+            ToolStatus.Installed(result.stdout.trim().lineSequence().first())
+        } else {
+            null
+        }
+    }
+
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
+
+    private fun installerExecutable(installer: PythonToolInstaller, installerPath: String?): String {
+        val resolvedPath = installerPath?.trim().orEmpty()
+        return if (resolvedPath.isNotEmpty()) shellQuote(resolvedPath) else installer.binaryName
+    }
+
+    private fun cliMismatchManualGuidance(mismatch: ToolStatus.VersionMismatch?): String {
+        val versionLine = if (mismatch == null) {
+            "PocketShell found pocketshell on the host, but it is not app-compatible."
+        } else {
+            "PocketShell found pocketshell at ${mismatch.path}, but it is not app-compatible: remote ${mismatch.currentVersion}, expected ${mismatch.expectedVersion}."
+        }
+        return "$versionLine\n\nAutomatic update needs uv or pipx on the host. Run one of these over SSH, then reconnect:\n" +
+            "uv tool install --upgrade pocketshell\n" +
+            "pipx upgrade pocketshell\n\n" +
+            "If the command succeeds but PocketShell still cannot find it, make sure ~/.local/bin is on the remote PATH."
+    }
+
+    internal fun missingInstallerGuidance(): String =
+        "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install pocketshell.\n\n" +
+            "Recommended:\nuv tool install pocketshell\n\n" +
+            "Alternative:\npipx install pocketshell\n\n" +
+            "Make sure ~/.local/bin is on the remote PATH."
 
     private fun systemdExecArg(value: String): String =
         "\"" + value
@@ -783,5 +844,14 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         private val VERSION_PATTERN: Regex = Regex("""\b(\d+(?:\.\d+){1,3}(?:[-+][0-9A-Za-z.-]+)?)\b""")
         private const val PATH_BEGIN: String = "__POCKETSHELL_PATH_BEGIN__"
         private const val PATH_END: String = "__POCKETSHELL_PATH_END__"
+        private val COMMON_TOOL_DIRS: List<String> = listOf(
+            "\$HOME/.local/bin",
+            "\$HOME/bin",
+            "\$HOME/.cargo/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+        )
     }
 }

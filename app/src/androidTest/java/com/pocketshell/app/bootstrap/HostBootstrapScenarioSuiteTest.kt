@@ -109,6 +109,34 @@ class HostBootstrapScenarioSuiteTest {
     }
 
     @Test
+    fun uvUpgradeFailure() = scenario("uv-upgrade-failure") {
+        launchSeededHost()
+        tapSeededHost()
+
+        waitForBootstrapSheet()
+        compose.onNodeWithText("Host setup needed").assertExists()
+        assertSetupRows("pocketshell CLI update needed")
+        compose.onNodeWithText("path /usr/local/bin/pocketshell", substring = true).assertExists()
+        compose.onNodeWithText("remote 0.1.0", substring = true).assertExists()
+        compose.onNodeWithText("expected ${targetAppVersion()}", substring = true).assertExists()
+        compose.onNodeWithText("uv at /usr/local/bin/uv", substring = true).assertExists()
+        compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALL_ALL_TAG).assertExists().performClick()
+        compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALLING_TAG).assertExists()
+        compose.waitUntil(timeoutMillis = 20_000) {
+            compose.onAllNodesWithText("Install failed").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("Install failed").assertExists()
+        compose.onNodeWithText("PocketShell CLI update failed", substring = true).assertExists()
+        compose.onNodeWithText("fixture refused upgrade", substring = true).assertExists()
+        compose.onNodeWithText("uv tool install --upgrade pocketshell", substring = true).assertExists()
+        compose.onNodeWithText("Path: /usr/local/bin/pocketshell", substring = true).assertExists()
+        capture("03-upgrade-failed")
+        assertRemote("failed uv upgrade should leave the old pocketshell CLI in place") {
+            installedToolsAndEnabledDaemonCommand("0.1.0")
+        }
+    }
+
+    @Test
     fun unsupported() = scenario("unsupported") {
         launchSeededHost()
         tapSeededHost()
@@ -389,6 +417,7 @@ class HostBootstrapScenarioSuiteTest {
         const val STATE_FILE: String = "/tmp/pocketshell-bootstrap-systemctl-state"
         const val VERSION_FILE: String = "/tmp/pocketshell-bootstrap-pocketshell-version"
         const val LATEST_VERSION_FILE: String = "/tmp/pocketshell-bootstrap-latest-version"
+        const val UPGRADE_FAILURE_FILE: String = "/tmp/pocketshell-bootstrap-upgrade-failure"
 
         fun versionReset(targetAppVersion: String): String =
             "printf ${shellQuote("$targetAppVersion\n")} > $VERSION_FILE; " +
@@ -424,8 +453,20 @@ class HostBootstrapScenarioSuiteTest {
                 port = 2236,
                 resetCommand = { targetAppVersion ->
                     "rm -f ~/.local/bin/pocketshell; " +
+                        "rm -f $UPGRADE_FAILURE_FILE; " +
                         "printf '0.3.6\\n' > $VERSION_FILE; " +
                         latestVersionReset(targetAppVersion) +
+                        "printf 'active enabled\\n' > $STATE_FILE"
+                },
+            ),
+            "uv-upgrade-failure" to ScenarioDefinition(
+                label = "uv upgrade failure",
+                port = 2236,
+                resetCommand = { targetAppVersion ->
+                    "rm -f ~/.local/bin/pocketshell; " +
+                        "printf '0.1.0\\n' > $VERSION_FILE; " +
+                        latestVersionReset(targetAppVersion) +
+                        "printf 'fixture refused upgrade\\n' > $UPGRADE_FAILURE_FILE; " +
                         "printf 'active enabled\\n' > $STATE_FILE"
                 },
             ),
@@ -433,7 +474,7 @@ class HostBootstrapScenarioSuiteTest {
                 label = "unsupported",
                 port = 2232,
                 resetCommand = {
-                    "rm -f ~/.local/bin/pocketshell $VERSION_FILE $LATEST_VERSION_FILE; " +
+                    "rm -f ~/.local/bin/pocketshell $VERSION_FILE $LATEST_VERSION_FILE $UPGRADE_FAILURE_FILE; " +
                         "printf 'inactive disabled\\n' > $STATE_FILE"
                 },
             ),

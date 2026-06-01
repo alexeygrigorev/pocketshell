@@ -211,7 +211,7 @@ private fun SetupActions(
         report.pocketshellVersionMismatch?.let { mismatch ->
             SetupActionRow(
                 title = "pocketshell CLI update needed",
-                detail = versionMismatchDetail(report.installer, mismatch),
+                detail = versionMismatchDetail(report.installer, mismatch, report.installerPath),
                 actionLabel = "Upgrade",
                 onClick = { onInstallTool(BootstrapTool.Pocketshell) },
             )
@@ -439,17 +439,50 @@ private fun installCommand(installer: PythonToolInstaller?, tool: BootstrapTool)
     null -> "uv tool install ${tool.packageName} or pipx install ${tool.packageName}"
 }
 
-private fun upgradeCommand(installer: PythonToolInstaller?, tool: BootstrapTool): String = when (installer) {
+internal fun upgradeCommand(installer: PythonToolInstaller?, tool: BootstrapTool): String = when (installer) {
     PythonToolInstaller.Uv -> "uv tool install --upgrade ${tool.packageName}"
     PythonToolInstaller.Pipx -> "pipx upgrade ${tool.packageName}"
     null -> "uv tool install --upgrade ${tool.packageName} or pipx upgrade ${tool.packageName}"
 }
 
-private fun versionMismatchDetail(
+internal fun versionMismatchDetail(
     installer: PythonToolInstaller?,
     mismatch: ToolStatus.VersionMismatch,
+    installerPath: String? = null,
 ): String =
-    "remote ${mismatch.currentVersion}, expected ${mismatch.expectedVersion}; ${upgradeCommand(installer, BootstrapTool.Pocketshell)}"
+    buildString {
+        append("path ${mismatch.path}; remote ${mismatch.currentVersion}, expected ${mismatch.expectedVersion}; ")
+        val installerName = when (installer) {
+            PythonToolInstaller.Uv -> "uv"
+            PythonToolInstaller.Pipx -> "pipx"
+            null -> null
+        }
+        if (installerName != null && !installerPath.isNullOrBlank()) {
+            append("$installerName at $installerPath; ")
+        }
+        append(upgradeCommand(installer, BootstrapTool.Pocketshell))
+    }
+
+internal fun cliUpdateFailureMessage(
+    mismatch: ToolStatus.VersionMismatch?,
+    installer: PythonToolInstaller?,
+    stderr: String,
+    exitCode: Int,
+): String = buildString {
+    append("PocketShell CLI update failed")
+    if (exitCode >= 0) append(" (exit $exitCode)")
+    append(".")
+    if (mismatch != null) {
+        append("\n\nRemote: ${mismatch.currentVersion}\nExpected: ${mismatch.expectedVersion}\nPath: ${mismatch.path}")
+    }
+    val error = stderr.ifBlank { if (exitCode >= 0) "exit $exitCode" else "" }
+    if (error.isNotBlank()) {
+        append("\n\n$error")
+    }
+    append("\n\nManual update:\n")
+    append(upgradeCommand(installer, BootstrapTool.Pocketshell))
+    append("\n\nIf that does not update the binary above, run the matching command over SSH and make sure ~/.local/bin is on PATH.")
+}
 
 @Composable
 private fun SheetColumn(content: @Composable () -> Unit) {

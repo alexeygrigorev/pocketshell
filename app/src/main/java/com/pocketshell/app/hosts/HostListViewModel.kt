@@ -12,6 +12,7 @@ import com.pocketshell.app.bootstrap.BootstrapTool
 import com.pocketshell.app.bootstrap.PocketshellDaemonStatus
 import com.pocketshell.app.bootstrap.TmuxStatus
 import com.pocketshell.app.bootstrap.ToolStatus
+import com.pocketshell.app.bootstrap.cliUpdateFailureMessage
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -968,7 +969,7 @@ class HostListViewModel internal constructor(
 
                 is InstallResult.Failed -> {
                     _bootstrapState.value = HostBootstrapSheetState.Failed(
-                        message = result.stderr.ifBlank { "exit ${result.exitCode}" },
+                        message = serverSetupFailureMessage(prompt?.report, result),
                     )
                 }
 
@@ -997,16 +998,25 @@ class HostListViewModel internal constructor(
         val installer = prompt.report.installer
         if (installer == null) {
             _bootstrapState.value = HostBootstrapSheetState.Failed(
-                message = "Install uv or pipx on the host, then reconnect. PocketShell uses one of them to install pocketshell.",
+                message = if (prompt.report.tools[tool] is ToolStatus.VersionMismatch) {
+                    cliUpdateFailureMessage(
+                        mismatch = prompt.report.tools[tool] as? ToolStatus.VersionMismatch,
+                        installer = null,
+                        stderr = "Automatic update needs uv or pipx on the host.",
+                        exitCode = -1,
+                    )
+                } else {
+                    bootstrapper.missingInstallerGuidance()
+                },
             )
             return
         }
         _bootstrapState.value = HostBootstrapSheetState.Installing
         viewModelScope.launch {
             val result = if (prompt.report.tools[tool] is ToolStatus.VersionMismatch) {
-                bootstrapper.upgradeServerTool(session, installer, tool)
+                bootstrapper.upgradeServerTool(session, installer, tool, prompt.report.installerPath)
             } else {
-                bootstrapper.installServerTool(session, installer, tool)
+                bootstrapper.installServerTool(session, installer, tool, prompt.report.installerPath)
             }
             when (result) {
                 InstallResult.Success -> refreshServerSetupPrompt(session, needsTmux = prompt.needsTmux)
@@ -1015,7 +1025,16 @@ class HostListViewModel internal constructor(
                     report = result.report,
                 )
                 is InstallResult.Failed -> _bootstrapState.value = HostBootstrapSheetState.Failed(
-                    message = result.stderr.ifBlank { "exit ${result.exitCode}" },
+                    message = if (prompt.report.tools[tool] is ToolStatus.VersionMismatch) {
+                        cliUpdateFailureMessage(
+                            mismatch = prompt.report.tools[tool] as? ToolStatus.VersionMismatch,
+                            installer = installer,
+                            stderr = result.stderr,
+                            exitCode = result.exitCode,
+                        )
+                    } else {
+                        result.stderr.ifBlank { "exit ${result.exitCode}" }
+                    },
                 )
 
                 is InstallResult.UnsupportedOs -> _bootstrapState.value = HostBootstrapSheetState.Failed(
@@ -1024,6 +1043,23 @@ class HostListViewModel internal constructor(
 
                 is InstallResult.Error -> _bootstrapState.value = HostBootstrapSheetState.Failed(message = result.reason)
             }
+        }
+    }
+
+    private fun serverSetupFailureMessage(
+        report: HostBootstrapReport?,
+        result: InstallResult.Failed,
+    ): String {
+        val mismatch = report?.pocketshellVersionMismatch
+        return if (mismatch != null) {
+            cliUpdateFailureMessage(
+                mismatch = mismatch,
+                installer = report.installer,
+                stderr = result.stderr,
+                exitCode = result.exitCode,
+            )
+        } else {
+            result.stderr.ifBlank { "exit ${result.exitCode}" }
         }
     }
 

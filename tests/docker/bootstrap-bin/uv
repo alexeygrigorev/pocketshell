@@ -22,6 +22,11 @@ if [ "${1:-}" = "tool" ] && [ "${2:-}" = "install" ]; then
     latest_version="$(cat "$latest_version_file")"
   fi
   latest_version="${latest_version:-0.3.8}"
+  failure_file="${POCKETSHELL_BOOTSTRAP_UPGRADE_FAILURE_FILE:-/tmp/pocketshell-bootstrap-upgrade-failure}"
+  if [ "$package" = "pocketshell" ] && [ "$action" = "install --upgrade" ] && [ -r "$failure_file" ]; then
+    cat "$failure_file" >&2
+    exit 23
+  fi
   install -d "$target_dir"
   cp "${source_dir}/${package}" "${target_dir}/${package}"
   chmod +x "${target_dir}/${package}"

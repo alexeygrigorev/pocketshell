@@ -8,6 +8,7 @@ import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
 import java.io.OutputStream
 import java.lang.reflect.Field
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -71,8 +72,12 @@ public class SshTerminalBridge(
     cellWidthPixels: Int = INITIAL_CELL_WIDTH_PX,
     cellHeightPixels: Int = INITIAL_CELL_HEIGHT_PX,
     transcriptRows: Int = DEFAULT_TRANSCRIPT_ROWS,
-    private val client: TerminalSessionClient = NoOpTerminalSessionClient(),
+    client: TerminalSessionClient = NoOpTerminalSessionClient(),
+    traceSink: TraceSink? = null,
 ) {
+    private val traceState = traceSink?.let { TraceState(it) }
+    private val terminalSessionClient: TerminalSessionClient =
+        traceState?.let { TracingTerminalSessionClient(client, it) } ?: client
 
     /**
      * The vendored [TerminalSession] that [com.termux.view.TerminalView]
@@ -85,7 +90,7 @@ public class SshTerminalBridge(
         /* args = */ emptyArray(),
         /* env = */ emptyArray(),
         /* transcriptRows = */ transcriptRows,
-        /* client = */ client,
+        /* client = */ terminalSessionClient,
     )
 
     /**
@@ -102,7 +107,7 @@ public class SshTerminalBridge(
         /* cellWidthPixels = */ cellWidthPixels,
         /* cellHeightPixels = */ cellHeightPixels,
         /* transcriptRows = */ transcriptRows,
-        /* client = */ client,
+        /* client = */ terminalSessionClient,
     )
 
     /**
@@ -165,6 +170,15 @@ public class SshTerminalBridge(
         require(count <= data.size - offset) { "offset + count > data.size" }
         if (count == 0) return
 
+        val traceState = traceState
+        if (traceState == null) {
+            feedBytesUntraced(data = data, offset = offset, count = count)
+        } else {
+            feedBytesTraced(data = data, offset = offset, count = count, traceState = traceState)
+        }
+    }
+
+    private fun feedBytesUntraced(data: ByteArray, offset: Int, count: Int) {
         val handler = SessionReflection.getMainThreadHandler(session)
         val isHandlerLooper = Looper.myLooper() == handler.looper
         synchronized(feedLock) {
@@ -188,6 +202,65 @@ public class SshTerminalBridge(
                 remaining -= chunkLength
             }
         }
+    }
+
+    private fun feedBytesTraced(data: ByteArray, offset: Int, count: Int, traceState: TraceState) {
+        val handler = SessionReflection.getMainThreadHandler(session)
+        val isHandlerLooper = Looper.myLooper() == handler.looper
+        val traceSink = traceState.traceSink
+        val pendingDrainMessages = traceState.pendingDrainMessages
+        val feedStartedAtNanos = System.nanoTime()
+        var chunks = 0
+        traceSink.onFeedStarted(count)
+        synchronized(feedLock) {
+            var remaining = count
+            var chunkOffset = offset
+            while (remaining > 0) {
+                val chunkLength = minOf(remaining, PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES)
+                val writeStartedAtNanos = System.nanoTime()
+                val written = SessionReflection.writeProcessToTerminalQueue(
+                    session = session,
+                    data = data,
+                    offset = chunkOffset,
+                    length = chunkLength,
+                )
+                val writeNanos = System.nanoTime() - writeStartedAtNanos
+                if (!written) return
+                chunks += 1
+                traceSink.onProcessQueueWrite(
+                    bytes = chunkLength,
+                    durationNanos = writeNanos,
+                    waitedForDrain = writeNanos >= TRACE_WAIT_THRESHOLD_NANOS,
+                )
+                val pending = PendingDrainMessage(
+                    bytes = chunkLength,
+                    scheduledAtNanos = System.nanoTime(),
+                )
+                pendingDrainMessages.add(pending)
+                traceSink.onDrainMessageScheduled(
+                    bytes = chunkLength,
+                    pendingMessages = pendingDrainMessages.size,
+                    directDispatch = isHandlerLooper,
+                )
+                if (isHandlerLooper) {
+                    val dispatchStartedAtNanos = System.nanoTime()
+                    handler.dispatchMessage(Message.obtain(handler, MSG_NEW_INPUT))
+                    traceSink.onDirectDrainDispatched(
+                        bytes = chunkLength,
+                        durationNanos = System.nanoTime() - dispatchStartedAtNanos,
+                    )
+                } else {
+                    handler.sendEmptyMessage(MSG_NEW_INPUT)
+                }
+                chunkOffset += chunkLength
+                remaining -= chunkLength
+            }
+        }
+        traceSink.onFeedCompleted(
+            bytes = count,
+            chunks = chunks,
+            durationNanos = System.nanoTime() - feedStartedAtNanos,
+        )
     }
 
     /**
@@ -258,6 +331,24 @@ public class SshTerminalBridge(
         override fun logStackTrace(tag: String?, e: Exception?) = Unit
     }
 
+    /**
+     * Optional, test/debug-facing timing hook for terminal burst output.
+     *
+     * The bridge never installs a sink in production by default. Tests and
+     * diagnostics can use it to count producer writes, observe when writes
+     * wait behind a full Termux queue, and estimate drain/update cost from
+     * the time between scheduling `MSG_NEW_INPUT` and Termux's
+     * `onTextChanged` callback.
+     */
+    public abstract class TraceSink {
+        public open fun onFeedStarted(bytes: Int) = Unit
+        public open fun onProcessQueueWrite(bytes: Int, durationNanos: Long, waitedForDrain: Boolean) = Unit
+        public open fun onDrainMessageScheduled(bytes: Int, pendingMessages: Int, directDispatch: Boolean) = Unit
+        public open fun onScreenUpdated(bytes: Int, scheduleToCallbackNanos: Long, callbackDurationNanos: Long) = Unit
+        public open fun onDirectDrainDispatched(bytes: Int, durationNanos: Long) = Unit
+        public open fun onFeedCompleted(bytes: Int, chunks: Int, durationNanos: Long) = Unit
+    }
+
     public companion object {
         /**
          * Constant chosen to match the message id `TerminalSession.MSG_NEW_INPUT`
@@ -307,8 +398,81 @@ public class SshTerminalBridge(
          * drain has even been scheduled.
          */
         internal const val PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES: Int = 64 * 1024
+
+        private const val TRACE_WAIT_THRESHOLD_NANOS: Long = 1_000_000
     }
 }
+
+private data class PendingDrainMessage(
+    val bytes: Int,
+    val scheduledAtNanos: Long,
+)
+
+private class TraceState(
+    val traceSink: SshTerminalBridge.TraceSink,
+    val pendingDrainMessages: ConcurrentLinkedQueue<PendingDrainMessage> = ConcurrentLinkedQueue(),
+)
+
+private class TracingTerminalSessionClient(
+    private val delegate: TerminalSessionClient,
+    private val traceState: TraceState,
+) : TerminalSessionClient {
+
+    override fun onTextChanged(changedSession: TerminalSession) {
+        val pending = pollPendingDrainBytes()
+        val callbackStartedAtNanos = System.nanoTime()
+        try {
+            delegate.onTextChanged(changedSession)
+        } finally {
+            traceState.traceSink.onScreenUpdated(
+                bytes = pending.bytes,
+                scheduleToCallbackNanos = pending.scheduledAtNanos?.let { callbackStartedAtNanos - it } ?: -1L,
+                callbackDurationNanos = System.nanoTime() - callbackStartedAtNanos,
+            )
+        }
+    }
+
+    private fun pollPendingDrainBytes(): PolledDrain {
+        var bytes = 0
+        var scheduledAtNanos: Long? = null
+        while (bytes < SshTerminalBridge.PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES) {
+            val next = traceState.pendingDrainMessages.peek() ?: break
+            if (bytes > 0 && bytes + next.bytes > SshTerminalBridge.PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES) {
+                break
+            }
+            traceState.pendingDrainMessages.poll()
+            bytes += next.bytes
+            if (scheduledAtNanos == null) {
+                scheduledAtNanos = next.scheduledAtNanos
+            }
+        }
+        return PolledDrain(bytes = bytes, scheduledAtNanos = scheduledAtNanos)
+    }
+
+    override fun onTitleChanged(changedSession: TerminalSession) = delegate.onTitleChanged(changedSession)
+    override fun onSessionFinished(finishedSession: TerminalSession) = delegate.onSessionFinished(finishedSession)
+    override fun onCopyTextToClipboard(session: TerminalSession, text: String) = delegate.onCopyTextToClipboard(session, text)
+    override fun onPasteTextFromClipboard(session: TerminalSession?) = delegate.onPasteTextFromClipboard(session)
+    override fun onBell(session: TerminalSession) = delegate.onBell(session)
+    override fun onColorsChanged(session: TerminalSession) = delegate.onColorsChanged(session)
+    override fun onTerminalCursorStateChange(state: Boolean) = delegate.onTerminalCursorStateChange(state)
+    override fun setTerminalShellPid(session: TerminalSession, pid: Int) = delegate.setTerminalShellPid(session, pid)
+    override fun getTerminalCursorStyle(): Int? = delegate.getTerminalCursorStyle()
+    override fun logError(tag: String?, message: String?) = delegate.logError(tag, message)
+    override fun logWarn(tag: String?, message: String?) = delegate.logWarn(tag, message)
+    override fun logInfo(tag: String?, message: String?) = delegate.logInfo(tag, message)
+    override fun logDebug(tag: String?, message: String?) = delegate.logDebug(tag, message)
+    override fun logVerbose(tag: String?, message: String?) = delegate.logVerbose(tag, message)
+    override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) =
+        delegate.logStackTraceWithMessage(tag, message, e)
+
+    override fun logStackTrace(tag: String?, e: Exception?) = delegate.logStackTrace(tag, e)
+}
+
+private data class PolledDrain(
+    val bytes: Int,
+    val scheduledAtNanos: Long?,
+)
 
 /**
  * Reflective access to package-private fields of [TerminalSession]. We

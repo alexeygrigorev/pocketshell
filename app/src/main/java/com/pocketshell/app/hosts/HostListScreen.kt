@@ -56,7 +56,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.fragment.app.FragmentActivity
-import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.bootstrap.HostBootstrapSheet
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.SessionsDashboardViewModel
@@ -173,16 +172,6 @@ fun HostListScreen(
     val dismissedBanners by viewModel.dismissedBanners.collectAsState()
     val context = LocalContext.current
     val activity = context as? FragmentActivity
-    // Read the installed `versionName` once and cache it for the lifetime
-    // of this composable — `versionName` is a build-time constant for the
-    // running APK, so `remember` without a key is correct.
-    val versionName = remember {
-        try {
-            context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown"
-        } catch (_: Exception) {
-            "unknown"
-        }
-    }
 
     // Resolve-key-then-navigate is async (suspending DAO read) but the tap
     // originates from the main thread. The request is funneled through a
@@ -542,13 +531,6 @@ fun HostListScreen(
                         }
                     }
                 }
-
-                // Footer: installed version. Sits at the bottom of the
-                // list so the host list keeps its prominence; muted text
-                // colour so it doesn't compete with the FAB.
-                item(key = "footer:version") {
-                    VersionFooter(versionName = versionName)
-                }
             }
         }
 
@@ -698,9 +680,6 @@ internal const val HOST_LIST_ADD_FAB_TAG = "host-list:add-fab"
  */
 internal const val HOST_LIST_EMPTY_STATE_TAG = "host-list:empty-state"
 
-/** Issue #274: stable marker for verifying the list can scroll past bottom chrome. */
-internal const val HOST_LIST_VERSION_FOOTER_TAG = "host-list:version-footer"
-
 /** Issue #116: stable test tag for the cross-host usage dashboard strip. */
 internal const val USAGE_DASHBOARD_STRIP_TAG = "usage:dashboard-strip"
 
@@ -793,30 +772,6 @@ private fun UpdateBanner(info: ReleaseInfo, onUpdate: () -> Unit) {
                 fontWeight = FontWeight.SemiBold,
             )
         }
-    }
-}
-
-/**
- * Footer carrying the installed `versionName`. Muted colour so the
- * marker is observable for support / debugging but doesn't compete
- * visually with the host list.
- */
-@Composable
-private fun VersionFooter(versionName: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 22.dp, vertical = 10.dp)
-            .testTag(HOST_LIST_VERSION_FOOTER_TAG),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = ReleaseChecker().renderDottedVersionLabel(versionName),
-            color = PocketShellColors.TextMuted,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Medium,
-            letterSpacing = 0.4.sp,
-        )
     }
 }
 

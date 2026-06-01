@@ -57,7 +57,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * The v0.3.5 all-host sessions dashboard no longer exists on main, so
  * this exercises the replacement list surfaces that can overflow a Pixel
  * viewport: the host landing list and the per-host folder/session list.
- * Each assertion scrolls to the final row/footer and captures full-device
+ * Each assertion scrolls to the final row and captures full-device
  * screenshots under `additional_test_output/issue274-scroll/`.
  */
 @RunWith(AndroidJUnit4::class)
@@ -87,7 +87,7 @@ class HostAndFolderListScrollE2eTest {
     }
 
     @Test
-    fun hostListScrollsToLastHostAndVersionFooterAboveFab(): Unit = runBlocking {
+    fun hostListScrollsToLastHostWithoutVersionFooterAboveFab(): Unit = runBlocking {
         val lastHostId = seedOverflowHosts(count = 24)
         val lastHostTag = HOST_ROW_TAG_PREFIX + lastHostId
 
@@ -102,12 +102,11 @@ class HostAndFolderListScrollE2eTest {
             .performScrollToNode(hasTestTag(lastHostTag))
         compose.waitForIdle()
         compose.onNodeWithTag(lastHostTag, useUnmergedTree = true).assertIsDisplayed()
-
-        compose.onNodeWithTag(HOST_LIST_CONTENT_TAG, useUnmergedTree = true)
-            .performScrollToNode(hasTestTag(HOST_LIST_VERSION_FOOTER_TAG))
-        compose.waitForIdle()
-        compose.onNodeWithTag(HOST_LIST_VERSION_FOOTER_TAG, useUnmergedTree = true)
-            .assertIsDisplayed()
+        assertTrue(
+            "Host list version footer should stay out of the primary host-list surface",
+            compose.onAllNodesWithTag(OLD_HOST_LIST_VERSION_FOOTER_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes().isEmpty(),
+        )
         captureFullDevice("02-host-list-bottom-viewport.png")
     }
 
@@ -162,6 +161,7 @@ class HostAndFolderListScrollE2eTest {
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
+        const val OLD_HOST_LIST_VERSION_FOOTER_TAG: String = "host-list:version-footer"
     }
 }
 

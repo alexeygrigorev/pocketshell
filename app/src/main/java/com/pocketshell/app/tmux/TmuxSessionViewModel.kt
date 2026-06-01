@@ -73,6 +73,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -264,6 +265,8 @@ public class TmuxSessionViewModel @Inject constructor(
     private var windowSizePolicyAppliedForAttach: Boolean = false
     private val agentRepository: AgentConversationRepository = AgentConversationRepository()
     private val paneAgentJobs: MutableMap<String, Job> = ConcurrentHashMap()
+    private val paneAgentTailGenerations: MutableMap<String, Long> = ConcurrentHashMap()
+    private val nextAgentTailGeneration: AtomicInteger = AtomicInteger(0)
     // Issue #186: dedup key is (cwd, foreground-command, tty). Adding
     // tty here means a tmux re-attach that rotates a pane onto a new
     // `/dev/pts/N` is a fresh detection trigger — the previous shape
@@ -1036,8 +1039,9 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputJobs.clear()
         paneAgentJobs.values.forEach { it.cancel() }
         paneAgentJobs.clear()
+        paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
-        _agentConversations.value = emptyMap()
+        clearAgentConversations()
         _panes.value = emptyList()
         registeredHostId?.let { activeTmuxClients.unregister(it) }
         registeredHostId = null
@@ -1063,9 +1067,10 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputJobs.clear()
         paneInputJobs.putAll(runtime.paneInputJobs)
         paneAgentJobs.clear()
+        paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneAgentInputs.putAll(runtime.paneAgentInputs)
-        _agentConversations.value = runtime.agentConversations
+        replaceAgentConversations(runtime.agentConversations)
         remoteColumns = runtime.remoteColumns
         remoteRows = runtime.remoteRows
         resetControlClientSizeForAttach()
@@ -2355,13 +2360,14 @@ public class TmuxSessionViewModel @Inject constructor(
         for (paneId in gonePaneIds) {
             paneProducerJobs.remove(paneId)?.cancel()
             paneAgentJobs.remove(paneId)?.cancel()
+            paneAgentTailGenerations.remove(paneId)
             paneAgentInputs.remove(paneId)
             paneInputJobs.remove(paneId)?.cancel()
             paneInputQueues.remove(paneId)?.close()
             paneRows[paneId]?.terminalState?.detachExternalProducer()
             paneRows.remove(paneId)
         }
-        _agentConversations.value = _agentConversations.value.filterKeys { it in nextById.keys }
+        filterAgentConversationsToPaneIds(nextById.keys)
         paneRows.putAll(nextById)
         _panes.value = nextById.values.toList()
         return newRows
@@ -2489,6 +2495,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val input = Triple(cwd, command, tty)
         if (paneAgentInputs[pane.paneId] == input && paneAgentJobs[pane.paneId]?.isActive == true) return
         paneAgentJobs.remove(pane.paneId)?.cancel()
+        paneAgentTailGenerations.remove(pane.paneId)
         paneAgentInputs[pane.paneId] = input
         val paneId = pane.paneId
         val guard = refreshGuard ?: RuntimeRefreshGuard(
@@ -2542,9 +2549,9 @@ public class TmuxSessionViewModel @Inject constructor(
      * [_agentConversations].
      */
     private fun clearAgentDetectionForPane(paneId: String) {
-        val current = _agentConversations.value[paneId] ?: return
-        if (current.detection == null) return
-        _agentConversations.value = _agentConversations.value - paneId
+        updateAgentConversation(paneId) { current ->
+            if (current.detection == null) current else null
+        }
     }
 
     private suspend fun startAgentConversationForPane(
@@ -2578,11 +2585,13 @@ public class TmuxSessionViewModel @Inject constructor(
             return
         }
         if (followJob != null) {
+            val tailGeneration = nextAgentTailGeneration(paneId)
             paneAgentJobs[paneId] = followJob
+            paneAgentTailGenerations[paneId] = tailGeneration
             followJob.invokeOnCompletion { cause ->
                 if (cause is CancellationException) return@invokeOnCompletion
                 bridgeScope.launch {
-                    markAgentTailStopped(paneId, detection, cause)
+                    markAgentTailStopped(paneId, detection, followJob, tailGeneration, cause)
                 }
             }
         } else {
@@ -2600,6 +2609,7 @@ public class TmuxSessionViewModel @Inject constructor(
         runtime.agentConversations.forEach { (paneId, state) ->
             val detection = state.detection ?: return@forEach
             paneAgentJobs.remove(paneId)?.cancel()
+            paneAgentTailGenerations.remove(paneId)
             paneAgentJobs[paneId] = bridgeScope.launch {
                 restartAgentConversationTailForPane(
                     session = session,
@@ -2624,13 +2634,7 @@ public class TmuxSessionViewModel @Inject constructor(
             agentRepository.readInitialEvents(session, detection)
         }.getOrDefault(restored.events)
         if (!isCurrentRuntime(refreshGuard)) return
-        setAgentConversation(
-            paneId,
-            restored.copy(
-                events = boundedDistinctEvents(initialEvents),
-                syncStatus = AgentConversationSyncStatus.Live,
-            ),
-        )
+        markRestoredAgentTailLive(paneId, detection, initialEvents)
         val followJob = agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
             appendAgentEvents(paneId, listOf(event))
         }
@@ -2639,11 +2643,13 @@ public class TmuxSessionViewModel @Inject constructor(
             return
         }
         if (followJob != null) {
+            val tailGeneration = nextAgentTailGeneration(paneId)
             paneAgentJobs[paneId] = followJob
+            paneAgentTailGenerations[paneId] = tailGeneration
             followJob.invokeOnCompletion { cause ->
                 if (cause is CancellationException) return@invokeOnCompletion
                 bridgeScope.launch {
-                    markAgentTailStopped(paneId, detection, cause)
+                    markAgentTailStopped(paneId, detection, followJob, tailGeneration, cause)
                 }
             }
         } else {
@@ -2684,9 +2690,13 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     public fun selectSessionTab(paneId: String, tab: SessionTab) {
-        val current = _agentConversations.value[paneId] ?: return
-        if (tab == SessionTab.Conversation && current.detection == null) return
-        setAgentConversation(paneId, current.copy(selectedTab = tab))
+        updateAgentConversation(paneId) { current ->
+            if (tab == SessionTab.Conversation && current.detection == null) {
+                current
+            } else {
+                current.copy(selectedTab = tab)
+            }
+        }
     }
 
     /**
@@ -2697,22 +2707,26 @@ public class TmuxSessionViewModel @Inject constructor(
      * search field's `onValueChange` inside [TmuxConversationPane].
      */
     public fun setAgentSearchQuery(paneId: String, query: String) {
-        val current = _agentConversations.value[paneId] ?: return
-        if (current.searchQuery == query) return
-        setAgentConversation(paneId, current.copy(searchQuery = query))
+        updateAgentConversation(paneId) { current ->
+            if (current.searchQuery == query) current else current.copy(searchQuery = query)
+        }
     }
 
     private fun appendAgentEvents(paneId: String, events: List<ConversationEvent>) {
         if (events.isEmpty()) return
-        val current = _agentConversations.value[paneId] ?: return
-        setAgentConversation(paneId, current.copy(events = boundedDistinctEvents(current.events + events)))
+        updateAgentConversation(paneId) { current ->
+            current.copy(events = boundedDistinctEvents(current.events + events))
+        }
     }
 
     private fun markAgentTailStopped(
         paneId: String,
         detection: AgentDetection,
+        tailJob: Job,
+        tailGeneration: Long,
         cause: Throwable?,
     ) {
+        if (!isCurrentAgentTail(paneId, tailJob, tailGeneration)) return
         val nextStatus = if (cause == null) {
             AgentConversationSyncStatus.Stale
         } else {
@@ -2734,14 +2748,80 @@ public class TmuxSessionViewModel @Inject constructor(
         detection: AgentDetection,
         syncStatus: AgentConversationSyncStatus,
     ) {
-        val current = _agentConversations.value[paneId] ?: return
-        if (current.detection != detection || current.syncStatus == syncStatus) return
-        setAgentConversation(paneId, current.copy(syncStatus = syncStatus))
+        updateAgentConversation(paneId) { current ->
+            if (current.detection != detection || current.syncStatus == syncStatus) {
+                current
+            } else {
+                current.copy(syncStatus = syncStatus)
+            }
+        }
+    }
+
+    private fun markRestoredAgentTailLive(
+        paneId: String,
+        detection: AgentDetection,
+        fallbackEvents: List<ConversationEvent>,
+    ) {
+        _agentConversations.update { conversations ->
+            val current = conversations[paneId]
+            val updated = when {
+                current == null -> AgentConversationUiState(
+                    detection = detection,
+                    events = boundedDistinctEvents(fallbackEvents),
+                    selectedTab = SessionTab.Terminal,
+                    syncStatus = AgentConversationSyncStatus.Live,
+                )
+                current.detection != detection -> current
+                else -> current.copy(
+                    events = boundedDistinctEvents(current.events + fallbackEvents),
+                    syncStatus = AgentConversationSyncStatus.Live,
+                )
+            }
+            if (updated == current) conversations else conversations + (paneId to updated)
+        }
     }
 
     private fun setAgentConversation(paneId: String, state: AgentConversationUiState) {
-        _agentConversations.value = _agentConversations.value + (paneId to state)
+        _agentConversations.update { it + (paneId to state) }
     }
+
+    private fun updateAgentConversation(
+        paneId: String,
+        transform: (AgentConversationUiState) -> AgentConversationUiState?,
+    ) {
+        _agentConversations.update { conversations ->
+            val current = conversations[paneId] ?: return@update conversations
+            val updated = transform(current) ?: return@update conversations - paneId
+            if (updated == current) conversations else conversations + (paneId to updated)
+        }
+    }
+
+    private fun replaceAgentConversations(conversations: Map<String, AgentConversationUiState>) {
+        _agentConversations.value = conversations
+    }
+
+    private fun clearAgentConversations() {
+        _agentConversations.value = emptyMap()
+    }
+
+    private fun filterAgentConversationsToPaneIds(paneIds: Set<String>) {
+        _agentConversations.update { conversations ->
+            conversations.filterKeys { it in paneIds }
+        }
+    }
+
+    private fun nextAgentTailGeneration(paneId: String): Long =
+        nextAgentTailGeneration.incrementAndGet().toLong().also { generation ->
+            paneAgentTailGenerations[paneId] = generation
+        }
+
+    private fun isCurrentAgentTail(
+        paneId: String,
+        tailJob: Job,
+        tailGeneration: Long,
+    ): Boolean =
+        paneAgentJobs[paneId] === tailJob &&
+            paneAgentTailGenerations[paneId] == tailGeneration
 
     /**
      * Test seam: synthesize a freshly-detected agent conversation on
@@ -2776,11 +2856,13 @@ public class TmuxSessionViewModel @Inject constructor(
             appendAgentEvents(paneId, listOf(event))
         }
         if (job != null) {
+            val tailGeneration = nextAgentTailGeneration(paneId)
             paneAgentJobs[paneId] = job
+            paneAgentTailGenerations[paneId] = tailGeneration
             job.invokeOnCompletion { cause ->
                 if (cause is CancellationException) return@invokeOnCompletion
                 bridgeScope.launch {
-                    markAgentTailStopped(paneId, detection, cause)
+                    markAgentTailStopped(paneId, detection, job, tailGeneration, cause)
                 }
             }
         } else {
@@ -3640,6 +3722,7 @@ public class TmuxSessionViewModel @Inject constructor(
             queue.close()
         }
         paneAgentJobs.clear()
+        paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneInputJobs.clear()
         paneInputQueues.clear()
@@ -3731,6 +3814,7 @@ public class TmuxSessionViewModel @Inject constructor(
             queue.close()
         }
         paneAgentJobs.clear()
+        paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneInputJobs.clear()
         paneInputQueues.clear()
@@ -3852,6 +3936,7 @@ public class TmuxSessionViewModel @Inject constructor(
             queue.close()
         }
         paneAgentJobs.clear()
+        paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         paneInputJobs.clear()
         paneInputQueues.clear()

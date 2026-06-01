@@ -94,10 +94,12 @@ import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
+import com.pocketshell.app.session.ConversationSyncStatusRow
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.session.KeyBarWithMic
 import com.pocketshell.app.settings.SettingsViewModel
 import com.pocketshell.app.session.SessionTab
+import com.pocketshell.app.session.conversationSyncStatusLabel
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
@@ -2446,40 +2448,6 @@ private fun rememberHoistedQuery(
 }
 
 private val NoOpStringChange: (String) -> Unit = {}
-
-@Composable
-private fun ConversationSyncStatusRow(syncStatus: AgentConversationSyncStatus) {
-    val (label, color) = when (syncStatus) {
-        AgentConversationSyncStatus.Live -> conversationSyncStatusLabel(syncStatus) to PocketShellColors.Green
-        AgentConversationSyncStatus.Stale -> conversationSyncStatusLabel(syncStatus) to PocketShellColors.Amber
-        AgentConversationSyncStatus.LogUnavailable -> conversationSyncStatusLabel(syncStatus) to PocketShellColors.Red
-    }
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(7.dp)
-                .background(color = color, shape = RoundedCornerShape(50)),
-        )
-        Text(
-            text = "Conversation: $label",
-            color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
-        )
-    }
-}
-
-internal fun conversationSyncStatusLabel(syncStatus: AgentConversationSyncStatus): String =
-    when (syncStatus) {
-        AgentConversationSyncStatus.Live -> "Live"
-        AgentConversationSyncStatus.Stale -> "Stale"
-        AgentConversationSyncStatus.LogUnavailable -> "Log unavailable"
-    }
 
 /**
  * Issue #154: jump-to-latest affordance. A small accent-tinted pill that

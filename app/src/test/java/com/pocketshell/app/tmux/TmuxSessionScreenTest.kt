@@ -3,6 +3,7 @@ package com.pocketshell.app.tmux
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.SessionTab
+import com.pocketshell.app.session.conversationSyncStatusLabel
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
 import com.pocketshell.app.sessions.HostTmuxSessionPickerState
 import com.pocketshell.app.sessions.HostTmuxSessionRow

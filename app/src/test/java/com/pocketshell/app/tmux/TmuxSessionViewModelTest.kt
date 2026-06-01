@@ -2019,6 +2019,82 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun stoppedAgentLogTailPreservesConcurrentConversationState() = runTest {
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        val detection = newClaudeDetection()
+        val tailJob = Job()
+        vm.startAgentConversationForTest("%0", detection)
+        vm.startAgentTailForTest(
+            paneId = "%0",
+            session = FakeSshSession(tailJob = tailJob),
+            detection = detection,
+            fromLineExclusive = 0L,
+        )
+
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        vm.setAgentSearchQuery("%0", "deploy")
+        vm.appendAgentEventsForTest(
+            "%0",
+            listOf(
+                ConversationEvent.Message(
+                    id = "assistant-late",
+                    agent = AgentKind.ClaudeCode,
+                    atMillis = 10L,
+                    role = ConversationRole.Assistant,
+                    text = "late event",
+                ),
+            ),
+        )
+        tailJob.complete()
+        advanceUntilIdle()
+
+        val after = vm.agentConversations.value["%0"]!!
+        assertEquals(AgentConversationSyncStatus.Stale, after.syncStatus)
+        assertEquals(SessionTab.Conversation, after.selectedTab)
+        assertEquals("deploy", after.searchQuery)
+        assertEquals("assistant-late", after.events.single().id)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
+    @Test
+    fun staleOldAgentLogTailCompletionDoesNotMarkRestartedPaneStale() = runTest {
+        val vm = newVm()
+        vm.attachClientForTest(FakeTmuxClient())
+        val detection = newClaudeDetection()
+        val oldTailJob = Job()
+        val restartedTailJob = Job()
+        vm.startAgentConversationForTest("%0", detection)
+
+        vm.startAgentTailForTest(
+            paneId = "%0",
+            session = FakeSshSession(tailJob = oldTailJob),
+            detection = detection,
+            fromLineExclusive = 0L,
+        )
+        vm.startAgentTailForTest(
+            paneId = "%0",
+            session = FakeSshSession(tailJob = restartedTailJob),
+            detection = detection,
+            fromLineExclusive = 0L,
+        )
+
+        oldTailJob.complete()
+        advanceUntilIdle()
+
+        assertEquals(
+            "old tail completion must not stale a pane that already has a newer tail",
+            AgentConversationSyncStatus.Live,
+            vm.agentConversations.value["%0"]!!.syncStatus,
+        )
+
+        restartedTailJob.complete()
+        advanceUntilIdle()
+
+        assertEquals(AgentConversationSyncStatus.Stale, vm.agentConversations.value["%0"]!!.syncStatus)
+    }
+
+    @Test
     fun failedAgentLogTailMarksConversationLogUnavailableWhileTmuxStaysConnected() = runTest {
         val vm = newVm()
         vm.attachClientForTest(FakeTmuxClient())
@@ -3288,6 +3364,108 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun restoredRuntimeTailRefreshPreservesConcurrentConversationState() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val vm = newVm(runtimeCache = runtimeCache)
+        val execGate = CompletableDeferred<Unit>()
+        val clientA = FakeTmuxClient()
+        val clientB = FakeTmuxClient()
+        val detection = newClaudeDetection()
+        val refreshedLog = """
+            {"type":"assistant","uuid":"cached","message":{"role":"assistant","content":"cached event"}}
+            {"type":"assistant","uuid":"backlog","message":{"role":"assistant","content":"backlog while cached"}}
+        """.trimIndent()
+        val cachedEvent = ConversationEvent.Message(
+            id = "cached",
+            agent = AgentKind.ClaudeCode,
+            atMillis = 1L,
+            role = ConversationRole.Assistant,
+            text = "cached event",
+        )
+        val newerEvent = ConversationEvent.Message(
+            id = "newer",
+            agent = AgentKind.ClaudeCode,
+            atMillis = 2L,
+            role = ConversationRole.Assistant,
+            text = "newer event",
+        )
+        val session = FakeSshSession(
+            execGate = execGate,
+            wcOutput = "2\n",
+            initialEventsOutput = refreshedLog,
+        )
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = clientA,
+            session = session,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "work",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        vm.startAgentConversationForTest("%0", detection, initialEvents = listOf(cachedEvent))
+
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = clientB,
+            session = session,
+        )
+        runCurrent()
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        runCurrent()
+
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        vm.setAgentSearchQuery("%0", "deploy")
+        vm.appendAgentEventsForTest("%0", listOf(newerEvent))
+
+        execGate.complete(Unit)
+        advanceUntilIdle()
+
+        val after = vm.agentConversations.value["%0"]!!
+        assertEquals(AgentConversationSyncStatus.Live, after.syncStatus)
+        assertEquals(SessionTab.Conversation, after.selectedTab)
+        assertEquals("deploy", after.searchQuery)
+        assertEquals(listOf("cached", "newer", "backlog"), after.events.map { it.id })
+        assertEquals(
+            "cached restore plus async restart should start exactly one new tail",
+            1,
+            session.tailCalls,
+        )
+        assertEquals(listOf("/home/u/.claude/sessions/abc.jsonl" to 2L), session.tailFromLineCalls)
+    }
+
+    @Test
     fun runtimeCacheEvictsLeastRecentlyUsedRuntime() = runTest {
         val cache = TmuxSessionRuntimeCache(maxEntries = 2)
         val first = cachedRuntimeForTest("one")
@@ -4002,6 +4180,9 @@ class TmuxSessionViewModelTest {
     private class FakeSshSession(
         private val isConnectedValue: Boolean = true,
         private val tailJob: CompletableJob = Job(),
+        private val execGate: CompletableDeferred<Unit>? = null,
+        private val wcOutput: String = "0\n",
+        private val initialEventsOutput: String = "",
     ) : com.pocketshell.core.ssh.SshSession {
         @Volatile
         var closed: Boolean = false
@@ -4009,13 +4190,32 @@ class TmuxSessionViewModelTest {
         override val isConnected: Boolean
             get() = isConnectedValue && !closed
 
-        override suspend fun exec(command: String): com.pocketshell.core.ssh.ExecResult =
-            com.pocketshell.core.ssh.ExecResult(stdout = "", stderr = "", exitCode = 0)
+        override suspend fun exec(command: String): com.pocketshell.core.ssh.ExecResult {
+            execGate?.await()
+            val stdout = when {
+                command.contains("wc -l < ") -> wcOutput
+                command.startsWith("tail -n ") -> initialEventsOutput
+                else -> ""
+            }
+            return com.pocketshell.core.ssh.ExecResult(stdout = stdout, stderr = "", exitCode = 0)
+        }
 
         var tailCalls: Int = 0
             private set
 
+        val tailFromLineCalls = mutableListOf<Pair<String, Long>>()
+
         override fun tail(path: String, onLine: (String) -> Unit): kotlinx.coroutines.Job {
+            tailCalls += 1
+            return tailJob
+        }
+
+        override fun tail(
+            path: String,
+            fromLineExclusive: Long,
+            onLine: (String) -> Unit,
+        ): kotlinx.coroutines.Job {
+            tailFromLineCalls += path to fromLineExclusive
             tailCalls += 1
             return tailJob
         }

@@ -5,16 +5,21 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.session.AgentConversationSyncStatus
+import com.pocketshell.app.session.CONVERSATION_SYNC_RETRY_TAG
 import com.pocketshell.app.session.ConversationPane
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SESSION_CONVERSATION_COMPOSER_INPUT_TAG
 import com.pocketshell.app.session.SESSION_CONVERSATION_COMPOSER_SEND_TAG
+import com.pocketshell.app.session.SESSION_CONVERSATION_SEARCH_TAG
 import com.pocketshell.app.session.SessionViewModel
+import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
@@ -120,6 +125,197 @@ class ConversationInteractE2eTest {
                 """{"id":"e2e-opencode-$marker","role":"user","content":${prompt.jsonString()},"createdAtMillis":${System.currentTimeMillis()}}"""
             },
         )
+
+    @Test
+    fun rawSshRetryRecoversDroppedClaudeTailWithoutDisconnectingTerminal() = runBlocking<Unit> {
+        val journeyStart = SystemClock.elapsedRealtime()
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        val marker = "retry-${System.currentTimeMillis()}"
+        val searchNeedle = "assistant-$marker"
+        val draftPrompt = "draft-$marker"
+        val beforeMarker = "ALIVE-BEFORE-$marker"
+        val staleMarker = "ALIVE-STALE-$marker"
+
+        val tailSessionResult = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+            timeoutMs = 15_000,
+        )
+        assertTrue(
+            "expected tail-SSH connection to Docker agents target, got ${tailSessionResult.exceptionOrNull()}",
+            tailSessionResult.isSuccess,
+        )
+        val tailSession = tailSessionResult.getOrThrow()
+        val writerHandle = openShell(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+        )
+        val receivedFromRemote = StringBuilder()
+        val viewModel = SessionViewModel(
+            applicationContext = InstrumentationRegistry.getInstrumentation().targetContext,
+        )
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+        val outputCollectorJob = producerScope.launch {
+            viewModel.terminalState.output.collect { bytes ->
+                synchronized(receivedFromRemote) {
+                    receivedFromRemote.append(bytes.toString(Charsets.UTF_8))
+                }
+            }
+        }
+        val producerJob = viewModel.terminalState.attachExternalProducer(
+            scope = producerScope,
+            stdout = createStdoutFlow(writerHandle.shell),
+            remoteStdin = writerHandle.shell.outputStream,
+        )
+
+        try {
+            val detection = AgentDetection(
+                agent = AgentKind.ClaudeCode,
+                sourcePath = CLAUDE_PATH,
+                sessionId = CLAUDE_PATH.substringAfterLast('/').substringBeforeLast('.'),
+                confidence = AgentDetection.Confidence.RecentFile,
+            )
+            viewModel.startAgentConversationForTest(
+                detection = detection,
+                initialEvents = emptyList(),
+            )
+            viewModel.attachSessionForAgentRetryForTest(tailSession)
+
+            val seedLineCount = AgentTestRepo.lineCount(tailSession, detection)
+            assertTrue(
+                "expected seeded Claude JSONL at $CLAUDE_PATH to have at least one line, got $seedLineCount",
+                seedLineCount > 0,
+            )
+            val tailJob = viewModel.startAgentTailForTest(
+                session = tailSession,
+                detection = detection,
+                fromLineExclusive = seedLineCount,
+            )
+            assertTrue("expected Claude tail job", tailJob != null)
+
+            compose.setContent {
+                PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                    val state by viewModel.agentConversation.collectAsState()
+                    ConversationPane(
+                        events = state.events,
+                        onSendToAgent = viewModel::sendToAgent,
+                        query = state.searchQuery,
+                        onQueryChange = viewModel::setAgentSearchQuery,
+                        syncStatus = state.syncStatus,
+                        onRetryAgentStream = viewModel::retryAgentConversationStream,
+                        agentName = detection.agent.displayName,
+                    )
+                }
+            }
+            compose.waitUntil(timeoutMillis = 10_000) {
+                compose.onAllNodesWithTag(SESSION_CONVERSATION_COMPOSER_INPUT_TAG)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag(SESSION_CONVERSATION_SEARCH_TAG)
+                .performTextInput(searchNeedle)
+            compose.onNodeWithTag(SESSION_CONVERSATION_COMPOSER_INPUT_TAG)
+                .performTextInput(draftPrompt)
+
+            sendAndWaitForTerminalEcho(
+                viewModel = viewModel,
+                receivedFromRemote = receivedFromRemote,
+                command = "printf '$beforeMarker\\n'",
+                expected = beforeMarker,
+                label = "before tail drop",
+            )
+
+            waitForRemoteTailProcess(tailSession, CLAUDE_PATH)
+            val killResult = tailSession.exec(killRemoteTailCommand(CLAUDE_PATH))
+            assertEquals(
+                "expected remote tail-kill command to succeed: stderr=${killResult.stderr}",
+                0,
+                killResult.exitCode,
+            )
+            waitForSyncStatus(viewModel, AgentConversationSyncStatus.Stale, label = "tail drop")
+            assertTrue(
+                "tail drop must not mark the raw SSH terminal disconnected; status=${viewModel.connectionStatus.value}",
+                viewModel.connectionStatus.value is ConnectionStatus.Connected,
+            )
+            compose.waitUntil(timeoutMillis = TAIL_DEADLINE_MS) {
+                compose.onAllNodesWithText("Conversation: Stale", substring = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            sendAndWaitForTerminalEcho(
+                viewModel = viewModel,
+                receivedFromRemote = receivedFromRemote,
+                command = "printf '$staleMarker\\n'",
+                expected = staleMarker,
+                label = "stale tail terminal liveness",
+            )
+
+            val retryStart = SystemClock.elapsedRealtime()
+            compose.onNodeWithTag(CONVERSATION_SYNC_RETRY_TAG).performClick()
+            waitForSyncStatus(viewModel, AgentConversationSyncStatus.Live, label = "retry")
+            recordTiming("raw_retry_tail_drop_to_live_ms", SystemClock.elapsedRealtime() - retryStart)
+            assertEquals(
+                "search query must survive retry",
+                searchNeedle,
+                viewModel.agentConversation.value.searchQuery,
+            )
+
+            val assistantText = "assistant response after retry $searchNeedle"
+            val appendResult = tailSession.exec(
+                "printf '%s\\n' " +
+                    shellQuote(
+                        """{"type":"assistant","uuid":"e2e-claude-retry-$marker","timestamp":"2026-06-01T10:00:00Z","message":{"role":"assistant","content":${assistantText.jsonString()}}}""",
+                    ) +
+                    " >> " +
+                    shellQuote(CLAUDE_PATH),
+            )
+            assertEquals(
+                "expected post-retry Claude JSONL append to succeed: stderr=${appendResult.stderr}",
+                0,
+                appendResult.exitCode,
+            )
+            waitForConversationMessage(
+                viewModel = viewModel,
+                text = assistantText,
+                role = ConversationRole.Assistant,
+                label = "post-retry assistant response",
+            )
+            compose.waitUntil(timeoutMillis = TAIL_DEADLINE_MS) {
+                compose.onAllNodesWithText(assistantText, substring = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+
+            compose.onNodeWithTag(SESSION_CONVERSATION_COMPOSER_SEND_TAG).performClick()
+            waitForConversationMessage(
+                viewModel = viewModel,
+                text = draftPrompt,
+                role = ConversationRole.User,
+                label = "preserved draft optimistic send",
+            )
+            waitForRemoteTranscript(receivedFromRemote, draftPrompt, label = "preserved draft sent to terminal")
+
+            recordTiming("raw_retry_journey_total_ms", SystemClock.elapsedRealtime() - journeyStart)
+        } finally {
+            producerJob.cancel()
+            outputCollectorJob.cancel()
+            producerScope.cancel()
+            viewModel.terminalState.detachExternalProducer()
+            runCatching { writerHandle.shell.close() }
+            runCatching { writerHandle.sessionChannel.close() }
+            runCatching { writerHandle.client.disconnect() }
+        }
+
+        writeTimings("raw-retry")
+    }
 
     private fun runComposerJourneyTest(
         kind: AgentKind,
@@ -375,6 +571,67 @@ class ConversationInteractE2eTest {
         println(line)
     }
 
+    private fun waitForSyncStatus(
+        viewModel: SessionViewModel,
+        status: AgentConversationSyncStatus,
+        label: String,
+    ) {
+        val deadline = SystemClock.elapsedRealtime() + TAIL_DEADLINE_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            if (viewModel.agentConversation.value.syncStatus == status) return
+            SystemClock.sleep(100)
+        }
+        error("expected sync status $status for $label, got ${viewModel.agentConversation.value.syncStatus}")
+    }
+
+    private fun sendAndWaitForTerminalEcho(
+        viewModel: SessionViewModel,
+        receivedFromRemote: StringBuilder,
+        command: String,
+        expected: String,
+        label: String,
+    ) {
+        viewModel.sendText(command, withEnter = true)
+        waitForRemoteTranscript(receivedFromRemote, expected, label)
+    }
+
+    private fun waitForRemoteTranscript(
+        receivedFromRemote: StringBuilder,
+        expected: String,
+        label: String,
+    ) {
+        val deadline = SystemClock.elapsedRealtime() + TAIL_DEADLINE_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val snapshot = synchronized(receivedFromRemote) { receivedFromRemote.toString() }
+            if (expected in snapshot) return
+            SystemClock.sleep(100)
+        }
+        error(
+            "expected terminal transcript for $label to contain `$expected`; got tail=`${
+                synchronized(receivedFromRemote) { receivedFromRemote.toString().takeLast(400) }
+            }`",
+        )
+    }
+
+    private fun waitForConversationMessage(
+        viewModel: SessionViewModel,
+        text: String,
+        role: ConversationRole,
+        label: String,
+    ) {
+        val deadline = SystemClock.elapsedRealtime() + TAIL_DEADLINE_MS
+        var lastEvents: List<ConversationEvent> = emptyList()
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val events = viewModel.agentConversation.value.events
+            lastEvents = events
+            if (events.filterIsInstance<ConversationEvent.Message>().any { it.role == role && it.text == text }) {
+                return
+            }
+            SystemClock.sleep(100)
+        }
+        error("expected $label message role=$role text=`$text`; lastEvents=$lastEvents")
+    }
+
     private fun writeTimings(engineLabel: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val mediaRoot = instrumentation.targetContext.externalMediaDirs
@@ -419,6 +676,34 @@ class ConversationInteractE2eTest {
 
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\\''") + "'"
+
+    private fun killRemoteTailCommand(path: String): String {
+        val escapedPath = path.replace("\\", "\\\\").replace("\"", "\\\"")
+        return "for pid in $(ps -eo pid,args | awk 'index(\$0, \"tail -F\") && " +
+            "index(\$0, \"$escapedPath\") && !index(\$0, \"awk\") {print \$1}'); do kill \"\$pid\"; done"
+    }
+
+    private suspend fun waitForRemoteTailProcess(
+        session: com.pocketshell.core.ssh.SshSession,
+        path: String,
+    ) {
+        val command = remoteTailCountCommand(path)
+        val deadline = SystemClock.elapsedRealtime() + TAIL_DEADLINE_MS
+        var lastOutput = ""
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val result = session.exec(command)
+            lastOutput = result.stdout.trim()
+            if ((lastOutput.toIntOrNull() ?: 0) > 0) return
+            SystemClock.sleep(100)
+        }
+        error("expected a remote tail -F process for $path before killing the tail; last count=$lastOutput")
+    }
+
+    private fun remoteTailCountCommand(path: String): String {
+        val escapedPath = path.replace("\\", "\\\\").replace("\"", "\\\"")
+        return "ps -eo pid,args | awk 'index(\$0, \"tail -F\") && " +
+            "index(\$0, \"$escapedPath\") && !index(\$0, \"awk\") {count++} END {print count+0}'"
+    }
 
     private companion object {
         // The deterministic agent fixture pre-seeds these JSONL paths

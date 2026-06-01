@@ -79,7 +79,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import click
 
@@ -146,6 +146,150 @@ def _run_tmuxctl(args: Sequence[str]) -> int:
     return completed.returncode
 
 
+def _run_tmuxctl_capture(args: Sequence[str]) -> dict[str, Any]:
+    """Invoke ``tmuxctl`` and return a daemon-friendly raw envelope."""
+    tmuxctl_path = _resolve_tmuxctl_binary()
+    if tmuxctl_path is None:
+        return {
+            "stdout": "",
+            "stderr": _tmuxctl_missing_message() + "\n",
+            "returncode": 127,
+        }
+
+    completed = subprocess.run(
+        [tmuxctl_path, *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "returncode": completed.returncode,
+    }
+
+
+def _emit_envelope(ctx: click.Context, envelope: dict[str, Any]) -> None:
+    """Proxy a daemon/subprocess envelope to stdout/stderr and exit code."""
+    if envelope.get("stdout"):
+        sys.stdout.write(str(envelope["stdout"]))
+    if envelope.get("stderr"):
+        sys.stderr.write(str(envelope["stderr"]))
+    exit_code = int(envelope.get("returncode", 0))
+    if exit_code != 0:
+        ctx.exit(exit_code)
+
+
+def _try_daemon_jobs_call(
+    method: str,
+    params: dict[str, Any],
+    *,
+    timeout: float = 5.0,
+) -> Optional[dict[str, Any]]:
+    """Dispatch a jobs RPC to the daemon; return ``None`` on miss/error."""
+    from pocketshell import daemon as _daemon
+
+    socket_path = _daemon.resolve_socket_path()
+    if not socket_path.exists():
+        return None
+
+    try:
+        result = _daemon.call(
+            method,
+            params=params,
+            socket_path=socket_path,
+            timeout=timeout,
+        )
+    except (_daemon.DaemonClientError, RuntimeError, OSError):
+        return None
+    if not isinstance(result, dict):
+        return None
+    return result
+
+
+def _extra_args(params: dict[str, Any]) -> list[str]:
+    raw = params.get("extra_args")
+    if not isinstance(raw, list):
+        return []
+    return [item for item in raw if isinstance(item, str)]
+
+
+def daemon_handler_list(params: dict[str, Any]) -> dict[str, Any]:
+    """JSON-RPC handler for ``jobs.list``."""
+    args: list[str] = ["jobs", "list"]
+    session = params.get("session")
+    if isinstance(session, str) and session:
+        args.extend(["--session", session])
+    args.extend(_extra_args(params))
+    return _run_tmuxctl_capture(args)
+
+
+def daemon_handler_show(params: dict[str, Any]) -> dict[str, Any]:
+    """JSON-RPC handler for ``jobs.show``."""
+    job_id = params.get("job_id")
+    args: list[str] = ["jobs", "show", str(job_id)]
+    args.extend(_extra_args(params))
+    return _run_tmuxctl_capture(args)
+
+
+def daemon_handler_trigger(params: dict[str, Any]) -> dict[str, Any]:
+    """JSON-RPC handler for ``jobs.trigger``."""
+    job_id = params.get("job_id")
+    args: list[str] = ["jobs", "trigger", str(job_id)]
+    args.extend(_extra_args(params))
+    return _run_tmuxctl_capture(args)
+
+
+def daemon_handler_add(params: dict[str, Any]) -> dict[str, Any]:
+    """JSON-RPC handler for ``jobs.add``."""
+    session_name = params.get("session_name")
+    every = params.get("every")
+    args: list[str] = ["jobs", "add", str(session_name), "--every", str(every)]
+    message = params.get("message")
+    if isinstance(message, str):
+        args.extend(["--message", message])
+    if bool(params.get("start_now")):
+        args.append("--start-now")
+    args.extend(_extra_args(params))
+    return _run_tmuxctl_capture(args)
+
+
+def daemon_handler_edit(params: dict[str, Any]) -> dict[str, Any]:
+    """JSON-RPC handler for ``jobs.edit``."""
+    job_id = params.get("job_id")
+    args: list[str] = ["jobs", "edit", str(job_id)]
+    session = params.get("session")
+    if isinstance(session, str):
+        args.extend(["--session", session])
+    every = params.get("every")
+    if isinstance(every, str):
+        args.extend(["--every", every])
+    message = params.get("message")
+    if isinstance(message, str):
+        args.extend(["--message", message])
+    if bool(params.get("enable")):
+        args.append("--enable")
+    if bool(params.get("disable")):
+        args.append("--disable")
+    args.extend(_extra_args(params))
+    return _run_tmuxctl_capture(args)
+
+
+def daemon_handler_remove(params: dict[str, Any]) -> dict[str, Any]:
+    """JSON-RPC handler for ``jobs.remove``."""
+    job_id = params.get("job_id")
+    args: list[str] = ["jobs", "remove", str(job_id)]
+    args.extend(_extra_args(params))
+    return _run_tmuxctl_capture(args)
+
+
+def daemon_handler_status(_params: dict[str, Any]) -> dict[str, Any]:
+    """JSON-RPC handler for ``jobs.status``."""
+    if _is_daemon_running():
+        return {"stdout": "running\n", "stderr": "", "returncode": 0}
+    return {"stdout": "not running\n", "stderr": "", "returncode": 3}
+
+
 @click.group(
     name="jobs",
     context_settings={"help_option_names": ["-h", "--help"]},
@@ -191,9 +335,13 @@ def jobs_list(ctx: click.Context, session: Optional[str]) -> None:
     # `ctx.args` holds any extras we ignored (e.g. `--json` once
     # tmuxctl supports it). Forward verbatim, position preserved.
     args.extend(ctx.args)
-    exit_code = _run_tmuxctl(args)
-    if exit_code != 0:
-        ctx.exit(exit_code)
+    params: dict[str, Any] = {"extra_args": list(ctx.args)}
+    if session:
+        params["session"] = session
+    envelope = _try_daemon_jobs_call("jobs.list", params)
+    if envelope is None:
+        envelope = _run_tmuxctl_capture(args)
+    _emit_envelope(ctx, envelope)
 
 
 @jobs_group.command(
@@ -209,9 +357,13 @@ def jobs_list(ctx: click.Context, session: Optional[str]) -> None:
 def jobs_show(ctx: click.Context, job_id: int) -> None:
     """Show details for one job (delegates to `tmuxctl jobs show`)."""
     args: list[str] = ["jobs", "show", str(job_id), *ctx.args]
-    exit_code = _run_tmuxctl(args)
-    if exit_code != 0:
-        ctx.exit(exit_code)
+    envelope = _try_daemon_jobs_call(
+        "jobs.show",
+        {"job_id": job_id, "extra_args": list(ctx.args)},
+    )
+    if envelope is None:
+        envelope = _run_tmuxctl_capture(args)
+    _emit_envelope(ctx, envelope)
 
 
 @jobs_group.command(
@@ -234,9 +386,13 @@ def jobs_trigger(ctx: click.Context, job_id: int) -> None:
     brief calls for parity, not a reimplementation.
     """
     args: list[str] = ["jobs", "trigger", str(job_id), *ctx.args]
-    exit_code = _run_tmuxctl(args)
-    if exit_code != 0:
-        ctx.exit(exit_code)
+    envelope = _try_daemon_jobs_call(
+        "jobs.trigger",
+        {"job_id": job_id, "extra_args": list(ctx.args)},
+    )
+    if envelope is None:
+        envelope = _run_tmuxctl_capture(args)
+    _emit_envelope(ctx, envelope)
 
 
 # ----- jobs add / edit / remove --------------------------------------
@@ -294,9 +450,17 @@ def jobs_add(
     if start_now:
         args.append("--start-now")
     args.extend(ctx.args)
-    exit_code = _run_tmuxctl(args)
-    if exit_code != 0:
-        ctx.exit(exit_code)
+    params: dict[str, Any] = {
+        "session_name": session_name,
+        "every": every,
+        "message": message,
+        "start_now": start_now,
+        "extra_args": list(ctx.args),
+    }
+    envelope = _try_daemon_jobs_call("jobs.add", params)
+    if envelope is None:
+        envelope = _run_tmuxctl_capture(args)
+    _emit_envelope(ctx, envelope)
 
 
 @jobs_group.command(
@@ -374,9 +538,19 @@ def jobs_edit(
     if disable:
         args.append("--disable")
     args.extend(ctx.args)
-    exit_code = _run_tmuxctl(args)
-    if exit_code != 0:
-        ctx.exit(exit_code)
+    params = {
+        "job_id": job_id,
+        "session": session,
+        "every": every,
+        "message": message,
+        "enable": enable,
+        "disable": disable,
+        "extra_args": list(ctx.args),
+    }
+    envelope = _try_daemon_jobs_call("jobs.edit", params)
+    if envelope is None:
+        envelope = _run_tmuxctl_capture(args)
+    _emit_envelope(ctx, envelope)
 
 
 @jobs_group.command(
@@ -397,9 +571,13 @@ def jobs_remove(ctx: click.Context, job_id: int) -> None:
     `tmuxctl jobs remove JOB_ID`.
     """
     args: list[str] = ["jobs", "remove", str(job_id), *ctx.args]
-    exit_code = _run_tmuxctl(args)
-    if exit_code != 0:
-        ctx.exit(exit_code)
+    envelope = _try_daemon_jobs_call(
+        "jobs.remove",
+        {"job_id": job_id, "extra_args": list(ctx.args)},
+    )
+    if envelope is None:
+        envelope = _run_tmuxctl_capture(args)
+    _emit_envelope(ctx, envelope)
 
 
 # ----- daemon subgroup ------------------------------------------------
@@ -493,13 +671,10 @@ def daemon_status(ctx: click.Context) -> None:
     - 0  -> daemon process is alive
     - 3  -> daemon process is NOT running
     """
-    if _is_daemon_running():
-        click.echo("running")
-        return
-    click.echo("not running")
-    # `systemctl is-active` returns 3 for `inactive`; matching that lets
-    # shell-script consumers `&& echo up || echo down` consistently.
-    ctx.exit(3)
+    envelope = _try_daemon_jobs_call("jobs.status", {})
+    if envelope is None:
+        envelope = daemon_handler_status({})
+    _emit_envelope(ctx, envelope)
 
 
 @daemon_group.command("stop")

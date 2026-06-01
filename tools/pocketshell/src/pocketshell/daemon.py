@@ -85,6 +85,12 @@ METHOD_TTLS: Mapping[str, float] = {
     # rarely change minute-to-minute; the longer window keeps the
     # Android picker fast without burning rate-limit quota.
     "repos.list_remote": 300.0,
+    # tmuxctl-backed lists are relatively cheap, but Android may poll
+    # them from dashboards. Keep the window short so daemon-side
+    # mutations can invalidate immediately and external tmux changes are
+    # not hidden for long.
+    "sessions.list": 5.0,
+    "jobs.list": 5.0,
 }
 
 # Length-prefix is a 4-byte unsigned big-endian integer. ``struct``
@@ -460,6 +466,67 @@ def _repos_open_handler(params: Mapping[str, Any]) -> dict[str, Any]:
     return _repos.daemon_handler_open(dict(params))
 
 
+# ---------------------------------------------------------------------------
+# Methods: sessions.* / jobs.*
+# ---------------------------------------------------------------------------
+
+
+def _sessions_list_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Delegate ``sessions.list`` to the existing tmuxctl-backed wrapper."""
+    from pocketshell import sessions as _sessions
+
+    return _sessions.daemon_handler_list(dict(params))
+
+
+def _jobs_list_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Delegate ``jobs.list`` to the existing tmuxctl-backed wrapper."""
+    from pocketshell import jobs as _jobs
+
+    return _jobs.daemon_handler_list(dict(params))
+
+
+def _jobs_show_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Delegate ``jobs.show`` to the existing tmuxctl-backed wrapper."""
+    from pocketshell import jobs as _jobs
+
+    return _jobs.daemon_handler_show(dict(params))
+
+
+def _jobs_trigger_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Delegate ``jobs.trigger`` to the existing tmuxctl-backed wrapper."""
+    from pocketshell import jobs as _jobs
+
+    return _jobs.daemon_handler_trigger(dict(params))
+
+
+def _jobs_add_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Delegate ``jobs.add`` to the existing tmuxctl-backed wrapper."""
+    from pocketshell import jobs as _jobs
+
+    return _jobs.daemon_handler_add(dict(params))
+
+
+def _jobs_edit_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Delegate ``jobs.edit`` to the existing tmuxctl-backed wrapper."""
+    from pocketshell import jobs as _jobs
+
+    return _jobs.daemon_handler_edit(dict(params))
+
+
+def _jobs_remove_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Delegate ``jobs.remove`` to the existing tmuxctl-backed wrapper."""
+    from pocketshell import jobs as _jobs
+
+    return _jobs.daemon_handler_remove(dict(params))
+
+
+def _jobs_status_handler(params: Mapping[str, Any]) -> dict[str, Any]:
+    """Delegate ``jobs.status`` to the scheduler status helper."""
+    from pocketshell import jobs as _jobs
+
+    return _jobs.daemon_handler_status(dict(params))
+
+
 # Single shared registry; tests can register additional methods via
 # :meth:`Daemon.register_method` on a fresh instance without touching
 # this dict.
@@ -469,6 +536,14 @@ DEFAULT_METHODS: Mapping[str, RpcHandler] = {
     "repos.list_remote": _repos_list_remote_handler,
     "repos.clone": _repos_clone_handler,
     "repos.open": _repos_open_handler,
+    "sessions.list": _sessions_list_handler,
+    "jobs.list": _jobs_list_handler,
+    "jobs.show": _jobs_show_handler,
+    "jobs.trigger": _jobs_trigger_handler,
+    "jobs.add": _jobs_add_handler,
+    "jobs.edit": _jobs_edit_handler,
+    "jobs.remove": _jobs_remove_handler,
+    "jobs.status": _jobs_status_handler,
 }
 
 
@@ -485,6 +560,10 @@ DEFAULT_METHODS: Mapping[str, RpcHandler] = {
 # change as soon as a clone lands.
 METHOD_CACHE_INVALIDATIONS: Mapping[str, tuple[str, ...]] = {
     "repos.clone": ("repos.list_local",),
+    "jobs.add": ("jobs.list",),
+    "jobs.edit": ("jobs.list",),
+    "jobs.remove": ("jobs.list",),
+    "jobs.trigger": ("jobs.list",),
 }
 
 

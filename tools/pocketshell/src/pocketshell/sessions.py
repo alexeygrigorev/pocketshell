@@ -41,7 +41,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import click
 
@@ -98,6 +98,87 @@ def _run_tmuxctl(args: Sequence[str]) -> int:
     return completed.returncode
 
 
+def _run_tmuxctl_capture(args: Sequence[str]) -> dict[str, Any]:
+    """Invoke ``tmuxctl`` and return a daemon-friendly raw envelope."""
+    tmuxctl_path = _resolve_tmuxctl_binary()
+    if tmuxctl_path is None:
+        return {
+            "stdout": "",
+            "stderr": _tmuxctl_missing_message() + "\n",
+            "returncode": 127,
+        }
+
+    completed = subprocess.run(
+        [tmuxctl_path, *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return {
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+        "returncode": completed.returncode,
+    }
+
+
+def _emit_envelope(ctx: click.Context, envelope: dict[str, Any]) -> None:
+    """Proxy a daemon/subprocess envelope to stdout/stderr and exit code."""
+    if envelope.get("stdout"):
+        sys.stdout.write(str(envelope["stdout"]))
+    if envelope.get("stderr"):
+        sys.stderr.write(str(envelope["stderr"]))
+    exit_code = int(envelope.get("returncode", 0))
+    if exit_code != 0:
+        ctx.exit(exit_code)
+
+
+def _try_daemon_sessions_list(
+    *,
+    sort_by: Optional[str],
+    extra_args: Sequence[str],
+) -> Optional[dict[str, Any]]:
+    """Dispatch ``sessions.list`` to the daemon; return ``None`` on miss."""
+    from pocketshell import daemon as _daemon
+
+    socket_path = _daemon.resolve_socket_path()
+    if not socket_path.exists():
+        return None
+
+    params: dict[str, Any] = {"extra_args": list(extra_args)}
+    if sort_by:
+        params["sort_by"] = sort_by
+
+    try:
+        result = _daemon.call(
+            "sessions.list",
+            params=params,
+            socket_path=socket_path,
+            timeout=5.0,
+        )
+    except (_daemon.DaemonClientError, RuntimeError, OSError):
+        return None
+    if not isinstance(result, dict):
+        return None
+    return result
+
+
+def daemon_handler_list(params: dict[str, Any]) -> dict[str, Any]:
+    """JSON-RPC handler for ``sessions.list``.
+
+    Returns the same raw stdout/stderr/returncode envelope as the
+    one-shot subprocess path so the CLI can preserve byte-identical
+    output while moving the process spawn into the daemon.
+    """
+    args: list[str] = ["list"]
+    sort_by = params.get("sort_by")
+    if isinstance(sort_by, str) and sort_by:
+        args.extend(["--by", sort_by])
+    extra_args = params.get("extra_args")
+    if isinstance(extra_args, list):
+        args.extend(str(item) for item in extra_args if isinstance(item, str))
+    return _run_tmuxctl_capture(args)
+
+
 @click.group(
     name="sessions",
     context_settings={"help_option_names": ["-h", "--help"]},
@@ -149,6 +230,7 @@ def sessions_list(ctx: click.Context, sort_by: Optional[str]) -> None:
     # `ctx.args` holds any extras we ignored (e.g. `--json` once
     # tmuxctl supports it). Forward verbatim, position preserved.
     args.extend(ctx.args)
-    exit_code = _run_tmuxctl(args)
-    if exit_code != 0:
-        ctx.exit(exit_code)
+    envelope = _try_daemon_sessions_list(sort_by=sort_by, extra_args=ctx.args)
+    if envelope is None:
+        envelope = _run_tmuxctl_capture(args)
+    _emit_envelope(ctx, envelope)

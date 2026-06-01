@@ -130,6 +130,39 @@ def test_jobs_list_forwards_to_tmuxctl_and_proxies_stdout() -> None:
     assert invoked == ["/fake/tmuxctl", "jobs", "list"]
 
 
+def test_jobs_list_uses_daemon_when_available() -> None:
+    payload = _fake_jobs_table()
+    runner = CliRunner()
+    with patch(
+        "pocketshell.jobs._try_daemon_jobs_call",
+        return_value={"stdout": payload, "stderr": "", "returncode": 0},
+    ) as daemon_call, patch("pocketshell.jobs.subprocess.run") as run:
+        result = runner.invoke(jobs_group, ["list", "--session", "work"])
+    assert result.exit_code == 0, result.output
+    assert result.output == payload
+    daemon_call.assert_called_once_with(
+        "jobs.list",
+        {"extra_args": [], "session": "work"},
+    )
+    run.assert_not_called()
+
+
+def test_jobs_list_falls_back_when_daemon_misses() -> None:
+    payload = _fake_jobs_table()
+    runner = CliRunner()
+    with patch("pocketshell.jobs._try_daemon_jobs_call", return_value=None), patch(
+        "pocketshell.jobs._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"
+    ), patch(
+        "pocketshell.jobs.subprocess.run",
+        return_value=_fake_completed(stdout=payload),
+    ) as run:
+        result = runner.invoke(jobs_group, ["list"])
+    assert result.exit_code == 0, result.output
+    assert result.output == payload
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == ["/fake/tmuxctl", "jobs", "list"]
+
+
 def test_jobs_list_forwards_unknown_options_verbatim() -> None:
     """The wrapper does NOT enumerate every flag `tmuxctl jobs list`
     grows. The brief calls out a future `--json` flag in particular —
@@ -194,6 +227,31 @@ def test_jobs_trigger_forwards_id() -> None:
     assert result.exit_code == 0, result.output
     invoked: Sequence[str] = run.call_args.args[0]
     assert invoked == ["/fake/tmuxctl", "jobs", "trigger", "7"]
+
+
+def test_jobs_mutation_uses_daemon_when_available() -> None:
+    runner = CliRunner()
+    with patch(
+        "pocketshell.jobs._try_daemon_jobs_call",
+        return_value={"stdout": "Created job 7\n", "stderr": "", "returncode": 0},
+    ) as daemon_call, patch("pocketshell.jobs.subprocess.run") as run:
+        result = runner.invoke(
+            jobs_group,
+            ["add", "work", "--every", "15m", "--message", "poke claude"],
+        )
+    assert result.exit_code == 0, result.output
+    assert result.output == "Created job 7\n"
+    daemon_call.assert_called_once_with(
+        "jobs.add",
+        {
+            "session_name": "work",
+            "every": "15m",
+            "message": "poke claude",
+            "start_now": False,
+            "extra_args": [],
+        },
+    )
+    run.assert_not_called()
 
 
 def test_jobs_trigger_proxies_unknown_subcommand_failure() -> None:
@@ -598,6 +656,19 @@ def test_jobs_daemon_status_running_reports_zero() -> None:
     assert invoked[0:2] == ["/fake/pgrep", "-f"]
     assert "tmuxctl jobs daemon" in invoked[2]
     assert invoked[2].startswith("(^|/)") or invoked[2].startswith("(")
+
+
+def test_jobs_daemon_status_uses_daemon_when_available() -> None:
+    runner = CliRunner()
+    with patch(
+        "pocketshell.jobs._try_daemon_jobs_call",
+        return_value={"stdout": "running\n", "stderr": "", "returncode": 0},
+    ) as daemon_call, patch("pocketshell.jobs.subprocess.run") as run:
+        result = runner.invoke(jobs_group, ["daemon", "status"])
+    assert result.exit_code == 0, result.output
+    assert result.output == "running\n"
+    daemon_call.assert_called_once_with("jobs.status", {})
+    run.assert_not_called()
 
 
 def test_jobs_daemon_status_not_running_reports_three() -> None:

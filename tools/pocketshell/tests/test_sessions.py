@@ -106,6 +106,39 @@ def test_sessions_list_forwards_to_tmuxctl_and_proxies_stdout() -> None:
     assert invoked == ["/fake/tmuxctl", "list"]
 
 
+def test_sessions_list_uses_daemon_when_available() -> None:
+    payload = _fake_sessions_table()
+    runner = CliRunner()
+    with patch(
+        "pocketshell.sessions._try_daemon_sessions_list",
+        return_value={"stdout": payload, "stderr": "", "returncode": 0},
+    ) as daemon_call, patch("pocketshell.sessions.subprocess.run") as run:
+        result = runner.invoke(sessions_group, ["list", "--by", "activity"])
+    assert result.exit_code == 0, result.output
+    assert result.output == payload
+    daemon_call.assert_called_once_with(sort_by="activity", extra_args=[])
+    run.assert_not_called()
+
+
+def test_sessions_list_falls_back_when_daemon_misses() -> None:
+    payload = _fake_sessions_table()
+    runner = CliRunner()
+    with patch(
+        "pocketshell.sessions._try_daemon_sessions_list",
+        return_value=None,
+    ), patch(
+        "pocketshell.sessions._resolve_tmuxctl_binary", return_value="/fake/tmuxctl"
+    ), patch(
+        "pocketshell.sessions.subprocess.run",
+        return_value=_fake_completed(stdout=payload),
+    ) as run:
+        result = runner.invoke(sessions_group, ["list"])
+    assert result.exit_code == 0, result.output
+    assert result.output == payload
+    invoked: Sequence[str] = run.call_args.args[0]
+    assert invoked == ["/fake/tmuxctl", "list"]
+
+
 def test_sessions_list_forwards_by_activity() -> None:
     runner = CliRunner()
     with patch(

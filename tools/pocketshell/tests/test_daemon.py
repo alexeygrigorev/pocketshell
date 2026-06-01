@@ -728,6 +728,72 @@ def test_cache_invalidate_method_drops_only_that_method() -> None:
     assert cache.invalidate_method("repos.list_local") == 0
 
 
+def _dispatch_in_memory(daemon: daemon_mod.Daemon, method: str, params: dict) -> dict:
+    """Send one request through ``Daemon._handle_one`` using a socketpair."""
+    client, server = socket.socketpair()
+    try:
+        daemon_mod.send_json(
+            client,
+            {"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
+        )
+        daemon._handle_one(server)
+        response = daemon_mod.recv_json(client)
+        assert isinstance(response, dict)
+        return response
+    finally:
+        client.close()
+        server.close()
+
+
+def test_jobs_mutation_invalidates_jobs_list_cache(tmp_path: Path) -> None:
+    """Successful job mutations evict the cached ``jobs.list`` envelope."""
+    calls = {"list": 0}
+
+    def list_handler(_params: dict) -> dict:
+        calls["list"] += 1
+        return {"stdout": f"list-{calls['list']}\n", "stderr": "", "returncode": 0}
+
+    def add_handler(_params: dict) -> dict:
+        return {"stdout": "created\n", "stderr": "", "returncode": 0}
+
+    daemon = daemon_mod.Daemon(
+        socket_path=tmp_path / "daemon.sock",
+        methods={"jobs.list": list_handler, "jobs.add": add_handler},
+    )
+
+    first = _dispatch_in_memory(daemon, "jobs.list", {})
+    assert first["result"]["stdout"] == "list-1\n"
+    assert first["cached"] is False
+
+    cached = _dispatch_in_memory(daemon, "jobs.list", {})
+    assert cached["result"]["stdout"] == "list-1\n"
+    assert cached["cached"] is True
+    assert calls["list"] == 1
+
+    mutation = _dispatch_in_memory(daemon, "jobs.add", {"session_name": "work"})
+    assert mutation["result"]["returncode"] == 0
+
+    after = _dispatch_in_memory(daemon, "jobs.list", {})
+    assert after["result"]["stdout"] == "list-2\n"
+    assert after["cached"] is False
+    assert calls["list"] == 2
+
+
+def test_daemon_registry_includes_sessions_and_jobs_methods() -> None:
+    assert "sessions.list" in daemon_mod.DEFAULT_METHODS
+    assert "jobs.list" in daemon_mod.DEFAULT_METHODS
+    assert "jobs.show" in daemon_mod.DEFAULT_METHODS
+    assert "jobs.trigger" in daemon_mod.DEFAULT_METHODS
+    assert "jobs.add" in daemon_mod.DEFAULT_METHODS
+    assert "jobs.edit" in daemon_mod.DEFAULT_METHODS
+    assert "jobs.remove" in daemon_mod.DEFAULT_METHODS
+    assert "jobs.status" in daemon_mod.DEFAULT_METHODS
+    assert daemon_mod.METHOD_CACHE_INVALIDATIONS["jobs.add"] == ("jobs.list",)
+    assert daemon_mod.METHOD_CACHE_INVALIDATIONS["jobs.edit"] == ("jobs.list",)
+    assert daemon_mod.METHOD_CACHE_INVALIDATIONS["jobs.remove"] == ("jobs.list",)
+    assert daemon_mod.METHOD_CACHE_INVALIDATIONS["jobs.trigger"] == ("jobs.list",)
+
+
 def test_failed_usage_fetch_is_not_cached(
     sandbox_socket: Path,
     tmp_path: Path,

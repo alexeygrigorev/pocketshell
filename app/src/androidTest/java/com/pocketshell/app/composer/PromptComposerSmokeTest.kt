@@ -1,15 +1,21 @@
 package com.pocketshell.app.composer
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.DEFAULT_HOST
@@ -29,6 +35,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -95,6 +102,47 @@ class PromptComposerSmokeTest {
             .assertExists()
         compose.onNodeWithTag(COMPOSER_WAVEFORM_TAG)
             .assert(hasContentDescription("Prompt composer transcribing"))
+    }
+
+    @Test
+    fun longDraftScrollsInsideComposerAndKeepsControlsTappable() {
+        val longDraft = (1..80).joinToString(separator = "\n") { line ->
+            "line $line: keep writing the prompt without hiding controls"
+        }
+        var micTaps = 0
+        var attachTaps = 0
+        val sendModes = mutableListOf<Boolean>()
+
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(520.dp),
+                ) {
+                    SheetContent(
+                        state = PromptComposerViewModel.UiState(draft = longDraft),
+                        onClose = {},
+                        onDraftChange = {},
+                        onMicTap = { micTaps += 1 },
+                        onSend = { withEnter -> sendModes += withEnter },
+                        onAttachFiles = { attachTaps += 1 },
+                    )
+                }
+            }
+        }
+
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_ATTACH_TAG).assertIsDisplayed().performClick()
+        compose.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed().performClick()
+        compose.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed().performClick()
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).assertIsDisplayed().performClick()
+
+        compose.runOnIdle {
+            assertEquals(1, attachTaps)
+            assertEquals(1, micTaps)
+            assertEquals(listOf(false, true), sendModes)
+        }
     }
 
     @Test

@@ -473,6 +473,7 @@ internal fun SheetContent(
             placeholder = state.placeholderHint(),
             fieldTag = COMPOSER_DRAFT_TAG,
             minHeight = 110.dp,
+            maxHeight = 220.dp,
         )
 
         Spacer(modifier = Modifier.height(4.dp))
@@ -659,6 +660,7 @@ internal fun SheetContent(
                     PromptComposerViewModel.RecordingState.Transcribing -> MicButtonState.Disabled
                 },
                 onClick = { if (!isTranscribing) onMicTap() },
+                modifier = Modifier.testTag(COMPOSER_MIC_TAG),
             )
         }
 
@@ -1390,6 +1392,7 @@ internal const val COMPOSER_SEND_TAG = "prompt-composer-send"
 internal const val COMPOSER_SEND_ENTER_TAG = "prompt-composer-send-enter"
 internal const val COMPOSER_STATUS_TAG = "prompt-composer-status"
 internal const val COMPOSER_WAVEFORM_TAG = "prompt-composer-waveform"
+internal const val COMPOSER_MIC_TAG = "prompt-composer-mic"
 internal const val COMPOSER_ATTACH_TAG = "prompt-composer-attach"
 internal const val COMPOSER_ATTACHMENT_PROGRESS_TAG = "prompt-composer-attachment-progress"
 

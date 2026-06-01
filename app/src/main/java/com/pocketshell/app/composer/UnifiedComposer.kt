@@ -11,8 +11,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -29,6 +31,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -115,13 +118,19 @@ internal fun ComposerDraftField(
     // `assertTextContains` directly against the focusable editable node —
     // the same node identity both composer surfaces had before #196.
     fieldTag: String? = null,
-    minHeight: androidx.compose.ui.unit.Dp = 110.dp,
+    minHeight: Dp = 110.dp,
+    maxHeight: Dp? = null,
     singleLine: Boolean = false,
 ) {
+    val sizeModifier = if (maxHeight != null) {
+        Modifier.heightIn(min = minHeight, max = maxHeight)
+    } else {
+        Modifier.heightIn(min = minHeight)
+    }
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(min = minHeight)
+            .then(sizeModifier)
             .background(
                 color = PocketShellColors.SurfaceElev,
                 shape = RoundedCornerShape(12.dp),
@@ -141,11 +150,17 @@ internal fun ComposerDraftField(
         } else {
             Modifier.fillMaxWidth()
         }
+        val scrollState = rememberScrollState()
+        val editableModifier = if (singleLine) {
+            fieldModifier
+        } else {
+            fieldModifier.verticalScroll(scrollState)
+        }
         BasicTextField(
             value = value,
             onValueChange = onValueChange,
             singleLine = singleLine,
-            modifier = fieldModifier,
+            modifier = editableModifier,
             textStyle = TextStyle(
                 color = PocketShellColors.Text,
                 fontSize = 14.sp,

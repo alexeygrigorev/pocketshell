@@ -175,7 +175,9 @@ class TerminalLabController(
                     knownHosts = KnownHostsPolicy.AcceptAll,
                 ).getOrThrow()
                 sessionRef = session
-                val shell = session.startShell()
+                val shell = withContext(Dispatchers.IO) {
+                    session.startShell()
+                }
                 shellRef = shell
                 producerJob = terminalState.attachExternalProducer(
                     scope = scope,

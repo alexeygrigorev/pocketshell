@@ -221,6 +221,7 @@ fun TerminalSurface(
     viewClient.onTerminalSizeChanged = onTerminalSizeChanged
     var terminalView by remember { mutableStateOf<TerminalView?>(null) }
     var viewportTick by remember { mutableStateOf(0L) }
+    val desiredSession = state.session
 
     val context = LocalContext.current
 
@@ -370,16 +371,15 @@ fun TerminalSurface(
                 update = { view ->
                     terminalView = view
                     val current = view.currentSession
-                    val desired = state.session
                     // Attach / detach as the state's session reference
                     // changes. `attachSession` early-returns when given the
                     // same instance, so this is idempotent across
                     // recompositions.
-                    if (desired != null) {
-                        if (desired !== current) {
-                            view.attachSession(desired)
+                    if (desiredSession != null) {
+                        if (desiredSession !== current) {
+                            view.attachSession(desiredSession)
                         }
-                    } else if (desired !== current) {
+                    } else if (desiredSession !== current) {
                         // No public detach on TerminalView; clear the
                         // field via an attach of an empty marker is not
                         // possible because TerminalSession is `final`

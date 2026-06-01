@@ -19,7 +19,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.isActive
@@ -31,6 +30,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.io.OutputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedDeque
 
 /**
@@ -262,6 +262,9 @@ internal class RealTmuxClient(
 
     override val events: Flow<ControlEvent> = eventBus.asSharedFlow()
 
+    private val paneOutputFlows =
+        ConcurrentHashMap<String, MutableSharedFlow<ControlEvent.Output>>()
+
     // Issue #173: latched signal that the reader loop has exited (or
     // [close] was called). The reader sets this from its `finally` block
     // so subscribers (notably [TmuxSessionViewModel.attachClient]) can
@@ -416,15 +419,9 @@ internal class RealTmuxClient(
     }
 
     override fun outputFor(paneId: String): Flow<ControlEvent.Output> {
-        // Reuse the same shared eventBus — filtering on the consumer side
-        // is fine because tmux emits a single %output per pane write, so
-        // there's no fan-out savings from a per-pane flow. Filtering at
-        // the call site also means callers can late-subscribe without us
-        // having to materialise a flow per pane up-front.
-        return eventBus
-            .asSharedFlow()
-            .filterIsInstance<ControlEvent.Output>()
-            .filter { it.paneId == paneId }
+        return paneOutputFlows.getOrPut(paneId) {
+            MutableSharedFlow(replay = 0, extraBufferCapacity = EVENT_BUFFER)
+        }.asSharedFlow()
     }
 
     override suspend fun setWindowSizeLatest(sessionId: String): CommandResponse =
@@ -638,7 +635,7 @@ internal class RealTmuxClient(
                         ISSUE_105_DIAG_TAG,
                         "tmux-output-received pane=${event.paneId} bytes=${event.data.size}",
                     )
-                    eventBus.emit(event)
+                    emitOutput(event)
                     Log.i(
                         ISSUE_105_DIAG_TAG,
                         "tmux-output-bus-emit pane=${event.paneId} bytes=${event.data.size}",
@@ -672,6 +669,11 @@ internal class RealTmuxClient(
                 )
             }
         }
+    }
+
+    private suspend fun emitOutput(event: ControlEvent.Output) {
+        paneOutputFlows[event.paneId]?.emit(event)
+        eventBus.emit(event)
     }
 
     /**

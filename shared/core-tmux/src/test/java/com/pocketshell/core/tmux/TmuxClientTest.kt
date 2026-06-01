@@ -5,6 +5,7 @@ import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.tmux.protocol.ControlEvent
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -12,6 +13,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.take
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
@@ -438,6 +440,59 @@ class TmuxClientTest {
             assertEquals("%1", p1[0].paneId)
             assertEquals("world", String(p1[0].data, StandardCharsets.US_ASCII))
         } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `outputFor delivers pane output before saturated global event subscribers`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope)
+        val firstGlobalEventSeen = CompletableDeferred<Unit>()
+        val releaseGlobalCollector = CompletableDeferred<Unit>()
+        try {
+            client.connect()
+
+            val globalCollector = scope.async {
+                client.events.collect {
+                    firstGlobalEventSeen.complete(Unit)
+                    releaseGlobalCollector.await()
+                }
+            }
+            val targetOutput = scope.async {
+                client.outputFor("%target").first()
+            }
+            delay(100) // let both subscribers attach to their hot flows
+
+            val feedJob = scope.async {
+                shell.feed(
+                    buildString {
+                        // EVENT_BUFFER is 256. With the global collector parked on
+                        // the first event, these background writes fill the shared
+                        // bus so the following target emit would suspend if
+                        // outputFor still depended on eventBus filtering.
+                        repeat(257) { index ->
+                            append("%output %noise noisy-")
+                            append(index)
+                            append('\n')
+                        }
+                        append("%output %target visible\n")
+                    },
+                )
+            }
+
+            withTimeout(3_000) { firstGlobalEventSeen.await() }
+            val output = withTimeout(3_000) { targetOutput.await() }
+
+            assertEquals("%target", output.paneId)
+            assertEquals("visible", String(output.data, StandardCharsets.US_ASCII))
+
+            releaseGlobalCollector.complete(Unit)
+            withTimeout(3_000) { feedJob.await() }
+            globalCollector.cancel()
+        } finally {
+            releaseGlobalCollector.complete(Unit)
             client.close()
         }
     }

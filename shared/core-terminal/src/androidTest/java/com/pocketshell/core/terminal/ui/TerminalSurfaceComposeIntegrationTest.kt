@@ -698,6 +698,7 @@ class TerminalSurfaceComposeIntegrationTest {
         val expected = "long-press-selection-text"
 
         val recording = android.content.RecordingClipboardManager()
+        var terminalView: TerminalView? = null
         try {
             // Same override pattern as
             // [copyActionRoutesSelectedTextThroughRealClipboardManager] —
@@ -718,6 +719,7 @@ class TerminalSurfaceComposeIntegrationTest {
             }
             composeTestRule.waitForIdle()
             val view = waitForTerminalView()
+            terminalView = view
 
             state.appendRemoteOutput(expected.toByteArray(Charsets.US_ASCII))
             withTimeout(2_000) {
@@ -858,6 +860,7 @@ class TerminalSurfaceComposeIntegrationTest {
                     expectedClip.trim().any { ch -> expected.contains(ch) },
             )
         } finally {
+            stopSelectionModeAfterLongPress(terminalView)
             producerJob.cancel()
             producerScope.cancel()
             state.detachExternalProducer()
@@ -930,6 +933,22 @@ class TerminalSurfaceComposeIntegrationTest {
         // thread so the pending Runnable on the main Looper can fire.
         SystemClock.sleep(400)
         instrumentation.runOnMainSync { /* drain Looper */ }
+    }
+
+    private fun stopSelectionModeAfterLongPress(view: TerminalView?) {
+        if (view == null) return
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        // TextSelectionCursorController.hide() intentionally ignores hides in
+        // the first 300 ms after show(). The connected long-press test copies
+        // immediately, so wait past that guard and dismiss the floating action
+        // mode while the Activity is still alive. Leaving it for Activity
+        // teardown races PopupWindow cleanup and can crash the instrumentation
+        // process with WindowLeaked.
+        SystemClock.sleep(350)
+        instrumentation.runOnMainSync {
+            view.stopTextSelectionMode()
+        }
+        composeTestRule.waitForIdle()
     }
 
     private fun urlPixelX(view: TerminalView, region: UrlRegion): Float {

@@ -28,6 +28,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -63,6 +64,10 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class TerminalSurfaceSelectionInstrumentedTest {
+
+    private companion object {
+        const val CONNECTED_TERMINAL_SETTLE_TIMEOUT_MS = 5_000L
+    }
 
     @Test
     fun selectingTextAndCopyingRoutesPlainTextThroughClipboardSink() = runBlocking {
@@ -482,23 +487,25 @@ class TerminalSurfaceSelectionInstrumentedTest {
                 viewRef[0] = view
             }
             val view = requireNotNull(viewRef[0])
-            state.appendRemoteOutput("open $url and inspect $path\r\n$error".toByteArray(Charsets.US_ASCII))
-
-            val regionsRef = arrayOfNulls<List<TerminalMatchRegion>>(1)
-            withTimeout(2_000) {
-                while (regionsRef[0]?.let { regions ->
-                        regions.any { it.match.value == url } &&
-                            regions.any { it.match.value == path } &&
-                            regions.any { it.match.value == error }
-                    } != true) {
-                    delay(20)
-                    instrumentation.runOnMainSync {
-                        regionsRef[0] = findVisibleTerminalMatches(view)
-                    }
+            instrumentation.runOnMainSync {
+                val columns = requireNotNull(view.mEmulator).mColumns
+                val widestToken = maxOf(url.length, path.length, error.length)
+                require(columns > widestToken) {
+                    "fixture requires each token to fit on one visible row; columns=$columns widestToken=$widestToken"
                 }
             }
+            state.appendRemoteOutput("$url\r\n$path\r\n$error".toByteArray(Charsets.US_ASCII))
 
-            val regions = requireNotNull(regionsRef[0])
+            val regions = waitForVisibleTerminalMatches(
+                instrumentation = instrumentation,
+                view = view,
+                timeoutMs = CONNECTED_TERMINAL_SETTLE_TIMEOUT_MS,
+                description = "url=$url path=$path error=$error",
+            ) { regions ->
+                regions.any { it.match.value == url } &&
+                    regions.any { it.match.value == path } &&
+                    regions.any { it.match.value == error }
+            }
             val segments = smartSelectionAffordanceSegments(
                 view = view,
                 regions = regions,
@@ -808,5 +815,74 @@ class TerminalSurfaceSelectionInstrumentedTest {
     private object LegacyTicketMatcher : TerminalMatcher {
         override fun matches(text: String): List<TerminalMatch> =
             if ("PS-354" in text) listOf(TerminalMatch.Error("PS-354")) else emptyList()
+    }
+
+    private suspend fun waitForVisibleTerminalMatches(
+        instrumentation: android.app.Instrumentation,
+        view: TerminalView,
+        timeoutMs: Long,
+        description: String,
+        predicate: (List<TerminalMatchRegion>) -> Boolean,
+    ): List<TerminalMatchRegion> {
+        var snapshot = emptyList<TerminalMatchRegion>()
+        var matched: List<TerminalMatchRegion>? = null
+        withTimeoutOrNull(timeoutMs) {
+            while (matched == null) {
+                instrumentation.runOnMainSync {
+                    snapshot = findVisibleTerminalMatches(view)
+                }
+                if (predicate(snapshot)) {
+                    matched = snapshot
+                } else {
+                    delay(20)
+                }
+            }
+        }
+        if (matched != null) return matched
+        throw AssertionError(
+            "Timed out after ${timeoutMs}ms waiting for visible terminal matches ($description).\n" +
+                describeVisibleTerminal(instrumentation, view, snapshot),
+        )
+    }
+
+    private fun describeVisibleTerminal(
+        instrumentation: android.app.Instrumentation,
+        view: TerminalView,
+        regions: List<TerminalMatchRegion>,
+    ): String {
+        val lines = mutableListOf<String>()
+        var columns = 0
+        var rows = 0
+        var topRow = 0
+        instrumentation.runOnMainSync {
+            val emulator = view.mEmulator
+            val screen = emulator?.screen
+            columns = emulator?.mColumns ?: 0
+            rows = emulator?.mRows ?: 0
+            topRow = view.topRow
+            if (screen != null && columns > 0 && rows > 0) {
+                for (row in topRow until topRow + minOf(rows, 8)) {
+                    val line = try {
+                        screen.getSelectedText(0, row, columns, row)
+                    } catch (t: Throwable) {
+                        "<${t::class.java.simpleName}: ${t.message}>"
+                    }
+                    lines += "row=$row text=${line.trimEnd()}"
+                }
+            }
+        }
+        val regionSummary = regions.joinToString(
+            separator = "\n",
+            prefix = "regions:\n",
+        ) { region ->
+            "row=${region.row} cols=${region.startCol}..${region.endColExclusive} " +
+                "type=${region.match::class.java.simpleName} value=${region.match.value}"
+        }
+        return buildString {
+            appendLine("terminal: columns=$columns rows=$rows topRow=$topRow")
+            appendLine(regionSummary)
+            appendLine("visible rows:")
+            lines.forEach { appendLine(it) }
+        }
     }
 }

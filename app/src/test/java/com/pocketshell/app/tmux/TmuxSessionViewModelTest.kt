@@ -1077,6 +1077,39 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun terminalSurfaceFailureDoesNotMarkTmuxTransportDisconnectedOrReconnect() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+        )
+        advanceUntilIdle()
+        val originalTerminalState = vm.panes.value.single().terminalState
+        val attemptsBeforeFailure = TMUX_CONNECT_ATTEMPTS.get()
+
+        vm.reportTerminalSurfaceFailureForTest(
+            paneId = "%0",
+            cause = RuntimeException("ime resize"),
+        )
+        advanceUntilIdle()
+
+        assertFalse("local terminal failure must not flip tmux disconnected", client.disconnectedSignal.value)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(
+            "local terminal failure must not enqueue reconnect attempts",
+            attemptsBeforeFailure,
+            TMUX_CONNECT_ATTEMPTS.get(),
+        )
+        assertNotSame(
+            "terminal surface should be recreated locally so IME/input can recover",
+            originalTerminalState,
+            vm.panes.value.single().terminalState,
+        )
+    }
+
+    @Test
     fun tmuxHighRateInputStressBatchesWithBoundedBacklogAndNoContentLoss() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient().apply {

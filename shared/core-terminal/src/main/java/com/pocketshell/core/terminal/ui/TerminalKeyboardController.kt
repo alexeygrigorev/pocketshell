@@ -37,18 +37,26 @@ import com.termux.view.TerminalView
  * That matches the requested "no-op when already shown" contract without
  * adding fragile state tracking on the client side.
  */
-fun showTerminalSoftKeyboard(rootView: View): Boolean {
-    val terminalView = rootView.findTerminalViewDescendant() ?: return false
-    val focused = terminalView.requestFocus()
-    val imm = terminalView.context
-        .getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-        ?: return false
-    // `SHOW_IMPLICIT` matches the upstream Termux tap-on-viewport path
-    // (see `PocketShellTerminalViewClient.onSingleTapUp`). Using the same
-    // flag means the system keyboard policy treats the chip-tap the same
-    // way it treats a tap on the terminal viewport — important because the
-    // user already expects that tap interaction to "feel" like the chip.
-    return imm.showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT) && focused
+fun showTerminalSoftKeyboard(
+    rootView: View,
+    onLocalTerminalError: ((Throwable) -> Unit)? = null,
+): Boolean {
+    return runCatching {
+        val terminalView = rootView.findTerminalViewDescendant() ?: return@runCatching false
+        val focused = terminalView.requestFocus()
+        val imm = terminalView.context
+            .getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+            ?: return@runCatching false
+        // `SHOW_IMPLICIT` matches the upstream Termux tap-on-viewport path
+        // (see `PocketShellTerminalViewClient.onSingleTapUp`). Using the same
+        // flag means the system keyboard policy treats the chip-tap the same
+        // way it treats a tap on the terminal viewport — important because the
+        // user already expects that tap interaction to "feel" like the chip.
+        imm.showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT) && focused
+    }.getOrElse { cause ->
+        onLocalTerminalError?.invoke(cause)
+        false
+    }
 }
 
 /**
@@ -74,11 +82,19 @@ fun showTerminalSoftKeyboard(rootView: View): Boolean {
  * orthogonal "user scrolled then tapped IME" case where the size has
  * not changed but the visible viewport no longer covers the cursor row.
  */
-fun pinTerminalToBottom(rootView: View): Boolean {
-    val terminalView = rootView.findTerminalViewDescendant() ?: return false
-    terminalView.setTopRow(0)
-    terminalView.onScreenUpdated()
-    return true
+fun pinTerminalToBottom(
+    rootView: View,
+    onLocalTerminalError: ((Throwable) -> Unit)? = null,
+): Boolean {
+    return runCatching {
+        val terminalView = rootView.findTerminalViewDescendant() ?: return@runCatching false
+        terminalView.setTopRow(0)
+        terminalView.onScreenUpdated()
+        true
+    }.getOrElse { cause ->
+        onLocalTerminalError?.invoke(cause)
+        false
+    }
 }
 
 /**

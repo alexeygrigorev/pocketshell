@@ -355,26 +355,36 @@ public final class TerminalView extends View {
 
             @Override
             public boolean finishComposingText() {
-                if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) mClient.logInfo(LOG_TAG, "IME: finishComposingText()");
-                super.finishComposingText();
+                try {
+                    if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) mClient.logInfo(LOG_TAG, "IME: finishComposingText()");
+                    super.finishComposingText();
 
-                sendTextToTerminal(getEditable());
-                getEditable().clear();
+                    sendTextToTerminal(getEditable());
+                    getEditable().clear();
+                } catch (RuntimeException e) {
+                    reportTerminalViewFailure("IME finishComposingText failed", e);
+                    getEditable().clear();
+                }
                 return true;
             }
 
             @Override
             public boolean commitText(CharSequence text, int newCursorPosition) {
-                if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) {
-                    mClient.logInfo(LOG_TAG, "IME: commitText(\"" + text + "\", " + newCursorPosition + ")");
+                try {
+                    if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) {
+                        mClient.logInfo(LOG_TAG, "IME: commitText(\"" + text + "\", " + newCursorPosition + ")");
+                    }
+                    super.commitText(text, newCursorPosition);
+
+                    if (mEmulator == null) return true;
+
+                    Editable content = getEditable();
+                    sendTextToTerminal(content);
+                    content.clear();
+                } catch (RuntimeException e) {
+                    reportTerminalViewFailure("IME commitText failed", e);
+                    getEditable().clear();
                 }
-                super.commitText(text, newCursorPosition);
-
-                if (mEmulator == null) return true;
-
-                Editable content = getEditable();
-                sendTextToTerminal(content);
-                content.clear();
                 return true;
             }
 
@@ -1015,45 +1025,60 @@ public final class TerminalView extends View {
 
     /** Check if the terminal size in rows and columns should be updated. */
     public void updateSize() {
-        int viewWidth = getWidth();
-        int viewHeight = getHeight();
-        if (viewWidth == 0 || viewHeight == 0 || mTermSession == null) return;
-        if (mRenderer.mFontWidth <= 0 || mRenderer.mFontLineSpacing <= 0) return;
+        try {
+            int viewWidth = getWidth();
+            int viewHeight = getHeight();
+            if (viewWidth == 0 || viewHeight == 0 || mTermSession == null) return;
+            if (mRenderer.mFontWidth <= 0 || mRenderer.mFontLineSpacing <= 0) return;
 
-        // Set to 80 and 24 if you want to enable vttest.
-        int newColumns = Math.max(4, (int) (viewWidth / mRenderer.mFontWidth));
-        int newRows = Math.max(4, (viewHeight - mRenderer.mFontLineSpacingAndAscent) / mRenderer.mFontLineSpacing);
+            // Set to 80 and 24 if you want to enable vttest.
+            int newColumns = Math.max(4, (int) (viewWidth / mRenderer.mFontWidth));
+            int newRows = Math.max(4, (viewHeight - mRenderer.mFontLineSpacingAndAscent) / mRenderer.mFontLineSpacing);
 
-        if (mEmulator == null || (newColumns != mEmulator.mColumns || newRows != mEmulator.mRows)) {
-            mTermSession.updateSize(newColumns, newRows, (int) mRenderer.getFontWidth(), mRenderer.getFontLineSpacing());
-            mEmulator = mTermSession.getEmulator();
-            mClient.onEmulatorSet();
+            if (mEmulator == null || (newColumns != mEmulator.mColumns || newRows != mEmulator.mRows)) {
+                mTermSession.updateSize(newColumns, newRows, (int) mRenderer.getFontWidth(), mRenderer.getFontLineSpacing());
+                mEmulator = mTermSession.getEmulator();
+                mClient.onEmulatorSet();
 
-            // Update mTerminalCursorBlinkerRunnable inner class mEmulator on session change
-            if (mTerminalCursorBlinkerRunnable != null)
-                mTerminalCursorBlinkerRunnable.setEmulator(mEmulator);
+                // Update mTerminalCursorBlinkerRunnable inner class mEmulator on session change
+                if (mTerminalCursorBlinkerRunnable != null)
+                    mTerminalCursorBlinkerRunnable.setEmulator(mEmulator);
 
-            mTopRow = 0;
-            scrollTo(0, 0);
-            scheduleRenderInvalidation();
+                mTopRow = 0;
+                scrollTo(0, 0);
+                scheduleRenderInvalidation();
+            }
+        } catch (RuntimeException e) {
+            reportTerminalViewFailure("terminal resize failed", e);
         }
     }
 
     @Override
     protected void onDraw(Canvas canvas) {
-        if (mEmulator == null) {
-            canvas.drawColor(mDefaultBackgroundColor);
-        } else {
-            // render the terminal view and highlight any selected text
-            int[] sel = mDefaultSelectors;
-            if (mTextSelectionCursorController != null) {
-                mTextSelectionCursorController.getSelectors(sel);
+        try {
+            if (mEmulator == null) {
+                canvas.drawColor(mDefaultBackgroundColor);
+            } else {
+                // render the terminal view and highlight any selected text
+                int[] sel = mDefaultSelectors;
+                if (mTextSelectionCursorController != null) {
+                    mTextSelectionCursorController.getSelectors(sel);
+                }
+
+                mRenderer.render(mEmulator, canvas, mTopRow, sel[0], sel[1], sel[2], sel[3]);
+
+                // render the text selection handles
+                renderTextSelection();
             }
+        } catch (RuntimeException e) {
+            reportTerminalViewFailure("terminal draw failed", e);
+            canvas.drawColor(mDefaultBackgroundColor);
+        }
+    }
 
-            mRenderer.render(mEmulator, canvas, mTopRow, sel[0], sel[1], sel[2], sel[3]);
-
-            // render the text selection handles
-            renderTextSelection();
+    private void reportTerminalViewFailure(String message, RuntimeException e) {
+        if (mClient != null) {
+            mClient.logStackTraceWithMessage(LOG_TAG, message, e);
         }
     }
 

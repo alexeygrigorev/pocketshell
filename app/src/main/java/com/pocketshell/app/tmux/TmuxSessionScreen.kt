@@ -392,9 +392,16 @@ public fun TmuxSessionScreen(
     // [pinTerminalToBottom] helper which lives in core-terminal next
     // to the show-keyboard helper so the [TerminalView] import does
     // not leak into the app module.
-    LaunchedEffect(isImeVisible) {
+    LaunchedEffect(isImeVisible, currentPane?.paneId) {
         if (isImeVisible) {
-            com.pocketshell.core.terminal.ui.pinTerminalToBottom(composeRootView)
+            com.pocketshell.core.terminal.ui.pinTerminalToBottom(
+                composeRootView,
+                onLocalTerminalError = { cause ->
+                    currentPane?.paneId?.let { paneId ->
+                        viewModel.reportTerminalSurfaceFailure(paneId, cause)
+                    }
+                },
+            )
         }
     }
 
@@ -783,6 +790,9 @@ public fun TmuxSessionScreen(
                             // Resize prompt instead of resizing
                             // automatically on attach.
                             onTerminalSizeChanged = viewModel::resizeRemotePty,
+                            onLocalTerminalError = { cause ->
+                                viewModel.reportTerminalSurfaceFailure(pane.paneId, cause)
+                            },
                             modifier = Modifier
                                 .fillMaxSize()
                                 .padding(horizontal = 2.dp, vertical = 4.dp),
@@ -858,7 +868,16 @@ public fun TmuxSessionScreen(
                     // pager renders one pane at a time, so there is only
                     // ever a single attached `TerminalView` to find under
                     // the Compose root).
-                    onShowKeyboardTap = { showTerminalSoftKeyboard(composeRootView) },
+                    onShowKeyboardTap = {
+                        showTerminalSoftKeyboard(
+                            composeRootView,
+                            onLocalTerminalError = { cause ->
+                                currentPane?.paneId?.let { paneId ->
+                                    viewModel.reportTerminalSurfaceFailure(paneId, cause)
+                                }
+                            },
+                        )
+                    },
                     onAddSnippetTap = if (hostId != 0L) {
                         { showSnippetPicker = true }
                     } else null,

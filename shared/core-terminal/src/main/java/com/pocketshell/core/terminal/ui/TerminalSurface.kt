@@ -210,6 +210,7 @@ fun TerminalSurface(
     modifier: Modifier = Modifier,
     matchListener: ((TerminalMatch) -> Unit)? = null,
     onTerminalSizeChanged: ((columns: Int, rows: Int) -> Unit)? = null,
+    onLocalTerminalError: ((Throwable) -> Unit)? = null,
     onKeyEvent: ((ComposeKeyEvent) -> Boolean)? = null,
     onUrlTap: ((String) -> Unit)? = null,
     urlsEnabled: Boolean = true,
@@ -219,6 +220,7 @@ fun TerminalSurface(
     // factory runs once; update runs every recomposition.
     val viewClient = remember { PocketShellTerminalViewClient() }
     viewClient.onTerminalSizeChanged = onTerminalSizeChanged
+    viewClient.onTerminalSurfaceError = onLocalTerminalError
     var terminalView by remember { mutableStateOf<TerminalView?>(null) }
     var viewportTick by remember { mutableStateOf(0L) }
     val desiredSession = state.session
@@ -266,7 +268,8 @@ fun TerminalSurface(
     LaunchedEffect(state, terminalView) {
         val view = terminalView ?: return@LaunchedEffect
         state.renderRequests.collect {
-            view.onScreenUpdated()
+            runCatching { view.onScreenUpdated() }
+                .onFailure { onLocalTerminalError?.invoke(it) }
         }
     }
 
@@ -312,9 +315,17 @@ fun TerminalSurface(
             visibleUrls = emptyList()
             return@LaunchedEffect
         }
-        visibleUrls = findVisibleUrls(view)
+        visibleUrls = runCatching { findVisibleUrls(view) }
+            .getOrElse { cause ->
+                onLocalTerminalError?.invoke(cause)
+                emptyList()
+            }
         state.renderRequests.collect {
-            val fresh = findVisibleUrls(view)
+            val fresh = runCatching { findVisibleUrls(view) }
+                .getOrElse { cause ->
+                    onLocalTerminalError?.invoke(cause)
+                    emptyList()
+                }
             if (fresh != visibleUrls) {
                 visibleUrls = fresh
             }
@@ -377,7 +388,8 @@ fun TerminalSurface(
                     // recompositions.
                     if (desiredSession != null) {
                         if (desiredSession !== current) {
-                            view.attachSession(desiredSession)
+                            runCatching { view.attachSession(desiredSession) }
+                                .onFailure { onLocalTerminalError?.invoke(it) }
                         }
                     } else if (desiredSession !== current) {
                         // No public detach on TerminalView; clear the
@@ -500,6 +512,7 @@ private fun TerminalView.applyPocketShellDefaultColors() {
 internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessionClient {
     private var terminalView: TerminalView? = null
     var onTerminalSizeChanged: ((columns: Int, rows: Int) -> Unit)? = null
+    var onTerminalSurfaceError: ((Throwable) -> Unit)? = null
     var onViewportChanged: (() -> Unit)? = null
 
     /**
@@ -521,7 +534,8 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
     }
 
     override fun onTextChanged(changedSession: TerminalSession) {
-        terminalView?.onScreenUpdated()
+        runCatching { terminalView?.onScreenUpdated() }
+            .onFailure { onTerminalSurfaceError?.invoke(it) }
     }
 
     override fun onTitleChanged(changedSession: TerminalSession) = Unit
@@ -530,10 +544,12 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
     override fun onPasteTextFromClipboard(session: TerminalSession?) = Unit
     override fun onBell(session: TerminalSession) = Unit
     override fun onColorsChanged(session: TerminalSession) {
-        terminalView?.apply {
-            applyPocketShellDefaultColors()
-            onScreenUpdated()
-        }
+        runCatching {
+            terminalView?.apply {
+                applyPocketShellDefaultColors()
+                onScreenUpdated()
+            }
+        }.onFailure { onTerminalSurfaceError?.invoke(it) }
     }
 
     override fun onTerminalCursorStateChange(state: Boolean) = Unit
@@ -546,13 +562,14 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
         // the host says "yes, this hit a URL", suppress the keyboard summon
         // entirely; the host is responsible for the follow-up (typically
         // firing Intent.ACTION_VIEW).
-        if (e != null) {
-            val handled = onTapMaybeUrl?.invoke(e.x, e.y) == true
-            if (handled) return
-        }
-        view.requestFocus()
-        val inputMethodManager = view.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-        inputMethodManager?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+        runCatching {
+            val handledUrl = e != null && onTapMaybeUrl?.invoke(e.x, e.y) == true
+            if (!handledUrl) {
+                view.requestFocus()
+                val inputMethodManager = view.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                inputMethodManager?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+            }
+        }.onFailure { onTerminalSurfaceError?.invoke(it) }
     }
     override fun onScrollChanged() {
         onViewportChanged?.invoke()
@@ -571,18 +588,24 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
     override fun readFnKey(): Boolean = false
     override fun onCodePoint(codePoint: Int, ctrlDown: Boolean, session: TerminalSession?): Boolean = false
     override fun onEmulatorSet() {
-        terminalView?.applyPocketShellDefaultColors()
-        val emulator = terminalView?.currentSession?.emulator ?: return
-        if (emulator.mColumns > 0 && emulator.mRows > 0) {
-            onTerminalSizeChanged?.invoke(emulator.mColumns, emulator.mRows)
-        }
-        onViewportChanged?.invoke()
+        runCatching {
+            terminalView?.applyPocketShellDefaultColors()
+            val emulator = terminalView?.currentSession?.emulator ?: return
+            if (emulator.mColumns > 0 && emulator.mRows > 0) {
+                onTerminalSizeChanged?.invoke(emulator.mColumns, emulator.mRows)
+            }
+            onViewportChanged?.invoke()
+        }.onFailure { onTerminalSurfaceError?.invoke(it) }
     }
     override fun logError(tag: String?, message: String?) = Unit
     override fun logWarn(tag: String?, message: String?) = Unit
     override fun logInfo(tag: String?, message: String?) = Unit
     override fun logDebug(tag: String?, message: String?) = Unit
     override fun logVerbose(tag: String?, message: String?) = Unit
-    override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) = Unit
-    override fun logStackTrace(tag: String?, e: Exception?) = Unit
+    override fun logStackTraceWithMessage(tag: String?, message: String?, e: Exception?) {
+        e?.let { onTerminalSurfaceError?.invoke(it) }
+    }
+    override fun logStackTrace(tag: String?, e: Exception?) {
+        e?.let { onTerminalSurfaceError?.invoke(it) }
+    }
 }

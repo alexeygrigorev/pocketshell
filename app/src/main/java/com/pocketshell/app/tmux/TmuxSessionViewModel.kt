@@ -2679,15 +2679,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 // outlives recomposition; cancelling the scope (via
                 // onCleared) tears the bridge down cleanly.
                 if (client != null) {
-                    val job = state.attachExternalProducer(
-                        scope = bridgeScope,
-                        stdout = client.outputFor(p.paneId).map { it.data },
-                        // tmux -CC has no per-pane PTY fd, so the terminal's
-                        // input queue is bridged to tmux `send-keys`.
-                        remoteStdin = inputSinkForPane(p.paneId),
-                        suppressQueryResponses = true,
-                    )
-                    paneProducerJobs[p.paneId] = job
+                    attachTerminalProducerForPane(paneId = p.paneId, state = state, client = client)
                     activeAttachMilestone?.let { milestone ->
                         if (!milestone.firstTerminalBridgeLogged) {
                             milestone.firstTerminalBridgeLogged = true
@@ -2733,6 +2725,71 @@ public class TmuxSessionViewModel @Inject constructor(
         paneRows.putAll(nextById)
         _panes.value = nextById.values.toList()
         return newRows
+    }
+
+    private fun attachTerminalProducerForPane(
+        paneId: String,
+        state: TerminalSurfaceState,
+        client: TmuxClient,
+    ) {
+        runCatching {
+            state.attachExternalProducer(
+                scope = bridgeScope,
+                stdout = client.outputFor(paneId).map { it.data },
+                // tmux -CC has no per-pane PTY fd, so the terminal's
+                // input queue is bridged to tmux `send-keys`.
+                remoteStdin = inputSinkForPane(paneId),
+                suppressQueryResponses = true,
+            )
+        }.onSuccess { job ->
+            paneProducerJobs[paneId] = job
+        }.onFailure { cause ->
+            Log.w(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-terminal-producer-attach-failed pane=$paneId",
+                cause,
+            )
+        }
+    }
+
+    /**
+     * Recover local terminal-view state without touching the SSH/tmux
+     * transport. IME, resize, render, and local input bridge failures can
+     * leave the embedded Termux view or its bridge in a bad state while the
+     * control client is still alive; those failures must not flip
+     * [ConnectionStatus] or enter the reconnect loop.
+     */
+    public fun reportTerminalSurfaceFailure(paneId: String, cause: Throwable) {
+        val existing = paneRows[paneId] ?: return
+        Log.w(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-terminal-surface-recover pane=$paneId status=${_connectionStatus.value}",
+            cause,
+        )
+        paneProducerJobs.remove(paneId)?.cancel()
+        paneInputJobs.remove(paneId)?.cancel()
+        paneInputQueues.remove(paneId)?.close()
+        runCatching { existing.terminalState.detachExternalProducer() }
+
+        val replacementState = TerminalSurfaceState()
+        val client = clientRef
+        if (client != null && !client.disconnected.value) {
+            attachTerminalProducerForPane(
+                paneId = paneId,
+                state = replacementState,
+                client = client,
+            )
+        }
+        val recovered = existing.copy(terminalState = replacementState)
+        paneRows[paneId] = recovered
+        _panes.update { rows ->
+            rows.map { row -> if (row.paneId == paneId) recovered else row }
+        }
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun reportTerminalSurfaceFailureForTest(paneId: String, cause: Throwable) {
+        reportTerminalSurfaceFailure(paneId, cause)
     }
 
     private suspend fun preloadVisibleContentForNewPanes(

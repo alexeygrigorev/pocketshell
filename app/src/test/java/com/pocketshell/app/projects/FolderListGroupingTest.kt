@@ -619,7 +619,7 @@ class FolderListGroupingTest {
             projectCountText(folderWithSessions(entry("claude", 1_000L, kind = SessionAgentKind.Claude))),
         )
         assertEquals(
-            "2 sessions, 1 agent",
+            "2 sessions · 1 agent",
             projectCountText(
                 folderWithSessions(
                     entry("claude", 2_000L, kind = SessionAgentKind.Claude),
@@ -628,7 +628,7 @@ class FolderListGroupingTest {
             ),
         )
         assertEquals(
-            "3 sessions, 2 agents",
+            "3 sessions · 2 agents",
             projectCountText(
                 folderWithSessions(
                     entry("claude", 3_000L, kind = SessionAgentKind.Claude),

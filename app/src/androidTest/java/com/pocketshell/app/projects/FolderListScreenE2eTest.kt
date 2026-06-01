@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -32,6 +33,7 @@ import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellThemeMode
 import kotlinx.coroutines.runBlocking
 import org.junit.After
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -95,14 +97,21 @@ class FolderListScreenE2eTest {
                 keyId = keyId,
             ),
         )
-        // Seed one watched parent root. The fake gateway expands it
-        // into project folders, including an empty one, so the tree
-        // renders watched root -> project folder -> sessions.
+        // Seed the review fixture roots verbatim. The fake gateway
+        // resolves them to absolute paths and returns active projects
+        // under each root plus outside-root sessions after them.
         db.projectRootDao().insert(
             ProjectRootEntity(
                 hostId = hostId,
-                label = "code",
-                path = "/home/u/code",
+                label = "[00] git",
+                path = "~/git",
+            ),
+        )
+        db.projectRootDao().insert(
+            ProjectRootEntity(
+                hostId = hostId,
+                label = "[01] tmp",
+                path = "~/tmp",
             ),
         )
     }
@@ -118,32 +127,69 @@ class FolderListScreenE2eTest {
             rows = listOf(
                 FolderSessionRow(
                     sessionName = "claude-main",
-                    lastActivity = 1_700_000_000L,
+                    lastActivity = 1_700_004_000L,
                     attached = true,
-                    cwd = "/home/u/code/pocketshell",
+                    cwd = "/home/u/git/pocketshell",
                     agentKind = SessionAgentKind.Claude,
                 ),
                 FolderSessionRow(
                     sessionName = "build-shell",
-                    lastActivity = 1_700_000_500L,
+                    lastActivity = 1_700_003_500L,
                     attached = false,
-                    cwd = "/home/u/code/pocketshell",
+                    cwd = "/home/u/git/pocketshell",
                     agentKind = SessionAgentKind.Shell,
                 ),
                 FolderSessionRow(
                     sessionName = "codex-llm",
                     lastActivity = 1_700_001_000L,
                     attached = true,
-                    cwd = "/home/u/code/llm-zoomcamp",
+                    cwd = "/home/u/git/llm-zoomcamp",
                     agentKind = SessionAgentKind.Codex,
+                ),
+                FolderSessionRow(
+                    sessionName = "tmp-agent",
+                    lastActivity = 1_700_002_000L,
+                    attached = true,
+                    cwd = "/home/u/tmp/scratch",
+                    agentKind = SessionAgentKind.OpenCode,
+                ),
+                FolderSessionRow(
+                    sessionName = "tmp-codex",
+                    lastActivity = 1_700_001_500L,
+                    attached = false,
+                    cwd = "/home/u/tmp/scratch",
+                    agentKind = SessionAgentKind.Codex,
+                ),
+                FolderSessionRow(
+                    sessionName = "notes-shell",
+                    lastActivity = 1_700_000_800L,
+                    attached = false,
+                    cwd = "/home/u/tmp/notebooks",
+                    agentKind = SessionAgentKind.Shell,
+                ),
+                FolderSessionRow(
+                    sessionName = "outside-lab",
+                    lastActivity = 1_700_005_000L,
+                    attached = true,
+                    cwd = "/opt/work/demo",
+                    agentKind = SessionAgentKind.Claude,
                 ),
             ),
             projectFoldersByRoot = mapOf(
-                "/home/u/code" to listOf(
-                    "/home/u/code/pocketshell",
-                    "/home/u/code/llm-zoomcamp",
-                    "/home/u/code/empty-pinned",
+                "~/git" to listOf(
+                    "/home/u/git/pocketshell",
+                    "/home/u/git/llm-zoomcamp",
+                    "/home/u/git/empty-pinned",
                 ),
+                "~/tmp" to listOf(
+                    "/home/u/tmp/scratch",
+                    "/home/u/tmp/notebooks",
+                    "/home/u/tmp/old-run",
+                ),
+            ),
+            resolvedWatchedRootPaths = mapOf(
+                "~/git" to "/home/u/git",
+                "~/tmp" to "/home/u/tmp",
             ),
         )
         val viewModel = FolderListViewModel(
@@ -181,18 +227,42 @@ class FolderListScreenE2eTest {
         // Wait for the bind() + initial probe to complete.
         compose.waitUntil(timeoutMillis = 10_000) {
             fakeGateway.callCount.get() >= 1 &&
-                compose.onAllNodesWithTag(folderTreeRootTestTag("/home/u/code"))
+                compose.onAllNodesWithTag(folderTreeRootTestTag("~/git"))
                     .fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
-            .performScrollToNode(hasTestTag(folderRowTestTag("/home/u/code/pocketshell")))
+            .performScrollToNode(hasTestTag(folderRowTestTag("/home/u/git/pocketshell")))
 
         // --- Assertion 1: screen mounted with the host name on the
         //    app-bar header.
         compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_TITLE_TAG).assertExists()
         compose.onNodeWithText("issue171-host").assertExists()
-        compose.onNodeWithTag(folderTreeRootLabelTag("/home/u/code")).assertExists()
+        compose.onNodeWithText("Workspace roots").assertDoesNotExist()
+        compose.onNodeWithText("Flat projects").assertDoesNotExist()
+        compose.onNodeWithText("Repos").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Browse repos").assertExists()
+        compose.onNodeWithTag(folderTreeRootLabelTag("~/git")).assertExists()
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(folderTreeRootLabelTag("~/tmp")))
+        compose.onNodeWithTag(folderTreeRootLabelTag("~/tmp")).assertExists()
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(folderTreeRootLabelTag(FolderListViewModel.OTHER_ROOT_PATH)))
+        compose.onNodeWithTag(folderTreeRootLabelTag(FolderListViewModel.OTHER_ROOT_PATH)).assertExists()
+        val readyRoots = (viewModel.state.value as FolderListUiState.Ready).treeRoots
+        assertEquals(
+            listOf("git", "tmp", FolderListViewModel.OTHER_ROOT_LABEL),
+            readyRoots.map { it.label },
+        )
+        assertEquals(listOf("~/git", "~/tmp", FolderListViewModel.OTHER_ROOT_PATH), readyRoots.map { it.path })
+        assertEquals(
+            listOf("pocketshell", "llm-zoomcamp"),
+            readyRoots[0].folders.map { it.label },
+        )
+        assertEquals(listOf("scratch", "notebooks"), readyRoots[1].folders.map { it.label })
+        assertEquals(listOf("demo"), readyRoots[2].folders.map { it.label })
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(folderRowTestTag("/home/u/git/pocketshell")))
         compose.onAllNodesWithTag(FOLDER_LIST_PORT_FORWARDING_TAG)
             .fetchSemanticsNodes()
             .also {
@@ -213,31 +283,34 @@ class FolderListScreenE2eTest {
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_PANEL_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_PROMPT_MIC_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_PROMPT_TAG)
-            .performTextInput("create a project called notes under code")
+            .performTextInput("create a project called notes under git")
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_SUBMIT_TAG).performClick()
         compose.onNodeWithText("No assistant provider configured. Add an API key in Settings → Assistant.")
             .assertExists()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_CLOSE_TAG).performClick()
 
-        // --- Assertion 2: two active folder rows — pocketshell and
-        //    llm-zoomcamp. The inactive scanned empty-pinned project is
-        //    intentionally not rendered inline on the main root tree.
-        compose.onNodeWithTag(folderHeaderLabelTag("/home/u/code/pocketshell"), useUnmergedTree = true).assertExists()
-        compose.onNodeWithTag(folderHeaderLabelTag("/home/u/code/llm-zoomcamp"), useUnmergedTree = true).assertExists()
-        compose.onNodeWithTag(folderHeaderLabelTag("/home/u/code/empty-pinned"), useUnmergedTree = true).assertDoesNotExist()
-        compose.onNodeWithText("2 sessions, 1 agent", useUnmergedTree = true).assertExists()
-        assertCountPillRendersHorizontally("/home/u/code/pocketshell", "2 sessions, 1 agent")
-        compose.onNodeWithText("1 agent", useUnmergedTree = true).assertExists()
-        assertCountPillRendersHorizontally("/home/u/code/llm-zoomcamp", "1 agent")
+        // --- Assertion 2: active project rows under configured roots
+        //    render compactly. Inactive scanned projects stay sheet-only.
+        compose.onNodeWithTag(folderHeaderLabelTag("/home/u/git/pocketshell"), useUnmergedTree = true).assertExists()
+        compose.onNodeWithTag(folderHeaderLabelTag("/home/u/git/llm-zoomcamp"), useUnmergedTree = true).assertExists()
+        compose.onNodeWithTag(folderHeaderLabelTag("/home/u/git/empty-pinned"), useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithTag(folderCountPillTestTag("/home/u/git/pocketshell"), useUnmergedTree = true)
+            .assertTextEquals("active · 2 sessions · 1 agent")
+        assertProjectNameKeepsReadableWidth("/home/u/git/pocketshell")
+        compose.onNodeWithTag(folderCountPillTestTag("/home/u/git/llm-zoomcamp"), useUnmergedTree = true)
+            .assertTextEquals("active · 1 agent")
+        assertProjectNameKeepsReadableWidth("/home/u/git/llm-zoomcamp")
         compose.onNodeWithTag(
-            folderStatusDotTestTag("/home/u/code/pocketshell"),
+            folderStatusDotTestTag("/home/u/git/pocketshell"),
             useUnmergedTree = true,
         ).assertExists()
-        assertAccessibleTouchTarget(folderTreeRootActionsTestTag("/home/u/code"))
-        assertAccessibleTouchTarget(folderTreeRootCreateTestTag("/home/u/code"))
-        assertAccessibleTouchTarget(folderDetailActionsTestTag("/home/u/code/pocketshell"))
-        assertAccessibleTouchTarget(folderDetailEnvTestTag("/home/u/code/pocketshell"))
-        assertAccessibleTouchTarget(folderDetailCreateTestTag("/home/u/code/pocketshell"))
+        assertAccessibleTouchTarget(folderTreeRootActionsTestTag("~/git"))
+        assertAccessibleTouchTarget(folderTreeRootCreateTestTag("~/git"))
+        assertAccessibleTouchTarget(folderTreeRootActionsTestTag("~/tmp"))
+        assertAccessibleTouchTarget(folderTreeRootCreateTestTag("~/tmp"))
+        assertAccessibleTouchTarget(folderDetailActionsTestTag("/home/u/git/pocketshell"))
+        assertAccessibleTouchTarget(folderDetailEnvTestTag("/home/u/git/pocketshell"))
+        assertAccessibleTouchTarget(folderDetailCreateTestTag("/home/u/git/pocketshell"))
         compose.onNodeWithText("+ New", useUnmergedTree = true).assertDoesNotExist()
 
         // --- Assertion 3: projects are collapsed by default; expanding
@@ -245,17 +318,17 @@ class FolderListScreenE2eTest {
         //    sessions and keeps the raw tmux name as fallback text.
         compose.onNodeWithText("claude-main", useUnmergedTree = true).assertDoesNotExist()
         compose.onNodeWithTag(
-            folderDetailDisclosureTestTag("/home/u/code/pocketshell"),
+            folderDetailDisclosureTestTag("/home/u/git/pocketshell"),
             useUnmergedTree = true,
         ).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             (viewModel.state.value as? FolderListUiState.Ready)
                 ?.expandedProjectPaths
-                ?.contains("/home/u/code/pocketshell") == true
+                ?.contains("/home/u/git/pocketshell") == true
         }
         compose.onNodeWithText("claude-main", useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(
-            folderSessionStatusDotTestTag("/home/u/code/pocketshell", "claude-main"),
+            folderSessionStatusDotTestTag("/home/u/git/pocketshell", "claude-main"),
             useUnmergedTree = true,
         ).assertExists()
         compose.onNodeWithText("build-shell", useUnmergedTree = true).assertExists()
@@ -283,25 +356,27 @@ class FolderListScreenE2eTest {
         //    The root add affordance opens RootProjectAddSheet with quick actions and a
         //    candidate row that starts a session in the inactive folder.
         compose.onNodeWithText("Watched").assertDoesNotExist()
-        compose.onAllNodesWithTag(folderDetailCreateTestTag("/home/u/code/empty-pinned"))
+        compose.onAllNodesWithTag(folderDetailCreateTestTag("/home/u/git/empty-pinned"))
             .fetchSemanticsNodes().also {
                 assertTrue("expected empty-pinned folder to stay out of the main tree", it.isEmpty())
             }
 
-        compose.onNodeWithTag(folderTreeRootCreateTestTag("/home/u/code")).performClick()
+        compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
+            .performScrollToNode(hasTestTag(folderTreeRootCreateTestTag("~/git")))
+        compose.onNodeWithTag(folderTreeRootCreateTestTag("~/git")).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(ROOT_PROJECT_ADD_SHEET_TAG).fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag(ROOT_PROJECT_ADD_EMPTY_PROJECT_TAG).assertExists()
         compose.onNodeWithTag(ROOT_PROJECT_ADD_CLONE_TAG).assertExists()
-        compose.onNodeWithTag(rootProjectCandidateTestTag("/home/u/code/empty-pinned")).assertExists()
-        compose.onNodeWithTag(rootProjectCandidateTestTag("/home/u/code/empty-pinned")).performClick()
+        compose.onNodeWithTag(rootProjectCandidateTestTag("/home/u/git/empty-pinned")).assertExists()
+        compose.onNodeWithTag(rootProjectCandidateTestTag("/home/u/git/empty-pinned")).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(SESSION_TYPE_PICKER_SHELL_TAG).fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithText("in empty-pinned").assertExists()
         compose.onNodeWithTag(SESSION_TYPE_PICKER_CWD_TAG).assertExists()
-        compose.onNodeWithText("/home/u/code/empty-pinned").assertExists()
+        compose.onNodeWithText("/home/u/git/empty-pinned").assertExists()
         compose.onNodeWithTag(SESSION_TYPE_PICKER_CANCEL_TAG).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(SESSION_TYPE_PICKER_SHELL_TAG).fetchSemanticsNodes().isEmpty()
@@ -369,13 +444,13 @@ class FolderListScreenE2eTest {
 
         compose.waitUntil(timeoutMillis = 10_000) {
             fakeGateway.callCount.get() >= 1 &&
-                compose.onAllNodesWithTag(folderTreeRootTestTag("/home/u/code"))
+                compose.onAllNodesWithTag(folderTreeRootTestTag("~/git"))
                     .fetchSemanticsNodes().isNotEmpty() &&
                 compose.onAllNodesWithTag(FOLDER_LIST_PORT_FORWARDING_TAG)
                     .fetchSemanticsNodes().isNotEmpty()
         }
 
-        val rootBounds = compose.onNodeWithTag(folderTreeRootTestTag("/home/u/code"))
+        val rootBounds = compose.onNodeWithTag(folderTreeRootTestTag("~/git"))
             .fetchSemanticsNode()
             .boundsInRoot
         val forwardingBounds = compose.onNodeWithTag(FOLDER_LIST_PORT_FORWARDING_TAG)
@@ -391,18 +466,18 @@ class FolderListScreenE2eTest {
         compose.waitUntil(timeoutMillis = 5_000) { openedPortForwarding }
     }
 
-    private fun assertCountPillRendersHorizontally(folderPath: String, countText: String) {
-        compose.onNodeWithText(
-            countText,
-            useUnmergedTree = true,
-        ).assertExists()
-        val bounds = compose.onNodeWithTag(
-            folderCountPillTestTag(folderPath),
+    private fun assertProjectNameKeepsReadableWidth(folderPath: String) {
+        val labelBounds = compose.onNodeWithTag(
+            folderHeaderLabelTag(folderPath),
             useUnmergedTree = true,
         ).fetchSemanticsNode().boundsInRoot
+        compose.onNodeWithTag(
+            folderCountPillTestTag(folderPath),
+            useUnmergedTree = true,
+        ).assertExists()
         assertTrue(
-            "count pill for $folderPath is too narrow: ${bounds.width}x${bounds.height}",
-            bounds.width > bounds.height * 2.5f,
+            "project label for $folderPath should keep enough readable width: ${labelBounds.width}",
+            labelBounds.width >= 180f,
         )
     }
 
@@ -504,6 +579,7 @@ private fun noopAssistantDictationViewModel(): InlineDictationViewModel =
 private class FakeFolderListGateway(
     private val rows: List<FolderSessionRow>,
     private val projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
+    private val resolvedWatchedRootPaths: Map<String, String> = emptyMap(),
     private val discoveredPorts: List<RemotePort> = emptyList(),
 ) : FolderListGateway {
 
@@ -519,6 +595,7 @@ private class FakeFolderListGateway(
         return FolderListResult.Sessions(
             rows = rows,
             projectFoldersByRoot = projectFoldersByRoot,
+            resolvedWatchedRootPaths = resolvedWatchedRootPaths,
             discoveredPorts = discoveredPorts,
         )
     }

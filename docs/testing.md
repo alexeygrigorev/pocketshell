@@ -23,10 +23,23 @@ Standard Android Studio AVDs. Recommended set:
 Command-line launch (no Android Studio):
 
 ```bash
-$ANDROID_HOME/emulator/emulator -avd pixel_7_api_34 -no-snapshot-load &
+scripts/start-local-avd.sh
 ./gradlew installDebug
 adb shell am start -n com.pocketshell.app/.MainActivity
 ```
+
+The local startup helper defaults to `AVD_NAME=test` and the headless review
+flags used by the pre-release gate:
+`-no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
+-no-snapshot-load -no-snapshot-save`. It records
+`adb devices`, `getprop`, accelerator status, AVD config, process matching, and
+the emulator log under `build/local-avd-start/<run-id>/`, which is the first
+artifact to attach when an AVD exits before adb sees a device.
+
+For `connectedDebugAndroidTest` evidence, run the helper with
+`AVD_HOLD=1` in a dedicated terminal and leave it open while Gradle runs in
+another terminal. This keeps the startup monitor attached and records a clear
+failure if the emulator exits after initially reporting boot complete.
 
 ### Automated UI tests
 

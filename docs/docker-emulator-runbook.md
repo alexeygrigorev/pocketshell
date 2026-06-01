@@ -26,10 +26,35 @@ test
 Start the emulator:
 
 ```bash
-"$EMULATOR" -avd test -no-snapshot-load -no-window -gpu swiftshader_indirect -no-audio
+scripts/start-local-avd.sh
 ```
 
-Wait for boot:
+The helper uses the shared AVD lock, starts the local `test` AVD with the
+review-safe headless flags, waits for `sys.boot_completed=1`, and writes
+diagnostics under `build/local-avd-start/<run-id>/` if the emulator exits before
+adb device discovery. For connected-test review evidence, keep it open in a
+dedicated terminal:
+
+```bash
+AVD_HOLD=1 scripts/start-local-avd.sh
+```
+
+Then run `:app:connectedDebugAndroidTest` from another terminal. If the emulator
+exits after boot, the held helper records the failure in the same run directory.
+
+To run the same command manually:
+
+```bash
+"$EMULATOR" -avd test \
+  -no-window \
+  -no-audio \
+  -no-boot-anim \
+  -gpu swiftshader_indirect \
+  -no-snapshot-load \
+  -no-snapshot-save
+```
+
+Wait for boot if you start it manually:
 
 ```bash
 for i in {1..90}; do
@@ -478,16 +503,31 @@ context from logcat, recent app-crash dropbox entries, and the tombstone
 listing. The run directory also keeps a bounded full logcat artifact for the
 failed focused invocation.
 
-The script does not start the emulator. If no emulator is running, start the
-known local AVD first:
+By default, the script expects an already booted emulator. For local
+release-gate evidence, start the shared `test` AVD with the helper in hold mode
+from a dedicated terminal before running the gate:
 
 ```bash
-/home/alexey/Android/Sdk/emulator/emulator \
-  -avd test \
-  -no-snapshot-load \
+AVD_HOLD=1 RUN_ID=pre-release-hold scripts/start-local-avd.sh
+```
+
+Leave that terminal open while `scripts/pre-release-confidence-gate.sh` or any
+focused `connectedDebugAndroidTest` command runs in another terminal. Hold mode
+keeps the startup helper attached to the emulator and records diagnostics under
+`build/local-avd-start/pre-release-hold/` if the AVD exits while Gradle is still
+collecting connected-test evidence.
+
+If you need to start the AVD manually instead of using the helper, use the same
+flag set:
+
+```bash
+"$EMULATOR" -avd test \
   -no-window \
+  -no-audio \
+  -no-boot-anim \
   -gpu swiftshader_indirect \
-  -no-audio
+  -no-snapshot-load \
+  -no-snapshot-save
 ```
 
 The script accepts these environment overrides when a local machine differs:

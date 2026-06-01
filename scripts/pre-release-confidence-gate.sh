@@ -30,7 +30,7 @@ APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS="${APP_WALKTHROUGH_TRANSPORT_RECOVER
 ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS="${ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS:-3}"
 CORE_TERMINAL_CONNECTED_ATTEMPTS="${CORE_TERMINAL_CONNECTED_ATTEMPTS:-2}"
 PRE_RELEASE_MANAGE_EMULATOR="${PRE_RELEASE_MANAGE_EMULATOR:-0}"
-PRE_RELEASE_EMULATOR_START_ARGS="${PRE_RELEASE_EMULATOR_START_ARGS:--no-window -no-audio -no-boot-anim -gpu swiftshader_indirect}"
+PRE_RELEASE_EMULATOR_START_ARGS="${PRE_RELEASE_EMULATOR_START_ARGS:--no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save}"
 
 APP_WALKTHROUGH_TESTS=(
   "com.pocketshell.app.composer.PromptComposerSmokeTest#recordingAndTranscribingStatesAreVisible"
@@ -77,7 +77,7 @@ Environment overrides:
   ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS=3
   CORE_TERMINAL_CONNECTED_ATTEMPTS=2
   PRE_RELEASE_MANAGE_EMULATOR=0
-  PRE_RELEASE_EMULATOR_START_ARGS="-no-window -no-audio -no-boot-anim -gpu swiftshader_indirect"
+  PRE_RELEASE_EMULATOR_START_ARGS="-no-window -no-audio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-load -no-snapshot-save"
 USAGE
 }
 
@@ -446,6 +446,7 @@ record_diagnostics() {
     printf 'emulator=%s\n' '$EMULATOR'
     printf 'avd=%s\n' "\$avd_name"
     printf 'manage_emulator=%s\n' "\$manage_emulator"
+    printf 'managed_start_args=%s\n' '$PRE_RELEASE_EMULATOR_START_ARGS'
     printf '\n== adb devices ==\n'
     '$ADB' devices -l || true
     printf '\n== adb get-state ==\n'

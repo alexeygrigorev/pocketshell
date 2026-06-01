@@ -280,10 +280,9 @@ class FolderListScreenE2eTest {
         captureViewport("issue300-folder-tree-rendered-viewport.png")
 
         // --- Assertion 4: inactive scanned folders are sheet-only.
-        //    The watched root still carries the pin chip and the small
-        //    plus opens RootProjectAddSheet with quick actions and a
+        //    The root add affordance opens RootProjectAddSheet with quick actions and a
         //    candidate row that starts a session in the inactive folder.
-        compose.onNodeWithText("Watched").assertExists()
+        compose.onNodeWithText("Watched").assertDoesNotExist()
         compose.onAllNodesWithTag(folderDetailCreateTestTag("/home/u/code/empty-pinned"))
             .fetchSemanticsNodes().also {
                 assertTrue("expected empty-pinned folder to stay out of the main tree", it.isEmpty())

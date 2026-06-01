@@ -1,12 +1,28 @@
 package com.pocketshell.app.projects
 
+import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.app.hosts.MainDispatcherRule
+import com.pocketshell.app.portfwd.ForwardingController
+import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.dao.ProjectRootDao
+import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
 /**
  * Unit tests for the pure folder-grouping logic exposed on
@@ -19,7 +35,12 @@ import org.junit.Test
  * directly (without spinning up SSH / DAO) keeps the tests fast and
  * deterministic.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
+@RunWith(RobolectricTestRunner::class)
+@Config(manifest = Config.NONE, sdk = [33])
 class FolderListGroupingTest {
+    @get:Rule
+    val mainDispatcherRule = MainDispatcherRule()
 
     @Test
     fun canonicalisePathStripsTrailingSlash() {
@@ -422,6 +443,125 @@ class FolderListGroupingTest {
     }
 
     @Test
+    fun configuredRootsStayAheadOfOutsideSessionsEvenWhenOutsideIsNewer() {
+        val sessions = listOf(
+            entry("outside-newest", 9_000L),
+            entry("git-session", 2_000L),
+            entry("tmp-session", 1_000L),
+        )
+        val cwds = mapOf(
+            "outside-newest" to FolderListViewModel.canonicalisePath("/opt/work/demo"),
+            "git-session" to FolderListViewModel.canonicalisePath("/home/alexey/git/pocketshell"),
+            "tmp-session" to FolderListViewModel.canonicalisePath("/home/alexey/tmp/scratch"),
+        )
+        val watched = listOf(
+            ProjectRootEntity(id = 1L, hostId = 7L, label = "[00] git", path = "/home/alexey/git"),
+            ProjectRootEntity(id = 2L, hostId = 7L, label = "[01] tmp", path = "/home/alexey/tmp"),
+        )
+
+        val roots = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = cwds,
+            watchedFolders = watched,
+            scannedProjectFoldersByRoot = emptyMap(),
+        )
+
+        assertEquals(listOf("git", "tmp", FolderListViewModel.OTHER_ROOT_LABEL), roots.map { it.label })
+        assertEquals("demo", roots.last().folders.single().label)
+    }
+
+    @Test
+    fun activeProjectsRenderBeforeExtraInactiveProjects() {
+        val sessions = listOf(entry("main", 2_000L))
+        val cwds = mapOf(
+            "main" to FolderListViewModel.canonicalisePath("/home/alexey/git/pocketshell/app"),
+        )
+        val watched = listOf(
+            ProjectRootEntity(id = 1L, hostId = 7L, label = "git", path = "/home/alexey/git"),
+        )
+
+        val roots = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = cwds,
+            watchedFolders = watched,
+            scannedProjectFoldersByRoot = emptyMap(),
+            extraFolders = mapOf("/home/alexey/git/new-empty" to "new-empty"),
+        )
+
+        assertEquals(listOf("pocketshell", "new-empty"), roots.single().folders.map { it.label })
+        assertEquals(listOf(1, 0), roots.single().folders.map { it.sessions.size })
+    }
+
+    @Test
+    fun flatModeGroupingDoesNotIntroduceOutsideRootCallout() {
+        val sessions = listOf(
+            entry("inside", 2_000L),
+            entry("outside", 3_000L),
+        )
+        val cwds = mapOf(
+            "inside" to FolderListViewModel.canonicalisePath("/home/alexey/git/pocketshell"),
+            "outside" to FolderListViewModel.canonicalisePath("/tmp/scratch"),
+        )
+        val watched = listOf(
+            ProjectRootEntity(id = 1L, hostId = 7L, label = "git", path = "/home/alexey/git"),
+        )
+
+        val flatRows = FolderListViewModel.groupSessionsIntoFolders(
+            sessions = sessions,
+            sessionFolderPaths = cwds,
+            watchedFolders = watched,
+        )
+
+        assertEquals(listOf("scratch", "pocketshell", "git"), flatRows.map { it.label })
+        assertFalse(flatRows.any { it.label == FolderListViewModel.OTHER_ROOT_LABEL })
+        assertFalse(flatRows.any { it.path == FolderListViewModel.OTHER_ROOT_PATH })
+    }
+
+    @Test
+    fun treeRenderingStaysStableWhenRefreshAddsScanAndHistoryData() {
+        val sessions = listOf(
+            entry("main", 3_000L),
+            entry("worker", 2_000L),
+        )
+        val cwds = mapOf(
+            "main" to FolderListViewModel.canonicalisePath("/home/alexey/git/pocketshell/app"),
+            "worker" to FolderListViewModel.canonicalisePath("/home/alexey/tmp/scratch"),
+        )
+        val watched = listOf(
+            ProjectRootEntity(id = 1L, hostId = 7L, label = "[00] git", path = "/home/alexey/git"),
+            ProjectRootEntity(id = 2L, hostId = 7L, label = "[01] tmp", path = "/home/alexey/tmp"),
+        )
+
+        val first = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = cwds,
+            watchedFolders = watched,
+            scannedProjectFoldersByRoot = emptyMap(),
+        )
+        val refreshed = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = cwds,
+            watchedFolders = watched,
+            scannedProjectFoldersByRoot = mapOf(
+                "/home/alexey/git" to listOf("/home/alexey/git/inactive"),
+                "/home/alexey/tmp" to listOf("/home/alexey/tmp/old"),
+            ),
+            historyProjectFoldersByRoot = mapOf(
+                "/home/alexey/git" to listOf("/home/alexey/git/used-before"),
+            ),
+        )
+
+        assertEquals(
+            first.map { root -> root.path to root.folders.map { it.path } },
+            refreshed.map { root -> root.path to root.folders.map { it.path } },
+        )
+        assertEquals(
+            listOf("pocketshell", "used-before", "inactive"),
+            refreshed.first { it.path == "/home/alexey/git" }.addSheetProjects.map { it.label },
+        )
+    }
+
+    @Test
     fun sessionsSortAgentsFirstWithinProjectThenByRecency() {
         val sessions = listOf(
             entry("new-shell", 4_000L, kind = SessionAgentKind.Shell),
@@ -501,6 +641,47 @@ class FolderListGroupingTest {
         )
     }
 
+    @Test
+    fun rebindingToSecondHostStartsSecondHostProbe() = runTest {
+        val firstHostProbeStarted = CompletableDeferred<Unit>()
+        val secondHostProbeStarted = CompletableDeferred<Unit>()
+        val gateway = RebindRecordingFolderListGateway(
+            firstHostProbeStarted = firstHostProbeStarted,
+            secondHostProbeStarted = secondHostProbeStarted,
+        )
+        val vm = FolderListViewModel(
+            gateway = gateway,
+            hostDao = MapHostDao(FIRST_HOST, SECOND_HOST),
+            projectRootDao = EmptyProjectRootDao(),
+            forwardingController = ForwardingController(ApplicationProvider.getApplicationContext()),
+        )
+
+        vm.bind(
+            hostId = FIRST_HOST.id,
+            hostName = FIRST_HOST.name,
+            hostname = FIRST_HOST.hostname,
+            port = FIRST_HOST.port,
+            username = FIRST_HOST.username,
+            keyPath = KEY_PATH,
+            passphrase = null,
+        )
+        withTimeout(1_000L) { firstHostProbeStarted.await() }
+
+        vm.bind(
+            hostId = SECOND_HOST.id,
+            hostName = SECOND_HOST.name,
+            hostname = SECOND_HOST.hostname,
+            port = SECOND_HOST.port,
+            username = SECOND_HOST.username,
+            keyPath = KEY_PATH,
+            passphrase = null,
+        )
+        withTimeout(1_000L) { secondHostProbeStarted.await() }
+
+        assertEquals(listOf(FIRST_HOST.id, SECOND_HOST.id), gateway.probedHostIds)
+        assertTrue("first host probe should be cancelled on rebind", gateway.firstHostProbeCancelled)
+    }
+
     private fun folderWithSessions(vararg sessions: FolderSessionEntry): FolderRow =
         FolderRow(
             path = "/home/alexey/git/pocketshell",
@@ -521,4 +702,94 @@ class FolderListGroupingTest {
             attached = attached,
             agentKind = kind,
         )
+
+    private class RebindRecordingFolderListGateway(
+        private val firstHostProbeStarted: CompletableDeferred<Unit>,
+        private val secondHostProbeStarted: CompletableDeferred<Unit>,
+    ) : FolderListGateway {
+        val probedHostIds: MutableList<Long> = mutableListOf()
+        var firstHostProbeCancelled: Boolean = false
+
+        override suspend fun listSessionsWithFolder(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            watchedRoots: List<ProjectRootEntity>,
+        ): FolderListResult {
+            probedHostIds += host.id
+            return if (host.id == FIRST_HOST.id) {
+                firstHostProbeStarted.complete(Unit)
+                try {
+                    CompletableDeferred<Nothing>().await()
+                } finally {
+                    firstHostProbeCancelled = true
+                }
+            } else {
+                secondHostProbeStarted.complete(Unit)
+                FolderListResult.Sessions(rows = emptyList())
+            }
+        }
+
+        override suspend fun createSession(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            sessionName: String,
+            cwd: String,
+            startCommand: String?,
+        ): Result<String> = error("not used")
+
+        override suspend fun createEmptyProject(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            parentPath: String,
+            folderName: String,
+        ): Result<String> = error("not used")
+
+        override suspend fun importFile(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            folderPath: String,
+            payload: FolderImportPayload,
+        ): Result<String> = error("not used")
+    }
+
+    private class MapHostDao(vararg hosts: HostEntity) : HostDao {
+        private val hostsById = hosts.associateBy { it.id }
+
+        override fun getAll(): Flow<List<HostEntity>> = flowOf(hostsById.values.toList())
+        override suspend fun getById(id: Long): HostEntity? = hostsById[id]
+        override fun getEnabled(): Flow<List<HostEntity>> = flowOf(hostsById.values.toList())
+        override suspend fun insert(host: HostEntity): Long = error("not used")
+        override suspend fun update(host: HostEntity) = error("not used")
+        override suspend fun delete(host: HostEntity) = error("not used")
+        override suspend fun deleteById(id: Long) = error("not used")
+    }
+
+    private class EmptyProjectRootDao : ProjectRootDao {
+        override fun getByHostId(hostId: Long): Flow<List<ProjectRootEntity>> = flowOf(emptyList())
+        override suspend fun insert(root: ProjectRootEntity): Long = error("not used")
+        override suspend fun update(root: ProjectRootEntity) = error("not used")
+        override suspend fun delete(root: ProjectRootEntity) = error("not used")
+    }
+
+    private companion object {
+        const val KEY_PATH: String = "/tmp/pocketshell-test-key"
+        val FIRST_HOST: HostEntity = HostEntity(
+            id = 101L,
+            name = "first",
+            hostname = "10.0.0.101",
+            username = "tester",
+            keyId = 1L,
+        )
+        val SECOND_HOST: HostEntity = HostEntity(
+            id = 202L,
+            name = "second",
+            hostname = "10.0.0.202",
+            username = "tester",
+            keyId = 1L,
+        )
+    }
 }

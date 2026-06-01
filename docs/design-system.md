@@ -263,16 +263,26 @@ Subtle, non-intrusive.
 
 Compact active-only hierarchy for the host-detail workspace view.
 
+- Target structure follows `mockups/tree/index.html`'s terminal-style
+  outline: app bar title is the host, actions are compact icon controls,
+  then the tree starts immediately with workspace roots. Avoid an extra
+  "Workspace" label or repeated root path text inside each root row.
 - Configured roots render first, in configured order. Sessions outside those
-  roots render after them under one neutral group.
+  roots render after them under one neutral group in tree mode. Flat mode
+  is a simple project list and must not add an "outside roots" callout.
+- The screen should stay in a clear loading state until both local configured
+  roots and the first remote session/project snapshot are ready. Do not render
+  a roots-only placeholder tree and then move rows after the SSH probe returns.
 - Project rows are collapsed by default. Expanding reveals active sessions
   only; inactive scanned folders belong in add/browse flows, not the primary
   tree.
 - Hierarchy comes from indentation, subtle connector lines, and spacing. Do
   not put branch glyphs, bullets, or ASCII tree art in row titles.
-- Project rows use `Surface` with a 1 dp `BorderSoft` outline, 8-10 dp radius,
-  and 10-12 dp vertical padding. Session children use `SurfaceElev`, 8 dp
-  radius, and a 1 dp connector line at the left.
+- Root rows are compact `Surface` bands with subtle counts such as
+  "3 active · 5 sessions"; no pin chip is needed because every root in this
+  section is configured. Project rows use a lighter `Surface` treatment,
+  6-8 dp radius, and 7-9 dp vertical padding. Session children use
+  `SurfaceElev`, 8 dp radius, and a 1 dp connector line at the left.
 - Active/idle state is a 7-8 dp status dot: green for active/attached or
   agent-backed sessions, amber for idle detached shells. Do not add prose
   status labels unless accessibility text is needed.
@@ -281,6 +291,14 @@ Compact active-only hierarchy for the host-detail workspace view.
   phone width; truncate the project label before wrapping a count pill.
 - Session children prefer human-readable titles. The raw tmux session name is
   secondary fallback text when no richer title source exists.
+
+Implementation audit note for issue #396: visible churn was caused by
+`FolderListViewModel.bind()` emitting `Ready` from the watched-root DAO before
+the first remote probe had resolved sessions, scanned projects, and root
+expansion. A first probe could also start with `lastWatchedFolders` still empty,
+rendering sessions outside configured roots before a later DAO/probe cycle moved
+them under roots. Keep root/project `LazyColumn` items keyed by stable paths so
+legitimate refreshes update rows in place.
 
 ---
 

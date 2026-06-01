@@ -526,14 +526,14 @@ private fun FolderListAppBar(
         }
         Column(modifier = Modifier.padding(start = 4.dp).weight(1f)) {
             Text(
-                text = if (showFlatFolderList) "Folders" else "Workspace",
+                text = hostName,
                 color = PocketShellColors.Text,
                 fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.testTag(FOLDER_LIST_TITLE_TAG),
             )
             Text(
-                text = hostName,
+                text = if (showFlatFolderList) "Flat projects" else "Workspace roots",
                 color = PocketShellColors.TextSecondary,
                 fontSize = 12.sp,
             )
@@ -773,13 +773,21 @@ private fun SettingsGearIcon() {
 
 @Composable
 private fun LoadingPanel() {
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxSize()
+            .padding(horizontal = 20.dp)
             .testTag(FOLDER_LIST_LOADING_TAG),
-        contentAlignment = Alignment.Center,
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         CircularProgressIndicator(color = PocketShellColors.Accent)
+        Spacer(modifier = Modifier.height(12.dp))
+        Text(
+            text = "Loading workspace tree",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 13.sp,
+        )
     }
 }
 
@@ -846,7 +854,7 @@ private fun FolderListContent(
                 EmptyState()
             }
         } else if (!showFlatFolderList) {
-            items(treeRoots) { root ->
+            items(treeRoots, key = { it.path }) { root ->
                 FolderTreeRootGroup(
                     root = root,
                     expandedProjectPaths = expandedProjectPaths,
@@ -864,7 +872,7 @@ private fun FolderListContent(
                 EmptyState()
             }
         } else {
-            items(folders) { folder ->
+            items(folders, key = { it.path }) { folder ->
                 FolderGroup(
                     folder = folder,
                     expanded = true,
@@ -1059,7 +1067,7 @@ private fun FolderTreeRootGroup(
         modifier = Modifier
             .fillMaxWidth()
             .testTag(folderTreeRootTestTag(root.path)),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         FolderTreeRootHeader(
             root = root,
@@ -1071,7 +1079,7 @@ private fun FolderTreeRootGroup(
         } else {
             Column(
                 modifier = Modifier.padding(start = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 root.folders.forEachIndexed { index, folder ->
                     FolderGroup(
@@ -1100,32 +1108,23 @@ private fun FolderTreeRootHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PocketShellColors.Surface.copy(alpha = 0.62f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 10.dp, vertical = 9.dp),
+            .background(PocketShellColors.Surface.copy(alpha = 0.34f), RoundedCornerShape(6.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = root.label,
-                    color = PocketShellColors.Text,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.testTag(folderTreeRootLabelTag(root.path)),
-                )
-                if (root.isWatched) {
-                    Spacer(modifier = Modifier.size(8.dp))
-                    WatchedPin()
-                }
-            }
-            root.displayPath?.let { path ->
-                Text(
-                    text = path,
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 11.sp,
-                )
-            }
-        }
+        Text(
+            text = root.label,
+            color = PocketShellColors.Text,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .weight(1f)
+                .testTag(folderTreeRootLabelTag(root.path)),
+        )
+        RootCountText(root = root)
+        Spacer(modifier = Modifier.width(8.dp))
         if (root.path != FolderListViewModel.OTHER_ROOT_PATH) {
             CompactTreeIconButton(
                 label = "...",
@@ -1143,6 +1142,25 @@ private fun FolderTreeRootHeader(
             )
         }
     }
+}
+
+@Composable
+private fun RootCountText(root: FolderTreeRoot) {
+    val text = when {
+        root.sessionCount > 0 && root.inactiveProjectCount > 0 ->
+            "${root.activeProjectCount} active · ${root.sessionCount} sessions"
+        root.sessionCount > 0 -> "${root.activeProjectCount} active"
+        root.inactiveProjectCount > 0 -> "${root.inactiveProjectCount} inactive"
+        else -> "empty"
+    }
+    Text(
+        text = text,
+        color = PocketShellColors.TextSecondary,
+        fontSize = 11.sp,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.padding(start = 8.dp),
+    )
 }
 
 @Composable
@@ -1268,10 +1286,10 @@ private fun FolderHeader(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(PocketShellColors.Surface.copy(alpha = 0.58f), RoundedCornerShape(8.dp))
+            .background(PocketShellColors.Surface.copy(alpha = 0.18f), RoundedCornerShape(6.dp))
             .clickable(role = Role.Button, onClick = onToggleExpanded)
             .testTag(folderHeaderClickTestTag(folder.path))
-            .padding(horizontal = 9.dp, vertical = 8.dp),
+            .padding(horizontal = 8.dp, vertical = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         DisclosureIndicator(
@@ -1286,8 +1304,11 @@ private fun FolderHeader(
             modifier = Modifier.testTag(folderStatusDotTestTag(folder.path)),
         )
         Spacer(modifier = Modifier.width(9.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            val countText = projectCountText(folder)
+        val countText = projectCountText(folder)
+        Row(
+            modifier = Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Text(
                 text = folder.label,
                 color = PocketShellColors.Text,
@@ -1295,16 +1316,11 @@ private fun FolderHeader(
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.testTag(folderHeaderLabelTag(folder.path)),
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .testTag(folderHeaderLabelTag(folder.path)),
             )
-            Text(
-                text = folder.path,
-                color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(modifier = Modifier.height(4.dp))
+            Spacer(modifier = Modifier.width(6.dp))
             CountPill(
                 text = countText,
                 minWidth = projectCountPillMinWidth(countText),

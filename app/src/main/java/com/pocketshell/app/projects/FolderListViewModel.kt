@@ -100,6 +100,9 @@ data class FolderTreeRoot(
     val isEmpty: Boolean get() = folders.isEmpty()
     val mostRecentActivity: Long get() = folders.maxOfOrNull { it.mostRecentActivity } ?: 0L
     val displayPath: String? get() = path.takeUnless { it == FolderListViewModel.OTHER_ROOT_PATH }
+    val activeProjectCount: Int get() = folders.count { it.sessions.isNotEmpty() }
+    val sessionCount: Int get() = folders.sumOf { it.sessions.size }
+    val inactiveProjectCount: Int get() = addSheetProjects.count { !it.isActive }
 }
 
 data class RootProjectCandidate(
@@ -232,6 +235,8 @@ class FolderListViewModel @Inject constructor(
     private var lastSessions: List<FolderSessionEntry> = emptyList()
     private var lastSessionFolderPaths: Map<String, String> = emptyMap()
     private var lastWatchedFolders: List<ProjectRootEntity> = emptyList()
+    private var rootSnapshotLoaded: Boolean = false
+    private var hasSessionProbeSnapshot: Boolean = false
     private var lastScannedProjectFoldersByRoot: Map<String, List<String>> = emptyMap()
     private var lastHistoryProjectFoldersByRoot: Map<String, List<String>> = emptyMap()
     private var lastResolvedWatchedRootPaths: Map<String, String> = emptyMap()
@@ -283,7 +288,18 @@ class FolderListViewModel @Inject constructor(
             if (pollingJob == null) startPolling()
             return
         }
+        pollingJob?.cancel()
+        pollingJob = null
         bound = params
+        rootSnapshotLoaded = false
+        hasSessionProbeSnapshot = false
+        lastSessions = emptyList()
+        lastSessionFolderPaths = emptyMap()
+        lastWatchedFolders = emptyList()
+        lastScannedProjectFoldersByRoot = emptyMap()
+        lastHistoryProjectFoldersByRoot = emptyMap()
+        lastResolvedWatchedRootPaths = emptyMap()
+        _state.value = FolderListUiState.Loading
 
         warmJob?.cancel()
         warmJob = viewModelScope.launch {
@@ -293,12 +309,18 @@ class FolderListViewModel @Inject constructor(
         watchedFoldersJob = viewModelScope.launch {
             projectRootDao.getByHostId(hostId).collectLatest { rows ->
                 lastWatchedFolders = rows
-                // Re-emit so a watched-folder write that lands after
-                // the initial probe surfaces immediately.
+                rootSnapshotLoaded = true
+                if (pollingJob == null) {
+                    startPolling()
+                }
+                // Re-emit so a watched-folder write that lands after the
+                // initial probe surfaces immediately. Before the first
+                // probe, keep the explicit loading state instead of
+                // rendering roots-only scaffolding that will be replaced
+                // moments later by session/scan data.
                 emitReady()
             }
         }
-        startPolling()
     }
 
     /**
@@ -532,6 +554,12 @@ class FolderListViewModel @Inject constructor(
 
     private fun startPolling() {
         val params = bound ?: return
+        if (!rootSnapshotLoaded) {
+            if (_state.value !is FolderListUiState.Ready) {
+                _state.value = FolderListUiState.Loading
+            }
+            return
+        }
         pollingJob?.cancel()
         pollingJob = viewModelScope.launch {
             // Surface loading state on the very first cycle when we have
@@ -572,8 +600,10 @@ class FolderListViewModel @Inject constructor(
             passphrase = params.passphrase,
             watchedRoots = lastWatchedFolders,
         )
+        if (bound != params) return
         when (result) {
             is FolderListResult.Sessions -> {
+                hasSessionProbeSnapshot = true
                 lastSessions = result.rows.map { row ->
                     FolderSessionEntry(
                         sessionName = row.sessionName,
@@ -618,6 +648,7 @@ class FolderListViewModel @Inject constructor(
      */
     private fun emitReady() {
         if (bound == null) return
+        if (!hasSessionProbeSnapshot) return
         val folders = groupSessionsIntoFolders(
             sessions = lastSessions,
             sessionFolderPaths = lastSessionFolderPaths,

@@ -32,6 +32,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -367,6 +368,102 @@ class HostListViewModelTest {
      * the test asserts the pending-navigation tuple, which is the
      * canonical "ready to route" signal the UI consumes.
      */
+    @Test
+    fun beginHostOpen_surfacesConnectingImmediately_andRejectsDuplicateTap() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "slow",
+                hostname = "h.example",
+                username = "u",
+                keyId = keyId,
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = newViewModel(sessionOpener = neverOpeningSession())
+
+        assertTrue(viewModel.beginHostOpen(host.id, host.name))
+        assertFalse("second tap must not enqueue another open", viewModel.beginHostOpen(host.id, host.name))
+
+        val progress = viewModel.hostOpenProgress.value
+        assertNotNull(progress)
+        assertEquals(hostId, progress!!.hostId)
+        assertEquals(HostListViewModel.HostOpenPhase.ConnectingToHost, progress.phase)
+        assertEquals("Connecting to host", progress.phase.label)
+
+        viewModel.cancelHostOpen(host.id)
+        assertNull(viewModel.hostOpenProgress.value)
+    }
+
+    @Test
+    fun bootstrapHost_reportsCheckingSetup_thenOpeningFolders_andClearsAfterNavigation() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "ready",
+                hostname = "h.example",
+                username = "u",
+                keyId = keyId,
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val tmuxProbeReached = CompletableDeferred<Unit>()
+        val releaseTmuxProbe = CompletableDeferred<Unit>()
+        val viewModel = newViewModel(
+            sessionOpener = HostSessionOpener { _, _, _ ->
+                FakeBootstrapSession(
+                    tmuxProbeReached = tmuxProbeReached,
+                    releaseTmuxProbe = releaseTmuxProbe,
+                )
+            },
+        )
+
+        val job = viewModel.bootstrapHost(host, keyPath = "/tmp/k")
+        tmuxProbeReached.await()
+
+        assertEquals(
+            HostListViewModel.HostOpenPhase.CheckingSetup,
+            viewModel.hostOpenProgress.value!!.phase,
+        )
+
+        releaseTmuxProbe.complete(Unit)
+        job.join()
+
+        assertEquals(
+            HostListViewModel.HostOpenPhase.OpeningFolders,
+            viewModel.hostOpenProgress.value!!.phase,
+        )
+        assertEquals(true, viewModel.pendingNavigation.value!!.ready)
+
+        viewModel.consumePendingNavigation()
+        assertNull(viewModel.hostOpenProgress.value)
+    }
+
+    @Test
+    fun bootstrapHost_clearsProgress_whenSetupNeedsAction() = runTest {
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "missing-tmux",
+                hostname = "h.example",
+                username = "u",
+                keyId = keyId,
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = newViewModel(
+            sessionOpener = HostSessionOpener { _, _, _ ->
+                FakeBootstrapSession(tmuxInstalled = false)
+            },
+        )
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k").join()
+
+        assertNull(viewModel.hostOpenProgress.value)
+        assertNotNull(viewModel.bootstrapState.value)
+        assertEquals(false, viewModel.pendingNavigation.value!!.ready)
+    }
+
     @Test
     fun bootstrapHost_skipsProbe_whenCacheIsFresh() = runTest {
         val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
@@ -1757,6 +1854,7 @@ class HostListViewModelTest {
         private val tmuxProbeReached: CompletableDeferred<Unit>? = null,
         private val releaseTmuxProbe: CompletableDeferred<Unit>? = null,
         private val daemonEnabled: Boolean = true,
+        private val tmuxInstalled: Boolean = true,
     ) : SshSession {
         val recorded = mutableListOf<String>()
         override val isConnected: Boolean = true
@@ -1774,7 +1872,11 @@ class HostListViewModelTest {
                 command.contains("command -v tmux") -> {
                     tmuxProbeReached?.complete(Unit)
                     releaseTmuxProbe?.await()
-                    ExecResult("/usr/bin/tmux\n", "", 0)
+                    if (tmuxInstalled) {
+                        ExecResult("/usr/bin/tmux\n", "", 0)
+                    } else {
+                        ExecResult("", "", 1)
+                    }
                 }
                 command.contains("command -v") && command.contains("pocketshell") ->
                     ExecResult("/home/u/.local/bin/pocketshell\n", "", 0)

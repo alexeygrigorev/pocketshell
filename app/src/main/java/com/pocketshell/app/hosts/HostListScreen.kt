@@ -152,6 +152,7 @@ fun HostListScreen(
     val bootstrapState by viewModel.bootstrapState.collectAsState()
     val bootstrapHostName by viewModel.bootstrapHostName.collectAsState()
     val pendingNavigation by viewModel.pendingNavigation.collectAsState()
+    val hostOpenProgress by viewModel.hostOpenProgress.collectAsState()
     val sharePayload by viewModel.sharePayload.collectAsState()
     val shareMessage by viewModel.shareMessage.collectAsState()
     // Issue #157 polish item 2: import-conflict prompt surfaced when an
@@ -249,14 +250,23 @@ fun HostListScreen(
             title = "Unlock SSH key passphrase",
             subtitle = "Confirm it is you before entering this key's passphrase",
             onSuccess = showPrompt,
-            onError = { passphraseUnlockError = it },
+            onError = {
+                if (action == PendingPassphraseAction.OpenSession) {
+                    viewModel.cancelHostOpen(host.id)
+                }
+                passphraseUnlockError = it
+            },
         )
     }
 
     LaunchedEffect(Unit) {
         tapRequests.receiveAsFlow().collect { hostId ->
             val host = currentHosts.find { it.id == hostId } ?: return@collect
-            val key = viewModel.keyFor(host.keyId) ?: return@collect
+            val key = viewModel.keyFor(host.keyId)
+            if (key == null) {
+                viewModel.cancelHostOpen(host.id)
+                return@collect
+            }
             requestProtectedConnection(host, key, PendingPassphraseAction.OpenSession)
         }
     }
@@ -476,7 +486,11 @@ fun HostListScreen(
                                 name = host.name,
                                 subtitle = "${host.username}@${host.hostname}:${host.port}",
                                 status = hostStatus,
-                                onClick = { tapRequests.trySend(host.id) },
+                                onClick = {
+                                    if (viewModel.beginHostOpen(host.id, host.name)) {
+                                        tapRequests.trySend(host.id)
+                                    }
+                                },
                                 // Issue #113: long-press now opens the same
                                 // overflow menu the kebab exposes — gives
                                 // users two equivalent ways to reach the
@@ -497,8 +511,16 @@ fun HostListScreen(
                                     // `pocketshellInstalled == false`, both of
                                     // which surface the sheet when the
                                     // probe re-runs.
-                                    { tapRequests.trySend(host.id) }
+                                    {
+                                        if (viewModel.beginHostOpen(host.id, host.name)) {
+                                            tapRequests.trySend(host.id)
+                                        }
+                                    }
                                 } else null,
+                                connectingLabel = hostOpenProgress
+                                    ?.takeIf { it.hostId == host.id }
+                                    ?.phase
+                                    ?.label,
                                 trailingContent = {
                                     HostOverflowMenuAnchor(
                                         expanded = menuOpen,
@@ -614,6 +636,9 @@ fun HostListScreen(
                 passphrase = passphraseText,
                 onPassphraseChange = { passphraseText = it },
                 onDismiss = {
+                    if (request.action == PendingPassphraseAction.OpenSession) {
+                        viewModel.cancelHostOpen(request.host.id)
+                    }
                     pendingPassphrase = null
                     passphraseText = ""
                     passphraseUnlockError = null

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -88,6 +89,7 @@ fun HostCard(
     onLongClick: (() -> Unit)? = null,
     setupState: HostSetupState = HostSetupState.Unknown,
     onSetupBadgeClick: (() -> Unit)? = null,
+    connectingLabel: String? = null,
     // Issue #116 (usage-panel Fix B): optional caller-supplied chip
     // rendered to the right of the setup-state badge from #120. The
     // host list call site uses this slot for the cross-host
@@ -111,7 +113,8 @@ fun HostCard(
             .combinedClickable(
                 role = Role.Button,
                 onClick = onClick,
-                onLongClick = onLongClick,
+                onLongClick = if (connectingLabel == null) onLongClick else null,
+                enabled = connectingLabel == null,
             )
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -186,6 +189,10 @@ fun HostCard(
                 fontFamily = JetBrainsMonoFamily,
                 fontSize = 12.sp,
             )
+            connectingLabel?.let { label ->
+                Spacer(modifier = Modifier.height(8.dp))
+                HostConnectingRow(label = label)
+            }
         }
 
         // Issue #201: the trailing chip is the host's at-a-glance
@@ -208,6 +215,32 @@ fun HostCard(
         }
     }
 }
+
+@Composable
+private fun HostConnectingRow(label: String) {
+    Row(
+        modifier = Modifier.testTag(HOST_CONNECTING_ROW_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier
+                .size(14.dp)
+                .testTag(HOST_CONNECTING_SPINNER_TAG),
+            color = PocketShellColors.Amber,
+            strokeWidth = 1.5.dp,
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = label,
+            color = PocketShellColors.Amber,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+const val HOST_CONNECTING_ROW_TAG: String = "host-connecting-row"
+const val HOST_CONNECTING_SPINNER_TAG: String = "host-connecting-row:spinner"
 
 /**
  * Small colour + text chip rendering the host's at-a-glance status.

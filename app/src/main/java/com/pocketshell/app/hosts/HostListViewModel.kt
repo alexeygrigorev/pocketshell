@@ -363,6 +363,14 @@ class HostListViewModel internal constructor(
     private val _pendingNavigation = MutableStateFlow<PendingNavigation?>(null)
     val pendingNavigation: StateFlow<PendingNavigation?> = _pendingNavigation.asStateFlow()
 
+    /**
+     * Foreground host-open progress shown on the tapped host card.
+     * This is intentionally separate from background setup reprobes so
+     * cold-launch maintenance never makes the host list look blocked.
+     */
+    private val _hostOpenProgress = MutableStateFlow<HostOpenProgress?>(null)
+    val hostOpenProgress: StateFlow<HostOpenProgress?> = _hostOpenProgress.asStateFlow()
+
     /** Session held open while the bootstrap sheet is visible so install reuses the connection. */
     private var bootstrapSession: SshSession? = null
 
@@ -702,6 +710,7 @@ class HostListViewModel internal constructor(
      * the user taps Skip / Continue on the sheet).
      */
     fun bootstrapHost(host: HostEntity, keyPath: String, passphrase: CharArray? = null): Job {
+        if (!markHostOpenRequestStarted(host.id, host.name)) return completedJob()
         // Cache: a fresh tmux result skips the bootstrap SSH probe when
         // the matching server-setup probe proved the unified pocketshell
         // CLI is present and app-compatible. Optional jobs/daemon state
@@ -725,6 +734,7 @@ class HostListViewModel internal constructor(
 
         if (skipTmuxProbe) {
             _bootstrapState.value = null
+            setHostOpenPhase(host.id, HostOpenPhase.OpeningFolders)
             _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
             return completedJob()
         }
@@ -734,6 +744,7 @@ class HostListViewModel internal constructor(
                 val currentHost = hostDao.getById(host.id) ?: host
                 if (currentHost.canUseBootstrapCache()) {
                     _bootstrapState.value = null
+                    setHostOpenPhase(host.id, HostOpenPhase.OpeningFolders)
                     _pendingNavigation.value = PendingNavigation(currentHost, keyPath, passphrase, ready = true)
                     return@withLock
                 }
@@ -752,10 +763,12 @@ class HostListViewModel internal constructor(
             // Couldn't connect → don't block navigation. The session
             // screen will surface the same connect failure with its
             // own retry UX, which is the right place to handle it.
+            setHostOpenPhase(host.id, HostOpenPhase.OpeningFolders)
             _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
             return
         }
         bootstrapSession = session
+        setHostOpenPhase(host.id, HostOpenPhase.CheckingSetup)
 
         // Issue #294: bootstrap probes derive PATH from the remote
         // user's interactive shell rc, then prepend PocketShell's
@@ -767,8 +780,10 @@ class HostListViewModel internal constructor(
                 persistPocketshellResult(host, report)
                 if (report.isReady) {
                     closeBootstrapSession()
+                    setHostOpenPhase(host.id, HostOpenPhase.OpeningFolders)
                     _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
                 } else {
+                    clearHostOpenProgress(host.id)
                     _bootstrapState.value = HostBootstrapSheetState.Prompt(
                         needsTmux = false,
                         report = report,
@@ -780,6 +795,7 @@ class HostListViewModel internal constructor(
                 persistResult(host, installed = false)
                 val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
                 persistPocketshellResult(host, report)
+                clearHostOpenProgress(host.id)
                 _bootstrapState.value = HostBootstrapSheetState.Prompt(
                     needsTmux = true,
                     report = report,
@@ -789,6 +805,7 @@ class HostListViewModel internal constructor(
             is TmuxStatus.Unknown -> {
                 // Can't prove missing → continue, don't pester the user.
                 closeBootstrapSession()
+                setHostOpenPhase(host.id, HostOpenPhase.OpeningFolders)
                 _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
                 @Suppress("UNUSED_VARIABLE") val reason = status.reason
             }
@@ -1049,6 +1066,7 @@ class HostListViewModel internal constructor(
         closeBootstrapSession()
         _bootstrapState.value = null
         val pending = _pendingNavigation.value ?: return
+        setHostOpenPhase(pending.host.id, HostOpenPhase.OpeningFolders)
         _pendingNavigation.value = pending.copy(ready = true)
     }
 
@@ -1071,9 +1089,53 @@ class HostListViewModel internal constructor(
      * tap re-triggers the flow.
      */
     fun consumePendingNavigation() {
+        _pendingNavigation.value?.let { clearHostOpenProgress(it.host.id) }
         _pendingNavigation.value = null
         bootstrapTargetHost = null
         _bootstrapHostName.value = ""
+    }
+
+    fun beginHostOpen(hostId: Long, hostName: String): Boolean {
+        if (_hostOpenProgress.value != null) return false
+        _hostOpenProgress.value = HostOpenProgress(
+            hostId = hostId,
+            hostName = hostName,
+            phase = HostOpenPhase.ConnectingToHost,
+            requestStarted = false,
+        )
+        return true
+    }
+
+    fun cancelHostOpen(hostId: Long) {
+        clearHostOpenProgress(hostId)
+    }
+
+    private fun setHostOpenPhase(hostId: Long, phase: HostOpenPhase) {
+        val current = _hostOpenProgress.value
+        if (current == null || current.hostId != hostId) return
+        _hostOpenProgress.value = current.copy(phase = phase)
+    }
+
+    private fun markHostOpenRequestStarted(hostId: Long, hostName: String): Boolean {
+        val current = _hostOpenProgress.value
+        if (current == null) {
+            _hostOpenProgress.value = HostOpenProgress(
+                hostId = hostId,
+                hostName = hostName,
+                phase = HostOpenPhase.ConnectingToHost,
+                requestStarted = true,
+            )
+            return true
+        }
+        if (current.hostId != hostId || current.requestStarted) return false
+        _hostOpenProgress.value = current.copy(requestStarted = true)
+        return true
+    }
+
+    private fun clearHostOpenProgress(hostId: Long) {
+        if (_hostOpenProgress.value?.hostId == hostId) {
+            _hostOpenProgress.value = null
+        }
     }
 
     private suspend fun openSession(host: HostEntity, keyPath: String, passphrase: CharArray?): SshSession? {
@@ -1213,6 +1275,19 @@ class HostListViewModel internal constructor(
         val passphrase: CharArray?,
         val ready: Boolean = false,
     )
+
+    data class HostOpenProgress(
+        val hostId: Long,
+        val hostName: String,
+        val phase: HostOpenPhase,
+        internal val requestStarted: Boolean = false,
+    )
+
+    enum class HostOpenPhase(val label: String) {
+        ConnectingToHost("Connecting to host"),
+        CheckingSetup("Checking setup"),
+        OpeningFolders("Opening folders"),
+    }
 
     data class HostSharePayload(
         val hostName: String,

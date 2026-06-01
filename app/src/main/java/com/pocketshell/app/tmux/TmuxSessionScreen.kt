@@ -2314,10 +2314,13 @@ internal fun TmuxConversationPane(
     val visibleEvents = remember(events, showSystemNotes) {
         if (showSystemNotes) events else events.filterNot { it is ConversationEvent.SystemNote }
     }
-    val filteredEvents = remember(visibleEvents, effectiveQuery) {
-        val q = effectiveQuery.trim()
-        if (q.isBlank()) visibleEvents else visibleEvents.filter { it.searchText().contains(q, ignoreCase = true) }
+    val filteredConversation = remember(visibleEvents, effectiveQuery) {
+        filterConversationRows(
+            events = visibleEvents,
+            query = effectiveQuery,
+        )
     }
+    val filteredEvents = filteredConversation.events
     // Tool-call expansion state per event-id. Persisted at the pane
     // level (not inside the row composable) so a row scrolling out and
     // back in remembers the user's decision until the session detaches.
@@ -2329,24 +2332,28 @@ internal fun TmuxConversationPane(
     val runningToolIds = remember(events) { runningToolCallIds(events) }
     val rowMap = remember(events) { events.associateBy { it.id } }
 
-    // Issue #154 (acceptance criteria #1 & #3): tail-follow + jump-to-latest.
-    // The list state owns scroll position; we read it via snapshots so
-    // recomposition tracks both the user's manual scroll and the
-    // auto-scroll fired by new events. `atBottom` is derived once per
-    // change rather than recomputed inside the LazyColumn item lambda.
+    // Issue #401: terminal-style tail-follow. The pane opens at the newest
+    // row and follows appended events until the user intentionally scrolls
+    // away from the tail. Returning to the bottom resumes following.
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
+    var userScrolledAwayFromTail by remember { mutableStateOf(false) }
     val atBottom by remember(filteredEvents) {
         derivedStateOf { listState.isScrolledToBottom(filteredEvents.size) }
     }
-    // Auto-scroll on new events when the user is at the bottom. The
-    // effect is keyed on `filteredEvents.size`, not the full list, so a
-    // tail-follow scroll fires once per new event rather than on every
-    // recomposition. If the user has scrolled up, we leave their
-    // position alone and surface the jump-to-latest FAB instead.
-    LaunchedEffect(filteredEvents.size) {
+    LaunchedEffect(listState, filteredEvents.size) {
+        snapshotFlow {
+            listState.isScrollInProgress to listState.isScrolledToBottom(filteredEvents.size)
+        }.collect { (scrolling, scrolledToBottom) ->
+            when {
+                scrolledToBottom -> userScrolledAwayFromTail = false
+                scrolling -> userScrolledAwayFromTail = true
+            }
+        }
+    }
+    LaunchedEffect(filteredEvents.lastOrNull()?.id, effectiveQuery) {
         if (filteredEvents.isEmpty()) return@LaunchedEffect
-        if (atBottom) {
+        if (!userScrolledAwayFromTail) {
             listState.scrollToItem(filteredEvents.size - 1)
         }
     }
@@ -2399,7 +2406,8 @@ internal fun TmuxConversationPane(
                         event = event,
                         runningToolIds = runningToolIds,
                         eventsById = rowMap,
-                        isExplicitlyExpanded = expandedToolCalls.value.contains(event.id),
+                        isExplicitlyExpanded = expandedToolCalls.value.contains(event.id) ||
+                            event.id in filteredConversation.searchExpandedToolCallIds,
                         onToggleExpand = { id ->
                             expandedToolCalls.value = expandedToolCalls.value.toggle(id)
                         },
@@ -2411,8 +2419,9 @@ internal fun TmuxConversationPane(
                 }
             }
             JumpToLatestOverlay(
-                visible = !atBottom && filteredEvents.isNotEmpty(),
+                visible = userScrolledAwayFromTail && !atBottom && filteredEvents.isNotEmpty(),
                 onClick = {
+                    userScrolledAwayFromTail = false
                     coroutineScope.launch {
                         listState.animateScrollToItem(filteredEvents.size - 1)
                     }
@@ -2652,9 +2661,11 @@ private fun ConversationEventRow(
             onToggle = { onToggleExpand(event.id) },
         )
         is ConversationEvent.ToolResult -> {
-            // Orphan tool result with no parent ToolCall — render as a
-            // standalone, very subtle row.
-            ConversationToolResultRow(event)
+            if (event.toolCallId == null || eventsById[event.toolCallId] !is ConversationEvent.ToolCall) {
+                // Orphan tool result with no parent ToolCall — render as a
+                // standalone, very subtle row.
+                ConversationToolResultRow(event)
+            }
         }
         is ConversationEvent.SystemNote -> ConversationSystemNoteRow(
             note = event,
@@ -2676,9 +2687,8 @@ private fun Map<String, ConversationEvent>.findToolResultFor(
         as? ConversationEvent.ToolResult
 
 /**
- * Identify every tool call that has no matching tool result yet — the
- * scope addition asks for these to auto-expand so the user can see
- * what's currently happening live.
+ * Identify every tool call that has no matching tool result yet so the
+ * compact row can show a running status glyph without expanding details.
  */
 internal fun runningToolCallIds(events: List<ConversationEvent>): Set<String> {
     val resolved = events
@@ -2693,6 +2703,61 @@ internal fun runningToolCallIds(events: List<ConversationEvent>): Set<String> {
 
 private fun Set<String>.toggle(id: String): Set<String> =
     if (contains(id)) this - id else this + id
+
+private data class ConversationFilterResult(
+    val events: List<ConversationEvent>,
+    val searchExpandedToolCallIds: Set<String> = emptySet(),
+)
+
+private fun filterConversationRows(
+    events: List<ConversationEvent>,
+    query: String,
+): ConversationFilterResult {
+    val eventsById = events.associateBy { it.id }
+    val q = query.trim()
+    if (q.isBlank()) {
+        return ConversationFilterResult(
+            events = events.filterNot { it is ConversationEvent.ToolResult && it.hasVisibleParentToolCall(eventsById) },
+        )
+    }
+
+    val resultMatchedParentToolCallIds = events
+        .filterIsInstance<ConversationEvent.ToolResult>()
+        .mapNotNull { result ->
+            result.toolCallId
+                ?.takeIf { result.hasVisibleParentToolCall(eventsById) }
+                ?.takeIf { result.searchText().contains(q, ignoreCase = true) }
+        }
+        .toSet()
+    val directlyMatchedToolCallIds = events
+        .filterIsInstance<ConversationEvent.ToolCall>()
+        .filter { it.searchText().contains(q, ignoreCase = true) }
+        .mapTo(mutableSetOf()) { it.id }
+
+    val searchExpandedToolCallIds = directlyMatchedToolCallIds + resultMatchedParentToolCallIds
+    return ConversationFilterResult(
+        events = events.mapNotNull { event ->
+            when (event) {
+                is ConversationEvent.ToolCall ->
+                    event.takeIf {
+                        event.id in resultMatchedParentToolCallIds ||
+                            event.searchText().contains(q, ignoreCase = true)
+                    }
+                is ConversationEvent.ToolResult ->
+                    event.takeIf {
+                        !event.hasVisibleParentToolCall(eventsById) &&
+                            event.searchText().contains(q, ignoreCase = true)
+                    }
+                else -> event.takeIf { event.searchText().contains(q, ignoreCase = true) }
+            }
+        },
+        searchExpandedToolCallIds = searchExpandedToolCallIds,
+    )
+}
+
+private fun ConversationEvent.ToolResult.hasVisibleParentToolCall(
+    eventsById: Map<String, ConversationEvent>,
+): Boolean = toolCallId?.let { eventsById[it] is ConversationEvent.ToolCall } == true
 
 private fun ConversationEvent.searchText(): String = when (this) {
     is ConversationEvent.Message -> text
@@ -2734,12 +2799,9 @@ private fun AgentComposerRow(
  * card with input + output bounded by a scroll container for very long
  * payloads.
  *
- * Auto-expand policy: a tool call without a matching tool result is
- * considered "running" and starts expanded so the user sees what's
- * happening live. The user's explicit expand/collapse via [onToggle]
- * overrides the auto-state — that's why we track the explicit flag
- * separately at the pane level rather than relying purely on the
- * derived running state.
+ * Tool/call noise is collapsed by default. The row stays one line even
+ * while a tool is running; tapping it expands details and that decision
+ * is remembered by [TmuxConversationPane] while the pane remains mounted.
  */
 @Composable
 private fun ConversationToolCallRow(
@@ -2749,7 +2811,7 @@ private fun ConversationToolCallRow(
     isExplicitlyExpanded: Boolean,
     onToggle: () -> Unit,
 ) {
-    val expanded = isExplicitlyExpanded || (isRunning && result == null)
+    val expanded = isExplicitlyExpanded
     val summary = remember(toolCall.id, toolCall.input) { ToolCallSummary.forToolCall(toolCall) }
     val statusGlyph = when {
         result?.isError == true -> "!"
@@ -2774,10 +2836,17 @@ private fun ConversationToolCallRow(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
+                text = if (expanded) "v" else "›",
+                color = PocketShellColors.TextMuted,
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
                 text = toolCall.name,
                 color = PocketShellColors.TextSecondary,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.Medium,
+                maxLines = 1,
             )
             Spacer(modifier = Modifier.width(6.dp))
             Text(

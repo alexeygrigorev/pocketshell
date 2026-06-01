@@ -7,6 +7,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -99,6 +102,121 @@ class TmuxConversationPaneNavigationUiTest {
                 .fetchSemanticsNodes()
                 .isEmpty()
         }
+    }
+
+    @Test
+    fun conversationOpensAtLatestMessage() {
+        val events = sampleMessageEvents(count = 80)
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                TmuxConversationPane(
+                    events = events,
+                    onSendToAgent = { true },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("event-79 body text")
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("event-79 body text").assertIsDisplayed()
+        compose.onNodeWithTag(TMUX_CONVERSATION_JUMP_TO_LATEST_TAG)
+            .assertDoesNotExist()
+    }
+
+    @Test
+    fun toolCallDetailsAreCollapsedUntilExpanded() {
+        val events = listOf(
+            ConversationEvent.ToolCall(
+                id = "tool-1",
+                agent = AgentKind.ClaudeCode,
+                name = "Bash",
+                input = "printf 'expanded-input-only'",
+            ),
+            ConversationEvent.ToolResult(
+                id = "result-1",
+                agent = AgentKind.ClaudeCode,
+                toolCallId = "tool-1",
+                output = "expanded-output-only",
+                isError = false,
+            ),
+        )
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                TmuxConversationPane(
+                    events = events,
+                    onSendToAgent = { true },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + "tool-1")
+            .assertIsDisplayed()
+        compose.onNodeWithText("expanded-output-only").assertDoesNotExist()
+
+        compose.onNodeWithTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + "tool-1")
+            .performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("expanded-output-only").assertIsDisplayed()
+    }
+
+    @Test
+    fun searchForParentedToolResultOutputPromotesAndExpandsToolCall() {
+        val events = listOf(
+            ConversationEvent.ToolCall(
+                id = "tool-1",
+                agent = AgentKind.ClaudeCode,
+                name = "Bash",
+                input = "printf 'hidden-input'",
+            ),
+            ConversationEvent.ToolResult(
+                id = "result-1",
+                agent = AgentKind.ClaudeCode,
+                toolCallId = "tool-1",
+                output = "needle-output-only",
+                isError = false,
+            ),
+            ConversationEvent.Message(
+                id = "message-1",
+                agent = AgentKind.ClaudeCode,
+                role = ConversationRole.Assistant,
+                text = "ordinary assistant text",
+            ),
+        )
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                TmuxConversationPane(
+                    events = events,
+                    onSendToAgent = { true },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        compose.onNodeWithText("needle-output-only").assertDoesNotExist()
+
+        compose.onNodeWithTag(TMUX_CONVERSATION_SEARCH_TAG)
+            .performTextInput("needle-output-only")
+        compose.waitForIdle()
+
+        compose.onNodeWithTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + "tool-1")
+            .assertIsDisplayed()
+        compose.onAllNodes(
+            hasText("needle-output-only") and
+                hasAnyAncestor(hasTestTag(TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX + "tool-1")),
+            useUnmergedTree = true,
+        ).fetchSemanticsNodes()
+            .let { assertEquals(1, it.size) }
+        compose.onAllNodesWithText("ordinary assistant text")
+            .fetchSemanticsNodes()
+            .let { assertEquals(0, it.size) }
+        compose.onAllNodesWithText("No matching events.")
+            .fetchSemanticsNodes()
+            .let { assertEquals(0, it.size) }
     }
 
     @Test

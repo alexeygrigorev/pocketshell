@@ -615,7 +615,10 @@ public final class TerminalView extends View {
                 }
             }
         }
-        if (changedTopRow && !awakenScrollBars()) scheduleRenderInvalidation();
+        if (changedTopRow) {
+            if (mClient != null) mClient.onScrollChanged();
+            if (!awakenScrollBars()) scheduleRenderInvalidation();
+        }
     }
 
     /** Overriding {@link View#onGenericMotionEvent(MotionEvent)}. */
@@ -1086,7 +1089,9 @@ public final class TerminalView extends View {
     }
 
     public void setTopRow(int mTopRow) {
+        if (this.mTopRow == mTopRow) return;
         this.mTopRow = mTopRow;
+        if (mClient != null) mClient.onScrollChanged();
     }
 
     public boolean hasPendingRenderInvalidationForTesting() {

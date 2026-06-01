@@ -43,6 +43,14 @@ class DefaultTerminalMatcherTest {
     }
 
     @Test
+    fun `url span excludes trailing sentence punctuation`() {
+        val text = "open https://example.com."
+        val span = matcher.matchSpans(text).single { it.match is TerminalMatch.Url }
+        assertEquals("https://example.com", text.substring(span.start, span.endExclusive))
+        assertEquals(text.length - 1, span.endExclusive)
+    }
+
+    @Test
     fun `does not match scheme-less hostnames as urls`() {
         // No `http://` prefix — this must not be reported as a URL even
         // though it looks like a domain.
@@ -68,6 +76,25 @@ class DefaultTerminalMatcherTest {
         val paths = matcher.matches(text).filterIsInstance<TerminalMatch.Path>()
         assertEquals(2, paths.size)
         assertEquals(setOf("/etc/hosts", "/tmp/backup-hosts"), paths.map { it.value }.toSet())
+    }
+
+    @Test
+    fun `path spans preserve multiple matches on one line`() {
+        val text = "cp /etc/hosts /tmp/backup-hosts"
+        val spans = matcher.matchSpans(text).filter { it.match is TerminalMatch.Path }
+        assertEquals(2, spans.size)
+        assertEquals("/etc/hosts", text.substring(spans[0].start, spans[0].endExclusive))
+        assertEquals("/tmp/backup-hosts", text.substring(spans[1].start, spans[1].endExclusive))
+    }
+
+    @Test
+    fun `duplicate path values keep distinct spans`() {
+        val text = "diff /etc/hosts /etc/hosts"
+        val spans = matcher.matchSpans(text).filter { it.match is TerminalMatch.Path }
+        assertEquals(2, spans.size)
+        assertEquals(5, spans[0].start)
+        assertEquals(16, spans[1].start)
+        assertEquals(listOf("/etc/hosts", "/etc/hosts"), spans.map { it.match.value })
     }
 
     @Test
@@ -142,6 +169,16 @@ class DefaultTerminalMatcherTest {
     }
 
     @Test
+    fun `generic error span excludes surrounding row whitespace`() {
+        val text = "   Error: cannot find symbol   "
+        val span = matcher.matchSpans(text).single { it.match is TerminalMatch.Error }
+        assertEquals("Error: cannot find symbol", span.match.value)
+        assertEquals("Error: cannot find symbol", text.substring(span.start, span.endExclusive))
+        assertEquals(3, span.start)
+        assertEquals(text.length - 3, span.endExclusive)
+    }
+
+    @Test
     fun `matches Exception keyword line`() {
         val text = "NullPointerException at Foo.kt:12"
         val errors = matcher.matches(text).filterIsInstance<TerminalMatch.Error>()
@@ -177,6 +214,17 @@ class DefaultTerminalMatcherTest {
         assertTrue(
             "URL tail should not also surface as a Path, got $paths",
             paths.isEmpty(),
+        )
+    }
+
+    @Test
+    fun `span matching keeps url path tail claimed`() {
+        val text = "visit https://example.com/docs/api"
+        val spans = matcher.matchSpans(text)
+        assertEquals(1, spans.count { it.match is TerminalMatch.Url })
+        assertTrue(
+            "URL tail should not also surface as a Path span, got $spans",
+            spans.none { it.match is TerminalMatch.Path },
         )
     }
 
@@ -353,5 +401,35 @@ class DefaultTerminalMatcherTest {
         val bound = DefaultTerminalMatcher.MAX_SCAN_CHARS
         assertTrue("MAX_SCAN_CHARS too small ($bound)", bound >= 2_000)
         assertTrue("MAX_SCAN_CHARS too large ($bound)", bound <= 64_000)
+    }
+
+    @Test
+    fun `visible-row fallback maps legacy value-only matcher results to spans`() {
+        val line = "copy ticket PS-354 now"
+        val spans = matchSpansForLine(line, LegacyTicketMatcher)
+
+        assertEquals(1, spans.size)
+        assertEquals(TerminalMatch.Error("PS-354"), spans.single().match)
+        assertEquals(12, spans.single().start)
+        assertEquals(18, spans.single().endExclusive)
+    }
+
+    @Test
+    fun `visible-row fallback keeps duplicate legacy matcher results distinct`() {
+        val line = "PS-354 then PS-354"
+        val spans = matchSpansForLine(line, LegacyDuplicateTicketMatcher)
+
+        assertEquals(listOf(0, 12), spans.map { it.start })
+        assertEquals(listOf(6, 18), spans.map { it.endExclusive })
+    }
+
+    private object LegacyTicketMatcher : TerminalMatcher {
+        override fun matches(text: String): List<TerminalMatch> =
+            if ("PS-354" in text) listOf(TerminalMatch.Error("PS-354")) else emptyList()
+    }
+
+    private object LegacyDuplicateTicketMatcher : TerminalMatcher {
+        override fun matches(text: String): List<TerminalMatch> =
+            List(2) { TerminalMatch.Error("PS-354") }.takeIf { "PS-354" in text }.orEmpty()
     }
 }

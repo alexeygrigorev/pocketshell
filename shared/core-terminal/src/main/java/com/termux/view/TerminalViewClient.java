@@ -28,6 +28,12 @@ public interface TerminalViewClient {
      */
     void onSingleTapUp(MotionEvent e);
 
+    /**
+     * Called when the visible scrollback viewport changes without new terminal
+     * output. The default keeps existing clients source-compatible.
+     */
+    default void onScrollChanged() {}
+
     boolean shouldBackButtonBeMappedToEscape();
 
     boolean shouldEnforceCharBasedInput();

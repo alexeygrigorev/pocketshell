@@ -13,7 +13,6 @@ import android.widget.Toast
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -28,16 +27,16 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import com.pocketshell.core.terminal.selection.SelectionOverlay
 import com.pocketshell.core.terminal.selection.TerminalMatch
+import com.pocketshell.core.terminal.selection.TerminalMatchRegion
 import com.pocketshell.core.terminal.selection.UrlOverlay
 import com.pocketshell.core.terminal.selection.UrlRegion
+import com.pocketshell.core.terminal.selection.findVisibleTerminalMatches
 import com.pocketshell.core.terminal.selection.hitTestUrl
 import com.termux.terminal.TextStyle
 import com.termux.terminal.TerminalSessionClient
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
 import com.termux.view.TerminalViewClient
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.flowOf
 
 /**
  * Background colour applied to the [TerminalView]'s parent surface. This is
@@ -221,6 +220,7 @@ fun TerminalSurface(
     val viewClient = remember { PocketShellTerminalViewClient() }
     viewClient.onTerminalSizeChanged = onTerminalSizeChanged
     var terminalView by remember { mutableStateOf<TerminalView?>(null) }
+    var viewportTick by remember { mutableStateOf(0L) }
 
     val context = LocalContext.current
 
@@ -255,12 +255,12 @@ fun TerminalSurface(
         onDispose { state.setOnCopySelection(null) }
     }
 
-    // Subscribe to the detector flow only when the caller actually wants
-    // match callbacks. The empty-flow fallback avoids spinning up a debounce
-    // coroutine when no overlay is being rendered.
-    val matchesFlow: Flow<List<TerminalMatch>> =
-        if (matchListener != null) state.flowOfMatches else remember { flowOf(emptyList()) }
-    val matches by matchesFlow.collectAsState(initial = emptyList<TerminalMatch>())
+    DisposableEffect(viewClient) {
+        viewClient.onViewportChanged = {
+            viewportTick += 1
+        }
+        onDispose { viewClient.onViewportChanged = null }
+    }
 
     LaunchedEffect(state, terminalView) {
         val view = terminalView ?: return@LaunchedEffect
@@ -303,6 +303,22 @@ fun TerminalSurface(
     // view-coordinate concept, not a transcript-bytes concept — the same
     // session can render different URL sets at different sizes.
     var visibleUrls by remember { mutableStateOf<List<UrlRegion>>(emptyList()) }
+    var visibleMatchRegions by remember { mutableStateOf<List<TerminalMatchRegion>>(emptyList()) }
+
+    LaunchedEffect(state, terminalView, matchListener, viewportTick) {
+        val view = terminalView
+        if (view == null || matchListener == null) {
+            visibleMatchRegions = emptyList()
+            return@LaunchedEffect
+        }
+        visibleMatchRegions = findVisibleTerminalMatches(view, state.currentMatcher())
+        state.renderRequests.collect {
+            val fresh = findVisibleTerminalMatches(view, state.currentMatcher())
+            if (fresh != visibleMatchRegions) {
+                visibleMatchRegions = fresh
+            }
+        }
+    }
 
     // Install the tap-hook on the view client every time `visibleUrls`,
     // `terminalView`, or `effectiveUrlTap` changes. The hook receives a tap
@@ -376,7 +392,8 @@ fun TerminalSurface(
             )
             if (matchListener != null) {
                 SelectionOverlay(
-                    matches = matches,
+                    view = terminalView,
+                    regions = visibleMatchRegions,
                     onTap = matchListener,
                 )
             }
@@ -384,6 +401,7 @@ fun TerminalSurface(
                 UrlOverlay(
                     view = terminalView,
                     renderRequests = state.renderRequests,
+                    viewportChangeKey = viewportTick,
                     onUrlsChanged = { visibleUrls = it },
                 )
             }
@@ -480,6 +498,7 @@ private fun TerminalView.applyPocketShellDefaultColors() {
 internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessionClient {
     private var terminalView: TerminalView? = null
     var onTerminalSizeChanged: ((columns: Int, rows: Int) -> Unit)? = null
+    var onViewportChanged: (() -> Unit)? = null
 
     /**
      * Hook installed by [TerminalSurface] when URL detection is enabled.
@@ -533,6 +552,9 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
         val inputMethodManager = view.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
         inputMethodManager?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
     }
+    override fun onScrollChanged() {
+        onViewportChanged?.invoke()
+    }
     override fun shouldBackButtonBeMappedToEscape(): Boolean = false
     override fun shouldEnforceCharBasedInput(): Boolean = true
     override fun shouldUseCtrlSpaceWorkaround(): Boolean = false
@@ -552,6 +574,7 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
         if (emulator.mColumns > 0 && emulator.mRows > 0) {
             onTerminalSizeChanged?.invoke(emulator.mColumns, emulator.mRows)
         }
+        onViewportChanged?.invoke()
     }
     override fun logError(tag: String?, message: String?) = Unit
     override fun logWarn(tag: String?, message: String?) = Unit

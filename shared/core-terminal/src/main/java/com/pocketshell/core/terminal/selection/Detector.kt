@@ -68,11 +68,9 @@ package com.pocketshell.core.terminal.selection
  * - **Snapshot bound**: only the last
  *   [DefaultTerminalMatcher.MAX_SCAN_CHARS] characters are scanned (see
  *   "Snapshot windowing").
- * - **Hit-test in `SelectionOverlay`**: the overlay currently dispatches taps
- *   to `matches.first()` and ignores the tap coordinate. Multi-match rows
- *   misdirect taps to the leftmost match. A proper hit test needs glyph-grid
- *   geometry from the underlying `TerminalView`, which is non-trivial; see
- *   the KDoc on [SelectionOverlay] for the deferred work.
+ * - **Visible-viewport hit-testing**: tap targets are derived from visible
+ *   terminal rows. Off-screen transcript matches are still available through
+ *   [TerminalMatcher.matches], but they are not tap targets until visible.
  * - **Windows paths, `ftp://` / `ssh://` URLs, IPv6 hosts**: not surfaced.
  * - **Paths with spaces**: not surfaced. (No way to disambiguate from prose.)
  *
@@ -150,6 +148,25 @@ interface TerminalMatcher {
 }
 
 /**
+ * A [TerminalMatch] plus its half-open character range inside the scanned
+ * string. Span-aware matchers let the terminal surface convert visible-row
+ * matches to grid rectangles without guessing from duplicate string values.
+ */
+data class TerminalMatchSpan(
+    val match: TerminalMatch,
+    val start: Int,
+    val endExclusive: Int,
+)
+
+/**
+ * Optional extension for matchers that can preserve exact source spans.
+ * Precise smart-selection hit-testing requires this contract.
+ */
+interface TerminalSpanMatcher : TerminalMatcher {
+    fun matchSpans(text: String): List<TerminalMatchSpan>
+}
+
+/**
  * Default [TerminalMatcher] implementation backed by a small set of regular
  * expressions. The patterns target the categories called out in
  * `docs/vision.md` §4 (paths, URLs, error keywords) without trying to be
@@ -159,9 +176,12 @@ interface TerminalMatcher {
  * See the file-level KDoc above for supported kinds, precedence, snapshot
  * bound, known limitations, and the extension recipe.
  */
-class DefaultTerminalMatcher : TerminalMatcher {
+class DefaultTerminalMatcher : TerminalSpanMatcher {
 
-    override fun matches(text: String): List<TerminalMatch> {
+    override fun matches(text: String): List<TerminalMatch> =
+        matchSpans(text).map { it.match }
+
+    override fun matchSpans(text: String): List<TerminalMatchSpan> {
         if (text.isEmpty()) return emptyList()
 
         // Window the input. Terminal transcripts can be megabytes when the
@@ -175,8 +195,9 @@ class DefaultTerminalMatcher : TerminalMatcher {
         } else {
             text
         }
+        val scannedOffset = text.length - scanned.length
 
-        val results = mutableListOf<TerminalMatch>()
+        val results = mutableListOf<TerminalMatchSpan>()
         val claimed = BooleanArray(scanned.length)
 
         // 1. URLs — match first so any path-like tail is consumed.
@@ -191,7 +212,11 @@ class DefaultTerminalMatcher : TerminalMatcher {
             val start = match.range.first
             val end = start + trimmed.length // exclusive
             if (!claim(claimed, start, end)) return@forEach
-            results += TerminalMatch.Url(trimmed)
+            results += TerminalMatchSpan(
+                TerminalMatch.Url(trimmed),
+                scannedOffset + start,
+                scannedOffset + end,
+            )
         }
 
         // 2. Absolute Unix paths.
@@ -202,7 +227,11 @@ class DefaultTerminalMatcher : TerminalMatcher {
             val start = match.range.first
             val end = match.range.last + 1
             if (!claim(claimed, start, end)) return@forEach
-            results += TerminalMatch.Path(raw)
+            results += TerminalMatchSpan(
+                TerminalMatch.Path(raw),
+                scannedOffset + start,
+                scannedOffset + end,
+            )
         }
 
         // 3. Relative paths.
@@ -211,7 +240,11 @@ class DefaultTerminalMatcher : TerminalMatcher {
             val start = match.range.first
             val end = match.range.last + 1
             if (!claim(claimed, start, end)) return@forEach
-            results += TerminalMatch.Path(raw)
+            results += TerminalMatchSpan(
+                TerminalMatch.Path(raw),
+                scannedOffset + start,
+                scannedOffset + end,
+            )
         }
 
         // 4. Stack-trace frames (Java-style and Python-style).
@@ -220,7 +253,11 @@ class DefaultTerminalMatcher : TerminalMatcher {
             val start = match.range.first
             val end = match.range.last + 1
             if (!claim(claimed, start, end)) return@forEach
-            results += TerminalMatch.Error(raw)
+            results += TerminalMatchSpan(
+                TerminalMatch.Error(raw),
+                scannedOffset + start,
+                scannedOffset + end,
+            )
         }
 
         // 5. Generic error keywords — emit the whole containing line so the
@@ -234,7 +271,15 @@ class DefaultTerminalMatcher : TerminalMatcher {
             val line = scanned.substring(lineStart, lineEnd).trim()
             if (line.isEmpty()) return@forEach
             if (!claim(claimed, lineStart, lineEnd)) return@forEach
-            results += TerminalMatch.Error(line)
+            val visualStart = scanned.indexOfFirstNonWhitespace(lineStart, lineEnd)
+            val visualEnd = scanned.indexAfterLastNonWhitespace(lineStart, lineEnd)
+            if (visualStart < visualEnd) {
+                results += TerminalMatchSpan(
+                    TerminalMatch.Error(line),
+                    scannedOffset + visualStart,
+                    scannedOffset + visualEnd,
+                )
+            }
         }
 
         return results
@@ -256,6 +301,20 @@ class DefaultTerminalMatcher : TerminalMatcher {
         var end = length
         while (end > 0 && this[end - 1] in URL_TRAILING_PUNCTUATION) end--
         return substring(0, end)
+    }
+
+    private fun String.indexOfFirstNonWhitespace(start: Int, end: Int): Int {
+        for (i in start until end) {
+            if (!this[i].isWhitespace()) return i
+        }
+        return end
+    }
+
+    private fun String.indexAfterLastNonWhitespace(start: Int, end: Int): Int {
+        for (i in end - 1 downTo start) {
+            if (!this[i].isWhitespace()) return i + 1
+        }
+        return start
     }
 
     companion object {

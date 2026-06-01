@@ -353,6 +353,8 @@ class TerminalSurfaceState internal constructor(
         bufferTick.value = bufferTick.value + 1
     }
 
+    internal fun currentMatcher(): TerminalMatcher = matcher
+
     /**
      * Pull the current visible-transcript text from the attached session and
      * run the matcher across it. Returns an empty list when no session is

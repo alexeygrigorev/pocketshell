@@ -8,8 +8,13 @@ import android.view.View
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.core.terminal.selection.UrlRegion
+import com.pocketshell.core.terminal.selection.TerminalMatch
+import com.pocketshell.core.terminal.selection.TerminalMatcher
+import com.pocketshell.core.terminal.selection.TerminalMatchRegion
 import com.pocketshell.core.terminal.selection.findVisibleUrls
+import com.pocketshell.core.terminal.selection.findVisibleTerminalMatches
 import com.pocketshell.core.terminal.selection.hitTestUrl
+import com.pocketshell.core.terminal.selection.hitTestTerminalMatch
 import com.termux.view.TerminalView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -347,5 +352,367 @@ class TerminalSurfaceSelectionInstrumentedTest {
             producerScope.cancel()
             state.detachExternalProducer()
         }
+    }
+
+    @Test
+    fun visibleSmartSelectionHitTestChoosesPressedSameLineMatch() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = null,
+        )
+        val client = PocketShellTerminalViewClient()
+
+        try {
+            val viewRef = arrayOfNulls<TerminalView>(1)
+            instrumentation.runOnMainSync {
+                val view = TerminalView(context, null)
+                view.applyPocketShellDefaults(client)
+                view.attachSession(requireNotNull(state.session))
+                val widthSpec = View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY)
+                val heightSpec = View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+                view.measure(widthSpec, heightSpec)
+                view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+                viewRef[0] = view
+            }
+            val view = requireNotNull(viewRef[0])
+            val leftPath = "/etc/hosts"
+            val rightPath = "/tmp/backup-hosts"
+            val line = "open $leftPath then $rightPath"
+            state.appendRemoteOutput(line.toByteArray(Charsets.US_ASCII))
+
+            val regionsRef = arrayOfNulls<List<TerminalMatchRegion>>(1)
+            withTimeout(2_000) {
+                while ((regionsRef[0]?.size ?: 0) < 2) {
+                    delay(20)
+                    instrumentation.runOnMainSync {
+                        regionsRef[0] = findVisibleTerminalMatches(view)
+                    }
+                }
+            }
+
+            val regions = requireNotNull(regionsRef[0])
+            val left = regions.single { it.match.value == leftPath }
+            val right = regions.single { it.match.value == rightPath }
+            assertEquals("left path should start after \"open \"", 5, left.startCol)
+            assertEquals(
+                "right path should start after the left path and separator",
+                5 + leftPath.length + " then ".length,
+                right.startCol,
+            )
+
+            val renderer = view.mRenderer
+            assertNotNull("renderer should be initialised after layout", renderer)
+            val fontWidth = renderer!!.fontWidth
+            val lineSpacing = renderer.fontLineSpacing.toFloat()
+            val rowOffset = renderer.fontLineSpacingAndAscent.toFloat()
+            val midY = rowOffset + 0.5f * lineSpacing
+            val rightMidX = (right.startCol + (right.endColExclusive - right.startCol) / 2f) * fontWidth
+            val rightHit = hitTestTerminalMatch(view, regions, rightMidX, midY)
+            assertNotNull("tap inside right path should hit the right region", rightHit)
+            assertEquals(rightPath, rightHit!!.match.value)
+
+            val gapCol = left.endColExclusive + 1
+            val gapHit = hitTestTerminalMatch(view, regions, (gapCol + 0.5f) * fontWidth, midY)
+            assertNull("tap between same-line matches should not select either match", gapHit)
+
+            val topY = rowOffset
+            val bottomY = rowOffset + lineSpacing
+            val leftEdgeHit = hitTestTerminalMatch(view, regions, right.startCol * fontWidth, topY)
+            assertNotNull("left/top boundary should be inside the right path region", leftEdgeHit)
+            assertEquals(rightPath, leftEdgeHit!!.match.value)
+
+            val insideBottomHit = hitTestTerminalMatch(view, regions, rightMidX, bottomY - 0.5f)
+            assertNotNull("tap just above row bottom should hit the right path", insideBottomHit)
+            assertEquals(rightPath, insideBottomHit!!.match.value)
+
+            val rightBoundaryHit = hitTestTerminalMatch(
+                view,
+                regions,
+                right.endColExclusive * fontWidth,
+                midY,
+            )
+            assertNull("endColExclusive boundary should not hit the right path", rightBoundaryHit)
+
+            val bottomBoundaryHit = hitTestTerminalMatch(view, regions, rightMidX, bottomY)
+            assertNull("row bottom boundary should not hit the right path", bottomBoundaryHit)
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun visibleSmartSelectionSupportsLegacyValueOnlyMatcherForHitTesting() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = null,
+        )
+        val client = PocketShellTerminalViewClient()
+
+        try {
+            val viewRef = arrayOfNulls<TerminalView>(1)
+            instrumentation.runOnMainSync {
+                val view = TerminalView(context, null)
+                view.applyPocketShellDefaults(client)
+                view.attachSession(requireNotNull(state.session))
+                val widthSpec = View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY)
+                val heightSpec = View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+                view.measure(widthSpec, heightSpec)
+                view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+                viewRef[0] = view
+            }
+            val view = requireNotNull(viewRef[0])
+            val token = "PS-354"
+            state.appendRemoteOutput("ticket $token is tappable".toByteArray(Charsets.US_ASCII))
+
+            val regionsRef = arrayOfNulls<List<TerminalMatchRegion>>(1)
+            withTimeout(2_000) {
+                while (regionsRef[0]?.singleOrNull()?.match?.value != token) {
+                    delay(20)
+                    instrumentation.runOnMainSync {
+                        regionsRef[0] = findVisibleTerminalMatches(view, LegacyTicketMatcher)
+                    }
+                }
+            }
+
+            val region = requireNotNull(regionsRef[0]).single()
+            assertEquals(7, region.startCol)
+            assertEquals(7 + token.length, region.endColExclusive)
+
+            val renderer = view.mRenderer
+            assertNotNull("renderer should be initialised after layout", renderer)
+            val fontWidth = renderer!!.fontWidth
+            val lineSpacing = renderer.fontLineSpacing.toFloat()
+            val rowOffset = renderer.fontLineSpacingAndAscent.toFloat()
+            val hit = hitTestTerminalMatch(
+                view,
+                listOf(region),
+                (region.startCol + 0.5f) * fontWidth,
+                rowOffset + 0.5f * lineSpacing,
+            )
+            assertNotNull("legacy matcher region should be tappable", hit)
+            assertEquals(token, hit!!.match.value)
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun visibleSmartSelectionCanBeRecomputedAfterScrollWithoutNewOutput() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = null,
+        )
+        val client = PocketShellTerminalViewClient()
+
+        try {
+            val viewRef = arrayOfNulls<TerminalView>(1)
+            instrumentation.runOnMainSync {
+                val view = TerminalView(context, null)
+                view.applyPocketShellDefaults(client)
+                view.attachSession(requireNotNull(state.session))
+                val widthSpec = View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY)
+                val heightSpec = View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+                view.measure(widthSpec, heightSpec)
+                view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+                viewRef[0] = view
+            }
+            val view = requireNotNull(viewRef[0])
+            val rows = view.mEmulator.mRows
+            val historyPath = "/tmp/history-354"
+            val output = buildString {
+                append("old $historyPath\r\n")
+                repeat(rows + 2) { index ->
+                    append("filler-$index\r\n")
+                }
+            }
+            state.appendRemoteOutput(output.toByteArray(Charsets.US_ASCII))
+
+            withTimeout(2_000) {
+                while (view.mEmulator.screen.activeTranscriptRows < 1) {
+                    delay(20)
+                }
+            }
+            val historyRows = view.mEmulator.screen.activeTranscriptRows
+
+            val bottomRegionsRef = arrayOfNulls<List<TerminalMatchRegion>>(1)
+            instrumentation.runOnMainSync {
+                view.setTopRow(0)
+                bottomRegionsRef[0] = findVisibleTerminalMatches(view)
+            }
+            assertTrue(
+                "history-only path should not be visible before scrolling",
+                requireNotNull(bottomRegionsRef[0]).none { it.match.value == historyPath },
+            )
+
+            var viewportChanges = 0
+            client.onViewportChanged = { viewportChanges++ }
+            val scrolledRegionsRef = arrayOfNulls<List<TerminalMatchRegion>>(1)
+            instrumentation.runOnMainSync {
+                view.setTopRow(-historyRows)
+                scrolledRegionsRef[0] = findVisibleTerminalMatches(view)
+            }
+            assertEquals("scrolling the viewport should notify the surface", 1, viewportChanges)
+            assertTrue(
+                "recomputed scrolled viewport should expose history path as a tap target",
+                requireNotNull(scrolledRegionsRef[0]).any { it.match.value == historyPath },
+            )
+        } finally {
+            client.onViewportChanged = null
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun visibleUrlRegionsCanBeRecomputedAfterScrollWithoutNewOutput() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = null,
+        )
+        val client = PocketShellTerminalViewClient()
+
+        try {
+            val viewRef = arrayOfNulls<TerminalView>(1)
+            instrumentation.runOnMainSync {
+                val view = TerminalView(context, null)
+                view.applyPocketShellDefaults(client)
+                view.attachSession(requireNotNull(state.session))
+                val widthSpec = View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY)
+                val heightSpec = View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+                view.measure(widthSpec, heightSpec)
+                view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+                viewRef[0] = view
+            }
+            val view = requireNotNull(viewRef[0])
+            val rows = view.mEmulator.mRows
+            val historyUrl = "https://example.com/history-354"
+            val output = buildString {
+                append("old $historyUrl\r\n")
+                repeat(rows + 2) { index ->
+                    append("filler-$index\r\n")
+                }
+            }
+            state.appendRemoteOutput(output.toByteArray(Charsets.US_ASCII))
+
+            withTimeout(2_000) {
+                while (view.mEmulator.screen.activeTranscriptRows < 1) {
+                    delay(20)
+                }
+            }
+            val historyRows = view.mEmulator.screen.activeTranscriptRows
+
+            val bottomUrlsRef = arrayOfNulls<List<UrlRegion>>(1)
+            instrumentation.runOnMainSync {
+                view.setTopRow(0)
+                bottomUrlsRef[0] = findVisibleUrls(view)
+            }
+            assertTrue(
+                "history-only URL should not be visible before scrolling",
+                requireNotNull(bottomUrlsRef[0]).none { it.url == historyUrl },
+            )
+
+            var viewportChanges = 0
+            client.onViewportChanged = { viewportChanges++ }
+            val scrolledUrlsRef = arrayOfNulls<List<UrlRegion>>(1)
+            instrumentation.runOnMainSync {
+                view.setTopRow(-historyRows)
+                scrolledUrlsRef[0] = findVisibleUrls(view)
+            }
+            assertEquals("scrolling the viewport should notify the surface", 1, viewportChanges)
+            assertTrue(
+                "recomputed scrolled viewport should expose history URL as a tap target",
+                requireNotNull(scrolledUrlsRef[0]).any { it.url == historyUrl },
+            )
+        } finally {
+            client.onViewportChanged = null
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun emulatorSetInvalidatesViewportForOverlayRecompute() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = null,
+        )
+        val client = PocketShellTerminalViewClient()
+
+        try {
+            instrumentation.runOnMainSync {
+                val view = TerminalView(context, null)
+                view.applyPocketShellDefaults(client)
+                view.attachSession(requireNotNull(state.session))
+                val widthSpec = View.MeasureSpec.makeMeasureSpec(1080, View.MeasureSpec.EXACTLY)
+                val heightSpec = View.MeasureSpec.makeMeasureSpec(1920, View.MeasureSpec.EXACTLY)
+                view.measure(widthSpec, heightSpec)
+                view.layout(0, 0, view.measuredWidth, view.measuredHeight)
+            }
+
+            var terminalSizeChanges = 0
+            var viewportChanges = 0
+            client.onTerminalSizeChanged = { columns, rows ->
+                if (columns > 0 && rows > 0) terminalSizeChanges++
+            }
+            client.onViewportChanged = { viewportChanges++ }
+
+            instrumentation.runOnMainSync {
+                client.onEmulatorSet()
+            }
+
+            assertEquals("emulator set should still report terminal size", 1, terminalSizeChanges)
+            assertEquals(
+                "emulator set should invalidate viewport-derived overlays",
+                1,
+                viewportChanges,
+            )
+        } finally {
+            client.onTerminalSizeChanged = null
+            client.onViewportChanged = null
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
+        }
+    }
+
+    private object LegacyTicketMatcher : TerminalMatcher {
+        override fun matches(text: String): List<TerminalMatch> =
+            if ("PS-354" in text) listOf(TerminalMatch.Error("PS-354")) else emptyList()
     }
 }

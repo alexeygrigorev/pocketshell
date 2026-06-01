@@ -67,12 +67,13 @@ import kotlinx.coroutines.flow.Flow
  *
  * The overlay does not poll continuously. It re-scans the visible viewport
  * for URLs every time the supplied [renderRequests] flow emits — the same
- * signal that drives [TerminalView.onScreenUpdated]. That keeps URL regions
- * in sync with the rendered text without spinning a render-rate animation
- * loop. The composable also emits the latest snapshot via [onUrlsChanged]
- * so the host can install the same list into the View client's tap-hook;
- * a single source of truth keeps the underline and tap-target always
- * agreeing about which rectangle is a URL.
+ * signal that drives [TerminalView.onScreenUpdated] — and whenever
+ * [viewportChangeKey] changes due to scroll or terminal resize. That keeps
+ * URL regions in sync with both rendered text and viewport-only movement
+ * without spinning a render-rate animation loop. The composable also emits
+ * the latest snapshot via [onUrlsChanged] so the host can install the same
+ * list into the View client's tap-hook; a single source of truth keeps the
+ * underline and tap-target always agreeing about which rectangle is a URL.
  *
  * Why no dependency on `androidx.compose.foundation`: this module stays on
  * `androidx.compose.ui` only (`compose.foundation` is not a declared
@@ -85,6 +86,9 @@ import kotlinx.coroutines.flow.Flow
  *   layout pass; the overlay composes an inert sized box in that case.
  * @param renderRequests the surface's redraw signal — typically
  *   `state.renderRequests`. Each emission triggers a fresh URL scan.
+ * @param viewportChangeKey any value that changes when the visible grid
+ *   changes without a render request, such as scrollback position or
+ *   emulator size. Each key change triggers an immediate fresh URL scan.
  * @param onUrlsChanged invoked with the latest URL snapshot whenever the
  *   scanner produces a new list. The host installs this list into the
  *   View client's tap-hook so single-tap hit-testing stays consistent with
@@ -99,13 +103,14 @@ import kotlinx.coroutines.flow.Flow
 public fun UrlOverlay(
     view: TerminalView?,
     renderRequests: Flow<Unit>,
+    viewportChangeKey: Any? = Unit,
     onUrlsChanged: (List<UrlRegion>) -> Unit,
     modifier: Modifier = Modifier,
     accentColor: Color = Color(0xFF22D3EE),
 ) {
     var urls by remember { mutableStateOf<List<UrlRegion>>(emptyList()) }
 
-    LaunchedEffect(view, renderRequests, onUrlsChanged) {
+    LaunchedEffect(view, renderRequests, viewportChangeKey, onUrlsChanged) {
         if (view == null) {
             onUrlsChanged(emptyList())
             return@LaunchedEffect
@@ -177,9 +182,9 @@ public fun UrlOverlay(
  * `(tapX, tapY)` in view-local pixels, or `null` if no URL is under the
  * pointer.
  *
- * The bounding box is inclusive on the left/top edges and inclusive on the
- * right/bottom — a tap exactly on the right edge of a URL still counts as
- * hitting it, which keeps small targets tappable on a phone.
+ * The bounding box is inclusive on the left/top edges and exclusive on the
+ * right/bottom edges, matching [UrlRegion.endColExclusive] and row-cell
+ * geometry.
  *
  * Used both by the connected test (to assert the math) and at runtime by
  * [com.pocketshell.core.terminal.ui.PocketShellTerminalViewClient.onSingleTapUp]
@@ -190,27 +195,16 @@ public fun hitTestUrl(
     urls: List<UrlRegion>,
     tapX: Float,
     tapY: Float,
-): UrlRegion? {
-    val renderer = view.mRenderer ?: return null
-    val emulator = view.mEmulator ?: return null
-    if (emulator.mColumns <= 0 || emulator.mRows <= 0) return null
-    val fontWidth = renderer.fontWidth
-    val lineSpacing = renderer.fontLineSpacing.toFloat()
-    val rowOffsetPx = renderer.fontLineSpacingAndAscent.toFloat()
-    val topRow = view.topRow
-    for (region in urls) {
-        val rowOnScreen = region.row - topRow
-        if (rowOnScreen < 0) continue
-        val left = region.startCol * fontWidth
-        val right = region.endColExclusive * fontWidth
-        val top = rowOffsetPx + rowOnScreen * lineSpacing
-        val bottom = top + lineSpacing
-        if (tapX in left..right && tapY in top..bottom) {
-            return region
-        }
-    }
-    return null
-}
+): UrlRegion? =
+    hitTestGridRegion(
+        view = view,
+        regions = urls,
+        tapX = tapX,
+        tapY = tapY,
+        rowOf = { it.row },
+        startColOf = { it.startCol },
+        endColExclusiveOf = { it.endColExclusive },
+    )
 
 /**
  * Compose-friendly overload of [hitTestUrl] that takes an [Offset] instead

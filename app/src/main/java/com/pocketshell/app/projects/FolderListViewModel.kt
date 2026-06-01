@@ -145,6 +145,15 @@ data class FolderSessionEntry(
     val lastActivity: Long?,
     val attached: Boolean,
     val agentKind: SessionAgentKind,
+    val windows: List<FolderSessionWindowEntry> = emptyList(),
+)
+
+data class FolderSessionWindowEntry(
+    val index: Int?,
+    val name: String?,
+    val active: Boolean,
+    val command: String?,
+    val agentKind: SessionAgentKind,
 )
 
 sealed interface FolderListUiState {
@@ -610,6 +619,15 @@ class FolderListViewModel @Inject constructor(
                         lastActivity = row.lastActivity,
                         attached = row.attached,
                         agentKind = row.agentKind,
+                        windows = row.windows.map { window ->
+                            FolderSessionWindowEntry(
+                                index = window.index,
+                                name = window.name,
+                                active = window.active,
+                                command = window.command,
+                                agentKind = window.agentKind,
+                            )
+                        },
                     )
                 }
                 lastSessionFolderPaths = result.rows.associate { row ->

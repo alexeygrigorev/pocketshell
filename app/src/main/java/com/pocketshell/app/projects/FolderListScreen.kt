@@ -1423,13 +1423,15 @@ private fun WorkspaceSessionRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(
-                text = session.sessionName,
-                color = PocketShellColors.TextMuted,
-                fontSize = 11.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            sessionSecondaryText(session)?.let { secondary ->
+                Text(
+                    text = secondary,
+                    color = PocketShellColors.TextMuted,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         Text(
             text = sessionKindLabel(session),
@@ -1570,15 +1572,28 @@ private fun sessionKindLabel(session: FolderSessionEntry): String = when (sessio
 private fun sessionDisplayTitle(session: FolderSessionEntry): String {
     val raw = session.sessionName.trim()
     if (raw.isBlank()) return "Tmux session"
-    val normalised = raw
-        .replace(Regex("[_-]+"), " ")
-        .trim()
-    return normalised
-        .split(Regex("\\s+"))
-        .joinToString(" ") { token ->
-            if (token.all(Char::isDigit)) token else token.replaceFirstChar { char -> char.uppercase() }
+    return raw
+}
+
+private fun sessionSecondaryText(session: FolderSessionEntry): String? {
+    val windows = session.windows
+        .sortedWith(compareBy<FolderSessionWindowEntry> { it.index ?: Int.MAX_VALUE }.thenBy { it.name.orEmpty() })
+    if (windows.size <= 1) return null
+    val visible = windows.take(3).joinToString(" · ") { window ->
+        val identity = window.index?.let { "w$it" } ?: "window"
+        val hint = when {
+            window.agentKind.isAgent() -> sessionKindLabel(
+                session.copy(agentKind = window.agentKind, attached = false, windows = emptyList()),
+            )
+            !window.command.isNullOrBlank() -> window.command
+            !window.name.isNullOrBlank() -> window.name
+            window.active -> "active"
+            else -> null
         }
-        .ifBlank { raw }
+        if (hint == null) identity else "$identity $hint"
+    }
+    val remaining = windows.size - 3
+    return if (remaining > 0) "$visible · +$remaining" else visible
 }
 
 @Composable

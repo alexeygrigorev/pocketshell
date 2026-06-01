@@ -262,6 +262,86 @@ class FolderListGroupingTest {
     }
 
     @Test
+    fun cableWorldSessionsStayRawUnderPathDerivedProjectInTreeAndFlatGrouping() {
+        val cableWorldPath = FolderListViewModel.canonicalisePath("/home/alexey/git/cable-world")
+        val sessions = listOf(
+            entry("git-cable-world", 1_000L, kind = SessionAgentKind.Shell),
+            entry("git-cable-world-map", 1_500L, kind = SessionAgentKind.Claude),
+        )
+        val cwds = sessions.associate { it.sessionName to cableWorldPath }
+        val watched = listOf(
+            ProjectRootEntity(id = 1L, hostId = 7L, label = "[00] git", path = "/home/alexey/git"),
+        )
+
+        val roots = FolderListViewModel.buildFolderTree(
+            sessions = sessions,
+            sessionFolderPaths = cwds,
+            watchedFolders = watched,
+            scannedProjectFoldersByRoot = emptyMap(),
+        )
+        val flat = FolderListViewModel.groupSessionsIntoFolders(
+            sessions = sessions,
+            sessionFolderPaths = cwds,
+            watchedFolders = emptyList(),
+        )
+
+        assertEquals("cable-world", roots.single().folders.single().label)
+        assertEquals(cableWorldPath, roots.single().folders.single().path)
+        assertEquals(
+            listOf("git-cable-world-map", "git-cable-world"),
+            roots.single().folders.single().sessions.map { it.sessionName },
+        )
+        assertEquals("cable-world", flat.single().label)
+        assertEquals(
+            listOf("git-cable-world-map", "git-cable-world"),
+            flat.single().sessions.map { it.sessionName },
+        )
+    }
+
+    @Test
+    fun groupingPreservesCompactWindowMetadataForMultiWindowSessions() {
+        val session = FolderSessionEntry(
+            sessionName = "git-cable-world-map",
+            lastActivity = 1_500L,
+            attached = false,
+            agentKind = SessionAgentKind.Claude,
+            windows = listOf(
+                FolderSessionWindowEntry(
+                    index = 0,
+                    name = "node",
+                    active = false,
+                    command = "node",
+                    agentKind = SessionAgentKind.Shell,
+                ),
+                FolderSessionWindowEntry(
+                    index = 1,
+                    name = "claude",
+                    active = true,
+                    command = "claude",
+                    agentKind = SessionAgentKind.Claude,
+                ),
+            ),
+        )
+
+        val rows = FolderListViewModel.groupSessionsIntoFolders(
+            sessions = listOf(session),
+            sessionFolderPaths = mapOf(
+                "git-cable-world-map" to FolderListViewModel.canonicalisePath("/home/alexey/git/cable-world"),
+            ),
+            watchedFolders = emptyList(),
+        )
+
+        assertEquals(
+            listOf("node", "claude"),
+            rows.single().sessions.single().windows.map { it.name },
+        )
+        assertEquals(
+            listOf(SessionAgentKind.Shell, SessionAgentKind.Claude),
+            rows.single().sessions.single().windows.map { it.agentKind },
+        )
+    }
+
+    @Test
     fun buildFolderTreeMatchesTildeWatchedRootToAbsoluteProjectsAndSessions() {
         val sessions = listOf(
             entry("codex-pocketshell", 3_000L, kind = SessionAgentKind.Codex),

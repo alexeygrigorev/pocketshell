@@ -32,6 +32,18 @@ class FolderListGatewayParserTest {
     }
 
     @Test
+    fun parseListSessionsRowsPreservesHetznerCableWorldRawNames() {
+        val stdout =
+            "git-cable-world::1700000000::1700001000::0::/home/alexey/git/cable-world\n" +
+                "git-cable-world-map::1700000100::1700002000::0::/home/alexey/git/cable-world\n"
+
+        val rows = SshFolderListGateway.parseListSessionsRows(stdout)
+
+        assertEquals(listOf("git-cable-world", "git-cable-world-map"), rows.map { it.sessionName })
+        assertEquals(listOf("/home/alexey/git/cable-world", "/home/alexey/git/cable-world"), rows.map { it.cwd })
+    }
+
+    @Test
     fun parseListSessionsRowsHandlesBlankCwdAsNull() {
         // Some tmux setups leave session_path empty for sessions
         // created without `-c`; row must still parse.
@@ -112,6 +124,30 @@ class FolderListGatewayParserTest {
         assertEquals("/dev/pts/3", map["claude-main"]?.tty)
         assertEquals("node", map["claude-main"]?.command)
         assertEquals("/tmp", map["solo"]?.cwd)
+    }
+
+    @Test
+    fun parseSessionWindowRowsKeepsWindowIdentityAndActiveWindowCwd() {
+        val stdout = """
+            git-cable-world::0::node::1::1::/home/alexey/git/cable-world::/dev/pts/2::node
+            git-cable-world-map::0::claude::1::1::/home/alexey/git/cable-world::/dev/pts/3::claude
+            multi-agent::0::shell::0::1::/srv/app::/dev/pts/4::bash
+            multi-agent::1::claude::1::1::/srv/app::/dev/pts/5::claude
+            multi-agent::1::claude::1::0::/srv/app/ignored::/dev/pts/6::vim
+        """.trimIndent()
+
+        val windows = SshFolderListGateway.parseSessionWindowRows(stdout)
+        val activePanes = SshFolderListGateway.parseActivePaneRows(stdout)
+
+        assertEquals(
+            listOf("git-cable-world", "git-cable-world-map", "multi-agent", "multi-agent"),
+            windows.map { it.sessionName },
+        )
+        assertEquals(listOf(0, 0, 0, 1), windows.map { it.index })
+        assertEquals(listOf("node", "claude", "shell", "claude"), windows.map { it.name })
+        assertEquals("/srv/app", activePanes["multi-agent"]?.cwd)
+        assertEquals(1, activePanes["multi-agent"]?.windowIndex)
+        assertEquals("claude", activePanes["multi-agent"]?.windowName)
     }
 
     @Test

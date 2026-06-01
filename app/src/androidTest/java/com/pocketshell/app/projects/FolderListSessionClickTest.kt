@@ -220,6 +220,109 @@ class FolderListSessionClickTest {
     }
 
     @Test
+    fun cableWorldRowsRenderRawSessionNamesInTreeAndFlatModes() {
+        runBlocking {
+            db.projectRootDao().insert(
+                ProjectRootEntity(
+                    hostId = hostId,
+                    label = "git",
+                    path = "/home/alexey/git",
+                ),
+            )
+        }
+        val cableWorldPath = "/home/alexey/git/cable-world"
+        val fakeGateway = StaticGateway(
+            rows = listOf(
+                FolderSessionRow(
+                    sessionName = "git-cable-world",
+                    lastActivity = 1_700_000_000L,
+                    attached = false,
+                    cwd = cableWorldPath,
+                    agentKind = SessionAgentKind.Shell,
+                    windows = listOf(
+                        FolderSessionWindowRow(
+                            sessionName = "git-cable-world",
+                            index = 0,
+                            name = "node",
+                            active = true,
+                            cwd = cableWorldPath,
+                            tty = "/dev/pts/2",
+                            command = "node",
+                        ),
+                    ),
+                ),
+                FolderSessionRow(
+                    sessionName = "git-cable-world-map",
+                    lastActivity = 1_700_000_100L,
+                    attached = false,
+                    cwd = cableWorldPath,
+                    agentKind = SessionAgentKind.Claude,
+                    windows = listOf(
+                        FolderSessionWindowRow(
+                            sessionName = "git-cable-world-map",
+                            index = 0,
+                            name = "claude",
+                            active = true,
+                            cwd = cableWorldPath,
+                            tty = "/dev/pts/3",
+                            command = "claude",
+                            agentKind = SessionAgentKind.Claude,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val viewModel = FolderListViewModel(
+            gateway = fakeGateway,
+            hostDao = db.hostDao(),
+            projectRootDao = db.projectRootDao(),
+            forwardingController = ForwardingController(InstrumentationRegistry.getInstrumentation().targetContext),
+        )
+        var mode by mutableStateOf(HostDetailViewMode.Tree)
+
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "h",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue419",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                    hostDetailViewMode = mode,
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(folderHeaderLabelTag(cableWorldPath), useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("cable-world").assertIsDisplayed()
+        compose.onNodeWithTag(folderRowTestTag(cableWorldPath)).performClick()
+        compose.onNodeWithText("git-cable-world").assertIsDisplayed()
+        compose.onNodeWithText("git-cable-world-map").assertIsDisplayed()
+        assertTrue(compose.onAllNodesWithText("Git Cable World Map").fetchSemanticsNodes().isEmpty())
+
+        compose.runOnIdle { mode = HostDetailViewMode.Flat }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithText("git-cable-world-map").fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("cable-world").assertIsDisplayed()
+        compose.onNodeWithText("git-cable-world").assertIsDisplayed()
+        compose.onNodeWithText("git-cable-world-map").assertIsDisplayed()
+    }
+
+    @Test
     fun defaultViewModeSwitchesBetweenTreeAndFlatFolderList() {
         runBlocking {
             db.projectRootDao().insert(

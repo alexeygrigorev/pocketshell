@@ -63,6 +63,23 @@ data class FolderSessionRow(
     val attached: Boolean,
     val cwd: String?,
     val agentKind: SessionAgentKind = SessionAgentKind.Shell,
+    val windows: List<FolderSessionWindowRow> = emptyList(),
+)
+
+/**
+ * Compact per-window metadata for a tmux session. The folder list uses
+ * one active pane per tmux window to expose enough identity for
+ * multi-window sessions without becoming a window manager.
+ */
+data class FolderSessionWindowRow(
+    val sessionName: String,
+    val index: Int?,
+    val name: String?,
+    val active: Boolean,
+    val cwd: String?,
+    val tty: String?,
+    val command: String?,
+    val agentKind: SessionAgentKind = SessionAgentKind.Shell,
 )
 
 /**
@@ -100,12 +117,12 @@ sealed interface FolderListResult {
  *
  *  - `tmux list-sessions -F '#{session_name}\t#{session_created}\t
  *    #{session_activity}\t#{session_attached}\t#{session_path}'`
- *  - `tmux list-panes -a -F '#{session_name}\t#{pane_active}\t
+ *  - `tmux list-panes -a -F '#{session_name}\t#{window_index}\t
+ *    #{window_name}\t#{window_active}\t#{pane_active}\t
  *    #{pane_current_path}\t#{pane_tty}\t#{pane_current_command}'` so
- *    the active pane's cwd + TTY + foreground command supersede
- *    `session_path` when they disagree. Per the spike:
- *    `pane_current_path` is the primary signal, `session_path` is the
- *    fallback.
+ *    the active window's active-pane cwd + TTY + foreground command
+ *    supersede `session_path` when they disagree, while every window's
+ *    active pane remains available for compact metadata.
  *  - Agent detection probe (issue #252): one batched
  *    `AgentConversationRepository.detectForPanes` call for the whole
  *    list — a CONSTANT 2 host-wide round-trips (candidate enumeration
@@ -306,16 +323,18 @@ class SshFolderListGateway @Inject constructor(
                     )
             else -> {
                 val baseRows = parseListSessionsRows(listSessions.stdout)
-                val paneRows = runCatching {
+                val windowRows = runCatching {
                     val listPanes = session.exec(pathAware(LIST_PANES_COMMAND))
-                    if (listPanes.exitCode == 0) parseActivePaneRows(listPanes.stdout) else emptyMap()
-                }.getOrDefault(emptyMap())
+                    if (listPanes.exitCode == 0) parseSessionWindowRows(listPanes.stdout) else emptyList()
+                }.getOrDefault(emptyList())
+                val paneRows = activePaneRowsBySession(windowRows)
+                val windowsBySession = windowRows.groupBy { it.sessionName }
 
                 // Merge active-pane data into each session row first.
                 val merged = baseRows.map { row ->
                     val pane = paneRows[row.sessionName]
                     val cwd = pane?.cwd ?: row.cwd
-                    row.copy(cwd = cwd)
+                    row.copy(cwd = cwd, windows = windowsBySession[row.sessionName].orEmpty())
                 }
 
                 // Issue #252: per-session agent detection delegated to
@@ -329,12 +348,18 @@ class SshFolderListGateway @Inject constructor(
                     detectAgentKinds(
                         session = session,
                         rows = merged,
-                        paneRows = paneRows,
                     )
-                }.getOrDefault(emptyMap())
+                }.getOrDefault(FolderAgentDetection())
 
                 val annotated = merged.map { row ->
-                    row.copy(agentKind = agentKinds[row.sessionName] ?: SessionAgentKind.Shell)
+                    val windows = row.windows.map { window ->
+                        val key = WindowProbeKey(row.sessionName, window.index)
+                        window.copy(agentKind = agentKinds.windowKinds[key] ?: SessionAgentKind.Shell)
+                    }
+                    row.copy(
+                        agentKind = agentKinds.sessionKinds[row.sessionName] ?: SessionAgentKind.Shell,
+                        windows = windows,
+                    )
                 }
                 sessionsWithWatchedRootExpansion(
                     session = session,
@@ -583,66 +608,74 @@ class SshFolderListGateway @Inject constructor(
     }
 
     /**
-     * Classify every session's active pane by delegating to the SAME
-     * detector the Conversation view uses
-     * ([AgentConversationRepository]). Issue #252: the list path used to
-     * keep its own forked candidate-enumeration + process scan that
-     * drifted out of sync with the conversation detector — it predated
-     * #183 (Codex/OpenCode candidate enumeration), #186 (per-pane
-     * TTY-scoped scan), OpenCode SQLite detection, and #236 (120-minute
-     * freshness window). The drift is why a live Claude Code session
-     * showed the Conversation tab yet was labelled `Shell` in the list.
-     *
-     * Latency follow-up (same issue): the per-session
-     * [AgentConversationRepository.detectForPane] call costs 2 SSH
-     * round-trips each, so an N-session list incurred ~2N SEQUENTIAL
-     * round-trips per load — a regression the maintainer flagged. This
-     * now uses the BATCHED [AgentConversationRepository.detectForPanes],
-     * which runs a CONSTANT 2 host-wide round-trips (one candidate
-     * enumeration across all cwds, one host-wide `ps`) and classifies
-     * each pane in-memory with the SAME [AgentDetector] + the same
-     * per-cwd / per-TTY `requireProcessMatch = true` discipline. So the
-     * list and the Conversation tab still agree by construction, but the
-     * load no longer scales with the session count.
-     *
-     * Each session is probed with its active pane's `pane_current_path`
-     * (cwd), `pane_tty`, and `pane_current_command`. Sessions whose
-     * active pane has no TTY, no cwd, or no live agent stay on
-     * [SessionAgentKind.Shell].
+     * Classify every session window's active pane by delegating to the
+     * SAME detector the Conversation view uses. This keeps issue #252's
+     * constant host-wide probe count while letting the project tree show
+     * compact per-window agent hints for multi-window sessions.
      */
     private suspend fun detectAgentKinds(
         session: com.pocketshell.core.ssh.SshSession,
         rows: List<FolderSessionRow>,
-        paneRows: Map<String, ActivePaneRow>,
-    ): Map<String, SessionAgentKind> {
-        val probes = rows.mapNotNull { row ->
-            val cwd = row.cwd?.trim()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            val pane = paneRows[row.sessionName]
-            // No active-pane TTY ⇒ no per-pane attribution (same rule the
-            // Conversation view enforces via the detector's blank-TTY
-            // guard). Without a TTY there is no way to scope the process
-            // scan to this session's pane.
-            val paneTty = pane?.tty?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            AgentConversationRepository.PaneProbe(
-                key = row.sessionName,
-                cwd = cwd,
-                paneTty = paneTty,
-                paneCommand = pane.command.orEmpty(),
-            )
+    ): FolderAgentDetection {
+        val probeKeys = mutableMapOf<String, WindowProbeKey>()
+        val probes = rows.flatMap { row ->
+            row.windows.mapNotNull { window ->
+                val cwd = window.cwd?.trim()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val paneTty = window.tty?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val key = WindowProbeKey(row.sessionName, window.index)
+                val probeKey = key.asProbeKey()
+                probeKeys[probeKey] = key
+                AgentConversationRepository.PaneProbe(
+                    key = probeKey,
+                    cwd = cwd,
+                    paneTty = paneTty,
+                    paneCommand = window.command.orEmpty(),
+                )
+            }
         }
-        if (probes.isEmpty()) return emptyMap()
+        if (probes.isEmpty()) return FolderAgentDetection()
 
         val detections = agentRepository.detectForPanes(
             session = session,
             panes = probes,
         )
-        return detections.mapValues { (_, detection) ->
-            when (detection.agent) {
-                AgentKind.ClaudeCode -> SessionAgentKind.Claude
-                AgentKind.Codex -> SessionAgentKind.Codex
-                AgentKind.OpenCode -> SessionAgentKind.OpenCode
-            }
+        val windowKinds = detections.mapNotNull { (probeKey, detection) ->
+            val key = probeKeys[probeKey] ?: return@mapNotNull null
+            key to detection.agent.toSessionAgentKind()
+        }.toMap()
+        val sessionKinds = rows.associate { row ->
+            val activeWindowKind = row.windows
+                .firstOrNull { it.active }
+                ?.let { windowKinds[WindowProbeKey(row.sessionName, it.index)] }
+            val anyAgentKind = row.windows
+                .asSequence()
+                .mapNotNull { windowKinds[WindowProbeKey(row.sessionName, it.index)] }
+                .firstOrNull { it != SessionAgentKind.Shell }
+            row.sessionName to (activeWindowKind ?: anyAgentKind ?: SessionAgentKind.Shell)
         }
+        return FolderAgentDetection(
+            sessionKinds = sessionKinds,
+            windowKinds = windowKinds,
+        )
+    }
+
+    private fun AgentKind.toSessionAgentKind(): SessionAgentKind =
+        when (this) {
+            AgentKind.ClaudeCode -> SessionAgentKind.Claude
+            AgentKind.Codex -> SessionAgentKind.Codex
+            AgentKind.OpenCode -> SessionAgentKind.OpenCode
+        }
+
+    private data class FolderAgentDetection(
+        val sessionKinds: Map<String, SessionAgentKind> = emptyMap(),
+        val windowKinds: Map<WindowProbeKey, SessionAgentKind> = emptyMap(),
+    )
+
+    private data class WindowProbeKey(
+        val sessionName: String,
+        val windowIndex: Int?,
+    ) {
+        fun asProbeKey(): String = "$sessionName$FIELD_SEP${windowIndex ?: "active"}"
     }
 
     private fun pathAware(command: String): String =
@@ -667,16 +700,23 @@ class SshFolderListGateway @Inject constructor(
                 listSessions.isError -> null
                 else -> {
                     val baseRows = parseListSessionsRows(listSessions.output.joinToString(separator = "\n"))
-                    val paneRows = runCatching {
+                    val windowRows = runCatching {
                         val listPanes = entry.client.sendCommand(CONTROL_LIST_PANES_COMMAND)
-                        if (!listPanes.isError) parseActivePaneRows(listPanes.output.joinToString("\n")) else emptyMap()
-                    }.getOrDefault(emptyMap())
+                        if (!listPanes.isError) {
+                            parseSessionWindowRows(listPanes.output.joinToString("\n"))
+                        } else {
+                            emptyList()
+                        }
+                    }.getOrDefault(emptyList())
+                    val paneRows = activePaneRowsBySession(windowRows)
+                    val windowsBySession = windowRows.groupBy { it.sessionName }
 
                     val rows = baseRows.map { row ->
                         val pane = paneRows[row.sessionName]
                         row.copy(
                             cwd = pane?.cwd ?: row.cwd,
                             agentKind = SessionAgentKind.Shell,
+                            windows = windowsBySession[row.sessionName].orEmpty(),
                         )
                     }
                     FolderListResult.Sessions(rows = rows)
@@ -716,6 +756,8 @@ class SshFolderListGateway @Inject constructor(
         val cwd: String?,
         val tty: String?,
         val command: String?,
+        val windowIndex: Int? = null,
+        val windowName: String? = null,
     )
 
     private data class WatchedRootProjectExpansion(
@@ -806,7 +848,8 @@ class SshFolderListGateway @Inject constructor(
 
         const val LIST_PANES_COMMAND: String =
             "tmux list-panes -a -F " +
-                "'#{session_name}$FIELD_SEP#{pane_active}$FIELD_SEP" +
+                "'#{session_name}$FIELD_SEP#{window_index}$FIELD_SEP#{window_name}$FIELD_SEP" +
+                "#{window_active}$FIELD_SEP#{pane_active}$FIELD_SEP" +
                 "#{pane_current_path}$FIELD_SEP#{pane_tty}$FIELD_SEP#{pane_current_command}'"
 
         const val POCKETSHELL_SESSIONS_COMMAND: String = "pocketshell sessions list --by activity"
@@ -820,7 +863,8 @@ class SshFolderListGateway @Inject constructor(
 
         const val CONTROL_LIST_PANES_COMMAND: String =
             "list-panes -a -F " +
-                "'#{session_name}$FIELD_SEP#{pane_active}$FIELD_SEP" +
+                "'#{session_name}$FIELD_SEP#{window_index}$FIELD_SEP#{window_name}$FIELD_SEP" +
+                "#{window_active}$FIELD_SEP#{pane_active}$FIELD_SEP" +
                 "#{pane_current_path}$FIELD_SEP#{pane_tty}$FIELD_SEP#{pane_current_command}'"
 
         /**
@@ -895,33 +939,83 @@ class SshFolderListGateway @Inject constructor(
         }
 
         /**
-         * Parse `list-panes -a` output into a map from session name to
-         * its active pane's metadata. Sessions whose active pane row is
-         * missing fall back to the session-level `session_path` from
-         * `list-sessions`.
+         * Parse `list-panes -a` output into compact per-window rows. The
+         * current command emits one row per pane with window identity;
+         * only the active pane in each window is kept. The legacy 5-field
+         * shape remains accepted for parser tests and live-client drift.
          */
-        internal fun parseActivePaneRows(stdout: String): Map<String, ActivePaneRow> {
-            val result = mutableMapOf<String, ActivePaneRow>()
-            for (line in stdout.lineSequence()) {
-                if (line.isBlank()) continue
-                val parts = line.split(FIELD_SEP, limit = 5)
-                if (parts.size < 3) continue
-                val name = parts[0].trim()
-                if (name.isEmpty()) continue
-                val active = (parts[1].trim().toLongOrNull() ?: 0L) > 0L
-                if (!active) continue
-                val cwd = parts.getOrNull(2)?.trim()?.takeIf { it.isNotEmpty() }
-                val tty = parts.getOrNull(3)?.trim()?.takeIf { it.isNotEmpty() }
-                val command = parts.getOrNull(4)?.trim()?.takeIf { it.isNotEmpty() }
-                result[name] = ActivePaneRow(
-                    sessionName = name,
-                    cwd = cwd,
-                    tty = tty,
-                    command = command,
+        internal fun parseSessionWindowRows(stdout: String): List<FolderSessionWindowRow> {
+            val lines = stdout.lineSequence().filter { it.isNotBlank() }.toList()
+            if (lines.isEmpty()) return emptyList()
+            val firstParts = lines.first().split(FIELD_SEP, limit = 8)
+            if (firstParts.size < 8) return parseLegacySessionWindowRows(lines)
+
+            val rows = mutableListOf<FolderSessionWindowRow>()
+            for (line in lines) {
+                val parts = line.split(FIELD_SEP, limit = 8)
+                if (parts.size < 8) continue
+                val sessionName = parts[0].trim()
+                if (sessionName.isEmpty()) continue
+                val paneActive = (parts[4].trim().toLongOrNull() ?: 0L) > 0L
+                if (!paneActive) continue
+                rows += FolderSessionWindowRow(
+                    sessionName = sessionName,
+                    index = parts[1].trim().toIntOrNull(),
+                    name = parts[2].trim().takeIf { it.isNotEmpty() },
+                    active = (parts[3].trim().toLongOrNull() ?: 0L) > 0L,
+                    cwd = parts[5].trim().takeIf { it.isNotEmpty() },
+                    tty = parts[6].trim().takeIf { it.isNotEmpty() },
+                    command = parts[7].trim().takeIf { it.isNotEmpty() },
                 )
             }
-            return result
+            return rows
         }
+
+        private fun parseLegacySessionWindowRows(lines: List<String>): List<FolderSessionWindowRow> {
+            val rows = mutableListOf<FolderSessionWindowRow>()
+            for (line in lines) {
+                val parts = line.split(FIELD_SEP, limit = 5)
+                if (parts.size < 3) continue
+                val sessionName = parts[0].trim()
+                if (sessionName.isEmpty()) continue
+                val active = (parts[1].trim().toLongOrNull() ?: 0L) > 0L
+                if (!active) continue
+                rows += FolderSessionWindowRow(
+                    sessionName = sessionName,
+                    index = null,
+                    name = null,
+                    active = true,
+                    cwd = parts.getOrNull(2)?.trim()?.takeIf { it.isNotEmpty() },
+                    tty = parts.getOrNull(3)?.trim()?.takeIf { it.isNotEmpty() },
+                    command = parts.getOrNull(4)?.trim()?.takeIf { it.isNotEmpty() },
+                )
+            }
+            return rows
+        }
+
+        internal fun activePaneRowsBySession(
+            windows: List<FolderSessionWindowRow>,
+        ): Map<String, ActivePaneRow> =
+            windows
+                .groupBy { it.sessionName }
+                .mapValues { (_, rows) ->
+                    val row = rows.firstOrNull { it.active } ?: rows.first()
+                    ActivePaneRow(
+                        sessionName = row.sessionName,
+                        cwd = row.cwd,
+                        tty = row.tty,
+                        command = row.command,
+                        windowIndex = row.index,
+                        windowName = row.name,
+                    )
+                }
+
+        /**
+         * Parse `list-panes -a` output into a map from session name to
+         * the active window's active-pane metadata.
+         */
+        internal fun parseActivePaneRows(stdout: String): Map<String, ActivePaneRow> =
+            activePaneRowsBySession(parseSessionWindowRows(stdout))
 
         private fun JSONObject.stringOrNull(name: String): String? =
             when (val value = opt(name)) {

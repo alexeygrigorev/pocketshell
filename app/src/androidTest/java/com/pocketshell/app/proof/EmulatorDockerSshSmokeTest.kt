@@ -14,6 +14,7 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.printToString
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
@@ -21,7 +22,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
+import com.pocketshell.app.hosts.HOST_LIST_CONTENT_TAG
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.hosts.USAGE_DASHBOARD_STRIP_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_EMPTY_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_ERROR_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_LOADING_TAG
@@ -32,6 +35,7 @@ import com.pocketshell.app.projects.folderDetailRowTestTag
 import com.pocketshell.app.projects.folderHeaderClickTestTag
 import com.pocketshell.app.projects.folderRowTestTag
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.usage.usageBannerTagFor
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
@@ -322,14 +326,36 @@ class EmulatorDockerSshSmokeTest {
 
         try {
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-            compose.waitUntil(timeoutMillis = 10_000) {
-                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+            waitUntilWithDiagnostics(
+                label = "host list with walkthrough host and settled usage strip",
+                timeoutMillis = 20_000,
+                textProbes = listOf(
+                    "PocketShell",
+                    "Walkthrough Docker",
+                    DEFAULT_HOST,
+                    "Claude Code usage",
+                    "Usage",
+                ),
+                tagProbes = hostListDiagnosticTags(hostRowTag),
+            ) {
+                hasTag(HOST_LIST_CONTENT_TAG) &&
+                    hasTag(hostRowTag) &&
+                    hasText("Walkthrough Docker") &&
+                    // The seeded host is marked pocketshell-ready, so the
+                    // process-wide UsageScheduler immediately inserts the
+                    // host-list warning/strip after the first SSH poll. The
+                    // release failure showed the old test could tap the row
+                    // while that insertion was racing, causing the physical
+                    // click to land on the Usage surface. Wait for one usage
+                    // surface first, then scroll/click the row at its final
+                    // position.
+                    (hasTag(USAGE_DASHBOARD_STRIP_TAG) || hasTag(usageBannerTagFor("claude")))
             }
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).assertExists()
             compose.onNodeWithText("Walkthrough Docker", useUnmergedTree = true).assertExists()
             compose.onNodeWithText(DEFAULT_HOST, substring = true, useUnmergedTree = true).assertExists()
+            compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performScrollTo()
+            compose.waitForIdle()
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
             waitUntilWithDiagnostics(
                 label = "ready host detail screen for Walkthrough Docker",
@@ -541,6 +567,15 @@ class EmulatorDockerSshSmokeTest {
                 .fetchSemanticsNodes()
                 .size
         }.getOrDefault(-1)
+
+    private fun hostListDiagnosticTags(hostRowTag: String): List<String> = listOf(
+        HOST_LIST_CONTENT_TAG,
+        hostRowTag,
+        USAGE_DASHBOARD_STRIP_TAG,
+        usageBannerTagFor("claude"),
+        usageBannerTagFor("codex"),
+        usageBannerTagFor("github-copilot"),
+    )
 
     private fun hostDetailDiagnosticTags(folderPath: String, sessionName: String): List<String> = listOf(
         FOLDER_LIST_SCREEN_TAG,

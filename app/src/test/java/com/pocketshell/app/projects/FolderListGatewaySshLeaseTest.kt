@@ -3,15 +3,18 @@ package com.pocketshell.app.projects
 import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.sessions.ActiveTmuxClients
-import com.pocketshell.app.sessions.SshConnector
-import com.pocketshell.app.sessions.WarmSshConnections
-import com.pocketshell.app.sessions.WarmSshTarget
 import com.pocketshell.core.ssh.ExecResult
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
 import com.pocketshell.core.storage.entity.HostEntity
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -20,15 +23,19 @@ import org.junit.Test
 import java.io.File
 import java.io.InputStream
 
-class FolderListGatewayWarmSshTest {
+class FolderListGatewaySshLeaseTest {
     @Test
-    fun folderListKeepsAndReusesWarmSessionAcrossPolls() = runTest {
+    fun folderListKeepsAndReusesLeaseSessionAcrossPolls() = runTest {
         val session = FakeSshSession()
         val connector = CountingConnector(session)
         val gateway = SshFolderListGateway(
             reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
             activeTmuxClients = ActiveTmuxClients(),
-            warmSshConnections = WarmSshConnections(connector),
+            sshLeaseManager = SshLeaseManager(
+                connector = connector,
+                scope = this,
+                idleTtlMillis = 30_000L,
+            ),
         )
 
         val first = gateway.listSessionsWithFolder(HOST, KEY_PATH, passphrase = null)
@@ -57,18 +64,46 @@ class FolderListGatewayWarmSshTest {
         )
     }
 
+    @Test
+    fun cancelledFolderPollReleasesLease() = runTest {
+        val session = FakeSshSession(cancelOnExec = true)
+        val gateway = SshFolderListGateway(
+            reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
+            activeTmuxClients = ActiveTmuxClients(),
+            sshLeaseManager = SshLeaseManager(
+                connector = CountingConnector(session),
+                scope = this,
+                idleTtlMillis = 0L,
+            ),
+        )
+
+        val pollJob = launch {
+            try {
+                gateway.listSessionsWithFolder(HOST, KEY_PATH, passphrase = null)
+            } catch (_: CancellationException) {
+                // Expected: this simulates folder polling being cancelled while
+                // the leased SSH session is in use.
+            }
+        }
+        pollJob.join()
+
+        assertTrue("cancelled folder poll should release and close the lease", session.closed)
+    }
+
     private class CountingConnector(
         private val session: FakeSshSession,
-    ) : SshConnector {
+    ) : SshLeaseConnector {
         var connectCount: Int = 0
 
-        override suspend fun connect(target: WarmSshTarget, passphrase: CharArray?): Result<SshSession> {
+        override suspend fun connect(target: SshLeaseTarget): Result<SshSession> {
             connectCount += 1
             return Result.success(session)
         }
     }
 
-    private class FakeSshSession : SshSession {
+    private class FakeSshSession(
+        private val cancelOnExec: Boolean = false,
+    ) : SshSession {
         val execCommands: MutableList<String> = mutableListOf()
         var closed: Boolean = false
 
@@ -76,6 +111,10 @@ class FolderListGatewayWarmSshTest {
             get() = !closed
 
         override suspend fun exec(command: String): ExecResult {
+            if (cancelOnExec) {
+                currentCoroutineContext()[Job]?.cancel()
+                throw CancellationException("cancelled during folder poll")
+            }
             execCommands += command
             return ExecResult(stdout = "", stderr = "", exitCode = 0)
         }

@@ -7,9 +7,6 @@ import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.sessions.ActiveTmuxClients
-import com.pocketshell.app.sessions.SshConnector
-import com.pocketshell.app.sessions.WarmSshConnections
-import com.pocketshell.app.sessions.WarmSshTarget
 import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
@@ -80,7 +77,6 @@ class TmuxSessionViewModelTest {
     private fun newVm(
         registry: ActiveTmuxClients = ActiveTmuxClients(),
         runtimeCache: TmuxSessionRuntimeCache = TmuxSessionRuntimeCache(),
-        warmSshConnections: WarmSshConnections? = WarmSshConnections(),
         sshLeaseManager: SshLeaseManager = SshLeaseManager(
             connector = SshLeaseConnector { target ->
                 error("unexpected SSH lease connect for ${target.leaseKey}")
@@ -91,7 +87,6 @@ class TmuxSessionViewModelTest {
         tmuxClientFactory = TmuxClientFactory(factoryScope),
         activeTmuxClients = registry,
         runtimeCache = runtimeCache,
-        warmSshConnections = warmSshConnections,
         sshLeaseManager = sshLeaseManager,
     )
 
@@ -3525,49 +3520,6 @@ class TmuxSessionViewModelTest {
             client.detachCleanlyCalled,
         )
         assertTrue("final cached lease release should close the idle SSH session", session.closed)
-    }
-
-    @Test
-    fun tmuxLeaseAcquisitionConsumesMatchingWarmSshSession() = runTest {
-        val warmedSession = FakeSshSession()
-        val warm = WarmSshConnections(
-            connector = SshConnector { _, _ -> Result.success(warmedSession) },
-            reuseTtlMs = 30_000L,
-        )
-        val target = WarmSshTarget(
-            hostId = 1L,
-            hostname = "alpha.example",
-            port = 22,
-            username = "alex",
-            keyPath = "/keys/a",
-        )
-        warm.warm(target, passphrase = null).getOrThrow()
-        val manager = SshLeaseManager(
-            connector = SshLeaseConnector { leaseTarget ->
-                error("tmux should consume the warmed session, not cold-connect $leaseTarget")
-            },
-            idleTtlMillis = 0L,
-        )
-        val vm = newVm(warmSshConnections = warm, sshLeaseManager = manager)
-
-        val lease = vm.acquireLeaseForTmuxForTest(
-            hostId = 1L,
-            hostName = "alpha",
-            host = "alpha.example",
-            port = 22,
-            user = "alex",
-            keyPath = "/keys/a",
-            sessionName = "work",
-        ) ?: error("expected adopted lease")
-
-        assertSame(
-            "tmux must adopt the folder-prewarmed SSH session",
-            warmedSession,
-            lease.session,
-        )
-        assertFalse("adopted warm session stays open while leased", warmedSession.closed)
-        lease.release()
-        assertTrue("released adopted lease follows lease-manager idle policy", warmedSession.closed)
     }
 
     @Test

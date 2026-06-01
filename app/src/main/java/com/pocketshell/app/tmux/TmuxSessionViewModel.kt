@@ -32,8 +32,6 @@ import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
 import com.pocketshell.app.sessions.SSH_SOURCE_TMUX_CONNECT
 import com.pocketshell.app.sessions.SshOpenTelemetry
-import com.pocketshell.app.sessions.WarmSshConnections
-import com.pocketshell.app.sessions.WarmSshTarget
 import com.pocketshell.app.sessions.remoteStartDirectoryExists
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.core.agents.AgentDetection
@@ -148,7 +146,6 @@ public class TmuxSessionViewModel @Inject constructor(
     @ApplicationContext private val applicationContext: Context? = null,
     private val projectRootDao: ProjectRootDao? = null,
     private val runtimeCache: TmuxSessionRuntimeCache = TmuxSessionRuntimeCache(),
-    private val warmSshConnections: WarmSshConnections? = WarmSshConnections(),
     private val sshLeaseManager: SshLeaseManager = SshLeaseManager(
         connector = SshLeaseConnector { target ->
             com.pocketshell.core.ssh.DefaultSshLeaseConnector().connect(target)
@@ -1145,12 +1142,7 @@ public class TmuxSessionViewModel @Inject constructor(
         preferReuseLog: Boolean = false,
     ): SshLease? {
         val leaseTarget = target.toSshLeaseTarget()
-        val warmedSession = warmSshConnections?.take(target.toWarmSshTarget())
-        val leaseResult = if (warmedSession != null) {
-            sshLeaseManager.adopt(leaseTarget, warmedSession)
-        } else {
-            sshLeaseManager.acquire(leaseTarget)
-        }
+        val leaseResult = sshLeaseManager.acquire(leaseTarget)
         val lease = leaseResult.getOrElse { e ->
             failConnectAttempt(
                 target = target,
@@ -1162,7 +1154,7 @@ public class TmuxSessionViewModel @Inject constructor(
             )
             return null
         }
-        if (preferReuseLog || warmedSession != null || !lease.isNewConnection) {
+        if (preferReuseLog || !lease.isNewConnection) {
             StartupTiming.mark(
                 "tmux-ssh-lease-reused",
                 "attempt" to attempt,
@@ -1203,15 +1195,6 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         return lease
     }
-
-    private fun ConnectionTarget.toWarmSshTarget(): WarmSshTarget =
-        WarmSshTarget(
-            hostId = hostId,
-            hostname = host,
-            port = port,
-            username = user,
-            keyPath = keyPath,
-        )
 
     private fun ConnectionTarget.toSshLeaseTarget(): SshLeaseTarget =
         SshLeaseTarget(

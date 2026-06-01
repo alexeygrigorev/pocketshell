@@ -17,8 +17,13 @@ import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.portfwd.ForwardingHostSnapshot
 import com.pocketshell.app.repos.ReposRemoteSource
-import com.pocketshell.app.sessions.WarmSshConnections
-import com.pocketshell.app.sessions.WarmSshTarget
+import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLease
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
@@ -28,6 +33,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,7 +44,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import java.io.File
 import javax.inject.Inject
 
 /**
@@ -185,7 +193,11 @@ class FolderListViewModel @Inject constructor(
     private val gateway: FolderListGateway,
     private val hostDao: HostDao,
     private val projectRootDao: ProjectRootDao,
-    private val warmSshConnections: WarmSshConnections = WarmSshConnections(),
+    private val sshLeaseManager: SshLeaseManager = SshLeaseManager(
+        connector = SshLeaseConnector { target ->
+            com.pocketshell.core.ssh.DefaultSshLeaseConnector().connect(target)
+        },
+    ),
     @ApplicationContext private val applicationContext: Context? = null,
     private val assistantClientFactory: AssistantLlmClientFactory? = null,
     private val reposRemoteSource: ReposRemoteSource? = null,
@@ -212,6 +224,9 @@ class FolderListViewModel @Inject constructor(
     private var bound: BoundParams? = null
     private var warmJob: Job? = null
     private var warmReleaseJob: Job? = null
+    private var warmLease: SshLease? = null
+    @androidx.annotation.VisibleForTesting
+    internal var warmLeaseAcquiredForTest: (() -> Unit)? = null
     private var watchedFoldersJob: Job? = null
     private var pollingJob: Job? = null
     private var lastSessions: List<FolderSessionEntry> = emptyList()
@@ -272,10 +287,7 @@ class FolderListViewModel @Inject constructor(
 
         warmJob?.cancel()
         warmJob = viewModelScope.launch {
-            warmSshConnections.warm(
-                target = params.toWarmSshTarget(),
-                passphrase = params.passphrase,
-            )
+            replaceWarmLease(params)
         }
         watchedFoldersJob?.cancel()
         watchedFoldersJob = viewModelScope.launch {
@@ -653,8 +665,8 @@ class FolderListViewModel @Inject constructor(
         pollingJob?.cancel()
         warmJob?.cancel()
         warmReleaseJob?.cancel()
-        bound?.let { params ->
-            warmSshConnections.closeIfIdle(params.toWarmSshTarget())
+        runBlocking {
+            releaseWarmLease()
         }
         watchedFoldersJob?.cancel()
         super.onCleared()
@@ -696,22 +708,50 @@ class FolderListViewModel @Inject constructor(
             return result
         }
 
-        fun toWarmSshTarget(): WarmSshTarget =
-            WarmSshTarget(
-                hostId = hostId,
-                hostname = hostname,
-                port = port,
-                username = username,
-                keyPath = keyPath,
+        fun toSshLeaseTarget(): SshLeaseTarget =
+            SshLeaseTarget(
+                leaseKey = SshLeaseKey(
+                    host = hostname,
+                    port = port,
+                    user = username,
+                    credentialId = "$hostId:$keyPath",
+                    knownHostsId = "accept-all",
+                ),
+                key = SshKey.Path(File(keyPath)),
+                passphrase = passphrase?.copyOf(),
+                knownHosts = KnownHostsPolicy.AcceptAll,
             )
     }
 
+    private suspend fun releaseWarmLease() {
+        withContext(NonCancellable) {
+            val lease = warmLease ?: return@withContext
+            warmLease = null
+            lease.release()
+        }
+    }
+
+    private suspend fun replaceWarmLease(params: BoundParams) {
+        releaseWarmLease()
+        var acquiredLease: SshLease? = null
+        try {
+            val lease = sshLeaseManager.acquire(params.toSshLeaseTarget()).getOrNull() ?: return
+            acquiredLease = lease
+            warmLeaseAcquiredForTest?.invoke()
+            withContext(NonCancellable) {
+                warmLease = lease
+                acquiredLease = null
+            }
+        } finally {
+            acquiredLease?.release()
+        }
+    }
+
     private fun scheduleWarmRelease() {
-        val params = bound ?: return
         warmReleaseJob?.cancel()
         warmReleaseJob = viewModelScope.launch {
             delay(WARM_RELEASE_DELAY_MS)
-            warmSshConnections.close(params.toWarmSshTarget())
+            releaseWarmLease()
         }
     }
 

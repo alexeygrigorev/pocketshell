@@ -6,21 +6,28 @@ import com.pocketshell.app.repos.ReposJsonParser
 import com.pocketshell.app.session.AgentConversationRepository
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.sessions.HostTmuxSessionListParser
-import com.pocketshell.app.sessions.WarmSshConnections
-import com.pocketshell.app.sessions.WarmSshTarget
 import com.pocketshell.app.sessions.remoteStartDirectoryExists
 import com.pocketshell.app.sessions.startDirectoryMissingMessage
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.portfwd.PortScanner
 import com.pocketshell.core.portfwd.RemotePort
 import com.pocketshell.core.ssh.ExecResult
+import com.pocketshell.core.ssh.KnownHostsPolicy
+import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshLeaseConnector
+import com.pocketshell.core.ssh.SshLeaseKey
+import com.pocketshell.core.ssh.SshLeaseManager
+import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.io.InputStream
 import javax.inject.Inject
 
@@ -166,14 +173,22 @@ data class FolderImportPayload(
 class SshFolderListGateway @Inject constructor(
     private val reposRemoteSource: ReposRemoteSource,
     private val activeTmuxClients: ActiveTmuxClients,
-    private val warmSshConnections: WarmSshConnections = WarmSshConnections(),
+    private val sshLeaseManager: SshLeaseManager = SshLeaseManager(
+        connector = SshLeaseConnector { target ->
+            com.pocketshell.core.ssh.DefaultSshLeaseConnector().connect(target)
+        },
+    ),
     private val sessionListParser: HostTmuxSessionListParser = HostTmuxSessionListParser(),
 ) : FolderListGateway {
 
     constructor() : this(
         ReposRemoteSource(ReposJsonParser()),
         ActiveTmuxClients(),
-        WarmSshConnections(),
+        SshLeaseManager(
+            connector = SshLeaseConnector { target ->
+                com.pocketshell.core.ssh.DefaultSshLeaseConnector().connect(target)
+            },
+        ),
         HostTmuxSessionListParser(),
     )
 
@@ -202,8 +217,9 @@ class SshFolderListGateway @Inject constructor(
         }
 
         return try {
-            warmSshConnections.withSession(
-                target = host.toWarmSshTarget(keyPath),
+            withLeaseSession(
+                host = host,
+                keyPath = keyPath,
                 passphrase = passphrase,
             ) { session ->
                 val listSessions = session.exec(pathAware(LIST_SESSIONS_COMMAND))
@@ -219,33 +235,49 @@ class SshFolderListGateway @Inject constructor(
         }
     }
 
-    private fun HostEntity.toWarmSshTarget(keyPath: String): WarmSshTarget =
-        WarmSshTarget(
-            hostId = id,
-            hostname = hostname,
-            port = port,
-            username = username,
-            keyPath = keyPath,
-        )
-
-    private suspend fun <T> withWarmSession(
+    private suspend fun <T> withLeaseSession(
         host: HostEntity,
         keyPath: String,
         passphrase: CharArray?,
         block: suspend (SshSession) -> T,
     ): Result<T> {
-        val warmResult = try {
-            warmSshConnections.withSession(host.toWarmSshTarget(keyPath), passphrase, block)
+        val lease = try {
+            sshLeaseManager.acquire(host.toSshLeaseTarget(keyPath, passphrase))
+                .getOrElse { return Result.failure(it) }
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
             return Result.failure(t)
         }
-        if (warmResult.isSuccess) return warmResult
-        val warmError = warmResult.exceptionOrNull()
-        if (warmError is CancellationException) throw warmError
-        return Result.failure(warmError ?: RuntimeException("SSH connection failed"))
+        return try {
+            Result.success(block(lease.session))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            Result.failure(t)
+        } finally {
+            withContext(NonCancellable) {
+                lease.release()
+            }
+        }
     }
+
+    private fun HostEntity.toSshLeaseTarget(
+        keyPath: String,
+        passphrase: CharArray?,
+    ): SshLeaseTarget =
+        SshLeaseTarget(
+            leaseKey = SshLeaseKey(
+                host = hostname,
+                port = port,
+                user = username,
+                credentialId = "$id:$keyPath",
+                knownHostsId = "accept-all",
+            ),
+            key = SshKey.Path(File(keyPath)),
+            passphrase = passphrase?.copyOf(),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        )
 
     internal suspend fun listSessionsFromNativeOrPocketshell(
         session: SshSession,
@@ -454,7 +486,7 @@ class SshFolderListGateway @Inject constructor(
         cwd: String,
         startCommand: String?,
     ): Result<String> {
-        return withWarmSession(host, keyPath, passphrase) { session ->
+        return withLeaseSession(host, keyPath, passphrase) { session ->
             if (!remoteStartDirectoryExists(session, cwd)) {
                 throw RuntimeException(
                     startDirectoryMissingMessage(
@@ -511,7 +543,7 @@ class SshFolderListGateway @Inject constructor(
         val safeName = normaliseProjectFolderName(folderName)
             ?: return Result.failure(IllegalArgumentException("Enter a project folder name."))
         val child = childPath(parentPath, safeName)
-        return withWarmSession(host, keyPath, passphrase) { session ->
+        return withLeaseSession(host, keyPath, passphrase) { session ->
             val result = session.exec(pathAware("mkdir -p -- ${shellQuoteRemotePath(child)}"))
             if (result.exitCode == 0) {
                 resolveRemoteDirectory(session, child).getOrDefault(child)
@@ -528,7 +560,7 @@ class SshFolderListGateway @Inject constructor(
         folderPath: String,
         payload: FolderImportPayload,
     ): Result<String> {
-        return withWarmSession(host, keyPath, passphrase) { session ->
+        return withLeaseSession(host, keyPath, passphrase) { session ->
             val mkdir = session.exec(pathAware("mkdir -p -- ${shellQuoteRemotePath(folderPath)}"))
             if (mkdir.exitCode != 0) {
                 throw RuntimeException(mkdir.stderr.ifBlank { mkdir.stdout }.trim())

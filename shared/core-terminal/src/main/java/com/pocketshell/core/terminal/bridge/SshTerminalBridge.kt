@@ -1,6 +1,8 @@
 package com.pocketshell.core.terminal.bridge
 
 import android.os.Handler
+import android.os.Looper
+import android.os.Message
 import com.termux.terminal.TerminalEmulator
 import com.termux.terminal.TerminalSession
 import com.termux.terminal.TerminalSessionClient
@@ -112,6 +114,7 @@ public class SshTerminalBridge(
     @Volatile
     private var inputDrainerThread: Thread? = null
     private val stopped = AtomicBoolean(false)
+    private val feedLock = Any()
 
     @Volatile
     private var remoteStdin: OutputStream? = null
@@ -156,11 +159,35 @@ public class SshTerminalBridge(
      * file descriptor.
      */
     public fun feedBytes(data: ByteArray, offset: Int = 0, count: Int = data.size) {
-        if (count <= 0) return
-        val written = SessionReflection.writeProcessToTerminalQueue(session, data, offset, count)
-        if (!written) return
+        require(offset >= 0) { "offset < 0" }
+        require(count >= 0) { "count < 0" }
+        require(offset <= data.size) { "offset > data.size" }
+        require(count <= data.size - offset) { "offset + count > data.size" }
+        if (count == 0) return
+
         val handler = SessionReflection.getMainThreadHandler(session)
-        handler.sendEmptyMessage(MSG_NEW_INPUT)
+        val isHandlerLooper = Looper.myLooper() == handler.looper
+        synchronized(feedLock) {
+            var remaining = count
+            var chunkOffset = offset
+            while (remaining > 0) {
+                val chunkLength = minOf(remaining, PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES)
+                val written = SessionReflection.writeProcessToTerminalQueue(
+                    session = session,
+                    data = data,
+                    offset = chunkOffset,
+                    length = chunkLength,
+                )
+                if (!written) return
+                if (isHandlerLooper) {
+                    handler.dispatchMessage(Message.obtain(handler, MSG_NEW_INPUT))
+                } else {
+                    handler.sendEmptyMessage(MSG_NEW_INPUT)
+                }
+                chunkOffset += chunkLength
+                remaining -= chunkLength
+            }
+        }
     }
 
     /**
@@ -269,6 +296,17 @@ public class SshTerminalBridge(
          * recommended in `TerminalEmulator.DEFAULT_TERMINAL_TRANSCRIPT_ROWS`.
          */
         public const val DEFAULT_TRANSCRIPT_ROWS: Int = 2000
+
+        /**
+         * Matches `TerminalSession.mProcessToTerminalIOQueue`.
+         *
+         * `ByteQueue.write` blocks until the full requested length has been
+         * accepted, so bridge feeds must never submit more than one queueful
+         * before posting `MSG_NEW_INPUT`; otherwise a large tmux `%output`
+         * chunk can fill the queue and wait forever before the main-thread
+         * drain has even been scheduled.
+         */
+        internal const val PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES: Int = 64 * 1024
     }
 }
 

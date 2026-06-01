@@ -5,7 +5,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.notifications.ShareUploadNotifications
 import com.pocketshell.app.sessions.ActiveTmuxClients
-import com.pocketshell.app.tmux.buildBracketedPasteHex
+import com.pocketshell.app.tmux.TMUX_PASTE_BODY_CHUNK_BYTES
+import com.pocketshell.app.tmux.buildBracketedPasteHexChunks
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
@@ -361,10 +362,11 @@ internal class ShareViewModel @Inject constructor(
      * through tmux's `send-keys -H` with bracketed-paste markers
      * (`\e[200~` ... `\e[201~`) so the receiving program (Claude Code
      * CLI, modern bash/zsh readline, vim, …) treats the entire block
-     * as ONE pasted prompt instead of submitting line-by-line. Single-
-     * line text keeps the existing `send-keys -l` shape so the
-     * regression suite around the share paste UI (and the
-     * [ShareViewModelTest] command shape assertions) is preserved.
+     * as ONE pasted prompt instead of submitting line-by-line. Large
+     * single-line text uses the same bounded chunk route so a share
+     * cannot create one unbounded tmux control command. Normal-sized
+     * single-line text keeps the existing `send-keys -l` shape so the
+     * regression suite around the share paste UI is preserved.
      *
      * Throws [IllegalStateException] when tmux reports an error so the
      * caller surfaces a Failed UploadState instead of silently
@@ -372,14 +374,24 @@ internal class ShareViewModel @Inject constructor(
      */
     private suspend fun sendTextToAttachedPane(client: TmuxClient, text: String) {
         val paneId = resolveActivePaneIdOrNull(client)
-        val cmd = if (text.contains('\n')) {
-            val hex = buildBracketedPasteHex(text.toByteArray(Charsets.UTF_8))
-            if (paneId != null) {
-                "send-keys -H -t $paneId $hex"
-            } else {
-                "send-keys -H $hex"
+        val bytes = text.toByteArray(Charsets.UTF_8)
+        if (text.contains('\n') || bytes.size > TMUX_PASTE_BODY_CHUNK_BYTES) {
+            for (hex in buildBracketedPasteHexChunks(bytes)) {
+                val response = if (paneId != null) {
+                    client.sendCommand("send-keys -H -t $paneId $hex")
+                } else {
+                    client.sendCommand("send-keys -H $hex")
+                }
+                if (response.isError) {
+                    val detail = response.output.joinToString(separator = " ").trim()
+                    throw IllegalStateException(
+                        "tmux rejected paste${if (detail.isNotEmpty()) ": $detail" else ""}",
+                    )
+                }
             }
-        } else {
+            return
+        }
+        val cmd = run {
             val literal = escapeSingleQuoted(text)
             if (paneId != null) {
                 "send-keys -l -t $paneId -- '$literal'"

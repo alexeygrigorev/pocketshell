@@ -44,7 +44,7 @@ class TmuxConversationTurnDensityScreenshotTest {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = sampleConversationEvents(),
-                    onSendToAgent = {},
+                    onSendToAgent = { true },
                     modifier = Modifier
                         .fillMaxSize()
                         .background(PocketShellColors.Background)

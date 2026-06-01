@@ -42,7 +42,7 @@ class TmuxConversationSendTargetUiTest {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
-                    onSendToAgent = {},
+                    onSendToAgent = { true },
                     agentName = "Claude Code",
                 )
             }
@@ -66,7 +66,7 @@ class TmuxConversationSendTargetUiTest {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
-                    onSendToAgent = {},
+                    onSendToAgent = { true },
                 )
             }
         }
@@ -94,6 +94,7 @@ class TmuxConversationSendTargetUiTest {
                     onSendToAgent = { text ->
                         sentCount += 1
                         lastSent = text
+                        true
                     },
                     sendEnabled = false,
                 )
@@ -137,6 +138,7 @@ class TmuxConversationSendTargetUiTest {
                     onSendToAgent = { text ->
                         sentCount += 1
                         lastSent = text
+                        true
                     },
                     sendEnabled = true,
                 )
@@ -150,12 +152,78 @@ class TmuxConversationSendTargetUiTest {
             .assertIsEnabled()
         compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_SEND_TAG)
             .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { sentCount == 1 }
 
         assertEquals("live Send must deliver exactly once", 1, sentCount)
         assertEquals("ls -la", lastSent)
         // Composer cleared after a successful live send.
         compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_INPUT_TAG)
             .assertTextContains("")
+    }
+
+    @Test
+    fun failedLiveSendPreservesDraft() {
+        var sentCount = 0
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                TmuxConversationPane(
+                    events = emptyList(),
+                    onSendToAgent = {
+                        sentCount += 1
+                        false
+                    },
+                    sendEnabled = true,
+                )
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_INPUT_TAG)
+            .performTextInput("large pasted draft")
+        compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_SEND_TAG)
+            .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { sentCount == 1 }
+
+        assertEquals("failed send still attempts delivery once", 1, sentCount)
+        compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_INPUT_TAG)
+            .assertTextContains("large pasted draft")
+    }
+
+    @Test
+    fun longDraftKeepsSendReachableClickableAndPreservedOnFailure() {
+        var sentCount = 0
+        var lastSent: String? = null
+        val longDraft = List(160) { "dictated-paste-$it" }.joinToString(separator = " ")
+        compose.setContent {
+            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                TmuxConversationPane(
+                    events = emptyList(),
+                    onSendToAgent = { text ->
+                        sentCount += 1
+                        lastSent = text
+                        false
+                    },
+                    sendEnabled = true,
+                    initialDraft = longDraft,
+                )
+            }
+        }
+
+        compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_INPUT_TAG)
+            .assertIsDisplayed()
+            .assertTextContains("dictated-paste-0")
+        compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_SEND_TAG)
+            .assertIsDisplayed()
+            .assertIsEnabled()
+            .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { sentCount == 1 }
+
+        assertEquals("long failed send should attempt delivery once", 1, sentCount)
+        assertEquals(longDraft, lastSent)
+        compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_SEND_TAG)
+            .assertIsDisplayed()
+            .assertIsEnabled()
+        compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_INPUT_TAG)
+            .assertTextContains("dictated-paste-159")
     }
 
     @Test
@@ -166,7 +234,7 @@ class TmuxConversationSendTargetUiTest {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = emptyList(),
-                    onSendToAgent = {},
+                    onSendToAgent = { true },
                     initialDraft = "half typed message",
                 )
             }

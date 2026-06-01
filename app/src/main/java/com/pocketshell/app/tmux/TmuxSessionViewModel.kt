@@ -2923,20 +2923,45 @@ public class TmuxSessionViewModel @Inject constructor(
      * defensive check matches the rest of the public API).
      */
     public fun sendToAgentPane(paneId: String, text: String) {
+        bridgeScope.launch {
+            sendToAgentPaneResult(paneId, text)
+        }
+    }
+
+    internal suspend fun sendToAgentPaneResult(paneId: String, text: String): Result<Unit> {
         val payload = text.trim()
-        if (payload.isEmpty()) return
-        val current = _agentConversations.value[paneId] ?: return
-        val detection = current.detection ?: return
-        val optimistic = ConversationEvent.Message(
-            // Issue #160 round 2: see [OPTIMISTIC_USER_MESSAGE_ID_PREFIX].
-            id = "$OPTIMISTIC_USER_MESSAGE_ID_PREFIX${System.nanoTime()}",
-            agent = detection.agent,
-            atMillis = System.currentTimeMillis(),
-            role = ConversationRole.User,
-            text = payload,
-        )
-        appendAgentEvents(paneId, listOf(optimistic))
-        writeInputToPane(paneId, (payload + "\r").toByteArray(Charsets.UTF_8))
+        if (payload.isEmpty()) return Result.success(Unit)
+        val current = _agentConversations.value[paneId]
+            ?: return Result.failure(IllegalStateException("No agent conversation for pane $paneId."))
+        val detection = current.detection
+            ?: return Result.failure(IllegalStateException("No detected agent for pane $paneId."))
+        val result = sendAgentPayloadToPaneResult(paneId, payload)
+        if (result.isSuccess) {
+            val optimistic = ConversationEvent.Message(
+                // Issue #160 round 2: see [OPTIMISTIC_USER_MESSAGE_ID_PREFIX].
+                id = "$OPTIMISTIC_USER_MESSAGE_ID_PREFIX${System.nanoTime()}",
+                agent = detection.agent,
+                atMillis = System.currentTimeMillis(),
+                role = ConversationRole.User,
+                text = payload,
+            )
+            appendAgentEvents(paneId, listOf(optimistic))
+        }
+        return result
+    }
+
+    private suspend fun sendAgentPayloadToPaneResult(paneId: String, payload: String): Result<Unit> {
+        val payloadBytes = payload.toByteArray(Charsets.UTF_8)
+        if (payloadBytes.size <= TMUX_PASTE_BODY_CHUNK_BYTES || containsLineBreak(payloadBytes)) {
+            return writeInputToPaneResult(paneId, (payload + "\r").toByteArray(Charsets.UTF_8))
+        }
+        val client = clientRef
+            ?: return Result.failure(IllegalStateException("No active tmux client for pane input."))
+        return runCatching {
+            sendBracketedPaste(client, paneId, payloadBytes)
+            client.sendCommand("send-keys -t $paneId Enter")
+                .throwIfTmuxError("submit pasted agent input")
+        }
     }
 
     public fun selectSessionTab(paneId: String, tab: SessionTab) {
@@ -3439,12 +3464,9 @@ public class TmuxSessionViewModel @Inject constructor(
         //     for the paste body.
         //   - `send-keys -H <hex pairs>` writes the bytes named by the
         //     space-separated hex pairs. This lets us include 0x0A
-        //     freely. We use this path for the entire bracketed-paste
-        //     block (prefix + body + suffix) so the whole thing reaches
-        //     the pane PTY as one contiguous byte sequence — tmux does
-        //     not buffer between two `send-keys` calls, but using one
-        //     command minimises the chance that the program reads a
-        //     partial block.
+        //     freely. We keep each control-mode command bounded by
+        //     sending one paste-start marker, a sequence of small body
+        //     chunks, and one paste-end marker.
         //
         // Single-line input still goes through the existing
         // [inputTokens] path so named keys (arrows, Escape, Tab,
@@ -3479,8 +3501,8 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     /**
-     * Issue #209: send [bytes] to [paneId] as a single bracketed-paste
-     * block via `send-keys -H`.
+     * Issue #209 / #398: send [bytes] to [paneId] as a bracketed-paste
+     * block via bounded `send-keys -H` commands.
      *
      * The hex payload is `1b 5b 32 30 30 7e` (`\e[200~`) + the UTF-8
      * bytes of the input + `1b 5b 32 30 31 7e` (`\e[201~`). `\r\n`
@@ -3489,17 +3511,28 @@ public class TmuxSessionViewModel @Inject constructor(
      * separators in dictation transcripts and we have no reason to
      * mangle them).
      *
-     * Visible-for-test so the unit suite can exercise the encoding
-     * without going through the suspending sendInputBytesToPane path.
+     * If any chunk fails, either by throwing or by tmux returning
+     * `%error`, the exception propagates to the caller so composer
+     * surfaces can keep the unsent draft.
      */
     private suspend fun sendBracketedPaste(
         client: TmuxClient,
         paneId: String,
         bytes: ByteArray,
     ) {
-        val hex = buildBracketedPasteHex(bytes)
-        if (hex.isEmpty()) return
-        client.sendCommand("send-keys -H -t $paneId $hex")
+        if (bytes.isEmpty()) return
+        for (hex in buildBracketedPasteHexChunks(bytes)) {
+            client.sendCommand("send-keys -H -t $paneId $hex")
+                .throwIfTmuxError("paste chunk into pane $paneId")
+        }
+    }
+
+    private fun CommandResponse.throwIfTmuxError(action: String) {
+        if (!isError) return
+        val detail = output.joinToString(separator = " ").trim()
+        throw IllegalStateException(
+            "tmux rejected $action${if (detail.isNotEmpty()) ": $detail" else ""}",
+        )
     }
 
     private fun inputTokens(bytes: ByteArray): List<TmuxInputToken> {
@@ -4699,10 +4732,32 @@ internal fun buildBracketedPasteHex(bytes: ByteArray): String {
     return builder.toString()
 }
 
-internal fun buildTmuxHex(bytes: ByteArray): String {
-    if (bytes.isEmpty()) return ""
-    val builder = StringBuilder(3 * bytes.size)
-    appendHex(builder, bytes)
+internal fun buildBracketedPasteHexChunks(
+    bytes: ByteArray,
+    bodyChunkBytes: Int = TMUX_PASTE_BODY_CHUNK_BYTES,
+): List<String> {
+    if (bytes.isEmpty()) return emptyList()
+    val chunkSize = bodyChunkBytes.coerceAtLeast(1)
+    val normalised = normaliseLineEndingsForPaste(bytes)
+    val chunks = ArrayList<String>((normalised.size + chunkSize - 1) / chunkSize + 2)
+    chunks += buildTmuxHex(PASTE_START)
+    var offset = 0
+    while (offset < normalised.size) {
+        val length = minOf(chunkSize, normalised.size - offset)
+        chunks += buildTmuxHex(normalised, offset, length)
+        offset += length
+    }
+    chunks += buildTmuxHex(PASTE_END)
+    return chunks
+}
+
+internal fun buildTmuxHex(bytes: ByteArray): String =
+    buildTmuxHex(bytes, 0, bytes.size)
+
+private fun buildTmuxHex(bytes: ByteArray, offset: Int, length: Int): String {
+    if (length <= 0) return ""
+    val builder = StringBuilder(3 * length)
+    appendHex(builder, bytes, offset, length)
     return builder.toString()
 }
 
@@ -4859,8 +4914,15 @@ private fun normaliseLineEndingsForPaste(bytes: ByteArray): ByteArray {
     return out.toByteArray()
 }
 
-private fun appendHex(builder: StringBuilder, bytes: ByteArray) {
-    for (b in bytes) {
+private fun appendHex(
+    builder: StringBuilder,
+    bytes: ByteArray,
+    offset: Int = 0,
+    length: Int = bytes.size,
+) {
+    val end = minOf(bytes.size, offset + length)
+    for (index in offset until end) {
+        val b = bytes[index]
         if (builder.isNotEmpty() && builder.last() != ' ') builder.append(' ')
         val v = b.toInt() and 0xFF
         builder.append(HEX_DIGITS[(v ushr 4) and 0xF])
@@ -5006,6 +5068,7 @@ internal const val LIST_PANES_FIELD_SEPARATOR: String = "|PS|"
 internal const val TMUX_INPUT_MAX_PENDING_BYTES: Int = 64 * 1024
 internal const val TMUX_INPUT_MAX_BATCH_BYTES: Int = 4 * 1024
 internal const val TMUX_INPUT_CHUNK_BYTES: Int = 512
+internal const val TMUX_PASTE_BODY_CHUNK_BYTES: Int = 1024
 internal const val TMUX_INPUT_MAX_PENDING_CHUNKS: Int =
     TMUX_INPUT_MAX_PENDING_BYTES / TMUX_INPUT_CHUNK_BYTES - 1
 

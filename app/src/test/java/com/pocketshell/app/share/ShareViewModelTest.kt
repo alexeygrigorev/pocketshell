@@ -6,6 +6,7 @@ import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.tmux.FakeTmuxClient
+import com.pocketshell.app.tmux.TMUX_PASTE_BODY_CHUNK_BYTES
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
@@ -265,10 +266,12 @@ class ShareViewModelTest {
             responses.addLast(
                 CommandResponse(number = 0L, output = listOf("%7"), isError = false),
             )
-            // send-keys -H succeeds.
-            responses.addLast(
-                CommandResponse(number = 0L, output = emptyList(), isError = false),
-            )
+            // send-keys -H start/body/end chunks succeed.
+            repeat(3) {
+                responses.addLast(
+                    CommandResponse(number = 0L, output = emptyList(), isError = false),
+                )
+            }
         }
         registry.register(
             hostId = host.id,
@@ -286,22 +289,22 @@ class ShareViewModelTest {
 
         val state = vm.uploadState.first { it is UploadState.Success }
         assertTrue(state is UploadState.Success)
-        assertEquals(2, client.sentCommands.size)
-        val sendKeys = client.sentCommands[1]
+        assertEquals(4, client.sentCommands.size)
+        val sendKeys = client.sentCommands.drop(1)
         assertTrue(
-            "expected send-keys -H targeting %7, got '$sendKeys'",
-            sendKeys.startsWith("send-keys -H -t %7 "),
+            "expected all paste chunks to target %7, got '$sendKeys'",
+            sendKeys.all { it.startsWith("send-keys -H -t %7 ") },
         )
         assertTrue(
             "expected bracketed-paste start marker, got '$sendKeys'",
-            sendKeys.contains("1b 5b 32 30 30 7e"),
+            sendKeys.first().endsWith("1b 5b 32 30 30 7e"),
         )
         assertTrue(
             "expected bracketed-paste end marker, got '$sendKeys'",
-            sendKeys.endsWith("1b 5b 32 30 31 7e"),
+            sendKeys.last().endsWith("1b 5b 32 30 31 7e"),
         )
         // Exactly one LF inside the body (two paragraphs).
-        val hexBody = sendKeys.substringAfter("send-keys -H -t %7 ")
+        val hexBody = sendKeys[1].substringAfter("send-keys -H -t %7 ")
         val tokens = hexBody.split(' ')
         assertEquals(
             "expected exactly one LF inside the paste body, got '$hexBody'",
@@ -344,6 +347,58 @@ class ShareViewModelTest {
         assertTrue(
             "single-line text must not use the -H path, got '$sendKeys'",
             sendKeys.startsWith("send-keys -l -t %3 -- '"),
+        )
+    }
+
+    @Test
+    fun pasteIntoSessionLongSingleLineTextUsesBoundedBracketedChunks() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = host(id = 23L, name = "long-single-line-host")
+        val client = FakeTmuxClient().apply {
+            responses.addLast(
+                CommandResponse(number = 0L, output = listOf("%3"), isError = false),
+            )
+            repeat(6) {
+                responses.addLast(
+                    CommandResponse(number = 0L, output = emptyList(), isError = false),
+                )
+            }
+        }
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key",
+            client = client,
+        )
+        vm.setItem(
+            ShareableItem.TextItem(
+                text = "s".repeat(TMUX_PASTE_BODY_CHUNK_BYTES * 3 + 17),
+                displayName = "long-note",
+            ),
+        )
+
+        vm.pasteIntoSession(host)
+        advanceUntilIdle()
+
+        val sendKeys = client.sentCommands.drop(1).filter { it.startsWith("send-keys") }
+        assertTrue(
+            "large single-line share must not create one unbounded literal command: $sendKeys",
+            sendKeys.none { it.startsWith("send-keys -l") },
+        )
+        assertTrue(
+            "expected bracketed-paste chunks for large single-line share, got $sendKeys",
+            sendKeys.count { it.startsWith("send-keys -H -t %3 ") } > 3,
+        )
+        val maxExpectedCommandLength =
+            "send-keys -H -t %3 ".length + (TMUX_PASTE_BODY_CHUNK_BYTES * 3 - 1)
+        val longest = sendKeys.maxOf { it.length }
+        assertTrue(
+            "tmux commands must stay bounded; longest=$longest max=$maxExpectedCommandLength commands=$sendKeys",
+            longest <= maxExpectedCommandLength,
         )
     }
 

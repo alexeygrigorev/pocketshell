@@ -59,7 +59,7 @@ class TmuxConversationComposerNoTargetIndicatorScreenshotTest {
                             text = "Deploying the staging build now.",
                         ),
                     ),
-                    onSendToAgent = {},
+                    onSendToAgent = { true },
                     modifier = Modifier
                         .fillMaxSize()
                         .background(PocketShellColors.Background),

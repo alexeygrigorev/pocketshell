@@ -730,7 +730,7 @@ public fun TmuxSessionScreen(
                     TmuxConversationPane(
                         events = visibleConversation.events,
                         onSendToAgent = { text ->
-                            viewModel.sendToAgentPane(paneIdForSend, text)
+                            viewModel.sendToAgentPaneResult(paneIdForSend, text).isSuccess
                         },
                         modifier = Modifier
                             .fillMaxSize()
@@ -2273,7 +2273,7 @@ private fun WindowSwitcherOverlay(
 @Composable
 internal fun TmuxConversationPane(
     events: List<ConversationEvent>,
-    onSendToAgent: (String) -> Unit,
+    onSendToAgent: suspend (String) -> Boolean,
     modifier: Modifier = Modifier,
     // Issue #176: when false, XML-tagged SystemNote events are filtered
     // from the visible feed entirely. The default keeps the existing
@@ -2310,6 +2310,7 @@ internal fun TmuxConversationPane(
 ) {
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     var composerText by rememberSaveable { mutableStateOf(initialDraft) }
+    var sendInFlight by remember { mutableStateOf(false) }
     val visibleEvents = remember(events, showSystemNotes) {
         if (showSystemNotes) events else events.filterNot { it is ConversationEvent.SystemNote }
     }
@@ -2429,13 +2430,21 @@ internal fun TmuxConversationPane(
             },
             onSend = {
                 val trimmed = composerText.trim()
-                if (trimmed.isNotEmpty()) {
-                    onSendToAgent(trimmed)
-                    composerText = ""
-                    onDraftChanged("")
+                if (trimmed.isNotEmpty() && !sendInFlight) {
+                    coroutineScope.launch {
+                        sendInFlight = true
+                        try {
+                            if (onSendToAgent(trimmed)) {
+                                composerText = ""
+                                onDraftChanged("")
+                            }
+                        } finally {
+                            sendInFlight = false
+                        }
+                    }
                 }
             },
-            sendEnabled = sendEnabled,
+            sendEnabled = sendEnabled && !sendInFlight,
             agentName = agentName,
         )
     }

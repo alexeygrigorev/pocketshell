@@ -57,7 +57,7 @@ class TmuxConversationPaneNavigationUiTest {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 TmuxConversationPane(
                     events = events,
-                    onSendToAgent = {},
+                    onSendToAgent = { true },
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -114,7 +114,7 @@ class TmuxConversationPaneNavigationUiTest {
                 var query by remember { mutableStateOf("") }
                 TmuxConversationPane(
                     events = sampleMessageEvents(count = 3),
-                    onSendToAgent = {},
+                    onSendToAgent = { true },
                     query = query,
                     onQueryChange = { query = it },
                 )

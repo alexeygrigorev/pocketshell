@@ -1140,11 +1140,11 @@ class TmuxSessionViewModelTest {
 
         val sent = client.sentCommands.filter { it.startsWith("send-keys") }
         assertEquals(
-            "expected exactly one send-keys -H invocation, got $sent",
-            1,
+            "expected bracketed paste start, body, and end commands, got $sent",
+            3,
             sent.size,
         )
-        val cmd = sent.single()
+        val cmd = sent[1]
         assertTrue(
             "expected send-keys -H targeting %4, got '$cmd'",
             cmd.startsWith("send-keys -H -t %4 "),
@@ -1156,11 +1156,11 @@ class TmuxSessionViewModelTest {
         // literal LF), NOT as separate `send-keys ... Enter` calls.
         assertTrue(
             "expected bracketed-paste start marker in hex payload, got '$cmd'",
-            cmd.contains("1b 5b 32 30 30 7e"),
+            sent.first().endsWith("1b 5b 32 30 30 7e"),
         )
         assertTrue(
             "expected bracketed-paste end marker in hex payload, got '$cmd'",
-            cmd.endsWith("1b 5b 32 30 31 7e"),
+            sent.last().endsWith("1b 5b 32 30 31 7e"),
         )
         // Three paragraphs separated by two `\n` bytes inside the
         // markers.
@@ -1190,7 +1190,9 @@ class TmuxSessionViewModelTest {
         vm.writeInputToPane("%0", "alpha\r\nbeta".toByteArray(Charsets.UTF_8))
         advanceUntilIdle()
 
-        val cmd = client.sentCommands.single { it.startsWith("send-keys") }
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals("expected start, body, and end commands, got $sent", 3, sent.size)
+        val cmd = sent[1]
         val hexBody = cmd.substringAfter("send-keys -H -t %0 ")
         val tokens = hexBody.split(' ')
         assertEquals(
@@ -1244,13 +1246,42 @@ class TmuxSessionViewModelTest {
 
         val sent = client.sentCommands.filter { it.startsWith("send-keys") }
         assertEquals(
-            "expected a single send-keys -H invocation for `\\n`-terminated input, got $sent",
-            1,
+            "expected start, body, and end send-keys -H invocations for `\\n`-terminated input, got $sent",
+            3,
             sent.size,
         )
         assertTrue(
-            "expected send-keys -H, got '${sent.single()}'",
-            sent.single().startsWith("send-keys -H -t %0 "),
+            "expected send-keys -H, got '$sent'",
+            sent.all { it.startsWith("send-keys -H -t %0 ") },
+        )
+    }
+
+    @Test
+    fun largeBracketedPasteIsSplitIntoBoundedSendKeysCommands() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        val payload = buildString {
+            append("first line\n")
+            repeat(TMUX_PASTE_BODY_CHUNK_BYTES * 3) { append(('a'.code + (it % 26)).toChar()) }
+        }
+        vm.writeInputToPane("%0", payload.toByteArray(Charsets.UTF_8))
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys -H") }
+        assertTrue("expected multiple bounded paste chunks, got ${sent.size}: $sent", sent.size > 3)
+        assertTrue("paste start marker must be its own bounded command", sent.first().endsWith("1b 5b 32 30 30 7e"))
+        assertTrue("paste end marker must be its own bounded command", sent.last().endsWith("1b 5b 32 30 31 7e"))
+        val maxHexTokens = sent.drop(1).dropLast(1)
+            .maxOf { command -> command.substringAfter("send-keys -H -t %0 ").split(' ').size }
+        assertTrue(
+            "body chunks must be bounded to $TMUX_PASTE_BODY_CHUNK_BYTES bytes; max tokens=$maxHexTokens",
+            maxHexTokens <= TMUX_PASTE_BODY_CHUNK_BYTES,
+        )
+        assertTrue(
+            "large paste must not fall back to one unbounded command",
+            sent.none { it.substringAfter("send-keys -H -t %0 ").split(' ').size > TMUX_PASTE_BODY_CHUNK_BYTES },
         )
     }
 
@@ -1933,6 +1964,142 @@ class TmuxSessionViewModelTest {
                 "send-keys -t %0 Enter",
             ),
             client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+    }
+
+    @Test
+    fun sendToAgentPaneLongSingleLineUsesBoundedBracketedChunksThenEnter() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+
+        val draft = "x".repeat(TMUX_PASTE_BODY_CHUNK_BYTES * 3 + 17)
+        val result = vm.sendToAgentPaneResult("%0", draft)
+        runCurrent()
+
+        assertTrue("expected long single-line send to succeed", result.isSuccess)
+        val sendKeys = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertTrue(
+            "long single-line draft must not create one unbounded literal command: $sendKeys",
+            sendKeys.none { it.startsWith("send-keys -l") },
+        )
+        assertTrue(
+            "expected bracketed-paste chunks for long single-line draft, got $sendKeys",
+            sendKeys.count { it.startsWith("send-keys -H -t %0 ") } > 3,
+        )
+        assertEquals("send-keys -t %0 Enter", sendKeys.last())
+        val maxExpectedCommandLength =
+            "send-keys -H -t %0 ".length + (TMUX_PASTE_BODY_CHUNK_BYTES * 3 - 1)
+        val longest = sendKeys.maxOf { it.length }
+        assertTrue(
+            "tmux commands must stay bounded; longest=$longest max=$maxExpectedCommandLength commands=$sendKeys",
+            longest <= maxExpectedCommandLength,
+        )
+    }
+
+    @Test
+    fun sendToAgentPaneResultFailureDuringLargePasteKeepsConversationAndReconnectAvailable() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            closeAndThrowOnCommandPrefix = "send-keys -H"
+            closeAndThrowException = TmuxClientException("failed to write tmux command `send-keys`")
+        }
+        vm.replaceClientForTest(
+            hostId = 42L,
+            hostName = "dev",
+            host = "dev.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/dev",
+            sessionName = "work",
+            client = client,
+        )
+        runCurrent()
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+
+        val result = vm.sendToAgentPaneResult(
+            "%0",
+            "line one\n" + "x".repeat(TMUX_PASTE_BODY_CHUNK_BYTES * 2),
+        )
+        runCurrent()
+
+        assertTrue("expected forced send failure", result.isFailure)
+        assertTrue("forced failure should close fake client", client.closed)
+        assertTrue("Reconnect must remain available after paste disconnect", vm.canReconnect.value)
+        assertTrue(
+            "failed paste must not append an optimistic user message",
+            vm.agentConversations.value["%0"]!!.events.isEmpty(),
+        )
+    }
+
+    @Test
+    fun sendToAgentPaneResultPasteChunkTmuxErrorDoesNotAppendOptimisticMessage() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            responses.addLast(CommandResponse(number = 1L, output = emptyList(), isError = false))
+            responses.addLast(
+                CommandResponse(
+                    number = 2L,
+                    output = listOf("not enough arguments"),
+                    isError = true,
+                ),
+            )
+        }
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+
+        val result = vm.sendToAgentPaneResult(
+            "%0",
+            "x".repeat(TMUX_PASTE_BODY_CHUNK_BYTES * 2 + 1),
+        )
+        runCurrent()
+
+        assertTrue("expected tmux %error to fail the paste result", result.isFailure)
+        assertTrue(
+            "failed paste chunk must not append an optimistic user message",
+            vm.agentConversations.value["%0"]!!.events.isEmpty(),
+        )
+        assertTrue(
+            "failed paste must stop before submitting Enter: ${client.sentCommands}",
+            client.sentCommands.none { it == "send-keys -t %0 Enter" },
+        )
+    }
+
+    @Test
+    fun sendToAgentPaneResultFinalEnterTmuxErrorDoesNotAppendOptimisticMessage() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient().apply {
+            repeat(5) {
+                responses.addLast(
+                    CommandResponse(number = it.toLong(), output = emptyList(), isError = false),
+                )
+            }
+            responses.addLast(
+                CommandResponse(
+                    number = 6L,
+                    output = listOf("can't find pane: %0"),
+                    isError = true,
+                ),
+            )
+        }
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+
+        val result = vm.sendToAgentPaneResult(
+            "%0",
+            "x".repeat(TMUX_PASTE_BODY_CHUNK_BYTES * 2 + 1),
+        )
+        runCurrent()
+
+        assertTrue("expected tmux %error from final Enter to fail the send result", result.isFailure)
+        assertTrue(
+            "failed final Enter must not append an optimistic user message",
+            vm.agentConversations.value["%0"]!!.events.isEmpty(),
+        )
+        assertEquals(
+            "send-keys -t %0 Enter",
+            client.sentCommands.filter { it.startsWith("send-keys") }.last(),
         )
     }
 

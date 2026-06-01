@@ -8,6 +8,7 @@ import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.flow.toList
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotSame
@@ -126,6 +127,138 @@ class SshLeaseManagerTest {
 
         assertTrue(first.closed)
         assertFalse(second.closed)
+    }
+
+    @Test
+    fun `process stop closes all idle warm hosts`() = runTest {
+        val first = FakeSshSession()
+        val second = FakeSshSession()
+        val connector = QueueLeaseConnector(first, second)
+        val manager = leaseManager(
+            connector = connector,
+            idleTtlMillis = 60_000,
+            maxIdleLeases = 2,
+        )
+
+        manager.acquire(TARGET).getOrThrow().release()
+        manager.acquire(OTHER_TARGET).getOrThrow().release()
+
+        assertFalse(first.closed)
+        assertFalse(second.closed)
+
+        manager.onProcessStopped()
+
+        assertTrue(first.closed)
+        assertTrue(second.closed)
+        assertEquals(1, first.closeCount)
+        assertEquals(1, second.closeCount)
+    }
+
+    @Test
+    fun `active lease released after process stop closes without idle ttl`() = runTest {
+        val session = FakeSshSession()
+        val manager = leaseManager(
+            connector = QueueLeaseConnector(session),
+            idleTtlMillis = 60_000,
+        )
+
+        val lease = manager.acquire(TARGET).getOrThrow()
+        manager.onProcessStopped()
+
+        assertFalse("active foreground owner still holds the lease", session.closed)
+
+        lease.release()
+        advanceTimeBy(1)
+        runCurrent()
+
+        assertTrue(session.closed)
+        assertEquals(1, session.closeCount)
+    }
+
+    @Test
+    fun `process start restores warm ttl behavior`() = runTest {
+        val session = FakeSshSession()
+        val manager = leaseManager(
+            connector = QueueLeaseConnector(session),
+            idleTtlMillis = 1_000,
+        )
+
+        manager.onProcessStopped()
+        manager.onProcessStarted()
+        val lease = manager.acquire(TARGET).getOrThrow()
+        lease.release()
+        advanceTimeBy(999)
+        runCurrent()
+
+        assertFalse(session.closed)
+
+        advanceTimeBy(1)
+        runCurrent()
+
+        assertTrue(session.closed)
+    }
+
+    @Test
+    fun `explicit disconnect closes host once and stale release is ignored`() = runTest {
+        val session = FakeSshSession()
+        val manager = leaseManager(
+            connector = QueueLeaseConnector(session),
+            idleTtlMillis = 60_000,
+        )
+
+        val lease = manager.acquire(TARGET).getOrThrow()
+        manager.disconnect(TARGET.leaseKey)
+        lease.release()
+        advanceTimeBy(60_000)
+        runCurrent()
+
+        assertTrue(session.closed)
+        assertEquals(1, session.closeCount)
+    }
+
+    @Test
+    fun `state events include idle expiry and lifecycle close reasons`() = runTest {
+        val first = FakeSshSession()
+        val second = FakeSshSession()
+        val manager = leaseManager(
+            connector = QueueLeaseConnector(first, second),
+            idleTtlMillis = 1_000,
+            maxIdleLeases = 2,
+        )
+        val events = mutableListOf<SshLeaseStateEvent>()
+        val collectJob = backgroundScope.launch {
+            manager.stateEvents.toList(events)
+        }
+        runCurrent()
+
+        manager.acquire(TARGET).getOrThrow().release()
+        advanceTimeBy(1_000)
+        runCurrent()
+        manager.acquire(OTHER_TARGET).getOrThrow().release()
+        manager.onProcessStopped()
+        runCurrent()
+        collectJob.cancel()
+
+        assertTrue(
+            events.any {
+                it.key == TARGET.leaseKey &&
+                    it.state == SshLeaseConnectionState.Idle
+            },
+        )
+        assertTrue(
+            events.any {
+                it.key == TARGET.leaseKey &&
+                    it.state == SshLeaseConnectionState.Closed &&
+                    it.closeReason == SshLeaseCloseReason.IdleExpired
+            },
+        )
+        assertTrue(
+            events.any {
+                it.key == OTHER_TARGET.leaseKey &&
+                    it.state == SshLeaseConnectionState.Closed &&
+                    it.closeReason == SshLeaseCloseReason.ProcessStopped
+            },
+        )
     }
 
     @Test
@@ -281,6 +414,7 @@ class SshLeaseManagerTest {
     private class FakeSshSession : SshSession {
         var closed: Boolean = false
         var connected: Boolean = true
+        var closeCount: Int = 0
 
         override val isConnected: Boolean
             get() = connected && !closed
@@ -315,6 +449,7 @@ class SshLeaseManagerTest {
         ): String = error("not used")
 
         override fun close() {
+            closeCount += 1
             closed = true
         }
     }

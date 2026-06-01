@@ -6,6 +6,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -31,6 +34,12 @@ public class SshLeaseManager(
     private val entries: MutableMap<SshLeaseKey, Entry> = linkedMapOf()
     private var closed: Boolean = false
     private var nextEntryId: Long = 1L
+    private var processStarted: Boolean = true
+    private val _stateEvents = MutableSharedFlow<SshLeaseStateEvent>(
+        extraBufferCapacity = STATE_EVENT_BUFFER_CAPACITY,
+    )
+
+    public val stateEvents: SharedFlow<SshLeaseStateEvent> = _stateEvents.asSharedFlow()
 
     init {
         require(idleTtlMillis >= 0) { "idleTtlMillis must be >= 0" }
@@ -46,6 +55,7 @@ public class SshLeaseManager(
                 entry.closeJob = null
                 entry.idleSinceMillis = null
                 entry.refCount += 1
+                emitStateLocked(key, SshLeaseConnectionState.Connected)
             }
         }
         if (existing != null) {
@@ -77,6 +87,7 @@ public class SshLeaseManager(
                 raced.closeJob = null
                 raced.idleSinceMillis = null
                 raced.refCount += 1
+                emitStateLocked(key, SshLeaseConnectionState.Connected)
                 Result.success(
                     SshLease(
                         key = key,
@@ -90,6 +101,7 @@ public class SshLeaseManager(
                 raced?.close()
                 val entry = Entry(id = nextEntryId++, key = key, session = session, refCount = 1)
                 entries[key] = entry
+                emitStateLocked(key, SshLeaseConnectionState.Connected)
                 Result.success(
                     SshLease(
                         key = key,
@@ -128,6 +140,7 @@ public class SshLeaseManager(
                 existing.closeJob = null
                 existing.idleSinceMillis = null
                 existing.refCount += 1
+                emitStateLocked(key, SshLeaseConnectionState.Connected)
                 return@withLock Result.success(
                     SshLease(
                         key = key,
@@ -141,6 +154,7 @@ public class SshLeaseManager(
             entries.remove(key)?.close()
             val entry = Entry(id = nextEntryId++, key = key, session = session, refCount = 1)
             entries[key] = entry
+            emitStateLocked(key, SshLeaseConnectionState.Connected)
             Result.success(
                 SshLease(
                     key = key,
@@ -157,9 +171,64 @@ public class SshLeaseManager(
         val idleEntries = mutex.withLock {
             entries.values
                 .filter { it.refCount == 0 }
-                .also { idle -> idle.forEach { entries.remove(it.key) } }
+                .also { idle ->
+                    idle.forEach {
+                        entries.remove(it.key)
+                        emitStateLocked(
+                            key = it.key,
+                            state = SshLeaseConnectionState.Closed,
+                            closeReason = SshLeaseCloseReason.ExplicitDisconnect,
+                        )
+                    }
+                }
         }
         idleEntries.forEach { it.close() }
+    }
+
+    public suspend fun disconnect(key: SshLeaseKey) {
+        val entry = mutex.withLock {
+            entries.remove(key)?.also {
+                emitStateLocked(
+                    key = key,
+                    state = SshLeaseConnectionState.Closed,
+                    closeReason = SshLeaseCloseReason.ExplicitDisconnect,
+                )
+            }
+        }
+        entry?.close()
+    }
+
+    /**
+     * Apply the app process background policy for warm SSH transports.
+     *
+     * Active leases are left alone because the owning foreground flow must
+     * detach/release its tmux channels in the correct order. Once those leases
+     * release while the process is stopped, [release] closes them immediately
+     * instead of starting another idle timer.
+     */
+    public suspend fun onProcessStopped() {
+        val idleEntries = mutex.withLock {
+            processStarted = false
+            entries.values
+                .filter { it.refCount == 0 }
+                .also { idle ->
+                    idle.forEach {
+                        entries.remove(it.key)
+                        emitStateLocked(
+                            key = it.key,
+                            state = SshLeaseConnectionState.Closed,
+                            closeReason = SshLeaseCloseReason.ProcessStopped,
+                        )
+                    }
+                }
+        }
+        idleEntries.forEach { it.close() }
+    }
+
+    public suspend fun onProcessStarted() {
+        mutex.withLock {
+            processStarted = true
+        }
     }
 
     override fun close() {
@@ -170,6 +239,13 @@ public class SshLeaseManager(
                     closed = true
                     toClose += entries.values
                     entries.clear()
+                    toClose.forEach {
+                        emitStateLocked(
+                            key = it.key,
+                            state = SshLeaseConnectionState.Closed,
+                            closeReason = SshLeaseCloseReason.ManagerClosed,
+                        )
+                    }
                 }
             }
         }
@@ -183,8 +259,17 @@ public class SshLeaseManager(
             if (entry.refCount <= 0) return
             entry.refCount -= 1
             if (entry.refCount > 0) return
-            if (!entry.session.isConnected || idleTtlMillis == 0L || maxIdleLeases == 0) {
+            if (!entry.session.isConnected || !processStarted || idleTtlMillis == 0L || maxIdleLeases == 0) {
                 entries.remove(key)
+                emitStateLocked(
+                    key = key,
+                    state = SshLeaseConnectionState.Closed,
+                    closeReason = when {
+                        !entry.session.isConnected -> SshLeaseCloseReason.Disconnected
+                        !processStarted -> SshLeaseCloseReason.ProcessStopped
+                        else -> SshLeaseCloseReason.IdleExpired
+                    },
+                )
                 return@withLock entry
             }
 
@@ -194,6 +279,7 @@ public class SshLeaseManager(
                 delay(idleTtlMillis)
                 closeIfStillIdle(key, entryId)
             }
+            emitStateLocked(key, SshLeaseConnectionState.Idle)
             trimIdleLocked()
         }
         closeNow?.close()
@@ -205,6 +291,12 @@ public class SshLeaseManager(
             if (entry.id != entryId) return
             if (entry.refCount != 0) return
             entries.remove(key)
+            emitStateLocked(
+                key = key,
+                state = SshLeaseConnectionState.Closed,
+                closeReason = SshLeaseCloseReason.IdleExpired,
+            )
+            entry
         }
         expired?.close()
     }
@@ -216,7 +308,26 @@ public class SshLeaseManager(
         if (idle.size <= maxIdleLeases) return null
         val oldest = idle.first()
         entries.remove(oldest.key)
+        emitStateLocked(
+            key = oldest.key,
+            state = SshLeaseConnectionState.Closed,
+            closeReason = SshLeaseCloseReason.IdleTrimmed,
+        )
         return oldest
+    }
+
+    private fun emitStateLocked(
+        key: SshLeaseKey,
+        state: SshLeaseConnectionState,
+        closeReason: SshLeaseCloseReason? = null,
+    ) {
+        _stateEvents.tryEmit(
+            SshLeaseStateEvent(
+                key = key,
+                state = state,
+                closeReason = closeReason,
+            ),
+        )
     }
 
     private class Entry(
@@ -237,7 +348,29 @@ public class SshLeaseManager(
     public companion object {
         public const val DEFAULT_IDLE_TTL_MILLIS: Long = 60_000L
         public const val DEFAULT_MAX_IDLE_LEASES: Int = 2
+        private const val STATE_EVENT_BUFFER_CAPACITY: Int = 64
     }
+}
+
+public data class SshLeaseStateEvent(
+    val key: SshLeaseKey,
+    val state: SshLeaseConnectionState,
+    val closeReason: SshLeaseCloseReason? = null,
+)
+
+public enum class SshLeaseConnectionState {
+    Connected,
+    Idle,
+    Closed,
+}
+
+public enum class SshLeaseCloseReason {
+    IdleExpired,
+    IdleTrimmed,
+    ProcessStopped,
+    ExplicitDisconnect,
+    ManagerClosed,
+    Disconnected,
 }
 
 public data class SshLeaseKey(

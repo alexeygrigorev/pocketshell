@@ -10,10 +10,13 @@ import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.usage.UsageScheduler
+import com.pocketshell.core.ssh.SshLeaseManager
 import dagger.hilt.android.HiltAndroidApp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -51,6 +54,9 @@ class App : Application() {
     @Inject
     lateinit var activeTmuxClients: ActiveTmuxClients
 
+    @Inject
+    lateinit var sshLeaseManager: SshLeaseManager
+
     /**
      * Issue #235: scope for fanning out tmux detach/reattach hooks
      * driven by the lifecycle observer. The dispatcher is
@@ -67,12 +73,25 @@ class App : Application() {
     private val tmuxLifecycleScope: CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
+    private val sshLifecycleScope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private val sshLeaseLifecycleDispatcher = SshLeaseLifecycleDispatcher(
+        scope = sshLifecycleScope,
+        onProcessStopped = { sshLeaseManager.onProcessStopped() },
+        onProcessStarted = { sshLeaseManager.onProcessStarted() },
+    )
+
     private val tmuxLifecycleObserver = LifecycleEventObserver { _: LifecycleOwner, event ->
         when (event) {
             Lifecycle.Event.ON_STOP -> dispatchTmuxBackground()
             Lifecycle.Event.ON_START -> dispatchTmuxForeground()
             else -> Unit
         }
+    }
+
+    private val sshLeaseLifecycleObserver = LifecycleEventObserver { _: LifecycleOwner, event ->
+        sshLeaseLifecycleDispatcher.dispatch(event)
     }
 
     override fun onCreate() {
@@ -97,6 +116,7 @@ class App : Application() {
         // every config change) so the journey only fires when ALL
         // PocketShell activities go background.
         ProcessLifecycleOwner.get().lifecycle.addObserver(tmuxLifecycleObserver)
+        ProcessLifecycleOwner.get().lifecycle.addObserver(sshLeaseLifecycleObserver)
         StartupTiming.mark("app-on-create-end")
     }
 
@@ -137,3 +157,37 @@ class App : Application() {
  * older Android versions.
  */
 private const val APP_LIFECYCLE_TAG: String = "PsAppTmuxLifecycle"
+
+internal class SshLeaseLifecycleDispatcher(
+    scope: CoroutineScope,
+    private val onProcessStopped: suspend () -> Unit,
+    private val onProcessStarted: suspend () -> Unit,
+) {
+    private val events = Channel<SshLeaseLifecycleEvent>(capacity = Channel.UNLIMITED)
+    private val worker: Job = scope.launch {
+        for (event in events) {
+            when (event) {
+                SshLeaseLifecycleEvent.Stopped -> onProcessStopped()
+                SshLeaseLifecycleEvent.Started -> onProcessStarted()
+            }
+        }
+    }
+
+    fun dispatch(event: Lifecycle.Event) {
+        when (event) {
+            Lifecycle.Event.ON_STOP -> events.trySend(SshLeaseLifecycleEvent.Stopped).getOrThrow()
+            Lifecycle.Event.ON_START -> events.trySend(SshLeaseLifecycleEvent.Started).getOrThrow()
+            else -> Unit
+        }
+    }
+
+    fun close() {
+        events.close()
+        worker.cancel()
+    }
+
+    private enum class SshLeaseLifecycleEvent {
+        Stopped,
+        Started,
+    }
+}

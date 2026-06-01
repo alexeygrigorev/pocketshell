@@ -25,6 +25,7 @@ DEVICE_ARTIFACT_ROOT="$RUN_DIR/device-artifacts"
 export GRADLE_USER_HOME="${GRADLE_USER_HOME:-$LOG_ROOT/gradle-home}"
 BUILD_APKS="${BUILD_APKS:-1}"
 PHONE_WALKTHROUGH_CLEAN_GENERATED="${PHONE_WALKTHROUGH_CLEAN_GENERATED:-${PHONE_DOGFOOD_CLEAN_GENERATED:-1}}"
+PHONE_WALKTHROUGH_VERIFY_DISPATCH_ONLY="${PHONE_WALKTHROUGH_VERIFY_DISPATCH_ONLY:-0}"
 LOGCAT_LINES="${LOGCAT_LINES:-4000}"
 PHONE_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS="${PHONE_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS:-3}"
 SSH_KEY="${SSH_KEY:-$ROOT_DIR/tests/docker/test_key}"
@@ -440,6 +441,47 @@ setup_detection_profiles_for_scenario() {
   fi
 }
 
+scenario_handler_for() {
+  local scenario="$1"
+  case "$scenario" in
+    terminal-lab)
+      printf '%s\n' "run_terminal_lab"
+      ;;
+    tmux-existing-session)
+      printf '%s\n' "run_tmux_existing_session"
+      ;;
+    setup-detection|setup-detection:*)
+      printf '%s\n' "run_setup_detection"
+      ;;
+    visual-audit)
+      printf '%s\n' "run_visual_audit"
+      ;;
+    *)
+      fail "unknown selected scenario '$scenario'"
+      ;;
+  esac
+}
+
+assert_selected_scenario_handlers_defined() {
+  local scenario handler
+  for scenario in "${SCENARIOS[@]}"; do
+    handler="$(scenario_handler_for "$scenario")"
+    if ! declare -F "$handler" >/dev/null 2>&1; then
+      fail "selected scenario '$scenario' handler '$handler' is not defined; check phone-walkthrough function definitions before dispatch"
+    fi
+  done
+}
+
+verify_dispatch_only() {
+  printf 'Verified phone-walkthrough scenario handlers:\n'
+  local scenario
+  for scenario in "${SCENARIOS[@]}"; do
+    printf '  %s -> %s\n' "$scenario" "$(scenario_handler_for "$scenario")"
+  done
+  pocketshell_release_avd_lock
+  trap - EXIT
+}
+
 verify_static_tools() {
   require_executable "$ADB" "adb"
   require_executable "$EMULATOR" "emulator"
@@ -619,7 +661,7 @@ build_and_install_apks() {
 
   run_logged "09-cold-reset-app-state-before-install" bash -lc \
     "printf 'COLD-RESET: clearing app/test package data for deterministic phone walkthrough\n'; \
-    "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell pm clear com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell pm clear com.pocketshell.app.test >/dev/null 2>&1 || true"
+    '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell pm clear com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell pm clear com.pocketshell.app.test >/dev/null 2>&1 || true"
   run_logged "10-cold-reset-install-apks" bash -lc "$(declare -f install_apk); ADB='$ADB'; printf 'COLD-RESET: installing app/test APKs after data clear\n'; install_apk com.pocketshell.app '$APP_APK'; install_apk com.pocketshell.app.test '$TEST_APK'"
   run_logged "11-wait-package-manager-idle" bash -lc \
     "'$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true; '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true; for i in {1..30}; do '$ADB' shell pm path com.pocketshell.app >/dev/null && '$ADB' shell pm path com.pocketshell.app.test >/dev/null && '$ADB' shell pm list instrumentation | grep -q '^instrumentation:com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner' && exit 0; sleep 1; done; '$ADB' shell pm path com.pocketshell.app; '$ADB' shell pm path com.pocketshell.app.test; '$ADB' shell pm list instrumentation; exit 1"
@@ -1021,6 +1063,12 @@ run_unimplemented() {
 }
 
 select_scenarios "$@"
+assert_selected_scenario_handlers_defined
+
+if [[ "$PHONE_WALKTHROUGH_VERIFY_DISPATCH_ONLY" = "1" ]]; then
+  verify_dispatch_only
+  exit 0
+fi
 
 printf 'PocketShell phone walkthrough\n'
 printf 'run-id: %s\n' "$RUN_ID"

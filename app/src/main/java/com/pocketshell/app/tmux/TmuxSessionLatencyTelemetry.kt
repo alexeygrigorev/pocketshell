@@ -6,8 +6,9 @@ import android.os.SystemClock
  * Lightweight latency/event sink for the tmux terminal attach path.
  *
  * Production keeps this in memory only; connected tests snapshot it and write
- * durable artifacts. This deliberately measures existing path boundaries
- * without adding caching or changing switch architecture.
+ * durable artifacts. The warm-switch events split the visible cached-frame
+ * path from the later remote-refresh path so tests can gate the user's first
+ * selected terminal frame without turning cold attach into a 100 ms contract.
  */
 public object TmuxSessionLatencyTelemetry {
     private val lock = Any()

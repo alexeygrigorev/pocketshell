@@ -917,8 +917,30 @@ public class TmuxSessionViewModel @Inject constructor(
         trigger: TmuxConnectTrigger,
         visibleSwitchStartedAtMs: Long,
     ): Boolean {
-        val cached = runtimeCache.activate(target.toRuntimeKey()) ?: return false
+        val cached = runtimeCache.activate(target.toRuntimeKey()) ?: run {
+            val startedAtMs = visibleSwitchStartedAtMs.takeIf { it > 0L }
+                ?: SystemClock.elapsedRealtime()
+            recordWarmSwitchMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                name = "warm_switch_runtime_cache_miss",
+                trigger = trigger,
+                detail = "source=runtime_cache",
+            )
+            return false
+        }
         if (cached.client.disconnected.value || cached.session?.isConnected == false) {
+            val startedAtMs = visibleSwitchStartedAtMs.takeIf { it > 0L }
+                ?: SystemClock.elapsedRealtime()
+            recordWarmSwitchMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                name = "warm_switch_runtime_cache_miss",
+                trigger = trigger,
+                detail = "source=runtime_cache reason=disconnected",
+            )
             viewModelScope.launch {
                 cached.closeCachedRuntime()
             }
@@ -982,6 +1004,14 @@ public class TmuxSessionViewModel @Inject constructor(
             name = "warm_switch_connect_ready",
             trigger = trigger,
             detail = "paneCount=${cached.panes.size} source=runtime_cache",
+        )
+        recordWarmSwitchMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = milestoneStartedAtMs,
+            name = "warm_switch_first_cached_frame",
+            trigger = trigger,
+            detail = "paneCount=${cached.panes.size} source=runtime_cache cacheHit=true",
         )
         launchCachedRuntimeRemoteRefresh(
             target = target,

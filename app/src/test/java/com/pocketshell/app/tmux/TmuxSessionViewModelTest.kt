@@ -2997,6 +2997,7 @@ class TmuxSessionViewModelTest {
 
     @Test
     fun activatingCachedRuntimePublishesPanesSynchronouslyWithoutTmuxCommands() = runTest {
+        TmuxSessionLatencyTelemetry.resetForTest()
         val registry = ActiveTmuxClients()
         val runtimeCache = TmuxSessionRuntimeCache()
         val vm = newVm(registry = registry, runtimeCache = runtimeCache)
@@ -3074,10 +3075,40 @@ class TmuxSessionViewModelTest {
         val activateMs = SystemClock.elapsedRealtime() - activateStartedAtMs
 
         val panes = vm.panes.value
+        val telemetryBeforeRefresh = TmuxSessionLatencyTelemetry.snapshot()
+        val firstCachedFrame = telemetryBeforeRefresh.single {
+            it.name == "warm_switch_first_cached_frame"
+        }
+        val forbiddenCommandEventsBeforeFrame = telemetryBeforeRefresh.filter {
+            it.elapsedRealtimeMs <= firstCachedFrame.elapsedRealtimeMs &&
+                (
+                    it.name == "tmux_control_attach_count" ||
+                        it.name == "list_panes" ||
+                        it.name == "capture_pane" ||
+                        it.name == "cursor_query"
+                    )
+        }
         assertTrue(
             "cached pointer-swap activation must publish visible pane state under 100ms; " +
                 "activateMs=$activateMs",
             activateMs < TMUX_WARM_SWITCH_LOCAL_P95_BUDGET_MS,
+        )
+        assertTrue(
+            "first cached-frame telemetry must stay under 100ms; event=$firstCachedFrame",
+            firstCachedFrame.durationMs < TMUX_WARM_SWITCH_LOCAL_P95_BUDGET_MS,
+        )
+        assertTrue(
+            "cached first frame must not require synchronous tmux control/list/capture work; " +
+                "forbidden=$forbiddenCommandEventsBeforeFrame events=$telemetryBeforeRefresh",
+            forbiddenCommandEventsBeforeFrame.isEmpty(),
+        )
+        assertEquals(
+            "work",
+            firstCachedFrame.sessionName,
+        )
+        assertTrue(
+            "first cached-frame artifact must include cache-hit detail",
+            firstCachedFrame.toArtifactLine(prefix = "warm_switch").contains("cacheHit=true"),
         )
         assertEquals(listOf("%0"), panes.map { it.paneId })
         assertSame(cachedTerminalState, panes.single().terminalState)
@@ -3113,6 +3144,7 @@ class TmuxSessionViewModelTest {
             clientA.sentCommands.contains("display-message -p -t %1 '#{cursor_x},#{cursor_y}'"),
         )
         assertEquals(listOf("%0", "%1"), vm.panes.value.map { it.paneId })
+        TmuxSessionLatencyTelemetry.resetForTest()
     }
 
     @Test

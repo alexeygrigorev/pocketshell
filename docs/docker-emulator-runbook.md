@@ -460,29 +460,34 @@ The fast pre-release gate does all of the following:
    `sys.boot_completed`.
 5. Runs focused connected walkthrough journeys:
    - `:shared:core-terminal:connectedDebugAndroidTest` for keyboard/input.
-   - Builds the app and Android test APKs, clears existing app/test package
-     data once, replace-installs both APKs once with explicit-path
-     `adb install -r`, stops any restored app/test process before each focused
-     selector, then runs direct
+   - Builds the app and Android test APKs, runs an explicit cold-reset setup
+     for deterministic walkthrough tests, clears existing app/test package data
+     once, replace-installs both APKs once with explicit-path `adb install -r`,
+     stops any restored app/test process before each focused selector, then runs direct
      `adb shell am instrument -e class <selector>` invocations covering both
      `PromptComposerSmokeTest` methods,
      `SnippetTerminalE2eTest`, both `InlineDictationUiTest` methods,
      `VoiceCommandPlannerE2eTest`, and both `EmulatorDockerSshSmokeTest`
      methods.
 6. Rebuilds `app/build/outputs/apk/debug/app-debug.apk`.
-7. Installs the final APK on the emulator with explicit-path `adb install -r`.
+7. Runs the separate data-preserving update gate via
+   `scripts/install-update-apk.sh app/build/outputs/apk/debug/app-debug.apk`.
+   That helper runs only `adb install -r` and never clears app data or
+   uninstalls the package.
 
 Before the focused app instrumentation phase, the gate force-stops
 `com.pocketshell.app.test` and `com.pocketshell.app`, clears existing package
 data if either package is already installed, and waits for the package-manager
-handler queues to go idle. It then replace-installs the app/test APKs once and
-waits for package-manager idle plus a stable package path check before starting
+handler queues to go idle. This is the cold-reset walkthrough path, not the user
+update path. It then replace-installs the app/test APKs once and waits for
+package-manager idle plus a stable package path check before starting
 instrumentation. During that stability window it also watches logcat for delayed
 PocketShell package removal broadcasts left over from earlier emulator work; if
 one appears, it waits for package-manager idle, reinstalls both APKs, and repeats
 the stability check before instrumentation. Uninstall is only used as a logged
-fallback when replace install reports an incompatible existing package, and that
-fallback also waits for package-manager idle before retrying install. Before
+fallback when replace install reports an incompatible existing package in this
+cold-reset path, and that fallback also waits for package-manager idle before
+retrying install. Before
 each focused selector, the gate force-stops the app/test packages, waits until
 no PocketShell process is visible, verifies both packages report `stopped=true`,
 and holds that state through a short settle window. If prior instrumentation

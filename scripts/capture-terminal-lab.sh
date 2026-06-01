@@ -146,7 +146,8 @@ run_logged "03-docker-agents-recreate" docker compose -f "$COMPOSE_FILE" up -d -
 wait_for_host_ssh_fixture
 run_logged "05-emulator-readiness" bash -lc \
   "'$ADB' devices && for i in {1..90}; do state=\$('$ADB' shell getprop sys.boot_completed 2>/dev/null | tr -d '\r'); if [ \"\$state\" = 1 ]; then exit 0; fi; sleep 2; done; '$ADB' devices; exit 1"
-run_logged "06-reset-emulator-app-state" bash -lc \
+run_logged "06-cold-reset-emulator-app-state" bash -lc \
+  "printf 'COLD-RESET: uninstalling app/test packages for deterministic terminal lab\n'; \
   "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' uninstall com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' uninstall com.pocketshell.app.test >/dev/null 2>&1 || true"
 run_logged "07-clear-logcat" "$ADB" logcat -c
 run_logged "08-clear-device-artifacts" "$ADB" shell rm -rf "$DEVICE_ARTIFACT_DIR"
@@ -162,7 +163,8 @@ else
     printf 'Test APK: %s\n' "$TEST_APK"
   } | tee "$RUN_DIR/09-build-terminal-lab-apks.log"
 fi
-run_logged "10-install-terminal-lab-apks" bash -lc \
+run_logged "10-cold-reset-install-terminal-lab-apks" bash -lc \
+  "printf 'COLD-RESET: installing app/test APKs after package removal\n'; \
   "'$ADB' install -r '$APP_APK' && '$ADB' install -r '$TEST_APK'"
 run_logged "10a-wait-for-package-manager" bash -lc \
   "'$ADB' shell cmd package wait-for-handler --timeout 120000 && '$ADB' shell cmd package wait-for-background-handler --timeout 120000 && sleep 2"

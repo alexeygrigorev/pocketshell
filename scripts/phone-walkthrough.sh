@@ -587,6 +587,7 @@ install_apk() {
     return 0
   fi
   if printf '%s\n' "$output" | grep -q 'INSTALL_FAILED_UPDATE_INCOMPATIBLE'; then
+    printf 'COLD-RESET: uninstall fallback for incompatible walkthrough package: %s\n' "$package"
     "$ADB" uninstall "$package" >/dev/null 2>&1 || true
     "$ADB" install -r -d -t "$apk"
     return 0
@@ -616,9 +617,10 @@ build_and_install_apks() {
     } | tee "$LOG_DIR/08-build-apks.log"
   fi
 
-  run_logged "09-reset-app-state-before-install" bash -lc \
+  run_logged "09-cold-reset-app-state-before-install" bash -lc \
+    "printf 'COLD-RESET: clearing app/test package data for deterministic phone walkthrough\n'; \
     "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell pm clear com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell pm clear com.pocketshell.app.test >/dev/null 2>&1 || true"
-  run_logged "10-install-apks" bash -lc "$(declare -f install_apk); ADB='$ADB'; install_apk com.pocketshell.app '$APP_APK'; install_apk com.pocketshell.app.test '$TEST_APK'"
+  run_logged "10-cold-reset-install-apks" bash -lc "$(declare -f install_apk); ADB='$ADB'; printf 'COLD-RESET: installing app/test APKs after data clear\n'; install_apk com.pocketshell.app '$APP_APK'; install_apk com.pocketshell.app.test '$TEST_APK'"
   run_logged "11-wait-package-manager-idle" bash -lc \
     "'$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true; '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true; for i in {1..30}; do '$ADB' shell pm path com.pocketshell.app >/dev/null && '$ADB' shell pm path com.pocketshell.app.test >/dev/null && '$ADB' shell pm list instrumentation | grep -q '^instrumentation:com.pocketshell.app.test/androidx.test.runner.AndroidJUnitRunner' && exit 0; sleep 1; done; '$ADB' shell pm path com.pocketshell.app; '$ADB' shell pm path com.pocketshell.app.test; '$ADB' shell pm list instrumentation; exit 1"
 }

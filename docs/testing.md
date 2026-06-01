@@ -538,25 +538,27 @@ checkout is otherwise idle.
 Every run also writes
 `build/pre-release-confidence-gate/<run-id>/summary.txt`, including the commit,
 run directory, APK path, emulator serial when available, Docker target,
-step-by-step status/log paths, focused selector status, final install status,
-and the final pass/fail result. On failures, start review from that summary:
-it names the failing step and, for focused instrumentation failures, the
-diagnostics and bounded logcat artifact paths.
+step-by-step status/log paths, focused selector status, the focused walkthrough
+cold-reset install status, the final data-preserving update install status, and
+the final pass/fail result. On failures, start review from that summary: it
+names the failing step and, for focused instrumentation failures, the diagnostics
+and bounded logcat artifact paths.
 
 The focused app walkthrough selectors run through direct
 `adb shell am instrument -e class <selector>` invocations after one app/test
-package reset and one explicit app/test APK install for the whole focused
-phase. This makes the gate repeatable on a reused emulator, avoids stale Gradle
-connected-test runner arguments, and keeps package deletion/replacement work out
-of the selector window.
-The reset clears existing package data without uninstalling in the normal path,
-then replace-installs both APKs and waits for package-manager handlers to go
-idle. Uninstall is only used as a logged fallback for incompatible existing
-packages. After install, the gate watches a stability window for delayed
-PocketShell package removal broadcasts from earlier emulator work and reinstalls
-before instrumentation if one appears. The gate then force-stops app/test
-packages before each selector and waits until no PocketShell process is running
-and both packages report
+package reset and one explicit app/test APK install for the whole focused phase.
+This is a destructive cold-reset path for deterministic walkthrough tests, not
+the user update path. It makes the gate repeatable on a reused emulator, avoids
+stale Gradle connected-test runner arguments, and keeps package
+deletion/replacement work out of the selector window.
+The cold-reset setup clears existing package data without uninstalling in the
+normal path, then replace-installs both APKs and waits for package-manager
+handlers to go idle. Uninstall is only used as a logged fallback for incompatible
+existing packages in that cold-reset setup. After install, the gate watches a
+stability window for delayed PocketShell package removal broadcasts from earlier
+emulator work and reinstalls before instrumentation if one appears. The gate then
+force-stops app/test packages before each selector and waits until no PocketShell
+process is running and both packages report
 `stopped=true`, followed by a short stable settle window. If Android restarts
 the app/test package during that settle window due prior instrumentation
 teardown, the gate repeats the force-stop/idle/settle cycle up to three times.
@@ -572,6 +574,11 @@ gate keeps the final failure. If
 instrumentation crashes or reports a non-success code, the step log includes
 filtered crash context and points to the bounded full logcat artifact in the same
 run directory.
+
+The final APK install in the pre-release gate is the data-preserving update gate:
+`scripts/install-update-apk.sh app/build/outputs/apk/debug/app-debug.apk`. That
+helper runs exactly `adb install -r <apk>` and intentionally has no `pm clear`,
+uninstall fallback, or cold-install flags.
 
 See [docker-emulator-runbook.md](docker-emulator-runbook.md#apk-pre-release-gate)
 for the exact steps, SDK paths, focused test list, APK location, and slower

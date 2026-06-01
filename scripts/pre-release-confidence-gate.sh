@@ -50,9 +50,9 @@ Runs the local APK pre-release-confidence gate:
   - compile/unit checks
   - deterministic Docker agent target
   - emulator readiness with explicit Android SDK paths
-  - #261 stale Room DB launch sanity
-  - focused connected walkthrough tests
-  - debug APK build and emulator install sanity
+  - #261 stale Room DB launch sanity using an explicit cold-reset setup
+  - focused connected walkthrough tests using an explicit cold-reset package setup
+  - debug APK build and data-preserving update install sanity
 
 Acquires an exclusive `flock` on `build/.avd-lock` (relative to the repo
 root) before touching the emulator so that parallel-worktree gate runs
@@ -204,9 +204,9 @@ write_summary() {
     printf 'Docker compose file: %s\n' "$COMPOSE_FILE"
     printf 'Docker profile/service: agents\n'
     printf 'Docker SSH target: 127.0.0.1:2222\n'
-    printf 'Focused app APK install status: %s\n' "$APP_WALKTHROUGH_INSTALL_STATUS"
-    printf 'Final install status: %s\n' "$FINAL_INSTALL_STATUS"
-    printf 'Issue #261 stale DB launch status: %s\n' "$ISSUE_261_STALE_DB_STATUS"
+    printf 'Focused app cold-reset APK install status: %s\n' "$APP_WALKTHROUGH_INSTALL_STATUS"
+    printf 'Final data-preserving update install status: %s\n' "$FINAL_INSTALL_STATUS"
+    printf 'Issue #261 cold-reset stale DB launch status: %s\n' "$ISSUE_261_STALE_DB_STATUS"
     printf 'Issue #261 stale DB logcat: %s\n' "$ISSUE_261_STALE_DB_LOGCAT"
     if [[ "$GATE_RESULT" != "PASS" ]]; then
       printf 'Failing step: %s\n' "${FAILING_STEP:-unknown}"
@@ -291,13 +291,13 @@ run_step() {
   if [[ "$status" -eq 0 ]]; then
     STEP_STATUSES[$step_array_index]="passed"
     case "$name" in
-      install-app-walkthrough-apks)
+      cold-reset-install-app-walkthrough-apks)
         APP_WALKTHROUGH_INSTALL_STATUS="passed"
         ;;
-      install-debug-apk)
+      update-install-debug-apk)
         FINAL_INSTALL_STATUS="passed"
         ;;
-      issue-261-stale-db-launch)
+      cold-reset-issue-261-stale-db-launch)
         ISSUE_261_STALE_DB_STATUS="passed"
         ;;
     esac
@@ -311,13 +311,13 @@ run_step() {
         FAILURE_MESSAGE="infrastructure readiness failed before connected tests; see emulator-readiness diagnostics"
         FAILURE_DIAGNOSTICS_PATH="$RUN_DIR/emulator-readiness-diagnostics.log"
         ;;
-      install-app-walkthrough-apks)
+      cold-reset-install-app-walkthrough-apks)
         APP_WALKTHROUGH_INSTALL_STATUS="failed"
         ;;
-      install-debug-apk)
+      update-install-debug-apk)
         FINAL_INSTALL_STATUS="failed"
         ;;
-      issue-261-stale-db-launch)
+      cold-reset-issue-261-stale-db-launch)
         ISSUE_261_STALE_DB_STATUS="failed"
         FAILURE_LOGCAT_PATH="$ISSUE_261_STALE_DB_LOGCAT"
         ;;
@@ -540,7 +540,7 @@ require_command_or_executable() {
   fi
 }
 
-reset_app_packages_script() {
+cold_reset_app_packages_script() {
   cat <<RESET_SCRIPT
 set -euo pipefail
 package_installed() {
@@ -555,7 +555,7 @@ for package in com.pocketshell.app.test com.pocketshell.app; do
 done
 for package in com.pocketshell.app.test com.pocketshell.app; do
   if package_installed "\$package"; then
-    printf 'Clearing package data without uninstalling: %s\n' "\$package"
+    printf 'COLD-RESET: clearing package data without uninstalling: %s\n' "\$package"
     '$ADB' shell pm clear "\$package" || true
   else
     printf 'Package not installed: %s\n' "\$package"
@@ -565,11 +565,11 @@ wait_package_manager_idle
 for package in com.pocketshell.app.test com.pocketshell.app; do
   '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
 done
-printf 'Focused app walkthrough package state reset without package deletion\n'
+printf 'COLD-RESET: focused app walkthrough package state reset without package deletion\n'
 RESET_SCRIPT
 }
 
-install_app_walkthrough_apks_script() {
+cold_reset_install_app_walkthrough_apks_script() {
   cat <<INSTALL_SCRIPT
 set -euo pipefail
 wait_package_manager_idle() {
@@ -589,7 +589,7 @@ post_install_removal_seen() {
 uninstall_with_idle_wait() {
   local package="\$1"
   if '$ADB' shell pm path "\$package" >/dev/null 2>&1; then
-    printf 'Uninstall fallback for incompatible package: %s\n' "\$package"
+    printf 'COLD-RESET: uninstall fallback for incompatible package: %s\n' "\$package"
     '$ADB' uninstall "\$package" || true
   fi
   wait_package_manager_idle
@@ -631,7 +631,7 @@ install_pair() {
   wait_package_manager_idle
 }
 for attempt in {1..3}; do
-  printf 'Focused app walkthrough APK install attempt %s\n' "\$attempt"
+  printf 'COLD-RESET: focused app walkthrough APK install attempt %s\n' "\$attempt"
   '$ADB' logcat -c || true
   install_pair
   stable=true
@@ -650,7 +650,7 @@ for attempt in {1..3}; do
     sleep 1
   done
   if [ "\$stable" = true ]; then
-    printf 'Focused app walkthrough APK install is package-manager idle and stable\n'
+    printf 'COLD-RESET: focused app walkthrough APK install is package-manager idle and stable\n'
     exit 0
   fi
   printf 'Recent package removal context before reinstall:\n' >&2
@@ -659,7 +659,7 @@ for attempt in {1..3}; do
   wait_package_manager_idle
   sleep 3
 done
-printf 'Focused app walkthrough APK install did not stabilize after retries.\n' >&2
+printf 'COLD-RESET: focused app walkthrough APK install did not stabilize after retries.\n' >&2
 exit 1
 INSTALL_SCRIPT
 }
@@ -737,7 +737,7 @@ exit 1
 QUIESCE_SCRIPT
 }
 
-issue_261_stale_db_launch_script() {
+cold_reset_issue_261_stale_db_launch_script() {
   cat <<ISSUE261_SCRIPT
 set -euo pipefail
 
@@ -762,6 +762,7 @@ install_or_fallback_uninstall() {
     return 0
   fi
   if printf '%s\n' "\$output" | grep -q 'INSTALL_FAILED_UPDATE_INCOMPATIBLE'; then
+    printf 'COLD-RESET: uninstall fallback for incompatible app package before stale DB setup\n'
     '$ADB' uninstall com.pocketshell.app >/dev/null 2>&1 || true
     wait_package_manager_idle
     '$ADB' install -r -d -t '$APK_PATH'
@@ -825,6 +826,7 @@ PY
 
 '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
 install_or_fallback_uninstall
+printf 'COLD-RESET: clearing app data before injecting stale Room DB\n'
 '$ADB' shell pm clear com.pocketshell.app
 wait_package_manager_idle
 '$ADB' push "\$stale_db_host" "\$stale_db_device"
@@ -908,7 +910,7 @@ for attempt in \$(seq 1 '$ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS'); do
 done
 
 '$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true
-printf 'Issue #261 stale Room DB launch survived with pid %s\n' "\$pid"
+printf 'COLD-RESET: issue #261 stale Room DB launch survived with pid %s\n' "\$pid"
 printf 'Logcat artifact: %s\n' "\$logcat_file"
 ISSUE261_SCRIPT
 }
@@ -1130,10 +1132,10 @@ run_step "build-app-test-apks" \
 [[ -f "$TEST_APK_PATH" ]] || fail "Android test APK artifact was not created at $TEST_APK_PATH"
 
 ISSUE_261_STALE_DB_STATUS="running"
-run_bash_step "issue-261-stale-db-launch" "$(issue_261_stale_db_launch_script)"
+run_bash_step "cold-reset-issue-261-stale-db-launch" "$(cold_reset_issue_261_stale_db_launch_script)"
 
-run_bash_step "reset-app-packages-before-app-walkthrough" "$(reset_app_packages_script)"
-run_bash_step "install-app-walkthrough-apks" "$(install_app_walkthrough_apks_script)"
+run_bash_step "cold-reset-app-packages-before-app-walkthrough" "$(cold_reset_app_packages_script)"
+run_bash_step "cold-reset-install-app-walkthrough-apks" "$(cold_reset_install_app_walkthrough_apks_script)"
 
 for app_walkthrough_index in "${!APP_WALKTHROUGH_TESTS[@]}"; do
   app_walkthrough_selector="${APP_WALKTHROUGH_TESTS[$app_walkthrough_index]}"
@@ -1161,7 +1163,7 @@ done
 run_step "build-debug-apk" ./gradlew $GRADLE_FLAGS :app:assembleDebug --stacktrace
 [[ -f "$APK_PATH" ]] || fail "APK artifact was not created at $APK_PATH"
 
-run_step "install-debug-apk" "$ADB" install -r "$APK_PATH"
+run_step "update-install-debug-apk" "$ROOT_DIR/scripts/install-update-apk.sh" "$APK_PATH"
 
 GATE_RESULT="PASS"
 GATE_RESULT_MESSAGE="PASS: pre-release confidence gate completed"

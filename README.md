@@ -64,6 +64,10 @@ shims, no legacy paths. The maintainer is the only user.
    adb install -r app-debug.apk
    ```
 
+   The repo helper for this data-preserving update path is
+   `scripts/install-update-apk.sh app-debug.apk`; it runs only
+   `adb install -r` and never clears app data or uninstalls the package.
+
 3. Open PocketShell. The first run will prompt for an SSH host; the
    canonical way to add one is QR-code import (see Quickstart below).
    Manual host entry is still available from the host list.

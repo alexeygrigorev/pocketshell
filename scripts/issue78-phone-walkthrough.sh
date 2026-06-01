@@ -165,6 +165,7 @@ install_apk() {
     return 0
   fi
   if printf '%s\n' "$output" | grep -q 'INSTALL_FAILED_UPDATE_INCOMPATIBLE'; then
+    printf 'COLD-RESET: uninstall fallback for incompatible issue #78 package: %s\n' "$package"
     "$ADB" uninstall "$package" >/dev/null 2>&1 || true
     "$ADB" install -r -d -t "$apk"
     return 0
@@ -177,14 +178,15 @@ install_apks() {
   local test_apk="$VERIFY_ROOT/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk"
   [[ -f "$app_apk" ]] || fail "app APK not found at $app_apk"
   [[ -f "$test_apk" ]] || fail "androidTest APK not found at $test_apk"
-  run_logged "06-install-apks" bash -lc "$(declare -f install_apk); ADB='$ADB'; install_apk com.pocketshell.app '$app_apk'; install_apk com.pocketshell.app.test '$test_apk'"
+  run_logged "06-cold-reset-install-apks" bash -lc "$(declare -f install_apk); ADB='$ADB'; printf 'COLD-RESET: installing app/test APKs for issue #78 walkthrough\n'; install_apk com.pocketshell.app '$app_apk'; install_apk com.pocketshell.app.test '$test_apk'"
   run_logged "06b-wait-package-manager-idle" bash -lc \
     "'$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true; '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true; for i in {1..20}; do '$ADB' shell pm path com.pocketshell.app >/dev/null && '$ADB' shell pm path com.pocketshell.app.test >/dev/null; sleep 1; done"
 }
 
 run_issue78_test() {
   local instrumentation_log="$RUN_DIR/09-issue78-instrumentation.log"
-  run_logged "07-reset-app-and-artifacts" bash -lc \
+  run_logged "07-cold-reset-app-and-artifacts" bash -lc \
+    "printf 'COLD-RESET: clearing app data and issue #78 artifacts\n'; \
     "'$ADB' shell am force-stop com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell am force-stop com.pocketshell.app.test >/dev/null 2>&1 || true; '$ADB' shell pm clear com.pocketshell.app >/dev/null 2>&1 || true; '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true; '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true; '$ADB' shell rm -rf '$DEVICE_ISSUE78_DIR'"
   run_logged "08-clear-logcat" "$ADB" logcat -c
   run_logged "09-issue78-instrumentation" \

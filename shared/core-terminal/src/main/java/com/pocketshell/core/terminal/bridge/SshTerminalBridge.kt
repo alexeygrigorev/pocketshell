@@ -348,14 +348,16 @@ public class SshTerminalBridge(
      *
      * The bridge never installs a sink in production by default. Tests and
      * diagnostics can use it to count producer writes, observe when writes
-     * wait behind a full Termux queue, and estimate drain/update cost from
-     * the time between scheduling `MSG_NEW_INPUT` and Termux's
-     * `onTextChanged` callback.
+     * wait behind a full Termux queue, count bytes actually drained by
+     * Termux's main-thread handler, and estimate drain/update cost from the
+     * time between scheduling `MSG_NEW_INPUT` and Termux's `onTextChanged`
+     * callback.
      */
     public abstract class TraceSink {
         public open fun onFeedStarted(bytes: Int) = Unit
         public open fun onProcessQueueWrite(bytes: Int, durationNanos: Long, waitedForDrain: Boolean) = Unit
         public open fun onDrainMessageScheduled(bytes: Int, pendingMessages: Int, directDispatch: Boolean) = Unit
+        public open fun onProcessOutputDrained(bytes: Int) = Unit
         public open fun onScreenUpdated(bytes: Int, scheduleToCallbackNanos: Long, callbackDurationNanos: Long) = Unit
         public open fun onDirectDrainDispatched(bytes: Int, durationNanos: Long) = Unit
         public open fun onFeedCompleted(bytes: Int, chunks: Int, durationNanos: Long) = Unit
@@ -436,6 +438,7 @@ private class TracingTerminalSessionClient(
 
     override fun onProcessOutputDrained(session: TerminalSession, bytes: Int) {
         if (bytes > 0) {
+            traceState.traceSink.onProcessOutputDrained(bytes)
             traceState.pendingScreenUpdates.add(pollPendingDrainBytes(bytes))
         }
         delegate.onProcessOutputDrained(session, bytes)

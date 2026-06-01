@@ -5,6 +5,7 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.test.core.app.ActivityScenario
@@ -190,6 +191,18 @@ class SettingsPersistenceE2eTest {
         compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG)
             .performScrollToNode(hasTestTag(frenchTag))
         compose.onNodeWithTag(frenchTag, useUnmergedTree = true).performClick()
+
+        // Issue #397: the Voice silence control must make the aggressive
+        // vs conservative trade-off explicit now that the default is a
+        // long-dictation value.
+        compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG)
+            .performScrollToNode(hasTestTag(VOICE_SILENCE_SLIDER_TAG))
+        compose.onNodeWithText("Aggressive", useUnmergedTree = true).assertExists()
+        compose.onNodeWithText("Conservative", useUnmergedTree = true).assertExists()
+        compose.onNodeWithText(
+            "Default is conservative for long dictation; lower values stop more aggressively.",
+            useUnmergedTree = true,
+        ).assertExists()
 
         // ---------------------------------------------------------------
         // Phase 4 — ground-truth: the toggles wrote to SharedPreferences

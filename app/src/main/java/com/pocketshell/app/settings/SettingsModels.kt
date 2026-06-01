@@ -67,11 +67,10 @@ enum class HostDetailViewMode {
  *   recording auto-stops after this many seconds of below-threshold
  *   amplitude. Range: [MIN_VOICE_SILENCE_SECONDS] to
  *   [MAX_VOICE_SILENCE_SECONDS]; default
- *   [DEFAULT_VOICE_SILENCE_SECONDS] matches the historic 5-second
- *   constant in `PromptComposerViewModel.SILENCE_WINDOW_MS`. Issue #125.
- *   Issue #185 raised the minimum bound to 2s so a hand-edited or stray
- *   slider drag cannot leave the user with a sub-2s threshold that
- *   auto-stops on natural mid-sentence pauses.
+ *   [DEFAULT_VOICE_SILENCE_SECONDS]. Issue #125 added the setting.
+ *   Issue #185 raised the minimum bound to 2s; issue #397 makes the
+ *   default much more conservative so natural pauses and quieter speech
+ *   from a distant phone do not cut dictation off mid-thought.
  */
 data class AppSettings(
     val theme: ThemePreference = ThemePreference.System,
@@ -129,12 +128,9 @@ data class AppSettings(
         /**
          * Lowest silence window the user is allowed to configure. Issue
          * #185 raised this from 0.5s to 2.0s after a v0.2.8 feedback
-         * report where dictation auto-stopped mid-sentence. A natural
-         * mid-utterance pause routinely exceeds 0.5s — anything below
-         * ~2s makes the watchdog feel hostile rather than helpful — so
-         * the floor is now 2s. Users who want a tighter window are out
-         * of luck on purpose; the failure mode (auto-stop mid-speech)
-         * was uniformly worse than waiting an extra second.
+         * report where dictation auto-stopped mid-sentence. Issue #397
+         * keeps the low end available only as the explicit aggressive
+         * choice; the default now lives far away from this floor.
          *
          * Persisted values predating #185 that fell below the new floor
          * are clamped on read by [SettingsRepository.readSnapshot], so a
@@ -142,18 +138,18 @@ data class AppSettings(
          * SharedPreferences blob carries a legacy sub-2s value.
          */
         const val MIN_VOICE_SILENCE_SECONDS: Float = 2f
-        const val MAX_VOICE_SILENCE_SECONDS: Float = 10f
+        const val MAX_VOICE_SILENCE_SECONDS: Float = 60f
 
         /**
-         * Default silence window used on fresh installs. Issue #185
-         * documents the chosen value as 5 seconds — well above the 2s
-         * floor — so a user who never visits Settings still gets a
-         * forgiving window. The historic constant
-         * `PromptComposerViewModel.SILENCE_WINDOW_MS` (5000 ms) is the
-         * same value expressed in milliseconds.
+         * Default silence window used on fresh installs. Issue #397 moves
+         * the default to 30 seconds: long enough to behave like a
+         * long-dictation mode through natural pauses and quieter distant
+         * speech, while still eventually recovering if the user walks away
+         * from an active mic. Users who want faster auto-stop can choose an
+         * aggressive value in Settings.
          */
-        const val DEFAULT_VOICE_SILENCE_SECONDS: Float = 5f
-        const val VOICE_SILENCE_STEP_SECONDS: Float = 0.5f
+        const val DEFAULT_VOICE_SILENCE_SECONDS: Float = 30f
+        const val VOICE_SILENCE_STEP_SECONDS: Float = 1f
 
         /**
          * Default for [AppSettings.showSystemNotes] — issue #176. When

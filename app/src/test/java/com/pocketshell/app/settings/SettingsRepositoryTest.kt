@@ -237,18 +237,18 @@ class SettingsRepositoryTest {
     }
 
     @Test
-    fun `default voice silence threshold is at least two seconds`() {
-        // Issue #185 acceptance: "Default silence threshold raised to >=
-        // 2000ms (document the chosen value)." The chosen default is 5s.
-        // Lock it in as both the documented value and the >= 2s
-        // contract so a future tweak below 2s gets caught.
+    fun `default voice silence threshold is conservative for long dictation`() {
+        // Issue #397: default auto-stop should be much less sensitive than
+        // the earlier 5s window. Pin 30s as the long-dictation default so
+        // natural pauses and quieter distant speech do not stop recording
+        // mid-thought.
         assertTrue(
             "default silence threshold (${AppSettings.DEFAULT_VOICE_SILENCE_SECONDS}s) must be >= 2s",
             AppSettings.DEFAULT_VOICE_SILENCE_SECONDS >= 2f,
         )
         assertEquals(
-            "issue #185 documents the default as 5s; raise or lower with care",
-            5f,
+            "issue #397 documents the default as 30s; raise or lower with care",
+            30f,
             AppSettings.DEFAULT_VOICE_SILENCE_SECONDS,
             0f,
         )
@@ -291,10 +291,10 @@ class SettingsRepositoryTest {
     @Test
     fun `setVoiceSilenceThresholdSeconds persists and round-trips`() {
         val repo = SettingsRepository(context)
-        repo.setVoiceSilenceThresholdSeconds(2.5f)
-        assertEquals(2.5f, repo.settings.value.voiceSilenceThresholdSeconds, 0.01f)
+        repo.setVoiceSilenceThresholdSeconds(12f)
+        assertEquals(12f, repo.settings.value.voiceSilenceThresholdSeconds, 0.01f)
         assertEquals(
-            2.5f,
+            12f,
             SettingsRepository(context).settings.value.voiceSilenceThresholdSeconds,
             0.01f,
         )

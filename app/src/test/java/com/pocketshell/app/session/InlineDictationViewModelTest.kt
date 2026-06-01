@@ -118,9 +118,9 @@ class InlineDictationViewModelTest {
 
     /**
      * In-memory [PromptComposerViewModel.VoiceSettingsSnapshot] for unit
-     * tests. Defaults preserve the historic 5s silence window and the
-     * "no language hint" behaviour so the existing FSM assertions keep
-     * passing without per-test wiring.
+     * tests. Defaults preserve the production long-dictation silence
+     * window and the "no language hint" behaviour so the FSM assertions
+     * keep passing without per-test wiring.
      */
     private class FakeVoiceSettings(
         private var window: Long = InlineDictationViewModel.SILENCE_WINDOW_MS,
@@ -480,14 +480,13 @@ class InlineDictationViewModelTest {
         collector.join()
     }
 
-    // -- 5s silence auto-stop -----------------------------------------------
+    // -- Configured silence auto-stop ---------------------------------------
 
     @Test
-    fun silenceForFiveSecondsAutoStopsRecording() = runTest {
+    fun silenceWindowAutoStopsRecording() = runTest {
         // Mirrors the composer's silence-watchdog test 1:1. The ViewModel
-        // owns its own constants, but they must equal the composer's per
-        // D10 — we assert on `InlineDictationViewModel.SILENCE_WINDOW_MS`
-        // here so the test would fail loudly if the constant drifted.
+        // owns its own constant, but it must equal the composer's
+        // long-dictation fallback.
         val mic = FakeMicCapture(amplitudes = listOf(0.5f, 0.5f, 0.5f) + List(500) { 0f })
         val vm = newVm(
             mic = mic,
@@ -535,7 +534,7 @@ class InlineDictationViewModelTest {
 
         // ~55 polls (= 2.75s) burns through the leading loud chunk, the
         // 50-quiet stretch, and the resetting loud sample — but stops
-        // short of the 5s window, so the watchdog has not fired yet.
+        // short of the configured window, so the watchdog has not fired yet.
         advanceTimeBy(55L * InlineDictationViewModel.SAMPLE_INTERVAL_MS)
         runCurrent()
         assertEquals(RecordingState.Recording, vm.uiState.value.recording)
@@ -543,6 +542,41 @@ class InlineDictationViewModelTest {
         advanceTimeBy(InlineDictationViewModel.SILENCE_WINDOW_MS + 1_000L)
         advanceUntilIdle()
         assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+    }
+
+    @Test
+    fun defaultLongDictationWindowKeepsRecordingThroughTenSecondPause() = runTest {
+        // Issue #397: inline dictation uses the same conservative default as
+        // the prompt composer. A transient 10s pause must not stop recording
+        // before the user resumes speaking.
+        val mic = FakeMicCapture(amplitudes = listOf(0.5f, 0.5f, 0.5f) + List(800) { 0f })
+        val vm = newVm(
+            mic = mic,
+            whisper = fakeWhisperClient { Result.success("too early") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { testScheduler.currentTime },
+        )
+
+        try {
+            vm.onMicTap()
+            runCurrent()
+            assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+            advanceTimeBy(3L * InlineDictationViewModel.SAMPLE_INTERVAL_MS)
+            runCurrent()
+            advanceTimeBy(10_000L)
+            runCurrent()
+
+            assertEquals(
+                "default 30s silence window must survive a 10s pause",
+                RecordingState.Recording,
+                vm.uiState.value.recording,
+            )
+            assertEquals(0, mic.stopCount)
+        } finally {
+            vm.onMicTap()
+            advanceUntilIdle()
+        }
     }
 
     // -- Whisper failure surfaced as error ----------------------------------

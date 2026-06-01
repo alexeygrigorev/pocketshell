@@ -42,7 +42,7 @@ import javax.inject.Inject
  * ## State machine
  *
  * ```
- *   Idle  ──tap mic──▶  Recording  ──tap mic / 5s silence──▶  Transcribing
+ *   Idle  ──tap mic──▶  Recording  ──tap mic / configured silence──▶  Transcribing
  *    ▲                                                              │
  *    └──────────────  Whisper success / failure  ◀──────────────────┘
  * ```
@@ -50,8 +50,8 @@ import javax.inject.Inject
  * - `Idle` is the initial state. The mic FAB shows the accent fill, no
  *   pulse. Tapping it transitions to `Recording`.
  * - `Recording` opens the mic via [AudioRecorder.start] and starts the
- *   amplitude / silence-watchdog loop. Tapping the mic again, or 5s of
- *   silence below [SILENCE_AMPLITUDE_THRESHOLD], transitions to
+ *   amplitude / silence-watchdog loop. Tapping the mic again, or the
+ *   configured silence window below [SILENCE_AMPLITUDE_THRESHOLD], transitions to
  *   `Transcribing`.
  * - `Transcribing` calls [com.pocketshell.core.voice.WhisperClient.transcribe]
  *   on the captured WAV bytes. On success the transcription is appended
@@ -221,7 +221,7 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     // Test seam: defaults to wall-clock System.currentTimeMillis at
-    // production, but tests substitute a virtual clock so the 5s silence
+    // production, but tests substitute a virtual clock so the silence
     // window is exercised deterministically.
     internal var clock: () -> Long = { System.currentTimeMillis() }
 
@@ -410,8 +410,8 @@ public class PromptComposerViewModel @Inject constructor(
      * The silence clock resets every time we see amplitude above the
      * threshold, so a brief pause mid-sentence doesn't cut the user off.
      * It is *not* reset by user interactions (typing, scrolling) — only
-     * by the audio level itself, per the issue's "5s silence auto-stop
-     * (timer reset on amplitude change above a threshold)".
+     * by the audio level itself, per the auto-stop contract: the timer
+     * resets on amplitude change above a threshold.
      */
     private suspend fun sampleAmplitudeAndAutoStopOnSilence() {
         var lastLoudAtMs: Long = clock()
@@ -1074,8 +1074,8 @@ public class PromptComposerViewModel @Inject constructor(
     public interface VoiceSettingsSnapshot {
         /**
          * Auto-stop silence window in milliseconds. Defaults to the
-         * historic 5-second constant when no preference is stored, so
-         * fresh installs feel identical to the pre-#125 behaviour.
+         * long-dictation fallback when no preference is stored, so fresh
+         * installs are conservative about stopping mid-speech.
          */
         public fun silenceWindowMs(): Long
 
@@ -1178,17 +1178,18 @@ public class PromptComposerViewModel @Inject constructor(
         public const val SILENCE_AMPLITUDE_THRESHOLD: Float = 0.04f
 
         /**
-         * Default silence window — once this much time passes without
+         * Fallback silence window — once this much time passes without
          * amplitude crossing [SILENCE_AMPLITUDE_THRESHOLD], the recording
-         * is auto-stopped. Per D10: "auto-stop after 5s silence".
+         * is auto-stopped.
          *
          * Issue #125 made the window user-configurable from Settings →
-         * Voice; this constant is now only the fallback used when no
-         * preference has been stored yet. The live value comes from
-         * [VoiceSettingsSnapshot.silenceWindowMs] and is sampled at the
-         * start of each recording.
+         * Voice; issue #397 raised the fallback/default to 30s so natural
+         * pauses and quieter distant speech do not stop recording
+         * mid-thought. The live value comes from
+         * [VoiceSettingsSnapshot.silenceWindowMs] and is sampled at the start
+         * of each recording.
          */
-        public const val SILENCE_WINDOW_MS: Long = 5_000L
+        public const val SILENCE_WINDOW_MS: Long = 30_000L
 
         /**
          * Amplitude poll interval. 50ms is fast enough to drive a 20fps

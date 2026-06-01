@@ -57,7 +57,7 @@ Configuration: API key stored in Android Keystore. Future: support self-hosted `
 
 Behaviours:
 - Bottom sheet, modal over terminal (terminal dims behind)
-- Big mic button: tap to start, tap again to stop; auto-stop after 5s silence
+- Big mic button starts recording on tap and stops on the next tap. It auto-stops after the configured silence window (30s default, adjustable from 2s to 60s)
 - Live partial transcription streams into the text area as you speak
 - Text area is editable — tap any word to fix before sending
 - `Insert` writes to PTY without submitting; `Send` submits with Enter; `Snippets` opens the saved-prompt library
@@ -67,6 +67,8 @@ Behaviours:
 ### Inline dictation (escape hatch)
 
 For short shell commands when the prompt composer is overkill. Mic icon lives in the key bar. Tap → words stream directly into the terminal at cursor. Tap again → stop. No review step.
+
+Inline dictation uses the same configured silence window as the prompt composer (30s default, adjustable from 2s to 60s).
 
 Used for: `git status`, file names mid-command, dictating an `ssh` target.
 
@@ -155,7 +157,7 @@ Keyboard down:
 ## Settings
 
 Single "Input methods" settings screen with sub-pages:
-- Voice: Whisper API key, language, auto-stop silence threshold
+- Voice: Whisper API key, language, auto-stop silence threshold (30s default, 2s-60s range)
 - Key bar: which keys appear, ordering
 - Snippets: organize, share, per-host
 

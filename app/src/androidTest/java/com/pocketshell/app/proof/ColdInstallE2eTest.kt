@@ -92,7 +92,7 @@ import org.junit.runner.RunWith
  * 8. Re-launch the activity into the host list, open Settings, and
  *    assert the default settings snapshot matches [AppSettings] defaults
  *    (theme = System, terminal font = 14sp, tmux-on-attach = true,
- *    voice language = auto, voice silence threshold = 5s).
+ *    voice language = auto, voice silence threshold = 30s).
  *
  * **Production paths the test breaks against:**
  *

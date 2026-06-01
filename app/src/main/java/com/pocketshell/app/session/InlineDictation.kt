@@ -100,7 +100,7 @@ import javax.inject.Inject
  * the screen wires that to `terminalState.writeInput(...)`.
  *
  * ```
- *   Idle  ──tap mic──▶  Recording  ──tap mic / 5s silence──▶  Transcribing
+ *   Idle  ──tap mic──▶  Recording  ──tap mic / configured silence──▶  Transcribing
  *    ▲                                                              │
  *    └──────────────  Whisper success / failure  ◀──────────────────┘
  * ```
@@ -108,8 +108,8 @@ import javax.inject.Inject
  * - `Idle` — the mic slot renders in the secondary text colour. Tapping
  *   transitions to `Recording`.
  * - `Recording` — the mic slot fills with the accent colour. A 50ms
- *   amplitude poll loop drives the 5s silence watchdog (D10). Tapping
- *   again, or 5s of below-threshold amplitude, transitions to
+ *   amplitude poll loop drives the configured silence watchdog. Tapping
+ *   again, or the configured duration of below-threshold amplitude, transitions to
  *   `Transcribing`.
  * - `Transcribing` — the mic slot shows a small inline spinner. When the
  *   Whisper round-trip resolves we emit the text into [transcriptions]
@@ -417,14 +417,14 @@ public class InlineDictationViewModel @Inject constructor(
         public const val SILENCE_AMPLITUDE_THRESHOLD: Float = 0.04f
 
         /**
-         * Default silence window. Per D10 the historic value is 5s; this
-         * constant is now only the fallback used when no preference has
-         * been stored. Issue #125 made the window user-configurable from
+         * Fallback silence window. Issue #397 raised this to 30s so inline
+         * dictation matches the prompt composer and is much less likely to
+         * stop mid-speech. Issue #125 made the window user-configurable from
          * Settings → Voice; the live value comes from
          * [PromptComposerViewModel.VoiceSettingsSnapshot.silenceWindowMs]
          * sampled at the start of each recording.
          */
-        public const val SILENCE_WINDOW_MS: Long = 5_000L
+        public const val SILENCE_WINDOW_MS: Long = 30_000L
 
         /** Same poll interval as [PromptComposerViewModel.SAMPLE_INTERVAL_MS]. */
         public const val SAMPLE_INTERVAL_MS: Long = 50L

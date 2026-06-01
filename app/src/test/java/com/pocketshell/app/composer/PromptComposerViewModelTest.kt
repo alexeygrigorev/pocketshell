@@ -35,7 +35,7 @@ import org.robolectric.annotation.Config
  * criteria are demonstrably met without an emulator:
  *
  *  - Idle -> Recording -> (manual stop) -> Transcribing -> Idle
- *  - Idle -> Recording -> (5s silence auto-stop) -> Transcribing -> Idle
+ *  - Idle -> Recording -> (configured silence auto-stop) -> Transcribing -> Idle
  *  - Whisper success appends to existing draft (never replaces)
  *  - Whisper failure surfaces an error and returns to Idle
  *
@@ -121,10 +121,9 @@ class PromptComposerViewModelTest {
 
     /**
      * In-memory [PromptComposerViewModel.VoiceSettingsSnapshot] for unit
-     * tests. The default mirrors the historic 5s window + no language
-     * hint so every existing assertion still holds — issue #125-specific
-     * tests override the values via [SettingsRepositoryTest]'s explicit
-     * factory call site below.
+     * tests. The default mirrors the production long-dictation window
+     * and no language hint; issue-specific tests override values through
+     * the factory call site below.
      */
     private class FakeVoiceSettings(
         private var window: Long = PromptComposerViewModel.SILENCE_WINDOW_MS,
@@ -238,15 +237,15 @@ class PromptComposerViewModelTest {
         assertEquals("Tell me from the agent", vm.uiState.value.draft)
     }
 
-    // -- 5s silence auto-stop -----------------------------------------------
+    // -- Configured silence auto-stop ---------------------------------------
 
     @Test
-    fun silenceForFiveSecondsAutoStopsRecording() = runTest {
+    fun silenceWindowAutoStopsRecording() = runTest {
         // Amplitudes: first three loud, then nothing.
         val mic = FakeMicCapture(amplitudes = listOf(0.5f, 0.5f, 0.5f) + List(500) { 0f })
         // Bind the ViewModel's clock to the virtual scheduler so the
-        // 5s silence window advances in the same coordinate system the
-        // test does via `advanceTimeBy`.
+        // silence window advances in the same coordinate system the test
+        // does via `advanceTimeBy`.
         val vm = newVm(
             mic = mic,
             whisper = fakeWhisperClient { Result.success("auto-stopped") },
@@ -263,7 +262,7 @@ class PromptComposerViewModelTest {
         advanceTimeBy(3L * PromptComposerViewModel.SAMPLE_INTERVAL_MS)
         runCurrent()
 
-        // Advance past the 5s silence window — auto-stop should fire.
+        // Advance past the configured silence window — auto-stop should fire.
         advanceTimeBy(PromptComposerViewModel.SILENCE_WINDOW_MS + 1_000L)
         advanceUntilIdle()
 
@@ -294,8 +293,8 @@ class PromptComposerViewModelTest {
 
         // Drain ~55 polls (2.75s) — that consumes the leading loud chunk,
         // the 50-sample quiet run, and the resetting loud sample. We
-        // stop short of the 5s window so the silence watchdog has not
-        // yet fired by this point.
+        // stop short of the configured window so the silence watchdog has
+        // not yet fired by this point.
         advanceTimeBy(55L * PromptComposerViewModel.SAMPLE_INTERVAL_MS)
         runCurrent()
         assertEquals(RecordingState.Recording, vm.uiState.value.recording)
@@ -305,6 +304,41 @@ class PromptComposerViewModelTest {
         advanceTimeBy(PromptComposerViewModel.SILENCE_WINDOW_MS + 1_000L)
         advanceUntilIdle()
         assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+    }
+
+    @Test
+    fun defaultLongDictationWindowKeepsRecordingThroughTenSecondPause() = runTest {
+        // Issue #397: the default must be much less sensitive than the old
+        // 5s window. Ten seconds of transient silence after speech is a
+        // natural long-dictation pause and must not auto-stop by default.
+        val mic = FakeMicCapture(amplitudes = listOf(0.5f, 0.5f, 0.5f) + List(800) { 0f })
+        val vm = newVm(
+            mic = mic,
+            whisper = fakeWhisperClient { Result.success("too early") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { testScheduler.currentTime },
+        )
+
+        try {
+            vm.onMicTap()
+            runCurrent()
+            assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+            advanceTimeBy(3L * PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+            runCurrent()
+            advanceTimeBy(10_000L)
+            runCurrent()
+
+            assertEquals(
+                "default 30s silence window must survive a 10s pause",
+                RecordingState.Recording,
+                vm.uiState.value.recording,
+            )
+            assertEquals(0, mic.stopCount)
+        } finally {
+            vm.cancelRecording()
+            advanceUntilIdle()
+        }
     }
 
     // -- Whisper failure surfaced as error -----------------------------------
@@ -1310,8 +1344,8 @@ class PromptComposerViewModelTest {
 
     @Test
     fun voiceSettingsCustomSilenceWindowAutoStopsAtConfiguredThreshold() = runTest {
-        // Configure a 1.5s window — well below the historic 5s default —
-        // and verify the recording auto-stops just past the new bound.
+        // Configure a 1.5s window — well below the long-dictation default
+        // — and verify the recording auto-stops just past the new bound.
         val mic = FakeMicCapture(amplitudes = listOf(0.5f, 0.5f, 0.5f) + List(500) { 0f })
         val customWindowMs = 1_500L
         val vm = newVm(
@@ -1332,7 +1366,7 @@ class PromptComposerViewModelTest {
         assertEquals(RecordingState.Recording, vm.uiState.value.recording)
 
         // Advance past the configured 1.5s window — the watchdog should
-        // fire even though the historic 5s constant has not elapsed.
+        // fire even though the default fallback has not elapsed.
         advanceTimeBy(customWindowMs + 500L)
         advanceUntilIdle()
 

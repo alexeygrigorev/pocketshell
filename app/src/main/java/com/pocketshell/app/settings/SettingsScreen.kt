@@ -680,8 +680,9 @@ private fun DefaultHostOptionRow(
  *  - **Auto-stop silence threshold** — slider over
  *    [AppSettings.MIN_VOICE_SILENCE_SECONDS] /
  *    [AppSettings.MAX_VOICE_SILENCE_SECONDS] in
- *    [AppSettings.VOICE_SILENCE_STEP_SECONDS] increments. The current
- *    value is rendered next to the label as `Xs`. Both the prompt
+ *    [AppSettings.VOICE_SILENCE_STEP_SECONDS] increments, labelled from
+ *    aggressive to conservative. The current value is rendered next to
+ *    the label as `Xs`. Both the prompt
  *    composer and inline dictation read the latest snapshot before each
  *    recording starts, so a slider drag while the mic is idle takes
  *    effect on the next tap without any restart.
@@ -800,7 +801,7 @@ private fun VoiceSection(
             }
             Spacer(modifier = Modifier.height(2.dp))
             Text(
-                text = "Recording auto-stops after this many seconds of silence.",
+                text = "Default is conservative for long dictation; lower values stop more aggressively.",
                 color = PocketShellColors.TextSecondary,
                 fontSize = 12.sp,
             )
@@ -824,6 +825,22 @@ private fun VoiceSection(
                     .fillMaxWidth()
                     .testTag(VOICE_SILENCE_SLIDER_TAG),
             )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Aggressive",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 11.sp,
+                )
+                Text(
+                    text = "Conservative",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 11.sp,
+                )
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -965,8 +982,8 @@ internal fun VoiceApiKeyEntryDialog(
 
 /**
  * Pretty-format the silence threshold for the inline `Xs` label. Drops
- * the trailing `.0` for whole-second values so the label reads `5s`
- * rather than `5.0s`; otherwise renders one decimal (`1.5s`).
+ * the trailing `.0` for whole-second values so the label reads `30s`
+ * rather than `30.0s`; otherwise renders one decimal (`2.5s`).
  */
 internal fun formatThresholdLabel(seconds: Float): String {
     val rounded = (seconds * 10f).roundToInt() / 10f

@@ -15,7 +15,7 @@ Captured 2026-05-21 during conceptual planning, before any code.
 | D7 | Server-side recurring jobs via `pocketshell jobs daemon` on each host | Jobs survive phone offline / sleep. Trade-off: host bootstrap is a first-class onboarding step for the unified `pocketshell` helper. |
 | D8 | Termius-inspired design language, built in shared `ui-kit` module | Both apps converge on one visual language. Avoids per-screen redesign. |
 | D9 | Voice input is first-class. Engine: Whisper via OpenAI Audio Transcriptions API. | Better than Android `SpeechRecognizer` for technical content. Per-request cost accepted. Existing `openai-transcribe` skill is the integration reference. |
-| D10 | Mic trigger: tap-to-toggle, auto-stop after 5s silence | Best for long agent prompts. Hold-to-talk is fatiguing past 10s. |
+| D10 | Mic trigger: tap-to-toggle, auto-stop after configurable silence (30s default, 2s-60s range) | Best for long agent prompts. Hold-to-talk is fatiguing past 10s. The conservative default avoids cutting off natural pauses while the setting still allows more aggressive auto-stop when wanted. |
 | D11 | Prompt composer is a bottom sheet (modal over terminal) | Cleanest hierarchy for review-and-send. Terminal dims behind. |
 | D12 | Key bar always visible above the keyboard (only while keyboard is up) | One-tap Esc/Tab/Ctrl/Alt/arrows. Matches "super smooth" requirement, zero discovery cost. |
 | ~~D13~~ | ~~Chord palette opens on long-press of ⚡ in the key bar~~ | Superseded by D18. |

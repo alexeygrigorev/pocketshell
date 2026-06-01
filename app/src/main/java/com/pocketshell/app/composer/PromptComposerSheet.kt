@@ -1370,7 +1370,7 @@ internal const val COMPOSER_SILENCE_THRESHOLD_HINT_TAG = "prompt-composer-silenc
 /**
  * Issue #185: pretty-format the silence threshold for the composer's
  * inline hint. Drops the trailing `.0` for whole-second values so the
- * hint reads `Auto-stops after 5s silence` rather than `5.0s`; renders
+ * hint reads `Auto-stops after 30s silence` rather than `30.0s`; renders
  * one decimal otherwise (`2.5s`). Mirrors the same rounding rule used
  * by `SettingsScreen.formatThresholdLabel` so the Settings slider value
  * and the composer hint never disagree by a rounding artifact.
@@ -1455,10 +1455,10 @@ private fun PromptComposerRecordingListeningPreview() {
                     recording = PromptComposerViewModel.RecordingState.Recording,
                     amplitude = 0f,
                     hasDetectedSpeech = false,
-                    // Issue #185: show the inline "auto-stops after 5s
+                    // Issue #397: show the inline "auto-stops after 30s
                     // silence" hint so the design surface reflects what
                     // the user sees while the mic is open.
-                    silenceThresholdSeconds = 5f,
+                    silenceThresholdSeconds = 30f,
                     error = null,
                 ),
                 onClose = {},
@@ -1491,7 +1491,7 @@ private fun PromptComposerRecordingCapturingPreview() {
                     // Issue #185: hint stays visible across the
                     // listening -> capturing sub-state flip so the user
                     // keeps the auto-stop mental model while speaking.
-                    silenceThresholdSeconds = 5f,
+                    silenceThresholdSeconds = 30f,
                     error = null,
                 ),
                 onClose = {},

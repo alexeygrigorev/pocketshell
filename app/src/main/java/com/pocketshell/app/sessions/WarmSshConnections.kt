@@ -23,6 +23,8 @@ import javax.inject.Singleton
  */
 @Singleton
 class WarmSshConnections @Inject constructor() {
+    private var nowMs: () -> Long = { System.nanoTime() / NANOS_PER_MILLI }
+    private var reuseTtlMs: Long = DEFAULT_REUSE_TTL_MS
     private var connector: SshConnector = SshConnector { target, passphrase ->
         SshOpenTelemetry.record(
             source = SSH_SOURCE_WARM_HOST_CONNECT,
@@ -40,8 +42,14 @@ class WarmSshConnections @Inject constructor() {
         )
     }
 
-    internal constructor(connector: SshConnector) : this() {
+    internal constructor(
+        connector: SshConnector,
+        nowMs: () -> Long = { System.nanoTime() / NANOS_PER_MILLI },
+        reuseTtlMs: Long = DEFAULT_REUSE_TTL_MS,
+    ) : this() {
         this.connector = connector
+        this.nowMs = nowMs
+        this.reuseTtlMs = reuseTtlMs
     }
 
     private val mutex = Mutex()
@@ -92,7 +100,7 @@ class WarmSshConnections @Inject constructor() {
         val closeGeneration = closeGeneration(target)
         val current = entry ?: return@withLock null
         if (!current.target.matches(target)) return@withLock null
-        if (!current.session.isConnected) {
+        if (!current.isFresh(nowMs(), reuseTtlMs) || !current.session.isConnected) {
             closeLocked(target)
             return@withLock null
         }
@@ -142,14 +150,19 @@ class WarmSshConnections @Inject constructor() {
     ): Result<SshSession> {
         entry?.let { current ->
             if (current.target.matches(target) && current.session.isConnected) {
-                if (closeRequestedSince(target, closeGeneration)) {
+                if (!current.isFresh(nowMs(), reuseTtlMs)) {
+                    closeLocked(target)
+                } else if (closeRequestedSince(target, closeGeneration)) {
                     closeLocked(target)
                     return Result.failure(WarmSshConnectionAbandonedException())
+                } else {
+                    return Result.success(current.session)
                 }
-                return Result.success(current.session)
             }
-            runCatching { current.session.close() }
-            entry = null
+            if (entry != null) {
+                runCatching { current.session.close() }
+                entry = null
+            }
         }
 
         val result = connector.connect(target, passphrase)
@@ -158,7 +171,7 @@ class WarmSshConnections @Inject constructor() {
             runCatching { session.close() }
             return Result.failure(WarmSshConnectionAbandonedException())
         }
-        entry = Entry(target = target, session = session)
+        entry = Entry(target = target, session = session, createdAtMs = nowMs())
         return Result.success(session)
     }
 
@@ -172,7 +185,10 @@ class WarmSshConnections @Inject constructor() {
     private data class Entry(
         val target: WarmSshTarget,
         val session: SshSession,
-    )
+        val createdAtMs: Long,
+    ) {
+        fun isFresh(nowMs: Long, reuseTtlMs: Long): Boolean = nowMs - createdAtMs <= reuseTtlMs
+    }
 
     private fun closeGeneration(target: WarmSshTarget): Long =
         synchronized(closeGenerationLock) {
@@ -193,6 +209,11 @@ class WarmSshConnections @Inject constructor() {
     private class WarmSshConnectionAbandonedException : CancellationException(
         "Warm SSH connection abandoned",
     )
+
+    private companion object {
+        const val DEFAULT_REUSE_TTL_MS: Long = 30_000L
+        const val NANOS_PER_MILLI: Long = 1_000_000L
+    }
 }
 
 data class WarmSshTarget(

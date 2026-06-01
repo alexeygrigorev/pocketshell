@@ -39,6 +39,47 @@ class WarmSshConnectionsTest {
     }
 
     @Test
+    fun takeRejectsExpiredWarmSessionEvenWhenConnected() = runTest {
+        var nowMs = 0L
+        val session = FakeSshSession()
+        val connector = QueueConnector(session)
+        val warm = WarmSshConnections(
+            connector = connector,
+            nowMs = { nowMs },
+            reuseTtlMs = 1_000L,
+        )
+
+        warm.warm(TARGET, passphrase = null).getOrThrow()
+        nowMs = 1_001L
+
+        assertEquals(null, warm.take(TARGET))
+        assertTrue(session.closed)
+        assertEquals(1, connector.connectCount)
+    }
+
+    @Test
+    fun warmReplacesExpiredSameHostConnection() = runTest {
+        var nowMs = 0L
+        val first = FakeSshSession()
+        val second = FakeSshSession()
+        val connector = QueueConnector(first, second)
+        val warm = WarmSshConnections(
+            connector = connector,
+            nowMs = { nowMs },
+            reuseTtlMs = 1_000L,
+        )
+
+        warm.warm(TARGET, passphrase = null).getOrThrow()
+        nowMs = 1_001L
+        warm.warm(TARGET, passphrase = null).getOrThrow()
+
+        assertTrue(first.closed)
+        assertFalse(second.closed)
+        assertEquals(2, connector.connectCount)
+        assertSame(second, warm.take(TARGET))
+    }
+
+    @Test
     fun warmingDifferentHostClosesPreviousConnection() = runTest {
         val first = FakeSshSession()
         val second = FakeSshSession()

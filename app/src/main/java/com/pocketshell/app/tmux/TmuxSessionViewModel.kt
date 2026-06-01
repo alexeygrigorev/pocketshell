@@ -24,6 +24,7 @@ import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
+import com.pocketshell.app.session.canRetryAgentStream
 import com.pocketshell.app.session.reconcileAgentEvents
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
@@ -1807,6 +1808,23 @@ public class TmuxSessionViewModel @Inject constructor(
         _connectionStatus.value = ConnectionStatus.Connected("test", 0, "test")
     }
 
+    internal fun attachSessionForAgentRetryForTest(session: SshSession) {
+        sessionRef = session
+        activeTarget = ConnectionTarget(
+            hostId = 0L,
+            hostName = "test",
+            host = "test",
+            port = 0,
+            user = "test",
+            keyPath = "",
+            passphrase = null,
+            sessionName = "test",
+            startDirectory = null,
+        )
+        refreshReconnectAvailability()
+        _connectionStatus.value = ConnectionStatus.Connected("test", 0, "test")
+    }
+
     internal fun replaceClientForTest(
         hostId: Long,
         hostName: String,
@@ -2596,15 +2614,7 @@ public class TmuxSessionViewModel @Inject constructor(
             agentRepository.readInitialEvents(session, detection)
         }.getOrDefault(emptyList())
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
-        setAgentConversation(
-            paneId,
-            AgentConversationUiState(
-                detection = detection,
-                events = boundedDistinctEvents(initialEvents),
-                selectedTab = SessionTab.Terminal,
-                syncStatus = AgentConversationSyncStatus.Live,
-            ),
-        )
+        markAgentTailLive(paneId, detection, initialEvents)
         // Issue #160: OpenCode now tails its JSONL via `session.tail`
         // identically to Claude and Codex. No more polling branch — the
         // tmux pane gets the same real-time refresh as the raw-SSH route.
@@ -2743,6 +2753,55 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    public fun retryAgentConversationStreamForPane(paneId: String): Boolean {
+        val session = sessionRef?.takeIf { it.isConnected } ?: return false
+        if (_connectionStatus.value !is ConnectionStatus.Connected) return false
+        val pane = paneRows[paneId] ?: return false
+        val guard = RuntimeRefreshGuard(
+            generation = connectGeneration,
+            target = activeTarget ?: return false,
+            client = clientRef ?: return false,
+        )
+        val currentDetection = markAgentConversationRetrying(paneId) ?: return false
+        paneAgentJobs.remove(paneId)?.cancel()
+        paneAgentTailGenerations.remove(paneId)
+        paneAgentJobs[paneId] = bridgeScope.launch {
+            retryAgentConversationForPane(
+                session = session,
+                pane = pane,
+                currentDetection = currentDetection,
+                refreshGuard = guard,
+            )
+        }
+        return true
+    }
+
+    private suspend fun retryAgentConversationForPane(
+        session: SshSession,
+        pane: TmuxPaneState,
+        currentDetection: AgentDetection,
+        refreshGuard: RuntimeRefreshGuard,
+    ) {
+        val detection = runCatching {
+            agentRepository.detectForPane(
+                session = session,
+                cwd = pane.cwd,
+                paneTty = pane.paneTty,
+                paneCommand = pane.currentCommand,
+            )
+        }.getOrNull()
+        if (!isCurrentRuntime(refreshGuard)) return
+        if (detection == null) {
+            markAgentConversationSyncStatus(
+                paneId = pane.paneId,
+                detection = currentDetection,
+                syncStatus = AgentConversationSyncStatus.LogUnavailable,
+            )
+            return
+        }
+        startAgentConversationForPane(session, pane.paneId, detection, refreshGuard)
+    }
+
     private fun appendAgentEvents(paneId: String, events: List<ConversationEvent>) {
         if (events.isEmpty()) return
         updateAgentConversation(paneId) { current ->
@@ -2788,23 +2847,52 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    private fun markAgentConversationRetrying(paneId: String): AgentDetection? {
+        var retryDetection: AgentDetection? = null
+        updateAgentConversation(paneId) { current ->
+            val detection = current.detection
+            if (detection == null || !current.syncStatus.canRetryAgentStream) {
+                current
+            } else {
+                retryDetection = detection
+                current.copy(syncStatus = AgentConversationSyncStatus.Retrying)
+            }
+        }
+        return retryDetection
+    }
+
     private fun markRestoredAgentTailLive(
         paneId: String,
         detection: AgentDetection,
         fallbackEvents: List<ConversationEvent>,
+    ) {
+        markAgentTailLive(paneId, detection, fallbackEvents, preserveDifferentDetection = true)
+    }
+
+    private fun markAgentTailLive(
+        paneId: String,
+        detection: AgentDetection,
+        initialEvents: List<ConversationEvent>,
+        preserveDifferentDetection: Boolean = false,
     ) {
         _agentConversations.update { conversations ->
             val current = conversations[paneId]
             val updated = when {
                 current == null -> AgentConversationUiState(
                     detection = detection,
-                    events = boundedDistinctEvents(fallbackEvents),
+                    events = boundedDistinctEvents(initialEvents),
                     selectedTab = SessionTab.Terminal,
                     syncStatus = AgentConversationSyncStatus.Live,
                 )
-                current.detection != detection -> current
+                current.detection != detection && preserveDifferentDetection -> current
+                current.detection != detection -> AgentConversationUiState(
+                    detection = detection,
+                    events = boundedDistinctEvents(initialEvents),
+                    selectedTab = SessionTab.Terminal,
+                    syncStatus = AgentConversationSyncStatus.Live,
+                )
                 else -> current.copy(
-                    events = boundedDistinctEvents(current.events + fallbackEvents),
+                    events = boundedDistinctEvents(current.events + initialEvents),
                     syncStatus = AgentConversationSyncStatus.Live,
                 )
             }

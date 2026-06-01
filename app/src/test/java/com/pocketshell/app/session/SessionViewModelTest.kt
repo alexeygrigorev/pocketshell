@@ -858,20 +858,36 @@ class SessionViewModelTest {
     private class FakeSshSession(
         private val execStdout: String = "/wrong/fresh/exec/cwd\n",
         private val tailJob: Job = Job(),
+        private val tailJobs: MutableList<Job>? = null,
+        private val isConnectedValue: Boolean = true,
+        private val execFailure: Throwable? = null,
+        private val execGate: CompletableDeferred<Unit>? = null,
     ) : SshSession {
         val recordedExecCommands = mutableListOf<String>()
+        var tailCalls: Int = 0
+            private set
 
-        override val isConnected: Boolean = true
+        override val isConnected: Boolean = isConnectedValue
 
         override suspend fun exec(command: String): ExecResult {
             recordedExecCommands += command
+            execGate?.await()
+            execFailure?.let { throw it }
             return ExecResult(stdout = execStdout, stderr = "", exitCode = 0)
         }
 
-        override fun tail(path: String, onLine: (String) -> Unit): Job = Job()
+        override fun tail(path: String, onLine: (String) -> Unit): Job {
+            tailCalls += 1
+            return nextTailJob()
+        }
 
-        override fun tail(path: String, fromLineExclusive: Long, onLine: (String) -> Unit): Job =
-            tailJob
+        override fun tail(path: String, fromLineExclusive: Long, onLine: (String) -> Unit): Job {
+            tailCalls += 1
+            return nextTailJob()
+        }
+
+        private fun nextTailJob(): Job =
+            tailJobs?.takeIf { it.isNotEmpty() }?.removeAt(0) ?: tailJob
 
         override fun openLocalPortForward(
             remoteHost: String,
@@ -1031,6 +1047,79 @@ class SessionViewModelTest {
         )
 
         tailJob.completeExceptionally(RuntimeException("tail failed"))
+        advanceUntilIdle()
+
+        assertEquals(
+            AgentConversationSyncStatus.LogUnavailable,
+            vm.agentConversation.value.syncStatus,
+        )
+    }
+
+    @Test
+    fun retryRawSshAgentStreamRestartsTailAndKeepsTerminalConnected() = runTest {
+        val vm = newVm()
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/u/.claude/sessions/abc.jsonl",
+            sessionId = "abc",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+        val stoppedTail = Job()
+        val retryTail = Job()
+        vm.startAgentConversationForTest(detection, emptyList())
+        vm.startAgentTailForTest(
+            session = FakeSshSession(tailJob = stoppedTail),
+            detection = detection,
+            fromLineExclusive = 0L,
+        )
+        stoppedTail.complete()
+        advanceUntilIdle()
+        val retryGate = CompletableDeferred<Unit>()
+        val retrySession = FakeSshSession(
+            tailJobs = mutableListOf(retryTail),
+            execGate = retryGate,
+        )
+        vm.attachSessionForAgentRetryForTest(retrySession)
+
+        assertTrue(vm.retryAgentConversationStream())
+        assertEquals(AgentConversationSyncStatus.Retrying, vm.agentConversation.value.syncStatus)
+        assertFalse("duplicate retry must not start a second tail", vm.retryAgentConversationStream())
+
+        retryGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(1, retrySession.tailCalls)
+        assertEquals(AgentConversationSyncStatus.Live, vm.agentConversation.value.syncStatus)
+        assertTrue(vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Connected)
+    }
+
+    @Test
+    fun retryRawSshAgentStreamReadFailureReturnsLogUnavailable() = runTest {
+        val vm = newVm()
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/u/.claude/sessions/abc.jsonl",
+            sessionId = "abc",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+        vm.startAgentConversationForTest(detection, emptyList())
+        val failureGate = CompletableDeferred<Unit>()
+        vm.attachSessionForAgentRetryForTest(
+            FakeSshSession(
+                execFailure = RuntimeException("wc failed"),
+                execGate = failureGate,
+            ),
+        )
+        vm.startAgentTailForTest(
+            session = FakeSshSession(tailJob = Job().also { it.complete() }),
+            detection = detection,
+            fromLineExclusive = 0L,
+        )
+        advanceUntilIdle()
+
+        assertTrue(vm.retryAgentConversationStream())
+        assertEquals(AgentConversationSyncStatus.Retrying, vm.agentConversation.value.syncStatus)
+        failureGate.complete(Unit)
         advanceUntilIdle()
 
         assertEquals(

@@ -9,19 +9,25 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.theme.PocketShellColors
 
 @Composable
-internal fun ConversationSyncStatusRow(syncStatus: AgentConversationSyncStatus) {
+internal fun ConversationSyncStatusRow(
+    syncStatus: AgentConversationSyncStatus,
+    onRetry: (() -> Unit)? = null,
+) {
     val (label, color) = when (syncStatus) {
         AgentConversationSyncStatus.Live -> conversationSyncStatusLabel(syncStatus) to PocketShellColors.Green
         AgentConversationSyncStatus.Stale -> conversationSyncStatusLabel(syncStatus) to PocketShellColors.Amber
         AgentConversationSyncStatus.LogUnavailable -> conversationSyncStatusLabel(syncStatus) to PocketShellColors.Red
+        AgentConversationSyncStatus.Retrying -> conversationSyncStatusLabel(syncStatus) to PocketShellColors.Amber
     }
     Row(
         modifier = Modifier
@@ -40,6 +46,14 @@ internal fun ConversationSyncStatusRow(syncStatus: AgentConversationSyncStatus) 
             color = PocketShellColors.TextSecondary,
             fontSize = 12.sp,
         )
+        if (onRetry != null && syncStatus.canRetryAgentStream) {
+            TextButton(
+                onClick = onRetry,
+                modifier = Modifier.testTag(CONVERSATION_SYNC_RETRY_TAG),
+            ) {
+                Text("Retry")
+            }
+        }
     }
 }
 
@@ -48,4 +62,11 @@ internal fun conversationSyncStatusLabel(syncStatus: AgentConversationSyncStatus
         AgentConversationSyncStatus.Live -> "Live"
         AgentConversationSyncStatus.Stale -> "Stale"
         AgentConversationSyncStatus.LogUnavailable -> "Log unavailable"
+        AgentConversationSyncStatus.Retrying -> "Retrying"
     }
+
+internal val AgentConversationSyncStatus.canRetryAgentStream: Boolean
+    get() = this == AgentConversationSyncStatus.Stale ||
+        this == AgentConversationSyncStatus.LogUnavailable
+
+internal const val CONVERSATION_SYNC_RETRY_TAG: String = "conversation_sync_retry"

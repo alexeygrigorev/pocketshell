@@ -755,6 +755,9 @@ public fun TmuxSessionScreen(
                         onDraftChanged = onComposerDraftChanged,
                         agentName = visibleConversation.detection.agent.displayName,
                         syncStatus = visibleConversation.syncStatus,
+                        onRetryAgentStream = {
+                            viewModel.retryAgentConversationStreamForPane(paneIdForSend)
+                        },
                     )
                 } else if (panes.isEmpty()) {
                     EmptyPanesPlaceholder()
@@ -2294,6 +2297,7 @@ internal fun TmuxConversationPane(
     onDraftChanged: (String) -> Unit = {},
     agentName: String = "agent",
     syncStatus: AgentConversationSyncStatus = AgentConversationSyncStatus.Live,
+    onRetryAgentStream: () -> Unit = {},
 ) {
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     var composerText by rememberSaveable { mutableStateOf(initialDraft) }
@@ -2351,7 +2355,10 @@ internal fun TmuxConversationPane(
                 .fillMaxWidth()
                 .testTag(TMUX_CONVERSATION_SEARCH_TAG),
         )
-        ConversationSyncStatusRow(syncStatus = syncStatus)
+        ConversationSyncStatusRow(
+            syncStatus = syncStatus,
+            onRetry = onRetryAgentStream,
+        )
         // Wrap the LazyColumn in a Box so the jump-to-latest FAB can
         // overlay the bottom-end of the scrollable area. The Box claims
         // the flex weight; the FAB is a sibling pinned to BottomEnd.

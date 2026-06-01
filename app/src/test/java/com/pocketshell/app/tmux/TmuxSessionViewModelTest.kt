@@ -2131,6 +2131,113 @@ class TmuxSessionViewModelTest {
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
     }
 
+    @Test
+    fun retryAgentLogTailForPaneRestartsOneTailAndKeepsTmuxConnected() = runTest {
+        val vm = newVm()
+        val detection = newClaudeDetection()
+        val oldTailJob = Job()
+        val retryTailJob = Job()
+        val recentMtimeSeconds = System.currentTimeMillis() / 1000
+        val retryGate = CompletableDeferred<Unit>()
+        val retrySession = FakeSshSession(
+            tailJob = retryTailJob,
+            execGate = retryGate,
+            detectionOutput = "claude|$recentMtimeSeconds|/work|/home/u/.claude/projects/-work/abc.jsonl\n",
+            processOutput = "123 1 pts/1 node claude\n",
+        )
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "agent",
+                    paneIndex = 0,
+                    cwd = "/work",
+                    currentCommand = "claude",
+                    paneTty = "/dev/pts/1",
+                ),
+            ),
+        )
+        vm.attachSessionForAgentRetryForTest(retrySession)
+        vm.startAgentConversationForTest("%0", detection)
+        vm.startAgentTailForTest(
+            paneId = "%0",
+            session = FakeSshSession(tailJob = oldTailJob),
+            detection = detection,
+            fromLineExclusive = 0L,
+        )
+        oldTailJob.complete()
+        advanceUntilIdle()
+
+        assertTrue(vm.retryAgentConversationStreamForPane("%0"))
+        assertEquals(
+            AgentConversationSyncStatus.Retrying,
+            vm.agentConversations.value["%0"]!!.syncStatus,
+        )
+        assertFalse(
+            "duplicate retry must not start a second pane tail",
+            vm.retryAgentConversationStreamForPane("%0"),
+        )
+
+        retryGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(1, retrySession.tailCalls)
+        assertEquals(AgentConversationSyncStatus.Live, vm.agentConversations.value["%0"]!!.syncStatus)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
+    @Test
+    fun retryAgentLogTailForPaneDetectionFailureReturnsLogUnavailable() = runTest {
+        val vm = newVm()
+        val detection = newClaudeDetection()
+        val retryGate = CompletableDeferred<Unit>()
+        val retrySession = FakeSshSession(execGate = retryGate)
+        vm.attachClientForTest(FakeTmuxClient())
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "agent",
+                    paneIndex = 0,
+                    cwd = "/work",
+                    currentCommand = "claude",
+                    paneTty = "/dev/pts/1",
+                ),
+            ),
+        )
+        vm.attachSessionForAgentRetryForTest(retrySession)
+        vm.startAgentConversationForTest("%0", detection)
+        val oldTailJob = Job()
+        vm.startAgentTailForTest(
+            paneId = "%0",
+            session = FakeSshSession(tailJob = oldTailJob),
+            detection = detection,
+            fromLineExclusive = 0L,
+        )
+        oldTailJob.complete()
+        advanceUntilIdle()
+
+        assertTrue(vm.retryAgentConversationStreamForPane("%0"))
+        assertEquals(
+            AgentConversationSyncStatus.Retrying,
+            vm.agentConversations.value["%0"]!!.syncStatus,
+        )
+        retryGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(
+            AgentConversationSyncStatus.LogUnavailable,
+            vm.agentConversations.value["%0"]!!.syncStatus,
+        )
+        assertEquals(0, retrySession.tailCalls)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+    }
+
     // ─── Issue #186: per-window agent detection state ──────────────────
     //
     // Detection is per-pane (and therefore per-window for the simple
@@ -4327,6 +4434,8 @@ class TmuxSessionViewModelTest {
         private val execGate: CompletableDeferred<Unit>? = null,
         private val wcOutput: String = "0\n",
         private val initialEventsOutput: String = "",
+        private val detectionOutput: String = "",
+        private val processOutput: String = "",
     ) : com.pocketshell.core.ssh.SshSession {
         @Volatile
         var closed: Boolean = false
@@ -4339,6 +4448,10 @@ class TmuxSessionViewModelTest {
             val stdout = when {
                 command.contains("wc -l < ") -> wcOutput
                 command.startsWith("tail -n ") -> initialEventsOutput
+                command.contains("ps -eo pid,ppid,tty,comm,args") -> processOutput
+                command.contains(".claude") ||
+                    command.contains(".codex") ||
+                    command.contains("opencode") -> detectionOutput
                 else -> ""
             }
             return com.pocketshell.core.ssh.ExecResult(stdout = stdout, stderr = "", exitCode = 0)

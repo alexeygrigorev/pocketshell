@@ -194,6 +194,7 @@ class TmuxSessionScreenTest {
     fun conversationSyncStatusLabelsExposeLiveStaleAndUnavailable() {
         assertEquals("Live", conversationSyncStatusLabel(AgentConversationSyncStatus.Live))
         assertEquals("Stale", conversationSyncStatusLabel(AgentConversationSyncStatus.Stale))
+        assertEquals("Retrying", conversationSyncStatusLabel(AgentConversationSyncStatus.Retrying))
         assertEquals(
             "Log unavailable",
             conversationSyncStatusLabel(AgentConversationSyncStatus.LogUnavailable),

@@ -243,6 +243,7 @@ public class SessionViewModel @Inject constructor(
     private var connectJob: Job? = null
     private var agentDetectJob: Job? = null
     private var agentTailJob: Job? = null
+    private var agentRetryJob: Job? = null
     private var projectRootsJob: Job? = null
     private var activeTarget: RawSshTarget? = null
     private var connectingTarget: RawSshTarget? = null
@@ -438,6 +439,7 @@ public class SessionViewModel @Inject constructor(
     private fun startAgentDetection(session: SshSession) {
         agentDetectJob?.cancel()
         agentTailJob?.cancel()
+        agentRetryJob?.cancel()
         _agentConversation.value = AgentConversationUiState()
         agentDetectJob = viewModelScope.launch {
             val detection = runCatching { agentRepository.detect(session) }.getOrNull() ?: return@launch
@@ -489,6 +491,11 @@ public class SessionViewModel @Inject constructor(
         )
     }
 
+    internal fun attachSessionForAgentRetryForTest(session: SshSession) {
+        sessionRef = session
+        _connectionStatus.value = ConnectionStatus.Connected("test", 0, "test")
+    }
+
     /**
      * Issue #160 (review round 2) test seam: start the production
      * `session.tail` follow loop against [session] from
@@ -520,6 +527,18 @@ public class SessionViewModel @Inject constructor(
         return job
     }
 
+    public fun retryAgentConversationStream(): Boolean {
+        val session = sessionRef?.takeIf { it.isConnected } ?: return false
+        if (_connectionStatus.value !is ConnectionStatus.Connected) return false
+        if (agentRetryJob?.isActive == true) return false
+        val detection = markAgentConversationRetrying() ?: return false
+        agentTailJob?.cancel()
+        agentRetryJob = viewModelScope.launch {
+            restartAgentConversationTail(session, detection)
+        }
+        return true
+    }
+
     private suspend fun startAgentConversation(
         session: SshSession,
         detection: AgentDetection,
@@ -542,6 +561,38 @@ public class SessionViewModel @Inject constructor(
         observeAgentTailCompletion(agentTailJob, detection)
     }
 
+    private suspend fun restartAgentConversationTail(
+        session: SshSession,
+        detection: AgentDetection,
+    ) {
+        val lineCount = runCatching { agentRepository.lineCount(session, detection) }
+            .getOrElse {
+                markAgentConversationSyncStatus(detection, AgentConversationSyncStatus.LogUnavailable)
+                return
+            }
+        val initialEvents = runCatching {
+            agentRepository.readInitialEvents(session, detection)
+        }.getOrElse {
+            markAgentConversationSyncStatus(detection, AgentConversationSyncStatus.LogUnavailable)
+            return
+        }
+        _agentConversation.update { current ->
+            if (current.detection != detection) {
+                current
+            } else {
+                current.copy(
+                    events = boundedDistinctEvents(current.events + initialEvents),
+                    syncStatus = AgentConversationSyncStatus.Live,
+                )
+            }
+        }
+        val job = agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
+            appendAgentEvents(listOf(event))
+        }
+        agentTailJob = job
+        observeAgentTailCompletion(job, detection)
+    }
+
     private fun appendAgentEvents(events: List<ConversationEvent>) {
         if (events.isEmpty()) return
         _agentConversation.update { current ->
@@ -556,17 +607,32 @@ public class SessionViewModel @Inject constructor(
         }
         job.invokeOnCompletion { cause ->
             if (cause is CancellationException) return@invokeOnCompletion
-            markAgentTailStopped(detection, cause)
+            markAgentTailStopped(detection, job, cause)
         }
     }
 
-    private fun markAgentTailStopped(detection: AgentDetection, cause: Throwable?) {
+    private fun markAgentTailStopped(detection: AgentDetection, tailJob: Job, cause: Throwable?) {
+        if (agentTailJob !== tailJob) return
         val nextStatus = if (cause == null) {
             AgentConversationSyncStatus.Stale
         } else {
             AgentConversationSyncStatus.LogUnavailable
         }
         markAgentConversationSyncStatus(detection, nextStatus)
+    }
+
+    private fun markAgentConversationRetrying(): AgentDetection? {
+        var retryDetection: AgentDetection? = null
+        _agentConversation.update { current ->
+            val detection = current.detection
+            if (detection == null || !current.syncStatus.canRetryAgentStream) {
+                current
+            } else {
+                retryDetection = detection
+                current.copy(syncStatus = AgentConversationSyncStatus.Retrying)
+            }
+        }
+        return retryDetection
     }
 
     private fun markAgentConversationSyncStatus(
@@ -1151,6 +1217,7 @@ public enum class AgentConversationSyncStatus {
     Live,
     Stale,
     LogUnavailable,
+    Retrying,
 }
 
 public data class AgentConversationUiState(

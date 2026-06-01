@@ -348,6 +348,7 @@ public fun SessionScreen(
                         sendEnabled = sessionLive,
                         agentName = detection.agent.displayName,
                         syncStatus = agentConversation.syncStatus,
+                        onRetryAgentStream = viewModel::retryAgentConversationStream,
                     )
                 } else {
                     TerminalSurface(
@@ -579,6 +580,7 @@ internal fun ConversationPane(
     sendEnabled: Boolean = true,
     agentName: String = "agent",
     syncStatus: AgentConversationSyncStatus = AgentConversationSyncStatus.Live,
+    onRetryAgentStream: () -> Unit = {},
 ) {
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     var composerText by remember { mutableStateOf("") }
@@ -696,7 +698,10 @@ internal fun ConversationPane(
             sendEnabled = sendEnabled,
             placeholder = "Message ${agentName.ifBlank { "agent" }}",
         )
-        ConversationSyncStatusRow(syncStatus = syncStatus)
+        ConversationSyncStatusRow(
+            syncStatus = syncStatus,
+            onRetry = onRetryAgentStream,
+        )
     }
 }
 

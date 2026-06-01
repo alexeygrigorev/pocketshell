@@ -383,7 +383,7 @@ public class TmuxSessionViewModel @Inject constructor(
             )
         }
 
-        if (tryActivateCachedRuntime(target, attempt, effectiveTrigger)) {
+        if (tryActivateCachedRuntime(target, attempt, effectiveTrigger, fastSwitchStartedAtMs)) {
             return
         }
 
@@ -520,6 +520,13 @@ public class TmuxSessionViewModel @Inject constructor(
             left.keyPath == right.keyPath &&
             left.sessionName == right.sessionName &&
             left.startDirectory == right.startDirectory
+
+    private fun isCurrentRuntime(guard: RuntimeRefreshGuard): Boolean {
+        val currentTarget = activeTarget ?: return false
+        return connectGeneration == guard.generation &&
+            clientRef === guard.client &&
+            sameSessionIdentity(currentTarget, guard.target)
+    }
 
     private fun ConnectionTarget.toRuntimeKey(): TmuxRuntimeKey =
         TmuxRuntimeKey(
@@ -912,6 +919,7 @@ public class TmuxSessionViewModel @Inject constructor(
         target: ConnectionTarget,
         attempt: Int,
         trigger: TmuxConnectTrigger,
+        visibleSwitchStartedAtMs: Long,
     ): Boolean {
         val cached = runtimeCache.activate(target.toRuntimeKey()) ?: return false
         if (cached.client.disconnected.value || cached.session?.isConnected == false) {
@@ -921,6 +929,10 @@ public class TmuxSessionViewModel @Inject constructor(
             return false
         }
         val startedAtMs = SystemClock.elapsedRealtime()
+        val milestoneStartedAtMs = visibleSwitchStartedAtMs.takeIf { it > 0L } ?: startedAtMs
+        val generation = latestConnectIntent?.takeIf {
+            sameSessionIdentity(it.target, target)
+        }?.generation ?: connectGeneration
         deactivateCurrentRuntimeToCache()
         restoreCachedRuntime(target, cached)
         StartupTiming.mark(
@@ -950,6 +962,38 @@ public class TmuxSessionViewModel @Inject constructor(
             event = "tmux-runtime-cache-ready",
             trigger = trigger,
             detail = "paneCount=${cached.panes.size}",
+        )
+        recordWarmSwitchMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = milestoneStartedAtMs,
+            name = "warm_switch_selected_session_state",
+            trigger = trigger,
+            detail = "paneCount=${cached.panes.size} source=runtime_cache",
+        )
+        recordWarmSwitchMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = milestoneStartedAtMs,
+            name = "warm_switch_panes_ready",
+            trigger = trigger,
+            detail = "paneCount=${cached.panes.size} source=runtime_cache",
+        )
+        recordWarmSwitchMilestone(
+            attempt = attempt,
+            target = target,
+            startedAtMs = milestoneStartedAtMs,
+            name = "warm_switch_connect_ready",
+            trigger = trigger,
+            detail = "paneCount=${cached.panes.size} source=runtime_cache",
+        )
+        launchCachedRuntimeRemoteRefresh(
+            target = target,
+            client = cached.client,
+            generation = generation,
+            attempt = attempt,
+            startedAtMs = milestoneStartedAtMs,
+            trigger = trigger,
         )
         return true
     }
@@ -1049,6 +1093,43 @@ public class TmuxSessionViewModel @Inject constructor(
             target.port,
             target.user,
         )
+    }
+
+    private fun launchCachedRuntimeRemoteRefresh(
+        target: ConnectionTarget,
+        client: TmuxClient,
+        generation: Long,
+        attempt: Int,
+        startedAtMs: Long,
+        trigger: TmuxConnectTrigger,
+    ) {
+        val refresh = RuntimeRefreshGuard(
+            generation = generation,
+            target = target,
+            client = client,
+        )
+        bridgeScope.launch {
+            delay(CACHED_RUNTIME_REMOTE_REFRESH_DELAY_MS)
+            if (!isCurrentRuntime(refresh)) return@launch
+            logAttachMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                event = "tmux-runtime-cache-refresh-start",
+                trigger = trigger,
+            )
+            reconcilePanes(refresh)
+            if (!isCurrentRuntime(refresh)) return@launch
+            maybeRefreshControlClientSize()
+            recordWarmSwitchMilestone(
+                attempt = attempt,
+                target = target,
+                startedAtMs = startedAtMs,
+                name = "warm_switch_remote_refresh_complete",
+                trigger = trigger,
+                detail = "source=runtime_cache",
+            )
+        }
     }
 
     private suspend fun runConnect(
@@ -2095,9 +2176,14 @@ public class TmuxSessionViewModel @Inject constructor(
      * leave the existing pane list intact rather than wiping it — a
      * transient failure should not blank the UI.
      */
-    private suspend fun reconcilePanes(): PaneReconcileResult {
+    private suspend fun reconcilePanes(
+        refreshGuard: RuntimeRefreshGuard? = null,
+    ): PaneReconcileResult {
         val client = clientRef ?: return PaneReconcileResult.NoClient
         val target = activeTarget
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
+            return PaneReconcileResult.NoClient
+        }
         val listPanesStartedAtMs = SystemClock.elapsedRealtime()
         val response = try {
             client.sendCommand(
@@ -2122,8 +2208,14 @@ public class TmuxSessionViewModel @Inject constructor(
                 ),
             )
         }
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
+            return PaneReconcileResult.NoClient
+        }
 
         val parsed: List<ParsedPane> = response.output.mapNotNull { parsePaneRow(it) }
+        if (refreshGuard != null && parsed.isEmpty() && _panes.value.isNotEmpty()) {
+            return PaneReconcileResult.Ready(_panes.value.size)
+        }
         activeAttachMilestone?.let { milestone ->
             if (!milestone.firstPaneListReadyLogged) {
                 milestone.firstPaneListReadyLogged = true
@@ -2134,8 +2226,8 @@ public class TmuxSessionViewModel @Inject constructor(
                 )
             }
         }
-        val newPanes = applyParsedPanes(parsed)
-        preloadVisibleContentForNewPanes(newPanes)
+        val newPanes = applyParsedPanes(parsed, refreshGuard)
+        preloadVisibleContentForNewPanes(newPanes, refreshGuard)
         return PaneReconcileResult.Ready(_panes.value.size)
     }
 
@@ -2182,7 +2274,11 @@ public class TmuxSessionViewModel @Inject constructor(
         applyParsedPanes(parsed)
     }
 
-    private fun applyParsedPanes(parsed: List<ParsedPane>): List<TmuxPaneState> {
+    private fun applyParsedPanes(
+        parsed: List<ParsedPane>,
+        refreshGuard: RuntimeRefreshGuard? = null,
+    ): List<TmuxPaneState> {
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return emptyList()
         val client = clientRef
         val target = activeTarget
         val sorted = parsed
@@ -2248,8 +2344,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 ).also { newRows += it }
             }
             nextById[p.paneId] = row
-            startAgentDetectionForPane(row)
+            startAgentDetectionForPane(row, refreshGuard)
         }
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return emptyList()
 
         // Tear down panes that disappeared. Cancel the producer + detach
         // the bridge so the TerminalSurfaceState releases its emulator
@@ -2270,9 +2367,13 @@ public class TmuxSessionViewModel @Inject constructor(
         return newRows
     }
 
-    private suspend fun preloadVisibleContentForNewPanes(newPanes: List<TmuxPaneState>) {
+    private suspend fun preloadVisibleContentForNewPanes(
+        newPanes: List<TmuxPaneState>,
+        refreshGuard: RuntimeRefreshGuard? = null,
+    ) {
         val client = clientRef ?: return
         for (pane in newPanes) {
+            if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
             val captureStartedAtMs = SystemClock.elapsedRealtime()
             val response = runCatching {
                 client.sendCommand("capture-pane -p -e -S -200 -t ${pane.paneId}")
@@ -2285,6 +2386,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 trigger = activeAttachMilestone?.trigger,
                 detail = "success=${response != null && !response.isError}",
             )
+            if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
             if (response == null || response.isError || response.output.isEmpty()) continue
             // Issue #259: ask tmux for the pane's true cursor position so the
             // seed can restore it after replaying the capture. Without this the
@@ -2314,6 +2416,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 ?.output
                 ?.firstOrNull()
                 .let { parseTmuxPaneCursor(it) }
+            if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
             val appendStartedAtMs = SystemClock.elapsedRealtime()
             pane.terminalState.appendRemoteOutput(
                 response.output.toTerminalViewportBytes(cursor),
@@ -2370,7 +2473,10 @@ public class TmuxSessionViewModel @Inject constructor(
             .firstOrNull()
     }
 
-    private fun startAgentDetectionForPane(pane: TmuxPaneState) {
+    private fun startAgentDetectionForPane(
+        pane: TmuxPaneState,
+        refreshGuard: RuntimeRefreshGuard? = null,
+    ) {
         val session = sessionRef ?: return
         val cwd = pane.cwd.takeIf { it.isNotBlank() } ?: return
         val command = pane.currentCommand
@@ -2385,6 +2491,11 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentJobs.remove(pane.paneId)?.cancel()
         paneAgentInputs[pane.paneId] = input
         val paneId = pane.paneId
+        val guard = refreshGuard ?: RuntimeRefreshGuard(
+            generation = connectGeneration,
+            target = activeTarget ?: return,
+            client = clientRef ?: return,
+        )
         paneAgentJobs[paneId] = bridgeScope.launch {
             // Issue #186: run the per-pane detection path so a sibling
             // window's JSONL log cannot light up the Conversation tab
@@ -2407,6 +2518,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     paneCommand = command,
                 )
             }.getOrNull()
+            if (!isCurrentRuntime(guard)) return@launch
             if (detection == null) {
                 // Issue #186: when a pane that previously had a
                 // detection no longer does (the user exited Claude /
@@ -2416,7 +2528,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 clearAgentDetectionForPane(paneId)
                 return@launch
             }
-            startAgentConversationForPane(session, paneId, detection)
+            startAgentConversationForPane(session, paneId, detection, guard)
         }
     }
 
@@ -2439,11 +2551,13 @@ public class TmuxSessionViewModel @Inject constructor(
         session: SshSession,
         paneId: String,
         detection: AgentDetection,
+        refreshGuard: RuntimeRefreshGuard? = null,
     ) {
         val lineCount = runCatching { agentRepository.lineCount(session, detection) }.getOrDefault(0L)
         val initialEvents = runCatching {
             agentRepository.readInitialEvents(session, detection)
         }.getOrDefault(emptyList())
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
         setAgentConversation(
             paneId,
             AgentConversationUiState(
@@ -2458,6 +2572,10 @@ public class TmuxSessionViewModel @Inject constructor(
         // tmux pane gets the same real-time refresh as the raw-SSH route.
         val followJob = agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
             appendAgentEvents(paneId, listOf(event))
+        }
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) {
+            followJob?.cancel()
+            return
         }
         if (followJob != null) {
             paneAgentJobs[paneId] = followJob
@@ -2474,6 +2592,11 @@ public class TmuxSessionViewModel @Inject constructor(
 
     private fun restartAgentConversationsForRestoredRuntime(runtime: CachedTmuxRuntime) {
         val session = runtime.session ?: return
+        val guard = RuntimeRefreshGuard(
+            generation = connectGeneration,
+            target = activeTarget ?: return,
+            client = clientRef ?: return,
+        )
         runtime.agentConversations.forEach { (paneId, state) ->
             val detection = state.detection ?: return@forEach
             paneAgentJobs.remove(paneId)?.cancel()
@@ -2483,6 +2606,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     paneId = paneId,
                     detection = detection,
                     restored = state,
+                    refreshGuard = guard,
                 )
             }
         }
@@ -2493,11 +2617,13 @@ public class TmuxSessionViewModel @Inject constructor(
         paneId: String,
         detection: AgentDetection,
         restored: AgentConversationUiState,
+        refreshGuard: RuntimeRefreshGuard,
     ) {
         val lineCount = runCatching { agentRepository.lineCount(session, detection) }.getOrDefault(0L)
         val initialEvents = runCatching {
             agentRepository.readInitialEvents(session, detection)
         }.getOrDefault(restored.events)
+        if (!isCurrentRuntime(refreshGuard)) return
         setAgentConversation(
             paneId,
             restored.copy(
@@ -2507,6 +2633,10 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         val followJob = agentRepository.tailEventsFromLine(session, detection, lineCount) { event ->
             appendAgentEvents(paneId, listOf(event))
+        }
+        if (!isCurrentRuntime(refreshGuard)) {
+            followJob?.cancel()
+            return
         }
         if (followJob != null) {
             paneAgentJobs[paneId] = followJob
@@ -3035,6 +3165,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val rows = remoteRows
         if (cols <= 0 || rows <= 0) return
         if (cols == appliedControlClientColumns && rows == appliedControlClientRows) return
+        val attachGeneration = connectGeneration
         val generation = ++controlClientSizeGeneration
         Log.i(
             ISSUE_145_RECONNECT_TAG,
@@ -3063,7 +3194,11 @@ public class TmuxSessionViewModel @Inject constructor(
                 Result.success(null)
             }
             val refreshResult = runCatching { client.refreshClientSize(cols, rows) }
-            if (clientRef !== client || activeTarget != target) return@launch
+            if (connectGeneration != attachGeneration) return@launch
+            val currentTarget = activeTarget
+            if (clientRef !== client || currentTarget == null || !sameSessionIdentity(currentTarget, target)) {
+                return@launch
+            }
             if (controlClientSizeGeneration != generation) return@launch
             if (remoteColumns != cols || remoteRows != rows) return@launch
             val policyResponse = policyResult.getOrNull()
@@ -3865,6 +4000,12 @@ public class TmuxSessionViewModel @Inject constructor(
         val intendedTrigger: TmuxConnectTrigger?,
     )
 
+    private data class RuntimeRefreshGuard(
+        val generation: Long,
+        val target: ConnectionTarget,
+        val client: TmuxClient,
+    )
+
     private data class AttachMilestone(
         val attempt: Int,
         val sessionName: String,
@@ -4385,6 +4526,7 @@ internal const val CtrlDByte: Int = 0x04
 internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
 internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 30_000L
 internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
+internal const val CACHED_RUNTIME_REMOTE_REFRESH_DELAY_MS: Long = 1L
 internal const val LIST_PANES_FIELD_SEPARATOR: String = "|PS|"
 internal const val TMUX_INPUT_MAX_PENDING_BYTES: Int = 64 * 1024
 internal const val TMUX_INPUT_MAX_BATCH_BYTES: Int = 4 * 1024

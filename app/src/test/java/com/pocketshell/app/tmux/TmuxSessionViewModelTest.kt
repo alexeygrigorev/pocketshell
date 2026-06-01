@@ -2954,6 +2954,22 @@ class TmuxSessionViewModelTest {
         runCurrent()
         clientA.sentCommands.clear()
         clientB.sentCommands.clear()
+        clientA.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf(
+                    "%0\t@0\t\$0\twork\tcached-work\t0",
+                    "%1\t@0\t\$0\twork\tfresh-remote\t1",
+                ),
+                isError = false,
+            ),
+        )
+        clientA.capturePaneResponses.addLast(
+            CommandResponse(number = 2L, output = listOf("fresh remote line"), isError = false),
+        )
+        clientA.cursorQueryResponses.addLast(
+            CommandResponse(number = 3L, output = listOf("0,0"), isError = false),
+        )
 
         val activateStartedAtMs = SystemClock.elapsedRealtime()
         vm.connect(
@@ -2981,7 +2997,9 @@ class TmuxSessionViewModelTest {
         assertTrue(
             "cached activation must avoid tmux list/capture commands, got ${clientA.sentCommands}",
             clientA.sentCommands.none {
-                it.startsWith("list-panes") || it.startsWith("capture-pane")
+                it.startsWith("list-panes") ||
+                    it.startsWith("capture-pane") ||
+                    it.startsWith("display-message")
             },
         )
         assertTrue(
@@ -2990,6 +3008,148 @@ class TmuxSessionViewModelTest {
                 TmuxRuntimeKey(1L, "alpha.example", 22, "alex", "/keys/a", "other"),
             ),
         )
+
+        advanceTimeBy(CACHED_RUNTIME_REMOTE_REFRESH_DELAY_MS)
+        runCurrent()
+        assertTrue(
+            "cached activation should refresh list-panes asynchronously after the visible swap",
+            clientA.sentCommands.any { it.startsWith("list-panes") },
+        )
+        assertTrue(
+            "new panes discovered by the async refresh should be seeded after the visible swap",
+            clientA.sentCommands.contains("capture-pane -p -e -S -200 -t %1"),
+        )
+        assertTrue(
+            "async seed should query the cursor after capture-pane",
+            clientA.sentCommands.contains("display-message -p -t %1 '#{cursor_x},#{cursor_y}'"),
+        )
+        assertEquals(listOf("%0", "%1"), vm.panes.value.map { it.paneId })
+    }
+
+    @Test
+    fun staleCachedRuntimeRefreshCannotOverwriteNewerSelection() = runTest {
+        val registry = ActiveTmuxClients()
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val vm = newVm(registry = registry, runtimeCache = runtimeCache)
+        val session = FakeSshSession()
+        val clientA = FakeTmuxClient()
+        val clientB = FakeTmuxClient()
+        val listPanesGate = CompletableDeferred<Unit>()
+
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = clientA,
+            session = session,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "cached-work",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        vm.fastSwitchSessionForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "other",
+            client = clientB,
+            session = session,
+        )
+        runCurrent()
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%9",
+                    windowId = "@9",
+                    sessionId = "$9",
+                    title = "other-visible",
+                    paneIndex = 0,
+                    sessionName = "other",
+                ),
+            ),
+        )
+        clientA.responses.addLast(
+            CommandResponse(
+                number = 1L,
+                output = listOf(
+                    "%7\t@7\t\$7\twork\tstale-refresh-pane\t0",
+                ),
+                isError = false,
+            ),
+        )
+        clientA.capturePaneResponses.addLast(
+            CommandResponse(number = 2L, output = listOf("must not seed"), isError = false),
+        )
+        clientA.sendCommandGatePrefix = "list-panes"
+        clientA.sendCommandGate = listPanesGate
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        assertEquals(listOf("%0"), vm.panes.value.map { it.paneId })
+        advanceTimeBy(CACHED_RUNTIME_REMOTE_REFRESH_DELAY_MS)
+        runCurrent()
+        assertTrue(
+            "precondition: cached work refresh is suspended in list-panes",
+            clientA.sentCommands.any { it.startsWith("list-panes") },
+        )
+        clientB.responses.addLast(
+            CommandResponse(
+                number = 10L,
+                output = listOf("%9\t@9\t\$9\tother\tother-visible\t0"),
+                isError = false,
+            ),
+        )
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "other",
+        )
+        assertEquals("other", vm.activeSessionNameForTest())
+        assertEquals(listOf("%9"), vm.panes.value.map { it.paneId })
+
+        listPanesGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals(
+            "stale work refresh must not replace the newer active session panes",
+            listOf("%9"),
+            vm.panes.value.map { it.paneId },
+        )
+        assertEquals("other", vm.activeSessionNameForTest())
+        assertFalse(
+            "stale refresh must not run capture-pane after losing the runtime guard",
+            clientA.sentCommands.any { it.startsWith("capture-pane") },
+        )
+        assertSame(clientB, registry.clients.value[1L]?.client)
     }
 
     @Test
@@ -3013,7 +3173,16 @@ class TmuxSessionViewModelTest {
             session = session,
         )
         vm.applyParsedPanesForTest(
-            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "work", paneIndex = 0)),
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "work",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
         )
         vm.fastSwitchSessionForTest(
             hostId = 1L,
@@ -3070,7 +3239,16 @@ class TmuxSessionViewModelTest {
             session = session,
         )
         vm.applyParsedPanesForTest(
-            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "work", paneIndex = 0)),
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "$0",
+                    title = "work",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
         )
         vm.startAgentConversationForTest("%0", detection)
         vm.startAgentTailForTest("%0", session, detection, fromLineExclusive = 0L)

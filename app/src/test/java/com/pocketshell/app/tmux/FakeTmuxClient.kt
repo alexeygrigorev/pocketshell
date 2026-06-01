@@ -83,6 +83,10 @@ internal class FakeTmuxClient : TmuxClient {
 
     var sendCommandDelayMs: Long = 0L
 
+    var sendCommandGatePrefix: String? = null
+
+    var sendCommandGate: CompletableDeferred<Unit>? = null
+
     @Volatile
     var closed: Boolean = false
 
@@ -95,6 +99,11 @@ internal class FakeTmuxClient : TmuxClient {
 
     override suspend fun sendCommand(cmd: String): CommandResponse {
         sentCommands += cmd
+        sendCommandGatePrefix?.let { prefix ->
+            if (cmd.startsWith(prefix)) {
+                sendCommandGate?.await()
+            }
+        }
         if (sendCommandDelayMs > 0L && cmd.startsWith("send-keys")) {
             delay(sendCommandDelayMs)
         }

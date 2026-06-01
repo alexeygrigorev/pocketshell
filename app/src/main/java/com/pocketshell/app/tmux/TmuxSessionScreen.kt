@@ -118,6 +118,7 @@ import com.pocketshell.app.voice.ADD_PROMPT_CHIP_LABEL
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.AssistantStrip
+import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ToolCallSummary
 import androidx.compose.foundation.layout.heightIn
@@ -1060,11 +1061,16 @@ public fun TmuxSessionScreen(
                 if (!sessionLive || pane == null) {
                     false
                 } else {
-                    val payload = if (withEnter) text + "\r" else text
-                    val sent = viewModel.writeInputToPaneResult(
-                        pane.paneId,
-                        payload.toByteArray(Charsets.UTF_8),
-                    ).isSuccess
+                    val agent = currentAgentConversation?.detection?.agent
+                    val sent = if (withEnter && agent == AgentKind.Codex) {
+                        viewModel.sendAgentPayloadToPaneResult(pane.paneId, text, agent).isSuccess
+                    } else {
+                        val payload = if (withEnter) text + "\r" else text
+                        viewModel.writeInputToPaneResult(
+                            pane.paneId,
+                            payload.toByteArray(Charsets.UTF_8),
+                        ).isSuccess
+                    }
                     if (sent) {
                         showMicSheet = false
                     }

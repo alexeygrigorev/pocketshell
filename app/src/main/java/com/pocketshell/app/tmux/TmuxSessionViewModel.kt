@@ -3061,7 +3061,7 @@ public class TmuxSessionViewModel @Inject constructor(
             ?: return Result.failure(IllegalStateException("No agent conversation for pane $paneId."))
         val detection = current.detection
             ?: return Result.failure(IllegalStateException("No detected agent for pane $paneId."))
-        val result = sendAgentPayloadToPaneResult(paneId, payload)
+        val result = sendAgentPayloadToPaneResult(paneId, payload, detection.agent)
         if (result.isSuccess) {
             val optimistic = ConversationEvent.Message(
                 // Issue #160 round 2: see [OPTIMISTIC_USER_MESSAGE_ID_PREFIX].
@@ -3076,20 +3076,33 @@ public class TmuxSessionViewModel @Inject constructor(
         return result
     }
 
-    private suspend fun sendAgentPayloadToPaneResult(paneId: String, payload: String): Result<Unit> {
+    internal suspend fun sendAgentPayloadToPaneResult(
+        paneId: String,
+        payload: String,
+        agent: AgentKind,
+    ): Result<Unit> {
         val payloadBytes = payload.toByteArray(Charsets.UTF_8)
-        if (payloadBytes.size <= TMUX_PASTE_BODY_CHUNK_BYTES || containsLineBreak(payloadBytes)) {
-            return writeInputToPaneResult(paneId, (payload + "\r").toByteArray(Charsets.UTF_8))
-        }
         val client = clientRef
             ?: return Result.failure(IllegalStateException("No active tmux client for pane input."))
         if (client.disconnected.value) {
             return Result.failure(IllegalStateException("Tmux client is disconnected."))
         }
         return runCatching {
-            sendBracketedPaste(client, paneId, payloadBytes)
+            if (payloadBytes.size > TMUX_PASTE_BODY_CHUNK_BYTES || containsLineBreak(payloadBytes)) {
+                sendBracketedPaste(client, paneId, payloadBytes)
+            } else if (payload.isNotEmpty()) {
+                client.sendCommand("send-keys -l -t $paneId -- '${escapeSingleQuoted(payload)}'")
+                    .throwIfTmuxError("type agent input into pane $paneId")
+            }
+            delayBeforeAgentSubmitIfNeeded(agent)
             client.sendCommand("send-keys -t $paneId Enter")
                 .throwIfTmuxError("submit pasted agent input")
+        }
+    }
+
+    private suspend fun delayBeforeAgentSubmitIfNeeded(agent: AgentKind) {
+        if (agent == AgentKind.Codex) {
+            delay(CODEX_AGENT_SUBMIT_DELAY_MS)
         }
     }
 
@@ -5204,6 +5217,7 @@ internal const val CtrlDByte: Int = 0x04
  * teardown pause rather than an apparent app freeze.
  */
 internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
+internal const val CODEX_AGENT_SUBMIT_DELAY_MS: Long = 250L
 internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 30_000L
 internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
 internal const val CACHED_RUNTIME_REMOTE_REFRESH_DELAY_MS: Long = 1L

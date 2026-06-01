@@ -1983,6 +1983,13 @@ class TmuxSessionViewModelTest {
         confidence = AgentDetection.Confidence.ProcessConfirmed,
     )
 
+    private fun newCodexDetection(): AgentDetection = AgentDetection(
+        agent = AgentKind.Codex,
+        sourcePath = "/home/u/.codex/sessions/xyz.jsonl",
+        sessionId = "xyz",
+        confidence = AgentDetection.Confidence.ProcessConfirmed,
+    )
+
     @Test
     fun detectedAgentConversationStartsWithoutHintPopupState() = runTest {
         val vm = newVm()
@@ -2081,6 +2088,61 @@ class TmuxSessionViewModelTest {
         assertEquals(
             listOf(
                 "send-keys -l -t %0 -- 'run tests'",
+                "send-keys -t %0 Enter",
+            ),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+    }
+
+    @Test
+    fun codexAgentSubmitDelaysFinalEnterAfterTextInsertion() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newCodexDetection())
+
+        val send = async { vm.sendToAgentPaneResult("%0", "  run tests  ") }
+        runCurrent()
+
+        assertEquals(
+            "Codex submit should type the prompt before waiting to press Enter",
+            listOf("send-keys -l -t %0 -- 'run tests'"),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+
+        advanceTimeBy(CODEX_AGENT_SUBMIT_DELAY_MS - 1L)
+        runCurrent()
+        assertEquals(
+            "Codex submit must not press Enter before the submit delay elapses",
+            listOf("send-keys -l -t %0 -- 'run tests'"),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+
+        advanceTimeBy(1L)
+        assertTrue(send.await().isSuccess)
+        assertEquals(
+            listOf(
+                "send-keys -l -t %0 -- 'run tests'",
+                "send-keys -t %0 Enter",
+            ),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+    }
+
+    @Test
+    fun rawPaneInputDoesNotUseCodexAgentSubmitDelay() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newCodexDetection())
+
+        vm.writeInputToPane("%0", "manual\r".toByteArray(Charsets.UTF_8))
+        runCurrent()
+
+        assertEquals(
+            "manual pane input should keep the immediate text + Enter routing",
+            listOf(
+                "send-keys -l -t %0 -- 'manual'",
                 "send-keys -t %0 Enter",
             ),
             client.sentCommands.filter { it.startsWith("send-keys") },

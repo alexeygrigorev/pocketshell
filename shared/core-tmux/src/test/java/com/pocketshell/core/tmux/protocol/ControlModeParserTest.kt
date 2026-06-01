@@ -5,6 +5,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.system.measureNanoTime
 
 /**
  * Unit tests for [ControlModeParser]. Pure-JVM, no Android, no Docker.
@@ -335,6 +336,99 @@ class ControlModeParserTest {
         // `%output  data` (two spaces) — paneId would be "" which isn't a
         // valid pane reference.
         assertNull(parser.parse("%output  data"))
+    }
+
+    @Test
+    fun `parses large no-escape output exactly`() {
+        val payload = buildString(capacity = 128 * 1024) {
+            repeat(2048) { index ->
+                append("line-")
+                append(index.toString().padStart(4, '0'))
+                append(" abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789\n")
+            }
+        }
+
+        val event = parser.parse("%output %42 $payload") as ControlEvent.Output
+
+        assertEquals("%42", event.paneId)
+        assertArrayEquals(payload.toByteArray(Charsets.US_ASCII), event.data)
+    }
+
+    @Test
+    fun `parses large escape-heavy output exactly`() {
+        val escaped = buildString(capacity = 96 * 1024) {
+            repeat(4096) { index ->
+                append("\\033[31mrow")
+                append(index)
+                append("\\011red\\033[0m\\012")
+            }
+        }
+        val expected = buildString {
+            repeat(4096) { index ->
+                append("\u001b[31mrow")
+                append(index)
+                append("\tred\u001b[0m\n")
+            }
+        }.toByteArray(Charsets.US_ASCII)
+
+        val event = parser.parse("%output %7 $escaped") as ControlEvent.Output
+
+        assertEquals("%7", event.paneId)
+        assertArrayEquals(expected, event.data)
+    }
+
+    @Test
+    fun `large output decoder preserves truncated escapes literally`() {
+        val decoded = decodeOutputData("prefix\\03 middle \\x4 suffix\\")
+
+        assertArrayEquals(
+            "prefix\\03 middle \\x4 suffix\\".toByteArray(Charsets.US_ASCII),
+            decoded,
+        )
+    }
+
+    @Test
+    fun `rejects malformed output before large payload decode`() {
+        val payload = "x".repeat(64 * 1024)
+
+        assertNull(parser.parse("%output  $payload"))
+        assertNull(parser.parse("%output 12 $payload"))
+    }
+
+    @Test
+    fun `prints large output parser timing smoke measurements`() {
+        val noEscapePayload = "a".repeat(128 * 1024)
+        val escapePayload = "\\033[32mdata\\033[0m\\012".repeat(4096)
+        val noEscapeLine = "%output %1 $noEscapePayload"
+        val escapeLine = "%output %1 $escapePayload"
+
+        repeat(5) {
+            parser.parse(noEscapeLine)
+            parser.parse(escapeLine)
+        }
+
+        var noEscapeBytes = 0
+        val noEscapeNanos = measureNanoTime {
+            repeat(20) {
+                val event = parser.parse(noEscapeLine) as ControlEvent.Output
+                noEscapeBytes += event.data.size
+            }
+        }
+        var escapeBytes = 0
+        val escapeNanos = measureNanoTime {
+            repeat(20) {
+                val event = parser.parse(escapeLine) as ControlEvent.Output
+                escapeBytes += event.data.size
+            }
+        }
+
+        println(
+            "ControlModeParser large %output timing: " +
+                "noEscapeBytes=$noEscapeBytes noEscapeMs=${noEscapeNanos / 1_000_000.0} " +
+                "escapeBytes=$escapeBytes escapeMs=${escapeNanos / 1_000_000.0}",
+        )
+        assertEquals(20 * noEscapePayload.length, noEscapeBytes)
+        assertEquals(20 * "\u001b[32mdata\u001b[0m\n".repeat(4096).length, escapeBytes)
     }
 
     @Test

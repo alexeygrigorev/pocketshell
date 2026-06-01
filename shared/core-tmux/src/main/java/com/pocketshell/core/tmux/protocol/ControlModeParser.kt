@@ -76,17 +76,17 @@ public class ControlModeParser {
         // After "%output " comes "%<paneId> <data>". The paneId is itself
         // `%`-prefixed (e.g. `%12`); do NOT strip it — see ControlEvent.Output
         // KDoc for the rationale.
-        val rest = line.substring(OUTPUT_PREFIX.length)
-        val space = rest.indexOf(' ')
+        val paneStart = OUTPUT_PREFIX.length
+        val space = line.indexOf(' ', startIndex = paneStart)
         if (space < 0) {
             // `%output %0` with no data is technically valid (empty write).
             // Anything without even the paneId is malformed.
-            if (rest.isEmpty() || rest[0] != '%') return malformed(line)
-            return ControlEvent.Output(rest, ByteArray(0))
+            if (paneStart >= line.length || line[paneStart] != '%') return malformed(line)
+            return ControlEvent.Output(line.substring(paneStart), ByteArray(0))
         }
-        val paneId = rest.substring(0, space)
-        if (paneId.isEmpty() || paneId[0] != '%') return malformed(line)
-        val data = decodeOutputData(rest.substring(space + 1))
+        if (space == paneStart || line[paneStart] != '%') return malformed(line)
+        val paneId = line.substring(paneStart, space)
+        val data = decodeOutputData(line, space + 1, line.length)
         return ControlEvent.Output(paneId, data)
     }
 
@@ -221,12 +221,35 @@ private const val DCS_TERMINATOR = "\u001b\\"
  * tests can poke at it directly without instantiating the parser.
  */
 internal fun decodeOutputData(escaped: String): ByteArray {
-    val out = java.io.ByteArrayOutputStream(escaped.length)
-    var i = 0
-    val n = escaped.length
-    while (i < n) {
+    return decodeOutputData(escaped, 0, escaped.length)
+}
+
+private fun decodeOutputData(escaped: String, start: Int, end: Int): ByteArray {
+    if (start == end) return ByteArray(0)
+
+    var i = start
+    while (i < end) {
         val c = escaped[i]
-        if (c != '\\' || i + 1 >= n) {
+        if (c == '\\' || c.code >= 0x80) break
+        i++
+    }
+    if (i == end) {
+        val data = ByteArray(end - start)
+        var source = start
+        var target = 0
+        while (source < end) {
+            data[target] = escaped[source].code.toByte()
+            source++
+            target++
+        }
+        return data
+    }
+
+    val out = java.io.ByteArrayOutputStream(end - start)
+    i = start
+    while (i < end) {
+        val c = escaped[i]
+        if (c != '\\' || i + 1 >= end) {
             // Plain character. tmux only emits 7-bit ASCII in control-mode
             // streams (everything else is escaped), but be tolerant: if a
             // non-ASCII char slipped through, UTF-8-encode it so we don't
@@ -243,7 +266,7 @@ internal fun decodeOutputData(escaped: String): ByteArray {
         val next = escaped[i + 1]
         when {
             // \NNN — 3-digit octal. tmux's primary escape form.
-            next in '0'..'7' && i + 3 < n &&
+            next in '0'..'7' && i + 3 < end &&
                 escaped[i + 2] in '0'..'7' && escaped[i + 3] in '0'..'7' -> {
                 val value = ((next.code - '0'.code) shl 6) or
                     ((escaped[i + 2].code - '0'.code) shl 3) or
@@ -252,7 +275,7 @@ internal fun decodeOutputData(escaped: String): ByteArray {
                 i += 4
             }
             // \xNN — 2-digit hex. Legacy / documented form per the brief.
-            next == 'x' && i + 3 < n &&
+            next == 'x' && i + 3 < end &&
                 escaped[i + 2].isHexDigit() && escaped[i + 3].isHexDigit() -> {
                 val value = (escaped[i + 2].hexValue() shl 4) or escaped[i + 3].hexValue()
                 out.write(value and 0xff)

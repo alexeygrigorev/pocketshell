@@ -185,6 +185,14 @@ GitHub Issues are the contract. Every artifact lives there:
 
 Agents do not talk to each other directly. The orchestrator is always the messenger so the audit trail stays complete.
 
+## Maintainer Voice Notes
+
+The maintainer may send dictated notes in Russian. When that happens, the
+orchestrator first translates the note to English in the thread, then proceeds
+through the same issue/backlog/process flow as for an English request. Do not
+treat the language switch as a different priority level or a request to skip
+the implementer/reviewer loop.
+
 ## Workflow Per Issue
 
 1. Orchestrator refines the issue. Acceptance criteria must be specific and verifiable.

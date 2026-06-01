@@ -1,5 +1,6 @@
 package com.pocketshell.app.jobs
 
+import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.CancellationException
 import javax.inject.Inject
@@ -98,6 +99,11 @@ public class PocketshellJobsRemoteSource @Inject constructor(
         when {
             result.exitCode == 0 -> onSuccess(result.stdout)
             result.exitCode == 127 -> RecurringJobsCommandResult.ToolMissing
+            result.looksLikeDaemonUnavailable() -> RecurringJobsCommandResult.DaemonUnavailable(
+                result.stderr.ifBlank { result.stdout }.ifBlank {
+                    "pocketshell jobs daemon is unavailable"
+                },
+            )
             else -> RecurringJobsCommandResult.Failed(
                 result.stderr.ifBlank { result.stdout }.ifBlank { "pocketshell exited ${result.exitCode}" },
             )
@@ -115,4 +121,12 @@ public class PocketshellJobsRemoteSource @Inject constructor(
         public fun shellQuote(value: String): String =
             "'" + value.replace("'", "'\"'\"'") + "'"
     }
+}
+
+private fun ExecResult.looksLikeDaemonUnavailable(): Boolean {
+    val text = (stderr + "\n" + stdout).lowercase()
+    return "pocketshell-jobs.service" in text ||
+        "jobs daemon" in text ||
+        "systemctl --user" in text ||
+        "failed to connect to bus" in text
 }

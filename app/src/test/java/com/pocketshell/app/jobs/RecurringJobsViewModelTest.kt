@@ -71,6 +71,34 @@ class RecurringJobsViewModelTest {
     }
 
     @Test
+    fun refreshMapsUnavailableJobsDaemonToTargetedSetupMessage() = runTest {
+        val session = FakeSshSession(
+            pathAware("pocketshell jobs list --session 'codex'") to ExecResult(
+                "",
+                "pocketshell jobs daemon is not running",
+                2,
+            ),
+        )
+        val viewModel = newViewModel(session)
+
+        viewModel.load(
+            hostName = "Lab",
+            hostname = "lab.local",
+            port = 22,
+            username = "alexey",
+            keyPath = "/tmp/key",
+            passphrase = null,
+            sessionName = "codex",
+        )
+        advanceUntilIdle()
+
+        val error = viewModel.state.value.error.orEmpty()
+        assertEquals(true, error.contains("Recurring jobs need the optional pocketshell jobs daemon"))
+        assertEquals(true, error.contains("systemctl --user enable --now pocketshell-jobs.service"))
+        assertFalse(viewModel.state.value.loading)
+    }
+
+    @Test
     fun addRefreshesTheBoundSessionAfterSuccess() = runTest {
         val session = FakeSshSession(
             pathAware("pocketshell jobs list --session 'codex'") to listOf(

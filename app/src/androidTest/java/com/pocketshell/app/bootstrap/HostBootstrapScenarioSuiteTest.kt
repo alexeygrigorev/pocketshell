@@ -138,20 +138,12 @@ class HostBootstrapScenarioSuiteTest {
         launchSeededHost()
         tapSeededHost()
 
-        waitForBootstrapSheet()
-        compose.onNodeWithText("Host setup needed").assertExists()
-        compose.onNodeWithTag(HOST_BOOTSTRAP_ROW_TAG_PREFIX + "pocketshell jobs daemon").assertExists()
-        capture("02-daemon-disabled")
-        compose.onNodeWithText("Enable").assertExists().performClick()
-        compose.onNodeWithTag(HOST_BOOTSTRAP_INSTALLING_TAG).assertExists()
-        capture("03-enabling-daemon")
-        compose.waitUntil(timeoutMillis = 20_000) {
-            compose.onAllNodesWithText("Host ready").fetchSemanticsNodes().isNotEmpty()
-        }
-        compose.onNodeWithText("Host ready").assertExists()
-        capture("04-host-ready")
-        assertRemote("daemon-disabled scenario should enable the fixture daemon") {
-            "systemctl --user is-enabled pocketshell-jobs.service >/dev/null"
+        waitForReadyNavigation()
+        capture("02-ready-navigation")
+        assertRemote("daemon-disabled profile should navigate normally without enabling the optional jobs daemon") {
+            "/bin/sh -lc 'PATH=\"\$HOME/.local/bin:\$HOME/bin:\$HOME/.cargo/bin:\$PATH\"; " +
+                "command -v pocketshell >/dev/null && " +
+                "! systemctl --user is-enabled pocketshell-jobs.service >/dev/null'"
         }
     }
 

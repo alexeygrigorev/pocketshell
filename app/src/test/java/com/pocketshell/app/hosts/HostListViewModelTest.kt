@@ -412,7 +412,7 @@ class HostListViewModelTest {
     }
 
     @Test
-    fun bootstrapHost_reprobes_whenFreshToolCacheHasUnknownDaemonState() = runTest {
+    fun bootstrapHost_skipsProbe_whenFreshRequiredCacheHasUnknownDaemonState() = runTest {
         val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
         val now = System.currentTimeMillis()
         val hostId = db.hostDao().insert(
@@ -441,12 +441,12 @@ class HostListViewModelTest {
         val pending = viewModel.pendingNavigation.value
         assertNotNull(pending)
         assertEquals(hostId, pending!!.host.id)
-        assertEquals(false, pending.ready)
+        assertEquals(true, pending.ready)
         assertNull(viewModel.bootstrapState.value)
     }
 
     @Test
-    fun bootstrapHost_reprobes_whenFreshToolCacheHasDisabledDaemon() = runTest {
+    fun bootstrapHost_skipsProbe_whenFreshRequiredCacheHasDisabledDaemon() = runTest {
         val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
         val now = System.currentTimeMillis()
         val hostId = db.hostDao().insert(
@@ -475,7 +475,7 @@ class HostListViewModelTest {
         val pending = viewModel.pendingNavigation.value
         assertNotNull(pending)
         assertEquals(hostId, pending!!.host.id)
-        assertEquals(false, pending.ready)
+        assertEquals(true, pending.ready)
         assertNull(viewModel.bootstrapState.value)
     }
 
@@ -737,7 +737,7 @@ class HostListViewModelTest {
     }
 
     @Test
-    fun deriveSetupState_returnsUnknown_whenDaemonStateIsUnknown() {
+    fun deriveSetupState_returnsOptionalUnavailable_whenDaemonStateIsUnknown() {
         val host = hostFixture().copy(
             tmuxInstalled = true,
             pocketshellInstalled = true,
@@ -745,13 +745,13 @@ class HostListViewModelTest {
             pocketshellDaemonEnabled = null,
         )
         assertEquals(
-            com.pocketshell.uikit.model.HostSetupState.Unknown,
+            com.pocketshell.uikit.model.HostSetupState.OptionalUnavailable,
             deriveSetupState(host),
         )
     }
 
     @Test
-    fun deriveSetupState_returnsNeedsSetup_whenDaemonIsDisabled() {
+    fun deriveSetupState_returnsDaemonDisabled_whenDaemonIsDisabled() {
         val host = hostFixture().copy(
             tmuxInstalled = true,
             pocketshellInstalled = true,
@@ -759,7 +759,7 @@ class HostListViewModelTest {
             pocketshellDaemonEnabled = false,
         )
         assertEquals(
-            com.pocketshell.uikit.model.HostSetupState.NeedsSetup,
+            com.pocketshell.uikit.model.HostSetupState.DaemonDisabled,
             deriveSetupState(host),
         )
     }

@@ -100,6 +100,24 @@ class PocketshellJobsRemoteSourceTest {
     }
 
     @Test
+    fun jobsDaemonFailureIsTargetedOptionalCapabilityState() = runTest {
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("pocketshell jobs list") to ExecResult(
+                    "",
+                    "pocketshell jobs daemon is not running; systemctl --user enable --now pocketshell-jobs.service",
+                    2,
+                ),
+            ),
+        )
+
+        val result = source.list(session)
+
+        assertTrue(result is RecurringJobsCommandResult.DaemonUnavailable)
+        assertTrue((result as RecurringJobsCommandResult.DaemonUnavailable).reason.contains("systemctl --user"))
+    }
+
+    @Test
     fun cancellationPropagates() = runTest {
         val session = ThrowingSshSession(CancellationException("cancelled"))
 

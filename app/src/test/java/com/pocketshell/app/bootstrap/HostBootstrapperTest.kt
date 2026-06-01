@@ -38,6 +38,15 @@ class HostBootstrapperTest {
     private val bootstrapper = HostBootstrapper()
 
     @Test
+    fun successSubtitleDoesNotClaimOptionalDaemonIsEnabled() {
+        val subtitle = hostBootstrapSuccessSubtitle("devbox")
+
+        assertEquals("devbox · tmux and the pocketshell CLI are ready.", subtitle)
+        assertTrue(!subtitle.contains("daemon", ignoreCase = true))
+        assertTrue(!subtitle.contains("enabled", ignoreCase = true))
+    }
+
+    @Test
     fun checkTmux_returnsInstalled_whenExitZero() = runTest {
         val session = FakeSshSession(
             mapOf(pathAware("command -v tmux") to ExecResult("/usr/bin/tmux\n", "", 0)),
@@ -391,7 +400,7 @@ class HostBootstrapperTest {
     }
 
     @Test
-    fun bootstrapPromptTreatsRunningButDisabledDaemonAsActionable() {
+    fun bootstrapPromptDoesNotTreatRunningButDisabledDaemonAsRequiredSetup() {
         val report = HostBootstrapReport(
             tools = BootstrapTool.entries.associateWith {
                 ToolStatus.Installed("/home/u/.local/bin/${it.binaryName}")
@@ -401,7 +410,8 @@ class HostBootstrapperTest {
         )
 
         assertTrue(report.needsPocketshellDaemonAction())
-        assertTrue(HostBootstrapSheetState.Prompt(needsTmux = false, report = report).hasActionableSetup())
+        assertTrue(!report.hasBootstrapSheetRows())
+        assertTrue(!HostBootstrapSheetState.Prompt(needsTmux = false, report = report).hasActionableSetup())
     }
 
     @Test
@@ -422,7 +432,7 @@ class HostBootstrapperTest {
     }
 
     @Test
-    fun installServerSetup_usesUvToolForMissingTools_thenInstallsSystemdUserUnit() = runTest {
+    fun installServerSetup_usesUvToolForMissingRequiredTools_withoutInstallingSystemdUserUnit() = runTest {
         val installedTools = mutableSetOf<String>()
         val session = FakeSshSession(
             dynamic = { command ->
@@ -454,8 +464,8 @@ class HostBootstrapperTest {
 
         assertEquals(InstallResult.Success, result)
         assertTrue(session.recorded.contains(pathAware("uv tool install pocketshell")))
-        assertTrue(session.recorded.any { it.contains("ExecStart=\"/home/u/.local/bin/pocketshell\" jobs daemon") })
-        assertTrue(session.recorded.any { it.contains("systemctl --user enable --now pocketshell-jobs.service") })
+        assertTrue(session.recorded.none { it.contains("ExecStart=\"/home/u/.local/bin/pocketshell\" jobs daemon") })
+        assertTrue(session.recorded.none { it.contains("systemctl --user enable --now pocketshell-jobs.service") })
     }
 
     @Test
@@ -503,7 +513,7 @@ class HostBootstrapperTest {
         val report = bootstrapper.checkServerSetup(session)
 
         assertEquals(PocketshellDaemonStatus.Running(enabled = false), report.daemon)
-        assertTrue(!report.isReady)
+        assertTrue(report.isRequiredReady)
     }
 
     @Test
@@ -521,7 +531,7 @@ class HostBootstrapperTest {
         val report = bootstrapper.checkServerSetup(session)
 
         assertEquals(PocketshellDaemonStatus.InstalledStopped(enabled = false), report.daemon)
-        assertTrue(!report.isReady)
+        assertTrue(report.isRequiredReady)
     }
 
     @Test
@@ -543,7 +553,7 @@ class HostBootstrapperTest {
     }
 
     @Test
-    fun installServerSetup_enablesDaemon_whenRunningButDisabled() = runTest {
+    fun installServerSetup_doesNotEnableOptionalDaemon_whenRunningButDisabled() = runTest {
         val session = FakeSshSession(
             dynamic = { command ->
                 when (command) {
@@ -569,7 +579,7 @@ class HostBootstrapperTest {
         val result = bootstrapper.installServerSetup(session, report)
 
         assertEquals(InstallResult.Success, result)
-        assertTrue(session.recorded.any { it.contains("systemctl --user enable --now pocketshell-jobs.service") })
+        assertTrue(session.recorded.none { it.contains("systemctl --user enable --now pocketshell-jobs.service") })
     }
 
     @Test

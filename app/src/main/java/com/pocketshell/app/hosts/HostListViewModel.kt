@@ -702,13 +702,13 @@ class HostListViewModel internal constructor(
      * the user taps Skip / Continue on the sheet).
      */
     fun bootstrapHost(host: HostEntity, keyPath: String, passphrase: CharArray? = null): Job {
-        // Cache: a fresh tmux result skips the bootstrap SSH probe only
-        // when the matching server-setup probe also proved the unified
-        // pocketshell CLI is present and app-compatible and its daemon is
-        // running/enabled. NeedsSetup / CliUpdateNeeded rows must not route
+        // Cache: a fresh tmux result skips the bootstrap SSH probe when
+        // the matching server-setup probe proved the unified pocketshell
+        // CLI is present and app-compatible. Optional jobs/daemon state
+        // is not part of the normal host-open gate. NeedsSetup /
+        // CliUpdateNeeded rows must not route
         // immediately off a partial cache; they need a chance to re-run
-        // checkServerSetup so README-installed CLIs can be upgraded and the
-        // daemon can be enabled.
+        // checkServerSetup so README-installed CLIs can be upgraded.
         val probeLock = probeLockFor(host.id)
         markForegroundProbe(host.id)
         val skipTmuxProbe = !probeLock.isLocked && host.canUseBootstrapCache()
@@ -927,8 +927,8 @@ class HostListViewModel internal constructor(
                 InstallResult.Success -> {
                     // Re-probe so the persisted pocketshell flag reflects the
                     // post-install reality. Only show the success state when
-                    // that final report is fully ready; a successful command
-                    // exit is not enough if the version gate still fails.
+                    // required setup is ready; optional jobs/daemon state is
+                    // surfaced where those features are invoked.
                     val finalReport = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
                     persistPocketshellResult(host, finalReport)
                     _bootstrapState.value = if (finalReport.isReady) {
@@ -1058,7 +1058,7 @@ class HostListViewModel internal constructor(
     ) {
         val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
         bootstrapTargetHost?.let { persistPocketshellResult(it, report) }
-        _bootstrapState.value = if (!needsTmux && report.isReady) {
+        _bootstrapState.value = if (!needsTmux && report.isRequiredReady) {
             HostBootstrapSheetState.Success
         } else {
             HostBootstrapSheetState.Prompt(needsTmux = needsTmux, report = report)
@@ -1289,18 +1289,10 @@ class HostListViewModel internal constructor(
             now - last < BOOTSTRAP_CACHE_MS
     }
 
-    private fun HostEntity.hasFreshReadyDaemonResult(now: Long = System.currentTimeMillis()): Boolean {
-        val last = pocketshellLastDetectedAt ?: return false
-        return pocketshellDaemonRunning == true &&
-            pocketshellDaemonEnabled == true &&
-            now - last < BOOTSTRAP_CACHE_MS
-    }
-
     private fun HostEntity.canUseBootstrapCache(now: Long = System.currentTimeMillis()): Boolean =
         tmuxInstalled == true &&
             isBootstrapFresh(now) &&
-            hasFreshCompatiblePocketshellResult(now) &&
-            hasFreshReadyDaemonResult(now)
+            hasFreshCompatiblePocketshellResult(now)
 }
 
 internal fun interface HostSessionOpener {
@@ -1354,7 +1346,11 @@ enum class ImportConflictResolution {
  * - `NeedsSetup`  — `tmuxInstalled == false`, OR `pocketshellInstalled ==
  *                   false`. At least one required tool is missing.
  * - `Ready`       — `tmuxInstalled == true`, `pocketshellInstalled == true`,
- *                   and the pocketshell daemon is known running/enabled.
+ *                   and no optional helper gap is known.
+ * - `OptionalUnavailable` — required setup is ready, but optional helper
+ *                   capability state is unavailable or unverified.
+ * - `DaemonDisabled` — required setup is ready, but the optional jobs daemon
+ *                   is known stopped or disabled.
  */
 internal fun deriveSetupState(host: HostEntity): HostSetupState {
     val tmux = host.tmuxInstalled
@@ -1368,8 +1364,8 @@ internal fun deriveSetupState(host: HostEntity): HostSetupState {
         host.pocketshellVersionCompatible == false -> HostSetupState.CliUpdateNeeded
         pocketshell == null -> HostSetupState.Unknown
         pocketshell == false -> HostSetupState.NeedsSetup
-        daemonRunning == null || daemonEnabled == null -> HostSetupState.Unknown
-        daemonRunning == false || daemonEnabled == false -> HostSetupState.NeedsSetup
+        daemonRunning == false || daemonEnabled == false -> HostSetupState.DaemonDisabled
+        daemonRunning == null || daemonEnabled == null -> HostSetupState.OptionalUnavailable
         else -> HostSetupState.Ready
     }
 }

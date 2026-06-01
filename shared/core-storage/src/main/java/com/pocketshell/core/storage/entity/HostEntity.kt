@@ -51,9 +51,8 @@ import androidx.room.PrimaryKey
  * into the generic "needs setup" state.
  *
  * Issue #328 adds [pocketshellDaemonRunning] and
- * [pocketshellDaemonEnabled] to keep the connect cache honest: a fresh,
- * compatible CLI is not enough to route directly unless the matching probe
- * also proved the user daemon is running and enabled.
+ * [pocketshellDaemonEnabled] so optional jobs-daemon capability can be shown
+ * separately from the required tmux + compatible CLI setup cache.
  */
 @Entity(
     tableName = "hosts",

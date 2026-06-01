@@ -73,6 +73,9 @@ public class RecurringJobsViewModel @Inject constructor(
                 RecurringJobsCommandResult.ToolMissing -> {
                     _state.value = _state.value.copy(loading = false, error = "pocketshell is not installed on this host")
                 }
+                is RecurringJobsCommandResult.DaemonUnavailable -> {
+                    _state.value = _state.value.copy(loading = false, error = jobsDaemonUnavailableMessage(result.reason))
+                }
                 is RecurringJobsCommandResult.Failed -> {
                     _state.value = _state.value.copy(loading = false, error = result.reason)
                 }
@@ -113,6 +116,9 @@ public class RecurringJobsViewModel @Inject constructor(
                 }
                 RecurringJobsCommandResult.ToolMissing -> {
                     _state.value = _state.value.copy(loading = false, error = "pocketshell is not installed on this host")
+                }
+                is RecurringJobsCommandResult.DaemonUnavailable -> {
+                    _state.value = _state.value.copy(loading = false, error = jobsDaemonUnavailableMessage(result.reason))
                 }
                 is RecurringJobsCommandResult.Failed -> {
                     _state.value = _state.value.copy(loading = false, error = result.reason)
@@ -174,3 +180,6 @@ public class RecurringJobsViewModel @Inject constructor(
             )
     }
 }
+
+private fun jobsDaemonUnavailableMessage(reason: String): String =
+    "Recurring jobs need the optional pocketshell jobs daemon. Enable it with `systemctl --user enable --now pocketshell-jobs.service`, then refresh. ${reason.trim()}"

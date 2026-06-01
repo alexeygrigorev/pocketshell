@@ -27,5 +27,6 @@ public sealed interface RecurringJobsCommandResult {
     public data object Success : RecurringJobsCommandResult
     public data class Jobs(val jobs: List<RecurringJob>) : RecurringJobsCommandResult
     public data object ToolMissing : RecurringJobsCommandResult
+    public data class DaemonUnavailable(val reason: String) : RecurringJobsCommandResult
     public data class Failed(val reason: String) : RecurringJobsCommandResult
 }

@@ -101,7 +101,6 @@ public fun HostBootstrapSheet(
     hostName: String,
     onInstall: () -> Unit,
     onInstallTool: (BootstrapTool) -> Unit = { onInstall() },
-    onSetupDaemon: () -> Unit = onInstall,
     onSkip: () -> Unit,
     onDismiss: () -> Unit,
     onOpenUsage: (() -> Unit)? = null,
@@ -121,7 +120,6 @@ public fun HostBootstrapSheet(
                 state = state,
                 onInstall = onInstall,
                 onInstallTool = onInstallTool,
-                onSetupDaemon = onSetupDaemon,
                 onSkip = onSkip,
             )
 
@@ -148,7 +146,6 @@ private fun PromptContent(
     state: HostBootstrapSheetState.Prompt,
     onInstall: () -> Unit,
     onInstallTool: (BootstrapTool) -> Unit,
-    onSetupDaemon: () -> Unit,
     onSkip: () -> Unit,
 ) {
     SheetColumn {
@@ -157,7 +154,6 @@ private fun PromptContent(
         SetupActions(
             state = state,
             onInstallTool = onInstallTool,
-            onSetupDaemon = onSetupDaemon,
         )
         Spacer(modifier = Modifier.height(20.dp))
         if (state.hasActionableSetup()) {
@@ -197,11 +193,9 @@ private fun PromptContent(
 private fun SetupActions(
     state: HostBootstrapSheetState.Prompt,
     onInstallTool: (BootstrapTool) -> Unit,
-    onSetupDaemon: () -> Unit,
 ) {
     val report = state.report ?: return
     val missingTools = report.missingTools
-    val needsDaemon = report.needsPocketshellDaemonSetup()
     if (!report.hasBootstrapSheetRows()) return
 
     Spacer(modifier = Modifier.height(16.dp))
@@ -222,26 +216,6 @@ private fun SetupActions(
                 onClick = { onInstallTool(BootstrapTool.Pocketshell) },
             )
         }
-        if (needsDaemon) {
-            when (val daemon = report.daemon) {
-                is PocketshellDaemonStatus.Unavailable -> SetupInfoRow(
-                    title = "pocketshell jobs daemon",
-                    detail = daemon.reason,
-                )
-
-                is PocketshellDaemonStatus.Unknown -> SetupInfoRow(
-                    title = "pocketshell jobs daemon",
-                    detail = daemon.reason,
-                )
-
-                else -> SetupActionRow(
-                    title = "pocketshell jobs daemon",
-                    detail = "systemctl --user enable --now pocketshell-jobs.service",
-                    actionLabel = "Enable",
-                    onClick = onSetupDaemon,
-                )
-            }
-        }
         // Mosh row intentionally not rendered. Spike #159 returned NO-GO
         // for Mosh + tmux -CC, so surfacing a permanent "unsupported" row
         // would only draw attention to a feature we do not ship. The
@@ -252,14 +226,12 @@ private fun SetupActions(
 
 internal fun HostBootstrapReport.hasBootstrapSheetRows(): Boolean =
     missingTools.isNotEmpty() ||
-        versionMismatchedTools.isNotEmpty() ||
-        needsPocketshellDaemonSetup()
+        versionMismatchedTools.isNotEmpty()
 
 internal fun HostBootstrapSheetState.Prompt.hasActionableSetup(): Boolean =
     needsTmux ||
         report?.missingTools?.isNotEmpty() == true ||
-        report?.versionMismatchedTools?.isNotEmpty() == true ||
-        report?.needsPocketshellDaemonAction() == true
+        report?.versionMismatchedTools?.isNotEmpty() == true
 
 internal fun HostBootstrapReport.needsPocketshellDaemonSetup(): Boolean {
     val daemonStatus = daemon
@@ -350,7 +322,7 @@ private fun SuccessContent(
 ) {
     SheetColumn {
         SheetTitle(text = "Host ready")
-        SheetSubtitle(text = "$hostName · server tools are installed and the pocketshell user daemon is enabled.")
+        SheetSubtitle(text = hostBootstrapSuccessSubtitle(hostName))
         Spacer(modifier = Modifier.height(20.dp))
         // Issue #117 (usage Fix C): when pocketshell was just installed by
         // the bootstrap flow, surface a direct route to the usage panel. The
@@ -389,6 +361,9 @@ private fun SuccessContent(
         }
     }
 }
+
+internal fun hostBootstrapSuccessSubtitle(hostName: String): String =
+    "$hostName · tmux and the pocketshell CLI are ready."
 
 @Composable
 private fun FailedContent(hostName: String, message: String, onClose: () -> Unit) {
@@ -443,9 +418,6 @@ private fun bootstrapPromptText(state: HostBootstrapSheetState.Prompt): String {
         ?.mapTo(parts) { it.binaryName }
     if (report?.versionMismatchedTools?.isNotEmpty() == true) {
         parts += "pocketshell CLI update"
-    }
-    if (report != null && report.needsPocketshellDaemonAction()) {
-        parts += "pocketshell jobs daemon"
     }
 
     val missing = parts.distinct().joinToString()

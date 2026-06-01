@@ -127,12 +127,13 @@ public data class HostBootstrapReport(
     public val pocketshellVersionMismatch: ToolStatus.VersionMismatch?
         get() = tools[BootstrapTool.Pocketshell] as? ToolStatus.VersionMismatch
 
-    public val isReady: Boolean
+    public val isRequiredReady: Boolean
         get() = missingTools.isEmpty() &&
             unknownTools.isEmpty() &&
-            versionMismatchedTools.isEmpty() &&
-            daemon is PocketshellDaemonStatus.Running &&
-            daemon.enabled
+            versionMismatchedTools.isEmpty()
+
+    public val isReady: Boolean
+        get() = isRequiredReady
 }
 
 /**
@@ -272,16 +273,6 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
                 report = afterTools,
                 reason = "Required host tools are still missing after setup: $missing.",
             )
-        }
-        val daemon = afterTools.daemon
-        if (daemon is PocketshellDaemonStatus.Unavailable) {
-            return InstallResult.Error(daemon.reason)
-        }
-        if (daemon is PocketshellDaemonStatus.Unknown) {
-            return InstallResult.Error(daemon.reason)
-        }
-        if (daemon !is PocketshellDaemonStatus.Running || !daemon.enabled) {
-            return installPocketshellUserDaemon(session, bootstrapPath)
         }
         return InstallResult.Success
     }

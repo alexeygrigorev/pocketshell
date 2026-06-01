@@ -19,6 +19,10 @@ package com.pocketshell.uikit.model
  * - [CliUpdateNeeded] — the remote `pocketshell` CLI exists, but its
  *   version does not match the app-compatible helper version. Tapping
  *   the badge opens the bootstrap sheet with an upgrade action.
+ * - [OptionalUnavailable] — required SSH/tmux/CLI setup is ready, but
+ *   optional helper capability state is unavailable or unverified.
+ * - [DaemonDisabled] — required SSH/tmux/CLI setup is ready, but the
+ *   optional jobs daemon is stopped or disabled.
  * - [Unknown] — there is no cached probe result yet (cold launch with
  *   saved hosts) OR the cache is stale and a probe has not landed. The
  *   ViewModel triggers a background re-probe on first composition; the
@@ -32,5 +36,7 @@ enum class HostSetupState {
     Ready,
     NeedsSetup,
     CliUpdateNeeded,
+    OptionalUnavailable,
+    DaemonDisabled,
     Unknown,
 }

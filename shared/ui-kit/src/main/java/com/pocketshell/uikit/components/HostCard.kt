@@ -330,6 +330,8 @@ const val HOST_STATUS_SPINNER_TAG: String = "host-status-chip:spinner"
  * - [HostSetupState.Ready]      -> green, "ready"
  * - [HostSetupState.NeedsSetup] -> amber, "needs setup"
  * - [HostSetupState.CliUpdateNeeded] -> amber, "CLI update needed"
+ * - [HostSetupState.OptionalUnavailable] -> muted grey, "optional unavailable"
+ * - [HostSetupState.DaemonDisabled] -> amber, "daemon disabled"
  * - [HostSetupState.Unknown]    -> muted grey, "unknown"
  *
  * When [onClick] is non-null the entire pill is tappable. Callers wire a
@@ -346,6 +348,8 @@ private fun HostSetupBadge(state: HostSetupState, onClick: (() -> Unit)?) {
         HostSetupState.Ready -> PocketShellColors.Green to "ready"
         HostSetupState.NeedsSetup -> PocketShellColors.Amber to "needs setup"
         HostSetupState.CliUpdateNeeded -> PocketShellColors.Amber to "CLI update needed"
+        HostSetupState.OptionalUnavailable -> PocketShellColors.TextMuted to "optional unavailable"
+        HostSetupState.DaemonDisabled -> PocketShellColors.Amber to "daemon disabled"
         HostSetupState.Unknown -> PocketShellColors.TextMuted to "unknown"
     }
     val baseModifier = Modifier

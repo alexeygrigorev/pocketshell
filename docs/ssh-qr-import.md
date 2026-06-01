@@ -57,7 +57,7 @@ Single QR import works best below about 2,800 UTF-8 bytes. Larger payloads (RSA 
 
 Private keys in QR codes are visible secrets. Generate and scan them in a private space, prefer passphrase-protected keys, and delete any generated payload or QR image after import.
 
-PocketShell may destructively rebuild its pre-release Room database when the local schema falls behind the current app. Treat the QR import payload or `pocketshell qr-share` output as the recovery path for host/key setup after that reset.
+Normal APK updates are expected to preserve PocketShell's Room-backed local data through migrations. Keep QR payloads for sharing or bootstrapping hosts, not as the routine recovery path after an app update.
 
 ## Multi-QR Envelope
 

@@ -38,15 +38,12 @@ import androidx.room.PrimaryKey
  * Issue #231 (parity swap, #170 follow-up) renamed these detection columns
  * from the legacy `quse*` naming to `pocketshell*` as the Android side cut
  * over from the separate `quse` / `tmuxctl` utilities to the unified
- * `pocketshell` CLI. Per D22 this is a hard cut: there is no legacy column,
- * no compatibility shim, and no Room migration — the destructive rebuild in
- * `StorageModule` (`fallbackToDestructiveMigration(dropAllTables = true)`)
- * is sufficient.
+ * `pocketshell` CLI. Those pre-#386 hard cuts happened before Room-backed
+ * data preservation became required for normal APK updates.
  *
  * Issue #294 removed the manual PATH override column. Bootstrap probes now
  * derive PATH from the remote user's shell rc and prepend PocketShell's
- * default user-bin locations automatically. Per D22 this is a hard cut;
- * the destructive rebuild handles the schema change.
+ * default user-bin locations automatically.
  *
  * Issue #315 adds [pocketshellCliVersion],
  * [pocketshellExpectedCliVersion], and [pocketshellVersionCompatible] so

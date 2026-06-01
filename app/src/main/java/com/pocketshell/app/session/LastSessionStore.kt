@@ -20,18 +20,16 @@ import javax.inject.Singleton
  * already made: the payload is tiny (one host tuple + a session name +
  * a composer draft + a timestamp), write traffic is one-edit-per-app-stop,
  * and SharedPreferences is already on the classpath transitively. A Room
- * entity would force a schema bump + `fallbackToDestructiveMigration`
- * which under D22 would nuke the user's saved hosts/keys for no functional
- * gain. DataStore would add a version-catalog entry without buying any
- * feature we need. Future issues are free to migrate.
+ * entity would force a schema bump and migration for state that does not need
+ * relational queries. DataStore would add a version-catalog entry without
+ * buying any feature we need. Future issues are free to migrate.
  *
  * ## Hard-cut (D22)
  *
  * There is no legacy shape to honour — this is a brand new store. A blob
  * written by a previous build that does not parse cleanly is simply
- * discarded ([read] returns null), exactly the behaviour the maintainer
- * accepts ("if it means nuking the current settings, it's fine"). We do
- * not carry an `if (old shape)` compatibility branch.
+ * discarded ([read] returns null). We do not carry an `if (old shape)`
+ * compatibility branch for this auxiliary preference blob.
  *
  * ## Foreground-only (D21)
  *

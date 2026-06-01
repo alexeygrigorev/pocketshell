@@ -2,6 +2,8 @@ package com.pocketshell.core.storage
 
 import androidx.room.Database
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.pocketshell.core.storage.dao.AgentSessionDao
 import com.pocketshell.core.storage.dao.AiApiCallLogDao
 import com.pocketshell.core.storage.dao.HostDao
@@ -28,19 +30,17 @@ const val APP_DATABASE_SCHEMA_VERSION = 12
 /**
  * The PocketShell Room database.
  *
- * PocketShell has no external install base to preserve, so schema changes
- * are handled by destructive rebuild in the app database builder
- * (`fallbackToDestructiveMigration(dropAllTables = true)`) instead of by
- * carrying migration code forward. That fallback only fires on a version
- * delta, so any entity-schema change MUST bump this number above every
- * shipped version — otherwise upgraded installs hit a Room identity-hash
- * mismatch or downgrade path and crash on launch (#261). Bumped to 12 because
- * issue #328 persists the remote pocketshell daemon running/enabled result so
- * the host setup cache cannot route on CLI readiness alone.
+ * Normal APK updates must preserve user data. Any entity-schema change MUST
+ * bump this number and add a matching [Migration] to [APP_DATABASE_MIGRATIONS]
+ * before it ships; otherwise upgraded installs fail Room validation instead of
+ * silently deleting hosts, keys, snippets, costs, or pending transcription
+ * metadata. Bumped to 12 because issue #328 persists the remote pocketshell
+ * daemon running/enabled result so the host setup cache cannot route on CLI
+ * readiness alone.
  *
- * `exportSchema = false` matches the reference module. When the schema
- * starts evolving in real users' hands, flip this on and check generated
- * schemas into `schemas/` so migrations are reviewable.
+ * `exportSchema = false` is historical. Issue #386 starts the preservation
+ * path with checked-in migration code; a follow-up should enable exported
+ * schemas so every future migration has a generated schema artifact too.
  */
 @Database(
     entities = [
@@ -70,3 +70,74 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun aiApiCallLogDao(): AiApiCallLogDao
     abstract fun pendingTranscriptionDao(): PendingTranscriptionDao
 }
+
+val MIGRATION_8_10: Migration = object : Migration(8, 10) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE ssh_keys ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''")
+
+        db.execSQL(
+            """
+            CREATE TABLE hosts_migration_8_10 (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                keyId INTEGER NOT NULL,
+                maxAutoPort INTEGER NOT NULL,
+                skipPortsBelow INTEGER NOT NULL,
+                scanIntervalSec INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL,
+                lastConnectedAt INTEGER,
+                tmuxInstalled INTEGER,
+                lastBootstrapAt INTEGER,
+                pocketshellInstalled INTEGER,
+                pocketshellLastDetectedAt INTEGER,
+                usageCommandOverride TEXT,
+                FOREIGN KEY(keyId) REFERENCES ssh_keys(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            INSERT INTO hosts_migration_8_10 (
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                usageCommandOverride
+            )
+            SELECT
+                id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                usageCommandOverride
+            FROM hosts
+            """.trimIndent(),
+        )
+        db.execSQL("DROP TABLE hosts")
+        db.execSQL("ALTER TABLE hosts_migration_8_10 RENAME TO hosts")
+        db.execSQL("CREATE INDEX index_hosts_keyId ON hosts(keyId)")
+    }
+}
+
+val MIGRATION_10_11: Migration = object : Migration(10, 11) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN pocketshellCliVersion TEXT")
+        db.execSQL("ALTER TABLE hosts ADD COLUMN pocketshellExpectedCliVersion TEXT")
+        db.execSQL("ALTER TABLE hosts ADD COLUMN pocketshellVersionCompatible INTEGER")
+    }
+}
+
+val MIGRATION_11_12: Migration = object : Migration(11, 12) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("ALTER TABLE hosts ADD COLUMN pocketshellDaemonRunning INTEGER")
+        db.execSQL("ALTER TABLE hosts ADD COLUMN pocketshellDaemonEnabled INTEGER")
+    }
+}
+
+val APP_DATABASE_MIGRATIONS: Array<Migration> = arrayOf(
+    MIGRATION_8_10,
+    MIGRATION_10_11,
+    MIGRATION_11_12,
+)

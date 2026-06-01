@@ -32,14 +32,15 @@ base to migrate, no third-party API to honor, no SDK consumer to warn.
   one in the same PR**. Do NOT keep a "legacy detection" path, a
   deprecation shim, a settings flag for "use the old behaviour", or a
   fallback branch.
-- When a schema changes, **either ship a migration or nuke the DB** —
-  but do NOT carry both a migration AND a code-level compatibility
-  branch ("if old shape ..."). The migration is sufficient.
-- The maintainer has explicitly said: "if it means nuking the current
-  settings, it's fine. I also want eventually to test configuring it
-  with QR code, so it should be relatively fast for me to restore."
-  Wiping `fallbackToDestructiveMigration(dropAllTables = false)`
-  → `dropAllTables = true` is acceptable when a feature requires it.
+- When a Room schema changes, **ship a migration** for normal APK updates.
+  Do NOT use production destructive migration, downgrade fallback, or
+  startup open-failure database deletion as the routine update path.
+  Migrations are sufficient; do not also carry code-level compatibility
+  branches ("if old shape ...").
+- A destructive reset is only acceptable as an explicit user-confirmed
+  recovery/reset path or as a separately reviewed release decision with a
+  preservation/export plan. QR import is a host-sharing/import feature, not
+  the normal recovery path for app updates.
 - When porting code from upstream (e.g. `ssh-auto-forward-android`),
   **do NOT port legacy-detection shims** the upstream had for its own
   install-base reasons.

@@ -3,10 +3,10 @@ package com.pocketshell.core.storage
 import androidx.room.Room
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
-import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.storage.entity.AgentSessionEntity
 import com.pocketshell.core.storage.entity.AiApiCallEntry
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.core.storage.entity.PortRemappingEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SessionEntity
@@ -270,7 +270,7 @@ class AppDatabaseTest {
         seedStaleIdentityDatabase(databaseName, version = currentRoomSchemaVersion())
 
         val thrown = assertThrows(IllegalStateException::class.java) {
-            val staleDb = openOnDiskDatabase(databaseName, destructiveFallback = true)
+            val staleDb = openOnDiskDatabase(databaseName)
             try {
                 staleDb.openHelper.writableDatabase.query("SELECT 1").close()
             } finally {
@@ -284,52 +284,139 @@ class AppDatabaseTest {
     }
 
     @Test
-    fun legacyVersionOneStaleIdentity_isDestroyedOnOpen() {
-        val databaseName = "stale-v1-${System.nanoTime()}.db"
+    fun missingMigrationFailsWithoutDestroyingLegacyRows() {
+        val databaseName = "missing-migration-${System.nanoTime()}.db"
         seedStaleIdentityDatabase(databaseName, version = LEGACY_CRASH_SCHEMA_VERSION)
 
-        assertStaleIdentityDatabaseIsDestroyed(databaseName)
-        context.deleteDatabase(databaseName)
-    }
-
-    @Test
-    fun legacyVersionFiveFrom026_isDestroyedOnOpen() {
-        val databaseName = "stale-v5-${System.nanoTime()}.db"
-        seedStaleIdentityDatabase(databaseName, version = LEGACY_026_SCHEMA_VERSION)
-
-        assertStaleIdentityDatabaseIsDestroyed(databaseName)
-        context.deleteDatabase(databaseName)
-    }
-
-    @Test
-    fun legacyVersionSevenFrom028_isDestroyedOnOpen() {
-        val databaseName = "stale-v7-${System.nanoTime()}.db"
-        seedStaleIdentityDatabase(databaseName, version = LEGACY_028_SCHEMA_VERSION)
-
-        assertStaleIdentityDatabaseIsDestroyed(databaseName)
-        context.deleteDatabase(databaseName)
-    }
-
-    @Test
-    fun legacyVersionEightFrom035_isDestroyedOnOpen() {
-        val databaseName = "stale-v8-${System.nanoTime()}.db"
-        seedStaleIdentityDatabase(databaseName, version = LEGACY_035_SCHEMA_VERSION)
-
-        assertStaleIdentityDatabaseIsDestroyed(databaseName)
-        context.deleteDatabase(databaseName)
-    }
-
-    private fun openOnDiskDatabase(
-        databaseName: String,
-        destructiveFallback: Boolean,
-    ): AppDatabase {
-        val builder = Room.databaseBuilder(context, AppDatabase::class.java, databaseName)
-            .allowMainThreadQueries()
-        if (destructiveFallback) {
-            builder.fallbackToDestructiveMigration(dropAllTables = true)
+        assertThrows(IllegalStateException::class.java) {
+            val staleDb = openOnDiskDatabase(databaseName)
+            try {
+                staleDb.openHelper.writableDatabase.query("SELECT 1").close()
+            } finally {
+                staleDb.close()
+            }
         }
-        return builder.build()
+
+        assertTableExists(databaseName, "stale_issue_261_marker")
+        context.deleteDatabase(databaseName)
     }
+
+    @Test
+    fun migrationFromVersionEightToCurrent_preservesUserRowsAndDropsPathOverride() = runTest {
+        val databaseName = "v8-to-current-${System.nanoTime()}.db"
+        seedVersionEightDatabaseWithUserRows(databaseName)
+
+        val migratedDb = openOnDiskDatabase(databaseName)
+        try {
+            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
+
+            val hosts = migratedDb.hostDao().getAll().first()
+            assertEquals(1, hosts.size)
+            assertEquals("prod-v8", hosts[0].name)
+            assertEquals("v8.example.com", hosts[0].hostname)
+            assertEquals(true, hosts[0].enabled)
+            assertEquals("pocketshell usage --json", hosts[0].usageCommandOverride)
+            assertNull(hosts[0].pocketshellCliVersion)
+            assertNull(hosts[0].pocketshellExpectedCliVersion)
+            assertNull(hosts[0].pocketshellVersionCompatible)
+            assertNull(hosts[0].pocketshellDaemonRunning)
+            assertNull(hosts[0].pocketshellDaemonEnabled)
+
+            val key = migratedDb.sshKeyDao().getById(1)
+            assertNotNull(key)
+            assertEquals("deploy-key-v8", key!!.name)
+            assertEquals("/keys/deploy-v8", key.privateKeyPath)
+            assertEquals("", key.fingerprint)
+
+            val roots = migratedDb.projectRootDao().getByHostId(1).first()
+            assertEquals(listOf("~/git/pocketshell-v8"), roots.map { it.path })
+
+            val sessions = migratedDb.sessionDao().getByHostId(1).first()
+            assertEquals(listOf("main-v8"), sessions.map { it.name })
+
+            val snippets = migratedDb.snippetDao().getByHostId(1).first()
+            assertEquals(listOf("echo preserved from v8"), snippets.map { it.body })
+
+            val costs = migratedDb.aiApiCallLogDao().getAll().first()
+            assertEquals(1, costs.size)
+            assertEquals(456L, costs[0].computedCostUsdMillicents)
+
+            val pending = migratedDb.pendingTranscriptionDao().getAllOnce()
+            assertEquals(1, pending.size)
+            assertEquals("pending-v8", pending[0].id)
+
+            val remappings = migratedDb.portRemappingDao().getByHostId(1).first()
+            assertEquals(1, remappings.size)
+            assertEquals(4000, remappings[0].remotePort)
+
+            val usage = migratedDb.portUsageDao().getByHostId(1).first()
+            assertEquals(1, usage.size)
+            assertEquals(84L, usage[0].totalBytes)
+
+            assertColumnMissing(databaseName, "hosts", "pathOverride")
+        } finally {
+            migratedDb.close()
+        }
+        context.deleteDatabase(databaseName)
+    }
+
+    @Test
+    fun migrationFromVersionElevenToCurrent_preservesUserRows() = runTest {
+        val databaseName = "v11-to-current-${System.nanoTime()}.db"
+        seedVersionElevenDatabaseWithUserRows(databaseName)
+
+        val migratedDb = openOnDiskDatabase(databaseName)
+        try {
+            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
+
+            val hosts = migratedDb.hostDao().getAll().first()
+            assertEquals(1, hosts.size)
+            assertEquals("prod", hosts[0].name)
+            assertEquals("example.com", hosts[0].hostname)
+            assertEquals(true, hosts[0].enabled)
+            assertNull(hosts[0].pocketshellDaemonRunning)
+            assertNull(hosts[0].pocketshellDaemonEnabled)
+
+            val key = migratedDb.sshKeyDao().getById(1)
+            assertNotNull(key)
+            assertEquals("deploy-key", key!!.name)
+            assertEquals("sha256:v11", key.fingerprint)
+
+            val roots = migratedDb.projectRootDao().getByHostId(1).first()
+            assertEquals(listOf("~/git/pocketshell"), roots.map { it.path })
+
+            val sessions = migratedDb.sessionDao().getByHostId(1).first()
+            assertEquals(listOf("main"), sessions.map { it.name })
+
+            val snippets = migratedDb.snippetDao().getByHostId(1).first()
+            assertEquals(listOf("echo preserved"), snippets.map { it.body })
+
+            val costs = migratedDb.aiApiCallLogDao().getAll().first()
+            assertEquals(1, costs.size)
+            assertEquals(123L, costs[0].computedCostUsdMillicents)
+
+            val pending = migratedDb.pendingTranscriptionDao().getAllOnce()
+            assertEquals(1, pending.size)
+            assertEquals("pending-v11", pending[0].id)
+
+            val remappings = migratedDb.portRemappingDao().getByHostId(1).first()
+            assertEquals(1, remappings.size)
+            assertEquals(3000, remappings[0].remotePort)
+
+            val usage = migratedDb.portUsageDao().getByHostId(1).first()
+            assertEquals(1, usage.size)
+            assertEquals(42L, usage[0].totalBytes)
+        } finally {
+            migratedDb.close()
+        }
+        context.deleteDatabase(databaseName)
+    }
+
+    private fun openOnDiskDatabase(databaseName: String): AppDatabase =
+        Room.databaseBuilder(context, AppDatabase::class.java, databaseName)
+            .allowMainThreadQueries()
+            .addMigrations(*APP_DATABASE_MIGRATIONS)
+            .build()
 
     private fun seedStaleIdentityDatabase(databaseName: String, version: Int) {
         context.deleteDatabase(databaseName)
@@ -348,25 +435,526 @@ class AppDatabaseTest {
         }
     }
 
-    private fun assertStaleIdentityDatabaseIsDestroyed(databaseName: String) {
-        val migratedDb = openOnDiskDatabase(databaseName, destructiveFallback = true)
-        try {
-            migratedDb.openHelper.writableDatabase.query("SELECT 1").close()
-        } finally {
-            migratedDb.close()
-        }
-
+    private fun assertTableExists(databaseName: String, tableName: String) {
         val sqlite = SQLiteDatabase.openDatabase(
             context.getDatabasePath(databaseName).path,
             null,
             SQLiteDatabase.OPEN_READONLY,
         )
         sqlite.use {
-            it.rawQuery("PRAGMA user_version", null).use { cursor ->
+            it.rawQuery(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                arrayOf(tableName),
+            ).use { cursor ->
                 assertTrue(cursor.moveToFirst())
-                assertEquals(currentRoomSchemaVersion(), cursor.getInt(0))
             }
         }
+    }
+
+    private fun assertColumnMissing(databaseName: String, tableName: String, columnName: String) {
+        val sqlite = SQLiteDatabase.openDatabase(
+            context.getDatabasePath(databaseName).path,
+            null,
+            SQLiteDatabase.OPEN_READONLY,
+        )
+        sqlite.use {
+            it.rawQuery("PRAGMA table_info($tableName)", emptyArray()).use { cursor ->
+                val nameIndex = cursor.getColumnIndexOrThrow("name")
+                while (cursor.moveToNext()) {
+                    if (cursor.getString(nameIndex) == columnName) {
+                        throw AssertionError("Unexpected column $tableName.$columnName")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun seedVersionEightDatabaseWithUserRows(databaseName: String) {
+        context.deleteDatabase(databaseName)
+        val databaseFile = context.getDatabasePath(databaseName)
+        databaseFile.parentFile?.mkdirs()
+
+        val sqlite = SQLiteDatabase.openOrCreateDatabase(databaseFile, null)
+        sqlite.use {
+            createVersionEightSchema(it)
+            it.execSQL(
+                """
+                INSERT INTO ssh_keys(id, name, privateKeyPath, hasPassphrase, createdAt)
+                VALUES(1, 'deploy-key-v8', '/keys/deploy-v8', 1, 100)
+                """.trimIndent(),
+            )
+            it.execSQL(
+                """
+                INSERT INTO hosts(
+                    id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                    scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                    lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                    usageCommandOverride, pathOverride
+                ) VALUES(
+                    1, 'prod-v8', 'v8.example.com', 2222, 'alexey', 1, 10000, 1000,
+                    5, 1, 101, 102, 1, 103, 1, 104,
+                    'pocketshell usage --json', '~/git/pocketshell/.venv/bin'
+                )
+                """.trimIndent(),
+            )
+            it.execSQL(
+                "INSERT INTO project_roots(id, hostId, label, path, createdAt) " +
+                    "VALUES(1, 1, 'repo', '~/git/pocketshell-v8', 110)"
+            )
+            it.execSQL(
+                "INSERT INTO sessions(id, hostId, name, lastSeenAt, tags) " +
+                    "VALUES(1, 1, 'main-v8', 120, 'work')"
+            )
+            it.execSQL(
+                "INSERT INTO snippets(id, hostId, label, body, kind) " +
+                    "VALUES(1, 1, 'preserve', 'echo preserved from v8', 'command')"
+            )
+            it.execSQL(
+                "INSERT INTO port_remappings(id, hostId, remotePort, localPort) " +
+                    "VALUES(1, 1, 4000, 14000)"
+            )
+            it.execSQL(
+                "INSERT INTO port_usage(hostId, remotePort, clickCount, totalBytes, lastUsedAt) " +
+                    "VALUES(1, 4000, 3, 84, 130)"
+            )
+            it.execSQL(
+                "INSERT INTO agent_sessions(id, paneRef, agent, jsonlPath, detectedAt) " +
+                    "VALUES(1, 'prod-v8:main:0:0', 'codex', '/logs/codex-v8.jsonl', 140)"
+            )
+            it.execSQL(
+                """
+                INSERT INTO ai_api_call_log(
+                    id, timestampMillis, provider, feature, inputUnits, outputUnits,
+                    unitCostUsdMillicents, computedCostUsdMillicents, metadataJson
+                ) VALUES(1, 150, 'openai', 'whisper', 12, 34, 10, 456, '{"requestId":"v8"}')
+                """.trimIndent(),
+            )
+            it.execSQL(
+                """
+                INSERT INTO pending_transcriptions(
+                    id, audioPath, recordingTimestampMs, destinationContext, retryCount,
+                    lastErrorMessage, audioByteSize, createdAtMs
+                ) VALUES(
+                    'pending-v8', '/audio/pending-v8.wav', 160,
+                    '${PendingTranscriptionEntity.DESTINATION_COMPOSER}', 1,
+                    'offline', 2048, 161
+                )
+                """.trimIndent(),
+            )
+            it.execSQL("PRAGMA user_version = 8")
+        }
+    }
+
+    private fun seedVersionElevenDatabaseWithUserRows(databaseName: String) {
+        context.deleteDatabase(databaseName)
+        val databaseFile = context.getDatabasePath(databaseName)
+        databaseFile.parentFile?.mkdirs()
+
+        val sqlite = SQLiteDatabase.openOrCreateDatabase(databaseFile, null)
+        sqlite.use {
+            createVersionElevenSchema(it)
+            it.execSQL(
+                """
+                INSERT INTO ssh_keys(id, name, privateKeyPath, fingerprint, hasPassphrase, createdAt)
+                VALUES(1, 'deploy-key', '/keys/deploy', 'sha256:v11', 1, 100)
+                """.trimIndent(),
+            )
+            it.execSQL(
+                """
+                INSERT INTO hosts(
+                    id, name, hostname, port, username, keyId, maxAutoPort, skipPortsBelow,
+                    scanIntervalSec, enabled, createdAt, lastConnectedAt, tmuxInstalled,
+                    lastBootstrapAt, pocketshellInstalled, pocketshellLastDetectedAt,
+                    pocketshellCliVersion, pocketshellExpectedCliVersion,
+                    pocketshellVersionCompatible, usageCommandOverride
+                ) VALUES(
+                    1, 'prod', 'example.com', 2222, 'alexey', 1, 10000, 1000,
+                    5, 1, 101, 102, 1, 103, 1, 104, '0.3.14', '0.3.14', 1,
+                    'pocketshell usage --json'
+                )
+                """.trimIndent(),
+            )
+            it.execSQL(
+                "INSERT INTO project_roots(id, hostId, label, path, createdAt) " +
+                    "VALUES(1, 1, 'repo', '~/git/pocketshell', 110)"
+            )
+            it.execSQL(
+                "INSERT INTO sessions(id, hostId, name, lastSeenAt, tags) " +
+                    "VALUES(1, 1, 'main', 120, 'work')"
+            )
+            it.execSQL(
+                "INSERT INTO snippets(id, hostId, label, body, kind) " +
+                    "VALUES(1, 1, 'preserve', 'echo preserved', 'command')"
+            )
+            it.execSQL(
+                "INSERT INTO port_remappings(id, hostId, remotePort, localPort) " +
+                    "VALUES(1, 1, 3000, 13000)"
+            )
+            it.execSQL(
+                "INSERT INTO port_usage(hostId, remotePort, clickCount, totalBytes, lastUsedAt) " +
+                    "VALUES(1, 3000, 2, 42, 130)"
+            )
+            it.execSQL(
+                "INSERT INTO agent_sessions(id, paneRef, agent, jsonlPath, detectedAt) " +
+                    "VALUES(1, 'prod:main:0:0', 'codex', '/logs/codex.jsonl', 140)"
+            )
+            it.execSQL(
+                """
+                INSERT INTO ai_api_call_log(
+                    id, timestampMillis, provider, feature, inputUnits, outputUnits,
+                    unitCostUsdMillicents, computedCostUsdMillicents, metadataJson
+                ) VALUES(1, 150, 'openai', 'whisper', 12, 34, 10, 123, '{"requestId":"v11"}')
+                """.trimIndent(),
+            )
+            it.execSQL(
+                """
+                INSERT INTO pending_transcriptions(
+                    id, audioPath, recordingTimestampMs, destinationContext, retryCount,
+                    lastErrorMessage, audioByteSize, createdAtMs
+                ) VALUES(
+                    'pending-v11', '/audio/pending-v11.wav', 160,
+                    '${PendingTranscriptionEntity.DESTINATION_COMPOSER}', 1,
+                    'offline', 2048, 161
+                )
+                """.trimIndent(),
+            )
+            it.execSQL("PRAGMA user_version = 11")
+        }
+    }
+
+    private fun createVersionEightSchema(db: SQLiteDatabase) {
+        db.execSQL("PRAGMA foreign_keys=OFF")
+        db.execSQL(
+            """
+            CREATE TABLE ssh_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                privateKeyPath TEXT NOT NULL,
+                hasPassphrase INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                keyId INTEGER NOT NULL,
+                maxAutoPort INTEGER NOT NULL,
+                skipPortsBelow INTEGER NOT NULL,
+                scanIntervalSec INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL,
+                lastConnectedAt INTEGER,
+                tmuxInstalled INTEGER,
+                lastBootstrapAt INTEGER,
+                pocketshellInstalled INTEGER,
+                pocketshellLastDetectedAt INTEGER,
+                usageCommandOverride TEXT,
+                pathOverride TEXT,
+                FOREIGN KEY(keyId) REFERENCES ssh_keys(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_hosts_keyId ON hosts(keyId)")
+        createHostScopedVersionEightTables(db)
+    }
+
+    private fun createHostScopedVersionEightTables(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE port_remappings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                remotePort INTEGER NOT NULL,
+                localPort INTEGER NOT NULL,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_port_remappings_hostId ON port_remappings(hostId)")
+        db.execSQL(
+            "CREATE UNIQUE INDEX index_port_remappings_hostId_remotePort " +
+                "ON port_remappings(hostId, remotePort)"
+        )
+        db.execSQL(
+            """
+            CREATE TABLE port_usage (
+                hostId INTEGER NOT NULL,
+                remotePort INTEGER NOT NULL,
+                clickCount INTEGER NOT NULL,
+                totalBytes INTEGER NOT NULL,
+                lastUsedAt INTEGER NOT NULL,
+                PRIMARY KEY(hostId, remotePort),
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_port_usage_hostId ON port_usage(hostId)")
+        db.execSQL(
+            """
+            CREATE TABLE project_roots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                path TEXT NOT NULL,
+                createdAt INTEGER NOT NULL,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_project_roots_hostId ON project_roots(hostId)")
+        db.execSQL(
+            "CREATE UNIQUE INDEX index_project_roots_hostId_path ON project_roots(hostId, path)"
+        )
+        db.execSQL(
+            """
+            CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                lastSeenAt INTEGER NOT NULL,
+                tags TEXT,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_sessions_hostId ON sessions(hostId)")
+        db.execSQL("CREATE UNIQUE INDEX index_sessions_hostId_name ON sessions(hostId, name)")
+        db.execSQL(
+            """
+            CREATE TABLE snippets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                label TEXT,
+                body TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_snippets_hostId ON snippets(hostId)")
+        db.execSQL(
+            """
+            CREATE TABLE agent_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                paneRef TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                jsonlPath TEXT,
+                detectedAt INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE UNIQUE INDEX index_agent_sessions_paneRef ON agent_sessions(paneRef)")
+        db.execSQL(
+            """
+            CREATE TABLE ai_api_call_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                timestampMillis INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                feature TEXT NOT NULL,
+                inputUnits INTEGER NOT NULL,
+                outputUnits INTEGER NOT NULL,
+                unitCostUsdMillicents INTEGER NOT NULL,
+                computedCostUsdMillicents INTEGER NOT NULL,
+                metadataJson TEXT
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_ai_api_call_log_timestampMillis ON ai_api_call_log(timestampMillis)")
+        db.execSQL(
+            "CREATE INDEX index_ai_api_call_log_provider_feature ON ai_api_call_log(provider, feature)"
+        )
+        db.execSQL(
+            """
+            CREATE TABLE pending_transcriptions (
+                id TEXT NOT NULL,
+                audioPath TEXT NOT NULL,
+                recordingTimestampMs INTEGER NOT NULL,
+                destinationContext TEXT NOT NULL,
+                retryCount INTEGER NOT NULL,
+                lastErrorMessage TEXT,
+                audioByteSize INTEGER NOT NULL,
+                createdAtMs INTEGER NOT NULL,
+                PRIMARY KEY(id)
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX index_pending_transcriptions_recordingTimestampMs " +
+                "ON pending_transcriptions(recordingTimestampMs)"
+        )
+    }
+
+    private fun createVersionElevenSchema(db: SQLiteDatabase) {
+        db.execSQL("PRAGMA foreign_keys=OFF")
+        db.execSQL(
+            """
+            CREATE TABLE ssh_keys (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                privateKeyPath TEXT NOT NULL,
+                fingerprint TEXT NOT NULL,
+                hasPassphrase INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            """
+            CREATE TABLE hosts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                name TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                port INTEGER NOT NULL,
+                username TEXT NOT NULL,
+                keyId INTEGER NOT NULL,
+                maxAutoPort INTEGER NOT NULL,
+                skipPortsBelow INTEGER NOT NULL,
+                scanIntervalSec INTEGER NOT NULL,
+                enabled INTEGER NOT NULL,
+                createdAt INTEGER NOT NULL,
+                lastConnectedAt INTEGER,
+                tmuxInstalled INTEGER,
+                lastBootstrapAt INTEGER,
+                pocketshellInstalled INTEGER,
+                pocketshellLastDetectedAt INTEGER,
+                pocketshellCliVersion TEXT,
+                pocketshellExpectedCliVersion TEXT,
+                pocketshellVersionCompatible INTEGER,
+                usageCommandOverride TEXT,
+                FOREIGN KEY(keyId) REFERENCES ssh_keys(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_hosts_keyId ON hosts(keyId)")
+        db.execSQL(
+            """
+            CREATE TABLE port_remappings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                remotePort INTEGER NOT NULL,
+                localPort INTEGER NOT NULL,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_port_remappings_hostId ON port_remappings(hostId)")
+        db.execSQL(
+            "CREATE UNIQUE INDEX index_port_remappings_hostId_remotePort " +
+                "ON port_remappings(hostId, remotePort)"
+        )
+        db.execSQL(
+            """
+            CREATE TABLE port_usage (
+                hostId INTEGER NOT NULL,
+                remotePort INTEGER NOT NULL,
+                clickCount INTEGER NOT NULL,
+                totalBytes INTEGER NOT NULL,
+                lastUsedAt INTEGER NOT NULL,
+                PRIMARY KEY(hostId, remotePort),
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_port_usage_hostId ON port_usage(hostId)")
+        db.execSQL(
+            """
+            CREATE TABLE project_roots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                label TEXT NOT NULL,
+                path TEXT NOT NULL,
+                createdAt INTEGER NOT NULL,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_project_roots_hostId ON project_roots(hostId)")
+        db.execSQL(
+            "CREATE UNIQUE INDEX index_project_roots_hostId_path ON project_roots(hostId, path)"
+        )
+        db.execSQL(
+            """
+            CREATE TABLE sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                lastSeenAt INTEGER NOT NULL,
+                tags TEXT,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_sessions_hostId ON sessions(hostId)")
+        db.execSQL("CREATE UNIQUE INDEX index_sessions_hostId_name ON sessions(hostId, name)")
+        db.execSQL(
+            """
+            CREATE TABLE snippets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                hostId INTEGER NOT NULL,
+                label TEXT,
+                body TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                FOREIGN KEY(hostId) REFERENCES hosts(id) ON UPDATE NO ACTION ON DELETE CASCADE
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_snippets_hostId ON snippets(hostId)")
+        db.execSQL(
+            """
+            CREATE TABLE agent_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                paneRef TEXT NOT NULL,
+                agent TEXT NOT NULL,
+                jsonlPath TEXT,
+                detectedAt INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE UNIQUE INDEX index_agent_sessions_paneRef ON agent_sessions(paneRef)")
+        db.execSQL(
+            """
+            CREATE TABLE ai_api_call_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                timestampMillis INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                feature TEXT NOT NULL,
+                inputUnits INTEGER NOT NULL,
+                outputUnits INTEGER NOT NULL,
+                unitCostUsdMillicents INTEGER NOT NULL,
+                computedCostUsdMillicents INTEGER NOT NULL,
+                metadataJson TEXT
+            )
+            """.trimIndent(),
+        )
+        db.execSQL("CREATE INDEX index_ai_api_call_log_timestampMillis ON ai_api_call_log(timestampMillis)")
+        db.execSQL(
+            "CREATE INDEX index_ai_api_call_log_provider_feature ON ai_api_call_log(provider, feature)"
+        )
+        db.execSQL(
+            """
+            CREATE TABLE pending_transcriptions (
+                id TEXT NOT NULL,
+                audioPath TEXT NOT NULL,
+                recordingTimestampMs INTEGER NOT NULL,
+                destinationContext TEXT NOT NULL,
+                retryCount INTEGER NOT NULL,
+                lastErrorMessage TEXT,
+                audioByteSize INTEGER NOT NULL,
+                createdAtMs INTEGER NOT NULL,
+                PRIMARY KEY(id)
+            )
+            """.trimIndent(),
+        )
+        db.execSQL(
+            "CREATE INDEX index_pending_transcriptions_recordingTimestampMs " +
+                "ON pending_transcriptions(recordingTimestampMs)"
+        )
     }
 
     private fun currentRoomSchemaVersion(): Int =
@@ -374,9 +962,6 @@ class AppDatabaseTest {
 
     private companion object {
         const val LEGACY_CRASH_SCHEMA_VERSION = 1
-        const val LEGACY_026_SCHEMA_VERSION = 5
-        const val LEGACY_028_SCHEMA_VERSION = 7
-        const val LEGACY_035_SCHEMA_VERSION = 8
         const val LEGACY_CRASH_IDENTITY_HASH = "4a479a15dfcab2d576e00c7ce10ac581"
     }
 }

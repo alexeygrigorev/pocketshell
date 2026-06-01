@@ -4,8 +4,8 @@ import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.core.storage.APP_DATABASE_SCHEMA_VERSION
+import org.junit.Assert.assertThrows
 import org.junit.After
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -25,31 +25,35 @@ class StorageModuleTest {
     }
 
     @Test
-    fun provideAppDatabase_rebuildsSameVersionStaleIdentityDatabase() {
+    fun provideAppDatabase_doesNotRebuildSameVersionStaleIdentityDatabase() {
         seedStaleIdentityDatabase(version = APP_DATABASE_SCHEMA_VERSION)
 
         val db = StorageModule.provideAppDatabase(context)
-        try {
-            db.openHelper.writableDatabase.query("SELECT 1").close()
-        } finally {
-            db.close()
+        assertThrows(IllegalStateException::class.java) {
+            try {
+                db.openHelper.writableDatabase.query("SELECT 1").close()
+            } finally {
+                db.close()
+            }
         }
 
-        assertCurrentSchemaVersion()
+        assertTableExists("stale_database_marker")
     }
 
     @Test
-    fun provideAppDatabase_rebuildsLegacyVersionFiveDatabase() {
+    fun provideAppDatabase_doesNotRebuildLegacyVersionFiveDatabase() {
         seedStaleIdentityDatabase(version = LEGACY_026_SCHEMA_VERSION)
 
         val db = StorageModule.provideAppDatabase(context)
-        try {
-            db.openHelper.writableDatabase.query("SELECT 1").close()
-        } finally {
-            db.close()
+        assertThrows(IllegalStateException::class.java) {
+            try {
+                db.openHelper.writableDatabase.query("SELECT 1").close()
+            } finally {
+                db.close()
+            }
         }
 
-        assertCurrentSchemaVersion()
+        assertTableExists("stale_database_marker")
     }
 
     private fun seedStaleIdentityDatabase(version: Int) {
@@ -69,16 +73,18 @@ class StorageModuleTest {
         }
     }
 
-    private fun assertCurrentSchemaVersion() {
+    private fun assertTableExists(tableName: String) {
         val sqlite = SQLiteDatabase.openDatabase(
             context.getDatabasePath(DATABASE_NAME).path,
             null,
             SQLiteDatabase.OPEN_READONLY,
         )
         sqlite.use {
-            it.rawQuery("PRAGMA user_version", null).use { cursor ->
+            it.rawQuery(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                arrayOf(tableName),
+            ).use { cursor ->
                 assertTrue(cursor.moveToFirst())
-                assertEquals(APP_DATABASE_SCHEMA_VERSION, cursor.getInt(0))
             }
         }
     }

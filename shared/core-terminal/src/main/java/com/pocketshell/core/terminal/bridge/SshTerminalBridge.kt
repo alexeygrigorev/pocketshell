@@ -194,7 +194,7 @@ public class SshTerminalBridge(
                 )
                 if (!written) return
                 if (isHandlerLooper) {
-                    handler.dispatchMessage(Message.obtain(handler, MSG_NEW_INPUT))
+                    dispatchMainLooperDrains(handler = handler, queuedBytes = chunkLength)
                 } else {
                     handler.sendEmptyMessage(MSG_NEW_INPUT)
                 }
@@ -243,12 +243,9 @@ public class SshTerminalBridge(
                     directDispatch = isHandlerLooper,
                 )
                 if (isHandlerLooper) {
-                    val dispatchStartedAtNanos = System.nanoTime()
-                    handler.dispatchMessage(Message.obtain(handler, MSG_NEW_INPUT))
-                    traceSink.onDirectDrainDispatched(
-                        bytes = chunkLength,
-                        durationNanos = System.nanoTime() - dispatchStartedAtNanos,
-                    )
+                    dispatchMainLooperDrains(handler = handler, queuedBytes = chunkLength) { bytes, durationNanos ->
+                        traceSink.onDirectDrainDispatched(bytes = bytes, durationNanos = durationNanos)
+                    }
                 } else {
                     handler.sendEmptyMessage(MSG_NEW_INPUT)
                 }
@@ -261,6 +258,21 @@ public class SshTerminalBridge(
             chunks = chunks,
             durationNanos = System.nanoTime() - feedStartedAtNanos,
         )
+    }
+
+    private inline fun dispatchMainLooperDrains(
+        handler: Handler,
+        queuedBytes: Int,
+        onDispatched: (bytes: Int, durationNanos: Long) -> Unit = { _, _ -> },
+    ) {
+        var remaining = queuedBytes
+        while (remaining > 0) {
+            val drainBudget = minOf(remaining, PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES)
+            val dispatchStartedAtNanos = System.nanoTime()
+            handler.dispatchMessage(Message.obtain(handler, MSG_NEW_INPUT))
+            onDispatched(drainBudget, System.nanoTime() - dispatchStartedAtNanos)
+            remaining -= drainBudget
+        }
     }
 
     /**
@@ -398,15 +410,18 @@ public class SshTerminalBridge(
          * drain has even been scheduled.
          */
         internal const val PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES: Int = 64 * 1024
+        internal const val PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES: Int = 16 * 1024
 
         private const val TRACE_WAIT_THRESHOLD_NANOS: Long = 1_000_000
     }
 }
 
-private data class PendingDrainMessage(
+private class PendingDrainMessage(
     val bytes: Int,
     val scheduledAtNanos: Long,
-)
+) {
+    var remainingBytes: Int = bytes
+}
 
 private class TraceState(
     val traceSink: SshTerminalBridge.TraceSink,
@@ -435,13 +450,21 @@ private class TracingTerminalSessionClient(
     private fun pollPendingDrainBytes(): PolledDrain {
         var bytes = 0
         var scheduledAtNanos: Long? = null
-        while (bytes < SshTerminalBridge.PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES) {
+        while (bytes < SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES) {
             val next = traceState.pendingDrainMessages.peek() ?: break
-            if (bytes > 0 && bytes + next.bytes > SshTerminalBridge.PROCESS_TO_TERMINAL_QUEUE_CAPACITY_BYTES) {
-                break
+            val bytesToTake = minOf(
+                SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES - bytes,
+                next.remainingBytes,
+            )
+            if (bytesToTake <= 0) {
+                traceState.pendingDrainMessages.poll()
+                continue
             }
-            traceState.pendingDrainMessages.poll()
-            bytes += next.bytes
+            next.remainingBytes -= bytesToTake
+            bytes += bytesToTake
+            if (next.remainingBytes == 0) {
+                traceState.pendingDrainMessages.poll()
+            }
             if (scheduledAtNanos == null) {
                 scheduledAtNanos = next.scheduledAtNanos
             }

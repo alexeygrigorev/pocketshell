@@ -341,17 +341,19 @@ public final class TerminalSession extends TerminalOutput {
             super(Looper.getMainLooper());
         }
 
-        final byte[] mReceiveBuffer = new byte[64 * 1024];
+        private static final int PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES = 16 * 1024;
+
+        final byte[] mReceiveBuffer = new byte[PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES];
 
         @Override
         public void handleMessage(Message msg) {
-            int bytesRead = mProcessToTerminalIOQueue.read(mReceiveBuffer, false);
-            if (bytesRead > 0) {
-                mEmulator.append(mReceiveBuffer, bytesRead);
-                notifyScreenUpdate();
+            if (msg.what == MSG_NEW_INPUT) {
+                drainProcessOutput();
             }
 
             if (msg.what == MSG_PROCESS_EXITED) {
+                drainAllProcessOutput();
+
                 int exitCode = (Integer) msg.obj;
                 cleanupResources(exitCode);
 
@@ -371,6 +373,35 @@ public final class TerminalSession extends TerminalOutput {
 
                 mClient.onSessionFinished(TerminalSession.this);
             }
+        }
+
+        private void drainProcessOutput() {
+            removeMessages(MSG_NEW_INPUT);
+
+            int bytesRead = drainProcessOutputSlice();
+            if (bytesRead <= 0) return;
+
+            if (bytesRead == mReceiveBuffer.length) {
+                sendEmptyMessage(MSG_NEW_INPUT);
+            }
+        }
+
+        private void drainAllProcessOutput() {
+            removeMessages(MSG_NEW_INPUT);
+
+            int bytesRead;
+            do {
+                bytesRead = drainProcessOutputSlice();
+            } while (bytesRead == mReceiveBuffer.length);
+        }
+
+        private int drainProcessOutputSlice() {
+            int bytesRead = mProcessToTerminalIOQueue.read(mReceiveBuffer, false);
+            if (bytesRead <= 0) return bytesRead;
+
+            mEmulator.append(mReceiveBuffer, bytesRead);
+            notifyScreenUpdate();
+            return bytesRead;
         }
 
     }

@@ -12,13 +12,16 @@ import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.printToString
 import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.bootstrap.HOST_BOOTSTRAP_SHEET_TAG
 import com.pocketshell.app.hosts.HOST_LIST_ADD_FAB_TAG
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SETTINGS_BUTTON_TAG
@@ -28,8 +31,12 @@ import com.pocketshell.app.settings.HOST_IMPORT_ROW_TAG
 import com.pocketshell.app.settings.HOST_IMPORT_SCAN_QR_TAG
 import com.pocketshell.app.settings.SETTINGS_BACK_TAG
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.projects.FOLDER_LIST_EMPTY_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_ERROR_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_LOADING_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_NEW_SESSION_FAB_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_TITLE_TAG
 import com.pocketshell.app.projects.folderHeaderClickTestTag
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
@@ -80,12 +87,15 @@ class WalkthroughVisualScreenshotTest {
             prepareRemoteTmuxSession(key, tmuxSessionName)
 
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
-            compose.waitUntil(timeoutMillis = 10_000) {
-                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+            waitUntilWithDiagnostics(
+                label = "seeded host row visible",
+                timeoutMillis = 10_000,
+                textProbes = listOf(WALKTHROUGH_HOST_NAME),
+                tagProbes = listOf(hostRowTag, HOST_LIST_ADD_FAB_TAG),
+            ) {
+                hasTag(hostRowTag)
             }
-            compose.onNodeWithText("Walkthrough Docker", useUnmergedTree = true).assertExists()
+            compose.onNodeWithText(WALKTHROUGH_HOST_NAME, useUnmergedTree = true).assertExists()
             val hostListScreenshot = WalkthroughScreenshotArtifacts.capture("01-host-list")
             compose.onNodeWithTag(HOST_LIST_ADD_FAB_TAG, useUnmergedTree = true).assertExists()
             assertTrue(
@@ -150,33 +160,64 @@ class WalkthroughVisualScreenshotTest {
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performTouchInput {
                 click(center)
             }
-            // Issue #171 + #299: post-tap surface is the tree-mode
-            // FolderListScreen ("Workspace" title). The seeded session
-            // lives in its session_path and is visible after expanding the
-            // project row.
+            // Ready-host taps now pass through the setup cache gate and land
+            // on the host-detail FolderListScreen. The approved visible
+            // contract is the folder screen chrome for this host, not the
+            // retired generic "Workspace" title.
             val sessionProjectPath = "/home/$DEFAULT_USER"
-            compose.waitUntil(timeoutMillis = 20_000) {
-                compose.onAllNodesWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty() &&
-                    compose.onAllNodesWithText("Workspace", useUnmergedTree = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty() &&
-                    compose.onAllNodesWithTag(folderHeaderClickTestTag(sessionProjectPath), useUnmergedTree = true)
-                        .fetchSemanticsNodes()
-                        .isNotEmpty()
+            waitUntilWithDiagnostics(
+                label = "ready host detail screen for $WALKTHROUGH_HOST_NAME",
+                timeoutMillis = 20_000,
+                textProbes = listOf(
+                    WALKTHROUGH_HOST_NAME,
+                    "Workspace",
+                    "Checking setup",
+                    "Host setup needed",
+                    "PocketShell",
+                    "HOSTS",
+                    "No active sessions",
+                    tmuxSessionName,
+                ),
+                tagProbes = hostDetailDiagnosticTags(sessionProjectPath),
+            ) {
+                hasTag(FOLDER_LIST_SCREEN_TAG) &&
+                    hasTag(FOLDER_LIST_TITLE_TAG) &&
+                    hasTag(FOLDER_LIST_NEW_SESSION_FAB_TAG) &&
+                    hasText(WALKTHROUGH_HOST_NAME) &&
+                    !hasText("Checking setup") &&
+                    !hasText("PocketShell") &&
+                    !hasText("HOSTS") &&
+                    !hasTag(HOST_BOOTSTRAP_SHEET_TAG) &&
+                    !hasTag(HOST_LIST_ADD_FAB_TAG)
+            }
+            waitUntilWithDiagnostics(
+                label = "seeded project row $sessionProjectPath",
+                timeoutMillis = 20_000,
+                textProbes = listOf(
+                    WALKTHROUGH_HOST_NAME,
+                    "No active sessions",
+                    sessionProjectPath.substringAfterLast('/'),
+                    tmuxSessionName,
+                ),
+                tagProbes = hostDetailDiagnosticTags(sessionProjectPath),
+            ) {
+                hasTag(folderHeaderClickTestTag(sessionProjectPath))
             }
             compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true).assertExists()
+            compose.onNodeWithTag(FOLDER_LIST_TITLE_TAG, useUnmergedTree = true).assertExists()
             compose.onNodeWithTag(FOLDER_LIST_NEW_SESSION_FAB_TAG, useUnmergedTree = true).assertExists()
             compose.onNodeWithTag(folderHeaderClickTestTag(sessionProjectPath), useUnmergedTree = true).performClick()
-            compose.waitUntil(timeoutMillis = 10_000) {
-                compose.onAllNodesWithText(tmuxSessionName, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+            waitUntilWithDiagnostics(
+                label = "seeded tmux session $tmuxSessionName visible",
+                timeoutMillis = 10_000,
+                textProbes = listOf(WALKTHROUGH_HOST_NAME, sessionProjectPath.substringAfterLast('/'), tmuxSessionName),
+                tagProbes = hostDetailDiagnosticTags(sessionProjectPath),
+            ) {
+                hasText(tmuxSessionName)
             }
             val sessionPickerScreenshot = WalkthroughScreenshotArtifacts.capture("02-host-setup-folder-list")
             assertTextsClearOfNavigationBar(
-                texts = listOf("Workspace", tmuxSessionName),
+                texts = listOf(WALKTHROUGH_HOST_NAME, tmuxSessionName),
                 screenshotName = "02-host-setup-folder-list.png",
                 artifact = sessionPickerScreenshot,
             )
@@ -231,7 +272,7 @@ class WalkthroughVisualScreenshotTest {
             )
             val hostId = db.hostDao().insert(
                 HostEntity(
-                    name = "Walkthrough Docker",
+                    name = WALKTHROUGH_HOST_NAME,
                     hostname = DEFAULT_HOST,
                     port = DEFAULT_PORT,
                     username = DEFAULT_USER,
@@ -304,6 +345,83 @@ class WalkthroughVisualScreenshotTest {
             terminalTranscriptSnapshot().contains("tmux visual pass ready")
         }
     }
+
+    private fun waitUntilWithDiagnostics(
+        label: String,
+        timeoutMillis: Long,
+        textProbes: List<String> = emptyList(),
+        tagProbes: List<String> = emptyList(),
+        condition: () -> Boolean,
+    ) {
+        try {
+            compose.waitUntil(timeoutMillis = timeoutMillis, condition = condition)
+        } catch (error: Throwable) {
+            throw AssertionError(
+                buildString {
+                    appendLine("Timed out after ${timeoutMillis}ms waiting for $label.")
+                    appendLine(screenDiagnostics(textProbes = textProbes, tagProbes = tagProbes))
+                },
+                error,
+            )
+        }
+    }
+
+    private fun hasTag(tag: String): Boolean =
+        compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+
+    private fun hasText(text: String): Boolean =
+        compose.onAllNodesWithText(text, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+
+    private fun screenDiagnostics(textProbes: List<String>, tagProbes: List<String>): String = buildString {
+        appendLine("Tag probe counts:")
+        tagProbes.distinct().forEach { tag ->
+            appendLine("  $tag=${nodeCountForTag(tag)}")
+        }
+        appendLine("Text probe counts:")
+        textProbes.distinct().forEach { text ->
+            appendLine("  \"$text\"=${nodeCountForText(text)}")
+        }
+        appendLine("Compose semantics tree:")
+        appendLine(
+            runCatching {
+                compose.waitForIdle()
+                compose.onRoot(useUnmergedTree = true).printToString()
+            }.getOrElse { diagnosticsError ->
+                "  <failed to capture semantics tree: ${diagnosticsError.javaClass.simpleName}: " +
+                    "${diagnosticsError.message.orEmpty()}>"
+            },
+        )
+    }
+
+    private fun nodeCountForTag(tag: String): Int =
+        runCatching {
+            compose.onAllNodesWithTag(tag, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+        }.getOrDefault(-1)
+
+    private fun nodeCountForText(text: String): Int =
+        runCatching {
+            compose.onAllNodesWithText(text, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .size
+        }.getOrDefault(-1)
+
+    private fun hostDetailDiagnosticTags(sessionProjectPath: String): List<String> = listOf(
+        FOLDER_LIST_SCREEN_TAG,
+        FOLDER_LIST_TITLE_TAG,
+        FOLDER_LIST_NEW_SESSION_FAB_TAG,
+        FOLDER_LIST_LOADING_TAG,
+        FOLDER_LIST_ERROR_TAG,
+        FOLDER_LIST_EMPTY_TAG,
+        folderHeaderClickTestTag(sessionProjectPath),
+        HOST_BOOTSTRAP_SHEET_TAG,
+        HOST_LIST_ADD_FAB_TAG,
+    )
 
     private fun sendCommandViaTerminalSession(command: String) {
         // The non-agent tmux shell route intentionally omits the prompt
@@ -465,6 +583,7 @@ class WalkthroughVisualScreenshotTest {
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
+        const val WALKTHROUGH_HOST_NAME: String = "Walkthrough Docker"
         const val DASHBOARD_SESSIONS_SECTION_TAG: String = "dashboard:sessions"
         const val DASHBOARD_SESSION_ROW_TAG_PREFIX: String = "dashboard:sessions:row:"
     }

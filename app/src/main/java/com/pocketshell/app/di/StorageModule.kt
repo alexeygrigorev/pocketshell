@@ -3,6 +3,7 @@ package com.pocketshell.app.di
 import android.content.Context
 import androidx.room.Room
 import com.pocketshell.core.storage.APP_DATABASE_MIGRATIONS
+import com.pocketshell.core.storage.APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.AiApiCallLogDao
 import com.pocketshell.core.storage.dao.HostDao
@@ -48,6 +49,10 @@ object StorageModule {
             DATABASE_NAME,
         )
             .addMigrations(*APP_DATABASE_MIGRATIONS)
+            .fallbackToDestructiveMigrationFrom(
+                true,
+                *APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS,
+            )
             .build()
 
     @Provides

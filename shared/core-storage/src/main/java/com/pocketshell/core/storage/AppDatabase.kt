@@ -28,6 +28,15 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 const val APP_DATABASE_SCHEMA_VERSION = 12
 
 /**
+ * Issue #261 left a deliberately unsupported pre-migration v1 shape in the
+ * release gate: it only contains Room metadata and a stale marker table, not
+ * PocketShell user-data tables. Production may destructively rebuild only
+ * from these start versions; supported real schemas must be represented in
+ * [APP_DATABASE_MIGRATIONS] instead.
+ */
+val APP_DATABASE_UNSUPPORTED_STALE_SCHEMA_VERSIONS: IntArray = intArrayOf(1)
+
+/**
  * The PocketShell Room database.
  *
  * Normal APK updates must preserve user data. Any entity-schema change MUST

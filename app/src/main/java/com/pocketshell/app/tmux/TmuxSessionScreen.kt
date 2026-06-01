@@ -1053,15 +1053,19 @@ public fun TmuxSessionScreen(
                 // sheet was open, do NOT write into the dead pane and do
                 // NOT dismiss — keep the sheet (and the user's text) so
                 // nothing is lost; the user re-sends once reconnected.
-                if (sessionLive) {
-                    currentPane?.let { pane ->
-                        val payload = if (withEnter) text + "\r" else text
-                        viewModel.writeInputToPane(
-                            pane.paneId,
-                            payload.toByteArray(Charsets.UTF_8),
-                        )
+                val pane = currentPane
+                if (!sessionLive || pane == null) {
+                    false
+                } else {
+                    val payload = if (withEnter) text + "\r" else text
+                    val sent = viewModel.writeInputToPaneResult(
+                        pane.paneId,
+                        payload.toByteArray(Charsets.UTF_8),
+                    ).isSuccess
+                    if (sent) {
+                        showMicSheet = false
                     }
-                    showMicSheet = false
+                    sent
                 }
             },
             hostId = hostId.takeIf { it != 0L },
@@ -2311,6 +2315,7 @@ internal fun TmuxConversationPane(
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     var composerText by rememberSaveable { mutableStateOf(initialDraft) }
     var sendInFlight by remember { mutableStateOf(false) }
+    var hasUnsentPrompt by rememberSaveable { mutableStateOf(false) }
     val visibleEvents = remember(events, showSystemNotes) {
         if (showSystemNotes) events else events.filterNot { it is ConversationEvent.SystemNote }
     }
@@ -2431,6 +2436,32 @@ internal fun TmuxConversationPane(
                     .padding(end = 12.dp, bottom = 12.dp),
             )
         }
+        com.pocketshell.app.composer.UnsentPromptBanner(
+            visible = hasUnsentPrompt || (!sendEnabled && composerText.isNotBlank()),
+            canRetry = sendEnabled && !sendInFlight,
+            onRetry = {
+                val trimmed = composerText.trim()
+                if (trimmed.isNotEmpty() && !sendInFlight) {
+                    coroutineScope.launch {
+                        sendInFlight = true
+                        try {
+                            if (onSendToAgent(trimmed)) {
+                                composerText = ""
+                                hasUnsentPrompt = false
+                                onDraftChanged("")
+                            }
+                        } finally {
+                            sendInFlight = false
+                        }
+                    }
+                }
+            },
+            onDiscard = {
+                composerText = ""
+                hasUnsentPrompt = false
+                onDraftChanged("")
+            },
+        )
         AgentComposerRow(
             text = composerText,
             onTextChange = {
@@ -2445,7 +2476,10 @@ internal fun TmuxConversationPane(
                         try {
                             if (onSendToAgent(trimmed)) {
                                 composerText = ""
+                                hasUnsentPrompt = false
                                 onDraftChanged("")
+                            } else {
+                                hasUnsentPrompt = true
                             }
                         } finally {
                             sendInFlight = false

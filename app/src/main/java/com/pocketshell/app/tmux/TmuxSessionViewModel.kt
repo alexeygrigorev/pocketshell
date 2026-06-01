@@ -2931,6 +2931,9 @@ public class TmuxSessionViewModel @Inject constructor(
     internal suspend fun sendToAgentPaneResult(paneId: String, text: String): Result<Unit> {
         val payload = text.trim()
         if (payload.isEmpty()) return Result.success(Unit)
+        if (_connectionStatus.value !is ConnectionStatus.Connected) {
+            return Result.failure(IllegalStateException("Session is disconnected."))
+        }
         val current = _agentConversations.value[paneId]
             ?: return Result.failure(IllegalStateException("No agent conversation for pane $paneId."))
         val detection = current.detection
@@ -2957,6 +2960,9 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         val client = clientRef
             ?: return Result.failure(IllegalStateException("No active tmux client for pane input."))
+        if (client.disconnected.value) {
+            return Result.failure(IllegalStateException("Tmux client is disconnected."))
+        }
         return runCatching {
             sendBracketedPaste(client, paneId, payloadBytes)
             client.sendCommand("send-keys -t $paneId Enter")
@@ -3272,8 +3278,14 @@ public class TmuxSessionViewModel @Inject constructor(
 
     internal suspend fun writeInputToPaneResult(paneId: String, bytes: ByteArray): Result<Unit> {
         if (bytes.isEmpty()) return Result.success(Unit)
+        if (_connectionStatus.value !is ConnectionStatus.Connected) {
+            return Result.failure(IllegalStateException("Session is disconnected."))
+        }
         val client = clientRef
             ?: return Result.failure(IllegalStateException("No active tmux client for pane input."))
+        if (client.disconnected.value) {
+            return Result.failure(IllegalStateException("Tmux client is disconnected."))
+        }
         return writeInputToPaneResult(client, paneId, bytes)
     }
 

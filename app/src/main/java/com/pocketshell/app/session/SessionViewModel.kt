@@ -907,11 +907,14 @@ public class SessionViewModel @Inject constructor(
      * isn't reachable in that state, but the defensive check matches
      * the rest of the public API.
      */
-    public fun sendToAgent(text: String) {
+    public fun sendToAgent(text: String): Boolean = sendToAgentResult(text)
+
+    public fun sendToAgentResult(text: String): Boolean {
         val payload = text.trim()
-        if (payload.isEmpty()) return
+        if (payload.isEmpty()) return true
+        if (_connectionStatus.value !is ConnectionStatus.Connected) return false
         val current = _agentConversation.value
-        val detection = current.detection ?: return
+        val detection = current.detection ?: return false
         val optimistic = ConversationEvent.Message(
             // Issue #160 round 2: prefix used by [reconcileAgentEvents]
             // to recognise the placeholder so it can be replaced by the
@@ -927,6 +930,7 @@ public class SessionViewModel @Inject constructor(
         )
         appendAgentEvents(listOf(optimistic))
         sendText(payload, withEnter = true)
+        return true
     }
 
     /**

@@ -701,6 +701,7 @@ class SessionViewModelTest {
             ),
             initialEvents = emptyList(),
         )
+        vm.attachSessionForAgentRetryForTest(FakeSshSession())
 
         val stdin = ByteArrayOutputStream()
         val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -764,6 +765,28 @@ class SessionViewModelTest {
             producerScope.cancel()
             vm.terminalState.detachExternalProducer()
         }
+    }
+
+    @Test
+    fun sendToAgentResultFailsWithoutClearingWhenDisconnected() = runBlocking {
+        val vm = newVm()
+        vm.startAgentConversationForTest(
+            detection = AgentDetection(
+                agent = AgentKind.ClaudeCode,
+                sourcePath = "/tmp/claude.jsonl",
+                sessionId = "claude",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+            initialEvents = emptyList(),
+        )
+
+        val sent = vm.sendToAgentResult("preserve this prompt")
+
+        assertFalse("disconnected raw SSH agent send must report failure", sent)
+        assertTrue(
+            "failed disconnected send must not append optimistic conversation events",
+            vm.agentConversation.value.events.isEmpty(),
+        )
     }
 
     @Test
@@ -1008,6 +1031,7 @@ class SessionViewModelTest {
         )
         val tailJob = Job()
         vm.startAgentConversationForTest(detection, emptyList())
+        vm.attachSessionForAgentRetryForTest(FakeSshSession())
         vm.startAgentTailForTest(
             session = FakeSshSession(tailJob = tailJob),
             detection = detection,

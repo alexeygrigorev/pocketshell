@@ -1429,6 +1429,24 @@ class PromptComposerViewModelTest {
     }
 
     @Test
+    fun restoreFailedSendPutsPayloadBackInDraftWithActionableError() = runTest {
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        val request = PromptComposerViewModel.SendRequest(
+            text = "dictated prompt while offline",
+            withEnter = true,
+        )
+
+        vm.restoreFailedSend(request)
+
+        assertEquals("dictated prompt while offline", vm.uiState.value.draft)
+        assertEquals(
+            "Not sent. Reconnect, then send again or discard the draft.",
+            vm.uiState.value.error,
+        )
+        assertEquals(PromptComposerViewModel.RecordingState.Idle, vm.uiState.value.recording)
+    }
+
+    @Test
     fun sendDispatchedDuringSubscriberGapIsDeliveredToNextCollector() = runTest {
         // Issue #254 root cause + regression pin. The composer sheet's
         // `sendRequests` collector lives in the sheet's composition: it is

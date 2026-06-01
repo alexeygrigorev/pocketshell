@@ -205,7 +205,7 @@ class ConversationInteractE2eTest {
                     val state by viewModel.agentConversation.collectAsState()
                     ConversationPane(
                         events = state.events,
-                        onSendToAgent = viewModel::sendToAgent,
+                        onSendToAgent = { text -> viewModel.sendToAgentResult(text) },
                         query = state.searchQuery,
                         onQueryChange = viewModel::setAgentSearchQuery,
                         syncStatus = state.syncStatus,
@@ -418,7 +418,7 @@ class ConversationInteractE2eTest {
                     val state by viewModel.agentConversation.collectAsState()
                     ConversationPane(
                         events = state.events,
-                        onSendToAgent = viewModel::sendToAgent,
+                        onSendToAgent = { text -> viewModel.sendToAgentResult(text) },
                     )
                 }
             }

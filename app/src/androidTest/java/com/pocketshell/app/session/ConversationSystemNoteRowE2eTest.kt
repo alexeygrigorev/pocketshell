@@ -84,7 +84,7 @@ class ConversationSystemNoteRowE2eTest {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 ConversationPane(
                     events = events,
-                    onSendToAgent = { /* unused in render test */ },
+                    onSendToAgent = { true },
                 )
             }
         }
@@ -148,7 +148,7 @@ class ConversationSystemNoteRowE2eTest {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
                 ConversationPane(
                     events = events,
-                    onSendToAgent = { /* unused */ },
+                    onSendToAgent = { true },
                     showSystemNotes = showNotes.value,
                 )
             }

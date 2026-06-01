@@ -5,6 +5,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -14,6 +15,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -397,6 +399,53 @@ internal fun AgentComposerSurface(
     }
 }
 
+@Composable
+internal fun UnsentPromptBanner(
+    visible: Boolean,
+    canRetry: Boolean,
+    onRetry: () -> Unit,
+    onDiscard: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (!visible) return
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp)
+            .background(
+                color = PocketShellColors.AccentSoft,
+                shape = RoundedCornerShape(8.dp),
+            )
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+    ) {
+        Text(
+            text = "Prompt saved. Reconnect, then send it when ready.",
+            color = PocketShellColors.Accent,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(
+                onClick = onDiscard,
+                modifier = Modifier.testTag(UNSENT_PROMPT_DISCARD_TAG),
+            ) {
+                Text("Discard")
+            }
+            TextButton(
+                onClick = onRetry,
+                enabled = canRetry,
+                modifier = Modifier.testTag(UNSENT_PROMPT_RETRY_TAG),
+            ) {
+                Text("Send")
+            }
+        }
+    }
+}
+
 /**
  * Issue #196: long-press tooltip copy for the agent-pane Send button.
  * Kept here so the agent send affordance reuses the same long-press
@@ -404,3 +453,6 @@ internal fun AgentComposerSurface(
  */
 internal const val AGENT_SEND_TOOLTIP_LABEL: String =
     "Send the message to the agent"
+
+internal const val UNSENT_PROMPT_RETRY_TAG: String = "unsent-prompt-retry"
+internal const val UNSENT_PROMPT_DISCARD_TAG: String = "unsent-prompt-discard"

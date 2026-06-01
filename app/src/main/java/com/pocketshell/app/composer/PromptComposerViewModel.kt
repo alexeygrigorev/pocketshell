@@ -337,6 +337,29 @@ public class PromptComposerViewModel @Inject constructor(
         onDraftChange("")
     }
 
+    /**
+     * Issue #390: the sheet only clears/dismisses optimistically while it
+     * hands a SendRequest to the host. If the host reports that the target
+     * is disconnected or the write failed, put the exact payload back in
+     * the draft and keep a visible status message so the user can retry
+     * after reconnecting or discard it intentionally.
+     */
+    public fun restoreFailedSend(
+        request: SendRequest,
+        message: String = "Not sent. Reconnect, then send again or discard the draft.",
+    ) {
+        if (request.text.isEmpty()) return
+        savedStateHandle[KEY_DRAFT] = request.text
+        _uiState.update { current ->
+            current.copy(
+                draft = request.text,
+                error = message,
+                recording = RecordingState.Idle,
+                amplitude = 0f,
+            )
+        }
+    }
+
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     private fun startRecording() {
         // Guard: the user must have a stored API key before we burn cycles

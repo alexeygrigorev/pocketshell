@@ -121,7 +121,7 @@ import com.pocketshell.uikit.theme.PocketShellThemeMode
 @Composable
 public fun PromptComposerSheet(
     onDismiss: () -> Unit,
-    onSend: (text: String, withEnter: Boolean) -> Unit,
+    onSend: suspend (text: String, withEnter: Boolean) -> Boolean,
     modifier: Modifier = Modifier,
     hostId: Long? = null,
     viewModel: PromptComposerViewModel = hiltViewModel(),
@@ -209,13 +209,16 @@ public fun PromptComposerSheet(
     val currentOnDismiss by rememberUpdatedState(onDismiss)
     LaunchedEffect(viewModel) {
         viewModel.sendRequests.collect { request ->
-            currentOnSend(request.text, request.withEnter)
-            // Dismiss the sheet so the user lands back on the terminal
-            // with the bytes already flying. Historic behaviour from
-            // pre-#211; the dismiss + draft-clear now lives on the
-            // ViewModel side of the surface so the sheet's role is just
-            // to forward the request.
-            currentOnDismiss()
+            if (currentOnSend(request.text, request.withEnter)) {
+                // Dismiss the sheet so the user lands back on the terminal
+                // with the bytes already flying. Historic behaviour from
+                // pre-#211; the dismiss + draft-clear now lives on the
+                // ViewModel side of the surface so the sheet's role is just
+                // to forward the request.
+                currentOnDismiss()
+            } else {
+                viewModel.restoreFailedSend(request)
+            }
         }
     }
 

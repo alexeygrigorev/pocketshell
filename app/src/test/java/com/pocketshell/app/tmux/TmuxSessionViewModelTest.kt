@@ -2117,6 +2117,21 @@ class TmuxSessionViewModelTest {
         assertTrue(client.sentCommands.none { it.startsWith("send-keys") })
     }
 
+    @Test
+    fun sendToAgentPaneResultFailsWithoutOptimisticMessageWhenDisconnected() = runTest {
+        val vm = newVm()
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+
+        val result = vm.sendToAgentPaneResult("%0", "preserve this prompt")
+        runCurrent()
+
+        assertTrue("disconnected tmux agent send must report failure", result.isFailure)
+        assertTrue(
+            "disconnected send must not append optimistic messages",
+            vm.agentConversations.value["%0"]!!.events.isEmpty(),
+        )
+    }
+
     // ─── Issue #154: conversation search query persistence ─────────────
 
     @Test

@@ -45,6 +45,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
@@ -59,6 +60,7 @@ import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.composer.PromptComposerSheet
+import com.pocketshell.app.composer.UnsentPromptBanner
 import com.pocketshell.app.session.SessionViewModel.ConnectionStatus
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
@@ -334,7 +336,7 @@ public fun SessionScreen(
                 if (agentConversation.selectedTab == SessionTab.Conversation && detection != null) {
                     ConversationPane(
                         events = agentConversation.events,
-                        onSendToAgent = viewModel::sendToAgent,
+                        onSendToAgent = { text -> viewModel.sendToAgentResult(text) },
                         modifier = Modifier
                             .fillMaxSize()
                             .testTag(SESSION_CONVERSATION_PANE_TAG),
@@ -469,9 +471,12 @@ public fun SessionScreen(
                 // Issue #249: if the session dropped while the sheet was
                 // open, don't write into a dead PTY and don't dismiss —
                 // keep the sheet (and the user's text) so nothing is lost.
-                if (sessionLive) {
+                if (!sessionLive) {
+                    false
+                } else {
                     viewModel.sendText(text, withEnter)
                     showMicSheet = false
+                    true
                 }
             },
             hostId = hostId,
@@ -561,7 +566,7 @@ private fun breadcrumbCrumbs(host: String, user: String): List<Crumb> = listOf(
 @Composable
 internal fun ConversationPane(
     events: List<ConversationEvent>,
-    onSendToAgent: (String) -> Unit,
+    onSendToAgent: suspend (String) -> Boolean,
     modifier: Modifier = Modifier,
     // Issue #176: same opt-in as the tmux pane — when false, XML-tagged
     // SystemNote events are filtered out entirely; default is true so the
@@ -603,6 +608,8 @@ internal fun ConversationPane(
     // surface a "↓ Latest" pill when they have scrolled away.
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
+    var sendInFlight by remember { mutableStateOf(false) }
+    var hasUnsentPrompt by rememberSaveable { mutableStateOf(false) }
     val atBottom by remember(filteredEvents) {
         derivedStateOf { listState.isScrolledToBottom(filteredEvents.size) }
     }
@@ -677,6 +684,30 @@ internal fun ConversationPane(
                     .padding(end = 12.dp, bottom = 12.dp),
             )
         }
+        UnsentPromptBanner(
+            visible = hasUnsentPrompt || (!sendEnabled && composerText.isNotBlank()),
+            canRetry = sendEnabled && !sendInFlight,
+            onRetry = {
+                val trimmed = composerText.trim()
+                if (trimmed.isNotEmpty() && !sendInFlight) {
+                    coroutineScope.launch {
+                        sendInFlight = true
+                        try {
+                            if (onSendToAgent(trimmed)) {
+                                composerText = ""
+                                hasUnsentPrompt = false
+                            }
+                        } finally {
+                            sendInFlight = false
+                        }
+                    }
+                }
+            },
+            onDiscard = {
+                composerText = ""
+                hasUnsentPrompt = false
+            },
+        )
         // Issue #196: the raw-SSH agent composer uses the same shared
         // [com.pocketshell.app.composer.AgentComposerSurface] as the tmux
         // agent pane and the terminal-shell prompt composer, so all three
@@ -688,14 +719,25 @@ internal fun ConversationPane(
             onValueChange = { composerText = it },
             onSend = {
                 val trimmed = composerText.trim()
-                if (trimmed.isNotEmpty()) {
-                    onSendToAgent(trimmed)
-                    composerText = ""
+                if (trimmed.isNotEmpty() && !sendInFlight) {
+                    coroutineScope.launch {
+                        sendInFlight = true
+                        try {
+                            if (onSendToAgent(trimmed)) {
+                                composerText = ""
+                                hasUnsentPrompt = false
+                            } else {
+                                hasUnsentPrompt = true
+                            }
+                        } finally {
+                            sendInFlight = false
+                        }
+                    }
                 }
             },
             inputFieldTag = SESSION_CONVERSATION_COMPOSER_INPUT_TAG,
             sendButtonTag = SESSION_CONVERSATION_COMPOSER_SEND_TAG,
-            sendEnabled = sendEnabled,
+            sendEnabled = sendEnabled && !sendInFlight,
             placeholder = "Message ${agentName.ifBlank { "agent" }}",
         )
         ConversationSyncStatusRow(

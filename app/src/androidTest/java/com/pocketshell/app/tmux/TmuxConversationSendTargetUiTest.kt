@@ -104,6 +104,12 @@ class TmuxConversationSendTargetUiTest {
         compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_INPUT_TAG)
             .performTextInput("deploy the thing")
 
+        compose.onNodeWithTag(com.pocketshell.app.composer.UNSENT_PROMPT_RETRY_TAG)
+            .assertIsDisplayed()
+            .assertIsNotEnabled()
+        compose.onNodeWithTag(com.pocketshell.app.composer.UNSENT_PROMPT_DISCARD_TAG)
+            .assertIsDisplayed()
+
         // Send is disabled while not live.
         compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_SEND_TAG)
             .assertIsNotEnabled()
@@ -186,6 +192,14 @@ class TmuxConversationSendTargetUiTest {
         assertEquals("failed send still attempts delivery once", 1, sentCount)
         compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_INPUT_TAG)
             .assertTextContains("large pasted draft")
+        compose.onNodeWithTag(com.pocketshell.app.composer.UNSENT_PROMPT_RETRY_TAG)
+            .assertIsDisplayed()
+            .assertIsEnabled()
+        compose.onNodeWithTag(com.pocketshell.app.composer.UNSENT_PROMPT_DISCARD_TAG)
+            .assertIsDisplayed()
+            .performClick()
+        compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_INPUT_TAG)
+            .assertTextContains("")
     }
 
     @Test
@@ -210,7 +224,6 @@ class TmuxConversationSendTargetUiTest {
 
         compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_INPUT_TAG)
             .assertIsDisplayed()
-            .assertTextContains("dictated-paste-0")
         compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_SEND_TAG)
             .assertIsDisplayed()
             .assertIsEnabled()
@@ -222,8 +235,9 @@ class TmuxConversationSendTargetUiTest {
         compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_SEND_TAG)
             .assertIsDisplayed()
             .assertIsEnabled()
-        compose.onNodeWithTag(TMUX_CONVERSATION_COMPOSER_INPUT_TAG)
-            .assertTextContains("dictated-paste-159")
+            .performClick()
+        compose.waitUntil(timeoutMillis = 5_000) { sentCount == 2 }
+        assertEquals(longDraft, lastSent)
     }
 
     @Test

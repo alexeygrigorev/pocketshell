@@ -12,6 +12,9 @@ public interface TerminalSessionClient {
 
     void onTextChanged(@NonNull TerminalSession changedSession);
 
+    default void onProcessOutputDrained(@NonNull TerminalSession session, int bytes) {
+    }
+
     void onTitleChanged(@NonNull TerminalSession changedSession);
 
     void onSessionFinished(@NonNull TerminalSession finishedSession);

@@ -426,6 +426,7 @@ private class PendingDrainMessage(
 private class TraceState(
     val traceSink: SshTerminalBridge.TraceSink,
     val pendingDrainMessages: ConcurrentLinkedQueue<PendingDrainMessage> = ConcurrentLinkedQueue(),
+    val pendingScreenUpdates: ConcurrentLinkedQueue<PolledDrain> = ConcurrentLinkedQueue(),
 )
 
 private class TracingTerminalSessionClient(
@@ -433,8 +434,15 @@ private class TracingTerminalSessionClient(
     private val traceState: TraceState,
 ) : TerminalSessionClient {
 
+    override fun onProcessOutputDrained(session: TerminalSession, bytes: Int) {
+        if (bytes > 0) {
+            traceState.pendingScreenUpdates.add(pollPendingDrainBytes(bytes))
+        }
+        delegate.onProcessOutputDrained(session, bytes)
+    }
+
     override fun onTextChanged(changedSession: TerminalSession) {
-        val pending = pollPendingDrainBytes()
+        val pending = traceState.pendingScreenUpdates.poll() ?: PolledDrain(bytes = 0, scheduledAtNanos = null)
         val callbackStartedAtNanos = System.nanoTime()
         try {
             delegate.onTextChanged(changedSession)
@@ -447,13 +455,13 @@ private class TracingTerminalSessionClient(
         }
     }
 
-    private fun pollPendingDrainBytes(): PolledDrain {
+    private fun pollPendingDrainBytes(bytesRead: Int): PolledDrain {
         var bytes = 0
         var scheduledAtNanos: Long? = null
-        while (bytes < SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES) {
+        while (bytes < bytesRead) {
             val next = traceState.pendingDrainMessages.peek() ?: break
             val bytesToTake = minOf(
-                SshTerminalBridge.PROCESS_TO_TERMINAL_DRAIN_SLICE_BYTES - bytes,
+                bytesRead - bytes,
                 next.remainingBytes,
             )
             if (bytesToTake <= 0) {

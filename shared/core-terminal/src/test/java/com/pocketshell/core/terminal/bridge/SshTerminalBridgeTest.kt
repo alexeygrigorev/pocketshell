@@ -171,9 +171,12 @@ class SshTerminalBridgeTest {
             assertEquals(expectedChunks(payload.bytes.size), trace.feedCompletions.single().chunks)
             assertEquals(expectedChunks(payload.bytes.size), trace.queueWrites.size)
             assertEquals(expectedChunks(payload.bytes.size), trace.scheduledDrains.size)
-            val screenDrains = trace.screenUpdates.filter { it.bytes > 0 }
-            assertEquals(expectedDrainSlices(payload.bytes.size), screenDrains.size)
+            val screenDrains = trace.screenUpdateSnapshot().filter { it.bytes > 0 }
             assertEquals(payload.bytes.size, screenDrains.sumOf { it.bytes })
+            assertTrue(
+                "raw burst should be drained in multiple bounded screen updates",
+                screenDrains.size > trace.scheduledDrains.size,
+            )
             assertTrue(
                 "screen-update traces should stay within the main-thread drain budget",
                 screenDrains.all {
@@ -337,6 +340,11 @@ class SshTerminalBridgeTest {
         override fun toString(): String =
             "RecordingTraceSink(queueWrites=$queueWrites, scheduledDrains=$scheduledDrains, " +
                 "directDrains=$directDrains, screenUpdates=$screenUpdates, feedCompletions=$feedCompletions)"
+
+        fun screenUpdateSnapshot(): List<ScreenUpdate> =
+            synchronized(screenUpdates) {
+                screenUpdates.toList()
+            }
     }
 
     private data class QueueWrite(val bytes: Int, val durationNanos: Long, val waitedForDrain: Boolean)

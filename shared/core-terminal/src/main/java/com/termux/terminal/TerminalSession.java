@@ -400,6 +400,7 @@ public final class TerminalSession extends TerminalOutput {
             if (bytesRead <= 0) return bytesRead;
 
             mEmulator.append(mReceiveBuffer, bytesRead);
+            mClient.onProcessOutputDrained(TerminalSession.this, bytesRead);
             notifyScreenUpdate();
             return bytesRead;
         }

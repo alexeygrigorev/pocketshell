@@ -17,6 +17,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -44,6 +45,21 @@ import javax.inject.Inject
  * models register their per-host hooks into [ActiveTmuxClients] when
  * they attach; this class drives all hooks fanned out from a single
  * process lifecycle event.
+ *
+ * Issue #450 (maintainer-sanctioned relaxation of D21): the terminal
+ * teardown on `ON_STOP` is now **delayed by a bounded grace window**
+ * ([BACKGROUND_GRACE_MILLIS], 60 s) instead of firing immediately. A
+ * quick app-switch — to copy a snippet, glance at another app —
+ * returns to PocketShell within the grace window, the pending teardown
+ * is cancelled on `ON_START`, and the live SSH/tmux connection is never
+ * torn down. The user resumes instantly with no reconnect and no
+ * "Connecting"/"Reconnecting" UI. Only when the app stays backgrounded
+ * past the grace window does the existing teardown run. This is NOT
+ * permanent background work: it is a one-shot, self-cancelling delay of
+ * an already-scheduled teardown, not a `WorkManager`/`AlarmManager`
+ * job, not a polling loop, and not a wakelock. The usage-poll loop and
+ * agent detection still pause on `ON_STOP` immediately — the grace
+ * window applies only to the terminal connection teardown.
  */
 @HiltAndroidApp
 class App : Application() {
@@ -76,22 +92,57 @@ class App : Application() {
     private val sshLifecycleScope: CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    /**
+     * Issue #450: scope that runs the bounded grace-window timer. Uses
+     * [Dispatchers.Main.immediate] so the start/cancel decision is
+     * deterministic against the test `Dispatchers.setMain` swap and so a
+     * cancel from `ON_START` is observed before any new STOP timer would
+     * start. The actual teardown the timer fans out to still hops to IO
+     * internally (see [dispatchTmuxBackground] / the SSH lease worker).
+     */
+    private val graceLifecycleScope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
     private val sshLeaseLifecycleDispatcher = SshLeaseLifecycleDispatcher(
         scope = sshLifecycleScope,
         onProcessStopped = { sshLeaseManager.onProcessStopped() },
         onProcessStarted = { sshLeaseManager.onProcessStarted() },
     )
 
-    private val tmuxLifecycleObserver = LifecycleEventObserver { _: LifecycleOwner, event ->
+    /**
+     * Issue #450: delays the terminal teardown on background by a bounded
+     * grace window and cancels it if the app foregrounds first. The
+     * controller drives the existing tmux detach + SSH lease stop only
+     * when the window actually elapses; an `ON_START` within the window
+     * is a no-op so the live connection survives a quick app-switch.
+     */
+    private val backgroundGraceController = BackgroundGraceController(
+        scope = graceLifecycleScope,
+        graceMillis = BACKGROUND_GRACE_MILLIS,
+        onGraceElapsed = {
+            dispatchTmuxBackground()
+            sshLeaseLifecycleDispatcher.dispatch(Lifecycle.Event.ON_STOP)
+        },
+        onForeground = { resumedWithinGrace ->
+            // Always reverse the SSH lease "stopped" gate so reacquire
+            // works. When the grace window already elapsed (teardown
+            // ran) the tmux view models reattach via their foreground
+            // hooks; when we resumed within the window nothing was torn
+            // down, so reattach is a no-op and the user sees no
+            // reconnect.
+            sshLeaseLifecycleDispatcher.dispatch(Lifecycle.Event.ON_START)
+            if (!resumedWithinGrace) {
+                dispatchTmuxForeground()
+            }
+        },
+    )
+
+    private val terminalLifecycleObserver = LifecycleEventObserver { _: LifecycleOwner, event ->
         when (event) {
-            Lifecycle.Event.ON_STOP -> dispatchTmuxBackground()
-            Lifecycle.Event.ON_START -> dispatchTmuxForeground()
+            Lifecycle.Event.ON_STOP -> backgroundGraceController.onBackground()
+            Lifecycle.Event.ON_START -> backgroundGraceController.onForeground()
             else -> Unit
         }
-    }
-
-    private val sshLeaseLifecycleObserver = LifecycleEventObserver { _: LifecycleOwner, event ->
-        sshLeaseLifecycleDispatcher.dispatch(event)
     }
 
     override fun onCreate() {
@@ -109,14 +160,16 @@ class App : Application() {
         usageScheduler.start()
         StartupTiming.mark("usage-scheduler-started")
 
-        // Issue #235: auto-detach tmux `-CC` clients on lifecycle
-        // background + reattach on foreground. The observer attaches
-        // to [ProcessLifecycleOwner] (not the activity-level lifecycle
-        // — rotation / dark-mode flips would thrash the detach on
-        // every config change) so the journey only fires when ALL
-        // PocketShell activities go background.
-        ProcessLifecycleOwner.get().lifecycle.addObserver(tmuxLifecycleObserver)
-        ProcessLifecycleOwner.get().lifecycle.addObserver(sshLeaseLifecycleObserver)
+        // Issue #235 + #450: auto-detach tmux `-CC` clients on lifecycle
+        // background + reattach on foreground, but only after the bounded
+        // grace window elapses (see [backgroundGraceController]). The
+        // observer attaches to [ProcessLifecycleOwner] (not the
+        // activity-level lifecycle — rotation / dark-mode flips would
+        // thrash the detach on every config change) so the journey only
+        // fires when ALL PocketShell activities go background. A quick
+        // app-switch that returns within the grace window never tears the
+        // terminal connection down.
+        ProcessLifecycleOwner.get().lifecycle.addObserver(terminalLifecycleObserver)
         StartupTiming.mark("app-on-create-end")
     }
 
@@ -157,6 +210,97 @@ class App : Application() {
  * older Android versions.
  */
 private const val APP_LIFECYCLE_TAG: String = "PsAppTmuxLifecycle"
+
+/**
+ * Issue #450: logcat tag for the bounded background grace-window state
+ * machine. Kept short for the 23-character `Log.isLoggable` cap.
+ */
+internal const val GRACE_LIFECYCLE_TAG: String = "PsAppBgGrace"
+
+/**
+ * Issue #450: the single, easily-tunable bounded grace window before the
+ * terminal SSH/tmux connection is torn down after the app backgrounds.
+ *
+ * The maintainer asked for "at least a minute" so a quick app-switch
+ * (copying a snippet, glancing at another app) does not trigger a
+ * reconnect on return. 60 s satisfies that while keeping the window
+ * bounded — this is a delay of the existing teardown, not permanent
+ * background work. Flip this one constant to retune.
+ */
+internal const val BACKGROUND_GRACE_MILLIS: Long = 60_000L
+
+/**
+ * Issue #450: bounded grace-window state machine for the terminal
+ * connection teardown.
+ *
+ * On [onBackground] (process `ON_STOP`) it starts a single-shot
+ * [graceMillis] timer instead of tearing the connection down
+ * immediately. If [onForeground] (process `ON_START`) arrives before the
+ * timer fires, the timer is cancelled and [onForeground]'s callback is
+ * invoked with `resumedWithinGrace = true` — the live connection was
+ * never touched, so the user resumes instantly with no reconnect. If the
+ * timer elapses while still backgrounded, [onGraceElapsed] runs the
+ * existing teardown and a later [onForeground] is invoked with
+ * `resumedWithinGrace = false` so the caller can drive the normal
+ * reattach.
+ *
+ * The controller deliberately holds NO repeating timer, no
+ * `WorkManager`/`AlarmManager`, and no wakelock — it is a one-shot,
+ * self-cancelling [delay] coroutine. Once the teardown has fired (or
+ * before any background event) it owns no scheduled work at all, so it
+ * cannot keep the process awake. This is the bounded relaxation of D21
+ * sanctioned for issue #450.
+ *
+ * All entry points run on the controller's single-threaded
+ * [Dispatchers.Main.immediate] scope, so the [onBackground]/[onForeground]
+ * ordering is deterministic; callers do not need their own locking.
+ */
+internal class BackgroundGraceController(
+    private val scope: CoroutineScope,
+    private val graceMillis: Long,
+    private val onGraceElapsed: suspend () -> Unit,
+    private val onForeground: suspend (resumedWithinGrace: Boolean) -> Unit,
+) {
+    /** The in-flight grace timer, if the app is currently backgrounded. */
+    private var graceJob: Job? = null
+
+    /**
+     * True once [onGraceElapsed] has actually run for the current
+     * background cycle. Distinguishes a within-grace resume (connection
+     * intact) from a post-grace resume (connection torn down, reattach
+     * needed). Reset on the next [onBackground].
+     */
+    private var teardownFired: Boolean = false
+
+    fun onBackground() {
+        // A second ON_STOP without an intervening ON_START should not
+        // restart the window — keep the original deadline.
+        if (graceJob?.isActive == true) return
+        teardownFired = false
+        Log.i(GRACE_LIFECYCLE_TAG, "grace-window-start millis=$graceMillis")
+        graceJob = scope.launch {
+            delay(graceMillis)
+            teardownFired = true
+            Log.i(GRACE_LIFECYCLE_TAG, "grace-window-elapsed teardown")
+            onGraceElapsed()
+        }
+    }
+
+    fun onForeground() {
+        val pending = graceJob
+        graceJob = null
+        val resumedWithinGrace = pending?.isActive == true && !teardownFired
+        pending?.cancel()
+        Log.i(
+            GRACE_LIFECYCLE_TAG,
+            "grace-window-foreground resumedWithinGrace=$resumedWithinGrace",
+        )
+        scope.launch { onForeground(resumedWithinGrace) }
+    }
+
+    /** Test seam: true while the grace timer is counting down. */
+    internal fun isGracePendingForTest(): Boolean = graceJob?.isActive == true
+}
 
 internal class SshLeaseLifecycleDispatcher(
     scope: CoroutineScope,

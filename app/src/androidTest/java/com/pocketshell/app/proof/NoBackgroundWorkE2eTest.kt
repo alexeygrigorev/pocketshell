@@ -5,20 +5,28 @@ import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.app.BACKGROUND_GRACE_MILLIS
+import com.pocketshell.app.BackgroundGraceController
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Issue #161 — verifies the no-background-work principle (decision
@@ -54,6 +62,26 @@ import java.io.File
  * leave plenty of head-room for the first tick to land before we
  * background, but stay below the 5-minute background interval so a
  * regression that simply slowed the cadence is still caught.
+ *
+ * Issue #450 — bounded background grace window. The terminal SSH/tmux
+ * teardown on background is now *delayed* by a single bounded window
+ * ([com.pocketshell.app.BACKGROUND_GRACE_MILLIS], 60 s) so a quick
+ * app-switch resumes the live connection without a reconnect. The two
+ * grace tests below guard that the relaxation stayed bounded:
+ *
+ *  - [graceWindow_foregroundWithinWindow_neverTearsDownAndHoldsNoTimer]:
+ *    a foreground within the window cancels the pending teardown, the
+ *    teardown callback never fires, and the controller holds NO
+ *    scheduled work afterwards (no unbounded background timer / no
+ *    WorkManager-style repeating job).
+ *  - [graceWindow_stayingBackgroundedPastWindow_tearsDownExactlyOnce]:
+ *    staying backgrounded past the window runs the existing teardown
+ *    exactly once and then holds no scheduled work — proving the window
+ *    is a one-shot delay, not a polling loop.
+ *
+ * Both drive the controller on a short stand-in window so the assertion
+ * is deterministic without a 60 s wall-clock wait; the production
+ * constant is asserted to be bounded separately.
  */
 @RunWith(AndroidJUnit4::class)
 class NoBackgroundWorkE2eTest {
@@ -153,6 +181,99 @@ class NoBackgroundWorkE2eTest {
             "scheduler must resume ticking on ON_START; snapshot=$snapshot final=${scheduler.tickCount}",
             scheduler.tickCount > snapshot,
         )
+    }
+
+    /**
+     * Issue #450: a foreground within the grace window must cancel the
+     * pending terminal teardown (so the user resumes with no reconnect)
+     * AND leave the controller holding no scheduled work — proving the
+     * relaxation did not introduce an unbounded background timer.
+     */
+    @Test
+    fun graceWindow_foregroundWithinWindow_neverTearsDownAndHoldsNoTimer() = runBlocking {
+        val teardowns = AtomicInteger(0)
+        val foregrounds = mutableListOf<Boolean>()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        try {
+            val controller = BackgroundGraceController(
+                scope = scope,
+                graceMillis = STAND_IN_GRACE_MS,
+                onGraceElapsed = { teardowns.incrementAndGet() },
+                onForeground = { resumedWithinGrace -> foregrounds += resumedWithinGrace },
+            )
+
+            controller.onBackground()
+            // Return well within the stand-in window — a quick app-switch.
+            delay(STAND_IN_GRACE_MS / 4)
+            assertTrue("grace timer must be pending mid-window", controller.isGracePendingForTest())
+            controller.onForeground()
+
+            // Past the original deadline: no late teardown must fire.
+            delay(STAND_IN_GRACE_MS * 2)
+
+            assertEquals("teardown must NOT run on a within-grace resume", 0, teardowns.get())
+            assertEquals(
+                "foreground must signal an intact (within-grace) resume",
+                listOf(true),
+                foregrounds,
+            )
+            assertFalse(
+                "controller must hold no scheduled work after a within-grace resume",
+                controller.isGracePendingForTest(),
+            )
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    /**
+     * Issue #450: staying backgrounded past the grace window must run the
+     * existing teardown exactly once (the bounded delay elapsed) and then
+     * hold no scheduled work — the window is a one-shot delay, never a
+     * repeating background job.
+     */
+    @Test
+    fun graceWindow_stayingBackgroundedPastWindow_tearsDownExactlyOnce() = runBlocking {
+        val teardowns = AtomicInteger(0)
+        val foregrounds = mutableListOf<Boolean>()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+        try {
+            // Guard the production constant is bounded (a real minute-ish
+            // window, not an accidental Long.MAX_VALUE that would keep the
+            // connection up indefinitely).
+            assertTrue(
+                "production grace window must stay bounded; was $BACKGROUND_GRACE_MILLIS ms",
+                BACKGROUND_GRACE_MILLIS in 1L..120_000L,
+            )
+
+            val controller = BackgroundGraceController(
+                scope = scope,
+                graceMillis = STAND_IN_GRACE_MS,
+                onGraceElapsed = { teardowns.incrementAndGet() },
+                onForeground = { resumedWithinGrace -> foregrounds += resumedWithinGrace },
+            )
+
+            controller.onBackground()
+            // Stay backgrounded well past the stand-in window.
+            delay(STAND_IN_GRACE_MS * 3)
+
+            assertEquals("teardown must run exactly once past the window", 1, teardowns.get())
+            assertFalse(
+                "controller must hold no scheduled work after teardown (no repeating job)",
+                controller.isGracePendingForTest(),
+            )
+
+            controller.onForeground()
+            delay(STAND_IN_GRACE_MS)
+            assertEquals(
+                "foreground after teardown must signal a normal post-grace reattach",
+                listOf(false),
+                foregrounds,
+            )
+            assertEquals("teardown must not run again on foreground", 1, teardowns.get())
+        } finally {
+            scope.cancel()
+        }
     }
 
     private suspend fun waitForTickCountAtLeast(
@@ -275,6 +396,17 @@ class NoBackgroundWorkE2eTest {
          * issues land), bumping back to 30_000L is one constant flip.
          */
         const val BACKGROUND_HOLD_MS: Long = 5_000L
+
+        /**
+         * Issue #450: short stand-in grace window for the two grace tests
+         * so they exercise the elapse/cancel branches deterministically
+         * without a real 60 s wall-clock wait. The production constant
+         * ([BACKGROUND_GRACE_MILLIS]) is asserted to be bounded
+         * separately; here we only need the *state machine* to be
+         * one-shot and self-cancelling, which a short window proves just
+         * as well.
+         */
+        const val STAND_IN_GRACE_MS: Long = 400L
 
         /** Lifecycle dispatcher drain budget after `moveToState`. */
         const val LIFECYCLE_DRAIN_MS: Long = 500L

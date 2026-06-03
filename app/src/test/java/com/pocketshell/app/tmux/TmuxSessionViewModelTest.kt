@@ -5475,6 +5475,133 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    // ---- Issue #448 (epic #432 slice C): new-port detection overlay ----
+
+    /**
+     * Attach a client + session that reports [listeningPorts] from its
+     * `ss` confirm scan, then materialise one pane so the detection
+     * collector is wired onto the pane's shared output flow.
+     */
+    private fun TmuxSessionViewModel.attachForPortDetection(
+        client: FakeTmuxClient,
+        session: FakeSshSession,
+    ) {
+        replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            // Empty session name so the default ParsedPane.sessionName ("")
+            // passes applyParsedPanes' session filter.
+            sessionName = "",
+            client = client,
+            session = session,
+        )
+        applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane("%0", "@0", "$0", "shell", paneIndex = 0),
+            ),
+        )
+    }
+
+    @Test
+    fun confirmedNewPortSurfacesOverlay() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        val session = FakeSshSession(ssListeningPorts = setOf(5173))
+        vm.attachForPortDetection(client, session)
+        advanceUntilIdle()
+        assertNull(vm.detectedPort.value)
+
+        client.emittedEvents.emit(
+            ControlEvent.Output("%0", "Local:   http://localhost:5173/\n".toByteArray()),
+        )
+        advanceUntilIdle()
+
+        assertEquals(5173, vm.detectedPort.value)
+    }
+
+    @Test
+    fun echoedPortNotListeningDoesNotSurfaceOverlay() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        // ss reports nothing listening — the regex hit is an echoed/old URL.
+        val session = FakeSshSession(ssListeningPorts = emptySet())
+        vm.attachForPortDetection(client, session)
+        advanceUntilIdle()
+
+        client.emittedEvents.emit(
+            ControlEvent.Output("%0", "Listening on http://127.0.0.1:8000\n".toByteArray()),
+        )
+        advanceUntilIdle()
+
+        assertNull("unconfirmed port must not surface an overlay", vm.detectedPort.value)
+    }
+
+    @Test
+    fun acceptingDetectedPortReturnsItAndClearsOverlay() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        val session = FakeSshSession(ssListeningPorts = setOf(8000))
+        vm.attachForPortDetection(client, session)
+        advanceUntilIdle()
+        client.emittedEvents.emit(
+            ControlEvent.Output("%0", "Listening on 0.0.0.0:8000\n".toByteArray()),
+        )
+        advanceUntilIdle()
+        assertEquals(8000, vm.detectedPort.value)
+
+        assertEquals(8000, vm.acceptDetectedPort())
+        assertNull(vm.detectedPort.value)
+    }
+
+    @Test
+    fun dismissedPortDoesNotReSurfaceInSameSession() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        val session = FakeSshSession(ssListeningPorts = setOf(8000))
+        vm.attachForPortDetection(client, session)
+        advanceUntilIdle()
+        client.emittedEvents.emit(
+            ControlEvent.Output("%0", "Listening on 0.0.0.0:8000\n".toByteArray()),
+        )
+        advanceUntilIdle()
+        assertEquals(8000, vm.detectedPort.value)
+
+        vm.dismissDetectedPort()
+        assertNull(vm.detectedPort.value)
+
+        // Same port reprinted later in the session — must not re-prompt.
+        client.emittedEvents.emit(
+            ControlEvent.Output("%0", "Listening on 0.0.0.0:8000\n".toByteArray()),
+        )
+        advanceUntilIdle()
+        assertNull("dismissed port must not re-prompt", vm.detectedPort.value)
+    }
+
+    @Test
+    fun forwardedPortDoesNotReSurfaceInSameSession() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        val session = FakeSshSession(ssListeningPorts = setOf(8000))
+        vm.attachForPortDetection(client, session)
+        advanceUntilIdle()
+        client.emittedEvents.emit(
+            ControlEvent.Output("%0", "Listening on 0.0.0.0:8000\n".toByteArray()),
+        )
+        advanceUntilIdle()
+        assertEquals(8000, vm.acceptDetectedPort())
+
+        // Same port reprinted after the user forwarded it — no re-prompt.
+        client.emittedEvents.emit(
+            ControlEvent.Output("%0", "Listening on 0.0.0.0:8000\n".toByteArray()),
+        )
+        advanceUntilIdle()
+        assertNull("forwarded port must not re-prompt", vm.detectedPort.value)
+    }
+
     private fun cachedRuntimeForTest(
         sessionName: String,
         hostId: Long = 1L,
@@ -5635,6 +5762,11 @@ class TmuxSessionViewModelTest {
         private val initialEventsOutput: String = "",
         private val detectionOutput: String = "",
         private val processOutput: String = "",
+        // Issue #448: ports the `ss -tlnp` confirm scan reports as
+        // LISTENing. The detection collector calls PortScanner.scan, which
+        // runs `ss -tlnp ... | awk ...`; we answer that with one line per
+        // listening port in the `addr:port process` shape PortScanner parses.
+        private val ssListeningPorts: Set<Int> = emptySet(),
     ) : com.pocketshell.core.ssh.SshSession {
         @Volatile
         var closed: Boolean = false
@@ -5645,6 +5777,9 @@ class TmuxSessionViewModelTest {
         override suspend fun exec(command: String): com.pocketshell.core.ssh.ExecResult {
             execGate?.await()
             val stdout = when {
+                command.contains("ss -tlnp") ->
+                    ssListeningPorts.joinToString("\n") { "0.0.0.0:$it users:((\"server\",pid=1,fd=3))" }
+                command.contains("netstat -tlnp") || command.contains("ss -tln") -> ""
                 command.contains("wc -l < ") -> wcOutput
                 command.startsWith("tail -n ") -> initialEventsOutput
                 command.contains("ps -eo pid,ppid,tty,comm,args") -> processOutput

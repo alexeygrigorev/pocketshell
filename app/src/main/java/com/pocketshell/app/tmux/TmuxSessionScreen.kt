@@ -190,6 +190,11 @@ public fun TmuxSessionScreen(
     // navigate(AppDestination.PortForwardPanel(...)); the hand-rolled
     // back-stack restores this exact session/window on back.
     onOpenPortForwarding: () -> Unit = {},
+    // Issue #448 (epic #432 slice C): the detection overlay's "Forward"
+    // action opens the same panel pre-filled with the detected remote
+    // port (#447 prefillRemotePort). MainActivity navigates with the
+    // port; back returns to this exact session.
+    onOpenPortForwardingWithPort: (Int) -> Unit = {},
     /** Route an assistant-requested navigation (issue #266). */
     onAssistantNavigate: (com.pocketshell.app.nav.AppDestination) -> Unit = {},
     /**
@@ -242,6 +247,10 @@ public fun TmuxSessionScreen(
 
     val panes by viewModel.panes.collectAsState()
     val status by viewModel.connectionStatus.collectAsState()
+    // Issue #448 (epic #432 slice C): a confirmed newly-listening remote
+    // port (regex over output + `ss` confirm). Non-null drives the
+    // non-blocking forward overlay rendered over the terminal.
+    val detectedPort by viewModel.detectedPort.collectAsState()
     // Issue #249: the single source of truth that gates the composer /
     // send / dictation path. Input only reaches the remote when the tmux
     // `-CC` control channel is live (`Connected`). While Connecting (the
@@ -1089,6 +1098,24 @@ public fun TmuxSessionScreen(
                 openTextDialog(TmuxDialogMode.CreateSession)
             },
         )
+
+        // Issue #448 (epic #432 slice C): non-blocking "forward this new
+        // port?" overlay. Anchored to the bottom of the screen, above the
+        // composer/key bar, and it does NOT cover the terminal — the user
+        // can keep typing while it is shown. Forward navigates to the
+        // pre-filled port-forward panel (#447); back returns here.
+        DetectedPortOverlay(
+            port = detectedPort,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .imePadding(),
+            onForward = {
+                val accepted = viewModel.acceptDetectedPort()
+                if (accepted != null) onOpenPortForwardingWithPort(accepted)
+            },
+            onDismiss = { viewModel.dismissDetectedPort() },
+        )
     }
 
     LaunchedEffect(showSessionSwitcher, showSessionDrawer, sessionPickerRequest) {
@@ -1204,6 +1231,76 @@ public fun TmuxSessionScreen(
                 }
             },
         )
+    }
+}
+
+/**
+ * Issue #448 (epic #432 slice C): the non-blocking "forward this newly
+ * detected port?" overlay. Rendered as a bottom banner that floats over
+ * the terminal — it deliberately does not cover the terminal viewport or
+ * intercept terminal input, so the user can keep typing while deciding.
+ * [port] non-null shows the banner; null hides it (with a fade).
+ */
+@Composable
+internal fun DetectedPortOverlay(
+    port: Int?,
+    onForward: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // Keep the last non-null port so the banner text stays painted through
+    // the exit fade (the flow flips to null before the animation finishes).
+    var shownPort by remember { mutableStateOf(0) }
+    if (port != null) shownPort = port
+    AnimatedVisibility(
+        visible = port != null,
+        modifier = modifier,
+        enter = fadeIn(animationSpec = tween(durationMillis = MotionDurationMs)),
+        exit = fadeOut(animationSpec = tween(durationMillis = MotionDurationMs)),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp)
+                .background(PocketShellColors.Surface, RoundedCornerShape(10.dp))
+                .border(
+                    width = 1.dp,
+                    color = PocketShellColors.Accent,
+                    shape = RoundedCornerShape(10.dp),
+                )
+                .padding(start = 14.dp, end = 6.dp, top = 6.dp, bottom = 6.dp)
+                .testTag(TMUX_DETECTED_PORT_OVERLAY_TAG),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "New port $shownPort detected — forward it?",
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = onDismiss,
+                modifier = Modifier.testTag(TMUX_DETECTED_PORT_DISMISS_TAG),
+            ) {
+                Text(
+                    text = "Dismiss",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 14.sp,
+                )
+            }
+            TextButton(
+                onClick = onForward,
+                modifier = Modifier.testTag(TMUX_DETECTED_PORT_FORWARD_TAG),
+            ) {
+                Text(
+                    text = "Forward",
+                    color = PocketShellColors.Accent,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
     }
 }
 
@@ -1912,6 +2009,14 @@ internal const val TMUX_DETACH_BUTTON_TAG = "tmux:session:detach-button"
  * kebab -> port-forward panel -> back-to-session.
  */
 internal const val TMUX_PORT_FORWARDING_BUTTON_TAG = "tmux:session:port-forwarding-button"
+/**
+ * Issue #448 (epic #432 slice C): stable test tags for the new-port
+ * detection overlay and its actions, so instrumentation can assert the
+ * overlay appears and drive Forward / Dismiss.
+ */
+internal const val TMUX_DETECTED_PORT_OVERLAY_TAG = "tmux:session:detected-port-overlay"
+internal const val TMUX_DETECTED_PORT_FORWARD_TAG = "tmux:session:detected-port-forward"
+internal const val TMUX_DETECTED_PORT_DISMISS_TAG = "tmux:session:detected-port-dismiss"
 /**
  * Issue #165: stable test tags for the SSH-handshake progress overlay
  * rendered while [TmuxSessionViewModel.ConnectionStatus] is Connecting.

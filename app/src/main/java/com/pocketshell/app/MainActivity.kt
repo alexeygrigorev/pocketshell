@@ -1001,6 +1001,20 @@ private fun AppNavigator(
                     ),
                 )
             },
+            // Issue #448 (epic #432 slice C): the detection overlay's
+            // Forward action opens the same panel pre-filled with the
+            // detected port (#447 prefillRemotePort). Back returns to this
+            // exact session via the hand-rolled back-stack.
+            onOpenPortForwardingWithPort = { remotePort ->
+                navigate(
+                    AppDestination.PortForwardPanel(
+                        hostId = dest.hostId,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        prefillRemotePort = remotePort,
+                    ),
+                )
+            },
             onAssistantNavigate = ::navigate,
             // Issue #116: same per-host chip as the plain-SSH route.
             usageBadgeProvider = usageBadgesByHost[dest.hostId],

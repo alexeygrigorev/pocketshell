@@ -42,6 +42,7 @@ import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
+import com.pocketshell.core.portfwd.PortScanner
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLease
@@ -222,6 +223,20 @@ public class TmuxSessionViewModel @Inject constructor(
     private val _windowKillError: MutableStateFlow<String?> = MutableStateFlow(null)
     public val windowKillError: StateFlow<String?> = _windowKillError.asStateFlow()
 
+    /**
+     * Issue #448 (epic #432 slice C): a newly-listening remote port the
+     * session detected (regex over terminal output) AND confirmed via a
+     * single `ss` scan. Non-null means the screen should render the
+     * non-blocking "forward it?" overlay. Cleared by
+     * [dismissDetectedPort] / [acceptDetectedPort]. Only ever set while
+     * the session is foregrounded — detection rides the same per-pane
+     * output flow the terminal consumes, which is only collected while
+     * attached (foreground). There is no timer and no poll loop, so this
+     * adds no background work (D21).
+     */
+    private val _detectedPort: MutableStateFlow<Int?> = MutableStateFlow(null)
+    public val detectedPort: StateFlow<Int?> = _detectedPort.asStateFlow()
+
     // Issue #266: in-app action assistant — replaces the deleted
     // CommandPlanner voice path (D22 hard cut). Command-mode dictation lands
     // in [dictateToAssistant]; the controller owns the confirm-or-correct
@@ -313,6 +328,17 @@ public class TmuxSessionViewModel @Inject constructor(
     private val paneAgentInputs: MutableMap<String, Triple<String, String, String>> = ConcurrentHashMap()
     private val paneInputQueues: MutableMap<String, TmuxPaneInputQueue> = ConcurrentHashMap()
     private val paneInputJobs: MutableMap<String, Job> = ConcurrentHashMap()
+
+    // Issue #448 (epic #432 slice C): session-scoped new-port detection.
+    // [portDetector] owns the regex trigger + de-dup (dismissed /
+    // forwarded / already-listening ports are never re-offered). One
+    // collector per pane scans the same shared output flow the terminal
+    // consumes; the jobs are tracked so they tear down with the pane.
+    // Scoped to this view model instance (one per tmux session screen);
+    // de-dup is retained across same-host warm switches so a parked-then-
+    // restored runtime never re-prompts a port already handled.
+    private val portDetector: PortDetector = PortDetector()
+    private val panePortDetectorJobs: MutableMap<String, Job> = ConcurrentHashMap()
 
     // Bridge scope: a child of viewModelScope (parented via the
     // viewModelScope's Job) but with its own SupervisorJob so that a
@@ -1168,6 +1194,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 )
                 paneRows[pane.paneId] = row
                 paneProducerJobs[pane.paneId] = producerJob
+                // Issue #448 (epic #432 slice C): also tap the prewarmed
+                // pane's shared output flow for new-port detection.
+                startPortDetectionForPane(paneId = pane.paneId, client = client)
                 seedPrewarmedPane(client, row)
             }
             return PrewarmedPaneRuntime(
@@ -1379,6 +1408,12 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
         clearAgentConversations()
+        // Issue #448: drop any pending forward overlay when this runtime
+        // is parked to the cache — it belongs to the view we're leaving.
+        // The detector's session-scoped de-dup is intentionally retained
+        // so a restored same-host runtime doesn't re-prompt ports already
+        // dismissed/forwarded.
+        _detectedPort.value = null
         _panes.value = emptyList()
         registeredHostId?.let { activeTmuxClients.unregister(it) }
         registeredHostId = null
@@ -2906,6 +2941,8 @@ public class TmuxSessionViewModel @Inject constructor(
         val gonePaneIds = paneRows.keys - nextById.keys
         for (paneId in gonePaneIds) {
             paneProducerJobs.remove(paneId)?.cancel()
+            // Issue #448: stop the new-port detector for a removed pane.
+            panePortDetectorJobs.remove(paneId)?.cancel()
             paneAgentJobs.remove(paneId)?.cancel()
             paneAgentTailGenerations.remove(paneId)
             paneAgentInputs.remove(paneId)
@@ -2937,6 +2974,10 @@ public class TmuxSessionViewModel @Inject constructor(
             )
         }.onSuccess { job ->
             paneProducerJobs[paneId] = job
+            // Issue #448 (epic #432 slice C): tap the same shared output
+            // flow for new-port detection whenever a pane's producer is
+            // (re)attached — cold attach, warm switch, surface recreate.
+            startPortDetectionForPane(paneId = paneId, client = client)
         }.onFailure { cause ->
             Log.w(
                 ISSUE_145_RECONNECT_TAG,
@@ -2944,6 +2985,90 @@ public class TmuxSessionViewModel @Inject constructor(
                 cause,
             )
         }
+    }
+
+    /**
+     * Issue #448 (epic #432 slice C): start the new-port detector for a
+     * pane. A parallel collector on the same hot [TmuxClient.outputFor]
+     * flow the terminal already consumes (it is a `MutableSharedFlow`, so
+     * a second collector does not disturb the terminal producer). Each
+     * decoded chunk is fed to [portDetector]; a regex candidate is
+     * confirmed with a single `ss` scan over the live SSH session before
+     * the overlay is surfaced. No timer, no poll — purely event-driven
+     * and foreground-gated (the flow is only collected while attached).
+     */
+    private fun startPortDetectionForPane(paneId: String, client: TmuxClient) {
+        if (panePortDetectorJobs[paneId]?.isActive == true) return
+        panePortDetectorJobs[paneId]?.cancel()
+        panePortDetectorJobs[paneId] = bridgeScope.launch {
+            client.outputFor(paneId).collect { event ->
+                if (!appActive) return@collect
+                val text = runCatching { String(event.data, Charsets.UTF_8) }.getOrNull()
+                    ?: return@collect
+                val candidates = portDetector.scan(text)
+                for (candidate in candidates) {
+                    confirmAndSurfaceDetectedPort(candidate.port)
+                }
+            }
+        }
+    }
+
+    /**
+     * Issue #448: confirm a regex candidate is actually in `LISTEN` via a
+     * single [PortScanner.scan] over the session's SSH transport, then —
+     * if confirmed and not already resolved — surface the overlay. A
+     * candidate that is not actually listening (echoed/old URL) is
+     * released so a later real bind of the same port can still be offered.
+     */
+    private suspend fun confirmAndSurfaceDetectedPort(port: Int) {
+        // Don't replace an overlay the user hasn't acted on yet.
+        if (_detectedPort.value != null) {
+            portDetector.confirmFailed(port)
+            return
+        }
+        val session = sessionRef ?: run {
+            portDetector.confirmFailed(port)
+            return
+        }
+        val listening = runCatching { PortScanner.scan(session) }
+            .getOrDefault(emptyList())
+            .any { it.port == port }
+        if (!appActive) {
+            // Went to background mid-confirm — don't pop an overlay the
+            // user can't see; release so it can re-fire next foreground.
+            portDetector.confirmFailed(port)
+            return
+        }
+        if (!listening) {
+            portDetector.confirmFailed(port)
+            return
+        }
+        if (portDetector.confirmed(port) && _detectedPort.value == null) {
+            _detectedPort.value = port
+        }
+    }
+
+    /**
+     * Issue #448: user dismissed (or auto-dismissed) the forward overlay.
+     * Suppress re-prompting this port for the session and clear the state.
+     */
+    public fun dismissDetectedPort() {
+        _detectedPort.value?.let { portDetector.dismissed(it) }
+        _detectedPort.value = null
+    }
+
+    /**
+     * Issue #448: user accepted the overlay. Suppress re-prompting this
+     * port for the session, clear the overlay, and return the port so the
+     * screen can navigate to the prefilled port-forward panel
+     * (#447 `AppDestination.PortForwardPanel.prefillRemotePort`). Returns
+     * null if the overlay was already cleared.
+     */
+    public fun acceptDetectedPort(): Int? {
+        val port = _detectedPort.value ?: return null
+        portDetector.forwarded(port)
+        _detectedPort.value = null
+        return port
     }
 
     /**

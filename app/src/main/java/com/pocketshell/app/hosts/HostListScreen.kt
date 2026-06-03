@@ -351,76 +351,96 @@ fun HostListScreen(
                 ),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                // Issue #40: surface the upgrade prompt at the top so the
-                // user sees it before the host list, but only when the
-                // ViewModel has confirmed a strictly-newer release.
-                updateInfo?.let { info ->
-                    item(key = "banner:update") {
-                        UpdateBanner(
-                            info = info,
-                            onUpdate = {
-                                context.startActivity(
-                                    Intent(Intent.ACTION_VIEW, Uri.parse(info.apkUrl)),
-                                )
-                            },
-                        )
-                    }
-                }
-
-                shareMessage?.let { msg ->
-                    item(key = "banner:share") {
-                        ShareMessageBanner(message = msg, onDismiss = viewModel::clearShareMessage)
-                    }
-                }
-
-                // Issue #120: dedicated banner for the manual "Re-check
-                // setup" acknowledgement. Reuses [ShareMessageBanner] for
-                // visual consistency with the existing share-message banner;
-                // a separate StateFlow keeps the two messages independent so
-                // a host-share doesn't blow away a re-check ack and vice
-                // versa.
-                recheckMessage?.let { msg ->
-                    item(key = "banner:recheck") {
-                        ShareMessageBanner(message = msg, onDismiss = viewModel::clearRecheckMessage)
-                    }
-                }
-
-                // Issue #214: dismissible in-app usage warnings, one per
-                // provider that crossed the approaching / critical /
-                // exceeded threshold AND that the user hasn't dismissed
-                // for this app session. Banners sit above the Usage strip
-                // so they read as the most prominent quota signal on the
-                // host list. Tapping a banner routes to the Usage panel.
-                val activeBanners = usageWarningProviders
+                // Issue #418 (dashboard declutter): the top chrome
+                // (update / share / re-check / usage-warning banners and
+                // the cross-host usage strip) used to be one LazyColumn
+                // `item` each, so every banner also paid the column's
+                // inter-item gap. With up to five of them stacking, the
+                // first host card was pushed below the fold on a Pixel 7
+                // — the maintainer's "too crowded" complaint. We keep
+                // every functional affordance but collapse them into a
+                // single compact notices block with tight internal
+                // spacing so they read as one strip above the Hosts
+                // label instead of a tall stack of separate cards. The
+                // mockup (`dashboard.html`) has none of this chrome, so
+                // condensing — not removing — is the conservative middle
+                // ground.
+                val activeUsageBanners = usageWarningProviders
                     .filterKeys { it !in dismissedBanners }
                     .entries
                     .sortedBy { it.key }
-                if (activeBanners.isNotEmpty() && onOpenUsage != null) {
-                    items(activeBanners, key = { "banner:usage-warning:" + it.key }) { entry ->
-                        com.pocketshell.app.usage.UsageWarningBanner(
-                            provider = entry.value,
-                            onDismiss = { viewModel.dismissUsageBanner(entry.key) },
-                            onTap = onOpenUsage,
-                        )
-                    }
-                }
-
-                // Issue #116 (usage-panel Fix B): cross-host usage strip
-                // sits above the Hosts section header so the user sees the
-                // at-a-glance quota state for every pocketshell-installed host
-                // before scanning individual rows. The strip is gated on
-                // `hasUsageInstalledHost` so a workspace with no pocketshell
-                // hosts never renders an empty rail. Tapping routes to
-                // `AppDestination.Usage` via `onOpenUsage`.
-                if (hasUsageInstalledHost && onOpenUsage != null) {
-                    item(key = "usage:strip") {
-                        com.pocketshell.app.usage.UsageDashboardStrip(
-                            rows = usageDashboardRows,
-                            onClick = onOpenUsage,
+                val hasUpdateBanner = updateInfo != null
+                val hasShareBanner = shareMessage != null
+                val hasRecheckBanner = recheckMessage != null
+                val hasUsageWarningBanners = activeUsageBanners.isNotEmpty() && onOpenUsage != null
+                val hasUsageStrip = hasUsageInstalledHost && onOpenUsage != null
+                val hasAnyNotice = hasUpdateBanner || hasShareBanner || hasRecheckBanner ||
+                    hasUsageWarningBanners || hasUsageStrip
+                if (hasAnyNotice) {
+                    item(key = "notices") {
+                        Column(
                             modifier = Modifier
-                                .padding(top = 8.dp)
-                                .testTag(USAGE_DASHBOARD_STRIP_TAG),
-                        )
+                                .fillMaxWidth()
+                                .testTag(HOST_LIST_NOTICES_TAG),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            // Issue #40: upgrade prompt, only when the
+                            // ViewModel confirmed a strictly-newer release.
+                            updateInfo?.let { info ->
+                                UpdateBanner(
+                                    info = info,
+                                    onUpdate = {
+                                        context.startActivity(
+                                            Intent(Intent.ACTION_VIEW, Uri.parse(info.apkUrl)),
+                                        )
+                                    },
+                                )
+                            }
+
+                            shareMessage?.let { msg ->
+                                ShareMessageBanner(
+                                    message = msg,
+                                    onDismiss = viewModel::clearShareMessage,
+                                )
+                            }
+
+                            // Issue #120: manual "Re-check setup"
+                            // acknowledgement. Reuses [ShareMessageBanner]
+                            // for visual consistency; a separate StateFlow
+                            // keeps the two messages independent.
+                            recheckMessage?.let { msg ->
+                                ShareMessageBanner(
+                                    message = msg,
+                                    onDismiss = viewModel::clearRecheckMessage,
+                                )
+                            }
+
+                            // Issue #214: dismissible in-app usage
+                            // warnings, one per provider over threshold
+                            // that the user hasn't dismissed this session.
+                            if (hasUsageWarningBanners) {
+                                activeUsageBanners.forEach { entry ->
+                                    com.pocketshell.app.usage.UsageWarningBanner(
+                                        provider = entry.value,
+                                        onDismiss = { viewModel.dismissUsageBanner(entry.key) },
+                                        onTap = onOpenUsage,
+                                    )
+                                }
+                            }
+
+                            // Issue #116 (usage-panel Fix B): cross-host
+                            // usage strip. Gated on `hasUsageInstalledHost`
+                            // so a workspace with no pocketshell hosts
+                            // never renders an empty rail. Tapping routes
+                            // to `AppDestination.Usage`.
+                            if (hasUsageStrip) {
+                                com.pocketshell.app.usage.UsageDashboardStrip(
+                                    rows = usageDashboardRows,
+                                    onClick = onOpenUsage,
+                                    modifier = Modifier.testTag(USAGE_DASHBOARD_STRIP_TAG),
+                                )
+                            }
+                        }
                     }
                 }
 
@@ -689,6 +709,14 @@ internal const val HOST_LIST_CONTENT_TAG = "host-list:content"
 internal const val HOST_ROW_TAG_PREFIX = "host:row:"
 
 /**
+ * Issue #418: stable test tag for the single compact "notices" block
+ * that collapses the update / share / re-check / usage-warning banners
+ * and the cross-host usage strip above the Hosts label, so they no
+ * longer stack as separate full-gap LazyColumn items.
+ */
+internal const val HOST_LIST_NOTICES_TAG = "host-list:notices"
+
+/**
  * Issue #144: stable test tag for the bottom-right "+" FloatingActionButton
  * that opens the Add Host form. The FAB carries the only primary tap target
  * for "add a host" — the empty-state copy intentionally has no button — so
@@ -721,10 +749,11 @@ internal const val IMPORT_CONFLICT_ADD_AS_NEW_TAG = "host-list:import-conflict:a
 /**
  * Issue #116 / #155: stable test tag for the per-host blocked /
  * near-limit chip. Originally rendered next to the setup-state badge
- * on [HostCard] via the card's `usageBadge` slot. Issue #155 demoted
- * the chip OFF the primary status row to reduce scanning friction
- * (the cross-host Usage dashboard strip already surfaces blocked
- * state). The chip now lives inside the kebab overflow menu — see
+ * on the host card. Issue #155 demoted the chip OFF the primary status
+ * row to reduce scanning friction (the cross-host Usage dashboard strip
+ * already surfaces blocked state), and issue #418 removed the host
+ * card's inline badge slots entirely in favour of a single status dot.
+ * The chip now lives inside the kebab overflow menu — see
  * [HostOverflowMenuAnchor] — and keeps the same test tag so existing
  * instrumentation that targets it stays valid.
  */
@@ -747,7 +776,10 @@ private fun UpdateBanner(info: ReleaseInfo, onUpdate: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 8.dp)
+            // Issue #418: the outer vertical padding was dropped — the
+            // shared "notices" Column now owns inter-banner spacing, so
+            // the banner no longer double-pads above/below itself.
+            .padding(horizontal = 12.dp)
             .background(
                 color = PocketShellColors.AccentSoft,
                 shape = RoundedCornerShape(12.dp),
@@ -757,7 +789,7 @@ private fun UpdateBanner(info: ReleaseInfo, onUpdate: () -> Unit) {
                 color = PocketShellColors.Accent,
                 shape = RoundedCornerShape(12.dp),
             )
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {

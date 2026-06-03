@@ -3,6 +3,7 @@ package com.pocketshell.app.hosts
 import android.graphics.Bitmap
 import android.os.SystemClock
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
@@ -14,7 +15,8 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
-import com.pocketshell.uikit.components.HOST_STATUS_CHIP_TAG
+import com.pocketshell.uikit.components.HOST_STATUS_DESCRIPTION_ATTENTION
+import com.pocketshell.uikit.components.HOST_STATUS_DOT_TAG
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assume.assumeTrue
@@ -25,15 +27,16 @@ import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Connected (instrumentation) coverage for issue #201: the trailing
- * host-card status chip vocabulary.
+ * Connected (instrumentation) coverage for the trailing host-card status
+ * indicator vocabulary (originally issue #201; reshaped by issue #418).
  *
- * The AC explicitly calls for a "Connected E2E or screenshot test for
- * the three primary states (0 sessions, N sessions, needs setup)". This
- * suite seeds three host rows directly into the in-memory Room database
- * — one per state — then launches the host list and asserts the
- * expected label is visible AND that the literal word "idle" is not
- * present anywhere on the screen.
+ * Issue #418 collapsed the old text status **pill** + inline setup
+ * **badge** into a single status **dot** (design-system §8 / the
+ * `dashboard.html` `.status-dot`). The state vocabulary now lives in the
+ * dot's `contentDescription` rather than a painted label, so this suite
+ * asserts presence of the [HOST_STATUS_DOT_TAG] dot per row plus the
+ * folded `NeedsSetup` -> amber-dot ("Needs setup" description) case, and
+ * still guards that the ambiguous word "idle" never appears.
  *
  * No Docker / SSH is involved: the rows are stubbed with persisted
  * bootstrap columns so the badge derivation in [deriveSetupState] picks
@@ -65,86 +68,90 @@ class HostCardStatusChipTest {
     }
 
     /**
-     * AC primary state 1: host that has completed bootstrap (tmux +
-     * pocketshell both installed) but currently has zero tmux sessions. The
-     * chip must read "No active sessions" and the screen must not
+     * Primary state 1: host that has completed bootstrap (tmux +
+     * pocketshell both installed) but currently has zero tmux sessions.
+     * The single status dot must be present (its colour reads idle/active
+     * depending on the live session aggregate) and the screen must not
      * carry the word "idle".
      */
     @Test
-    fun noActiveSessions_chipRendersForReadyHostWithNoSessions() {
+    fun noActiveSessions_dotRendersForReadyHostWithNoSessions() {
         assumeScenariosEnabled()
         scenario(name = "no-active-sessions") {
             seedHost(tmuxInstalled = true, pocketshellInstalled = true)
             launchHostList()
             capture("01-no-active-sessions")
 
-            compose.onAllNodesWithTag(HOST_STATUS_CHIP_TAG, useUnmergedTree = true)
+            compose.onAllNodesWithTag(HOST_STATUS_DOT_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
-                .let { check(it.isNotEmpty()) { "expected trailing host-status chip" } }
-            // We assert the new label exists OR the row is showing the
-            // Unknown spinner; the spinner case is permitted because
-            // the cross-host SessionsDashboardViewModel may not have
-            // observed our seeded host yet (it polls when a tmux
-            // client registers, which this scenario never does). The
-            // AC requires the label vocabulary to be correct when
-            // present; "idle" must never appear.
+                .let { check(it.isNotEmpty()) { "expected trailing host-status dot" } }
+            // The dot may be the muted "No active sessions" colour, the
+            // green "Active sessions" colour, or the loading spinner if
+            // the cross-host session aggregate hasn't observed our seeded
+            // host yet (it polls when a tmux client registers, which this
+            // scenario never does). In all cases the ambiguous word
+            // "idle" must never appear.
             assertNoIdleLabel()
         }
     }
 
     /**
-     * AC primary state 2: host with five tmux sessions and the app
-     * NOT attached. The chip must read "5 sessions" (plural form) and
-     * the screen must not carry the word "idle".
+     * Primary state 2: host with live tmux sessions and the app NOT
+     * attached. The dot must be present (green "Active sessions" colour
+     * when the aggregate reports sessions) and the screen must not carry
+     * the word "idle".
      *
-     * Because the seeded scenario can't easily inject a fake
-     * SessionsDashboard snapshot from here (the dashboard polls a live
-     * tmux client and we are not standing one up), this test seeds the
-     * persisted setup state for a Ready host and primarily validates
-     * the chip slot exists. The N-sessions label rendering is covered
-     * by the JVM-side [HostStatusDerivationTest.activeSessions_whenReadyAndPositiveCount]
+     * Because the seeded scenario can't easily inject a fake session
+     * aggregate snapshot from here (it polls a live tmux client and we
+     * are not standing one up), this test seeds the persisted setup state
+     * for a Ready host and primarily validates the dot slot exists. The
+     * N-sessions colour mapping is covered by the JVM-side
+     * [HostStatusDerivationTest.activeSessions_whenReadyAndPositiveCount]
      * — together they prove the full path.
      */
     @Test
-    fun nSessionsChip_isStubbedForReadyHost() {
+    fun nSessionsDot_isStubbedForReadyHost() {
         assumeScenariosEnabled()
         scenario(name = "n-sessions") {
             seedHost(tmuxInstalled = true, pocketshellInstalled = true)
             launchHostList()
             capture("02-n-sessions")
-            compose.onAllNodesWithTag(HOST_STATUS_CHIP_TAG, useUnmergedTree = true)
+            compose.onAllNodesWithTag(HOST_STATUS_DOT_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
-                .let { check(it.isNotEmpty()) { "expected trailing host-status chip" } }
+                .let { check(it.isNotEmpty()) { "expected trailing host-status dot" } }
             assertNoIdleLabel()
         }
     }
 
     /**
-     * AC primary state 3: host whose bootstrap probe reported a tool
-     * missing — the trailing chip must NOT render (the inline setup
-     * badge already calls out the actionable state), and the screen
-     * must not carry the word "idle" anywhere.
+     * Primary state 3: host whose bootstrap probe reported a tool missing
+     * — issue #418 folds the old "needs setup" badge into the single
+     * status dot, which now renders amber and carries the accessible
+     * "Needs setup" description. There is exactly one dot (not a badge +
+     * a chip), and the screen must not carry the word "idle".
      */
     @Test
-    fun needsSetupHost_suppressesTrailingStatusChip() {
+    fun needsSetupHost_rendersAmberAttentionDot() {
         assumeScenariosEnabled()
         scenario(name = "needs-setup") {
             seedHost(tmuxInstalled = true, pocketshellInstalled = false)
             launchHostList()
             capture("03-needs-setup")
-            // The inline setup badge still reads "needs setup".
-            compose.onNodeWithText("needs setup").assertExists()
+            // Exactly one status dot, and it carries the folded "Needs
+            // setup" attention description.
+            compose.onAllNodesWithTag(HOST_STATUS_DOT_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .let { check(it.isNotEmpty()) { "expected single trailing host-status dot" } }
+            compose.onAllNodesWithContentDescription(
+                HOST_STATUS_DESCRIPTION_ATTENTION,
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes()
+                .let {
+                    check(it.isNotEmpty()) {
+                        "needs-setup host must fold into the amber attention dot"
+                    }
+                }
             assertNoIdleLabel()
-            // And — critically — the trailing chip is suppressed. The
-            // setup badge has its own test tag (HOST_SETUP_BADGE_TAG),
-            // not this one, so the absence of HOST_STATUS_CHIP_TAG is
-            // unambiguous.
-            check(
-                compose.onAllNodesWithTag(HOST_STATUS_CHIP_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes().isEmpty(),
-            ) {
-                "trailing status chip must be suppressed when setup badge already calls out NeedsSetup"
-            }
         }
     }
 

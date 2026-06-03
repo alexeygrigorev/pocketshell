@@ -21,15 +21,19 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -70,7 +74,11 @@ internal fun RootProjectAddSheetContent(
 ) {
     var query by remember { mutableStateOf("") }
     val filtered = remember(candidates, query) {
-        FolderListViewModel.filterRootProjectCandidates(candidates, query)
+        RootProjectFilter.filter(candidates, query)
+    }
+    val searchFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        searchFocus.requestFocus()
     }
 
     Column(
@@ -92,6 +100,16 @@ internal fun RootProjectAddSheetContent(
                 fontSize = 12.sp,
             )
         }
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            singleLine = true,
+            label = { Text("Search projects") },
+            modifier = Modifier
+                .fillMaxWidth()
+                .focusRequester(searchFocus)
+                .testTag(ROOT_PROJECT_ADD_SEARCH_TAG),
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             RootQuickAction(
                 label = "Empty project",
@@ -106,22 +124,13 @@ internal fun RootProjectAddSheetContent(
                 modifier = Modifier.weight(1f),
             )
         }
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            singleLine = true,
-            label = { Text("Search projects") },
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag(ROOT_PROJECT_ADD_SEARCH_TAG),
-        )
         LazyColumn(
             modifier = Modifier
                 .fillMaxWidth()
                 .heightIn(max = 360.dp)
                 .testTag(ROOT_PROJECT_ADD_LIST_TAG),
             contentPadding = PaddingValues(bottom = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             if (filtered.isEmpty()) {
                 item { RootProjectAddEmptyState(query = query) }
@@ -172,40 +181,67 @@ private fun RootProjectCandidateRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(10.dp))
+            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(8.dp))
             .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
             .testTag(rootProjectCandidateTestTag(candidate.path)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(modifier = Modifier.weight(1f)) {
+        Text(
+            text = candidate.label,
+            color = PocketShellColors.Text,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        candidatePathTail(candidate)?.let { tail ->
+            Spacer(modifier = Modifier.size(8.dp))
             Text(
-                text = candidate.label,
-                color = PocketShellColors.Text,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Text(
-                text = candidate.path,
-                color = PocketShellColors.TextSecondary,
+                text = tail,
+                color = PocketShellColors.TextMuted,
                 fontSize = 11.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
             )
         }
-        Spacer(modifier = Modifier.size(10.dp))
+        Spacer(modifier = Modifier.weight(1f))
         RootProjectSourceLabel(candidate)
     }
 }
 
+/**
+ * The path segment leading up to (but excluding) the project [label], shown
+ * dimmed so the user keeps just enough context to disambiguate same-named
+ * folders under different parents. Returns null when the path adds nothing
+ * beyond the label (e.g. the label already equals the final segment with no
+ * informative parent).
+ */
+private fun candidatePathTail(candidate: RootProjectCandidate): String? {
+    val path = candidate.path.trimEnd('/')
+    val lastSlash = path.lastIndexOf('/')
+    if (lastSlash <= 0) return null
+    val parent = path.substring(0, lastSlash)
+    val parentName = parent.substringAfterLast('/')
+    return if (parentName.isBlank()) null else "$parentName/"
+}
+
 @Composable
 private fun RootProjectSourceLabel(candidate: RootProjectCandidate) {
-    val label = when (candidate.source) {
-        RootProjectSource.History -> "Used before"
-        RootProjectSource.Scanned -> "Folder"
+    if (candidate.source != RootProjectSource.History) {
+        // Scanned folders are the common case; keep them clean and only badge
+        // the rarer "used before" history candidates.
+        Spacer(
+            modifier = Modifier
+                .size(0.dp)
+                .testTag(rootProjectCandidateSourceTestTag(candidate.path)),
+        )
+        return
     }
     Text(
-        text = label,
-        color = PocketShellColors.TextMuted,
+        text = "Recent",
+        color = PocketShellColors.Accent,
         fontSize = 10.sp,
         fontWeight = FontWeight.Medium,
         modifier = Modifier.testTag(rootProjectCandidateSourceTestTag(candidate.path)),

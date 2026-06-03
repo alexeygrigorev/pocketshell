@@ -372,11 +372,13 @@ class FolderListScreenE2eTest {
         compose.onNodeWithTag(rootProjectCandidateTestTag("/home/u/git/pocketshell")).assertDoesNotExist()
         compose.onNodeWithTag(rootProjectCandidateTestTag("/home/u/git/llm-zoomcamp")).assertDoesNotExist()
         compose.onNodeWithTag(rootProjectCandidateTestTag("/home/u/git/empty-pinned")).assertExists()
+        // Scanned candidates carry no inline source badge after the row
+        // compaction (only "Recent" history candidates are badged), so the
+        // source slot exists but has no label text.
         compose.onNodeWithTag(
             rootProjectCandidateSourceTestTag("/home/u/git/empty-pinned"),
             useUnmergedTree = true,
-        )
-            .assertTextEquals("Folder")
+        ).assertExists()
         compose.onNodeWithTag(rootProjectCandidateTestTag("/home/u/git/empty-pinned")).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(SESSION_TYPE_PICKER_SHELL_TAG).fetchSemanticsNodes().isNotEmpty()

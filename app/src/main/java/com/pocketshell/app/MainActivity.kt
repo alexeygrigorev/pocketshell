@@ -12,8 +12,13 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.core.content.ContextCompat
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.exclude
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
@@ -303,7 +308,21 @@ class MainActivity : FragmentActivity() {
                 Surface(
                     modifier = Modifier
                         .fillMaxSize()
-                        .safeDrawingPadding(),
+                        // Issue #457 (Part 1): pad for the system bars +
+                        // display cutout but deliberately EXCLUDE the IME
+                        // inset here. Consuming the IME at the root would
+                        // shrink the whole window when the soft keyboard
+                        // shows, which on the terminal screens shrinks the
+                        // embedded TerminalView's pixel height -> the vendored
+                        // `TerminalView.updateSize()` recomputes fewer rows ->
+                        // a tmux pane resize + full reflow/redraw (the jank the
+                        // maintainer hit). Keyboard avoidance is now owned per
+                        // screen: text-entry screens opt back into
+                        // `.imePadding()` (see [AppNavigator]); the terminal
+                        // screens PAN their viewport up instead of resizing.
+                        .windowInsetsPadding(
+                            WindowInsets.safeDrawing.exclude(WindowInsets.ime),
+                        ),
                     color = MaterialTheme.colorScheme.background,
                 ) {
                     AppNavigator(
@@ -521,7 +540,26 @@ private fun AppNavigator(
         setCurrentDestination(backStack.removeLastOrNull() ?: AppDestination.HostList)
     }
 
-    when (val dest = current) {
+    // Issue #457 (Part 1): the root Surface no longer consumes the IME inset
+    // (see MainActivity.onCreate), so each destination owns its own keyboard
+    // behaviour. Text-entry screens (host form, settings, jobs, env, folder
+    // list, etc.) opt back into `.imePadding()` here so their fields still
+    // float above the soft keyboard exactly as before. The terminal screens
+    // ([AppDestination.Session] / [AppDestination.TmuxSession]) are excluded:
+    // they keep full height under the keyboard and PAN the terminal viewport
+    // up instead of resizing the pane, which avoids the tmux reflow + full
+    // redraw jank.
+    val activeDestination = current
+    val keyboardAvoidanceModifier =
+        if (activeDestination is AppDestination.Session ||
+            activeDestination is AppDestination.TmuxSession
+        ) {
+            Modifier.fillMaxSize()
+        } else {
+            Modifier.fillMaxSize().imePadding()
+        }
+    androidx.compose.foundation.layout.Box(modifier = keyboardAvoidanceModifier) {
+    when (val dest = activeDestination) {
         AppDestination.HostList -> HostListScreen(
             onAddHost = { navigate(AppDestination.AddHost) },
             onEditHost = { id -> navigate(AppDestination.EditHost(id)) },
@@ -1043,6 +1081,7 @@ private fun AppNavigator(
                 TmuxConnectTrigger.UserTap
             },
         )
+    }
     }
 }
 

@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -292,9 +293,23 @@ public fun TmuxSessionScreen(
 
     val pagerState = rememberPagerState(pageCount = { panes.size })
 
-    val isImeVisible = WindowInsets.ime.getBottom(
-        LocalDensity.current,
-    ) > 0
+    val density = LocalDensity.current
+    val imeBottomPx = WindowInsets.ime.getBottom(density)
+    val navBarBottomPx = WindowInsets.navigationBars.getBottom(density)
+    val isImeVisible = imeBottomPx > 0
+    // Issue #457 (Part 1): the height in pixels that the soft keyboard
+    // overlaps the terminal column's content area. The root Surface no
+    // longer consumes the IME inset (see MainActivity), so the whole
+    // terminal column keeps its IME-down height while the keyboard is up —
+    // critically the embedded TerminalView never shrinks, so the vendored
+    // `TerminalView.updateSize()` never recomputes a smaller grid and no
+    // tmux pane resize / full reflow + redraw fires. Instead we PAN: the
+    // column is translated up by this overlap so the bottom rows + cursor +
+    // key bar stay visible above the keyboard. The navigation-bar inset is
+    // subtracted because the IME bottom inset is measured from the screen
+    // edge and already subsumes the nav bar the column would otherwise pad
+    // for. Clamped at 0 so a hidden keyboard leaves the column un-panned.
+    val imePanOffsetPx = imeKeyboardPanOffsetPx(imeBottomPx, navBarBottomPx)
     // Issue #184: while the soft keyboard is up, the user is in
     // "typing-focus" mode — the breadcrumb / window-strip / tabs chrome
     // up top eats vertical room that the terminal viewport (and the
@@ -556,7 +571,17 @@ public fun TmuxSessionScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .imePadding(),
+                // Issue #457 (Part 1): PAN, do not resize. We translate the
+                // whole terminal column up by the keyboard overlap rather than
+                // applying `.imePadding()` (which would shrink the column ->
+                // shrink the embedded TerminalView -> trigger a tmux resize +
+                // full reflow/redraw). `graphicsLayer` translation is a pure
+                // GPU pan: the column keeps its full IME-down measured height,
+                // so the terminal grid stays constant and the bottom rows +
+                // cursor + key bar pan up above the keyboard. The IME-up chrome
+                // is already collapsed ([chromeCompressed]) so the small slice
+                // that pans off the top is never user-facing content.
+                .graphicsLayer { translationY = -imePanOffsetPx.toFloat() },
         ) {
             // Issue #256: gate the inline Conversation tab on the
             // currently visible pane only. A sibling pane/window's agent
@@ -1773,6 +1798,25 @@ internal data class TmuxSessionTabState(
     val selectedIndex: Int,
     val showsConversationTab: Boolean,
 )
+
+/**
+ * Issue #457 (Part 1): how far (in pixels) to pan the terminal column up so
+ * its bottom rows + cursor + key bar stay visible above the soft keyboard,
+ * WITHOUT resizing the terminal grid (which would trigger a tmux pane resize
+ * and full reflow + redraw — the jank this slice removes).
+ *
+ * The IME bottom inset ([imeBottomPx]) is measured from the screen edge and
+ * already subsumes the navigation-bar region the column would otherwise pad
+ * for, so we subtract [navBarBottomPx] to get the slice the keyboard actually
+ * overlaps the column content. Clamped at 0 so a hidden keyboard (imeBottom
+ * == 0, which is < navBarBottom) leaves the column un-panned rather than
+ * pushing it DOWN.
+ *
+ * Pulled out as a pure function so the offset arithmetic is unit-testable
+ * without a composition or a live IME.
+ */
+internal fun imeKeyboardPanOffsetPx(imeBottomPx: Int, navBarBottomPx: Int): Int =
+    (imeBottomPx - navBarBottomPx).coerceAtLeast(0)
 
 internal fun tmuxSessionTabState(
     currentAgentConversation: AgentConversationUiState?,

@@ -273,4 +273,34 @@ class TmuxSessionScreenTest {
             sessionId = "abc",
             confidence = AgentDetection.Confidence.ProcessConfirmed,
         )
+
+    // ---------------------------------------------------------------- #457
+    // Keyboard-pan offset: PAN the terminal column up by the keyboard
+    // overlap instead of resizing the terminal (which would reflow tmux).
+
+    @Test
+    fun panOffsetIsZeroWhenKeyboardHidden() {
+        // Hidden IME reports a 0 bottom inset; the nav bar inset is still
+        // present. The offset must clamp at 0 so the column is NOT panned
+        // (and definitely never pushed DOWN by a negative translation).
+        assertEquals(0, imeKeyboardPanOffsetPx(imeBottomPx = 0, navBarBottomPx = 48))
+    }
+
+    @Test
+    fun panOffsetSubtractsNavBarFromImeOverlap() {
+        // IME inset is measured from the screen edge and subsumes the nav
+        // bar; the terminal column already pads the nav bar, so the pan is
+        // only the extra slice the keyboard covers above it.
+        assertEquals(
+            900 - 48,
+            imeKeyboardPanOffsetPx(imeBottomPx = 900, navBarBottomPx = 48),
+        )
+    }
+
+    @Test
+    fun panOffsetClampsWhenImeSmallerThanNavBar() {
+        // Defensive: a transient frame where the reported IME inset is below
+        // the nav bar height must not yield a negative (downward) pan.
+        assertEquals(0, imeKeyboardPanOffsetPx(imeBottomPx = 30, navBarBottomPx = 48))
+    }
 }

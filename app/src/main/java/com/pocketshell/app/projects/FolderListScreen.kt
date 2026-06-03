@@ -371,7 +371,21 @@ fun FolderListScreen(
             suggestStartDirectories = suggestStartDirectories,
             onCreate = { choice ->
                 pickerFolder = null
-                val newName = derivedSessionName(choice)
+                val newName = derivedSessionName(
+                    choice = choice,
+                    // Best-effort remote $HOME so directories under home
+                    // collapse to their tmuxctl home-relative form. The
+                    // authoritative $HOME lives on the remote and isn't
+                    // plumbed into this screen yet (#430/#438 own the
+                    // gateway/viewmodel), so we infer the conventional
+                    // path from the connecting username — correct for the
+                    // maintainer's hosts (`/home/<user>`, `/root`).
+                    homeDirectory = conventionalRemoteHome(username),
+                    // Disambiguate against the session names already
+                    // discovered for this host so a genuinely new second
+                    // session in the same directory doesn't collide.
+                    existingNames = knownSessionNames(state),
+                )
                 viewModel.createSession(
                     sessionName = newName,
                     cwd = choice.startDirectory,
@@ -472,22 +486,69 @@ private fun queryUriSize(resolver: ContentResolver, uri: Uri): Long? = try {
 }
 
 /**
- * Derive a tmux session name from the user's picker choice. The name
- * is based on the folder's trailing path segment (`/home/foo/bar` →
- * `bar`) plus a short timestamp suffix so multiple sessions in the
- * same folder don't collide. Agent sessions also carry the agent name
- * so a glance at the flat list still gives "what kind of session is
- * this".
+ * Derive a tmux session name from the user's picker choice — issue #429.
+ *
+ * Mirrors the `tmuxctl` (`t`) convention the maintainer already uses on
+ * the server: the name encodes the directory (relative to `$HOME` when
+ * possible) rather than the old cryptic `<basename>-<6-digit-timestamp>`.
+ * See [SessionNameDerivation] for the full convention.
+ *
+ *  - `~/git/pocketshell` (agent) → `claude-git-pocketshell`
+ *  - `/var/log` (shell)          → `var-log`
+ *  - `$HOME` itself              → `home-<homeBasename>`
+ *
+ * @param homeDirectory the remote `$HOME` if known, so paths under home
+ *   collapse to their home-relative form (and `~` is recognised). May be
+ *   `null` when home is unknown, in which case absolute paths are named
+ *   from their full components.
+ * @param existingNames session names already present on the host. A
+ *   genuinely different second session in the same directory gets a
+ *   deterministic `-2`, `-3`, … suffix instead of colliding; an exact
+ *   re-pick still attaches via the gateway's `tmux new-session -A`.
  */
-internal fun derivedSessionName(choice: SessionTypeChoice): String {
-    val tail = choice.startDirectory.trim().trimEnd('/').substringAfterLast('/').ifBlank { "shell" }
-    val safe = tail.replace(Regex("[^A-Za-z0-9_-]"), "-").take(20)
-    val suffix = (System.currentTimeMillis() % 1_000_000L).toString().padStart(6, '0')
-    return when (choice.type) {
-        SessionType.Shell -> "$safe-$suffix"
-        SessionType.Agent -> "${choice.agent?.command.orEmpty()}-$safe-$suffix"
+internal fun derivedSessionName(
+    choice: SessionTypeChoice,
+    homeDirectory: String? = null,
+    existingNames: Set<String> = emptySet(),
+): String = SessionNameDerivation.derive(
+    startDirectory = choice.startDirectory,
+    homeDirectory = homeDirectory,
+    agentCommand = when (choice.type) {
+        SessionType.Shell -> null
+        SessionType.Agent -> choice.agent?.command
+    },
+    existingNames = existingNames,
+)
+
+/**
+ * Conventional remote `$HOME` inferred from the SSH [username] — issue
+ * #429. The remote home is what `tmuxctl` keys its naming off, but the
+ * authoritative value lives on the remote and is not plumbed into this
+ * screen yet (#430/#438 own the gateway/viewmodel that would carry it).
+ * Until then this gives the correct home for the maintainer's hosts:
+ * `root` → `/root`, anything else → `/home/<user>`. Returns `null` for a
+ * blank username so the deriver falls back to absolute-path naming.
+ */
+internal fun conventionalRemoteHome(username: String): String? {
+    val user = username.trim()
+    return when {
+        user.isEmpty() -> null
+        user == "root" -> "/root"
+        else -> "/home/$user"
     }
 }
+
+/**
+ * Session names already discovered for this host, used so a genuinely new
+ * second session in the same directory gets a deterministic `-2`/`-3`
+ * suffix rather than colliding (issue #429).
+ */
+internal fun knownSessionNames(state: FolderListUiState): Set<String> =
+    when (state) {
+        is FolderListUiState.Ready ->
+            state.folders.flatMap { it.sessions }.map { it.sessionName }.toSet()
+        else -> emptySet()
+    }
 
 @Composable
 private fun FolderListAppBar(

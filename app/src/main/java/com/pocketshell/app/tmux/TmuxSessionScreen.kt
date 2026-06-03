@@ -185,6 +185,11 @@ public fun TmuxSessionScreen(
     onReplaceTmuxSession: (sessionName: String) -> Unit = {},
     onOpenJobs: () -> Unit = {},
     onOpenUsage: () -> Unit = {},
+    // Issue #445 (epic #432 slice A): open the per-host port-forward panel
+    // from inside a live tmux session. MainActivity wires this to
+    // navigate(AppDestination.PortForwardPanel(...)); the hand-rolled
+    // back-stack restores this exact session/window on back.
+    onOpenPortForwarding: () -> Unit = {},
     /** Route an assistant-requested navigation (issue #266). */
     onAssistantNavigate: (com.pocketshell.app.nav.AppDestination) -> Unit = {},
     /**
@@ -498,6 +503,10 @@ public fun TmuxSessionScreen(
             onOpenUsage = {
                 moreExpanded = false
                 onOpenUsage()
+            },
+            onOpenPortForwarding = {
+                moreExpanded = false
+                onOpenPortForwarding()
             },
             onNewWindow = {
                 moreExpanded = false
@@ -1896,6 +1905,12 @@ internal const val TMUX_SESSION_RECONNECT_TAG = "tmux:session:reconnect"
  */
 internal const val TMUX_DETACH_BUTTON_TAG = "tmux:session:detach-button"
 /**
+ * Issue #445 (epic #432 slice A): stable test tag for the kebab menu's
+ * "Port forwarding" item, used by the nav-route instrumentation to drive
+ * kebab -> port-forward panel -> back-to-session.
+ */
+internal const val TMUX_PORT_FORWARDING_BUTTON_TAG = "tmux:session:port-forwarding-button"
+/**
  * Issue #165: stable test tags for the SSH-handshake progress overlay
  * rendered while [TmuxSessionViewModel.ConnectionStatus] is Connecting.
  *
@@ -3284,6 +3299,10 @@ internal fun TmuxMoreMenu(
     onSwitchSession: () -> Unit,
     onOpenJobs: () -> Unit,
     onOpenUsage: () -> Unit,
+    // Issue #445: "Port forwarding" kebab item — opens the per-host
+    // port-forward panel. Defaulted so existing direct callers / tests
+    // of TmuxMoreMenu stay source-compatible.
+    onOpenPortForwarding: () -> Unit = {},
     onNewWindow: () -> Unit,
     onRenameWindow: () -> Unit,
     onKillWindow: () -> Unit,
@@ -3337,6 +3356,15 @@ internal fun TmuxMoreMenu(
         DropdownMenuItem(text = { Text("Switch session") }, onClick = onSwitchSession)
         DropdownMenuItem(text = { Text("Rename session") }, onClick = onRenameSession)
         DropdownMenuItem(text = { Text("Kill session") }, onClick = onKillSession)
+        // Issue #445 (epic #432 slice A): per-host port-forward panel is a
+        // host-scoped affordance, so it lives in the "On this host" group.
+        // Navigating away pushes onto the hand-rolled back-stack; back
+        // returns to this exact session/window.
+        DropdownMenuItem(
+            text = { Text("Port forwarding") },
+            onClick = onOpenPortForwarding,
+            modifier = Modifier.testTag(TMUX_PORT_FORWARDING_BUTTON_TAG),
+        )
         HorizontalDivider()
         // Issue #235: explicit "I'm done with this session for now"
         // affordance — frees the tmux server-side window-size lock

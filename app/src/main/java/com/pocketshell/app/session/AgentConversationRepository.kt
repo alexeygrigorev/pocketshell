@@ -69,6 +69,18 @@ internal const val OPTIMISTIC_USER_MESSAGE_ID_PREFIX: String = "optimistic:"
  *     conversation pane from growing without limit on long-lived
  *     sessions and matches the previous in-VM bound.
  *
+ *     Issue #460: the tail bound is **message-preserving**. A genuine
+ *     conversation turn — `Message` (user OR assistant prose) — is never
+ *     evicted to make room for tool activity. On a heavy agent session a
+ *     single turn can emit dozens of `ToolCall`/`ToolResult`/`SystemNote`
+ *     events between two user prompts, so a naive "keep the latest N
+ *     events" bound silently drops every user message off the top of the
+ *     window and the Conversation tab shows only the agent's most recent
+ *     replies. To avoid that, when the event count exceeds [maxEvents] we
+ *     keep ALL `Message` turns and only trim the non-message (tool /
+ *     system-note) events, oldest first, back to the budget. Document
+ *     order is preserved.
+ *
  * Time-windowing is intentionally NOT used. Optimistic events are
  * always inserted *before* the real one (the round trip cannot complete
  * faster than the local synchronous append), so order-based matching is
@@ -84,8 +96,11 @@ internal fun reconcileAgentEvents(
     // Mirror the pre-existing safety net: never inspect more than
     // 2 * maxEvents historic rows on a single reconcile call (callers
     // append new events at the tail; older events have already been
-    // bounded on previous passes).
-    val window = events.takeLast(maxEvents * 2)
+    // bounded on previous passes). Issue #460: the cap counts only
+    // non-message events so a turn-heavy session whose recent lines are
+    // all tool activity still keeps the user/assistant prose that
+    // preceded it within view.
+    val window = events.takeLastPreservingMessages(maxEvents * 2)
     for (event in window) {
         if (event is ConversationEvent.Message &&
             event.role == ConversationRole.User &&
@@ -104,12 +119,51 @@ internal fun reconcileAgentEvents(
         }
         byId[event.id] = event
     }
-    val distinct = byId.values.toList()
-    return if (distinct.size <= maxEvents) {
-        distinct
-    } else {
-        distinct.subList(distinct.size - maxEvents, distinct.size)
+    return byId.values.toList().takeLastPreservingMessages(maxEvents)
+}
+
+/**
+ * Issue #460: bound a conversation feed to at most [maxEvents] events
+ * **without ever dropping a `Message` turn**. Tool calls, tool results,
+ * and system notes are the trimmable surplus; conversation prose (user
+ * questions + assistant answers) is the irreducible signal the
+ * Conversation tab exists to show.
+ *
+ * Behaviour:
+ *  - If the list already fits in [maxEvents], it is returned unchanged.
+ *  - Otherwise the oldest non-message events are dropped, one at a time,
+ *    until the list fits — preserving document order of everything that
+ *    survives.
+ *  - If the `Message` turns alone already exceed [maxEvents] (a pure
+ *    chat with no tool activity longer than the cap), every non-message
+ *    event is dropped and the most recent [maxEvents] messages are kept,
+ *    matching the prior "latest N" semantics for that degenerate case.
+ */
+private fun List<ConversationEvent>.takeLastPreservingMessages(
+    maxEvents: Int,
+): List<ConversationEvent> {
+    if (size <= maxEvents) return this
+    val messageCount = count { it is ConversationEvent.Message }
+    if (messageCount >= maxEvents) {
+        // Even the prose alone overflows the budget: fall back to the
+        // most recent [maxEvents] events regardless of type.
+        return subList(size - maxEvents, size)
     }
+    // Drop the oldest non-message events until we fit. We have room for
+    // (maxEvents - messageCount) non-message events; keep the newest of
+    // them and all messages, in document order.
+    val nonMessageBudget = maxEvents - messageCount
+    val nonMessageTotal = count { it !is ConversationEvent.Message }
+    var dropRemaining = nonMessageTotal - nonMessageBudget
+    val kept = ArrayList<ConversationEvent>(maxEvents)
+    for (event in this) {
+        if (event !is ConversationEvent.Message && dropRemaining > 0) {
+            dropRemaining--
+            continue
+        }
+        kept += event
+    }
+    return kept
 }
 
 private fun ConversationEvent.Message.isOptimistic(): Boolean =
@@ -121,6 +175,21 @@ private fun ConversationEvent.Message.isOptimistic(): Boolean =
  * bounded-distinct contract stays unchanged for non-optimistic callers.
  */
 internal const val DEFAULT_MAX_AGENT_EVENTS: Int = 500
+
+/**
+ * Issue #460: multiplier applied to the requested event budget when
+ * tailing a raw JSONL transcript (Claude Code; legacy OpenCode JSONL).
+ * One conversation turn there is not one line — an active agent turn
+ * emits many `tool_use` / `tool_result` lines per user prompt — so a
+ * `tail -n <events>` over the raw file captures only the most recent
+ * turn's tool churn and none of the user's own prompts. Widening the raw
+ * read by this factor pulls several real turns into the window; the
+ * message-preserving bound in [reconcileAgentEvents] then keeps the
+ * user/assistant prose and trims the surplus tool events. Sized from
+ * observed maintainer transcripts where a single turn ran ~30-100 raw
+ * JSONL lines.
+ */
+internal const val JSONL_RAW_LINES_PER_EVENT: Int = 8
 
 private const val PROCESS_TREE_SCAN_COMMAND: String =
     "ps -eo pid,ppid,tty,comm,args 2>/dev/null | " +
@@ -472,7 +541,22 @@ internal class AgentConversationRepository(
             return readCodexInitialEvents(session, detection, maxLines)
         }
         val parser = parserFor(detection.agent) ?: return emptyList()
-        val result = session.exec("tail -n $maxLines ${shellQuote(detection.sourcePath)} 2>/dev/null || true")
+        // Issue #460: [maxLines] is a *message/event* budget, but a
+        // line-tailed JSONL transcript (Claude Code; legacy OpenCode
+        // JSONL) interleaves one user turn with potentially hundreds of
+        // tool_use / tool_result lines. A `tail -n <maxLines>` over the
+        // raw file therefore routinely captures only the final agent
+        // turn — all tool activity, zero of the user's own prompts — so
+        // the Conversation tab opens showing only the agent's replies.
+        // Read a much wider raw-line window so several real turns are
+        // present; the message-preserving bound in [reconcileAgentEvents]
+        // then keeps the user/assistant prose and trims surplus tool
+        // events back to budget.
+        val rawLineBudget = (maxLines * JSONL_RAW_LINES_PER_EVENT)
+            .coerceAtLeast(maxLines)
+        val result = session.exec(
+            "tail -n $rawLineBudget ${shellQuote(detection.sourcePath)} 2>/dev/null || true",
+        )
         return result.stdout.lineSequence().flatMap { parser.parseLine(it) }.toList()
     }
 

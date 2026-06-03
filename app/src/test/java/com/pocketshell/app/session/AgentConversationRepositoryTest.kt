@@ -62,6 +62,110 @@ class AgentConversationRepositoryTest {
         assertFalse(session.execCommands.single().contains("tail -n"))
     }
 
+    // ----------------------------------------------------------------
+    // Issue #460: the Conversation tab dropped the user's own messages.
+    // Both the parsed feed AND the bounded-distinct reconciliation must
+    // surface user prose alongside assistant prose, in order, while tool
+    // calls/results keep rendering.
+    // ----------------------------------------------------------------
+
+    @Test
+    fun claudeReadInitialEventsSurfacesBothUserAndAssistantTurnsInOrder() = runTest {
+        // A realistic Claude Code JSONL slice: a genuine user prompt, an
+        // assistant turn (prose + tool_use), a user-role tool_result line,
+        // then a second user prompt and a second assistant reply.
+        val jsonl = listOf(
+            """{"type":"user","uuid":"u1","message":{"role":"user","content":"inspect the failing tests"}}""",
+            """{"type":"assistant","uuid":"a1","message":{"role":"assistant","content":[{"type":"text","text":"I will run the checks."},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"./gradlew test"}}]}}""",
+            """{"type":"user","uuid":"u2","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"BUILD FAILED"}]}}""",
+            """{"type":"user","uuid":"u3","message":{"role":"user","content":"why did it fail?"}}""",
+            """{"type":"assistant","uuid":"a2","message":{"role":"assistant","content":"A dependency is missing."}}""",
+        ).joinToString("\n")
+        val session = FakeSshSession(jsonlTailOutput = jsonl)
+        val detection = AgentDetection(
+            agent = AgentKind.ClaudeCode,
+            sourcePath = "/home/testuser/.claude/projects/-workspace/c.jsonl",
+            sessionId = "c",
+            confidence = AgentDetection.Confidence.ProcessConfirmed,
+        )
+
+        val events = AgentConversationRepository().readInitialEvents(session, detection)
+
+        val messages = events.filterIsInstance<ConversationEvent.Message>()
+        // Both user prompts AND both assistant replies are present, in
+        // document order — the bug was that only the assistant side showed.
+        assertEquals(
+            listOf(
+                ConversationRole.User to "inspect the failing tests",
+                ConversationRole.Assistant to "I will run the checks.",
+                ConversationRole.User to "why did it fail?",
+                ConversationRole.Assistant to "A dependency is missing.",
+            ),
+            messages.map { it.role to it.text },
+        )
+        // Tool calls/results still render.
+        assertTrue(events.any { it is ConversationEvent.ToolCall && it.name == "Bash" })
+        assertTrue(events.any { it is ConversationEvent.ToolResult && it.output.contains("BUILD FAILED") })
+        // The raw JSONL read is widened past the event budget so a
+        // tool-heavy final turn cannot crowd out the user's prompts.
+        val tailCommand = session.execCommands.single { it.trimStart().startsWith("tail -n") }
+        assertTrue("expected a widened raw-line tail; got $tailCommand", tailCommand.contains("tail -n 1600"))
+    }
+
+    @Test
+    fun reconcilePreservesUserTurnsWhenToolEventsExceedTheBound() {
+        // One user prompt, then a flood of tool events larger than the
+        // cap, then an assistant reply. A naive "keep latest N" bound
+        // would evict the user prompt off the top; the message-preserving
+        // bound must keep it.
+        val cap = 10
+        val events = buildList {
+            add(
+                ConversationEvent.Message(
+                    id = "user-prompt",
+                    agent = AgentKind.ClaudeCode,
+                    role = ConversationRole.User,
+                    text = "fix the build",
+                ),
+            )
+            repeat(cap * 3) { index ->
+                add(
+                    ConversationEvent.ToolResult(
+                        id = "result-$index",
+                        agent = AgentKind.ClaudeCode,
+                        toolCallId = "tool-$index",
+                        output = "line $index",
+                    ),
+                )
+            }
+            add(
+                ConversationEvent.Message(
+                    id = "assistant-reply",
+                    agent = AgentKind.ClaudeCode,
+                    role = ConversationRole.Assistant,
+                    text = "done",
+                ),
+            )
+        }
+
+        val bounded = reconcileAgentEvents(events, maxEvents = cap)
+
+        assertTrue(bounded.size <= cap)
+        val messages = bounded.filterIsInstance<ConversationEvent.Message>()
+        assertEquals(
+            listOf(
+                ConversationRole.User to "fix the build",
+                ConversationRole.Assistant to "done",
+            ),
+            messages.map { it.role to it.text },
+        )
+        // The user prompt is first in order and the assistant reply last,
+        // with surviving tool results in between.
+        assertEquals("user-prompt", bounded.first().id)
+        assertEquals("assistant-reply", bounded.last().id)
+        assertTrue(bounded.any { it is ConversationEvent.ToolResult })
+    }
+
     @Test
     fun openCodeReadInitialEventsExportsSqliteRowsForDetectedSession() = runTest {
         val session = FakeSshSession(
@@ -707,6 +811,7 @@ class AgentConversationRepositoryTest {
         private val wcOutput: String = "0\n",
         private val tailLines: List<String> = emptyList(),
         private val agentLogOutput: String = "",
+        private val jsonlTailOutput: String = "",
     ) : SshSession {
         val execCommands = mutableListOf<String>()
         val tailFromLineCalls = mutableListOf<Pair<String, Long>>()
@@ -724,6 +829,7 @@ class AgentConversationRepositoryTest {
                 command.contains("stat -c '%Y' ") -> statOutputs.removeFirstOrNull() ?: statOutputs.lastOrNull() ?: "0\n"
                 command.contains("wc -l < ") -> wcOutput
                 command.contains("pocketshell agent-log") -> agentLogOutput
+                command.trimStart().startsWith("tail -n") -> jsonlTailOutput
                 command.contains("sqlite3 -readonly") -> {
                     sqliteFailure?.let { throw it }
                     sqliteOutputs.removeFirstOrNull() ?: sqliteOutput

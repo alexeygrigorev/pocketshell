@@ -91,6 +91,73 @@ class CostsViewModelTest {
     }
 
     @Test
+    fun groups_requests_by_local_day_newest_first_with_subtotals() {
+        // "Now" = 2026-06-04 10:00 UTC -> today is 2026-06-04.
+        val now = ZonedDateTime.of(2026, 6, 4, 10, 0, 0, 0, ZoneId.of("UTC"))
+        val vm = viewModel(now)
+
+        val entries = listOf(
+            // Today: two requests -> subtotal 200 + 50 = 250.
+            entry(millicents = 200L, at = ZonedDateTime.of(2026, 6, 4, 9, 0, 0, 0, ZoneId.of("UTC"))),
+            entry(millicents = 50L, at = ZonedDateTime.of(2026, 6, 4, 8, 0, 0, 0, ZoneId.of("UTC"))),
+            // Yesterday: one request -> subtotal 80.
+            entry(millicents = 80L, at = ZonedDateTime.of(2026, 6, 3, 12, 0, 0, 0, ZoneId.of("UTC"))),
+            // Two days ago: one request -> subtotal 120.
+            entry(millicents = 120L, at = ZonedDateTime.of(2026, 6, 2, 12, 0, 0, 0, ZoneId.of("UTC"))),
+        )
+
+        val state = vm.computeState(entries)
+        val groups = state.dailyGroups
+
+        assertEquals(3, groups.size)
+
+        // Newest day first.
+        assertEquals(java.time.LocalDate.of(2026, 6, 4), groups[0].date)
+        assertEquals(0L, groups[0].daysBeforeToday)
+        assertEquals(2, groups[0].requests.size)
+        assertEquals(250L, groups[0].subtotalUsdMillicents)
+        // Within a day, newest request first.
+        assertEquals(200L, groups[0].requests[0].costUsdMillicents)
+        assertEquals(50L, groups[0].requests[1].costUsdMillicents)
+
+        assertEquals(java.time.LocalDate.of(2026, 6, 3), groups[1].date)
+        assertEquals(1L, groups[1].daysBeforeToday)
+        assertEquals(80L, groups[1].subtotalUsdMillicents)
+
+        assertEquals(java.time.LocalDate.of(2026, 6, 2), groups[2].date)
+        assertEquals(2L, groups[2].daysBeforeToday)
+        assertEquals(120L, groups[2].subtotalUsdMillicents)
+
+        // Day subtotals sum to lifetime.
+        assertEquals(state.lifetimeUsdMillicents, groups.sumOf { it.subtotalUsdMillicents })
+    }
+
+    @Test
+    fun day_grouping_uses_local_zone_for_bucketing() {
+        // 2026-06-04 01:30 in a +03:00 zone is still 2026-06-03 22:30 UTC.
+        // The entry must bucket by the *local* date (the 4th), not UTC.
+        val zone = ZoneId.of("+03:00")
+        val now = ZonedDateTime.of(2026, 6, 4, 12, 0, 0, 0, zone)
+        val vm = viewModel(now)
+
+        val entries = listOf(
+            entry(millicents = 70L, at = ZonedDateTime.of(2026, 6, 4, 1, 30, 0, 0, zone)),
+        )
+
+        val state = vm.computeState(entries)
+        assertEquals(1, state.dailyGroups.size)
+        assertEquals(java.time.LocalDate.of(2026, 6, 4), state.dailyGroups[0].date)
+        assertEquals(0L, state.dailyGroups[0].daysBeforeToday)
+    }
+
+    @Test
+    fun empty_log_has_no_day_groups() {
+        val now = ZonedDateTime.of(2026, 6, 4, 12, 0, 0, 0, ZoneId.of("UTC"))
+        val vm = viewModel(now)
+        assertTrue(vm.computeState(emptyList()).dailyGroups.isEmpty())
+    }
+
+    @Test
     fun recent_calls_are_capped() {
         val now = ZonedDateTime.of(2026, 5, 27, 12, 0, 0, 0, ZoneId.of("UTC"))
         val vm = viewModel(now)

@@ -106,23 +106,36 @@ class CostFormatTest {
     }
 
     @Test
-    fun formatCallRow_renders_compact_summary() {
-        val entry = AiApiCallEntry(
+    fun formatRequestRow_renders_compact_summary() {
+        val request = DailyRequest(
             id = 1L,
+            // 2023-11-14 22:13:20 UTC.
             timestampMillis = 1_700_000_000_000L,
             provider = "openai",
             feature = "whisper",
             inputUnits = 12,
-            outputUnits = 84,
-            unitCostUsdMillicents = 10,
-            computedCostUsdMillicents = 120,
-            metadataJson = null,
+            costUsdMillicents = 120,
         )
-        val row = CostFormat.formatCallRow(entry, zone = ZoneId.of("UTC"))
-        // Date prefix.
-        assertTrue("expected ISO date, got: $row", row.startsWith("2023-"))
+        val row = CostFormat.formatRequestRow(request, zone = ZoneId.of("UTC"))
+        // Time-only prefix — the day is implied by the section header.
+        assertTrue("expected HH:mm prefix, got: $row", row.startsWith("22:13"))
+        assertFalse("must not repeat the date in a request row, got: $row", row.contains("2023-"))
         assertTrue(row.contains("OpenAI · Whisper"))
         assertTrue(row.contains("12 audio seconds"))
         assertTrue(row.contains("$0.0012"))
+    }
+
+    @Test
+    fun dayHeader_labels_today_yesterday_and_explicit_dates() {
+        val today = java.time.LocalDate.of(2026, 6, 4)
+        assertEquals("Today", CostFormat.dayHeader(today, 0L, today))
+        assertEquals("Yesterday", CostFormat.dayHeader(today.minusDays(1), 1L, today))
+        // Same year -> "MMM d" with no year.
+        assertEquals("Jun 2", CostFormat.dayHeader(java.time.LocalDate.of(2026, 6, 2), 2L, today))
+        // Different year -> include the year so the header is unambiguous.
+        assertEquals(
+            "Dec 31, 2025",
+            CostFormat.dayHeader(java.time.LocalDate.of(2025, 12, 31), 155L, today),
+        )
     }
 }

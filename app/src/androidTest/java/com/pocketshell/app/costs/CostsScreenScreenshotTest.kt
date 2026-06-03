@@ -29,8 +29,10 @@ class CostsScreenScreenshotTest {
     @Test
     fun captureRenderedCostsScreen() {
         val now = System.currentTimeMillis()
+        val oneDay = 24 * 60 * 60 * 1000L
         val dao = FakeAiApiCallLogDao(
             initial = listOf(
+                // Two requests today.
                 AiApiCallEntry(
                     id = 1L,
                     timestampMillis = now - 60_000L,
@@ -44,7 +46,7 @@ class CostsScreenScreenshotTest {
                 ),
                 AiApiCallEntry(
                     id = 2L,
-                    timestampMillis = now - 120_000L,
+                    timestampMillis = now - 3_600_000L,
                     provider = "openai",
                     feature = "whisper",
                     inputUnits = 3,
@@ -53,15 +55,39 @@ class CostsScreenScreenshotTest {
                     computedCostUsdMillicents = 30,
                     metadataJson = null,
                 ),
+                // Two requests yesterday.
                 AiApiCallEntry(
                     id = 3L,
-                    timestampMillis = now - 3_600_000L,
+                    timestampMillis = now - oneDay - 60_000L,
                     provider = "openai",
                     feature = "whisper",
                     inputUnits = 47,
                     outputUnits = 220,
                     unitCostUsdMillicents = 10,
                     computedCostUsdMillicents = 470,
+                    metadataJson = null,
+                ),
+                AiApiCallEntry(
+                    id = 4L,
+                    timestampMillis = now - oneDay - 3_600_000L,
+                    provider = "openai",
+                    feature = "whisper",
+                    inputUnits = 8,
+                    outputUnits = 40,
+                    unitCostUsdMillicents = 10,
+                    computedCostUsdMillicents = 80,
+                    metadataJson = null,
+                ),
+                // One request two days ago (explicit date header).
+                AiApiCallEntry(
+                    id = 5L,
+                    timestampMillis = now - (2 * oneDay) - 60_000L,
+                    provider = "openai",
+                    feature = "whisper",
+                    inputUnits = 20,
+                    outputUnits = 100,
+                    unitCostUsdMillicents = 10,
+                    computedCostUsdMillicents = 200,
                     metadataJson = null,
                 ),
             ),

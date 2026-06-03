@@ -99,7 +99,7 @@ fun CostsScreen(
                 BreakdownSection(state = state)
             }
             item {
-                RecentCallsSection(state = state)
+                ByDaySection(state = state)
             }
             item {
                 ActionsSection(
@@ -334,18 +334,27 @@ private fun BreakdownSection(state: CostsUiState) {
     }
 }
 
+/**
+ * Day-grouped request log (issue #467). Each local day gets a header
+ * (Today / Yesterday / explicit date), the per-request rows for that day
+ * (time + model + cost), and a per-day subtotal. The flat "Recent calls"
+ * list this replaced collapsed everything into one block; grouping by day
+ * is what the maintainer asked for so a day's spend is browsable at a
+ * glance. Retention is intentionally out of scope — every recorded request
+ * is shown.
+ */
 @Composable
-private fun RecentCallsSection(state: CostsUiState) {
+private fun ByDaySection(state: CostsUiState) {
     Column {
         SectionLabel(
-            "Recent calls" + if (state.totalCallCount > 0) {
-                " (${state.recentCalls.size} of ${state.totalCallCount})"
+            "By day" + if (state.totalCallCount > 0) {
+                " (${state.totalCallCount} ${if (state.totalCallCount == 1) "request" else "requests"})"
             } else {
                 ""
             },
         )
         SectionCard {
-            if (state.recentCalls.isEmpty()) {
+            if (state.dailyGroups.isEmpty()) {
                 Text(
                     text = "Empty. Once you make a voice prompt, each Whisper call will land here.",
                     color = PocketShellColors.TextSecondary,
@@ -355,22 +364,64 @@ private fun RecentCallsSection(state: CostsUiState) {
                         .testTag(COSTS_RECENT_EMPTY_TAG),
                 )
             } else {
-                state.recentCalls.forEachIndexed { index, entry ->
-                    if (index > 0) {
-                        Spacer(modifier = Modifier.height(6.dp))
+                val today = remember(state.nowMillis) {
+                    if (state.nowMillis > 0L) {
+                        java.time.Instant.ofEpochMilli(state.nowMillis)
+                            .atZone(java.time.ZoneId.systemDefault())
+                            .toLocalDate()
+                    } else {
+                        java.time.LocalDate.now()
                     }
-                    Text(
-                        text = CostFormat.formatCallRow(entry),
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 4.dp)
-                            .testTag(COSTS_RECENT_ROW_TAG_PREFIX + entry.id),
-                    )
+                }
+                state.dailyGroups.forEachIndexed { index, group ->
+                    if (index > 0) {
+                        Spacer(modifier = Modifier.height(16.dp))
+                    }
+                    DayGroup(group = group, today = today)
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun DayGroup(group: DailyCostGroup, today: java.time.LocalDate) {
+    val header = CostFormat.dayHeader(group.date, group.daysBeforeToday, today)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 6.dp)
+            .testTag(COSTS_DAY_HEADER_TAG_PREFIX + group.date),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = header,
+            color = PocketShellColors.Text,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = CostFormat.formatUsd(group.subtotalUsdMillicents),
+            color = PocketShellColors.Text,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.testTag(COSTS_DAY_SUBTOTAL_TAG_PREFIX + group.date),
+        )
+    }
+    group.requests.forEachIndexed { index, request ->
+        if (index > 0) {
+            Spacer(modifier = Modifier.height(6.dp))
+        }
+        Text(
+            text = CostFormat.formatRequestRow(request),
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 2.dp)
+                .testTag(COSTS_RECENT_ROW_TAG_PREFIX + request.id),
+        )
     }
 }
 
@@ -500,6 +551,8 @@ internal const val COSTS_BREAKDOWN_EMPTY_TAG = "costs:breakdown:empty"
 internal const val COSTS_BREAKDOWN_ROW_PREFIX = "costs:breakdown:row:"
 internal const val COSTS_RECENT_EMPTY_TAG = "costs:recent:empty"
 internal const val COSTS_RECENT_ROW_TAG_PREFIX = "costs:recent:row:"
+internal const val COSTS_DAY_HEADER_TAG_PREFIX = "costs:day:header:"
+internal const val COSTS_DAY_SUBTOTAL_TAG_PREFIX = "costs:day:subtotal:"
 internal const val COSTS_EXPORT_TAG = "costs:action:export"
 internal const val COSTS_CLEAR_TAG = "costs:action:clear"
 internal const val COSTS_CLEAR_CONFIRM_TAG = "costs:action:clear-confirm"

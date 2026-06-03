@@ -2,6 +2,7 @@ package com.pocketshell.app.costs
 
 import com.pocketshell.core.storage.entity.AiApiCallEntry
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -65,20 +66,44 @@ internal object CostFormat {
     }
 
     /**
-     * Render a single log entry as a one-line label for the "Recent
-     * calls" list. Time uses the user's locale, with a stable HH:mm
-     * shape so the list reads predictably.
+     * Section header for a day-grouped bucket (issue #467).
+     *
+     * - `daysBeforeToday == 0L` -> "Today"
+     * - `daysBeforeToday == 1L` -> "Yesterday"
+     * - otherwise -> an explicit date. Same calendar year -> `MMM d`
+     *   ("Jun 2"); a different year includes it ("Jun 2, 2025") so the
+     *   header is never ambiguous when the log spans a year boundary.
      */
-    fun formatCallRow(
-        entry: AiApiCallEntry,
+    fun dayHeader(
+        date: LocalDate,
+        daysBeforeToday: Long,
+        today: LocalDate = LocalDate.now(),
+    ): String = when (daysBeforeToday) {
+        0L -> "Today"
+        1L -> "Yesterday"
+        else -> {
+            val pattern = if (date.year == today.year) "MMM d" else "MMM d, yyyy"
+            DateTimeFormatter.ofPattern(pattern, Locale.US).format(date)
+        }
+    }
+
+    /**
+     * Render a single request inside a day group (issue #467) as a compact
+     * one-line label: time, model/feature, priced input quantity, and the
+     * per-request cost. Time is `HH:mm` because the day is already implied
+     * by the section header, so a full date would be redundant noise.
+     */
+    fun formatRequestRow(
+        request: DailyRequest,
         zone: ZoneId = ZoneId.systemDefault(),
     ): String {
         val time = DateTimeFormatter
-            .ofPattern("yyyy-MM-dd HH:mm", Locale.US)
+            .ofPattern("HH:mm", Locale.US)
             .withZone(zone)
-            .format(Instant.ofEpochMilli(entry.timestampMillis))
-        val cost = formatUsd(entry.computedCostUsdMillicents)
-        return "$time · ${featureLabel(entry.provider, entry.feature)} · ${entry.inputUnits} ${unitLabel(entry.provider, entry.feature)} · $cost"
+            .format(Instant.ofEpochMilli(request.timestampMillis))
+        val cost = formatUsd(request.costUsdMillicents)
+        return "$time · ${featureLabel(request.provider, request.feature)} · " +
+            "${request.inputUnits} ${unitLabel(request.provider, request.feature)} · $cost"
     }
 
     /**

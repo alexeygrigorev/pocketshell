@@ -57,9 +57,12 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 import java.io.File
 
@@ -989,11 +992,18 @@ public class SessionViewModel @Inject constructor(
     }
 
     public suspend fun stagePromptAttachments(uris: List<Uri>): Result<List<String>> {
-        val session = sessionRef?.takeIf { it.isConnected }
+        // Issue #451: the file picker backgrounds the app while selecting.
+        // Attach now behaves like Send: on a not-currently-live session it
+        // lazily connects-then-uploads instead of failing fast. #450 keeps
+        // the terminal SSH session alive for a bounded grace window (~60s)
+        // so the common quick round-trip returns to a still-live session and
+        // the upload just works. If the round-trip outran the grace window
+        // (or the OS killed the socket), Attach kicks the same connect-on-
+        // action primitive Send uses ([reconnect], driven by [activeTarget])
+        // and awaits the live session before uploading — the draft is
+        // preserved if the (re)connect never lands within the bound.
+        val session = awaitLiveSessionForAttachment()
             ?: return Result.failure(IllegalStateException("No live SSH session for attachment upload."))
-        if (_connectionStatus.value !is ConnectionStatus.Connected) {
-            return Result.failure(IllegalStateException("Reconnect before attaching files."))
-        }
         val target = activeTarget
         val scopeKey = when {
             target?.hostId != null -> "host-${target.hostId}"
@@ -1004,6 +1014,45 @@ public class SessionViewModel @Inject constructor(
             resolver = applicationContext.contentResolver,
             cacheDir = applicationContext.cacheDir,
         ).stage(session, scopeKey, uris)
+    }
+
+    /**
+     * Issue #451: return the live terminal [SshSession] for an attachment
+     * upload, lazily connecting-then-awaiting the connection the way the
+     * Send path does when the session is not currently live.
+     *
+     * Fast path: if the session is already live ([sessionRef] connected and
+     * [connectionStatus] is [ConnectionStatus.Connected]) return it
+     * immediately — the #450 grace window makes this the common case for a
+     * quick picker round-trip.
+     *
+     * Slow path (connect-on-action, mirroring Send): if the session is not
+     * live, kick the same connect primitive Send relies on. [reconnect]
+     * (re)dials [activeTarget]/[connectingTarget]; it is a no-op when a
+     * connect/reconnect is already in flight (#440 auto-reconnect), so this
+     * is safe to call unconditionally. Then poll [connectionStatus] /
+     * [sessionRef] up to [ATTACH_SESSION_WAIT_TIMEOUT_MS] and return the
+     * session as soon as it becomes live. Returns null on timeout so the
+     * caller surfaces the error with the draft preserved. Bounded and
+     * foreground-only — no background work.
+     */
+    private suspend fun awaitLiveSessionForAttachment(): SshSession? {
+        liveSessionForAttachmentOrNull()?.let { return it }
+        // Connect-on-action: drive a (re)connect like Send does. No-op when a
+        // connect is already in flight, so it just falls through to the wait.
+        reconnect()
+        return withTimeoutOrNull(ATTACH_SESSION_WAIT_TIMEOUT_MS) {
+            while (currentCoroutineContext().isActive) {
+                liveSessionForAttachmentOrNull()?.let { return@withTimeoutOrNull it }
+                delay(ATTACH_SESSION_WAIT_POLL_MS)
+            }
+            null
+        }
+    }
+
+    private fun liveSessionForAttachmentOrNull(): SshSession? {
+        if (_connectionStatus.value !is ConnectionStatus.Connected) return null
+        return sessionRef?.takeIf { it.isConnected }
     }
 
     public fun resizeRemotePty(columns: Int, rows: Int) {
@@ -1416,6 +1465,19 @@ private fun rawCredentialId(hostId: Long?, keyPath: String?): String =
     }
 
 private const val MaxAgentEvents: Int = 500
+
+/**
+ * Issue #451: how long [SessionViewModel.stagePromptAttachments] waits for
+ * the terminal SSH session to come back live before failing the attachment
+ * upload. Attach connects-on-action like Send: when the file picker
+ * round-trip outran the #450 grace window (or the OS killed the socket) it
+ * kicks [SessionViewModel.reconnect] and waits here for the (re)connect —
+ * including the SSH handshake — to land. The auto-reconnect backoff chain
+ * spans up to ~8s of delays alone, so the bound covers a full re-dial plus
+ * handshake headroom. Bounded and foreground-only — no background work.
+ */
+internal const val ATTACH_SESSION_WAIT_TIMEOUT_MS: Long = 30_000L
+internal const val ATTACH_SESSION_WAIT_POLL_MS: Long = 100L
 
 /**
  * Default host parameters for the Phase 1 hardcoded landing — same values

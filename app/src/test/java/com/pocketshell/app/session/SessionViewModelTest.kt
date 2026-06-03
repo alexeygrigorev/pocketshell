@@ -24,6 +24,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
@@ -32,6 +33,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
@@ -1403,6 +1405,148 @@ class SessionViewModelTest {
             nextSession.startedShells.forEach { it.close() }
             manager.close()
         }
+    }
+
+    // -- Issue #451: attach-after-file-picker session acquisition ----------
+
+    /**
+     * Issue #451 / #450: the file picker backgrounds the app; #450 keeps the
+     * terminal SSH session alive for the (sub-60s) round-trip, so on return
+     * the session is still live and the attach upload proceeds rather than
+     * hard-failing "No live SSH session". With a live, Connected session the
+     * gate passes immediately and the stager runs (an empty selection
+     * short-circuits to an empty success — the point is it did NOT fail the
+     * session check).
+     */
+    @Test
+    fun stagePromptAttachmentsSucceedsWhenSessionLiveAfterPicker() = runTest {
+        val vm = newVm()
+        vm.attachSessionForAgentRetryForTest(FakeSshSession())
+
+        val result = vm.stagePromptAttachments(emptyList())
+
+        assertTrue("live session must not fail the attach gate", result.isSuccess)
+        assertEquals(emptyList<String>(), result.getOrNull())
+    }
+
+    /**
+     * Issue #451: harden for the case where the picker round-trip outran the
+     * #450 grace window (or the OS killed the socket) and #440 auto-reconnect
+     * is mid-flight when the user returns and taps Attach. The session is
+     * briefly absent, then becomes Connected within the bounded wait. The
+     * attach must await the live session and proceed rather than immediately
+     * failing "No live SSH session".
+     */
+    @Test
+    fun stagePromptAttachmentsAwaitsSessionThatReturnsWithinBound() = runTest {
+        val vm = newVm()
+        // Reconnect in flight on return from the picker: status is
+        // Connecting, no live session yet (mirrors #440 auto-reconnect
+        // racing the user's Attach tap).
+        vm.beginConnectingForTest(
+            host = "alpha.example",
+            port = 2222,
+            user = "alex",
+            job = Job(),
+        )
+        assertFalse(
+            "precondition: session must not be Connected yet",
+            vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Connected,
+        )
+
+        val staged = async { vm.stagePromptAttachments(emptyList()) }
+        // Let the await suspend and poll a few times while still connecting.
+        advanceTimeBy(300L)
+        assertFalse("attach must still be waiting, not failed early", staged.isCompleted)
+
+        // Reconnect lands: session live + Connected.
+        vm.attachSessionForAgentRetryForTest(FakeSshSession())
+        advanceUntilIdle()
+
+        val result = staged.await()
+        assertTrue("attach must succeed once the session returns within bound", result.isSuccess)
+    }
+
+    /**
+     * Issue #451: if the session never comes back within the bounded wait,
+     * the attach fails with the "No live SSH session" message so the composer
+     * keeps the draft and surfaces the reconnect/retry copy. This is the
+     * floor — the bounded wait does not become permanent background work.
+     */
+    @Test
+    fun stagePromptAttachmentsFailsWhenSessionNeverReturns() = runTest {
+        val vm = newVm()
+        vm.beginConnectingForTest(
+            host = "alpha.example",
+            port = 2222,
+            user = "alex",
+            job = Job(),
+        )
+
+        val staged = async { vm.stagePromptAttachments(emptyList()) }
+        advanceTimeBy(ATTACH_SESSION_WAIT_TIMEOUT_MS + 500L)
+        advanceUntilIdle()
+
+        val result = staged.await()
+        assertTrue("attach must fail when no session returns", result.isFailure)
+        assertTrue(
+            "failure must be the no-live-session message",
+            result.exceptionOrNull()?.message?.contains("No live SSH session") == true,
+        )
+    }
+
+    /**
+     * Issue #451 (maintainer correction): Attach must behave like Send — on a
+     * not-currently-live session it lazily *connects-then-uploads* rather than
+     * failing fast. This is the core regression test: the session has dropped
+     * (fully disconnected) but a known [activeTarget] exists (the picker
+     * round-trip outran the #450 grace window). Tapping Attach must kick the
+     * same connect-on-action primitive Send uses, so the SSH lease connector
+     * is actually invoked. Previously the attach hard-failed without ever
+     * trying to (re)connect.
+     */
+    @Test
+    fun stagePromptAttachmentsKicksConnectWhenSessionDropped() = runTest {
+        val acquireAttempted = CompletableDeferred<Unit>()
+        val recordingManager = SshLeaseManager(
+            connector = SshLeaseConnector {
+                // Prove Attach drove a (re)connect like Send. Fail the lease
+                // afterwards so the attach still surfaces the bounded-wait
+                // error path with the draft preserved.
+                acquireAttempted.complete(Unit)
+                error("connect-on-action reached the lease connector")
+            },
+        )
+        val vm = newVm(sshLeaseManager = recordingManager)
+        // Session dropped on return from the picker, but the host is known —
+        // exactly the connect-on-action precondition Send relies on.
+        vm.markRawShellDisconnectedForTest(
+            host = "alpha.example",
+            port = 2222,
+            user = "alex",
+            keyPath = "/tmp/does-not-matter-for-this-test",
+        )
+        assertFalse(
+            "precondition: session must be dropped, not Connected",
+            vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Connected,
+        )
+
+        val staged = async { vm.stagePromptAttachments(emptyList()) }
+        // Drive the connect-on-action: the bounded wait polls while connect runs.
+        advanceTimeBy(1_000L)
+        advanceUntilIdle()
+
+        assertTrue(
+            "Attach must kick a (re)connect through the lease connector like Send",
+            acquireAttempted.isCompleted,
+        )
+
+        // Connect failed in this test, so the session never returns; the
+        // bounded wait elapses and the attach surfaces the kept-draft error.
+        advanceTimeBy(ATTACH_SESSION_WAIT_TIMEOUT_MS + 500L)
+        advanceUntilIdle()
+        val result = staged.await()
+        assertTrue("attach must fail when the kicked connect cannot land", result.isFailure)
     }
 }
 

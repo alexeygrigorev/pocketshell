@@ -3490,11 +3490,19 @@ public class TmuxSessionViewModel @Inject constructor(
     public suspend fun stagePromptAttachments(uris: List<Uri>): Result<List<String>> {
         val context = applicationContext
             ?: return Result.failure(IllegalStateException("Attachment staging unavailable."))
-        val session = sessionRef?.takeIf { it.isConnected }
+        // Issue #451: the system file picker backgrounds the app while the
+        // user selects a file. Attach now behaves like Send: on a
+        // not-currently-live session it lazily connects-then-uploads instead
+        // of hard-failing "No live SSH session" the instant we return. #450
+        // keeps the terminal SSH session alive for a bounded grace window
+        // (~60s) so the common quick round-trip returns to a still-live
+        // session and the upload just works. If the round-trip outran the
+        // grace window (or the OS killed the socket), Attach kicks the same
+        // connect-on-action primitive Send uses ([reconnect], driven by
+        // [activeTarget]) and awaits the live session before uploading — the
+        // draft is preserved if the (re)connect never lands within the bound.
+        val session = awaitLiveSessionForAttachment()
             ?: return Result.failure(IllegalStateException("No live SSH session for attachment upload."))
-        if (_connectionStatus.value !is ConnectionStatus.Connected) {
-            return Result.failure(IllegalStateException("Reconnect before attaching files."))
-        }
         val target = activeTarget
         val scopeKey = when (target) {
             null -> "tmux-session"
@@ -3504,6 +3512,48 @@ public class TmuxSessionViewModel @Inject constructor(
             resolver = context.contentResolver,
             cacheDir = context.cacheDir,
         ).stage(session, scopeKey, uris)
+    }
+
+    /**
+     * Issue #451: return the live terminal [SshSession] for an attachment
+     * upload, lazily connecting-then-awaiting the connection the way the
+     * Send path does when the session is not currently live.
+     *
+     * Fast path: if the session is already live ([sessionRef] connected and
+     * [connectionStatus] is [ConnectionStatus.Connected]), return it
+     * immediately — the #450 grace window means this is the common case for
+     * a quick picker round-trip.
+     *
+     * Slow path (connect-on-action, mirroring Send): if the session is not
+     * live (the picker round-trip outran the grace window, teardown fired,
+     * or the OS killed the backgrounded socket), kick the same connect
+     * primitive Send relies on. [reconnect] re-dials [activeTarget] /
+     * [connectingTarget] in tmux `-CC` control mode; it returns false (no
+     * known target) without throwing, so calling it unconditionally is safe.
+     * Then poll [connectionStatus] / [sessionRef] for the bounded interval;
+     * as soon as the status flips back to [ConnectionStatus.Connected] with a
+     * connected [sessionRef], return it. On timeout return null so the caller
+     * surfaces the "No live SSH session" error with the draft preserved.
+     *
+     * This is foreground-only and bounded — no scheduler, no background work.
+     */
+    private suspend fun awaitLiveSessionForAttachment(): SshSession? {
+        liveSessionForAttachmentOrNull()?.let { return it }
+        // Connect-on-action: drive a (re)connect like Send does. No-op when a
+        // connect is already in flight, so it just falls through to the wait.
+        reconnect()
+        return withTimeoutOrNull(ATTACH_SESSION_WAIT_TIMEOUT_MS) {
+            while (currentCoroutineContext().isActive) {
+                liveSessionForAttachmentOrNull()?.let { return@withTimeoutOrNull it }
+                delay(ATTACH_SESSION_WAIT_POLL_MS)
+            }
+            null
+        }
+    }
+
+    private fun liveSessionForAttachmentOrNull(): SshSession? {
+        if (_connectionStatus.value !is ConnectionStatus.Connected) return null
+        return sessionRef?.takeIf { it.isConnected }
     }
 
     internal suspend fun sendToAgentPaneResult(paneId: String, text: String): Result<Unit> {
@@ -5700,6 +5750,20 @@ internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
 internal const val CODEX_AGENT_SUBMIT_DELAY_MS: Long = 250L
 internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 30_000L
 internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
+
+/**
+ * Issue #451: how long [TmuxSessionViewModel.stagePromptAttachments] waits
+ * for the terminal SSH session to come back live before failing the
+ * attachment upload. Attach connects-on-action like Send: when the file
+ * picker round-trip outran the #450 grace window (or the OS killed the
+ * socket) it kicks [TmuxSessionViewModel.reconnect] and waits here for the
+ * tmux `-CC` re-attach — including the SSH handshake — to land. The
+ * auto-reconnect backoff chain spans several seconds of delays alone, so the
+ * bound covers a full re-dial plus handshake headroom. Bounded and
+ * foreground-only — no background work.
+ */
+internal const val ATTACH_SESSION_WAIT_TIMEOUT_MS: Long = 30_000L
+internal const val ATTACH_SESSION_WAIT_POLL_MS: Long = 100L
 internal const val CACHED_RUNTIME_REMOTE_REFRESH_DELAY_MS: Long = 1L
 internal const val TMUX_SESSION_PREWARM_MAX_TARGETS: Int = 2
 internal const val LIST_PANES_FIELD_SEPARATOR: String = "|PS|"

@@ -1168,11 +1168,14 @@ public fun TmuxSessionScreen(
             },
             hostId = hostId.takeIf { it != 0L },
             onStageAttachments = { uris ->
-                if (!sessionLive) {
-                    Result.failure(IllegalStateException("Reconnect before attaching files."))
-                } else {
-                    viewModel.stagePromptAttachments(uris)
-                }
+                // Issue #451: Attach connects-on-action like Send. Do NOT
+                // hard-fail here on `!sessionLive` — the file picker
+                // backgrounds the app, so on return the session may be
+                // briefly absent. `stagePromptAttachments` lazily
+                // (re)connects and awaits the live session before uploading,
+                // surfacing the error (with the draft kept) only if the
+                // connect never lands within the bounded wait.
+                viewModel.stagePromptAttachments(uris)
             },
         )
     }

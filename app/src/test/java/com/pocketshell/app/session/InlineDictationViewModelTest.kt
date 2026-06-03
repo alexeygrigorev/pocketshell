@@ -6,6 +6,7 @@ import com.pocketshell.app.session.InlineDictationViewModel.DictationMode
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.session.InlineDictationViewModel.RecordingState
 import com.pocketshell.core.voice.AudioRecorderException
+import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
 import kotlinx.coroutines.CompletableDeferred
@@ -98,10 +99,10 @@ class InlineDictationViewModelTest {
             stopFailure?.let { throw it }
             stopCount++
             running = false
-            // 44 bytes — same sentinel as the composer's WAV-shaped fake;
-            // any non-empty array would do but matching keeps the two
-            // test suites visually consistent.
-            return ByteArray(44) { 0 }
+            // Issue #452: return a WAV that passes the silence guard so the
+            // FSM tests reach Whisper. Silence-path coverage is in
+            // SpeechAudioGuardTest + the dedicated no-speech FSM test below.
+            return SpeechAudioGuard.speechWavForTesting()
         }
 
         override fun currentAmplitude(): Float {
@@ -232,7 +233,7 @@ class InlineDictationViewModelTest {
 
             override fun stop(): ByteArray {
                 stopCount++
-                return ByteArray(44) { 0 }
+                return SpeechAudioGuard.speechWavForTesting()
             }
 
             override fun currentAmplitude(): Float {
@@ -449,6 +450,77 @@ class InlineDictationViewModelTest {
         assertTrue(
             "expected no transcription emissions for whitespace, got $received",
             received.isEmpty(),
+        )
+        collector.cancel()
+    }
+
+    // -- Issue #452: silence / hallucination suppression --------------------
+
+    @Test
+    fun silentRecordingIsNotTranscribedAndShowsNoSpeechHint() = runTest {
+        var transcribeCalls = 0
+        val silentMic = object : PromptComposerViewModel.MicCapture {
+            private var running = false
+            override fun start() { running = true }
+            override fun stop(): ByteArray {
+                running = false
+                return SpeechAudioGuard.silentWavForTesting()
+            }
+            override fun currentAmplitude(): Float = if (running) 0.5f else 0f
+        }
+        val vm = newVm(
+            mic = silentMic,
+            whisper = fakeWhisperClient {
+                transcribeCalls++
+                Result.success("시청해주셔서 감사합니다!")
+            },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        val received = mutableListOf<String>()
+        val collector = launch { vm.transcriptions.collect { received += it } }
+        runCurrent()
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        // Whisper never ran; nothing was written to the terminal.
+        assertEquals(0, transcribeCalls)
+        assertTrue("no transcription should be emitted, got $received", received.isEmpty())
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals(
+            InlineDictationViewModel.NO_SPEECH_DETECTED_MESSAGE,
+            vm.uiState.value.error,
+        )
+        collector.cancel()
+    }
+
+    @Test
+    fun hallucinationPhraseFromWhisperIsSuppressed() = runTest {
+        // Energy guard passes (real-speech WAV) but Whisper still returns a
+        // stock phrase — the backstop must drop it before terminal write.
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = fakeWhisperClient { Result.success("시청해주셔서 감사합니다!") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+
+        val received = mutableListOf<String>()
+        val collector = launch { vm.transcriptions.collect { received += it } }
+        runCurrent()
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertTrue("hallucinated phrase must not be emitted, got $received", received.isEmpty())
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals(
+            InlineDictationViewModel.NO_SPEECH_DETECTED_MESSAGE,
+            vm.uiState.value.error,
         )
         collector.cancel()
     }

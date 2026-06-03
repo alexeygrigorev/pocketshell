@@ -14,6 +14,7 @@ import com.pocketshell.app.voice.PendingTranscriptionStore
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.core.voice.AndroidKeystoreApiKeyStorage
 import com.pocketshell.core.voice.AudioRecorderException
+import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -588,6 +589,27 @@ public class PromptComposerViewModel @Inject constructor(
             return
         }
 
+        // Issue #452: silence guard. Whisper hallucinates a stock phrase
+        // (e.g. the Korean `시청해주셔서 감사합니다!` from the report) when handed
+        // silent / very short / low-energy audio. Detect that BEFORE the
+        // network round-trip: skip Whisper entirely, never persist the
+        // empty clip, and surface a clear "no speech detected" hint instead
+        // of inserting hallucinated text. A queued Send is dropped — there
+        // is no transcript to send.
+        if (!SpeechAudioGuard.hasSpeechEnergy(audio)) {
+            savedStateHandle[KEY_WAS_RECORDING] = false
+            pendingSendOnTranscribeSuccess = false
+            pendingSendWithEnter = false
+            _uiState.update {
+                it.copy(
+                    recording = RecordingState.Idle,
+                    amplitude = 0f,
+                    error = NO_SPEECH_DETECTED_MESSAGE,
+                )
+            }
+            return
+        }
+
         _uiState.update {
             it.copy(recording = RecordingState.Transcribing, amplitude = 0f)
         }
@@ -680,6 +702,25 @@ public class PromptComposerViewModel @Inject constructor(
                         // delete failure here leaves an orphan file
                         // that the next reconcile() will sweep up.
                         runCatching { pendingTranscriptionStore.markSucceeded(pendingId) }
+                    }
+                    // Issue #452: secondary backstop. Even when the audio
+                    // cleared the energy bar, Whisper can still return a
+                    // canned silence-hallucination phrase. If the whole
+                    // transcript is one of the known stock phrases, treat
+                    // it as "no speech": do NOT append it to the draft and
+                    // drop any queued Send. The audio row is already
+                    // cleaned up above.
+                    if (SpeechAudioGuard.isLikelyHallucination(text)) {
+                        pendingSendOnTranscribeSuccess = false
+                        pendingSendWithEnter = false
+                        _uiState.update {
+                            it.copy(
+                                recording = RecordingState.Idle,
+                                amplitude = 0f,
+                                error = NO_SPEECH_DETECTED_MESSAGE,
+                            )
+                        }
+                        return@fold
                     }
                     // Issue #211: snapshot the queued-send flag BEFORE
                     // the state update clears the draft via the send
@@ -1311,6 +1352,17 @@ public class PromptComposerViewModel @Inject constructor(
          */
         public const val RECORDING_INTERRUPTED_MESSAGE: String =
             "Recording was interrupted. Tap the mic to record again."
+
+        /**
+         * Issue #452: user-facing hint surfaced via [UiState.error] when a
+         * recording is detected as silent / too short / too quiet (by
+         * [SpeechAudioGuard.hasSpeechEnergy]) or when Whisper returns a known
+         * silence-hallucination phrase ([SpeechAudioGuard.isLikelyHallucination]).
+         * In both cases nothing is inserted into the draft — the user sees
+         * this instead of a hallucinated "thanks for watching"-style line.
+         */
+        public const val NO_SPEECH_DETECTED_MESSAGE: String =
+            "No speech detected — nothing to send. Tap the mic and speak."
     }
 }
 

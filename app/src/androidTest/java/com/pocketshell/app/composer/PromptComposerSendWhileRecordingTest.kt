@@ -11,6 +11,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.di.WhisperClientFactory
+import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellThemeMode
@@ -69,7 +70,10 @@ class PromptComposerSendWhileRecordingTest {
         override fun start() { startCount++ }
         override fun stop(): ByteArray {
             stopCount++
-            return ByteArray(44) { 0 }
+            // Issue #452: real-speech WAV so the silence guard lets the
+            // capture through to Whisper — this test exercises the
+            // send-after-transcribe path, not silence detection.
+            return SpeechAudioGuard.speechWavForTesting()
         }
         override fun currentAmplitude(): Float = 0.5f
     }

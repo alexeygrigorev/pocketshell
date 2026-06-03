@@ -11,6 +11,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.composer.PromptComposerViewModel.ApiKeyVault
 import com.pocketshell.app.composer.PromptComposerViewModel.RecordingState
 import com.pocketshell.app.di.WhisperClientFactory
+import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.theme.PocketShellTheme
 import com.pocketshell.uikit.theme.PocketShellThemeMode
@@ -263,7 +264,9 @@ class PromptComposerRecreateAndKeepScreenOnTest {
         override fun stop(): ByteArray {
             stopCount++
             running = false
-            return ByteArray(44) { 0 }
+            // Issue #452: real-speech WAV so the silence guard lets the
+            // capture reach the transcribe branch this test documents.
+            return SpeechAudioGuard.speechWavForTesting()
         }
 
         override fun currentAmplitude(): Float = if (running) 0.4f else 0f

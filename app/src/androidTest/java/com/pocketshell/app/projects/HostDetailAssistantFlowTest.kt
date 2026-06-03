@@ -52,6 +52,7 @@ import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -348,7 +349,10 @@ private fun assistantDictationViewModel(vararg transcripts: String): InlineDicta
     return InlineDictationViewModel(
         audioRecorder = object : PromptComposerViewModel.MicCapture {
             override fun start() = Unit
-            override fun stop(): ByteArray = byteArrayOf(1, 2, 3)
+            // Issue #452: real-speech WAV so the silence guard lets the
+            // dictation reach Whisper — this flow asserts the queued
+            // transcripts reach the assistant.
+            override fun stop(): ByteArray = SpeechAudioGuard.speechWavForTesting()
             override fun currentAmplitude(): Float = 1f
         },
         whisperClientFactory = WhisperClientFactory {

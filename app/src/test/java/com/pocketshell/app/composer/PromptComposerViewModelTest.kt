@@ -5,6 +5,7 @@ import com.pocketshell.app.composer.PromptComposerViewModel.RecordingState
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.core.voice.AudioRecorderException
+import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
 import java.util.concurrent.atomic.AtomicReference
@@ -97,9 +98,12 @@ class PromptComposerViewModelTest {
             stopFailure?.let { throw it }
             stopCount++
             running = false
-            // Sentinel WAV-shaped non-empty payload; the real recorder
-            // returns the 44-byte header plus PCM data.
-            return ByteArray(44) { 0 }
+            // Issue #452: return a WAV that carries real speech energy so
+            // the silence guard lets it through to Whisper — these FSM
+            // tests exercise the transcription path, not the silence path.
+            // The dedicated silence-guard coverage lives in
+            // SpeechAudioGuardTest + the no-speech FSM tests below.
+            return SpeechAudioGuard.speechWavForTesting()
         }
 
         override fun currentAmplitude(): Float {
@@ -235,6 +239,97 @@ class PromptComposerViewModelTest {
         advanceUntilIdle()
 
         assertEquals("Tell me from the agent", vm.uiState.value.draft)
+    }
+
+    // -- Issue #452: silence / hallucination suppression --------------------
+
+    /**
+     * Mic that captures a silent WAV — passes the energy guard's WAV-shape
+     * check but has zero RMS, so [SpeechAudioGuard.hasSpeechEnergy] returns
+     * false and the FSM must skip Whisper.
+     */
+    private class SilentCaptureMic : PromptComposerViewModel.MicCapture {
+        var stopCount = 0
+        private var running = false
+        override fun start() { running = true }
+        override fun stop(): ByteArray {
+            stopCount++
+            running = false
+            return SpeechAudioGuard.silentWavForTesting()
+        }
+        override fun currentAmplitude(): Float = if (running) 0.5f else 0f
+    }
+
+    @Test
+    fun silentRecordingIsNotTranscribedAndShowsNoSpeechHint() = runTest {
+        var transcribeCalls = 0
+        val vm = newVm(
+            mic = SilentCaptureMic(),
+            whisper = fakeWhisperClient {
+                transcribeCalls++
+                Result.success("시청해주셔서 감사합니다!")
+            },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        vm.onDraftChange("keep this ")
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        // Whisper was never called — the silent audio was rejected up front.
+        assertEquals(0, transcribeCalls)
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        // No hallucinated text leaked into the draft; the typed text stays.
+        assertEquals("keep this ", vm.uiState.value.draft)
+        assertEquals(
+            PromptComposerViewModel.NO_SPEECH_DETECTED_MESSAGE,
+            vm.uiState.value.error,
+        )
+    }
+
+    @Test
+    fun hallucinationPhraseFromWhisperIsSuppressed() = runTest {
+        // Audio clears the energy bar (FakeMicCapture returns a real-speech
+        // WAV) but Whisper still returns a stock silence-hallucination
+        // phrase — the backstop must drop it.
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = fakeWhisperClient { Result.success("시청해주셔서 감사합니다!") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        vm.onDraftChange("keep this ")
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        // The hallucinated phrase is not appended; the prior draft survives.
+        assertEquals("keep this ", vm.uiState.value.draft)
+        assertEquals(
+            PromptComposerViewModel.NO_SPEECH_DETECTED_MESSAGE,
+            vm.uiState.value.error,
+        )
+    }
+
+    @Test
+    fun realSpeechIsStillTranscribedNormally() = runTest {
+        // Regression guard: the silence/hallucination changes must not
+        // affect a normal dictation.
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = fakeWhisperClient { Result.success("git status") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap()
+        advanceUntilIdle()
+
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+        assertEquals("git status", vm.uiState.value.draft)
+        assertNull(vm.uiState.value.error)
     }
 
     @Test

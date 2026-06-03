@@ -11,6 +11,7 @@ import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.voice.PendingTranscriptionItem
+import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
 import com.pocketshell.uikit.theme.PocketShellTheme
@@ -50,9 +51,9 @@ class PromptComposerPendingTranscriptionTest {
         override fun start() { startCount++ }
         override fun stop(): ByteArray {
             stopCount++
-            // Sentinel WAV header bytes — non-empty so the store accepts
-            // the audio.
-            return ByteArray(44) { 0 }
+            // Issue #452: real-speech WAV so the silence guard lets the
+            // capture through to Whisper / the pending-transcription queue.
+            return SpeechAudioGuard.speechWavForTesting()
         }
         override fun currentAmplitude(): Float = 0.5f
     }

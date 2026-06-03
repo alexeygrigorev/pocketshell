@@ -41,6 +41,7 @@ import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.voice.DictateDotIcon
 import com.pocketshell.core.voice.AudioRecorderException
+import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperException
 import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.model.KeyBinding
@@ -305,6 +306,21 @@ public class InlineDictationViewModel @Inject constructor(
             return
         }
 
+        // Issue #452: silence guard — skip Whisper on silent / too-short /
+        // low-energy audio so the model can't hallucinate a stock phrase
+        // (e.g. the Korean "thanks for watching") straight into the
+        // terminal. Surface a "no speech detected" hint instead.
+        if (!SpeechAudioGuard.hasSpeechEnergy(audio)) {
+            _uiState.update {
+                it.copy(
+                    recording = RecordingState.Idle,
+                    amplitude = 0f,
+                    error = NO_SPEECH_DETECTED_MESSAGE,
+                )
+            }
+            return
+        }
+
         _uiState.update { it.copy(recording = RecordingState.Transcribing, amplitude = 0f) }
 
         transcribeJob = viewModelScope.launch {
@@ -326,6 +342,20 @@ public class InlineDictationViewModel @Inject constructor(
                     // writing zero bytes is harmless but writing only a
                     // space-or-newline is a footgun on the shell side.
                     val trimmed = text.trim()
+                    // Issue #452: secondary backstop — if Whisper still
+                    // returned a known silence-hallucination phrase despite
+                    // the energy gate, do NOT write it to the terminal.
+                    // Surface the "no speech" hint instead.
+                    if (SpeechAudioGuard.isLikelyHallucination(trimmed)) {
+                        _uiState.update {
+                            it.copy(
+                                recording = RecordingState.Idle,
+                                amplitude = 0f,
+                                error = NO_SPEECH_DETECTED_MESSAGE,
+                            )
+                        }
+                        return@fold
+                    }
                     _uiState.update {
                         it.copy(recording = RecordingState.Idle, amplitude = 0f, error = null)
                     }
@@ -429,6 +459,15 @@ public class InlineDictationViewModel @Inject constructor(
 
         /** Same poll interval as [PromptComposerViewModel.SAMPLE_INTERVAL_MS]. */
         public const val SAMPLE_INTERVAL_MS: Long = 50L
+
+        /**
+         * Issue #452: hint surfaced via [UiState.error] when a recording is
+         * detected as silent / too short / too quiet, or when Whisper
+         * returns a known silence-hallucination phrase. Reuses the composer's
+         * message so both voice surfaces show identical copy.
+         */
+        public const val NO_SPEECH_DETECTED_MESSAGE: String =
+            PromptComposerViewModel.NO_SPEECH_DETECTED_MESSAGE
     }
 }
 

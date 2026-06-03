@@ -219,6 +219,9 @@ class FolderListViewModel internal constructor(
     private val assistantClientFactory: AssistantLlmClientFactory? = null,
     private val reposRemoteSource: ReposRemoteSource? = null,
     private val forwardingController: ForwardingController,
+    // Issue #464: cross-view-model fan-out so a confirmed Kill session on
+    // the per-session screen drops the dead row from this tree promptly.
+    private val sessionLifecycleSignals: com.pocketshell.app.tmux.SessionLifecycleSignals? = null,
     // Issue #430: when true the view model attaches a
     // [ProcessLifecycleOwner] observer in [init] so the session-discovery
     // poll loop is gated on the whole-process foreground signal. Always
@@ -244,6 +247,7 @@ class FolderListViewModel internal constructor(
         assistantClientFactory: AssistantLlmClientFactory?,
         reposRemoteSource: ReposRemoteSource?,
         forwardingController: ForwardingController,
+        sessionLifecycleSignals: com.pocketshell.app.tmux.SessionLifecycleSignals,
     ) : this(
         gateway = gateway,
         hostDao = hostDao,
@@ -252,6 +256,7 @@ class FolderListViewModel internal constructor(
         assistantClientFactory = assistantClientFactory,
         reposRemoteSource = reposRemoteSource,
         forwardingController = forwardingController,
+        sessionLifecycleSignals = sessionLifecycleSignals,
         attachLifecycle = true,
     )
 
@@ -322,7 +327,51 @@ class FolderListViewModel internal constructor(
                 emitReady()
             }
         }
+        // Issue #464: when the per-session screen confirms a Kill session,
+        // drop the matching row from this tree immediately (optimistic),
+        // then re-probe so a failed kill that somehow still broadcast — or
+        // a same-name session recreated since — is reconciled against the
+        // authoritative `tmux list-sessions` result.
+        sessionLifecycleSignals?.let { signals ->
+            viewModelScope.launch {
+                signals.killedSessions.collect { killed ->
+                    onSessionKilled(killed)
+                }
+            }
+        }
         if (attachLifecycle) attachProcessLifecycle()
+    }
+
+    /**
+     * Issue #464: handle a confirmed session kill broadcast from the
+     * per-session screen. Ignores kills for other hosts. Optimistically
+     * removes the dead session from the current snapshot so the tree
+     * updates instantly.
+     *
+     * Reconcile against the authoritative `tmux list-sessions` result is
+     * deliberately deferred to the screen's normal probe cadence rather
+     * than forced here: the kill is emitted only on a *confirmed* tmux
+     * teardown, so the optimistic drop is always correct, and the user is
+     * still on the per-session screen when this fires. Starting a competing
+     * probe now would re-acquire the warm SSH lease and race the session
+     * screen's own attach (the exact reason `stopPolling()` exists). If the
+     * tree's poll loop is still live (kill triggered while the tree screen
+     * remained composed), we kick an immediate refresh; otherwise the
+     * reconcile rides the re-probe that `bind()` runs when the user returns.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun onSessionKilled(killed: com.pocketshell.app.tmux.KilledSession) {
+        val params = bound ?: return
+        if (params.hostId != killed.hostId) return
+        if (hasSessionProbeSnapshot) {
+            val before = lastSessions.size
+            lastSessions = lastSessions.filterNot { it.sessionName == killed.sessionName }
+            if (lastSessions.size != before) {
+                lastSessionFolderPaths = lastSessionFolderPaths - killed.sessionName
+                emitReady()
+            }
+        }
+        if (pollingJob != null) refresh()
     }
 
     /**

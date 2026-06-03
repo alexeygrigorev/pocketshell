@@ -84,11 +84,13 @@ class TmuxSessionViewModelTest {
             },
             idleTtlMillis = 0L,
         ),
+        sessionLifecycleSignals: SessionLifecycleSignals? = null,
     ): TmuxSessionViewModel = TmuxSessionViewModel(
         tmuxClientFactory = TmuxClientFactory(factoryScope),
         activeTmuxClients = registry,
         runtimeCache = runtimeCache,
         sshLeaseManager = sshLeaseManager,
+        sessionLifecycleSignals = sessionLifecycleSignals,
     )
 
     @After
@@ -106,6 +108,72 @@ class TmuxSessionViewModelTest {
     fun connectionStatusStartsIdle() {
         val vm = newVm()
         assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Idle)
+    }
+
+    @Test
+    fun killCurrentSessionBroadcastsSignalOnConfirmedKill() = runTest {
+        val signals = SessionLifecycleSignals()
+        val vm = newVm(sessionLifecycleSignals = signals)
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "docker",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "doomed",
+            client = client,
+        )
+        runCurrent()
+
+        val killed = async { signals.killedSessions.first() }
+        runCurrent()
+
+        vm.killCurrentSession()
+        runCurrent()
+        // tmux acknowledges the teardown.
+        client.emittedEvents.emit(ControlEvent.SessionsChanged)
+        advanceUntilIdle()
+
+        val event = killed.await()
+        assertEquals(7L, event.hostId)
+        assertEquals("doomed", event.sessionName)
+        assertTrue(
+            "expected kill-session command, got ${client.sentCommands}",
+            client.sentCommands.any { it.startsWith("kill-session -t 'doomed'") },
+        )
+    }
+
+    @Test
+    fun killCurrentSessionDoesNotBroadcastWhenTmuxReportsError() = runTest {
+        val signals = SessionLifecycleSignals()
+        val vm = newVm(sessionLifecycleSignals = signals)
+        val client = FakeTmuxClient().apply {
+            // tmux rejects the kill (e.g. session already gone / bad target).
+            responses += CommandResponse(number = 1L, output = listOf("can't find session"), isError = true)
+        }
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "docker",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "stubborn",
+            client = client,
+        )
+        runCurrent()
+
+        var broadcast: KilledSession? = null
+        val collector = async { broadcast = signals.killedSessions.first() }
+        runCurrent()
+
+        vm.killCurrentSession()
+        advanceUntilIdle()
+
+        assertNull("a tmux %error kill must not broadcast a lifecycle signal", broadcast)
+        collector.cancel()
     }
 
     @Test

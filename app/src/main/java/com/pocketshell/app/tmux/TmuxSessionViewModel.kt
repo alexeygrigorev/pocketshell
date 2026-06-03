@@ -158,6 +158,11 @@ public class TmuxSessionViewModel @Inject constructor(
             com.pocketshell.core.ssh.DefaultSshLeaseConnector().connect(target)
         },
     ),
+    // Issue #464: process-scoped fan-out so a confirmed Kill session from
+    // this screen tells the folder/session tree to drop the dead row.
+    // Nullable default keeps the existing unit-test constructors working
+    // without supplying the singleton.
+    private val sessionLifecycleSignals: SessionLifecycleSignals? = null,
 ) : ViewModel() {
 
     /** SSH executor seam for assistant tools; tests substitute it. */
@@ -4447,9 +4452,80 @@ public class TmuxSessionViewModel @Inject constructor(
         )
     }
 
+    /**
+     * Kill the session this screen is attached to (session dropdown →
+     * Kill session → confirm) and, on a confirmed kill, broadcast it via
+     * [sessionLifecycleSignals] so the folder/session tree drops the dead
+     * row promptly instead of waiting for its next foreground re-probe
+     * (issue #464).
+     *
+     * Mirrors the dashboard's #168 confirmed-kill pattern: subscribe to the
+     * post-kill `%sessions-changed` / `%session-changed` notification BEFORE
+     * sending so the hot-SharedFlow event can't be missed, then only emit
+     * the lifecycle signal when tmux acknowledged the kill (transport OK +
+     * no `%error`). A failed kill never broadcasts, so the tree keeps the
+     * still-live row and its own re-probe stays authoritative.
+     */
     public fun killCurrentSession() {
-        val target = activeTarget?.sessionName ?: return
-        sendLifecycleCommand("kill-session -t '${escapeSingleQuoted(target)}'")
+        val current = activeTarget ?: return
+        val target = current.sessionName
+        val client = clientRef
+        if (client == null) {
+            // No live control client to confirm against — fall back to the
+            // best-effort send and still signal so the tree reconciles.
+            sendLifecycleCommand("kill-session -t '${escapeSingleQuoted(target)}'")
+            sessionLifecycleSignals?.emitKilled(current.hostId, target)
+            return
+        }
+        bridgeScope.launch {
+            val clientHash = System.identityHashCode(client)
+            Log.i(
+                ISSUE_464_KILL_TAG,
+                "kill-session-start host=${current.hostId} name=$target clientHash=$clientHash",
+            )
+            val eventDeferred = bridgeScope.launch(start = CoroutineStart.UNDISPATCHED) {
+                withTimeoutOrNull(KILL_SESSION_EVENT_WAIT_MS) {
+                    client.events.first { event ->
+                        event is ControlEvent.SessionsChanged ||
+                            (event is ControlEvent.SessionChanged && event.name == target)
+                    }
+                }
+                Unit
+            }
+
+            val sendResult = runCatching {
+                client.sendCommand("kill-session -t '${escapeSingleQuoted(target)}'")
+            }
+            val response = sendResult.getOrNull()
+            val transportFailure = sendResult.exceptionOrNull()
+            if (transportFailure != null) {
+                eventDeferred.cancel()
+                Log.w(
+                    ISSUE_464_KILL_TAG,
+                    "kill-session-transport-failed host=${current.hostId} name=$target " +
+                        "clientHash=$clientHash err=${transportFailure.javaClass.simpleName}: " +
+                        transportFailure.message,
+                )
+                return@launch
+            }
+            if (response != null && response.isError) {
+                eventDeferred.cancel()
+                val detail = response.output.joinToString(separator = " ").trim()
+                Log.w(
+                    ISSUE_464_KILL_TAG,
+                    "kill-session-tmux-error host=${current.hostId} name=$target " +
+                        "clientHash=$clientHash detail=$detail",
+                )
+                return@launch
+            }
+
+            eventDeferred.join()
+            Log.i(
+                ISSUE_464_KILL_TAG,
+                "kill-session-signal host=${current.hostId} name=$target clientHash=$clientHash",
+            )
+            sessionLifecycleSignals?.emitKilled(current.hostId, target)
+        }
     }
 
     public fun newWindow() {
@@ -5800,6 +5876,23 @@ internal const val ISSUE_235_LIFECYCLE_TAG: String = "PsTmuxLifecycle"
  * under the 23-character Log.isLoggable cap.
  */
 internal const val ISSUE_188_DIAG_TAG: String = "issue188-killwindow"
+
+/**
+ * Issue #464: logcat tag for the confirmed kill-session path on the
+ * per-session screen. Mirrors the dashboard's `issue168-kill` so a triage
+ * of "killed session lingered in the tree" can correlate the kill with the
+ * lifecycle signal that drops the folder-tree row. Under the 23-character
+ * `Log.isLoggable` cap.
+ */
+internal const val ISSUE_464_KILL_TAG: String = "issue464-killsession"
+
+/**
+ * Issue #464: max time we wait for tmux's post-kill `%sessions-changed` /
+ * `%session-changed` notification before emitting the lifecycle signal
+ * anyway. 2s mirrors the dashboard's #168 window; tmux's real session
+ * teardown latency on Docker / localhost is sub-100ms.
+ */
+internal const val KILL_SESSION_EVENT_WAIT_MS: Long = 2_000L
 
 private val DEFAULT_AUTO_RECONNECT_DELAYS_MS: List<Long> = listOf(0L, 1_000L, 2_000L, 5_000L)
 

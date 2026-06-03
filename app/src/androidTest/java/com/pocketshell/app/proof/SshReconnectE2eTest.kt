@@ -1,5 +1,6 @@
 package com.pocketshell.app.proof
 
+import android.os.Build
 import android.os.SystemClock
 import android.view.View
 import android.view.ViewGroup
@@ -9,6 +10,7 @@ import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.semantics.getOrNull
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.room.Room
@@ -18,67 +20,86 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
+import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.tmux.ISSUE_145_RECONNECT_TAG
+import com.pocketshell.app.tmux.TMUX_CONNECTING_PROGRESS_TAG
 import com.pocketshell.app.tmux.TMUX_CONNECT_ATTEMPTS
 import com.pocketshell.app.tmux.TMUX_SESSION_ERROR_TAG
-import com.pocketshell.app.tmux.TMUX_SESSION_RECONNECT_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
+import com.pocketshell.app.tmux.TmuxSessionViewModel
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.core.tmux.TmuxClient
+import com.pocketshell.core.tmux.TmuxClientFactory
+import com.pocketshell.core.tmux.protocol.ControlEvent
 import com.termux.view.TerminalView
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.After
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
-import org.junit.Assume
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
-import java.io.BufferedReader
 import java.io.File
-import java.io.InputStreamReader
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 /**
- * Issue #145: connected coverage for the mid-session SSH disconnect +
- * reconnect path against the deterministic `flaky-agent` Docker fixture
- * (host port 2226, `FLAKY_DISCONNECT_AFTER_SEC=12`).
+ * Issue #444 (retargets #145): connected coverage for the **current**
+ * auto-reconnect contract (`88b309b` "Auto reconnect dropped sessions",
+ * refined in #440).
  *
- * Test flow (matches the issue's #1-#8 scope):
+ * The old (#145-era) contract this test used to assert — a mid-session
+ * drop surfaces a `Failed` error band and waits for a *manual* Reconnect
+ * tap — was superseded when auto-reconnect landed. A dropped session now
+ * auto-retries with backoff (`DEFAULT_AUTO_RECONNECT_DELAYS_MS`), so the
+ * user-visible journey is: transport drop -> "Reconnecting (attempt
+ * N/max)" progress row -> the session auto-recovers (reattaches to the
+ * tmux session) with **no manual tap**. A non-retryable failure (bad
+ * auth, unknown host, missing key) short-circuits the backoff loop and
+ * falls back to the manual Reconnect affordance instead.
  *
- * 1. The Docker fixture's entrypoint pre-seeds a long-lived `flaky-main`
- *    tmux session as the test user before sshd starts, so the picker's
- *    first SSH probe (which itself runs inside the disconnect watcher)
- *    sees the session immediately.
- * 2. Open the host card -> picker -> attach to the seeded session.
- * 3. Send `printf 'BEFORE-<marker>\n'` and assert via
- *    [TerminalTextMatcher.containsWrapTolerant].
- * 4. Wait for the fixture's deterministic disconnect (~12s).
- * 5. Assert the in-session error band [TMUX_SESSION_ERROR_TAG] surfaces
- *    with a user-friendly message (no raw `IOException` text).
- * 6. Tap [TMUX_SESSION_RECONNECT_TAG]; production code today does NOT
- *    auto-reconnect (confirmed by reading
- *    [com.pocketshell.app.tmux.TmuxSessionViewModel.attachClient]'s
- *    `client.disconnected.collect` observer — it flips status to
- *    Failed and stops, no reconnect arm), so the test exercises the
- *    explicit user-triggered retry. The reconnect counter
- *    ([TMUX_CONNECT_ATTEMPTS]) is asserted to advance by exactly 1.
- * 7. Send `printf 'AFTER-<marker>\n'` and assert visible output.
- * 8. **Reconnect-loop guard**: grep logcat for
- *    `tmux-connect-attempt` lines under the
- *    [ISSUE_145_RECONNECT_TAG] tag emitted between the disconnect and
- *    the after-blip assertion. Assert at most 1 attempt per disconnect
- *    — anything higher means the production code went into a thrash
- *    loop. The instrumentation-side counter
- *    ([TMUX_CONNECT_ATTEMPTS]) is the authoritative signal; logcat is
- *    treated as a secondary check, but failures of either are surfaced
- *    so the artifact bundle still shows what happened.
+ * This test exercises both halves:
  *
- * The fixture is owned by `tests/docker/flaky-agent/`; the host port
- * (2226) is set by `tests/docker/docker-compose.yml`'s `flaky-agent`
- * service. Run the fixture before this test:
+ *  - [transportDropAutoRecoversWithReconnectingProgressAndNoManualTap]
+ *    drives the real app journey against the deterministic `flaky-agent`
+ *    Docker fixture (host port 2226, `FLAKY_DISCONNECT_AFTER_SEC=12`).
+ *    The fixture forcibly kills the SSH child after ~12s, so the app
+ *    observes a wire-level transport drop. We assert the
+ *    [TMUX_CONNECTING_PROGRESS_TAG] "Reconnecting to …" progress row
+ *    surfaces, the session auto-recovers to a live terminal **without**
+ *    ever showing the manual [TMUX_SESSION_ERROR_TAG] band, and the
+ *    after-drop blip lands — proving the reattach actually re-bound the
+ *    tmux pipe. The connect-attempt counter must advance by >= 2 (initial
+ *    connect + at least one auto-reconnect attempt).
+ *
+ *  - [nonRetryableDropShortCircuitsToManualReconnectAffordance] drives a
+ *    [TmuxSessionViewModel] directly (mirrors `TmuxAttachTimeoutDockerTest`):
+ *    it seeds a Connected state whose [target host is **unresolvable**, then
+ *    flips the attached client's `disconnected` signal. The auto-reconnect
+ *    loop tries a fresh SSH connect to the bad host, hits a real
+ *    `UnknownHostException` (a genuinely non-retryable failure), and falls
+ *    straight back to the manual Reconnect affordance: status becomes
+ *    `Failed` with an "authentication/host" reason and `canReconnect` is
+ *    true. No Docker fixture is required for this half (the DNS failure is
+ *    deterministic), so it runs on CI like the rest of the suite.
+ *
+ * The flaky fixture is owned by `tests/docker/flaky-agent/`; the host
+ * port (2226) is set by `tests/docker/docker-compose.yml`'s `flaky-agent`
+ * service and brought up by `.github/workflows/emulator-smoke.yml`. Run
+ * the fixture before this test:
  *
  * ```bash
  * docker compose -f tests/docker/docker-compose.yml up -d --build flaky-agent
@@ -92,27 +113,17 @@ class SshReconnectE2eTest {
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
     private val timings = mutableListOf<String>()
+    private val factoryScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     @After
     fun closeLaunchedActivity() {
         launchedActivity?.close()
         launchedActivity = null
+        factoryScope.cancel()
     }
 
     @Test
-    fun midSessionDisconnectSurfacesErrorAndReconnectsOnTap() = runBlocking {
-        // STOPGAP — tracked in #207. The CI emulator has been failing this
-        // mid-session-disconnect-and-reconnect journey on every push since
-        // recent merges (sshj timing? Docker fixture? runner memory under
-        // load?). Symptom is an assertion failure ("expected visible
-        // terminal text ...") rather than a crash, and the test still
-        // passes locally. Gate the test on CI so the main branch CI signal
-        // returns to green while the real root cause is investigated in
-        // parallel under #207. Same skip pattern as #132 (a4ccbff).
-        Assume.assumeFalse(
-            "STOPGAP for #207 — passes locally, fails intermittently on CI; root cause under investigation.",
-            TerminalTestTimeouts.isRunningOnCi(),
-        )
+    fun transportDropAutoRecoversWithReconnectingProgressAndNoManualTap() = runBlocking {
         val key = readFixtureKey()
         // Wait for the flaky-agent fixture port (2226) to accept SSH.
         // The fixture kills each accepted SSH session after ~12s, but
@@ -122,7 +133,7 @@ class SshReconnectE2eTest {
 
         val marker = "r${System.currentTimeMillis().toString(36).takeLast(5)}"
         // The flaky-agent container's entrypoint seeds this exact name
-        // before sshd starts; keep them in lock-step with
+        // before sshd starts; keep in lock-step with
         // `tests/docker/flaky-agent/Dockerfile` (env
         // `FLAKY_SEEDED_SESSION_NAME`).
         val sessionName = "flaky-main"
@@ -130,200 +141,228 @@ class SshReconnectE2eTest {
         val hostRowTag = seedFlakyHost(key, hostName)
 
         // Snapshot the connect-attempt counter BEFORE we drive the app.
-        // The view model increments this on every progress-past-early-
-        // return call; after the test it must have advanced by exactly
-        // 2 (the initial connect + the user-triggered reconnect). Doing
-        // this snapshot now avoids contamination from any sibling test
-        // that may have left a stale counter value behind on a shared
-        // emulator.
+        // After auto-reconnect recovers it must have advanced by at least
+        // 2 (the initial connect + at least one auto-reconnect attempt).
         val attemptsBefore = TMUX_CONNECT_ATTEMPTS.get()
 
-        // Capture a logcat anchor wall-clock timestamp (in logcat's
-        // `MM-dd HH:mm:ss.SSS` format) BEFORE we drive the app. The
-        // logcat helper uses this as the `-T <timestamp>` filter so only
-        // lines emitted from this test onward are scanned. We use the
-        // logcat-formatted wall clock — `SystemClock.elapsedRealtime`
-        // does not align with the threadtime log line format.
-        val logcatAnchor = logcatAnchorTimestamp()
-
+        preGrantRuntimePermissions()
         launchedActivity = ActivityScenario.launch(MainActivity::class.java)
         openHostPicker(hostRowTag, hostName)
 
         val attachStart = SystemClock.elapsedRealtime()
-        // The host-list picker (`HostTmuxSessionPickerSheet`) flips its
-        // title from "Connecting" -> "Tmux sessions" when the gateway's
-        // `listSessions` call resolves. Once it's Ready, the seeded
-        // `flaky-main` row is rendered. Wait for the production-emitted
-        // signal that the rows have actually materialised — the
-        // "+ New session" affordance which is Ready-only (not present
-        // in Loading) — before performing the click. This is the
-        // "wait on a production signal, not wall-clock" check round-2
-        // brief calls out.
         waitForPickerSessionRowReady(sessionName)
         compose.onNodeWithText(sessionName).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
         recordTiming("flaky_tmux_attach_ms", SystemClock.elapsedRealtime() - attachStart)
 
-        // Before-blip phase: send a short command and assert it lands
-        // BEFORE the fixture's disconnect window closes. The Docker
-        // compose service is configured with `FLAKY_DISCONNECT_AFTER_SEC=12`
-        // so we have ~8-10s of interactive headroom after the tmux
-        // attach (which itself burned 2-4s of the 12s budget on the
-        // first SSH session).
+        // Before-drop blip: send a short command and assert it lands BEFORE
+        // the fixture's disconnect window closes. The compose service is
+        // configured with `FLAKY_DISCONNECT_AFTER_SEC=12`, leaving ~8-10s of
+        // interactive headroom after the tmux attach burned the first 2-4s.
         val beforeBlipStart = SystemClock.elapsedRealtime()
-        sendCommandThroughTerminalInput(
-            "printf 'BEFORE-$marker\\n'",
-            label = "before-blip",
-        )
-        waitForVisibleTerminalText(label = "before-blip output") {
-            "BEFORE-$marker" in it
-        }
+        sendCommandThroughTerminalInput("printf 'BEFORE-$marker\\n'", label = "before-blip")
+        waitForVisibleTerminalText(label = "before-blip output") { "BEFORE-$marker" in it }
         recordTiming("flaky_before_blip_ms", SystemClock.elapsedRealtime() - beforeBlipStart)
 
-        // Wait for the disconnect to surface. The fixture kills the SSH
-        // session 12s after acceptance; the [TmuxClient.readerLoop]
-        // observes EOF and latches `disconnected = true`, which the view
-        // model's `attachClient` observer collects and flips status to
-        // [ConnectionStatus.Failed]. Use a generous deadline (45s)
-        // because the CI emulator can lag the observer by several
-        // seconds under load.
-        val disconnectWaitStart = SystemClock.elapsedRealtime()
-        compose.waitUntil(timeoutMillis = 45_000) {
-            compose.onAllNodesWithTag(TMUX_SESSION_ERROR_TAG, useUnmergedTree = true)
+        // Wait for the deterministic transport drop to trigger auto-reconnect.
+        // The fixture kills the SSH session ~12s after acceptance; the
+        // [TmuxClient.readerLoop] observes EOF, latches `disconnected`, and
+        // the view model's `disconnected` observer calls
+        // `scheduleAutoReconnect`, which flips status to
+        // [ConnectionStatus.Reconnecting] (-> [TMUX_CONNECTING_PROGRESS_TAG])
+        // and then runs a fresh connect attempt (advancing
+        // [TMUX_CONNECT_ATTEMPTS]).
+        //
+        // The authoritative "auto-reconnect fired" signal is the connect-
+        // attempt counter advancing past the initial connect: the underlying
+        // SSH lease is reused, so a successful reconnect can complete in
+        // well under one compose poll frame, which makes the transient
+        // "Reconnecting" progress row unreliable to latch as a hard gate.
+        // We poll for EITHER the visible progress row (captured when it lasts
+        // long enough) OR the counter advancing, then assert the contract on
+        // the durable signals (no manual band, terminal re-attached, after-
+        // drop blip lands). When we DO catch the row, we additionally assert
+        // its human-readable "Reconnecting to …" copy.
+        val dropWaitStart = SystemClock.elapsedRealtime()
+        var sawReconnectingRow = false
+        compose.waitUntil(timeoutMillis = RECONNECTING_PROGRESS_TIMEOUT_MS) {
+            val rowVisible = compose
+                .onAllNodesWithTag(TMUX_CONNECTING_PROGRESS_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
+            if (rowVisible) sawReconnectingRow = true
+            val reconnectFired = (TMUX_CONNECT_ATTEMPTS.get() - attemptsBefore) >= 2
+            rowVisible || reconnectFired
         }
-        recordTiming("flaky_disconnect_observed_ms", SystemClock.elapsedRealtime() - disconnectWaitStart)
-        // The user-facing text must NOT contain raw IOException stack
-        // text; it should be a friendly "Disconnected from ..." sentence.
-        compose.onNodeWithTag(TMUX_SESSION_ERROR_TAG, useUnmergedTree = true).assertExists()
-        compose.onAllNodesWithText("Reconnect", useUnmergedTree = true).fetchSemanticsNodes().let {
+        recordTiming("flaky_reconnect_observed_ms", SystemClock.elapsedRealtime() - dropWaitStart)
+        if (sawReconnectingRow) {
+            // The progress row carries the "Reconnecting to …" copy with the
+            // attempt counter. Assert the human-readable phrasing, not just
+            // the tag, when the row was caught.
             assertTrue(
-                "expected 'Reconnect' button to exist in the error band; found ${it.size} nodes",
-                it.isNotEmpty(),
-            )
-        }
-        // Negative-text checks for raw exception leakage. The friendly
-        // sentence we craft in [TmuxSessionViewModel.attachClient]'s
-        // `disconnected` observer contains the host coordinates plus
-        // 'Tap Reconnect to retry.'; no part of the message should be
-        // a stack trace.
-        listOf(
-            "IOException",
-            "EOFException",
-            "SSHException",
-            "TmuxClientException",
-            "java.io",
-            "at com.pocketshell",
-        ).forEach { needle ->
-            val hits = compose.onAllNodesWithText(needle, useUnmergedTree = true).fetchSemanticsNodes()
-            assertTrue(
-                "raw exception text '$needle' must not appear in the in-session disconnect band; found ${hits.size} node(s)",
-                hits.isEmpty(),
+                "the auto-reconnect progress row must show 'Reconnecting' copy when visible",
+                compose
+                    .onAllNodesWithText("Reconnecting to", substring = true, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty(),
             )
         }
 
-        // Snapshot the counter after the disconnect surfaces but before
-        // we tap Reconnect. Exactly one attempt must have happened so
-        // far (the initial connect()).
-        val attemptsAfterDisconnect = TMUX_CONNECT_ATTEMPTS.get()
-        val initialAttempts = attemptsAfterDisconnect - attemptsBefore
-        assertTrue(
-            "expected exactly 1 connect attempt between test start and disconnect, got $initialAttempts " +
-                "(attemptsBefore=$attemptsBefore attemptsAfterDisconnect=$attemptsAfterDisconnect)",
-            initialAttempts == 1,
-        )
-
-        // Trigger the explicit reconnect (production has no
-        // auto-reconnect today). The viewModel.reconnect() entry point
-        // routes through connect(), which logs another
-        // `tmux-connect-attempt` line and increments
-        // [TMUX_CONNECT_ATTEMPTS] by 1.
-        val reconnectTapAt = SystemClock.elapsedRealtime()
-        compose.onNodeWithTag(TMUX_SESSION_RECONNECT_TAG, useUnmergedTree = true).performClick()
-
-        // Wait for the reconcile to land — the error band must disappear
-        // and the terminal view must be re-attached. The new session
-        // gets a fresh 12s disconnect window, so we have time to send
-        // the after-blip.
-        compose.waitUntil(timeoutMillis = 45_000) {
-            compose.onAllNodesWithTag(TMUX_SESSION_ERROR_TAG, useUnmergedTree = true)
+        // Auto-recovery: WITHOUT any manual tap, the progress row clears, the
+        // manual Failed/Reconnect band never shows, and the terminal is
+        // re-attached. We never touch [TMUX_SESSION_RECONNECT_TAG].
+        val recoverStart = SystemClock.elapsedRealtime()
+        compose.waitUntil(timeoutMillis = AUTO_RECOVERY_TIMEOUT_MS) {
+            val progressGone = compose
+                .onAllNodesWithTag(TMUX_CONNECTING_PROGRESS_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isEmpty()
+            val screenUp = compose
+                .onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+            progressGone && screenUp
         }
-        waitForTerminalViewAttached()
-        recordTiming("flaky_reconnect_ms", SystemClock.elapsedRealtime() - reconnectTapAt)
-
-        // After-blip phase: same shape as before-blip but on the new
-        // session. We assert the command output renders, proving that
-        // the reconcile actually re-attached the tmux session and
-        // re-bound the terminal pipe.
-        val afterBlipStart = SystemClock.elapsedRealtime()
-        sendCommandThroughTerminalInput(
-            "printf 'AFTER-$marker\\n'",
-            label = "after-blip",
+        // The whole point of auto-reconnect: the manual Failed/Reconnect band
+        // must NOT be showing — the user does not tap anything for a
+        // transient transport drop.
+        assertTrue(
+            "manual Failed error band must NOT appear during an auto-reconnect — the drop is " +
+                "transient and recovers without a tap",
+            compose.onAllNodesWithTag(TMUX_SESSION_ERROR_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isEmpty(),
         )
-        waitForVisibleTerminalText(label = "after-blip output") {
-            "AFTER-$marker" in it
-        }
+        waitForTerminalViewAttached()
+        recordTiming("flaky_auto_recovery_ms", SystemClock.elapsedRealtime() - recoverStart)
+
+        // After-drop blip on the recovered session. Asserting the command
+        // output renders proves the auto-reconnect actually re-attached the
+        // tmux session and re-bound the terminal pipe — no manual tap was
+        // needed at any point.
+        val afterBlipStart = SystemClock.elapsedRealtime()
+        sendCommandThroughTerminalInput("printf 'AFTER-$marker\\n'", label = "after-blip")
+        waitForVisibleTerminalText(label = "after-blip output") { "AFTER-$marker" in it }
         recordTiming("flaky_after_blip_ms", SystemClock.elapsedRealtime() - afterBlipStart)
 
-        // Reconnect-loop guard #1 (authoritative): the
-        // [TMUX_CONNECT_ATTEMPTS] counter must have advanced by exactly
-        // 2 since test start — the initial connect plus the explicit
-        // reconnect. Anything higher means the production code went
-        // into a thrash loop; anything lower means the reconnect did
-        // not actually run.
-        val attemptsAfterReconnect = TMUX_CONNECT_ATTEMPTS.get()
-        val totalAttempts = attemptsAfterReconnect - attemptsBefore
+        // The connect-attempt counter must have advanced by at least 2:
+        // the initial connect plus at least one auto-reconnect attempt.
+        // Anything less than 2 means auto-reconnect never ran (i.e. the
+        // user would have been stuck on a manual band — the regression
+        // #444 guards against).
+        val attemptsAfter = TMUX_CONNECT_ATTEMPTS.get()
+        val totalAttempts = attemptsAfter - attemptsBefore
         assertTrue(
-            "expected exactly 2 connect attempts (initial + 1 reconnect), got $totalAttempts " +
-                "(attemptsBefore=$attemptsBefore attemptsAfterReconnect=$attemptsAfterReconnect)",
-            totalAttempts == 2,
+            "expected at least 2 connect attempts (initial + >=1 auto-reconnect), got $totalAttempts " +
+                "(attemptsBefore=$attemptsBefore attemptsAfter=$attemptsAfter)",
+            totalAttempts >= 2,
         )
 
-        // Reconnect-loop guard #2 (secondary, via logcat): grep the
-        // on-device logcat buffer for `tmux-connect-attempt` lines
-        // under [ISSUE_145_RECONNECT_TAG] since the `logcatAnchor` we
-        // captured at the start of the test. Logcat may have rolled
-        // over on resource-constrained CI emulators, in which case we
-        // treat a 0-line result as a soft miss (recorded in the
-        // artifact summary) — the counter assertion above is the
-        // gating signal.
-        val logcatHits = scanLogcatConnectAttempts(
-            tag = ISSUE_145_RECONNECT_TAG,
-            sessionName = sessionName,
-            sinceLogcatTimestamp = logcatAnchor,
-        )
         val artifactsDir = ensureArtifactDir()
-        File(artifactsDir, "logcat-connect-attempts.txt").writeText(
-            buildString {
-                appendLine("# Issue #145 logcat audit")
-                appendLine("session=$sessionName")
-                appendLine("logcat_anchor=$logcatAnchor")
-                appendLine("logcat_match_count=${logcatHits.size}")
-                appendLine("counter_total_attempts=$totalAttempts")
-                appendLine("counter_before=$attemptsBefore")
-                appendLine("counter_after=$attemptsAfterReconnect")
-                appendLine("---- matched logcat lines ----")
-                logcatHits.forEach { appendLine(it) }
-            },
-        )
-        // Logcat is best-effort but when it IS available, it must not
-        // contradict the counter. A higher logcat count than the
-        // counter would indicate either a duplicate log line or a
-        // genuine extra attempt — both are bugs.
-        assertTrue(
-            "logcat reconnect-attempt audit must not exceed counter: " +
-                "logcat=${logcatHits.size} counter=$totalAttempts",
-            logcatHits.size <= totalAttempts,
-        )
+        writeSummary(artifactsDir, sessionName, marker, totalAttempts)
+        Unit
+    }
 
-        writeSummary(artifactsDir, sessionName, marker)
+    @Test
+    fun nonRetryableDropShortCircuitsToManualReconnectAffordance() = runBlocking {
+        // Issue #440 / #444: a non-retryable failure during the auto-reconnect
+        // loop (bad auth, unknown host, missing key) must NOT burn the whole
+        // backoff schedule — it short-circuits straight to the manual
+        // Reconnect affordance so the user fixes the credential/host and taps
+        // once, instead of watching doomed retries.
+        //
+        // We make this deterministic with a REAL `UnknownHostException` (no
+        // Docker fixture, so it runs on CI): seed a Connected state whose
+        // target host is unresolvable, then flip the attached client's
+        // `disconnected` signal. The auto-reconnect loop runs a fresh SSH
+        // connect to the bad host, the DNS lookup throws
+        // `UnknownHostException` (classified non-retryable by the view model),
+        // and it falls back to a `Failed` state with `canReconnect == true`.
+        val vm = TmuxSessionViewModel(
+            tmuxClientFactory = TmuxClientFactory(factoryScope),
+            activeTmuxClients = ActiveTmuxClients(),
+        )
+        try {
+            // Four backoff delays available. The non-retryable contract is
+            // that the loop aborts after the FIRST attempt rather than
+            // burning all four — so the connect-attempt counter must advance
+            // by exactly 1 (not 4) before settling on Failed.
+            vm.setAutoReconnectDelaysForTest(listOf(0L, 0L, 0L, 0L))
+            val deadClient = DisconnectableStubTmuxClient()
+            vm.replaceClientForTest(
+                hostId = 444L,
+                hostName = "Unresolvable Reconnect",
+                // RFC 6761 reserves `.invalid` as never-resolvable, so the
+                // auto-reconnect SSH connect deterministically throws
+                // UnknownHostException rather than racing a real DNS server.
+                host = "nonexistent-host.pocketshell.invalid",
+                port = 22,
+                user = "testuser",
+                keyPath = "/does/not/matter.pem",
+                sessionName = "unresolvable-main",
+                client = deadClient,
+            )
+            assertTrue(
+                "precondition: VM must be Connected before the drop",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+
+            val attemptsBeforeDrop = TMUX_CONNECT_ATTEMPTS.get()
+
+            // Drop: flip the attached client's latched `disconnected` flow.
+            // The auto-reconnect loop runs one SSH connect to the bad host,
+            // hits UnknownHostException (non-retryable), and short-circuits.
+            deadClient.markDisconnected()
+
+            // Wait for the loop to settle on a terminal Failed state with the
+            // manual Reconnect affordance available. `runConnect` publishes a
+            // transient raw-cause Failed on its first failed attempt before
+            // `scheduleAutoReconnect` evaluates the non-retryable check, so we
+            // wait for the durable post-abort state (canReconnect == true and
+            // no further attempts) rather than latching that first transient.
+            waitForCondition {
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Failed &&
+                    vm.canReconnect.value
+            }
+            // Give any further would-be attempt a window to fire; with four
+            // zero-delay backoff steps an un-aborted loop would burn all four
+            // almost immediately, so a stable counter here proves the abort.
+            delay(300)
+
+            val attemptsAfter = TMUX_CONNECT_ATTEMPTS.get()
+            val attempts = attemptsAfter - attemptsBeforeDrop
+            assertTrue(
+                "non-retryable abort must short-circuit after exactly 1 auto-reconnect " +
+                    "attempt (not exhaust all 4 backoff steps), got $attempts",
+                attempts == 1,
+            )
+
+            val message = (vm.connectionStatus.value as TmuxSessionViewModel.ConnectionStatus.Failed)
+                .message
+            assertFalse(
+                "non-retryable abort must NOT report exhausting all backoff attempts, was: `$message`",
+                "Auto reconnect failed after" in message,
+            )
+            assertTrue(
+                "manual Reconnect affordance must remain available after a non-retryable abort",
+                vm.canReconnect.value,
+            )
+        } finally {
+            vm.clearForTest()
+        }
+        Unit
     }
 
     // ---- helpers ----
+
+    private suspend fun waitForCondition(predicate: () -> Boolean) {
+        withTimeout(NON_RETRYABLE_STATUS_TIMEOUT_MS) {
+            while (!predicate()) {
+                delay(25)
+            }
+        }
+    }
 
     private fun readFixtureKey(): String =
         InstrumentationRegistry.getInstrumentation()
@@ -354,8 +393,11 @@ class SshReconnectE2eTest {
                     username = DEFAULT_USER,
                     keyId = storedKey.id,
                     // Pretend bootstrap already happened so the host-list
-                    // tap goes straight to the picker (mirrors what
-                    // EmulatorWorkflowE2eTest does for the same reason).
+                    // tap goes straight to the session list (mirrors
+                    // EmulatorWorkflowE2eTest's seed). The live tooling
+                    // probe may still surface the "Host setup needed"
+                    // bootstrap sheet, which `dismissBootstrapSheetIfPresent`
+                    // skips past.
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
                 ),
@@ -367,51 +409,141 @@ class SshReconnectE2eTest {
     }
 
     private fun openHostPicker(hostRowTag: String, hostName: String) {
-        compose.waitUntil(timeoutMillis = 15_000) {
-            compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
+        // The compose hierarchy is not attached until MainActivity's
+        // setContent runs after `ActivityScenario.launch`. Until then
+        // `fetchSemanticsNodes()` THROWS `IllegalStateException("No compose
+        // hierarchies found")` instead of returning empty, which would
+        // escape the `waitUntil` predicate. Swallow that launch-window
+        // throw so we keep polling until the host list renders (mirrors
+        // the robust empty-rule + ActivityScenario pattern other
+        // connected tests rely on).
+        compose.waitUntil(timeoutMillis = 20_000) {
+            composeHierarchyReady() &&
+                compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
         }
         compose.onNodeWithText(hostName, useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        // 45s deadline matches the connected sibling tests
-        // (EmulatorWorkflowE2eTest uses 20s, but the picker sheet's
-        // "Tmux sessions" title shows only after the host-list ->
-        // picker route lands AND the gateway has had a frame to start
-        // the SSH list-sessions call. Under sibling-test load on the CI
-        // emulator the route can take 25-30 s).
-        compose.waitUntil(timeoutMillis = 45_000) {
-            compose.onAllNodesWithText("Tmux sessions", useUnmergedTree = true)
+        // Issue #171 (round 2, D22 hard-cut): tapping a host now routes to
+        // the per-host FolderListScreen (`folder-list:screen`) where tmux
+        // sessions render under their folder header. The live tooling probe
+        // against the flaky-agent container can first surface the "Host
+        // setup needed" bootstrap sheet (pocketshell isn't installed in
+        // that fixture); skip past it so we land on the folder/session
+        // tree.
+        compose.waitUntil(timeoutMillis = 30_000) {
+            dismissBootstrapSheetIfPresent()
+            compose.onAllNodesWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true)
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
     }
 
     /**
-     * Wait for the picker sheet to leave the Loading state by checking
-     * for a Ready-only element ("+ New session" affordance) AND the
-     * actual seeded session row. This is the production-emitted signal
-     * that the gateway's `listSessions` resolved into a non-empty
-     * [HostTmuxSessionPickerState.Ready], so by the time this returns
-     * the test can safely tap [sessionName] without racing the
-     * Loading -> Ready transition.
+     * If the "Host setup needed" bootstrap sheet is showing, tap its
+     * "Skip" affordance so the host-tap flow continues to the session
+     * list. No-op when the sheet is absent.
      */
-    private fun waitForPickerSessionRowReady(sessionName: String) {
-        compose.waitUntil(timeoutMillis = 45_000) {
-            val newSessionPresent = compose
-                .onAllNodesWithText("+ New session", useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-            val sessionPresent = compose
-                .onAllNodesWithText(sessionName, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty()
-            newSessionPresent && sessionPresent
+    private fun dismissBootstrapSheetIfPresent() {
+        val skip = compose
+            .onAllNodesWithTag("host-bootstrap-skip", useUnmergedTree = true)
+            .fetchSemanticsNodes()
+        if (skip.isNotEmpty()) {
+            runCatching {
+                compose.onNodeWithTag("host-bootstrap-skip", useUnmergedTree = true).performClick()
+            }
         }
     }
 
+    private fun waitForPickerSessionRowReady(sessionName: String) {
+        // On the FolderListScreen the seeded session lives inside a
+        // collapsed folder ("[idle · 1 session]"). First wait for the
+        // folder header to render once the gateway's `listSessions`
+        // resolves, then expand every folder header so the inline session
+        // rows (and their [sessionName] text) become visible.
+        compose.waitUntil(timeoutMillis = 45_000) {
+            val sessionVisible = compose
+                .onAllNodesWithText(sessionName, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+            if (sessionVisible) return@waitUntil true
+            expandFolderHeaders()
+            false
+        }
+    }
+
+    /**
+     * Tap each collapsed folder header on the FolderListScreen so its
+     * inline session rows expand into view. Folder headers carry the
+     * `folder-list:header-click:<path>` tag. Only acts while the target
+     * session text is still hidden (the caller re-checks visibility after
+     * each pass), so a folder that is already expanded is not toggled
+     * shut.
+     */
+    private fun expandFolderHeaders() {
+        val headerTags = collectTestTags().filter {
+            it.startsWith("folder-list:header-click:")
+        }
+        headerTags.forEach { tag ->
+            runCatching {
+                compose.onNodeWithTag(tag, useUnmergedTree = true).performClick()
+            }
+        }
+    }
+
+    /** Collect every `TestTag` value currently present in the semantics tree. */
+    private fun collectTestTags(): List<String> {
+        val roots = compose
+            .onAllNodes(androidx.compose.ui.test.isRoot(), useUnmergedTree = true)
+            .fetchSemanticsNodes()
+        val tags = mutableListOf<String>()
+        fun walk(node: androidx.compose.ui.semantics.SemanticsNode) {
+            node.config.getOrNull(androidx.compose.ui.semantics.SemanticsProperties.TestTag)
+                ?.let { tags += it }
+            node.children.forEach(::walk)
+        }
+        roots.forEach(::walk)
+        return tags
+    }
+
+    /**
+     * Pre-grant the Android-13+ `POST_NOTIFICATIONS` runtime permission so
+     * MainActivity's first-launch request does not throw the system
+     * `GrantPermissionsActivity` dialog over the activity window. That
+     * dialog steals focus from MainActivity's compose hierarchy, which
+     * makes the empty compose rule report "No compose hierarchies found"
+     * and the whole journey times out at the host-list wait. Mirrors the
+     * pre-grant other connected proof tests use (e.g.
+     * `ForwardingIndicatorE2eTest`).
+     */
+    private fun preGrantRuntimePermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val instrumentation = InstrumentationRegistry.getInstrumentation()
+            runCatching {
+                instrumentation.uiAutomation.grantRuntimePermission(
+                    instrumentation.targetContext.packageName,
+                    android.Manifest.permission.POST_NOTIFICATIONS,
+                )
+            }
+        }
+    }
+
+    /**
+     * Returns true once the launched MainActivity's compose tree is
+     * attached. `createEmptyComposeRule()` + `ActivityScenario.launch`
+     * is racy at launch: querying semantics before setContent runs
+     * throws `IllegalStateException`, so we probe defensively.
+     */
+    private fun composeHierarchyReady(): Boolean =
+        runCatching {
+            compose.onAllNodes(androidx.compose.ui.test.isRoot(), useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }.getOrDefault(false)
+
     private fun waitForTerminalViewAttached() {
-        compose.waitUntil(timeoutMillis = 20_000) {
+        compose.waitUntil(timeoutMillis = 30_000) {
             var attached = false
             launchedActivity?.onActivity { activity ->
                 val view = activity.window.decorView.findTerminalView()
@@ -527,68 +659,6 @@ class SshReconnectE2eTest {
             }
         }
 
-    /**
-     * Issue #145 round-2: format the current wall-clock time the way
-     * `logcat -v threadtime` does (`MM-dd HH:mm:ss.SSS`), so it can be
-     * passed straight to `logcat -T <timestamp>` as a since-anchor.
-     * Without this, an emulator process without
-     * permission to call `logcat -c` would scan the entire on-device
-     * buffer including lines from sibling tests.
-     */
-    private fun logcatAnchorTimestamp(): String {
-        val formatter = SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.ROOT)
-        return formatter.format(Date())
-    }
-
-    /**
-     * Issue #145: scan the on-device logcat buffer for
-     * `tmux-connect-attempt` lines under [tag] that mention
-     * [sessionName], filtered to lines emitted at or after
-     * [sinceLogcatTimestamp] (formatted by [logcatAnchorTimestamp]).
-     * We use `logcat -d` so the call returns immediately rather than
-     * streaming. The `-s` selector filters by tag so the output is
-     * small even on a busy emulator. Returns the matched lines in
-     * arrival order; an empty list means logcat either rolled over or
-     * the production code never emitted (the caller's counter
-     * assertion is the gating signal — see test body).
-     */
-    private fun scanLogcatConnectAttempts(
-        tag: String,
-        sessionName: String,
-        sinceLogcatTimestamp: String,
-    ): List<String> {
-        val process = runCatching {
-            // `-d` = dump and exit. `-T <timestamp>` filters by emit
-            // time so we only see lines from this test onward. `-v
-            // threadtime` keeps the wall-clock timestamp in each line
-            // for the artifact.
-            ProcessBuilder(
-                "logcat",
-                "-d",
-                "-T",
-                sinceLogcatTimestamp,
-                "-v",
-                "threadtime",
-                "-s",
-                "$tag:*",
-            )
-                .redirectErrorStream(true)
-                .start()
-        }.getOrNull() ?: return emptyList()
-        val lines = mutableListOf<String>()
-        BufferedReader(InputStreamReader(process.inputStream)).use { reader ->
-            while (true) {
-                val line = reader.readLine() ?: break
-                // Filter for the structured marker the view model emits.
-                if (line.contains("tmux-connect-attempt") && line.contains("session=$sessionName")) {
-                    lines += line
-                }
-            }
-        }
-        runCatching { process.waitFor() }
-        return lines
-    }
-
     private fun ensureArtifactDir(): File {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val mediaRoot = instrumentation.targetContext.externalMediaDirs
@@ -607,16 +677,17 @@ class SshReconnectE2eTest {
         println(line)
     }
 
-    private fun writeSummary(dir: File, sessionName: String, marker: String) {
+    private fun writeSummary(dir: File, sessionName: String, marker: String, totalAttempts: Int) {
         File(dir, "summary.txt").writeText(
             buildString {
-                appendLine("scenario=ssh-mid-session-disconnect-and-reconnect")
+                appendLine("scenario=ssh-mid-session-transport-drop-auto-reconnect")
+                appendLine("contract=auto-reconnect (88b309b + #440), retargeted by #444")
                 appendLine("fixture=tests/docker/flaky-agent (host port $FLAKY_PORT)")
                 appendLine("session=$sessionName")
                 appendLine("marker=$marker")
-                appendLine("disconnect_window_sec_default=12 (compose.yml override)")
-                appendLine("disconnect_window_sec_dockerfile=8 (Dockerfile baseline)")
-                appendLine("reconnect_counter_signal=android.util.Log tag=$ISSUE_145_RECONNECT_TAG")
+                appendLine("disconnect_window_sec=12 (compose.yml override)")
+                appendLine("connect_attempts_total=$totalAttempts")
+                appendLine("reconnect_signal_tag=$ISSUE_145_RECONNECT_TAG")
                 appendLine()
                 appendLine("timings:")
                 timings.forEach(::appendLine)
@@ -626,6 +697,44 @@ class SshReconnectE2eTest {
     }
 
     private data class TerminalGridSize(val columns: Int, val rows: Int)
+
+    /**
+     * Minimal [TmuxClient] test double standing in for an already-attached
+     * client whose underlying SSH transport then drops. Only the
+     * `disconnected` latch is meaningful — flipping it via
+     * [markDisconnected] drives the view model's `disconnected` observer
+     * into the auto-reconnect path, where the REAL SSH connect to the
+     * (unresolvable) target host produces the genuine `UnknownHostException`
+     * the non-retryable classifier reacts to. Every other member is a
+     * no-op: the view model never issues commands against this dead client.
+     */
+    private class DisconnectableStubTmuxClient : TmuxClient {
+        private val disconnectedState = MutableStateFlow(false)
+
+        override val events: Flow<ControlEvent> = emptyFlow()
+        override val disconnected: StateFlow<Boolean> = disconnectedState.asStateFlow()
+
+        fun markDisconnected() {
+            disconnectedState.value = true
+        }
+
+        override suspend fun connect() = Unit
+
+        override suspend fun sendCommand(cmd: String): CommandResponse =
+            CommandResponse(number = 0L, output = emptyList(), isError = false)
+
+        override fun outputFor(paneId: String): Flow<ControlEvent.Output> = emptyFlow()
+
+        override fun close() = Unit
+
+        override suspend fun setWindowSizeLatest(sessionId: String): CommandResponse =
+            CommandResponse(number = 0L, output = emptyList(), isError = false)
+
+        override suspend fun refreshClientSize(cols: Int, rows: Int): CommandResponse =
+            CommandResponse(number = 0L, output = emptyList(), isError = false)
+
+        override suspend fun detachCleanly(timeoutMs: Long) = Unit
+    }
 
     private companion object {
         const val DATABASE_NAME: String = "pocketshell.db"
@@ -638,5 +747,28 @@ class SshReconnectE2eTest {
          * `tests/docker/docker-compose.yml`.
          */
         const val FLAKY_PORT: Int = 2226
+
+        /**
+         * Ceiling for the auto-reconnect "Reconnecting" progress row to
+         * surface after the fixture's ~12s deterministic drop. The CI
+         * emulator can lag the `disconnected` observer by several seconds
+         * under sibling-test load.
+         */
+        val RECONNECTING_PROGRESS_TIMEOUT_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 45_000L else 30_000L
+
+        /**
+         * Ceiling for the auto-reconnect loop to recover the session
+         * (progress row clears, terminal re-attached) WITHOUT a manual tap.
+         * The default backoff schedule is `[0, 1s, 2s, 5s]`, and each
+         * attempt re-runs the full SSH handshake + tmux re-attach to the
+         * Docker fixture, so CI needs generous head-room.
+         */
+        val AUTO_RECOVERY_TIMEOUT_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 30_000L
+
+        /** Ceiling for the non-retryable abort to land on Failed. */
+        val NON_RETRYABLE_STATUS_TIMEOUT_MS: Long =
+            if (TerminalTestTimeouts.isRunningOnCi()) 30_000L else 20_000L
     }
 }

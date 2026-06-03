@@ -324,6 +324,18 @@ public class TmuxSessionViewModel @Inject constructor(
     // mid-lifecycle when a single pane closes.
     private val paneProducerJobs: MutableMap<String, Job> = ConcurrentHashMap()
 
+    // Issue #423: track recent terminal-surface recovery attempts per pane.
+    // A single IME/resize/render exception recovers transparently by
+    // recreating the surface, but if the surface keeps failing inside a
+    // short window we are in a recovery storm (the failure described in the
+    // issue: opening the keyboard after a long dictated prompt makes the
+    // terminal "start redrawing, then freeze and never return"). When that
+    // happens we stop re-attaching the broken surface and flip the pane to
+    // an actionable error state instead of thrashing the recovery path.
+    // The SSH/tmux transport stays untouched the whole time.
+    private val paneSurfaceRecoveryTimestamps: MutableMap<String, ArrayDeque<Long>> =
+        ConcurrentHashMap()
+
     /**
      * Open the SSH transport, spawn `tmux -CC` against [sessionName], and
      * begin maintaining [panes].
@@ -1302,6 +1314,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneProducerJobs.clear()
         paneInputQueues.clear()
         paneInputJobs.clear()
+        paneSurfaceRecoveryTimestamps.clear()
         paneAgentJobs.values.forEach { it.cancel() }
         paneAgentJobs.clear()
         paneAgentTailGenerations.clear()
@@ -1341,6 +1354,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneInputQueues.putAll(runtime.paneInputQueues)
         paneInputJobs.clear()
         paneInputJobs.putAll(runtime.paneInputJobs)
+        paneSurfaceRecoveryTimestamps.clear()
         paneAgentJobs.clear()
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
@@ -2718,6 +2732,7 @@ public class TmuxSessionViewModel @Inject constructor(
             paneAgentInputs.remove(paneId)
             paneInputJobs.remove(paneId)?.cancel()
             paneInputQueues.remove(paneId)?.close()
+            paneSurfaceRecoveryTimestamps.remove(paneId)
             paneRows[paneId]?.terminalState?.detachExternalProducer()
             paneRows.remove(paneId)
         }
@@ -2761,15 +2776,57 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     public fun reportTerminalSurfaceFailure(paneId: String, cause: Throwable) {
         val existing = paneRows[paneId] ?: return
+        // Already in the actionable error state — do nothing. The user
+        // recovers via [recreateTerminalSurface] (the "Recreate terminal"
+        // control). Re-running the recovery here would just resume the
+        // storm we already stopped.
+        if (existing.surfaceError) return
+
+        // Issue #423: count how many surface failures landed inside the
+        // sliding window. Repeated failures in a short burst are a recovery
+        // storm — the symptom the maintainer hit when opening the keyboard
+        // after a long dictated Codex prompt: the surface redraws, fails,
+        // gets recreated, fails again, and the terminal never settles.
+        val now = SystemClock.elapsedRealtime()
+        val timestamps = paneSurfaceRecoveryTimestamps.getOrPut(paneId) { ArrayDeque() }
+        synchronized(timestamps) {
+            timestamps.addLast(now)
+            while (timestamps.isNotEmpty() && now - timestamps.first() > SURFACE_RECOVERY_WINDOW_MS) {
+                timestamps.removeFirst()
+            }
+        }
+        val recentFailures = synchronized(timestamps) { timestamps.size }
+
         Log.w(
             ISSUE_145_RECONNECT_TAG,
-            "tmux-terminal-surface-recover pane=$paneId status=${_connectionStatus.value}",
+            "tmux-terminal-surface-recover pane=$paneId status=${_connectionStatus.value} " +
+                "recentFailures=$recentFailures",
             cause,
         )
+
         paneProducerJobs.remove(paneId)?.cancel()
         paneInputJobs.remove(paneId)?.cancel()
         paneInputQueues.remove(paneId)?.close()
         runCatching { existing.terminalState.detachExternalProducer() }
+
+        if (recentFailures >= SURFACE_RECOVERY_STORM_THRESHOLD) {
+            // Recovery storm: stop re-attaching the broken surface. Flip the
+            // pane to an actionable error state. Crucially we do NOT touch
+            // the SSH/tmux transport — the control client stays connected so
+            // the user can keep navigating, switch panes, and recreate this
+            // surface on demand.
+            Log.w(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-terminal-surface-error pane=$paneId recentFailures=$recentFailures " +
+                    "thresholdMs=$SURFACE_RECOVERY_WINDOW_MS",
+            )
+            val errored = existing.copy(surfaceError = true)
+            paneRows[paneId] = errored
+            _panes.update { rows ->
+                rows.map { row -> if (row.paneId == paneId) errored else row }
+            }
+            return
+        }
 
         val replacementState = TerminalSurfaceState()
         val client = clientRef
@@ -2780,7 +2837,44 @@ public class TmuxSessionViewModel @Inject constructor(
                 client = client,
             )
         }
-        val recovered = existing.copy(terminalState = replacementState)
+        val recovered = existing.copy(terminalState = replacementState, surfaceError = false)
+        paneRows[paneId] = recovered
+        _panes.update { rows ->
+            rows.map { row -> if (row.paneId == paneId) recovered else row }
+        }
+    }
+
+    /**
+     * Issue #423: user-driven recovery from the terminal-surface error
+     * state (the "Recreate terminal" control). Clears the storm counter,
+     * builds a fresh [TerminalSurfaceState], and re-attaches it to the
+     * still-live tmux client. This is the SSH-safe alternative to a
+     * reconnect: the transport is untouched, only the local Termux view is
+     * rebuilt. No-op if the pane is gone or was never in the error state.
+     */
+    public fun recreateTerminalSurface(paneId: String) {
+        val existing = paneRows[paneId] ?: return
+        paneSurfaceRecoveryTimestamps.remove(paneId)
+        paneProducerJobs.remove(paneId)?.cancel()
+        paneInputJobs.remove(paneId)?.cancel()
+        paneInputQueues.remove(paneId)?.close()
+        runCatching { existing.terminalState.detachExternalProducer() }
+
+        Log.i(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-terminal-surface-recreate pane=$paneId status=${_connectionStatus.value}",
+        )
+
+        val replacementState = TerminalSurfaceState()
+        val client = clientRef
+        if (client != null && !client.disconnected.value) {
+            attachTerminalProducerForPane(
+                paneId = paneId,
+                state = replacementState,
+                client = client,
+            )
+        }
+        val recovered = existing.copy(terminalState = replacementState, surfaceError = false)
         paneRows[paneId] = recovered
         _panes.update { rows ->
             rows.map { row -> if (row.paneId == paneId) recovered else row }
@@ -5315,6 +5409,20 @@ internal const val ISSUE_235_LIFECYCLE_TAG: String = "PsTmuxLifecycle"
 internal const val ISSUE_188_DIAG_TAG: String = "issue188-killwindow"
 
 private val DEFAULT_AUTO_RECONNECT_DELAYS_MS: List<Long> = listOf(0L, 1_000L, 2_000L, 5_000L)
+
+/**
+ * Issue #423: a terminal surface that fails this many times within
+ * [SURFACE_RECOVERY_WINDOW_MS] is treated as a recovery storm rather than
+ * a transient hiccup. At that point we stop silently re-attaching the
+ * broken surface (which thrashes the emulator and looks like a freeze) and
+ * flip the pane to an actionable error state with a "Recreate terminal"
+ * control. Three transparent recoveries inside the window are tolerated;
+ * the fourth trips the error state.
+ */
+internal const val SURFACE_RECOVERY_STORM_THRESHOLD: Int = 4
+
+/** Sliding window for [SURFACE_RECOVERY_STORM_THRESHOLD]. */
+internal const val SURFACE_RECOVERY_WINDOW_MS: Long = 4_000L
 
 public enum class TmuxConnectTrigger(public val logValue: String) {
     UserTap("user-tap"),

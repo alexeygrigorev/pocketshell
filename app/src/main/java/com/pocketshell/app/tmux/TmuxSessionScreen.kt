@@ -782,21 +782,37 @@ public fun TmuxSessionScreen(
                         modifier = Modifier.fillMaxSize(),
                     ) { pageIndex ->
                         val pane = panes[pageIndex]
-                        TerminalSurface(
-                            state = pane.terminalState,
-                            // Issue #240: cache the phone grid so the
-                            // view model can compare it with tmux's
-                            // current window size and offer an explicit
-                            // Resize prompt instead of resizing
-                            // automatically on attach.
-                            onTerminalSizeChanged = viewModel::resizeRemotePty,
-                            onLocalTerminalError = { cause ->
-                                viewModel.reportTerminalSurfaceFailure(pane.paneId, cause)
-                            },
-                            modifier = Modifier
-                                .fillMaxSize()
-                                .padding(horizontal = 2.dp, vertical = 4.dp),
-                        )
+                        if (pane.surfaceError) {
+                            // Issue #423: the local terminal surface kept
+                            // failing (IME/resize/render recovery storm) but
+                            // SSH/tmux is still alive. Render an actionable
+                            // error state instead of an indefinite reconnect
+                            // loop or a frozen, redrawing terminal. The
+                            // recreate control rebuilds the surface and
+                            // reattaches to the live tmux pane.
+                            TerminalSurfaceErrorState(
+                                onRecreate = { viewModel.recreateTerminalSurface(pane.paneId) },
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 2.dp, vertical = 4.dp),
+                            )
+                        } else {
+                            TerminalSurface(
+                                state = pane.terminalState,
+                                // Issue #240: cache the phone grid so the
+                                // view model can compare it with tmux's
+                                // current window size and offer an explicit
+                                // Resize prompt instead of resizing
+                                // automatically on attach.
+                                onTerminalSizeChanged = viewModel::resizeRemotePty,
+                                onLocalTerminalError = { cause ->
+                                    viewModel.reportTerminalSurfaceFailure(pane.paneId, cause)
+                                },
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(horizontal = 2.dp, vertical = 4.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -1722,6 +1738,13 @@ internal const val TMUX_SESSION_DRAWER_CLOSE_TAG = "tmux:session-drawer:close"
 internal const val TMUX_SESSION_DRAWER_CREATE_TAG = "tmux:session-drawer:create"
 internal const val TMUX_SESSION_DRAWER_REFRESH_TAG = "tmux:session-drawer:refresh"
 internal const val TMUX_CONVERSATION_PANE_TAG = "tmux:conversation"
+
+// Issue #423: actionable terminal-surface error state. Shown for a pane
+// whose local Termux surface failed to recover after a recovery storm
+// while SSH/tmux is still alive. The user taps the recreate control to
+// rebuild the surface without reconnecting SSH.
+internal const val TMUX_TERMINAL_SURFACE_ERROR_TAG = "tmux:terminal-surface-error"
+internal const val TMUX_TERMINAL_SURFACE_RECREATE_TAG = "tmux:terminal-surface-recreate"
 internal const val TMUX_CONVERSATION_COMPOSER_INPUT_TAG = "tmux:conversation:composer-input"
 internal const val TMUX_CONVERSATION_COMPOSER_SEND_TAG = "tmux:conversation:composer-send"
 internal const val TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX = "tmux:conversation:tool:"
@@ -2220,6 +2243,51 @@ private fun EmptyPanesPlaceholder() {
             color = PocketShellColors.TextSecondary,
             fontSize = 13.sp,
         )
+    }
+}
+
+/**
+ * Issue #423: actionable terminal-surface error state. Shown when the local
+ * Termux surface for the focused pane fails to recover (an IME/resize/render
+ * recovery storm) while the SSH/tmux transport is still alive. The user taps
+ * "Recreate terminal" to rebuild the surface and reattach to the live tmux
+ * pane — no SSH reconnect, no force-restart. The rest of the app stays
+ * navigable because only this pane's surface is affected.
+ */
+@Composable
+private fun TerminalSurfaceErrorState(
+    onRecreate: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .background(color = PocketShellColors.Surface)
+            .testTag(TMUX_TERMINAL_SURFACE_ERROR_TAG),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(24.dp),
+        ) {
+            Text(
+                text = "Terminal display stopped responding",
+                color = PocketShellColors.Text,
+                fontSize = 15.sp,
+            )
+            Text(
+                text = "The connection is still active. Recreate the terminal to " +
+                    "keep working in this tmux session.",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 13.sp,
+            )
+            TextButton(
+                onClick = onRecreate,
+                modifier = Modifier.testTag(TMUX_TERMINAL_SURFACE_RECREATE_TAG),
+            ) {
+                Text(text = "Recreate terminal")
+            }
+        }
     }
 }
 

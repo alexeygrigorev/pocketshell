@@ -1110,6 +1110,84 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun repeatedTerminalSurfaceFailuresStopAtErrorStateInsteadOfReconnectStorm() = runTest {
+        // Issue #423: opening the keyboard after a long dictated Codex
+        // prompt could send the terminal into a recovery storm — the
+        // surface redraws, fails, gets recreated, fails again, and never
+        // settles, then the app shows "reconnecting" and becomes
+        // unrecoverable. This asserts the storm stops at an actionable
+        // error state with the SSH/tmux transport untouched (no reconnect
+        // attempts, no disconnected signal), and that the user-driven
+        // recreate path clears the error and rebuilds the surface.
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+        )
+        advanceUntilIdle()
+        val attemptsBeforeFailure = TMUX_CONNECT_ATTEMPTS.get()
+
+        // Drive a burst of failures past the storm threshold. The first
+        // few recover transparently (surface recreated, surfaceError
+        // stays false); once the threshold trips, the pane flips to the
+        // actionable error state and stops re-attaching.
+        repeat(SURFACE_RECOVERY_STORM_THRESHOLD + 2) {
+            vm.reportTerminalSurfaceFailureForTest(
+                paneId = "%0",
+                cause = RuntimeException("ime redraw storm"),
+            )
+        }
+        advanceUntilIdle()
+
+        val pane = vm.panes.value.single()
+        assertTrue(
+            "a recovery storm must flip the pane into the actionable surface-error state",
+            pane.surfaceError,
+        )
+        assertFalse(
+            "surface recovery storm must not flip tmux disconnected",
+            client.disconnectedSignal.value,
+        )
+        assertTrue(
+            "surface recovery storm must leave the transport Connected",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(
+            "surface recovery storm must not enqueue any reconnect attempts",
+            attemptsBeforeFailure,
+            TMUX_CONNECT_ATTEMPTS.get(),
+        )
+
+        // User taps "Recreate terminal": the error clears, a fresh surface
+        // is attached, and the transport is still untouched.
+        val erroredTerminalState = pane.terminalState
+        vm.recreateTerminalSurface("%0")
+        advanceUntilIdle()
+
+        val recovered = vm.panes.value.single()
+        assertFalse(
+            "recreate must clear the surface-error state",
+            recovered.surfaceError,
+        )
+        assertNotSame(
+            "recreate must build a fresh TerminalSurfaceState so IME/input can recover",
+            erroredTerminalState,
+            recovered.terminalState,
+        )
+        assertEquals(
+            "recreate must not reconnect SSH",
+            attemptsBeforeFailure,
+            TMUX_CONNECT_ATTEMPTS.get(),
+        )
+        assertFalse(
+            "recreate must not flip tmux disconnected",
+            client.disconnectedSignal.value,
+        )
+    }
+
+    @Test
     fun tmuxHighRateInputStressBatchesWithBoundedBacklogAndNoContentLoss() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient().apply {

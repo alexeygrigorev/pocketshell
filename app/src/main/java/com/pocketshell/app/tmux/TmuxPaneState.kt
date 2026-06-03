@@ -55,4 +55,11 @@ public data class TmuxPaneState(
     // or when an older tmux fails to emit the field.
     val paneTty: String = "",
     val terminalState: TerminalSurfaceState,
+    // Issue #423: set when the local terminal surface for this pane has
+    // failed to recover after repeated IME/resize/render exceptions inside
+    // a short window (a recovery storm). The SSH/tmux transport is still
+    // alive — this flag tells the screen to stop re-attaching the broken
+    // surface and instead render an actionable "Recreate terminal" error
+    // state so the user can retry the surface without reconnecting SSH.
+    val surfaceError: Boolean = false,
 )

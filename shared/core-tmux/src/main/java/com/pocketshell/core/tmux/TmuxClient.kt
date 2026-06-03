@@ -27,8 +27,6 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedDeque
@@ -522,41 +520,59 @@ internal class RealTmuxClient(
      * [eventBus] / pending-command waiters.
      */
     private suspend fun readerLoop(sh: SshShell) {
-        // BufferedReader.readLine() handles `\r\n` / `\n` normalisation —
-        // tmux on alpine emits LF-only but we don't want to be brittle
-        // about it. UTF-8 is the only sensible decoding: tmux escapes
-        // non-printables inside %output data anyway, so the surrounding
-        // protocol stream is plain ASCII / UTF-8.
-        val reader = BufferedReader(InputStreamReader(sh.stdout, Charsets.UTF_8))
+        // Issue #435: the control-mode reader is BYTE-oriented. tmux under a
+        // UTF-8 locale emits raw high UTF-8 bytes inside `%output` data
+        // (it does NOT octal-escape them) and can split a single multi-byte
+        // character across two consecutive `%output` events. Decoding the
+        // line to a String here (the old `InputStreamReader(UTF_8)` +
+        // `readLine()` path) decoded each orphaned byte to `U+FFFD` and lost
+        // the original byte — that was the Cyrillic-`??` corruption. So we
+        // frame lines on the `0x0A` (LF) byte and hand each raw line, bytes
+        // intact, to [ControlEventStream]. The protocol's structural bytes
+        // (`%`, opcode, IDs, numbers, LF) are all 7-bit ASCII, so framing on
+        // the LF byte is safe; high bytes only ever appear inside the
+        // `%output` data tail, which the parser slices as raw bytes.
+        val input = sh.stdout
 
-        // Turn the blocking readLine() loop into a Flow<String>. We
-        // intentionally don't use `lineSequence().asFlow()` because that
-        // doesn't play nicely with coroutine cancellation — the underlying
-        // read is blocking. Instead we drive the read manually inside a
-        // cancellation-aware loop.
+        // Turn the blocking read loop into a Flow<ByteArray> of LF-framed
+        // lines. We drive the read manually inside a cancellation-aware loop
+        // because the underlying read is blocking. A growable buffer
+        // accumulates the current line; we emit a copy on each LF and trim a
+        // trailing CR (tmux on alpine emits LF-only, but be robust to CRLF).
         val lines = flow {
+            val buffer = java.io.ByteArrayOutputStream(DEFAULT_LINE_BUFFER_BYTES)
+            val chunk = ByteArray(READ_CHUNK_BYTES)
             while (currentCoroutineContext().isActive) {
-                val line = try {
-                    reader.readLine()
+                val read = try {
+                    input.read(chunk)
                 } catch (t: Throwable) {
                     // Channel torn down (close() called, transport drop,
-                    // etc.). End the flow rather than re-throw so the
-                    // reader loop completes cleanly. We surface the
-                    // cause via the diagnostic tag so the reviewer can
-                    // tell an SSH-transport drop apart from a clean
-                    // close — the bare `null` return also covers the
-                    // "EOF without throw" case below.
+                    // etc.). End the flow rather than re-throw so the reader
+                    // loop completes cleanly. We surface the cause via the
+                    // diagnostic tag so the reviewer can tell an SSH-transport
+                    // drop apart from a clean close — the `-1` return below
+                    // covers the clean "EOF without throw" case.
                     Log.w(
                         ISSUE_105_DIAG_TAG,
                         "ssh-read-failed cause=${t.javaClass.simpleName}: ${t.message}",
                     )
-                    null
+                    -1
                 }
-                if (line == null) {
+                if (read < 0) {
                     Log.i(ISSUE_105_DIAG_TAG, "ssh-read-eof")
                     break
                 }
-                emit(line)
+                var i = 0
+                while (i < read) {
+                    val b = chunk[i]
+                    if (b == LF_BYTE) {
+                        emit(takeLine(buffer))
+                        buffer.reset()
+                    } else {
+                        buffer.write(b.toInt())
+                    }
+                    i++
+                }
             }
         }
 
@@ -732,6 +748,33 @@ internal class RealTmuxClient(
          */
         private const val ISSUE_105_DIAG_TAG = "issue105-diag"
         private const val ISSUE_244_DIAG_TAG = "issue244-diag"
+
+        /** LF (`0x0A`) — the line delimiter in the control-mode stream. */
+        private const val LF_BYTE: Byte = 0x0A
+
+        /** CR (`0x0D`) — trimmed off a trailing CRLF when tmux emits one. */
+        private const val CR_BYTE: Byte = 0x0D
+
+        /** Initial per-line accumulation buffer. Grows as needed. */
+        private const val DEFAULT_LINE_BUFFER_BYTES = 4096
+
+        /** stdout read granularity for the control-mode reader. */
+        private const val READ_CHUNK_BYTES = 8192
+
+        /**
+         * Snapshot the accumulated line bytes, trimming a single trailing
+         * CR so a CRLF terminator normalizes to the same line a bare LF
+         * would (issue #435 byte-oriented reader; replaces the implicit
+         * `BufferedReader.readLine()` CRLF handling).
+         */
+        private fun takeLine(buffer: java.io.ByteArrayOutputStream): ByteArray {
+            val bytes = buffer.toByteArray()
+            return if (bytes.isNotEmpty() && bytes[bytes.size - 1] == CR_BYTE) {
+                bytes.copyOf(bytes.size - 1)
+            } else {
+                bytes
+            }
+        }
     }
 
     /**

@@ -4,8 +4,16 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 
 /**
- * Wraps a `Flow<String>` of raw `tmux -CC` lines (each one with the trailing
- * `\n` already stripped) into a structured `Flow<ControlEvent>`.
+ * Wraps a `Flow<ByteArray>` of raw `tmux -CC` lines (each one with the
+ * trailing `\n` already stripped) into a structured `Flow<ControlEvent>`.
+ *
+ * The line type is `ByteArray` (issue #435): tmux emits raw high UTF-8 bytes
+ * inside `%output` data under a UTF-8 locale and can split a multi-byte
+ * character across consecutive `%output` events, so the bytes must reach
+ * [ControlModeParser] without an intervening String round-trip that would
+ * corrupt orphaned bytes into `U+FFFD`. Response-block payload lines (the
+ * bodies between `%begin` and `%end`) are ASCII / UTF-8 text and are decoded
+ * to `String` for [onResponsePayload].
  *
  * Responsibilities beyond what [ControlModeParser] already does:
  *
@@ -42,14 +50,16 @@ public class ControlEventStream(
      * `collect`. That keeps the stream safely re-collectable across
      * reconnects.
      */
-    public fun events(lines: Flow<String>): Flow<ControlEvent> = flow {
+    public fun events(lines: Flow<ByteArray>): Flow<ControlEvent> = flow {
         // Non-null while we're between a `%begin` and the matching
         // `%end` / `%error` — holds the command-number from the `%begin`
         // so we can forward payload lines correctly.
         var openBlock: Long? = null
 
         lines.collect { rawLine ->
-            val line = normalizeControlLine(rawLine)
+            // Byte-level DCS strip; the parser re-strips defensively but we
+            // need the normalized bytes for the String-decoded payload path.
+            val lineBytes = normalizeControlLine(rawLine)
             if (openBlock != null) {
                 // Inside a response block. The block ends only at `%end` or
                 // `%error` with the matching command-number; until then,
@@ -57,7 +67,7 @@ public class ControlEventStream(
                 // payload. tmux command output is opaque text — it can
                 // legitimately contain `%`-prefixed lines (think `tmux ls`
                 // listing a session called "%done").
-                val parsed = parser.parse(line)
+                val parsed = parser.parse(lineBytes)
                 val closing = parsed is ControlEvent.End && parsed.number == openBlock ||
                     parsed is ControlEvent.Error && parsed.number == openBlock
                 if (closing) {
@@ -67,14 +77,15 @@ public class ControlEventStream(
                     emit(parsed!!)
                 } else {
                     // Payload line. Forward it to the response-correlation
-                    // callback; do not emit as an event.
-                    onResponsePayload(openBlock!!, line)
+                    // callback as a String — command-response bodies are
+                    // ASCII / UTF-8 text, never partial multi-byte fragments.
+                    onResponsePayload(openBlock!!, String(lineBytes, Charsets.UTF_8))
                 }
                 return@collect
             }
 
             // Outside any block: parse normally.
-            val event = parser.parse(line) ?: return@collect
+            val event = parser.parse(lineBytes) ?: return@collect
             if (event is ControlEvent.Begin) {
                 openBlock = event.number
             }

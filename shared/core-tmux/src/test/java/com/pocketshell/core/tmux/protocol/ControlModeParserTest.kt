@@ -77,6 +77,59 @@ class ControlModeParserTest {
     }
 
     @Test
+    fun `parses output with raw high UTF-8 bytes unescaped (issue 435)`() {
+        // tmux under a UTF-8 locale does NOT octal-escape high bytes — it
+        // passes raw UTF-8 through inside %output data. `ь` = U+044C = d1 8c,
+        // `─` = U+2500 = e2 94 80. The byte-oriented parser must preserve
+        // every byte exactly (no String round-trip, no U+FFFD).
+        val data = byteArrayOf(0xD1.toByte(), 0x8C.toByte(), 0xE2.toByte(), 0x94.toByte(), 0x80.toByte())
+        val line = "%output %0 ".toByteArray(Charsets.US_ASCII) + data
+        val event = parser.parse(line) as ControlEvent.Output
+        assertEquals("%0", event.paneId)
+        assertArrayEquals(data, event.data)
+        assertEquals("ь─", String(event.data, Charsets.UTF_8))
+    }
+
+    @Test
+    fun `parses output with a lone UTF-8 lead byte without corruption (issue 435)`() {
+        // A single %output event carrying only the lead byte of a multi-byte
+        // char (the other half arrives in a later event). The parser must
+        // surface that one byte verbatim, NOT decode it to U+FFFD.
+        val line = "%output %0 ".toByteArray(Charsets.US_ASCII) + byteArrayOf(0xD1.toByte())
+        val event = parser.parse(line) as ControlEvent.Output
+        assertArrayEquals(byteArrayOf(0xD1.toByte()), event.data)
+        // Must be the raw lead byte, not the 3-byte U+FFFD replacement.
+        assertEquals(1, event.data.size)
+    }
+
+    @Test
+    fun `byte-oriented output decoder preserves raw high bytes mixed with octal escapes`() {
+        // Raw high UTF-8 bytes (d1 8c) interleaved with an octal-escaped ESC.
+        val data = byteArrayOf(0xD1.toByte(), 0x8C.toByte())
+        val line = "%output %3 ".toByteArray(Charsets.US_ASCII) +
+            data + "\\033[0m".toByteArray(Charsets.US_ASCII)
+        val event = parser.parse(line) as ControlEvent.Output
+        assertEquals("%3", event.paneId)
+        assertArrayEquals(
+            byteArrayOf(
+                0xD1.toByte(), 0x8C.toByte(),
+                0x1b, '['.code.toByte(), '0'.code.toByte(), 'm'.code.toByte(),
+            ),
+            event.data,
+        )
+    }
+
+    @Test
+    fun `byte decodeOutputData passes high bytes through verbatim`() {
+        // Direct decoder check on a ByteArray with high bytes — the old
+        // String path re-encoded these via toString().toByteArray(UTF_8)
+        // and corrupted orphaned bytes. The byte path is identity for
+        // non-escaped bytes.
+        val raw = byteArrayOf(0xE2.toByte(), 0x95.toByte(), 0x91.toByte(), 0x41)
+        assertArrayEquals(raw, decodeOutputData(raw))
+    }
+
+    @Test
     fun `parses session-changed event`() {
         val event = parser.parse("%session-changed \$0 main") as ControlEvent.SessionChanged
         assertEquals("\$0", event.sessionId)

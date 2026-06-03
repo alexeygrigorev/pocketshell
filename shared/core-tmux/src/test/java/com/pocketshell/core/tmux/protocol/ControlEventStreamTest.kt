@@ -1,9 +1,13 @@
 package com.pocketshell.core.tmux.protocol
 
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.asFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -11,8 +15,17 @@ import org.junit.Test
  * Tests for [ControlEventStream]'s response-block framing and event
  * filtering. The parser's per-line behaviour lives in
  * [ControlModeParserTest]; here we focus on the state machine across lines.
+ *
+ * The stream consumes `Flow<ByteArray>` (issue #435). Fixtures are written
+ * as ASCII-ish `String`s for readability and encoded to UTF-8 bytes via
+ * [byteLines]; the dedicated byte-fidelity tests at the bottom build raw
+ * byte lines directly.
  */
 class ControlEventStreamTest {
+
+    /** Encode a list of fixture lines to the `Flow<ByteArray>` the stream wants. */
+    private fun byteLines(lines: List<String>): Flow<ByteArray> =
+        lines.asFlow().map { it.toByteArray(Charsets.UTF_8) }
 
     @Test
     fun `emits structured events from a happy-path transcript`() = runTest {
@@ -25,7 +38,7 @@ class ControlEventStreamTest {
             "%exit",
         )
 
-        val events = ControlEventStream().events(lines.asFlow()).toList()
+        val events = ControlEventStream().events(byteLines(lines)).toList()
 
         assertEquals(5, events.size)
         assertTrue(events[0] is ControlEvent.SessionChanged)
@@ -45,7 +58,7 @@ class ControlEventStreamTest {
             "%exit",
         )
 
-        val events = ControlEventStream().events(lines.asFlow()).toList()
+        val events = ControlEventStream().events(byteLines(lines)).toList()
 
         // Only the two recognised events survive.
         assertEquals(2, events.size)
@@ -71,7 +84,7 @@ class ControlEventStreamTest {
             "%output %0 after",
         )
 
-        val events = stream.events(lines.asFlow()).toList()
+        val events = stream.events(byteLines(lines)).toList()
 
         // 4 events expected: the two %outputs plus %begin and %end. The two
         // payload lines must NOT be there.
@@ -102,7 +115,7 @@ class ControlEventStreamTest {
             "%end 1 7 0\u001b\\",
         )
 
-        val events = stream.events(lines.asFlow()).toList()
+        val events = stream.events(byteLines(lines)).toList()
 
         assertEquals(2, events.size)
         assertTrue(events[0] is ControlEvent.Begin)
@@ -123,7 +136,7 @@ class ControlEventStreamTest {
             "%end 1 7 0\u001b\\",
         )
 
-        val events = stream.events(lines.asFlow()).toList()
+        val events = stream.events(byteLines(lines)).toList()
 
         assertEquals(2, events.size)
         assertTrue(events[0] is ControlEvent.Begin)
@@ -145,7 +158,7 @@ class ControlEventStreamTest {
             "%output %0 next",
         )
 
-        val events = stream.events(lines.asFlow()).toList()
+        val events = stream.events(byteLines(lines)).toList()
 
         // Begin and Error are events; the error message body is payload.
         assertEquals(3, events.size)
@@ -173,7 +186,7 @@ class ControlEventStreamTest {
             "%end 1 5 0",
         )
 
-        val events = stream.events(lines.asFlow()).toList()
+        val events = stream.events(byteLines(lines)).toList()
 
         // Only Begin and End escape as events; both `%`-prefixed payload
         // lines remain in the payload bucket.
@@ -202,7 +215,7 @@ class ControlEventStreamTest {
             "%end 1 1 0",           // matching close
         )
 
-        val events = stream.events(lines.asFlow()).toList()
+        val events = stream.events(byteLines(lines)).toList()
 
         // Begin + matching End only.
         assertEquals(2, events.size)
@@ -231,7 +244,7 @@ class ControlEventStreamTest {
             "%end 2 11 0",
         )
 
-        val events = stream.events(lines.asFlow()).toList()
+        val events = stream.events(byteLines(lines)).toList()
 
         assertEquals(4, events.size)
         assertEquals(
@@ -245,12 +258,103 @@ class ControlEventStreamTest {
         // End-to-end sanity: parser hex/octal decoding must propagate
         // through the stream unchanged (no double-decoding, no truncation).
         val lines = listOf("%output %1 \\033[31mred\\033[0m")
-        val events = ControlEventStream().events(lines.asFlow()).toList()
+        val events = ControlEventStream().events(byteLines(lines)).toList()
         assertEquals(1, events.size)
         val output = events.single() as ControlEvent.Output
         // 0x1b [ 3 1 m r e d 0x1b [ 0 m
         assertEquals(12, output.data.size)
         assertEquals(0x1b.toByte(), output.data[0])
         assertEquals(0x1b.toByte(), output.data[8])
+    }
+
+    // --- issue #435: byte-fidelity of %output data across the stream --------
+
+    /**
+     * Build one raw `%output %<paneId> ` line and append the given raw data
+     * bytes verbatim (no escaping, no String round-trip). This reproduces
+     * exactly what the byte-oriented reader hands [ControlEventStream]: the
+     * structural prefix is ASCII and the data tail is arbitrary bytes.
+     */
+    private fun rawOutputLine(paneId: String, data: ByteArray): ByteArray {
+        val prefix = "%output $paneId ".toByteArray(Charsets.US_ASCII)
+        return prefix + data
+    }
+
+    private suspend fun outputBytes(lines: List<ByteArray>): ByteArray {
+        val events = ControlEventStream().events(lines.asFlow()).toList()
+        val out = java.io.ByteArrayOutputStream()
+        events.filterIsInstance<ControlEvent.Output>().forEach { out.write(it.data) }
+        return out.toByteArray()
+    }
+
+    @Test
+    fun `multibyte char split across two output events reassembles losslessly`() = runTest {
+        // This is the maintainer's exact symptom (issue #435): tmux under a
+        // UTF-8 locale emits the two bytes of `ь` (U+044C = 0xD1 0x8C) as raw
+        // bytes split across two consecutive %output events. The old
+        // String-decoding reader turned each orphaned byte into U+FFFD
+        // (rendered `?`), so one `ь` became `??`. The byte-oriented pipeline
+        // must concatenate the two %output payloads back to {0xD1, 0x8C}
+        // with NO U+FFFD replacement bytes.
+        val lines = listOf(
+            rawOutputLine("%0", byteArrayOf(0xD1.toByte())), // lead byte alone
+            rawOutputLine("%0", byteArrayOf(0x8C.toByte())), // continuation alone
+        )
+
+        val combined = outputBytes(lines)
+
+        assertArrayEquals(byteArrayOf(0xD1.toByte(), 0x8C.toByte()), combined)
+        // The combined bytes decode to the real character, not a replacement.
+        assertEquals("ь", String(combined, Charsets.UTF_8))
+        // No U+FFFD (0xEF 0xBF 0xBD) anywhere — the old lossy path injected it.
+        val replacement = "�".toByteArray(Charsets.UTF_8)
+        assertFalse(
+            "decoded bytes must not contain a U+FFFD replacement sequence",
+            indexOfSubarray(combined, replacement) >= 0,
+        )
+    }
+
+    @Test
+    fun `box-drawing chars survive a single output event as exact bytes`() = runTest {
+        // Claude/Codex draw boxes with U+2500 (`─`, e2 94 80) and friends.
+        // A 3-byte UTF-8 char in one %output event must pass through byte for
+        // byte. `─` + `┌` (U+250C = e2 94 8c).
+        val expected = byteArrayOf(
+            0xE2.toByte(), 0x94.toByte(), 0x80.toByte(),
+            0xE2.toByte(), 0x94.toByte(), 0x8C.toByte(),
+        )
+        val lines = listOf(rawOutputLine("%0", expected))
+
+        val combined = outputBytes(lines)
+
+        assertArrayEquals(expected, combined)
+        assertEquals("─┌", String(combined, Charsets.UTF_8))
+    }
+
+    @Test
+    fun `box-drawing char split across two output events reassembles`() = runTest {
+        // A 3-byte box-drawing char (`─`, e2 94 80) torn across an %output
+        // flush boundary — the lead byte in one event, the two continuation
+        // bytes in the next. Must still reassemble to the exact 3 bytes.
+        val lines = listOf(
+            rawOutputLine("%0", byteArrayOf(0xE2.toByte())),
+            rawOutputLine("%0", byteArrayOf(0x94.toByte(), 0x80.toByte())),
+        )
+
+        val combined = outputBytes(lines)
+
+        assertArrayEquals(byteArrayOf(0xE2.toByte(), 0x94.toByte(), 0x80.toByte()), combined)
+        assertEquals("─", String(combined, Charsets.UTF_8))
+    }
+
+    private fun indexOfSubarray(haystack: ByteArray, needle: ByteArray): Int {
+        if (needle.isEmpty() || haystack.size < needle.size) return -1
+        outer@ for (start in 0..haystack.size - needle.size) {
+            for (j in needle.indices) {
+                if (haystack[start + j] != needle[j]) continue@outer
+            }
+            return start
+        }
+        return -1
     }
 }

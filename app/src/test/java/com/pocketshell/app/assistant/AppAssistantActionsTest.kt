@@ -253,6 +253,71 @@ class AppAssistantActionsTest {
     }
 
     @Test
+    fun resolveFolder_buildsFullCandidateSet_fromSessionsAndDiscovered() = runTest {
+        val gateway = object : FolderListGateway {
+            override suspend fun listSessionsWithFolder(
+                host: HostEntity,
+                keyPath: String,
+                passphrase: CharArray?,
+                watchedRoots: List<ProjectRootEntity>,
+            ) = FolderListResult.Sessions(
+                rows = listOf(
+                    com.pocketshell.app.projects.FolderSessionRow(
+                        sessionName = "pocketshell",
+                        lastActivity = null,
+                        attached = true,
+                        cwd = "/home/dev/git/pocketshell",
+                    ),
+                ),
+                projectFoldersByRoot = mapOf(
+                    "/home/dev/git" to listOf("/home/dev/git/ssh-auto-forward", "/home/dev/git/notes"),
+                ),
+            )
+            override suspend fun createSession(
+                host: HostEntity,
+                keyPath: String,
+                passphrase: CharArray?,
+                sessionName: String,
+                cwd: String,
+                startCommand: String?,
+            ): Result<String> = Result.success(sessionName)
+            override suspend fun createEmptyProject(
+                host: HostEntity,
+                keyPath: String,
+                passphrase: CharArray?,
+                parentPath: String,
+                folderName: String,
+            ): Result<String> = Result.success("$parentPath/$folderName")
+            override suspend fun importFile(
+                host: HostEntity,
+                keyPath: String,
+                passphrase: CharArray?,
+                folderPath: String,
+                payload: FolderImportPayload,
+            ): Result<String> = Result.success("$folderPath/${payload.remoteName}")
+        }
+        val actions = actions(responder = { ExecResult("", "", 0) }, gateway = gateway)
+
+        // Discovered-only folder (no live session) is still resolvable — the
+        // candidate set is NOT limited to live sessions.
+        val resolved = actions.resolveFolder("dev", "ssh auto forward")
+        assertTrue(resolved is FolderResolutionResult.Resolved)
+        val resolution = (resolved as FolderResolutionResult.Resolved).resolution
+        assertTrue(resolution is FolderResolution.Confident)
+        assertEquals(
+            "/home/dev/git/ssh-auto-forward",
+            (resolution as FolderResolution.Confident).candidate.path,
+        )
+    }
+
+    @Test
+    fun resolveFolder_unknownHost_returnsUnavailable() = runTest {
+        val actions = actions(responder = { ExecResult("", "", 0) })
+        val result = actions.resolveFolder("ghost", "anything")
+        assertTrue(result is FolderResolutionResult.Unavailable)
+    }
+
+    @Test
     fun createFile_writesViaSsh() = runTest {
         var heredoc = ""
         val actions = actions(responder = { cmd -> heredoc = cmd; ExecResult("", "", 0) })

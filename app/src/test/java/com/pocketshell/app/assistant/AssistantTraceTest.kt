@@ -30,6 +30,10 @@ class AssistantTraceTest {
         override suspend fun getContext() = "ctx"
         override suspend fun listHosts() = "dev"
         override suspend fun listFolders(host: String) = "f"
+        override suspend fun resolveFolder(host: String, query: String) =
+            FolderResolutionResult.Resolved(
+                FolderResolution.Confident(FolderCandidate("/home/dev/proj", "proj")),
+            )
         override suspend fun listSessions(host: String) = "s"
         override suspend fun listDirectory(path: String) = "d"
         override suspend fun readFile(path: String) = "r"
@@ -74,7 +78,7 @@ class AssistantTraceTest {
             installId = "install-123",
         )
 
-        loop.run("git status") { AssistantAgentLoop.Decision.Confirm }
+        loop.run("git status", confirmGate = { AssistantAgentLoop.Decision.Confirm })
 
         val event = sink.events.single { it.action == AssistantTools.RUN_COMMAND }
         assertEquals("ok", event.result)
@@ -98,7 +102,7 @@ class AssistantTraceTest {
             installId = "i",
         )
 
-        loop.run("write the env file") { AssistantAgentLoop.Decision.Confirm }
+        loop.run("write the env file", confirmGate = { AssistantAgentLoop.Decision.Confirm })
 
         val event = sink.events.single { it.action == AssistantTools.CREATE_FILE }
         assertEquals(AssistantAgentLoop.REDACTED, event.args["content"])
@@ -145,7 +149,7 @@ class AssistantTraceTest {
             installId = "i",
         )
 
-        loop.run("clone owner/repo") { AssistantAgentLoop.Decision.Confirm }
+        loop.run("clone owner/repo", confirmGate = { AssistantAgentLoop.Decision.Confirm })
 
         assertTrue(sink.events.any { it.action == AssistantTools.CLONE_REPO && it.result == "ok" })
     }

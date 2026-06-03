@@ -34,6 +34,18 @@ internal interface AssistantActions {
     /** tmux folders on [host] (session name → cwd grouping). */
     suspend fun listFolders(host: String): String
 
+    /**
+     * Resolve a fuzzy [query] folder name to a working directory on [host],
+     * ranking the FULL known folder set (live session cwds + discovered /
+     * known project folders). The returned [FolderResolution] always carries
+     * candidates drawn from that real set — never a model-invented path — so a
+     * confident/ambiguous resolution can be fed safely into [startSession].
+     *
+     * Returns null when the host is unknown or its folders cannot be read; the
+     * loop surfaces that as a plain tool message rather than a resolution.
+     */
+    suspend fun resolveFolder(host: String, query: String): FolderResolutionResult
+
     /** tmux sessions on [host]. */
     suspend fun listSessions(host: String): String
 
@@ -89,6 +101,15 @@ internal interface AssistantActions {
      * authenticated the result is a clear non-crashing message.
      */
     suspend fun cloneRepo(fullName: String, folder: String?): ActionResult
+}
+
+/**
+ * Wraps a [FolderResolver] outcome for the `resolve_folder` tool, or a plain
+ * error message when the host is unknown / its folders cannot be read.
+ */
+internal sealed interface FolderResolutionResult {
+    data class Resolved(val resolution: FolderResolution) : FolderResolutionResult
+    data class Unavailable(val message: String) : FolderResolutionResult
 }
 
 /**

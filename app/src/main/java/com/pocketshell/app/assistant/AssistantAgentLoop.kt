@@ -78,6 +78,29 @@ internal class AssistantAgentLoop(
         val summary: String,
     )
 
+    /**
+     * The user's response to a folder-disambiguation prompt: either they
+     * picked one of the offered folders, or they backed out.
+     */
+    sealed interface ChoiceDecision {
+        /** The user picked [candidate]; its cwd is fed back to the model. */
+        data class Pick(val candidate: FolderCandidate) : ChoiceDecision
+
+        /** The user dismissed the chooser; the loop relays a cancellation. */
+        data object Cancel : ChoiceDecision
+    }
+
+    /**
+     * The "which folder?" UX seam, sibling to [ConfirmGate]. Given the fuzzy
+     * [query] and the ambiguous [candidates] (all real, drawn from the known
+     * folder set), surface a chooser and return the user's [ChoiceDecision].
+     * Deterministic: the picked cwd is relayed straight back to the model with
+     * no extra round-trip, so the model cannot re-guess the wrong folder.
+     */
+    fun interface ChoiceGate {
+        suspend fun choose(query: String, candidates: List<FolderCandidate>): ChoiceDecision
+    }
+
     /** Final loop outcome surfaced to the UI. */
     sealed interface Outcome {
         data class Answer(val text: String) : Outcome
@@ -99,7 +122,11 @@ internal class AssistantAgentLoop(
         suspend fun decide(candidate: Candidate): Decision
     }
 
-    suspend fun run(transcript: String, confirmGate: ConfirmGate): Outcome {
+    suspend fun run(
+        transcript: String,
+        choiceGate: ChoiceGate = ChoiceGate { _, _ -> ChoiceDecision.Cancel },
+        confirmGate: ConfirmGate,
+    ): Outcome {
         val messages = mutableListOf(
             LlmMessage.system(SYSTEM_PROMPT),
             LlmMessage.user(transcript),
@@ -141,7 +168,7 @@ internal class AssistantAgentLoop(
 
             val results = mutableListOf<LlmToolResult>()
             for (call in response.toolCalls) {
-                val outcome = dispatch(call, confirmGate)
+                val outcome = dispatch(call, confirmGate, choiceGate)
                 if (outcome is DispatchOutcome.CancelLoop) {
                     return Outcome.Cancelled(outcome.message)
                 }
@@ -174,13 +201,77 @@ internal class AssistantAgentLoop(
     private suspend fun dispatch(
         call: LlmToolCall,
         confirmGate: ConfirmGate,
+        choiceGate: ChoiceGate,
     ): DispatchOutcome {
         val args = parseArgs(call.argumentsJson)
-        return if (AssistantTools.isMutating(call.name)) {
-            dispatchMutating(call, args, confirmGate)
-        } else {
-            DispatchOutcome.Result(LlmToolResult(call.id, dispatchInspectOrNav(call.name, args)))
+        return when {
+            AssistantTools.isMutating(call.name) -> dispatchMutating(call, args, confirmGate)
+            call.name == AssistantTools.RESOLVE_FOLDER -> dispatchResolveFolder(call, args, choiceGate)
+            else -> DispatchOutcome.Result(LlmToolResult(call.id, dispatchInspectOrNav(call.name, args)))
         }
+    }
+
+    /**
+     * `resolve_folder` is read-only (it never mutates remote state), but it
+     * gets bespoke dispatch because the AMBIGUOUS band triggers a clarifying
+     * turn: we suspend on the [ChoiceGate], and the user's pick is relayed
+     * deterministically back to the model as the tool result so the model can
+     * immediately call start_session with the real cwd. Confident and no-match
+     * resolutions are summarised as text the same way other inspect tools are.
+     */
+    private suspend fun dispatchResolveFolder(
+        call: LlmToolCall,
+        args: JSONObject,
+        choiceGate: ChoiceGate,
+    ): DispatchOutcome {
+        val host = args.optString("host")
+        val query = args.optString("query")
+        val result = actions.resolveFolder(host, query)
+        emit(call.name, host, null, mapOf("host" to host, "query" to query), result = "ok")
+        return when (result) {
+            is FolderResolutionResult.Unavailable ->
+                DispatchOutcome.Result(LlmToolResult(call.id, result.message))
+            is FolderResolutionResult.Resolved -> when (val resolution = result.resolution) {
+                is FolderResolution.Confident ->
+                    DispatchOutcome.Result(
+                        LlmToolResult(
+                            call.id,
+                            "Confident match: ${resolution.candidate.label} at " +
+                                "${resolution.candidate.path}. Use this cwd in start_session.",
+                        ),
+                    )
+                is FolderResolution.NoMatch -> {
+                    val nearest = resolution.nearest
+                        .joinToString(", ") { "${it.label} (${it.path})" }
+                        .ifBlank { "none" }
+                    DispatchOutcome.Result(
+                        LlmToolResult(
+                            call.id,
+                            "No folder matched \"$query\". Nearest folders: $nearest. " +
+                                "Tell the user it wasn't found and stop unless they clarify.",
+                        ),
+                    )
+                }
+                is FolderResolution.Ambiguous -> dispatchAmbiguous(call, query, resolution, choiceGate)
+            }
+        }
+    }
+
+    private suspend fun dispatchAmbiguous(
+        call: LlmToolCall,
+        query: String,
+        resolution: FolderResolution.Ambiguous,
+        choiceGate: ChoiceGate,
+    ): DispatchOutcome = when (val decision = choiceGate.choose(query, resolution.candidates)) {
+        is ChoiceDecision.Pick ->
+            DispatchOutcome.Result(
+                LlmToolResult(
+                    call.id,
+                    "The user chose ${decision.candidate.label} at ${decision.candidate.path}. " +
+                        "Use this cwd in start_session.",
+                ),
+            )
+        is ChoiceDecision.Cancel -> DispatchOutcome.CancelLoop("Cancelled.")
     }
 
     private suspend fun dispatchInspectOrNav(name: String, args: JSONObject): String =
@@ -395,7 +486,12 @@ internal class AssistantAgentLoop(
             "You are PocketShell's in-app action assistant. The user dictates or types a " +
                 "request; you inspect app state and perform actions through the provided tools. " +
                 "Resolve references like \"this folder\", \"here\", or \"it\" by calling " +
-                "get_context FIRST. Prefer inspect tools before acting. Mutating tools " +
+                "get_context FIRST. When the user names a folder loosely instead of giving an " +
+                "absolute path (e.g. \"open Claude in the workshops folder\"), call resolve_folder " +
+                "to turn it into an exact cwd before start_session — never invent a path. If " +
+                "resolve_folder reports a confident match or the user has picked one, call " +
+                "start_session with that cwd; if it finds no match, tell the user and stop. " +
+                "Prefer inspect tools before acting. Mutating tools " +
                 "(run_command, create_file, start_session, create_project, clone_repo) are confirmed by the user " +
                 "before they run; if the user corrects you, revise the candidate and try again. " +
                 "Keep shell commands short and non-interactive. When the task is complete, reply " +

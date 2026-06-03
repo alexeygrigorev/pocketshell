@@ -44,6 +44,7 @@ internal class SessionAssistantController(
 
     private var runJob: Job? = null
     private var pendingDecision: CompletableDeferred<AssistantAgentLoop.Decision>? = null
+    private var pendingChoice: CompletableDeferred<AssistantAgentLoop.ChoiceDecision>? = null
     private var lastTranscript: String? = null
 
     /** Start a fresh assistant run for [transcript]. No-op while one is active. */
@@ -83,7 +84,11 @@ internal class SessionAssistantController(
                 sessionId = deps.sessionId,
                 modelTurnTimeoutMs = modelTurnTimeoutMs,
             )
-            val outcome = loop.run(cleaned, confirmGate = ::awaitDecision)
+            val outcome = loop.run(
+                cleaned,
+                confirmGate = ::awaitDecision,
+                choiceGate = ::awaitChoice,
+            )
             _state.value = when (outcome) {
                 is AssistantAgentLoop.Outcome.Answer -> AssistantUiState.Done(outcome.text)
                 is AssistantAgentLoop.Outcome.Cancelled -> AssistantUiState.Done(outcome.text)
@@ -112,8 +117,33 @@ internal class SessionAssistantController(
         return decision
     }
 
+    private suspend fun awaitChoice(
+        query: String,
+        candidates: List<FolderCandidate>,
+    ): AssistantAgentLoop.ChoiceDecision {
+        val deferred = CompletableDeferred<AssistantAgentLoop.ChoiceDecision>()
+        pendingChoice = deferred
+        _state.value = AssistantUiState.Choosing(query, candidates)
+        val decision = deferred.await()
+        pendingChoice = null
+        if (decision !is AssistantAgentLoop.ChoiceDecision.Cancel) {
+            _state.value = AssistantUiState.Thinking("")
+        }
+        return decision
+    }
+
     fun confirm() {
         pendingDecision?.complete(AssistantAgentLoop.Decision.Confirm)
+    }
+
+    /** The user picked [candidate] in the "which folder?" chooser. */
+    fun choose(candidate: FolderCandidate) {
+        pendingChoice?.complete(AssistantAgentLoop.ChoiceDecision.Pick(candidate))
+    }
+
+    /** The user dismissed the "which folder?" chooser without picking. */
+    fun cancelChoice() {
+        pendingChoice?.complete(AssistantAgentLoop.ChoiceDecision.Cancel)
     }
 
     fun correct(correction: String) {
@@ -131,6 +161,8 @@ internal class SessionAssistantController(
         runJob = null
         pendingDecision?.complete(AssistantAgentLoop.Decision.Cancel)
         pendingDecision = null
+        pendingChoice?.complete(AssistantAgentLoop.ChoiceDecision.Cancel)
+        pendingChoice = null
         _state.value = AssistantUiState.Idle
     }
 }
@@ -147,6 +179,15 @@ internal sealed interface AssistantUiState {
 
     /** A mutating candidate is awaiting Confirm / Correct / Cancel. */
     data class Confirming(val candidate: AssistantAgentLoop.Candidate) : AssistantUiState
+
+    /**
+     * A fuzzy folder name matched several folders; the user must pick which
+     * one before the session is created. Sibling to [Confirming].
+     */
+    data class Choosing(
+        val query: String,
+        val candidates: List<FolderCandidate>,
+    ) : AssistantUiState
 
     /** The run finished with a final assistant message. */
     data class Done(val message: String) : AssistantUiState

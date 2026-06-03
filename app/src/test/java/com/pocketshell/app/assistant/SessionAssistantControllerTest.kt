@@ -38,9 +38,15 @@ class SessionAssistantControllerTest {
 
     private class RecordingActions : AssistantActions {
         val ran = mutableListOf<String>()
+        val startedSessions = mutableListOf<String>()
         override suspend fun getContext() = "ctx"
         override suspend fun listHosts() = "dev"
         override suspend fun listFolders(host: String) = "f"
+        var folderResolution: FolderResolutionResult =
+            FolderResolutionResult.Resolved(
+                FolderResolution.Confident(FolderCandidate("/home/dev/proj", "proj")),
+            )
+        override suspend fun resolveFolder(host: String, query: String) = folderResolution
         override suspend fun listSessions(host: String) = "s"
         override suspend fun listDirectory(path: String) = "d"
         override suspend fun readFile(path: String) = "r"
@@ -48,7 +54,9 @@ class SessionAssistantControllerTest {
         override suspend fun openFolder(host: String, path: String) = "open"
         override suspend fun openSession(sessionName: String) = "open"
         override suspend fun openScreen(destination: String) = "open"
-        override suspend fun startSession(host: String, cwd: String, agent: String) = ActionResult.ok("ok")
+        override suspend fun startSession(host: String, cwd: String, agent: String): ActionResult {
+            startedSessions += "start_session($host,$cwd,$agent)"; return ActionResult.ok("ok")
+        }
         override suspend fun createProject(host: String, parentPath: String, folderName: String) =
             ActionResult.ok("ok")
         override suspend fun runCommand(command: String): ActionResult { ran += command; return ActionResult.ok("ok") }
@@ -108,6 +116,116 @@ class SessionAssistantControllerTest {
 
         assertTrue(controller.state.value is AssistantUiState.Done)
         assertEquals(listOf("git log -5"), actions.ran)
+    }
+
+    @Test
+    fun ambiguousFolder_parksInChoosing_thenPickRunsStartSession() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val actions = RecordingActions().apply {
+            folderResolution = FolderResolutionResult.Resolved(
+                FolderResolution.Ambiguous(
+                    listOf(
+                        FolderCandidate("/home/dev/rov/workshop", "ROV workshop"),
+                        FolderCandidate("/home/dev/notes/workshop", "workshop"),
+                    ),
+                ),
+            )
+        }
+        val client = ScriptedClient(
+            ArrayDeque(
+                listOf(
+                    toolCall(AssistantTools.RESOLVE_FOLDER, """{"host":"dev","query":"workshop"}""", "r1"),
+                    toolCall(
+                        AssistantTools.START_SESSION,
+                        """{"host":"dev","cwd":"/home/dev/rov/workshop","agent":"claude"}""",
+                        "c1",
+                    ),
+                    LlmResponse("Started Claude.", stopReason = StopReason.EndTurn),
+                ),
+            ),
+        )
+        val controller = SessionAssistantController(
+            scope = kotlinx.coroutines.CoroutineScope(dispatcher),
+            sessionFactory = {
+                SessionAssistantController.AssistantRunDeps(
+                    client = client,
+                    actions = actions,
+                    traceSink = NoOpAssistantTraceSink,
+                    installId = "i",
+                    sessionId = null,
+                )
+            },
+        )
+
+        controller.start("open claude in the workshop folder")
+        advanceUntilIdle()
+
+        val choosing = controller.state.value
+        assertTrue("expected Choosing, got $choosing", choosing is AssistantUiState.Choosing)
+        choosing as AssistantUiState.Choosing
+        assertEquals("workshop", choosing.query)
+        assertEquals(2, choosing.candidates.size)
+
+        controller.choose(choosing.candidates.first { it.path == "/home/dev/rov/workshop" })
+        advanceUntilIdle()
+
+        // After the folder pick the model proposes start_session, which is a
+        // mutating action — it still parks in the confirm gate (disambiguation
+        // chose the folder, confirm still authorizes the create).
+        val confirming = controller.state.value
+        assertTrue("expected Confirming, got $confirming", confirming is AssistantUiState.Confirming)
+        confirming as AssistantUiState.Confirming
+        assertTrue(confirming.candidate.summary.contains("/home/dev/rov/workshop"))
+
+        controller.confirm()
+        advanceUntilIdle()
+
+        assertTrue(controller.state.value is AssistantUiState.Done)
+        assertEquals(listOf("start_session(dev,/home/dev/rov/workshop,claude)"), actions.startedSessions)
+    }
+
+    @Test
+    fun ambiguousFolder_cancelChoice_endsRun() = runTest {
+        val dispatcher = StandardTestDispatcher(testScheduler)
+        val actions = RecordingActions().apply {
+            folderResolution = FolderResolutionResult.Resolved(
+                FolderResolution.Ambiguous(
+                    listOf(
+                        FolderCandidate("/home/dev/rov/workshop", "ROV workshop"),
+                        FolderCandidate("/home/dev/notes/workshop", "workshop"),
+                    ),
+                ),
+            )
+        }
+        val client = ScriptedClient(
+            ArrayDeque(
+                listOf(
+                    toolCall(AssistantTools.RESOLVE_FOLDER, """{"host":"dev","query":"workshop"}""", "r1"),
+                ),
+            ),
+        )
+        val controller = SessionAssistantController(
+            scope = kotlinx.coroutines.CoroutineScope(dispatcher),
+            sessionFactory = {
+                SessionAssistantController.AssistantRunDeps(
+                    client = client,
+                    actions = actions,
+                    traceSink = NoOpAssistantTraceSink,
+                    installId = "i",
+                    sessionId = null,
+                )
+            },
+        )
+
+        controller.start("open claude in the workshop folder")
+        advanceUntilIdle()
+        assertTrue(controller.state.value is AssistantUiState.Choosing)
+
+        controller.cancelChoice()
+        advanceUntilIdle()
+
+        assertTrue(controller.state.value is AssistantUiState.Done)
+        assertTrue(actions.startedSessions.isEmpty())
     }
 
     @Test

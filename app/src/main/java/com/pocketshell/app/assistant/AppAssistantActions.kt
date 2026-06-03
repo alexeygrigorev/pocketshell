@@ -125,6 +125,62 @@ internal class AppAssistantActions(
         }
     }
 
+    override suspend fun resolveFolder(host: String, query: String): FolderResolutionResult {
+        val params = resolveParams(host) ?: return FolderResolutionResult.Unavailable("Unknown host: $host")
+        val entity = hostEntity(params) ?: return FolderResolutionResult.Unavailable("Unknown host: $host")
+        return when (val result = folderListGateway.listSessionsWithFolder(entity, params.keyPath, params.passphrase)) {
+            is FolderListResult.Sessions -> {
+                val candidates = folderCandidates(result)
+                if (candidates.isEmpty()) {
+                    FolderResolutionResult.Unavailable("No folders found on $host.")
+                } else {
+                    FolderResolutionResult.Resolved(FolderResolver.resolve(query, candidates))
+                }
+            }
+            FolderListResult.ToolUnavailable -> FolderResolutionResult.Unavailable("tmux is not available on $host.")
+            is FolderListResult.Failed ->
+                FolderResolutionResult.Unavailable("Failed to read folders: ${result.message}")
+            is FolderListResult.ConnectFailed ->
+                FolderResolutionResult.Unavailable("Could not connect to $host: ${result.cause.message}")
+        }
+    }
+
+    /**
+     * Flatten the gateway probe into the FULL, untruncated candidate set the
+     * resolver ranks against: every live session's cwd plus every discovered /
+     * historical project folder under a watched root. Labels are the path tail
+     * (matching `FolderListViewModel.defaultLabelForPath`); session counts come
+     * from how many live sessions share a cwd. Crucially this never applies a
+     * `take(N)` cap, so the target folder can't be silently dropped the way the
+     * `get_context` summary can.
+     */
+    private fun folderCandidates(result: FolderListResult.Sessions): List<FolderCandidate> {
+        val sessionsByPath: Map<String, Int> = result.rows
+            .mapNotNull { it.cwd }
+            .groupingBy { it }
+            .eachCount()
+
+        val discovered: Set<String> = buildSet {
+            result.projectFoldersByRoot.values.forEach { addAll(it) }
+            result.historyProjectFoldersByRoot.values.forEach { addAll(it) }
+        }
+
+        val allPaths = (sessionsByPath.keys + discovered).distinct()
+        return allPaths.map { path ->
+            FolderCandidate(
+                path = path,
+                label = labelForPath(path),
+                sessionCount = sessionsByPath[path] ?: 0,
+            )
+        }
+    }
+
+    /** Mirrors `FolderListViewModel.defaultLabelForPath`: the trailing path segment. */
+    private fun labelForPath(path: String): String {
+        val tail = path.trimEnd('/').substringAfterLast('/')
+        return tail.ifBlank { path }
+    }
+
     override suspend fun listSessions(host: String): String {
         val params = resolveParams(host) ?: return "Unknown host: $host"
         val entity = hostEntity(params) ?: return "Unknown host: $host"

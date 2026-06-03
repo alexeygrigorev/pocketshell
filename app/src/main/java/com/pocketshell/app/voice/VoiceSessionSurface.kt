@@ -35,6 +35,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.pocketshell.app.assistant.AssistantAgentLoop
 import com.pocketshell.app.assistant.AssistantUiState
+import com.pocketshell.app.assistant.FolderCandidate
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.uikit.components.CommandChip
 import com.pocketshell.uikit.components.MicButton
@@ -102,6 +103,7 @@ internal fun AssistantStrip(
     onCancel: () -> Unit,
     onDismiss: () -> Unit,
     onRetry: () -> Unit = {},
+    onChoose: (FolderCandidate) -> Unit = {},
     correctionDictation: AssistantCorrectionDictation? = null,
 ) {
     if (state is AssistantUiState.Idle) return
@@ -196,6 +198,25 @@ internal fun AssistantStrip(
                     }
                 }
             }
+            is AssistantUiState.Choosing -> {
+                Text(
+                    text = "Which folder did you mean for \"${state.query}\"?",
+                    color = PocketShellColors.Text,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.testTag(ASSISTANT_CHOOSING_TAG),
+                )
+                state.candidates.forEach { candidate ->
+                    TextButton(
+                        onClick = { onChoose(candidate) },
+                        modifier = Modifier.testTag(assistantChoiceTag(candidate.path)),
+                    ) {
+                        val suffix = if (candidate.sessionCount > 0) " (${candidate.sessionCount} sessions)" else ""
+                        Text("${candidate.label} — ${candidate.path}$suffix")
+                    }
+                }
+                TextButton(onClick = onCancel) { Text("Cancel") }
+            }
             is AssistantUiState.Done -> {
                 Text(text = state.message, color = PocketShellColors.Text, fontSize = 12.sp)
                 TextButton(onClick = onDismiss) { Text("Dismiss") }
@@ -251,6 +272,9 @@ internal const val ASSISTANT_CORRECTION_FIELD_TAG: String = "assistant:correctio
 internal const val ASSISTANT_CORRECTION_MIC_TAG: String = "assistant:correction-mic"
 internal const val ASSISTANT_SEND_CORRECTION_TAG: String = "assistant:send-correction"
 internal const val ASSISTANT_RETRY_TAG: String = "assistant:retry"
+internal const val ASSISTANT_CHOOSING_TAG: String = "assistant:choosing"
+
+internal fun assistantChoiceTag(path: String): String = "assistant:choice:$path"
 
 /**
  * Scrollable strip of secondary command chips. Only the chips here are

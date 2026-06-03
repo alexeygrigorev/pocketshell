@@ -20,6 +20,7 @@ internal object AssistantTools {
     const val GET_CONTEXT = "get_context"
     const val LIST_HOSTS = "list_hosts"
     const val LIST_FOLDERS = "list_folders"
+    const val RESOLVE_FOLDER = "resolve_folder"
     const val LIST_SESSIONS = "list_sessions"
     const val LIST_DIRECTORY = "list_directory"
     const val READ_FILE = "read_file"
@@ -68,6 +69,23 @@ internal object AssistantTools {
                 {"type":"object","properties":{
                   "host":{"type":"string","description":"Saved host name."}
                 },"required":["host"],"additionalProperties":false}
+            """.trimIndent(),
+        ),
+        ToolSpec(
+            name = RESOLVE_FOLDER,
+            description = "Resolve a fuzzy, spoken folder name to an exact working directory on a " +
+                "host BEFORE starting a session. Call this when the user names a folder loosely " +
+                "(e.g. \"the workshops folder\") instead of giving an absolute path. It searches " +
+                "the full set of known folders on the host and returns one of: a single confident " +
+                "match (use its cwd in start_session), an ambiguous result (the user is asked which " +
+                "one and the chosen cwd is returned to you — then call start_session with it), or no " +
+                "match (tell the user it wasn't found and list the nearest folders). Never invent a " +
+                "cwd; always resolve it through this tool first.",
+            parametersJsonSchema = """
+                {"type":"object","properties":{
+                  "host":{"type":"string","description":"Saved host name."},
+                  "query":{"type":"string","description":"The fuzzy folder name the user said."}
+                },"required":["host","query"],"additionalProperties":false}
             """.trimIndent(),
         ),
         ToolSpec(

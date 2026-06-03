@@ -57,6 +57,13 @@ class AssistantAgentLoopTest {
         }
         override suspend fun listHosts(): String { calls += "list_hosts"; return "dev" }
         override suspend fun listFolders(host: String): String { calls += "list_folders($host)"; return "/home/dev/proj" }
+        var folderResolution: FolderResolutionResult =
+            FolderResolutionResult.Resolved(
+                FolderResolution.Confident(FolderCandidate("/home/dev/proj", "proj")),
+            )
+        override suspend fun resolveFolder(host: String, query: String): FolderResolutionResult {
+            calls += "resolve_folder($host,$query)"; return folderResolution
+        }
         override suspend fun listSessions(host: String): String { calls += "list_sessions($host)"; return "main" }
         override suspend fun listDirectory(path: String): String { calls += "list_directory($path)"; return "a\nb" }
         override suspend fun readFile(path: String): String { calls += "read_file($path)"; return "contents" }
@@ -155,6 +162,133 @@ class AssistantAgentLoopTest {
         assertTrue(outcome is AssistantAgentLoop.Outcome.Answer)
         assertEquals(AssistantTools.START_SESSION, seen!!.toolName)
         assertEquals(listOf("start_session(dev,/home/dev/proj,codex)"), actions.calls)
+    }
+
+    @Test
+    fun resolveFolder_confident_relaysCwd_thenStartSession() = runTest {
+        val client = ScriptedClient(
+            ArrayDeque(
+                listOf(
+                    toolCall(AssistantTools.RESOLVE_FOLDER, """{"host":"dev","query":"workshops"}""", "r1"),
+                    toolCall(
+                        AssistantTools.START_SESSION,
+                        """{"host":"dev","cwd":"/home/dev/proj","agent":"claude"}""",
+                        "c1",
+                    ),
+                    answer("Started Claude in /home/dev/proj."),
+                ),
+            ),
+        )
+        val actions = RecordingActions()
+        val loop = AssistantAgentLoop(client, actions)
+
+        val outcome = loop.run("open claude in the workshops folder") { AssistantAgentLoop.Decision.Confirm }
+
+        assertTrue(outcome is AssistantAgentLoop.Outcome.Answer)
+        assertTrue(actions.calls.contains("resolve_folder(dev,workshops)"))
+        assertTrue(actions.calls.contains("start_session(dev,/home/dev/proj,claude)"))
+    }
+
+    @Test
+    fun resolveFolder_ambiguous_raisesChoiceGate_relaysPickedCwd() = runTest {
+        val client = ScriptedClient(
+            ArrayDeque(
+                listOf(
+                    toolCall(AssistantTools.RESOLVE_FOLDER, """{"host":"dev","query":"workshop"}""", "r1"),
+                    toolCall(
+                        AssistantTools.START_SESSION,
+                        """{"host":"dev","cwd":"/home/dev/rov/workshop","agent":"claude"}""",
+                        "c1",
+                    ),
+                    answer("Started Claude in the ROV workshop."),
+                ),
+            ),
+        )
+        val actions = RecordingActions().apply {
+            folderResolution = FolderResolutionResult.Resolved(
+                FolderResolution.Ambiguous(
+                    listOf(
+                        FolderCandidate("/home/dev/rov/workshop", "ROV workshop"),
+                        FolderCandidate("/home/dev/notes/workshop", "workshop"),
+                    ),
+                ),
+            )
+        }
+        val loop = AssistantAgentLoop(client, actions)
+        var offered: List<FolderCandidate>? = null
+
+        val outcome = loop.run(
+            transcript = "open claude in the workshop folder",
+            confirmGate = { AssistantAgentLoop.Decision.Confirm },
+            choiceGate = { _, candidates ->
+                offered = candidates
+                AssistantAgentLoop.ChoiceDecision.Pick(candidates.first { it.path == "/home/dev/rov/workshop" })
+            },
+        )
+
+        assertTrue(outcome is AssistantAgentLoop.Outcome.Answer)
+        assertEquals(2, offered!!.size)
+        assertTrue(actions.calls.contains("start_session(dev,/home/dev/rov/workshop,claude)"))
+    }
+
+    @Test
+    fun resolveFolder_ambiguous_choiceCancel_abortsLoop() = runTest {
+        val client = ScriptedClient(
+            ArrayDeque(
+                listOf(
+                    toolCall(AssistantTools.RESOLVE_FOLDER, """{"host":"dev","query":"workshop"}""", "r1"),
+                ),
+            ),
+        )
+        val actions = RecordingActions().apply {
+            folderResolution = FolderResolutionResult.Resolved(
+                FolderResolution.Ambiguous(
+                    listOf(
+                        FolderCandidate("/home/dev/rov/workshop", "ROV workshop"),
+                        FolderCandidate("/home/dev/notes/workshop", "workshop"),
+                    ),
+                ),
+            )
+        }
+        val loop = AssistantAgentLoop(client, actions)
+
+        val outcome = loop.run(
+            transcript = "open claude in the workshop folder",
+            confirmGate = { AssistantAgentLoop.Decision.Confirm },
+            choiceGate = { _, _ -> AssistantAgentLoop.ChoiceDecision.Cancel },
+        )
+
+        assertTrue(outcome is AssistantAgentLoop.Outcome.Cancelled)
+        assertTrue(actions.calls.none { it.startsWith("start_session") })
+    }
+
+    @Test
+    fun resolveFolder_noMatch_doesNotRaiseChoice() = runTest {
+        var choiceCalled = false
+        val client = ScriptedClient(
+            ArrayDeque(
+                listOf(
+                    toolCall(AssistantTools.RESOLVE_FOLDER, """{"host":"dev","query":"nope"}""", "r1"),
+                    answer("I couldn't find that folder."),
+                ),
+            ),
+        )
+        val actions = RecordingActions().apply {
+            folderResolution = FolderResolutionResult.Resolved(
+                FolderResolution.NoMatch(listOf(FolderCandidate("/home/dev/git/pocketshell", "pocketshell"))),
+            )
+        }
+        val loop = AssistantAgentLoop(client, actions)
+
+        val outcome = loop.run(
+            transcript = "open claude in nope",
+            confirmGate = { AssistantAgentLoop.Decision.Confirm },
+            choiceGate = { _, _ -> choiceCalled = true; AssistantAgentLoop.ChoiceDecision.Cancel },
+        )
+
+        assertTrue(outcome is AssistantAgentLoop.Outcome.Answer)
+        assertTrue("no-match must not raise the chooser", !choiceCalled)
+        assertTrue(actions.calls.none { it.startsWith("start_session") })
     }
 
     @Test

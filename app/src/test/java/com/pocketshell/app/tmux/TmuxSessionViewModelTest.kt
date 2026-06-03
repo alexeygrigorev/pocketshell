@@ -11,6 +11,7 @@ import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
+import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLease
 import com.pocketshell.core.ssh.SshLeaseConnector
@@ -973,6 +974,114 @@ class TmuxSessionViewModelTest {
         )
         assertEquals("work", vm.connectingSessionNameForTest())
         assertTrue("manual reconnect must remain available after bounded auto failure", vm.canReconnect.value)
+    }
+
+    @Test
+    fun eofDisconnectAutoReconnectAbortsImmediatelyOnNonRetryableAuthFailure() = runTest {
+        // Issue #440: a non-retryable failure (auth rejection) must NOT burn
+        // the whole backoff schedule — the first failed reconnect attempt
+        // should fall straight back to the manual Reconnect affordance.
+        val registry = ActiveTmuxClients()
+        val connector = FailingLeaseConnector(
+            SshException(
+                "SSH connect to alex@alpha.example:22 failed: UserAuthException: auth fail",
+                UserAuthException("Exhausted available authentication methods"),
+            ),
+        )
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        // Four delays available — if the abort fails, all four would be used.
+        vm.setAutoReconnectDelaysForTest(listOf(0L, 0L, 0L, 0L))
+        val deadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+        )
+
+        deadClient.disconnectedSignal.value = true
+        advanceUntilIdle()
+
+        assertEquals(
+            "non-retryable auth failure must stop after a single reconnect attempt",
+            1,
+            connector.connectCount,
+        )
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "expected Failed after non-retryable auth failure, got $status",
+            status is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        val message = (status as TmuxSessionViewModel.ConnectionStatus.Failed).message
+        assertTrue(
+            "Failed message must explain the non-retryable cause, was: $message",
+            message.contains("authentication failed"),
+        )
+        assertFalse(
+            "non-retryable abort must not report exhausting all attempts, was: $message",
+            message.contains("Auto reconnect failed after"),
+        )
+        assertTrue("manual reconnect must remain available after non-retryable abort", vm.canReconnect.value)
+    }
+
+    @Test
+    fun eofDisconnectAutoReconnectRetriesTransientFailures() = runTest {
+        // Issue #440: a transient transport failure (e.g. connection refused
+        // while the host reboots) is retryable, so the backoff loop keeps
+        // trying. A connection that fails twice then succeeds must recover
+        // without manual input.
+        val registry = ActiveTmuxClients()
+        val connector = FailingThenConnectingLeaseConnector(
+            failures = listOf(
+                SshException(
+                    "SSH connect to alex@alpha.example:22 failed: ConnectException: Connection refused",
+                    ConnectException("Connection refused"),
+                ),
+            ),
+            session = FakeSshSession(),
+        )
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            reconnectClient
+        }
+        vm.setAutoReconnectDelaysForTest(listOf(0L, 0L, 0L))
+        val deadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+        )
+
+        deadClient.disconnectedSignal.value = true
+        advanceUntilIdle()
+
+        assertEquals(
+            "transient failure must be retried until the connect succeeds",
+            2,
+            connector.connectCount,
+        )
+        assertTrue(
+            "expected Connected after a retried transient failure, got ${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertSame(reconnectClient, registry.clients.value[7L]?.client)
     }
 
     @Test
@@ -5450,6 +5559,63 @@ class TmuxSessionViewModelTest {
             return Result.success(next)
         }
     }
+
+    /**
+     * Issue #440: lease connector that always fails with [failure]. Used to
+     * drive the non-retryable abort path of the auto-reconnect loop. Counts
+     * connect attempts so the test can assert the backoff loop stopped after
+     * a single try instead of exhausting the whole schedule.
+     */
+    private class FailingLeaseConnector(
+        private val failure: Throwable,
+    ) : SshLeaseConnector {
+        var connectCount: Int = 0
+            private set
+
+        override suspend fun connect(target: SshLeaseTarget): Result<com.pocketshell.core.ssh.SshSession> {
+            connectCount += 1
+            return Result.failure(failure)
+        }
+    }
+
+    /**
+     * Issue #440: lease connector that fails for the first [failures].size
+     * attempts (transient failures), then returns [session]. Used to prove
+     * the backoff loop keeps retrying through retryable failures and
+     * recovers once the transport comes back.
+     */
+    private class FailingThenConnectingLeaseConnector(
+        private val failures: List<Throwable>,
+        private val session: FakeSshSession,
+    ) : SshLeaseConnector {
+        var connectCount: Int = 0
+            private set
+
+        override suspend fun connect(target: SshLeaseTarget): Result<com.pocketshell.core.ssh.SshSession> {
+            val index = connectCount
+            connectCount += 1
+            return failures.getOrNull(index)?.let { Result.failure(it) }
+                ?: Result.success(session)
+        }
+    }
+
+    /**
+     * Issue #440: a stand-in whose [Class.getSimpleName] is exactly
+     * `UserAuthException` — the sshj authentication-failure type the
+     * production classifier keys off — so the unit test exercises the
+     * non-retryable abort without pulling the sshj hierarchy onto the
+     * test classpath. The classifier matches on the simple name, so the
+     * nested class name is what matters here.
+     */
+    private class UserAuthException(message: String) : Exception(message)
+
+    /**
+     * Issue #440: a stand-in whose simple name is `ConnectException`
+     * (mirroring `java.net.ConnectException`) so the test can confirm
+     * "connection refused" stays on the retryable path — it must NOT match
+     * the non-retryable classifier.
+     */
+    private class ConnectException(message: String) : IOException(message)
 
     /**
      * Issue #178: minimal in-memory [SshSession] double for the

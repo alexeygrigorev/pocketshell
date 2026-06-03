@@ -270,6 +270,18 @@ public class TmuxSessionViewModel @Inject constructor(
     private var eventsJob: Job? = null
     private var disconnectedJob: Job? = null
 
+    // Issue #440: the cause of the most recent failed connect attempt, set
+    // by [failConnectAttempt] and consulted by [scheduleAutoReconnect]. The
+    // auto-retry loop walks back through delays on a transient transport
+    // drop (a network blip the maintainer wants recovered without a tap),
+    // but a *non-retryable* failure — bad credentials, an unknown host,
+    // a missing key file — will never fix itself by waiting and retrying.
+    // For those we short-circuit the backoff loop immediately and fall back
+    // to the manual Reconnect affordance so the user isn't watching four
+    // doomed attempts tick by. Reset to null at the start of each fresh
+    // connect attempt so a stale cause never leaks into a later decision.
+    private var lastConnectFailureCause: Throwable? = null
+
     // Issue #145: whether [reconnect] would result in a new connect
     // attempt. The screen surfaces a Reconnect button only when this is
     // true; without a known target (e.g. the ViewModel was never opened)
@@ -1554,6 +1566,10 @@ public class TmuxSessionViewModel @Inject constructor(
         trigger: TmuxConnectTrigger,
     ) {
         val startedAtMs = SystemClock.elapsedRealtime()
+        // Issue #440: a fresh attempt starts with no recorded failure so a
+        // stale cause from a previous attempt never influences the retry
+        // decision. [failConnectAttempt] re-populates it if this one fails.
+        lastConnectFailureCause = null
         try {
             val lease = acquireLeaseForTmux(target, attempt, trigger, startedAtMs)
                 ?: return
@@ -1676,6 +1692,9 @@ public class TmuxSessionViewModel @Inject constructor(
         trigger: TmuxConnectTrigger,
         startedAtMs: Long,
     ) {
+        // Issue #440: clear any prior failure so the retry decision keys off
+        // this attempt only (mirrors [runConnect]).
+        lastConnectFailureCause = null
         try {
             val lease = acquireLeaseForTmux(
                 target = target,
@@ -1881,6 +1900,12 @@ public class TmuxSessionViewModel @Inject constructor(
         cause: Throwable,
         preserveReconnectTarget: Boolean,
     ) {
+        // Issue #440: remember why this attempt failed so the auto-retry
+        // loop can tell a transient transport drop (worth retrying with
+        // backoff) apart from a non-retryable config error (bad auth,
+        // unknown host, missing key) that should fall straight back to the
+        // manual Reconnect affordance.
+        lastConnectFailureCause = cause
         Log.w(
             ISSUE_145_RECONNECT_TAG,
             attachMilestoneMessage(
@@ -1903,6 +1928,68 @@ public class TmuxSessionViewModel @Inject constructor(
         connectingTarget = if (preserveReconnectTarget) target else null
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Failed(message)
+    }
+
+    /**
+     * Issue #440: true when [cause] describes a connect failure that will
+     * never succeed by waiting and retrying — bad credentials, an unknown
+     * host, or a missing private key. Auto-reconnect short-circuits to the
+     * manual Reconnect affordance for these instead of burning the whole
+     * backoff schedule.
+     *
+     * We classify by walking the cause chain and matching the wrapped
+     * exception's simple class name. [com.pocketshell.core.ssh.SshException]
+     * preserves the original sshj / java.net cause on [Throwable.cause], so
+     * an authentication or DNS failure surfaces a recognisable type a few
+     * links down. Matching on the name (rather than importing the sshj
+     * hierarchy into the app module) keeps this classification self-
+     * contained and resilient to the exact wrapper depth.
+     *
+     * Deliberately NOT treated as non-retryable: connection refused,
+     * connect timeouts, and generic transport drops. Those are exactly the
+     * transient network blips the maintainer wants recovered automatically
+     * (a host briefly unreachable while rebooting, Wi-Fi handover, etc.), so
+     * they stay on the retry-with-backoff path.
+     */
+    private fun isNonRetryableConnectFailure(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (current != null && seen.add(current)) {
+            val simpleName = current.javaClass.simpleName
+            if (simpleName in NON_RETRYABLE_FAILURE_CLASS_NAMES) return true
+            // The key-not-found case is surfaced as a plain IOException with a
+            // descriptive message (see [SshConnection]); a literal type match
+            // would be too broad (IOException also covers transient socket
+            // tear-downs), so we narrow it on the message text.
+            val message = current.message
+            if (message != null && message.contains(MISSING_KEY_MESSAGE_FRAGMENT, ignoreCase = true)) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
+    }
+
+    /**
+     * Issue #440: a short, user-facing reason for a non-retryable connect
+     * failure, used in the [ConnectionStatus.Failed] message that replaces
+     * the backoff loop. Keeps the band actionable ("authentication failed —
+     * check your key") instead of leaking the raw exception type.
+     */
+    private fun nonRetryableReason(cause: Throwable?): String {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (current != null && seen.add(current)) {
+            when (current.javaClass.simpleName) {
+                "UserAuthException" -> return "authentication failed"
+                "UnknownHostException" -> return "host could not be resolved"
+            }
+            if (current.message?.contains(MISSING_KEY_MESSAGE_FRAGMENT, ignoreCase = true) == true) {
+                return "private key file not found"
+            }
+            current = current.cause
+        }
+        return "connection cannot be retried"
     }
 
     private fun connectFailureMessage(t: Throwable, target: ConnectionTarget): String =
@@ -2170,6 +2257,29 @@ public class TmuxSessionViewModel @Inject constructor(
                 refreshReconnectAvailability()
                 runConnect(target, attempt, TmuxConnectTrigger.AutoReconnect)
                 if (_connectionStatus.value is ConnectionStatus.Connected) {
+                    autoReconnectJob = null
+                    return@launch
+                }
+                // Issue #440: a non-retryable failure (bad auth, unknown
+                // host, missing key) will not be fixed by waiting and
+                // retrying, so abandon the remaining backoff steps and fall
+                // straight back to the manual Reconnect affordance. The
+                // user fixes the credential/host and taps Reconnect; we do
+                // not make them watch three more doomed attempts.
+                val failureCause = lastConnectFailureCause
+                if (isNonRetryableConnectFailure(failureCause)) {
+                    Log.w(
+                        ISSUE_145_RECONNECT_TAG,
+                        "tmux-auto-reconnect-abort reason=non-retryable " +
+                            "cause=${failureCause?.javaClass?.simpleName} " +
+                            "attempt=${index + 1} " + targetLogFields(target),
+                    )
+                    connectingTarget = target
+                    refreshReconnectAvailability()
+                    _connectionStatus.value = ConnectionStatus.Failed(
+                        "$reason Auto reconnect stopped: ${nonRetryableReason(failureCause)}. " +
+                            "Tap Reconnect to retry.",
+                    )
                     autoReconnectJob = null
                     return@launch
                 }
@@ -5496,6 +5606,32 @@ internal const val ISSUE_235_LIFECYCLE_TAG: String = "PsTmuxLifecycle"
 internal const val ISSUE_188_DIAG_TAG: String = "issue188-killwindow"
 
 private val DEFAULT_AUTO_RECONNECT_DELAYS_MS: List<Long> = listOf(0L, 1_000L, 2_000L, 5_000L)
+
+/**
+ * Issue #440: simple class names of connect-failure causes that retrying
+ * cannot fix — authentication rejection and DNS resolution failure. Matched
+ * against the cause chain of a failed connect attempt (see
+ * [TmuxSessionViewModel.isNonRetryableConnectFailure]). When one of these is
+ * the failure, auto-reconnect stops immediately and surfaces the manual
+ * Reconnect affordance rather than exhausting the backoff schedule.
+ *
+ * `UserAuthException` is sshj's authentication failure; `UnknownHostException`
+ * is `java.net`'s DNS / unresolved-host signal. Both are config-level
+ * problems the user must fix, not transient blips.
+ */
+private val NON_RETRYABLE_FAILURE_CLASS_NAMES: Set<String> = setOf(
+    "UserAuthException",
+    "UnknownHostException",
+)
+
+/**
+ * Issue #440: substring that identifies the "private key file not found"
+ * IOException raised by [com.pocketshell.core.ssh.SshConnection]. A missing
+ * key is a non-retryable config error; matching on the message keeps the
+ * generic IOException type (which also covers transient socket drops) on the
+ * retryable path.
+ */
+private const val MISSING_KEY_MESSAGE_FRAGMENT: String = "Private key file not found"
 
 /**
  * Issue #423: a terminal surface that fails this many times within

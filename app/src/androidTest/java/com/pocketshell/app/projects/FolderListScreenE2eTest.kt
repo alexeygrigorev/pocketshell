@@ -192,14 +192,14 @@ class FolderListScreenE2eTest {
                 "~/tmp" to "/home/u/tmp",
             ),
         )
-        val viewModel = FolderListViewModel(
-            gateway = fakeGateway,
-            hostDao = db.hostDao(),
-            projectRootDao = db.projectRootDao(),
-            forwardingController = ForwardingController(InstrumentationRegistry.getInstrumentation().targetContext),
-        )
+        // The view model attaches a ProcessLifecycleOwner observer in init
+        // (#430), which is main-thread-affine. Construct it on the main
+        // thread so the lifecycle registry touch is legal under the
+        // instrumentation thread (the @Test body runs off the main thread).
+        val viewModel = constructFolderListViewModel(fakeGateway)
         val dictationViewModel = noopAssistantDictationViewModel()
         var openedWorkspaceSettings = false
+        var editedEnvPath: String? = null
 
         compose.setContent {
             PocketShellTheme(mode = PocketShellThemeMode.Dark) {
@@ -216,7 +216,7 @@ class FolderListScreenE2eTest {
                     onSessionCreated = { _, _ -> },
                     onBrowseRepos = { _ -> },
                     onOpenWorkspaceSettings = { openedWorkspaceSettings = true },
-                    onEditEnv = { _, _, _ -> },
+                    onEditEnv = { path, _, _ -> editedEnvPath = path },
                     modifier = Modifier.fillMaxSize(),
                     viewModel = viewModel,
                     assistantDictationViewModel = dictationViewModel,
@@ -242,13 +242,20 @@ class FolderListScreenE2eTest {
         compose.onNodeWithText("Flat projects").assertDoesNotExist()
         compose.onNodeWithText("Repos").assertDoesNotExist()
         compose.onNodeWithContentDescription("Browse repos").assertExists()
-        compose.onNodeWithTag(folderTreeRootLabelTag("~/git")).assertExists()
+        compose.onNodeWithTag(folderTreeRootLabelTag("~/git"), useUnmergedTree = true).assertExists()
+        // The action-bearing root header Rows (~/git, ~/tmp) wrap their label
+        // in a semantics-merging `combinedClickable` (#455), so the label
+        // `Text` is no longer an independently-keyed node in the merged tree.
+        // Scroll to the still-independent root actions kebab button instead,
+        // then assert the label exists on the unmerged tree. The OTHER root
+        // has no actions (no `combinedClickable`, no kebab), so its label
+        // stays an independent node and can be scrolled to directly.
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
-            .performScrollToNode(hasTestTag(folderTreeRootLabelTag("~/tmp")))
-        compose.onNodeWithTag(folderTreeRootLabelTag("~/tmp")).assertExists()
+            .performScrollToNode(hasTestTag(folderTreeRootActionsTestTag("~/tmp")))
+        compose.onNodeWithTag(folderTreeRootLabelTag("~/tmp"), useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
             .performScrollToNode(hasTestTag(folderTreeRootLabelTag(FolderListViewModel.OTHER_ROOT_PATH)))
-        compose.onNodeWithTag(folderTreeRootLabelTag(FolderListViewModel.OTHER_ROOT_PATH)).assertExists()
+        compose.onNodeWithTag(folderTreeRootLabelTag(FolderListViewModel.OTHER_ROOT_PATH), useUnmergedTree = true).assertExists()
         val readyRoots = (viewModel.state.value as FolderListUiState.Ready).treeRoots
         assertEquals(
             listOf("git", "tmp", FolderListViewModel.OTHER_ROOT_LABEL),
@@ -308,10 +315,31 @@ class FolderListScreenE2eTest {
         assertAccessibleTouchTarget(folderTreeRootCreateTestTag("~/git"))
         assertAccessibleTouchTarget(folderTreeRootActionsTestTag("~/tmp"))
         assertAccessibleTouchTarget(folderTreeRootCreateTestTag("~/tmp"))
+        // #455: the per-folder inline cluster is now just the overflow
+        // kebab + the accent `+`. The former inline `E` (env) button is
+        // gone; env folds into the overflow sheet (asserted below).
         assertAccessibleTouchTarget(folderDetailActionsTestTag("/home/u/git/pocketshell"))
-        assertAccessibleTouchTarget(folderDetailEnvTestTag("/home/u/git/pocketshell"))
         assertAccessibleTouchTarget(folderDetailCreateTestTag("/home/u/git/pocketshell"))
         compose.onNodeWithText("+ New", useUnmergedTree = true).assertDoesNotExist()
+
+        // #455 evidence: compact tree with single overflow kebab + `+`,
+        // full folder names visible, more rows per screen.
+        captureViewport("issue455-folder-tree-compact-viewport.png")
+
+        // #455: opening the per-folder overflow sheet surfaces the "Env
+        // files" row (it replaced the inline `E` button). Tapping it routes
+        // to the env editor (no-op onEditEnv in this test) and dismisses the
+        // sheet, leaving the tree untouched for the remaining assertions.
+        compose.onNodeWithTag(folderDetailActionsTestTag("/home/u/git/pocketshell")).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(FOLDER_CONTEXT_ENV_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
+        captureFullDevice("issue455-overflow-sheet-with-env.png")
+        compose.onNodeWithTag(FOLDER_CONTEXT_ENV_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(FOLDER_CONTEXT_ENV_TAG).fetchSemanticsNodes().isEmpty()
+        }
+        assertEquals("/home/u/git/pocketshell", editedEnvPath)
 
         // --- Assertion 3: projects are collapsed by default; expanding
         //    pocketshell reveals agent sessions before idle shell
@@ -344,8 +372,11 @@ class FolderListScreenE2eTest {
         compose.onNodeWithText("tmux session detached").assertDoesNotExist()
 
         // Agent / shell rollup labels visible on the expanded project.
-        compose.onNodeWithText("Claude").assertExists()
-        compose.onNodeWithText("Idle").assertExists()
+        // #431 renders agent identity and state as one label ("Claude · Idle"),
+        // so match the agent identity and the state word as substrings rather
+        // than as two separate exact-text nodes.
+        compose.onNodeWithText("Claude", substring = true).assertExists()
+        compose.onNodeWithText("Idle", substring = true).assertExists()
 
         // --- Capture viewport before opening any picker/sheet (artifact
         //    path matches the project's `*-viewport.png` convention so
@@ -420,12 +451,7 @@ class FolderListScreenE2eTest {
             rows = emptyList(),
             discoveredPorts = listOf(RemotePort(port = 3000, processName = "node")),
         )
-        val viewModel = FolderListViewModel(
-            gateway = fakeGateway,
-            hostDao = db.hostDao(),
-            projectRootDao = db.projectRootDao(),
-            forwardingController = ForwardingController(InstrumentationRegistry.getInstrumentation().targetContext),
-        )
+        val viewModel = constructFolderListViewModel(fakeGateway)
         var openedPortForwarding = false
 
         compose.setContent {
@@ -484,13 +510,35 @@ class FolderListScreenE2eTest {
             folderCountPillTestTag(folderPath),
             useUnmergedTree = true,
         ).assertExists()
+        // #455: folding `...`/`E` behind the overflow and shrinking `+` to
+        // 36dp recovers name width. The label `Text` itself measures to its
+        // intrinsic content width (a short word renders narrow regardless of
+        // available space), so we assert the *available name column* instead:
+        // the horizontal gap from the label's left edge to the start of the
+        // overflow/`+` action cluster. With the old 3-button cluster this gap
+        // was ~108dp narrower; assert it is now comfortably wide (≥ 240dp) so
+        // long folder names have room and stop truncating.
+        val actionsBounds = compose.onNodeWithTag(
+            folderDetailActionsTestTag(folderPath),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val availableNameWidth = actionsBounds.left - labelBounds.left
+        val density = InstrumentationRegistry.getInstrumentation()
+            .targetContext.resources.displayMetrics.density
+        val minPx = 240f * density
         assertTrue(
-            "project label for $folderPath should keep enough readable width: ${labelBounds.width}",
-            labelBounds.width >= 180f,
+            "project name column for $folderPath should keep readable width " +
+                "(>= 240dp = ${minPx}px): ${availableNameWidth}px " +
+                "(label.left=${labelBounds.left}px, actions.left=${actionsBounds.left}px)",
+            availableNameWidth >= minPx,
         )
     }
 
-    private fun assertAccessibleTouchTarget(tag: String) {
+    // #455: the compact tree icon buttons (overflow kebab + accent `+`)
+    // shrank to a 36dp hit box so the folder name keeps its width. 36dp is
+    // the design-system minimum for tree icon buttons (§4/§6.1); secondary
+    // actions live in the long-press / overflow sheet, not as 48dp pills.
+    private fun assertAccessibleTouchTarget(tag: String, minDp: Float = 36f) {
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG)
             .performScrollToNode(hasTestTag(tag))
         val node = compose.onNodeWithTag(tag, useUnmergedTree = true)
@@ -499,11 +547,27 @@ class FolderListScreenE2eTest {
         val bounds = node.fetchSemanticsNode().boundsInRoot
         val density = InstrumentationRegistry.getInstrumentation()
             .targetContext.resources.displayMetrics.density
-        val minPx = 48f * density
+        val minPx = minDp * density
         assertTrue(
-            "control $tag should expose at least a 48dp tap target: ${bounds.width}x${bounds.height}",
+            "control $tag should expose at least a ${minDp}dp tap target: ${bounds.width}x${bounds.height}",
             bounds.width >= minPx && bounds.height >= minPx && bounds.width >= bounds.height * 0.85f,
         )
+    }
+
+    private fun constructFolderListViewModel(
+        gateway: FolderListGateway,
+    ): FolderListViewModel {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        lateinit var vm: FolderListViewModel
+        instrumentation.runOnMainSync {
+            vm = FolderListViewModel(
+                gateway = gateway,
+                hostDao = db.hostDao(),
+                projectRootDao = db.projectRootDao(),
+                forwardingController = ForwardingController(instrumentation.targetContext),
+            )
+        }
+        return vm
     }
 
     private fun captureFullDevice(name: String) {

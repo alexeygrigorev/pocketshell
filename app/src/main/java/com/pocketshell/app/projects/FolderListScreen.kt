@@ -10,7 +10,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -58,6 +60,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -293,24 +296,29 @@ fun FolderListScreen(
                         pickerFolder = PickerTarget(path = row.path, label = row.label)
                     },
                     onFolderActions = { row ->
-                        actionFolder = PickerTarget(path = row.path, label = row.label)
+                        // Copy-source set = every real (non-untracked)
+                        // discovered folder the user can see, so the env
+                        // screen's picker stays inside the known set (D24).
+                        // Captured here so the action sheet's "Env files"
+                        // row can route straight to the env editor (#455).
+                        val sources = s.folders
+                            .filter { it.path != FolderListViewModel.UNTRACKED_PATH }
+                            .map { it.path to it.label }
+                        actionFolder = PickerTarget(
+                            path = row.path,
+                            label = row.label,
+                            envSources = sources,
+                        )
                     },
                     onCreateInRoot = { root ->
                         rootAddSheet = root
                     },
                     onRootActions = { root ->
+                        // Roots have no `.env` of their own; the env row is
+                        // suppressed for them (empty envSources → no row).
                         actionFolder = PickerTarget(path = root.path, label = root.label)
                     },
                     onToggleProjectExpanded = { row -> viewModel.toggleProjectExpanded(row.path) },
-                    onEditEnv = { row ->
-                        // Copy-source set = every real (non-untracked)
-                        // discovered folder the user can see, so the env
-                        // screen's picker stays inside the known set (D24).
-                        val sources = s.folders
-                            .filter { it.path != FolderListViewModel.UNTRACKED_PATH }
-                            .map { it.path to it.label }
-                        onEditEnv(row.path, row.label, sources)
-                    },
                 )
             }
         }
@@ -410,6 +418,16 @@ fun FolderListScreen(
                 actionFolder = null
                 pickerFolder = target
             },
+            // Env files folds into the sheet (#455). Suppressed for roots,
+            // which have no `.env` of their own (empty envSources).
+            onEnv = if (target.envSources.isNotEmpty()) {
+                {
+                    actionFolder = null
+                    onEditEnv(target.path, target.label, target.envSources)
+                }
+            } else {
+                null
+            },
             onImport = {
                 actionFolder = null
                 importFolder = target
@@ -457,7 +475,15 @@ fun FolderListScreen(
     }
 }
 
-private data class PickerTarget(val path: String, val label: String)
+private data class PickerTarget(
+    val path: String,
+    val label: String,
+    // Copy-source set for the env screen, captured when the folder-actions
+    // sheet is opened so its "Env files" row can route straight to the env
+    // editor without re-deriving the folder list (#455). Empty for targets
+    // that never reach the env action (root add-sheet, FAB default).
+    val envSources: List<Pair<String, String>> = emptyList(),
+)
 
 private enum class AssistantDictationTarget { Prompt, Correction }
 
@@ -917,7 +943,6 @@ private fun FolderListContent(
     onCreateInRoot: (FolderTreeRoot) -> Unit,
     onRootActions: (FolderTreeRoot) -> Unit,
     onToggleProjectExpanded: (FolderRow) -> Unit,
-    onEditEnv: (FolderRow) -> Unit,
 ) {
     LazyColumn(
         modifier = Modifier
@@ -954,7 +979,6 @@ private fun FolderListContent(
                     onCreateInRoot = onCreateInRoot,
                     onRootActions = onRootActions,
                     onToggleProjectExpanded = onToggleProjectExpanded,
-                    onEditEnv = onEditEnv,
                 )
             }
         } else if (folders.isEmpty()) {
@@ -970,7 +994,6 @@ private fun FolderListContent(
                     onCreateInFolder = onCreateInFolder,
                     onFolderActions = onFolderActions,
                     onToggleExpanded = {},
-                    onEditEnv = onEditEnv,
                 )
             }
         }
@@ -1125,7 +1148,6 @@ private fun FolderTreeRootGroup(
     onCreateInRoot: (FolderTreeRoot) -> Unit,
     onRootActions: (FolderTreeRoot) -> Unit,
     onToggleProjectExpanded: (FolderRow) -> Unit,
-    onEditEnv: (FolderRow) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -1155,7 +1177,6 @@ private fun FolderTreeRootGroup(
                         onCreateInFolder = onCreateInFolder,
                         onFolderActions = onFolderActions,
                         onToggleExpanded = { onToggleProjectExpanded(folder) },
-                        onEditEnv = onEditEnv,
                     )
                 }
             }
@@ -1174,15 +1195,31 @@ private fun FolderTreeRootGroup(
 private fun folderDisplayLabel(label: String, path: String): String =
     label.ifBlank { FolderListViewModel.defaultLabelForPath(path) }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FolderTreeRootHeader(
     root: FolderTreeRoot,
     onCreateInRoot: () -> Unit,
     onRootActions: () -> Unit,
 ) {
+    val hasActions = root.path != FolderListViewModel.OTHER_ROOT_PATH
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // Long-press the root band reaches the same actions sheet as the
+            // overflow kebab, keeping the inline cluster to `+` plus the
+            // kebab (#455).
+            .then(
+                if (hasActions) {
+                    Modifier.combinedClickable(
+                        role = Role.Button,
+                        onClick = {},
+                        onLongClick = onRootActions,
+                    )
+                } else {
+                    Modifier
+                },
+            )
             .padding(horizontal = 2.dp, vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -1201,9 +1238,9 @@ private fun FolderTreeRootHeader(
             RootCountText(root = root)
         }
         Spacer(modifier = Modifier.width(8.dp))
-        if (root.path != FolderListViewModel.OTHER_ROOT_PATH) {
+        if (hasActions) {
             CompactTreeIconButton(
-                label = "...",
+                label = "⋮",
                 contentDescription = "Root actions",
                 onClick = onRootActions,
                 testTag = folderTreeRootActionsTestTag(root.path),
@@ -1284,7 +1321,6 @@ private fun FolderGroup(
     onCreateInFolder: (FolderRow) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onToggleExpanded: () -> Unit,
-    onEditEnv: (FolderRow) -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -1312,7 +1348,6 @@ private fun FolderGroup(
                 onToggleExpanded = onToggleExpanded,
                 onCreateInFolder = { onCreateInFolder(folder) },
                 onFolderActions = { onFolderActions(folder) },
-                onEditEnv = { onEditEnv(folder) },
                 modifier = Modifier.weight(1f),
             )
         }
@@ -1348,6 +1383,7 @@ private fun FolderGroup(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FolderHeader(
     folder: FolderRow,
@@ -1355,14 +1391,29 @@ private fun FolderHeader(
     onToggleExpanded: () -> Unit,
     onCreateInFolder: () -> Unit,
     onFolderActions: () -> Unit,
-    onEditEnv: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val hasActions = folder.path != FolderListViewModel.UNTRACKED_PATH
     Row(
         modifier = modifier
             .fillMaxWidth()
             .background(PocketShellColors.Surface.copy(alpha = 0.10f), RoundedCornerShape(4.dp))
-            .clickable(role = Role.Button, onClick = onToggleExpanded)
+            // Long-press the row to reach the consolidated folder-actions
+            // sheet (env files, import, clone, empty project) so the inline
+            // affordances stay down to one `+` plus the overflow kebab and
+            // the folder name keeps its width (#455). Untracked has no
+            // filesystem path to manage, so it only toggles.
+            .then(
+                if (hasActions) {
+                    Modifier.combinedClickable(
+                        role = Role.Button,
+                        onClick = onToggleExpanded,
+                        onLongClick = onFolderActions,
+                    )
+                } else {
+                    Modifier.clickable(role = Role.Button, onClick = onToggleExpanded)
+                },
+            )
             .testTag(folderHeaderClickTestTag(folder.path))
             .padding(start = 4.dp, end = 0.dp, top = 4.dp, bottom = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1412,20 +1463,17 @@ private fun FolderHeader(
         }
         Spacer(modifier = Modifier.width(4.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            // Issue #264: "Env" entry point — only on real folders (the
-            // synthetic Untracked group has no filesystem path to manage).
+            // Secondary actions (env files, import, clone, empty project)
+            // collapse behind a single overflow kebab — and the row
+            // long-press — so the name column keeps its width (#455). Only
+            // real folders have a filesystem path to manage; the synthetic
+            // Untracked group shows just the inline `+`.
             if (folder.path != FolderListViewModel.UNTRACKED_PATH) {
                 CompactTreeIconButton(
-                    label = "...",
+                    label = "⋮",
                     contentDescription = "Project actions",
                     onClick = onFolderActions,
                     testTag = folderDetailActionsTestTag(folder.path),
-                )
-                CompactTreeIconButton(
-                    label = "E",
-                    contentDescription = "Environment files",
-                    onClick = onEditEnv,
-                    testTag = folderDetailEnvTestTag(folder.path),
                 )
             }
             CompactTreeIconButton(
@@ -1535,6 +1583,7 @@ private fun CompactTreeIconButton(
     modifier: Modifier = Modifier,
     testTag: String? = null,
     accent: Boolean = false,
+    size: Dp = 36.dp,
 ) {
     val background = if (accent) {
         PocketShellColors.AccentSoft
@@ -1542,9 +1591,13 @@ private fun CompactTreeIconButton(
         PocketShellColors.SurfaceElev.copy(alpha = 0.72f)
     }
     val foreground = if (accent) PocketShellColors.Accent else PocketShellColors.TextSecondary
+    // Inner pill scales with the hit box but stays ~4 dp smaller so the
+    // tap target meets the design-system minimum (§6.1) while reading as a
+    // compact glyph.
+    val pillSize = (size.value - 4f).coerceAtLeast(24f).dp
     Box(
         modifier = modifier
-            .size(48.dp)
+            .size(size)
             .semantics { this.contentDescription = contentDescription }
             .clickable(role = Role.Button, onClick = onClick)
             .then(if (testTag != null) Modifier.testTag(testTag) else Modifier),
@@ -1552,14 +1605,14 @@ private fun CompactTreeIconButton(
     ) {
         Box(
             modifier = Modifier
-                .size(32.dp)
+                .size(pillSize)
                 .background(background, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
             Text(
                 text = label,
                 color = foreground,
-                fontSize = if (label == "+") 18.sp else 12.sp,
+                fontSize = if (label == "+") 18.sp else 14.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
             )
@@ -1747,8 +1800,6 @@ fun folderDetailCreateTestTag(folderPath: String): String =
     "folder-list:detail:$folderPath:create"
 fun folderDetailActionsTestTag(folderPath: String): String =
     "folder-list:detail:$folderPath:actions"
-fun folderDetailEnvTestTag(folderPath: String): String =
-    "folder-list:detail:$folderPath:env"
 fun folderDetailDisclosureTestTag(folderPath: String): String =
     "folder-list:detail:$folderPath:disclosure"
 fun folderStatusDotTestTag(folderPath: String): String =

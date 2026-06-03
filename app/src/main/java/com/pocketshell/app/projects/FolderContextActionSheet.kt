@@ -45,6 +45,7 @@ fun FolderContextActionSheet(
     onImport: () -> Unit,
     onCloneGitProject: () -> Unit,
     onEmptyProject: () -> Unit,
+    onEnv: (() -> Unit)? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
@@ -60,6 +61,7 @@ fun FolderContextActionSheet(
             onImport = onImport,
             onCloneGitProject = onCloneGitProject,
             onEmptyProject = onEmptyProject,
+            onEnv = onEnv,
         )
     }
 }
@@ -72,6 +74,7 @@ internal fun FolderContextActionContent(
     onImport: () -> Unit,
     onCloneGitProject: () -> Unit,
     onEmptyProject: () -> Unit,
+    onEnv: (() -> Unit)? = null,
 ) {
     Column(
         modifier = Modifier
@@ -92,6 +95,11 @@ internal fun FolderContextActionContent(
         )
         Spacer(modifier = Modifier.height(2.dp))
         FolderContextRow("+ New session here", FOLDER_CONTEXT_NEW_SESSION_TAG, onNewSession)
+        // Env files folds into the per-folder overflow sheet (#455); the
+        // former inline `E` button is gone. Suppressed for roots (no .env).
+        if (onEnv != null) {
+            FolderContextRow("Env files", FOLDER_CONTEXT_ENV_TAG, onEnv)
+        }
         FolderContextRow("Import into this folder", FOLDER_CONTEXT_IMPORT_TAG, onImport)
         FolderContextRow("Clone git project", FOLDER_CONTEXT_CLONE_TAG, onCloneGitProject)
         FolderContextRow("Empty project", FOLDER_CONTEXT_EMPTY_PROJECT_TAG, onEmptyProject)
@@ -180,6 +188,7 @@ fun EmptyProjectDialog(
 
 const val FOLDER_CONTEXT_SHEET_TAG: String = "folder-context:sheet"
 const val FOLDER_CONTEXT_NEW_SESSION_TAG: String = "folder-context:new-session"
+const val FOLDER_CONTEXT_ENV_TAG: String = "folder-context:env"
 const val FOLDER_CONTEXT_IMPORT_TAG: String = "folder-context:import"
 const val FOLDER_CONTEXT_CLONE_TAG: String = "folder-context:clone"
 const val FOLDER_CONTEXT_EMPTY_PROJECT_TAG: String = "folder-context:empty-project"

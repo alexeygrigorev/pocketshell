@@ -1,5 +1,6 @@
 package com.pocketshell.app.testaccess
 
+import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.SshKeyDao
 import dagger.hilt.EntryPoint
@@ -43,4 +44,13 @@ import dagger.hilt.components.SingletonComponent
 internal interface TestAccessEntryPoint {
     fun appDatabase(): AppDatabase
     fun sshKeyDao(): SshKeyDao
+
+    /**
+     * Issue #446: the singleton [ForwardingController] so the indicator
+     * connected test ([com.pocketshell.app.portfwd.ForwardingIndicatorE2eTest])
+     * can register/unregister an active host against the same instance the
+     * production app-bar indicator observes — without standing up a real
+     * SSH forward.
+     */
+    fun forwardingController(): ForwardingController
 }

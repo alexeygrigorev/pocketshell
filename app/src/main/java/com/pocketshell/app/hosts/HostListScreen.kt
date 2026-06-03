@@ -136,9 +136,17 @@ fun HostListScreen(
      * Success row falls back to a Continue-only layout.
      */
     onOpenUsage: (() -> Unit)? = null,
+    /**
+     * Issue #446 (epic #432 slice D): open the port-forward panel entry
+     * from the global "ports forwarding" indicator in the app bar. The
+     * indicator only renders when ≥1 host is actively forwarding, so this
+     * routes to the same chooser the QS tile + notification deep-link use.
+     */
+    onOpenPortForwarding: () -> Unit = {},
     modifier: Modifier = Modifier,
     viewModel: HostListViewModel = hiltViewModel(),
     sessionsViewModel: SessionsDashboardViewModel = hiltViewModel(),
+    forwardingIndicatorViewModel: com.pocketshell.app.portfwd.ForwardingIndicatorViewModel = hiltViewModel(),
 ) {
     val hosts by viewModel.hosts.collectAsState()
     val sessions by sessionsViewModel.sessions.collectAsState()
@@ -171,6 +179,7 @@ fun HostListScreen(
     // a warning AND that the user hasn't dismissed for this app session.
     val usageWarningProviders by viewModel.usageWarningProviders.collectAsState()
     val dismissedBanners by viewModel.dismissedBanners.collectAsState()
+    val forwardingIndicator by forwardingIndicatorViewModel.state.collectAsState()
     val context = LocalContext.current
     val activity = context as? FragmentActivity
 
@@ -334,6 +343,8 @@ fun HostListScreen(
             // while the content below scrolls.
             HostsAppBar(
                 onSettingsClick = onOpenSettings,
+                forwardingIndicator = forwardingIndicator,
+                onForwardingIndicatorClick = onOpenPortForwarding,
             )
 
             // The landing body is one scrolling hosts-first list. Live
@@ -843,6 +854,9 @@ private fun UpdateBanner(info: ReleaseInfo, onUpdate: () -> Unit) {
 @Composable
 private fun HostsAppBar(
     onSettingsClick: () -> Unit = {},
+    forwardingIndicator: com.pocketshell.app.portfwd.ForwardingIndicatorState =
+        com.pocketshell.app.portfwd.ForwardingIndicatorState(),
+    onForwardingIndicatorClick: () -> Unit = {},
 ) {
     Row(
         modifier = Modifier
@@ -860,6 +874,17 @@ private fun HostsAppBar(
             fontWeight = FontWeight.Bold,
             modifier = Modifier.weight(1f),
         )
+        // Issue #446: the global "ports forwarding" indicator only appears
+        // while ≥1 host is actively auto-forwarding. Tapping it opens the
+        // port-forward panel entry (same chooser as the QS tile +
+        // notification deep-link).
+        if (forwardingIndicator.visible) {
+            ForwardingIndicatorPill(
+                state = forwardingIndicator,
+                onClick = onForwardingIndicatorClick,
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+        }
         TopBarIconButton(
             contentDescription = "Settings",
             testTag = SETTINGS_BUTTON_TAG,
@@ -867,6 +892,95 @@ private fun HostsAppBar(
         ) {
             SettingsGearIcon()
         }
+    }
+}
+
+// Stable tag for the global port-forward indicator pill. Connected tests
+// assert it appears only while ≥1 host is forwarding and routes to the
+// panel on tap.
+internal const val FORWARDING_INDICATOR_TAG = "hosts:indicator:forwarding"
+
+@Composable
+private fun ForwardingIndicatorPill(
+    state: com.pocketshell.app.portfwd.ForwardingIndicatorState,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .height(32.dp)
+            .background(
+                color = PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(16.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = RoundedCornerShape(16.dp),
+            )
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { this.contentDescription = state.contentDescription }
+            .testTag(FORWARDING_INDICATOR_TAG)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        // A small forwarding glyph (two opposed arrows) drawn inline so the
+        // pill carries no extra drawable dependency.
+        ForwardingGlyph()
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = state.label,
+            color = PocketShellColors.Text,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+@Composable
+private fun ForwardingGlyph() {
+    val color = PocketShellColors.Accent
+    Canvas(modifier = Modifier.size(14.dp)) {
+        val w = size.width
+        val h = size.height
+        val stroke = Stroke(width = w * 0.12f)
+        // Top arrow pointing right.
+        drawLine(
+            color = color,
+            start = androidx.compose.ui.geometry.Offset(0f, h * 0.3f),
+            end = androidx.compose.ui.geometry.Offset(w, h * 0.3f),
+            strokeWidth = stroke.width,
+        )
+        drawLine(
+            color = color,
+            start = androidx.compose.ui.geometry.Offset(w * 0.65f, h * 0.05f),
+            end = androidx.compose.ui.geometry.Offset(w, h * 0.3f),
+            strokeWidth = stroke.width,
+        )
+        drawLine(
+            color = color,
+            start = androidx.compose.ui.geometry.Offset(w * 0.65f, h * 0.55f),
+            end = androidx.compose.ui.geometry.Offset(w, h * 0.3f),
+            strokeWidth = stroke.width,
+        )
+        // Bottom arrow pointing left.
+        drawLine(
+            color = color,
+            start = androidx.compose.ui.geometry.Offset(0f, h * 0.7f),
+            end = androidx.compose.ui.geometry.Offset(w, h * 0.7f),
+            strokeWidth = stroke.width,
+        )
+        drawLine(
+            color = color,
+            start = androidx.compose.ui.geometry.Offset(w * 0.35f, h * 0.45f),
+            end = androidx.compose.ui.geometry.Offset(0f, h * 0.7f),
+            strokeWidth = stroke.width,
+        )
+        drawLine(
+            color = color,
+            start = androidx.compose.ui.geometry.Offset(w * 0.35f, h * 0.95f),
+            end = androidx.compose.ui.geometry.Offset(0f, h * 0.7f),
+            strokeWidth = stroke.width,
+        )
     }
 }
 

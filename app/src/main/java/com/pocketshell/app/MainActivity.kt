@@ -1,13 +1,17 @@
 package com.pocketshell.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.material3.MaterialTheme
@@ -99,6 +103,20 @@ class MainActivity : FragmentActivity() {
     private val sessionViewModel: SessionViewModel by viewModels()
     private val tmuxSessionViewModel: TmuxSessionViewModel by viewModels()
     private var requestedDestination by mutableStateOf<AppDestination>(AppDestination.HostList)
+
+    /**
+     * Issue #446 (epic #432 slice D): Android 13+ gates notifications
+     * behind the runtime POST_NOTIFICATIONS grant. Without it the
+     * port-forwarding foreground-service notification — the user's
+     * always-on "ports forwarded, tap to stop" control — is silently
+     * hidden. We request it once at launch via this contract; the result
+     * is best-effort (the foreground service still keeps tunnels alive if
+     * denied, but the Stop/deep-link affordance would be unavailable, so
+     * asking up front maximizes the chance the control is visible the
+     * first time the user forwards a port).
+     */
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* best-effort */ }
 
     /**
      * Issue #129: payload pulled out of a `pocketshell://import?...`
@@ -312,7 +330,26 @@ class MainActivity : FragmentActivity() {
                 }
             }
         }
+        maybeRequestNotificationPermission()
         StartupTiming.mark("main-on-create-end")
+    }
+
+    /**
+     * Issue #446: request the Android 13+ POST_NOTIFICATIONS runtime
+     * permission so the port-forwarding ongoing notification (and its
+     * Stop / panel-deep-link actions) can be shown. No-op below API 33
+     * (the permission is install-time there) and when already granted.
+     */
+    private fun maybeRequestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) return
+        runCatching {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }.onFailure { Log.w("MainActivity", "POST_NOTIFICATIONS request failed", it) }
     }
 
     /**
@@ -519,6 +556,10 @@ private fun AppNavigator(
             onOpenPortForwardPanel = { host, keyPath, passphrase ->
                 navigate(AppDestination.PortForwardPanel(hostId = host.id, keyPath = keyPath, passphrase = passphrase))
             },
+            // Issue #446: the global "ports forwarding" app-bar indicator
+            // routes to the same host-picker the QS tile + notification
+            // body-tap use, so the user lands on the port-forward entry.
+            onOpenPortForwarding = { navigate(AppDestination.PortForwardChooser) },
             // Issue #206: kebab → "Watched folders". Pass the SSH
             // connection parameters so the discover-from-remote
             // probe can authenticate. The destination carries them

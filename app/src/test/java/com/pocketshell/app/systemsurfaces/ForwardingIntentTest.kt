@@ -26,4 +26,17 @@ class ForwardingIntentTest {
         assertEquals(AppDestination.HostList, initialDestinationFromIntent(Intent()))
         assertEquals(AppDestination.HostList, initialDestinationFromIntent(null))
     }
+
+    /**
+     * Issue #446: the ongoing port-forward notification's body-tap sets the
+     * same EXTRA the QS tile uses, so it deep-links to the port-forward
+     * panel entry (the chooser) instead of just re-opening whatever was on
+     * top. This asserts the deep-link contract the service's content
+     * PendingIntent relies on.
+     */
+    @Test
+    fun notificationBodyTapDeepLinksToForwardingChooser() {
+        val intent = Intent().putExtra(ForwardingTileService.EXTRA_OPEN_PORT_FORWARDING, true)
+        assertEquals(AppDestination.PortForwardChooser, initialDestinationFromIntent(intent))
+    }
 }

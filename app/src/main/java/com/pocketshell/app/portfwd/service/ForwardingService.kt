@@ -17,6 +17,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.portfwd.ForwardingController
+import com.pocketshell.app.systemsurfaces.ForwardingTileService
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import kotlinx.coroutines.CoroutineScope
@@ -170,14 +171,18 @@ class ForwardingService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // User swiped the app away from recents. The auto-forward
-        // carve-out is scoped to "while the user explicitly has it
-        // enabled" — swiping the task is closer to "I'm done with
-        // this for now" than "keep running invisibly", so we tear the
-        // service down. The controller's per-host enable state is
-        // persisted in [HostEntity.enabled], so the next launch will
-        // restore the user's intent.
-        stopForwarding()
+        // Issue #446 (maintainer ruling): active tunnels stay alive on
+        // swipe-away. The ongoing notification is an "always-on" control —
+        // the user keeps forwarding running (and the one-tap Stop / body-
+        // tap deep-link reachable) until they explicitly stop it, rather
+        // than swiping the task away tearing everything down. We therefore
+        // deliberately do NOT call stopForwarding() here; the service is
+        // still torn down the moment the active-host count drops to zero
+        // (Stop action or the user disabling auto-forward in the panel).
+        //
+        // This is still inside the D21 carve-out: the foreground service
+        // only exists while ≥1 host is actively auto-forwarding, with a
+        // visible persistent notification.
         super.onTaskRemoved(rootIntent)
     }
 
@@ -305,11 +310,17 @@ class ForwardingService : Service() {
         tunnelCount: Int,
         contentTextOverride: String? = null,
     ): Notification {
+        // Issue #446: body-tap deep-links to the port-forward panel entry
+        // (the host chooser) rather than just "open the app on whatever
+        // was last on top". Reuses the same EXTRA the QS tile sets, so the
+        // activity's initialDestinationFromIntent routes to
+        // PortForwardChooser.
         val contentIntent = PendingIntent.getActivity(
             this,
             0,
             Intent(this, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra(ForwardingTileService.EXTRA_OPEN_PORT_FORWARDING, true)
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )

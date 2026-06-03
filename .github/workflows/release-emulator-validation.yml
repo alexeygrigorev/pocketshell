@@ -91,6 +91,16 @@ jobs:
           arch: x86_64
           profile: pixel_7
           disable-animations: true
+          # Issue #449: pin a GL-robust boot config explicitly instead of
+          # relying on the action defaults. swiftshader_indirect is the
+          # software GL path the pre-release confidence gate already uses for
+          # its own managed-emulator starts, and a longer boot timeout gives a
+          # cold runner more slack before the first instrumentation. If a boot
+          # still loses GL init ('Failed to initialize 101010-2 format' ->
+          # "No compose hierarchies found"), the gate cold-reboots the emulator
+          # in-script and retries the affected selector on a fresh EGL surface.
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -camera-front none
+          emulator-boot-timeout: 900
           script: scripts/release-emulator-validation.sh
 
       - name: Publish validation summary

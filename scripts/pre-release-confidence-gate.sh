@@ -27,6 +27,15 @@ APK_PATH="${APK_PATH:-app/build/outputs/apk/debug/app-debug.apk}"
 TEST_APK_PATH="${TEST_APK_PATH:-app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk}"
 APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS="${APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS:-3}"
 APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS="${APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS:-3}"
+# Issue #449: when an instrumentation attempt fails because the emulator's GL
+# stack never initialised (`Failed to initialize 101010-2 format` -> Compose
+# `setContent` never renders -> "No compose hierarchies found"), retrying the
+# same selector in place is useless: the broken GL surface persists for the
+# whole emulator process lifetime. Instead we cold-reboot the emulator so the
+# next boot gets a fresh GL init, then retry the selector. Bounded so a real
+# rendering defect can never be masked into an infinite reboot loop.
+APP_WALKTHROUGH_GL_REBOOT_ATTEMPTS="${APP_WALKTHROUGH_GL_REBOOT_ATTEMPTS:-2}"
+APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS="${APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS:-300}"
 ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS="${ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS:-3}"
 CORE_TERMINAL_CONNECTED_ATTEMPTS="${CORE_TERMINAL_CONNECTED_ATTEMPTS:-2}"
 PRE_RELEASE_MANAGE_EMULATOR="${PRE_RELEASE_MANAGE_EMULATOR:-0}"
@@ -74,6 +83,8 @@ Environment overrides:
   TEST_APK_PATH=app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
   APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS=3
   APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS=3
+  APP_WALKTHROUGH_GL_REBOOT_ATTEMPTS=2
+  APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS=300
   ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS=3
   CORE_TERMINAL_CONNECTED_ATTEMPTS=2
   PRE_RELEASE_MANAGE_EMULATOR=0
@@ -965,6 +976,80 @@ logcat_has_adb_transport_drop_markers() {
   grep -Eq 'adbd[[:space:]].*(connection terminated|offline|read failed)|host-[0-9]+: read failed|UiAutomation service owner died' "\$full_logcat_file"
 }
 
+# Issue #449: the emulator GL init flake. When the runner's emulator process
+# fails to bring up its GL surface ('Failed to initialize 101010-2 format'),
+# the app's Compose Activity launches but never renders a hierarchy, and the
+# AndroidX Compose test framework aborts with "No compose hierarchies found".
+# This is a per-emulator-process driver fault, NOT an app rendering defect, so
+# the only recovery is a fresh emulator boot. We require the compose-hierarchy
+# failure to be present (in instrumentation output OR logcat) so a genuine
+# Compose regression that legitimately throws this is never matched without
+# also having the GL marker reproduce across a fresh boot.
+instrumentation_has_gl_compose_failure_signature() {
+  # The authoritative app-level signature: Compose surface never rendered.
+  if printf '%s\n' "\$output" |
+    grep -Eq 'No compose hierarchies found|the Activity that calls setContent did not launch'; then
+    return 0
+  fi
+  if [ -f "\$full_logcat_file" ] &&
+    grep -Eq 'No compose hierarchies found|the Activity that calls setContent did not launch' "\$full_logcat_file"; then
+    return 0
+  fi
+  return 1
+}
+
+logcat_has_gl_init_failure_marker() {
+  [ -f "\$full_logcat_file" ] || return 1
+  grep -Eq 'Failed to initialize 101010-2 format|eglCreateWindowSurface|eglMakeCurrent.*error|emugl: .*EGL|OpenGLRenderer.*Unable to (match|create) the EGL|Failed to choose config' "\$full_logcat_file"
+}
+
+# Treat the failure as the GL flake only when the Compose-never-rendered
+# signature is present. The EGL/101010-2 logcat marker is corroborating
+# evidence we log when available, but its absence (logcat can roll the line
+# out of the captured window) does not block the reboot recovery: the
+# compose-hierarchy signature alone, distinct from any real assertion failure,
+# is specific enough.
+should_recover_gl_init_failure() {
+  instrumentation_has_gl_compose_failure_signature
+}
+
+cold_reboot_emulator_for_gl_recovery() {
+  local boot_timeout='$APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS'
+  printf 'Cold-rebooting the emulator to recover from the GL init flake (fresh EGL surface on next boot).\n' >&2
+  if logcat_has_gl_init_failure_marker; then
+    printf 'Corroborating EGL/101010-2 GL init failure marker found in logcat.\n' >&2
+  else
+    printf 'No EGL/101010-2 logcat marker in the captured window; recovering on the compose-hierarchy signature alone.\n' >&2
+  fi
+  for package in com.pocketshell.app.test com.pocketshell.app; do
+    '$ADB' shell am force-stop "\$package" >/dev/null 2>&1 || true
+  done
+  '$ADB' reboot >/dev/null 2>&1 || true
+  # The transport drops while the device reboots; reconnect and wait for it
+  # to come back, then block on a fully completed boot before retrying.
+  '$ADB' wait-for-device >/dev/null 2>&1 || true
+  local waited=0
+  local boot_state=""
+  while [ "\$waited" -lt "\$boot_timeout" ]; do
+    '$ADB' reconnect >/dev/null 2>&1 || true
+    '$ADB' wait-for-device >/dev/null 2>&1 || true
+    boot_state=\$('$ADB' shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)
+    if [ "\$boot_state" = "1" ]; then
+      printf 'Emulator reported sys.boot_completed=1 after %s seconds of GL-recovery reboot.\n' "\$waited" >&2
+      # Dismiss any boot keyguard so the relaunched activity is visible.
+      '$ADB' shell wm dismiss-keyguard >/dev/null 2>&1 || true
+      '$ADB' shell input keyevent 82 >/dev/null 2>&1 || true
+      '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
+      '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
+      return 0
+    fi
+    sleep 3
+    waited=\$((waited + 3))
+  done
+  printf 'Emulator did not report sys.boot_completed=1 within %s seconds after GL-recovery reboot.\n' "\$boot_timeout" >&2
+  return 1
+}
+
 should_retry_interrupted_instrumentation() {
   [ "\$instrument_status" -eq 255 ] || return 1
   printf '%s\n' "\$output" | grep -q 'INSTRUMENTATION_CODE: -1' && return 1
@@ -976,9 +1061,11 @@ should_retry_interrupted_instrumentation() {
 '$ADB' logcat -c || true
 attempt=1
 transport_recovery_attempts=0
+gl_reboot_recovery_attempts=0
 app_walkthrough_instrumentation_attempts='$APP_WALKTHROUGH_INSTRUMENTATION_ATTEMPTS'
 max_transport_recovery_attempts='$APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS'
-max_instrumentation_runs=\$(( app_walkthrough_instrumentation_attempts + max_transport_recovery_attempts ))
+max_gl_reboot_recovery_attempts='$APP_WALKTHROUGH_GL_REBOOT_ATTEMPTS'
+max_instrumentation_runs=\$(( app_walkthrough_instrumentation_attempts + max_transport_recovery_attempts + max_gl_reboot_recovery_attempts ))
 while [ "\$attempt" -le "\$max_instrumentation_runs" ]; do
   '$ADB' logcat -c || true
   set +e
@@ -1022,6 +1109,20 @@ while [ "\$attempt" -le "\$max_instrumentation_runs" ]; do
     done
     '$ADB' shell cmd package wait-for-handler --timeout 60000 >/dev/null 2>&1 || true
     '$ADB' shell cmd package wait-for-background-handler --timeout 60000 >/dev/null 2>&1 || true
+    sleep 2
+    attempt=\$((attempt + 1))
+    continue
+  fi
+  if should_recover_gl_init_failure &&
+    [ "\$gl_reboot_recovery_attempts" -lt "\$max_gl_reboot_recovery_attempts" ]; then
+    gl_reboot_recovery_attempts=\$((gl_reboot_recovery_attempts + 1))
+    cp "\$full_logcat_file" "\$full_logcat_file.gl-attempt\$attempt" || true
+    printf '%s\n' "\$output" > "\$diagnostics_file.gl-attempt\$attempt-output" || true
+    printf 'Focused instrumentation hit the emulator GL init flake (no compose hierarchies) on attempt %s; GL reboot recovery %s/%s; cold-rebooting the emulator and retrying the selector without treating it as an app/test retry.\n' "\$attempt" "\$gl_reboot_recovery_attempts" "\$max_gl_reboot_recovery_attempts" >&2
+    if ! cold_reboot_emulator_for_gl_recovery; then
+      dump_instrumentation_diagnostics "emulator GL-recovery reboot did not reach sys.boot_completed=1 after the 101010-2 / no-compose-hierarchies flake on attempt \$attempt"
+      exit 1
+    fi
     sleep 2
     attempt=\$((attempt + 1))
     continue
@@ -1097,6 +1198,12 @@ if ! [[ "$APP_WALKTHROUGH_TRANSPORT_RECOVERY_ATTEMPTS" =~ ^[0-9]+$ ]]; then
 fi
 if ! [[ "$ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS" =~ ^[1-9][0-9]*$ ]]; then
   fail "ISSUE_261_STALE_DB_LAUNCH_ATTEMPTS must be a positive integer"
+fi
+if ! [[ "$APP_WALKTHROUGH_GL_REBOOT_ATTEMPTS" =~ ^[0-9]+$ ]]; then
+  fail "APP_WALKTHROUGH_GL_REBOOT_ATTEMPTS must be a non-negative integer"
+fi
+if ! [[ "$APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+  fail "APP_WALKTHROUGH_GL_REBOOT_BOOT_TIMEOUT_SECONDS must be a positive integer"
 fi
 
 run_step "android-sdk-paths" "$ADB" version

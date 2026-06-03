@@ -1,6 +1,10 @@
 package com.pocketshell.app.projects
 
 import android.content.Context
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.assistant.AppAssistantActions
@@ -43,6 +47,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -199,7 +204,7 @@ sealed interface FolderActionStatus {
  * orchestrator over existing DAOs + a fresh ssh-exec probe.
  */
 @HiltViewModel
-class FolderListViewModel @Inject constructor(
+class FolderListViewModel internal constructor(
     private val gateway: FolderListGateway,
     private val hostDao: HostDao,
     private val projectRootDao: ProjectRootDao,
@@ -212,7 +217,41 @@ class FolderListViewModel @Inject constructor(
     private val assistantClientFactory: AssistantLlmClientFactory? = null,
     private val reposRemoteSource: ReposRemoteSource? = null,
     private val forwardingController: ForwardingController,
+    // Issue #430: when true the view model attaches a
+    // [ProcessLifecycleOwner] observer in [init] so the session-discovery
+    // poll loop is gated on the whole-process foreground signal. Always
+    // true on the production Hilt path (constructed on the main thread).
+    // Connected tests that construct the VM off the main thread and drive
+    // the gate via [setProcessStartedForTest] pass `false` so they never
+    // touch the main-thread-affine lifecycle registry.
+    attachLifecycle: Boolean = true,
 ) : ViewModel() {
+
+    /**
+     * Production Hilt entry point. Delegates to the internal constructor
+     * with lifecycle attachment enabled. Hilt constructs view models on
+     * the main thread, so the [ProcessLifecycleOwner] touch in [init] is
+     * safe here.
+     */
+    @Inject
+    constructor(
+        gateway: FolderListGateway,
+        hostDao: HostDao,
+        projectRootDao: ProjectRootDao,
+        @ApplicationContext applicationContext: Context,
+        assistantClientFactory: AssistantLlmClientFactory?,
+        reposRemoteSource: ReposRemoteSource?,
+        forwardingController: ForwardingController,
+    ) : this(
+        gateway = gateway,
+        hostDao = hostDao,
+        projectRootDao = projectRootDao,
+        applicationContext = applicationContext,
+        assistantClientFactory = assistantClientFactory,
+        reposRemoteSource = reposRemoteSource,
+        forwardingController = forwardingController,
+        attachLifecycle = true,
+    )
 
     private val _state: MutableStateFlow<FolderListUiState> =
         MutableStateFlow(FolderListUiState.Loading)
@@ -254,6 +293,26 @@ class FolderListViewModel @Inject constructor(
     private var lastDiscoveredPorts: List<HostDiscoveredPort> = emptyList()
     private var forwardingSnapshots: Map<Long, ForwardingHostSnapshot> = emptyMap()
 
+    /**
+     * Issue #430: whole-process foreground signal driven by
+     * [ProcessLifecycleOwner]. `true` while an Activity is visible
+     * (`STARTED`). The session-discovery poll loop ([startPolling]) is
+     * gated on this flag, so:
+     *
+     *  - while backgrounded the loop parks instead of polling a dead SSH
+     *    lease (honours the no-background-work principle, D21 / #161); and
+     *  - on every `false -> true` transition (app foreground / resume)
+     *    the loop wakes and runs an **immediate** probe, re-acquiring a
+     *    fresh connection so a known host's live tmux sessions reappear
+     *    on the folder tree without the user manually re-attaching.
+     *
+     * Seeded synchronously in [attachProcessLifecycle] so a view model
+     * created while the app is already foregrounded does not block at a
+     * stale `false`.
+     */
+    private val processStarted = MutableStateFlow(false)
+    private var lifecycleObserver: LifecycleEventObserver? = null
+
     init {
         viewModelScope.launch {
             forwardingController.flowOfHostSnapshots().collectLatest { snapshots ->
@@ -261,6 +320,48 @@ class FolderListViewModel @Inject constructor(
                 emitReady()
             }
         }
+        if (attachLifecycle) attachProcessLifecycle()
+    }
+
+    /**
+     * Attach a [ProcessLifecycleOwner] observer so [processStarted]
+     * tracks the whole-process `STARTED` / `STOPPED` lifecycle. The
+     * current state is seeded synchronously so a poll loop started while
+     * the app is already foregrounded sweeps immediately rather than
+     * waiting for the next `ON_START`.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun attachProcessLifecycle(
+        owner: LifecycleOwner = ProcessLifecycleOwner.get(),
+    ) {
+        if (lifecycleObserver != null) return
+        val observer = LifecycleEventObserver { _: LifecycleOwner, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> processStarted.value = true
+                Lifecycle.Event.ON_STOP -> processStarted.value = false
+                else -> Unit
+            }
+        }
+        lifecycleObserver = observer
+        // Seed synchronously so a poll loop started while the app is
+        // already foregrounded sweeps immediately. `getCurrentState` /
+        // `addObserver` are main-thread-affine; production Hilt always
+        // constructs this view model on the main thread, so the touch is
+        // inline there. Connected tests that construct the VM off the
+        // main thread drive the gate via [setProcessStartedForTest] and
+        // pass `attachLifecycle = false` so we never reach the registry.
+        processStarted.value = owner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        owner.lifecycle.addObserver(observer)
+    }
+
+    /**
+     * Issue #430 test seam: flip the process-foreground gate without a
+     * real [ProcessLifecycleOwner]. Lets unit tests park / release the
+     * poll loop deterministically under `runTest`'s virtual clock.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun setProcessStartedForTest(started: Boolean) {
+        processStarted.value = started
     }
 
     /**
@@ -579,6 +680,14 @@ class FolderListViewModel @Inject constructor(
                 _state.value = FolderListUiState.Loading
             }
             while (isActive) {
+                // Issue #430: gate every probe on the whole-process
+                // foreground signal. While the app is backgrounded this
+                // suspends (no background SSH work, D21 / #161); the
+                // suspension releases on the next `ON_START`, so a
+                // `false -> true` foreground/resume transition runs an
+                // immediate probe and a host's live tmux sessions
+                // reappear on the folder tree without manual re-attach.
+                processStarted.first { it }
                 runProbe(params)
                 delay(POLL_INTERVAL_MS)
             }
@@ -720,6 +829,13 @@ class FolderListViewModel @Inject constructor(
             releaseWarmLease()
         }
         watchedFoldersJob?.cancel()
+        lifecycleObserver?.let { observer ->
+            // `removeObserver` is main-thread-affine; `onCleared` runs on
+            // the main thread so this is safe. Only set when lifecycle
+            // attachment was enabled (production path).
+            ProcessLifecycleOwner.get().lifecycle.removeObserver(observer)
+        }
+        lifecycleObserver = null
         super.onCleared()
     }
 

@@ -789,7 +789,14 @@ class FolderListGroupingTest {
                 idleTtlMillis = 0L,
             ),
             forwardingController = ForwardingController(ApplicationProvider.getApplicationContext()),
-        ).also { it.ioDispatcher = dispatcher }
+        ).also {
+            it.ioDispatcher = dispatcher
+            // Issue #430: the gateway poll loop is now gated on the
+            // whole-process foreground signal. Robolectric's
+            // ProcessLifecycleOwner is not STARTED under runTest, so open
+            // the gate explicitly to exercise the probe.
+            it.setProcessStartedForTest(true)
+        }
 
         try {
             vm.bind(

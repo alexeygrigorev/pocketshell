@@ -64,9 +64,36 @@ class FolderListGroupingTest {
     @Test
     fun defaultLabelTakesTrailingPathSegment() {
         assertEquals("pocketshell", FolderListViewModel.defaultLabelForPath("/home/alexey/git/pocketshell"))
+        // Trailing slashes don't change the trailing segment.
+        assertEquals("pocketshell", FolderListViewModel.defaultLabelForPath("/home/alexey/git/pocketshell/"))
         assertEquals("Untracked", FolderListViewModel.defaultLabelForPath(FolderListViewModel.UNTRACKED_PATH))
-        // Single-segment / root paths fall back to the full value.
-        assertEquals("/", FolderListViewModel.defaultLabelForPath("/"))
+        // A single-segment home path keeps the bare segment.
+        assertEquals("alexey", FolderListViewModel.defaultLabelForPath("/home/alexey"))
+    }
+
+    @Test
+    fun defaultLabelNeverReturnsBlankOrLoneSlash() {
+        // Filesystem root → a labelled "/ (root)", never a lone "/" (#438).
+        assertEquals(FolderListViewModel.ROOT_LABEL, FolderListViewModel.defaultLabelForPath("/"))
+        assertEquals(FolderListViewModel.ROOT_LABEL, FolderListViewModel.defaultLabelForPath("//"))
+        assertEquals(FolderListViewModel.ROOT_LABEL, FolderListViewModel.defaultLabelForPath("///"))
+        // Literal home markers → "~ (home)".
+        assertEquals(FolderListViewModel.HOME_LABEL, FolderListViewModel.defaultLabelForPath("~"))
+        assertEquals(FolderListViewModel.HOME_LABEL, FolderListViewModel.defaultLabelForPath("\$HOME"))
+        // Blank / whitespace → "Untracked", never an empty string.
+        assertEquals(FolderListViewModel.UNTRACKED_LABEL, FolderListViewModel.defaultLabelForPath(""))
+        assertEquals(FolderListViewModel.UNTRACKED_LABEL, FolderListViewModel.defaultLabelForPath("   "))
+        // A nested path keeps its meaningful tail.
+        assertEquals("pocketshell", FolderListViewModel.defaultLabelForPath("/home/alexey/git/pocketshell"))
+        // Whatever the input, the label is never blank or a degenerate token.
+        val inputs = listOf("/", "//", "~", "\$HOME", "", "   ", "/home/alexey", "/a/b/c")
+        for (input in inputs) {
+            val label = FolderListViewModel.defaultLabelForPath(input)
+            assertTrue("label for '$input' must not be blank", label.isNotBlank())
+            assertTrue("label for '$input' must not be a lone slash", label != "/")
+            assertTrue("label for '$input' must not be a lone dot", label != ".")
+            assertTrue("label for '$input' must not be a lone colon", label != ":")
+        }
     }
 
     @Test

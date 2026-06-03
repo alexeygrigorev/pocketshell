@@ -1182,6 +1182,17 @@ private fun FolderTreeRootGroup(
     }
 }
 
+/**
+ * Belt-and-suspenders UI fallback (#438): the view-model's
+ * [FolderListViewModel.defaultLabelForPath] already guarantees a
+ * non-blank, meaningful label, but the header composables defend
+ * against any future model regression so the tree can never paint a
+ * blank or lone-`/` title. Prefers the supplied label, then a label
+ * derived from the path, then "Untracked".
+ */
+private fun folderDisplayLabel(label: String, path: String): String =
+    label.ifBlank { FolderListViewModel.defaultLabelForPath(path) }
+
 @Composable
 private fun FolderTreeRootHeader(
     root: FolderTreeRoot,
@@ -1196,13 +1207,15 @@ private fun FolderTreeRootHeader(
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = root.label,
+                text = folderDisplayLabel(root.label, root.path),
                 color = PocketShellColors.Text,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.testTag(folderTreeRootLabelTag(root.path)),
+                modifier = Modifier
+                    .testTag(folderTreeRootLabelTag(root.path))
+                    .semantics { contentDescription = root.path },
             )
             RootCountText(root = root)
         }
@@ -1386,13 +1399,15 @@ private fun FolderHeader(
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             Text(
-                text = folder.label,
+                text = folderDisplayLabel(folder.label, folder.path),
                 color = PocketShellColors.Text,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.testTag(folderHeaderLabelTag(folder.path)),
+                modifier = Modifier
+                    .testTag(folderHeaderLabelTag(folder.path))
+                    .semantics { contentDescription = folder.path },
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 StatusDot(

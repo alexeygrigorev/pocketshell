@@ -937,6 +937,15 @@ class FolderListViewModel internal constructor(
         const val OTHER_ROOT_LABEL: String = "Other folders"
 
         /**
+         * Human-meaningful labels for the two degenerate-but-real cwd
+         * cases that otherwise render as a nameless folder (#438): a
+         * session sitting at filesystem root, and one at the literal
+         * home marker.
+         */
+        const val ROOT_LABEL: String = "/ (root)"
+        const val HOME_LABEL: String = "~ (home)"
+
+        /**
          * Polling cadence for the gateway probe. The folder list is a
          * leaf surface the user dwells on for at most a few seconds
          * before drilling further; 5 s is short enough that an agent
@@ -979,13 +988,27 @@ class FolderListViewModel internal constructor(
         /**
          * Derive a user-visible label from a canonicalised path: the
          * trailing path component (`/home/alexey/git/pocketshell` →
-         * `pocketshell`). Falls back to the whole path for short / root
-         * paths that don't have a meaningful trailing segment.
+         * `pocketshell`). This is a guaranteed-non-blank fallback chain —
+         * it never returns an empty string, a lone `"/"`, or any other
+         * degenerate label that would read as a nameless folder in the
+         * project tree (#438):
+         *
+         *  - the [UNTRACKED_PATH] sentinel → [UNTRACKED_LABEL].
+         *  - a blank path → [UNTRACKED_LABEL] (never blank).
+         *  - filesystem root (`/`, `//`, ...) → `"/ (root)"`.
+         *  - a literal home marker (`~` / `$HOME`) → `"~ (home)"`.
+         *  - otherwise the trailing path segment, or the full path when
+         *    there is no meaningful trailing segment.
          */
         fun defaultLabelForPath(path: String): String {
             if (path == UNTRACKED_PATH) return UNTRACKED_LABEL
-            val tail = path.substringAfterLast('/')
-            return tail.ifBlank { path }
+            val clean = path.trim()
+            if (clean.isEmpty()) return UNTRACKED_LABEL
+            val stripped = clean.trimEnd('/')
+            if (stripped.isEmpty()) return ROOT_LABEL
+            if (stripped == "~" || stripped == "\$HOME") return HOME_LABEL
+            val tail = stripped.substringAfterLast('/')
+            return tail.ifBlank { stripped }
         }
 
         /**
@@ -1037,7 +1060,8 @@ class FolderListViewModel internal constructor(
                         com.pocketshell.app.projects.WatchedFoldersViewModel
                             .stripOrderPrefix(watched.label)
                             .ifBlank { defaultLabelForPath(path) }
-                    extraByPath[path] != null -> extraByPath.getValue(path)
+                    extraByPath[path] != null ->
+                        extraByPath.getValue(path).ifBlank { defaultLabelForPath(path) }
                     else -> defaultLabelForPath(path)
                 }
                 FolderRow(
@@ -1210,7 +1234,8 @@ class FolderListViewModel internal constructor(
                 watched != null -> WatchedFoldersViewModel
                     .stripOrderPrefix(watched.label)
                     .ifBlank { defaultLabelForPath(path) }
-                extraByPath[path] != null -> extraByPath.getValue(path)
+                extraByPath[path] != null ->
+                    extraByPath.getValue(path).ifBlank { defaultLabelForPath(path) }
                 else -> defaultLabelForPath(path)
             }
             return FolderRow(
@@ -1265,7 +1290,8 @@ class FolderListViewModel internal constructor(
                     }
                     RootProjectCandidate(
                         path = path,
-                        label = extraByPath[path] ?: defaultLabelForPath(path),
+                        label = (extraByPath[path] ?: defaultLabelForPath(path))
+                            .ifBlank { defaultLabelForPath(path) },
                         source = source,
                     )
                 }

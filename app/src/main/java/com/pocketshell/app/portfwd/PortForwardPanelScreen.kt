@@ -307,19 +307,31 @@ private fun PortForwardRow(
         BodyCell("${tunnel.localPort}", 0.16f, monospace = true)
         BodyCell(tunnel.process.ifBlank { "-" }, 0.28f)
         BodyCell(tunnel.status.label, 0.18f, color = tunnel.status.color)
+        // Issue #456: declutter the table. Discovered/available rows have no
+        // traffic yet, so rendering "0 B / 0 B/s" on every row is just noise.
+        // Show the traffic figures only for rows that are actually forwarding.
         Column(modifier = Modifier.weight(0.20f)) {
-            Text(
-                text = formatBytes(tunnel.bytesIn + tunnel.bytesOut),
-                color = PocketShellColors.TextSecondary,
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 11.sp,
-            )
-            Text(
-                text = "${formatBytes(tunnel.speedBps)}/s",
-                color = PocketShellColors.TextMuted,
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 10.sp,
-            )
+            if (forwarding) {
+                Text(
+                    text = formatBytes(tunnel.bytesIn + tunnel.bytesOut),
+                    color = PocketShellColors.TextSecondary,
+                    fontFamily = JetBrainsMonoFamily,
+                    fontSize = 11.sp,
+                )
+                Text(
+                    text = "${formatBytes(tunnel.speedBps)}/s",
+                    color = PocketShellColors.TextMuted,
+                    fontFamily = JetBrainsMonoFamily,
+                    fontSize = 10.sp,
+                )
+            } else {
+                Text(
+                    text = "-",
+                    color = PocketShellColors.TextMuted,
+                    fontFamily = JetBrainsMonoFamily,
+                    fontSize = 11.sp,
+                )
+            }
         }
         Spacer(Modifier.width(8.dp))
         TextButtonBox(label = if (forwarding) "Stop" else "Start", onClick = onToggle)

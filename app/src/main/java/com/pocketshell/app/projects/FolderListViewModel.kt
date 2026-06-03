@@ -21,6 +21,7 @@ import com.pocketshell.app.assistant.SessionAssistantController
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.portfwd.ForwardingHostSnapshot
+import com.pocketshell.app.portfwd.InterestingPortFilter
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
 import com.pocketshell.core.ssh.KnownHostsPolicy
@@ -750,7 +751,11 @@ class FolderListViewModel internal constructor(
                 lastScannedProjectFoldersByRoot = result.projectFoldersByRoot
                 lastHistoryProjectFoldersByRoot = result.historyProjectFoldersByRoot
                 lastResolvedWatchedRootPaths = result.resolvedWatchedRootPaths
-                lastDiscoveredPorts = result.discoveredPorts.map { port ->
+                // Issue #456: filter discovery to interesting ports (drop
+                // system/noise 22/53/80, de-dupe, surface 1000-9999 / 49xxx
+                // first) so the host card's "N ports" count and the panel
+                // agree and the card never reflects an ~80-port dump.
+                lastDiscoveredPorts = InterestingPortFilter.filter(result.discoveredPorts).map { port ->
                     HostDiscoveredPort(
                         remotePort = port.port,
                         process = port.processName,

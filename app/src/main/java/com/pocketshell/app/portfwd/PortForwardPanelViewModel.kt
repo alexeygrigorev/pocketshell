@@ -589,16 +589,19 @@ class PortForwardPanelViewModel @Inject constructor(
 }
 
 private fun List<RemotePort>.toAvailableTunnels(remappings: Map<Int, Int>): List<TunnelInfo> =
-    groupBy { it.port }
-        .toSortedMap()
-        .map { (remotePort, ports) ->
-            TunnelInfo(
-                remotePort = remotePort,
-                localPort = remappings[remotePort] ?: remotePort,
-                process = ports.firstOrNull { it.processName.isNotBlank() }?.processName.orEmpty(),
-                status = TunnelInfo.Status.AVAILABLE,
-            )
-        }
+    // Issue #456: drop system/noise ports (22/53/80), de-dupe per port, and
+    // surface the interesting `1000-9999` / `49xxx` dev-server ports first so
+    // the panel table is readable instead of an ~80-row dump. The filter
+    // already orders interesting-before-other and de-duplicates, so we keep
+    // its order rather than re-sorting by port number.
+    InterestingPortFilter.filter(this).map { remotePort ->
+        TunnelInfo(
+            remotePort = remotePort.port,
+            localPort = remappings[remotePort.port] ?: remotePort.port,
+            process = remotePort.processName,
+            status = TunnelInfo.Status.AVAILABLE,
+        )
+    }
 
 private infix fun CharArray?.contentEquals(other: CharArray?): Boolean =
     when {

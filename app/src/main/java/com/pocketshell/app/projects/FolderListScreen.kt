@@ -1000,14 +1000,18 @@ private fun PortForwardingSummaryCard(
     summary: HostPortForwardingSummary,
     onOpen: () -> Unit,
 ) {
+    // Issue #456: the card is a summary + entry only — never a dump of raw
+    // discovered-port rows. `discoveredCount` already reflects the
+    // interesting-port filter (system/noise ports dropped, de-duped upstream),
+    // so "N ports" is the user-facing count of forwardable ports.
     val statusText = when {
         summary.active -> "${summary.activeTunnelCount} active"
-        summary.discoveredCount > 0 -> "${summary.discoveredCount} discovered"
+        summary.discoveredCount > 0 -> "${summary.discoveredCount} ports"
         else -> "Off"
     }
     val detailText = when {
         summary.active -> "Foreground forwarding service is running."
-        summary.discoveredCount > 0 -> "Ports are discovered only; no local tunnels are running."
+        summary.discoveredCount > 0 -> "Tap to view discovered ports and forward."
         else -> "Auto-forward is off by default."
     }
     Column(
@@ -1041,36 +1045,6 @@ private fun PortForwardingSummaryCard(
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(start = 12.dp),
             )
-        }
-        summary.discoveredPorts.take(3).forEach { port ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = port.remotePort.toString(),
-                    color = PocketShellColors.Text,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.width(56.dp),
-                )
-                Text(
-                    text = port.process.ifBlank { "unknown process" },
-                    color = PocketShellColors.TextMuted,
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    text = when (port.status) {
-                        HostPortForwardingPortStatus.FORWARDING -> "Forwarding"
-                        HostPortForwardingPortStatus.DISCOVERED -> "Discovered"
-                    },
-                    color = when (port.status) {
-                        HostPortForwardingPortStatus.FORWARDING -> PocketShellColors.Green
-                        HostPortForwardingPortStatus.DISCOVERED -> PocketShellColors.TextMuted
-                    },
-                    fontSize = 11.sp,
-                )
-            }
         }
     }
 }

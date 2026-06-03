@@ -162,11 +162,17 @@ class PortForwardPanelViewModelTest {
     @Test
     fun discoveryCollapsesDuplicateListenersToOneRowPerRemotePort() = runTest {
         val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1)
+        // Issue #456: the same dev-server port shows up once per bound address
+        // family (`0.0.0.0:3000` and `[::]:3000`). Discovery must collapse
+        // them to a single row, and the sshd control port (22) must be
+        // dropped as noise rather than surfaced.
         val session = FakeSshSession(
             ssOutput = """
                 0.0.0.0:22 users:(("sshd",pid=1,fd=3))
                 :::22 users:(("sshd",pid=1,fd=4))
-                127.0.0.1:3000 users:(("node",pid=42,fd=3))
+                0.0.0.0:3000 users:(("node",pid=42,fd=3))
+                :::3000 users:(("node",pid=42,fd=4))
+                127.0.0.1:8080 users:(("python",pid=99,fd=3))
             """.trimIndent(),
         )
         val viewModel = newViewModel(FakeConnector(Result.success(session)))
@@ -177,9 +183,9 @@ class PortForwardPanelViewModelTest {
         val state = viewModel.state.value
         assertFalse("discovery must leave auto-forward off", state.autoForwardEnabled)
         assertEquals(PortForwardConnectionState.Connected, state.connectionState)
-        assertEquals(listOf(22, 3000), state.tunnels.map { it.remotePort })
+        assertEquals(listOf(3000, 8080), state.tunnels.map { it.remotePort })
         assertEquals(2, state.tunnels.size)
-        assertEquals("sshd", state.tunnels.first { it.remotePort == 22 }.process)
+        assertEquals("node", state.tunnels.first { it.remotePort == 3000 }.process)
         assertEquals(emptyList<FakePortForward>(), session.openedForwards)
         assertTrue("passive discovery SSH session should close after scan", session.closed)
     }

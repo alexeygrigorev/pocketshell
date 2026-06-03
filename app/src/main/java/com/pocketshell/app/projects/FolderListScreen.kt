@@ -63,6 +63,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.assistant.AssistantUiState
+import com.pocketshell.app.assistant.FolderCandidate
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.settings.HostDetailViewMode
@@ -345,6 +346,8 @@ fun FolderListScreen(
                     viewModel.dismissAssistant()
                     showAssistant = false
                 },
+                onChoose = viewModel::chooseAssistantFolder,
+                onCancelChoice = viewModel::cancelAssistantChoice,
                 dictationState = assistantDictationState,
                 promptDictation = promptDictationEvent,
                 onPromptDictationConsumed = { promptDictationEvent = null },
@@ -660,6 +663,8 @@ private fun HostDetailAssistantPanel(
     onCancel: () -> Unit,
     onRetry: () -> Unit,
     onDismiss: () -> Unit,
+    onChoose: (FolderCandidate) -> Unit,
+    onCancelChoice: () -> Unit,
     dictationState: InlineDictationViewModel.UiState,
     promptDictation: AssistantDictationTextEvent?,
     onPromptDictationConsumed: () -> Unit,
@@ -706,6 +711,8 @@ private fun HostDetailAssistantPanel(
                 onCancel = onCancel,
                 onDismiss = onDismiss,
                 onRetry = onRetry,
+                onChoose = onChoose,
+                onCancelChoice = onCancelChoice,
                 correctionDictation = correctionDictation,
             )
         }

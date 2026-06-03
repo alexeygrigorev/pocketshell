@@ -848,6 +848,8 @@ public fun TmuxSessionScreen(
                 onCancel = viewModel::cancelAssistantAction,
                 onDismiss = viewModel::dismissAssistant,
                 onRetry = viewModel::retryAssistantAction,
+                onChoose = viewModel::chooseAssistantFolder,
+                onCancelChoice = viewModel::cancelAssistantChoice,
             )
 
             if (isImeVisible && currentPane != null) {

@@ -12,6 +12,7 @@ import com.pocketshell.app.assistant.AssistantSshExecutor
 import com.pocketshell.app.assistant.AssistantSshParams
 import com.pocketshell.app.assistant.AssistantUiState
 import com.pocketshell.app.assistant.ExecutorTraceSink
+import com.pocketshell.app.assistant.FolderCandidate
 import com.pocketshell.app.assistant.RealAssistantSshExecutor
 import com.pocketshell.app.assistant.SessionAssistantController
 import com.pocketshell.app.assistant.SessionActionBridge
@@ -857,6 +858,12 @@ public class SessionViewModel @Inject constructor(
 
     /** Cancel the pending mutating candidate. */
     public fun cancelAssistantAction() = assistant.cancel()
+
+    /** Pick [candidate] in the "which folder?" disambiguation chooser. */
+    internal fun chooseAssistantFolder(candidate: FolderCandidate) = assistant.choose(candidate)
+
+    /** Dismiss the "which folder?" chooser without picking. */
+    public fun cancelAssistantChoice() = assistant.cancelChoice()
 
     /** Retry the last assistant request after a retryable model failure. */
     public fun retryAssistantAction() = assistant.retry()

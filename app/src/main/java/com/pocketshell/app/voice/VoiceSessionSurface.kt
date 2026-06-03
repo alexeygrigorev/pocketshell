@@ -104,6 +104,7 @@ internal fun AssistantStrip(
     onDismiss: () -> Unit,
     onRetry: () -> Unit = {},
     onChoose: (FolderCandidate) -> Unit = {},
+    onCancelChoice: () -> Unit = {},
     correctionDictation: AssistantCorrectionDictation? = null,
 ) {
     if (state is AssistantUiState.Idle) return
@@ -215,7 +216,7 @@ internal fun AssistantStrip(
                         Text("${candidate.label} — ${candidate.path}$suffix")
                     }
                 }
-                TextButton(onClick = onCancel) { Text("Cancel") }
+                TextButton(onClick = onCancelChoice) { Text("Cancel") }
             }
             is AssistantUiState.Done -> {
                 Text(text = state.message, color = PocketShellColors.Text, fontSize = 12.sp)

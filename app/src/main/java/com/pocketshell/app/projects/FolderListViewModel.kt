@@ -14,6 +14,7 @@ import com.pocketshell.app.assistant.AssistantSshExecutor
 import com.pocketshell.app.assistant.AssistantSshParams
 import com.pocketshell.app.assistant.AssistantUiState
 import com.pocketshell.app.assistant.ExecutorTraceSink
+import com.pocketshell.app.assistant.FolderCandidate
 import com.pocketshell.app.assistant.RealAssistantSshExecutor
 import com.pocketshell.app.assistant.SessionActionBridge
 import com.pocketshell.app.assistant.SessionAssistantController
@@ -573,6 +574,10 @@ class FolderListViewModel internal constructor(
     fun correctAssistantAction(correction: String) = assistant.correct(correction)
 
     fun cancelAssistantAction() = assistant.cancel()
+
+    internal fun chooseAssistantFolder(candidate: FolderCandidate) = assistant.choose(candidate)
+
+    fun cancelAssistantChoice() = assistant.cancelChoice()
 
     fun retryAssistantAction() = assistant.retry()
 

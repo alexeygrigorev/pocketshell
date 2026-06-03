@@ -1621,14 +1621,39 @@ internal fun projectCountText(folder: FolderRow): String {
 private fun Int.countLabel(noun: String): String =
     if (this == 1) "$this $noun" else "$this ${noun}s"
 
-private fun sessionKindLabel(session: FolderSessionEntry): String = when (session.agentKind) {
-    SessionAgentKind.Claude -> "Claude"
-    SessionAgentKind.Codex -> "Codex"
-    SessionAgentKind.OpenCode -> "OpenCode"
-    SessionAgentKind.Probing -> "Agent"
-    SessionAgentKind.Exited -> "Agent"
-    SessionAgentKind.Shell -> if (session.attached) "Active" else "Idle"
+/**
+ * Folder-tree session label. Issue #431: type/agent and activity state are two
+ * orthogonal facets, so the label never collapses to a bare "Idle".
+ *
+ *  - Shell session  -> "Shell" (no agent activity state).
+ *  - Agent session  -> "<agent> · <state>", e.g. "Codex · Idle", so the agent
+ *    identity always travels with the state word.
+ *  - Probing        -> "Detecting" (agent identity not yet known; no state word).
+ *  - Exited         -> "Shell" (the agent process is gone; it is a plain shell).
+ *
+ * State signal: `FolderSessionEntry` carries no per-turn working/idle flag
+ * today, so the agent state defaults to "Idle" (agent waiting for input / not
+ * actively working) — the literal definition the maintainer gave in #431. A
+ * richer working/idle signal (live turn detection feeding a per-session state)
+ * is a follow-up once #430/#438 land; this rendering is correct for the data
+ * available now and avoids the conflated bare-"Idle" label.
+ */
+internal fun sessionKindLabel(session: FolderSessionEntry): String = when (session.agentKind) {
+    SessionAgentKind.Claude -> "Claude · ${agentStateLabel(session)}"
+    SessionAgentKind.Codex -> "Codex · ${agentStateLabel(session)}"
+    SessionAgentKind.OpenCode -> "OpenCode · ${agentStateLabel(session)}"
+    SessionAgentKind.Probing -> "Detecting"
+    SessionAgentKind.Exited -> "Shell"
+    SessionAgentKind.Shell -> "Shell"
 }
+
+/**
+ * Agent activity state for #431. "Idle" = agent waiting for input / not actively
+ * working. No per-session working/idle signal exists on [FolderSessionEntry]
+ * yet, so this defaults to "Idle"; promote to "Working" here once a live turn
+ * signal is surfaced (#430/#438 follow-up).
+ */
+private fun agentStateLabel(@Suppress("UNUSED_PARAMETER") session: FolderSessionEntry): String = "Idle"
 
 private fun sessionDisplayTitle(session: FolderSessionEntry): String {
     val raw = session.sessionName.trim()

@@ -109,6 +109,7 @@ import com.pocketshell.app.sessions.StartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
 import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
+import com.pocketshell.app.agentcommands.AgentCommandSheet
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.startup.StartupTiming
@@ -310,6 +311,8 @@ public fun TmuxSessionScreen(
     // dark for voice input).
     var showMicSheet by remember { mutableStateOf(false) }
     var showSnippetPicker by remember { mutableStateOf(false) }
+    // Issue #436 (Slice A): agent slash-command quick-send palette state.
+    var showAgentCommands by remember { mutableStateOf(false) }
 
     // Issue #167: intercept system-back so the user returns to the host
     // list instead of exiting the activity. Without this `BackHandler`
@@ -852,6 +855,10 @@ public fun TmuxSessionScreen(
                     onChipTap = { chip ->
                         currentPane?.let { pane ->
                             when (chip) {
+                                // Issue #436 (Slice A): open the agent
+                                // slash-command palette rather than typing the
+                                // chip label into the pane.
+                                AgentCommandsChip -> showAgentCommands = true
                                 CtrlC2Chip -> viewModel.sendControlInputToPane(
                                     pane.paneId,
                                     CtrlCByte,
@@ -1151,6 +1158,29 @@ public fun TmuxSessionScreen(
                         )
                     }
                     showSnippetPicker = false
+                }
+            },
+        )
+    }
+
+    // Issue #436 (Slice A): agent slash-command quick-send palette. Filtered
+    // to the agent detected in the visible pane; each row routes through the
+    // existing `sendToAgentPane` path (literal `send-keys -l` + Enter, with
+    // the Codex submit delay already handled there). When detection is null
+    // (plain shell pane) the "/ commands" chip is not offered, so the sheet
+    // only ever opens with a non-null agent.
+    val agentForCommands = currentAgentConversation?.detection?.agent
+    if (showAgentCommands && agentForCommands != null) {
+        AgentCommandSheet(
+            agent = agentForCommands,
+            onDismiss = { showAgentCommands = false },
+            onCommandSend = { command ->
+                // Issue #249: same liveness guard as the snippet picker —
+                // never write into a dead pane and lose the tap.
+                if (sessionLive) {
+                    currentPane?.let { pane ->
+                        viewModel.sendToAgentPane(pane.paneId, command.command)
+                    }
                 }
             },
         )
@@ -3991,4 +4021,11 @@ internal val TmuxKeyBarLayout: List<KeyBinding> = listOf(
 
 internal const val CtrlC2Chip: String = "Ctrl-C x2"
 internal const val CtrlD2Chip: String = "Ctrl-D x2"
-internal val AgentExitChips: List<String> = listOf(CtrlC2Chip, CtrlD2Chip)
+
+// Issue #436 (Slice A): "/ commands" chip on agent panes opens the
+// agent-aware slash-command quick-send palette ([AgentCommandSheet]). It is
+// a chip rather than a literal-input command, so the [onChipTap] handler
+// special-cases it (like the Ctrl-C/Ctrl-D chips) instead of writing it into
+// the pane.
+internal const val AgentCommandsChip: String = "/ commands"
+internal val AgentExitChips: List<String> = listOf(AgentCommandsChip, CtrlC2Chip, CtrlD2Chip)

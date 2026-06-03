@@ -52,6 +52,10 @@ fun PortForwardPanelScreen(
     hostId: Long,
     keyPath: String?,
     passphrase: CharArray? = null,
+    // Slice B (#447): open the panel pre-filled with a remote port and
+    // start its forward in one step. Null = the normal manual flow
+    // (discovery scan + tap a row to forward).
+    prefillRemotePort: Int? = null,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: PortForwardPanelViewModel = hiltViewModel(),
@@ -78,8 +82,14 @@ fun PortForwardPanelScreen(
         viewModel.observeProcessLifecycle()
     }
 
-    LaunchedEffect(hostId, keyPath, passphrase) {
-        viewModel.load(hostId, keyPath, passphrase, discoverPorts = true)
+    LaunchedEffect(hostId, keyPath, passphrase, prefillRemotePort) {
+        viewModel.load(
+            hostId = hostId,
+            initialKeyPath = keyPath,
+            initialPassphrase = passphrase,
+            discoverPorts = true,
+            prefillRemotePort = prefillRemotePort,
+        )
     }
 
     Box(
@@ -132,10 +142,15 @@ fun PortForwardPanelScreen(
                             contentPadding = PaddingValues(bottom = 12.dp),
                         ) {
                             items(state.tunnels, key = { it.remotePort }) { tunnel ->
+                                // Discovery (auto-forward off) state:
+                                // tapping a discovered-port row — or its
+                                // Start button — initiates a forward for
+                                // that remote port in one step (#447).
                                 PortForwardRow(
                                     tunnel = tunnel,
                                     onToggle = { viewModel.startPort(tunnel.remotePort) },
                                     onOpen = {},
+                                    onRowClick = { viewModel.startPort(tunnel.remotePort) },
                                 )
                             }
                         }
@@ -260,12 +275,31 @@ private fun PortTableHeader() {
 }
 
 @Composable
-private fun PortForwardRow(tunnel: TunnelInfo, onToggle: () -> Unit, onOpen: () -> Unit) {
+private fun PortForwardRow(
+    tunnel: TunnelInfo,
+    onToggle: () -> Unit,
+    onOpen: () -> Unit,
+    // When the row represents a discovered-but-not-yet-forwarded port,
+    // tapping the row body initiates the forward (#447). Forwarding rows
+    // keep their "open in browser" tap. Null = row body not tappable.
+    onRowClick: (() -> Unit)? = null,
+) {
     val forwarding = tunnel.status == TunnelInfo.Status.FORWARDING
+    val rowClick: (() -> Unit)? = when {
+        forwarding -> onOpen
+        onRowClick != null -> onRowClick
+        else -> null
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = forwarding, role = Role.Button, onClick = onOpen)
+            .let { base ->
+                if (rowClick != null) {
+                    base.clickable(role = Role.Button, onClick = rowClick)
+                } else {
+                    base
+                }
+            }
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

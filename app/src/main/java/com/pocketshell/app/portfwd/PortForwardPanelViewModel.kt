@@ -160,6 +160,14 @@ class PortForwardPanelViewModel @Inject constructor(
         initialKeyPath: String? = null,
         initialPassphrase: CharArray? = null,
         discoverPorts: Boolean = false,
+        // Slice B (#447): when a caller opens the panel for a specific
+        // remote port (the 432c detection overlay, a "known port" entry
+        // point, or a discovered-row tap that pre-resolved the port),
+        // the panel comes up with that port already being forwarded in
+        // one step instead of waiting for a discovery scan + a manual
+        // toggle. Prefill takes priority over the idle discovery scan so
+        // we don't open two SSH sessions for the same host on entry.
+        prefillRemotePort: Int? = null,
     ) {
         if (
             currentHostId == hostId &&
@@ -167,6 +175,13 @@ class PortForwardPanelViewModel @Inject constructor(
             passphrase contentEquals initialPassphrase &&
             _state.value.host != null
         ) {
+            // Same panel re-composition (no credential change). If a
+            // prefill port was requested and we are not already
+            // forwarding it, start it now without tearing down the
+            // existing connection/discovery state.
+            if (prefillRemotePort != null) {
+                startPort(prefillRemotePort)
+            }
             return
         }
         val requestGeneration = ++loadGeneration
@@ -199,7 +214,13 @@ class PortForwardPanelViewModel @Inject constructor(
             }
             keyPath = resolvedKeyPath
             _state.value = PortForwardPanelState(host = host)
-            if (discoverPorts && resolvedKeyPath != null) {
+            if (prefillRemotePort != null) {
+                // One-step forward of the requested port. `startPort`
+                // routes through `setAutoForwardEnabled(true)` which
+                // opens the SSH session, so the idle discovery scan is
+                // intentionally skipped to avoid a second connection.
+                startPort(prefillRemotePort)
+            } else if (discoverPorts && resolvedKeyPath != null) {
                 startDiscovery(host, resolvedKeyPath)
             }
             if (requestGeneration == loadGeneration) {

@@ -672,6 +672,7 @@ private fun AppNavigator(
             hostId = dest.hostId,
             keyPath = dest.keyPath,
             passphrase = dest.passphrase,
+            prefillRemotePort = dest.prefillRemotePort,
             onBack = ::back,
         )
 

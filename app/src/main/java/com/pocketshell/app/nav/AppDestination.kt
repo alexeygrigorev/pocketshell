@@ -95,6 +95,11 @@ sealed interface AppDestination {
         val hostId: Long,
         val keyPath: String,
         val passphrase: CharArray?,
+        // Slice B (#447): optional remote port to pre-fill and forward in
+        // one step when the panel opens (e.g. the 432c detection overlay
+        // or a "known port" entry point). Additive + defaulted so the
+        // #432a kebab nav call site and other constructors stay valid.
+        val prefillRemotePort: Int? = null,
     ) : AppDestination
 
     /**

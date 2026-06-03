@@ -213,6 +213,99 @@ class PortForwardPanelViewModelTest {
     }
 
     @Test
+    fun loadWithPrefillRemotePortForwardsThatPortInOneStep() = runTest {
+        // Slice B (#447): opening the panel pre-filled with a remote port
+        // must connect and forward that port without a manual toggle,
+        // and without a separate discovery scan (one SSH session).
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
+        val session = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val connector = QueueConnector(listOf(Result.success(session)))
+        val viewModel = newViewModel(connector)
+
+        viewModel.load(hostId, "/tmp/key", prefillRemotePort = 3000)
+        runCurrent()
+
+        val state = viewModel.state.value
+        assertTrue("prefill must enable auto-forward", state.autoForwardEnabled)
+        assertEquals(PortForwardConnectionState.Connected, state.connectionState)
+        assertEquals(listOf(3000), session.openedForwards.map { it.remotePort })
+        assertEquals(
+            com.pocketshell.core.portfwd.TunnelInfo.Status.FORWARDING,
+            state.tunnels.single { it.remotePort == 3000 }.status,
+        )
+        // Only the auto-forward session was opened: prefill skips the
+        // idle discovery scan, so a single SSH connect happened.
+        assertEquals(1, connector.hosts.size)
+
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
+    fun prefillRemotePortOnRecompositionStartsPortWithoutReconnect() = runTest {
+        // Slice B (#447): a re-composition with the same host/credentials
+        // but a newly-supplied prefill port must start that port using
+        // the existing supervisor, not tear down + reconnect.
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1)
+        val session = FakeSshSession(
+            ssOutput = """
+                127.0.0.1:3000 users:(("node",pid=42,fd=3))
+                127.0.0.1:8080 users:(("vite",pid=43,fd=3))
+            """.trimIndent(),
+        )
+        val connector = QueueConnector(listOf(Result.success(session)))
+        val viewModel = newViewModel(connector)
+
+        viewModel.load(hostId, "/tmp/key", prefillRemotePort = 3000)
+        runCurrent()
+        assertEquals(listOf(3000), session.openedForwards.map { it.remotePort })
+
+        // Same panel, same credentials, new prefill port -> starts the
+        // additional port over the existing session (no second connect).
+        viewModel.load(hostId, "/tmp/key", prefillRemotePort = 8080)
+        runCurrent()
+
+        assertEquals(1, connector.hosts.size)
+        assertFalse(session.closed)
+        assertEquals(
+            listOf(3000, 8080),
+            session.openedForwards.map { it.remotePort }.sorted(),
+        )
+
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
+    fun loadWithoutPrefillRunsDiscoveryAndLeavesForwardingOff() = runTest {
+        // Guard: the manual add-forward flow is unaffected — a load
+        // without a prefill port still discovers ports passively and
+        // does not open any forward until the user acts.
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
+        val session = FakeSshSession(
+            ssOutput = "127.0.0.1:3000 users:((\"node\",pid=42,fd=3))\n",
+        )
+        val viewModel = newViewModel(FakeConnector(Result.success(session)))
+
+        viewModel.load(hostId, "/tmp/key", discoverPorts = true)
+        runCurrent()
+
+        val state = viewModel.state.value
+        assertFalse(state.autoForwardEnabled)
+        assertEquals(PortForwardConnectionState.Connected, state.connectionState)
+        assertEquals(
+            com.pocketshell.core.portfwd.TunnelInfo.Status.AVAILABLE,
+            state.tunnels.single().status,
+        )
+        assertEquals(emptyList<FakePortForward>(), session.openedForwards)
+
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
     fun loadingDifferentHostStopsExistingForwarderAndSession() = runTest {
         val hostA = insertHost(name = "a", keyPath = "/tmp/a", maxAutoPort = 4000, skipPortsBelow = 1000)
         val hostB = insertHost(name = "b", keyPath = "/tmp/b", maxAutoPort = 5000, skipPortsBelow = 1000)

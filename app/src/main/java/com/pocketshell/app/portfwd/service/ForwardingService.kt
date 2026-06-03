@@ -197,12 +197,13 @@ class ForwardingService : Service() {
                 controller.flowOfActiveHostCount(),
                 controller.flowOfTotalTunnelCount(),
                 controller.flowOfPrimaryHostName(),
-            ) { activeHosts, tunnels, primaryHost ->
-                Triple(activeHosts, tunnels, primaryHost)
+                controller.flowOfRestoringHostCount(),
+            ) { activeHosts, tunnels, primaryHost, restoringHosts ->
+                NotificationSnapshot(activeHosts, tunnels, primaryHost, restoringHosts)
             }
                 .distinctUntilChanged()
-                .collect { (activeHosts, tunnels, primaryHost) ->
-                    if (activeHosts == 0) {
+                .collect { snapshot ->
+                    if (snapshot.activeHosts == 0) {
                         // All hosts disabled — tear down. The
                         // controller is responsible for posting the
                         // initial zero-count snapshot, so this also
@@ -211,7 +212,12 @@ class ForwardingService : Service() {
                         // foreground.
                         stopForwarding()
                     } else {
-                        updateNotification(primaryHost, activeHosts, tunnels)
+                        updateNotification(
+                            snapshot.primaryHost,
+                            snapshot.activeHosts,
+                            snapshot.tunnels,
+                            snapshot.restoringHosts,
+                        )
                     }
                 }
         }
@@ -287,8 +293,13 @@ class ForwardingService : Service() {
         hasStartedForeground = true
     }
 
-    private fun updateNotification(hostName: String, hostCount: Int, tunnelCount: Int) {
-        val notification = buildNotification(hostName, hostCount, tunnelCount)
+    private fun updateNotification(
+        hostName: String,
+        hostCount: Int,
+        tunnelCount: Int,
+        restoringHostCount: Int = 0,
+    ) {
+        val notification = buildNotification(hostName, hostCount, tunnelCount, restoringHostCount)
         if (!hasStartedForeground) {
             promoteToForegroundIfNeeded(notification)
             return
@@ -296,6 +307,19 @@ class ForwardingService : Service() {
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, notification)
     }
+
+    /**
+     * Snapshot of the controller state the notification renders (issue
+     * #439 added [restoringHosts]). A named class keeps the `combine` of
+     * four flows readable and lets `distinctUntilChanged` collapse on
+     * value equality.
+     */
+    private data class NotificationSnapshot(
+        val activeHosts: Int,
+        val tunnels: Int,
+        val primaryHost: String,
+        val restoringHosts: Int,
+    )
 
     private fun initialNotification(): Notification = buildNotification(
         hostName = "",
@@ -308,6 +332,7 @@ class ForwardingService : Service() {
         hostName: String,
         hostCount: Int,
         tunnelCount: Int,
+        restoringHostCount: Int = 0,
         contentTextOverride: String? = null,
     ): Notification {
         // Issue #446: body-tap deep-links to the port-forward panel entry
@@ -341,9 +366,17 @@ class ForwardingService : Service() {
                 if (hostCount > 1) append(" + ${hostCount - 1} more")
                 append(" • ")
             }
-            append("$tunnelCount tunnel")
-            if (tunnelCount != 1) append("s")
-            append(" active")
+            // Issue #439: while a host's transport is down the supervisor
+            // is re-establishing SSH and re-opening the user's desired
+            // forwards. Show "Restoring…" instead of "0 tunnels active"
+            // so a transient blip reads as restoring, not removed.
+            if (restoringHostCount > 0) {
+                append("Restoring…")
+            } else {
+                append("$tunnelCount tunnel")
+                if (tunnelCount != 1) append("s")
+                append(" active")
+            }
         }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)

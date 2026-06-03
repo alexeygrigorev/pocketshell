@@ -55,11 +55,21 @@ class ForwardingController @Inject constructor(
     private val totalTunnelCount = MutableStateFlow(0)
     private val primaryHostName = MutableStateFlow("")
     private val hostSnapshots = MutableStateFlow<Map<Long, ForwardingHostSnapshot>>(emptyMap())
+    private val restoringHostCount = MutableStateFlow(0)
 
     fun flowOfActiveHostCount(): StateFlow<Int> = activeHostCount.asStateFlow()
     fun flowOfTotalTunnelCount(): StateFlow<Int> = totalTunnelCount.asStateFlow()
     fun flowOfPrimaryHostName(): StateFlow<String> = primaryHostName.asStateFlow()
     fun flowOfHostSnapshots(): StateFlow<Map<Long, ForwardingHostSnapshot>> = hostSnapshots.asStateFlow()
+
+    /**
+     * Number of active hosts whose forwarding transport is currently
+     * down and reconnecting (issue #439). > 0 means the user's forwards
+     * are temporarily down and being restored — surfaced as a transient
+     * "restoring…" state in the indicator/notification so a transport
+     * blip reads as "restoring" rather than "removed".
+     */
+    fun flowOfRestoringHostCount(): StateFlow<Int> = restoringHostCount.asStateFlow()
 
     /**
      * Tell the controller that [hostId] has just gone active.
@@ -85,6 +95,7 @@ class ForwardingController @Inject constructor(
                 reconnectHook = reconnectHook,
                 tunnelCount = existing.tunnelCount,
                 activeRemotePorts = existing.activeRemotePorts,
+                restoring = existing.restoring,
             )
         } else {
             activeHosts += ActiveHost(hostId, hostName, reconnectHook, tunnelCount = 0)
@@ -145,6 +156,21 @@ class ForwardingController @Inject constructor(
     }
 
     /**
+     * Mark whether [hostId]'s forwarding transport is currently down and
+     * reconnecting (issue #439). Drives the transient "restoring…" state
+     * in the indicator/notification. No-op for an unregistered host —
+     * restoring only makes sense for a host the user has enabled.
+     */
+    @Synchronized
+    fun setHostRestoring(hostId: Long, restoring: Boolean) {
+        val entry = activeHosts.firstOrNull { it.hostId == hostId } ?: return
+        if (entry.restoring == restoring) return
+        activeHosts.remove(entry)
+        activeHosts += entry.copy(restoring = restoring)
+        recomputeSnapshot()
+    }
+
+    /**
      * Network-recovery / user-action hint. Fans out to every
      * registered host's [ActiveHost.reconnectHook] so each supervisor
      * has a chance to cancel its in-flight backoff sleep. Idempotent
@@ -158,12 +184,14 @@ class ForwardingController @Inject constructor(
         activeHostCount.update { activeHosts.size }
         totalTunnelCount.update { activeHosts.sumOf { it.tunnelCount } }
         primaryHostName.update { activeHosts.firstOrNull()?.hostName.orEmpty() }
+        restoringHostCount.update { activeHosts.count { it.restoring } }
         hostSnapshots.update {
             activeHosts.associate { host ->
                 host.hostId to ForwardingHostSnapshot(
                     active = true,
                     tunnelCount = host.tunnelCount,
                     activeRemotePorts = host.activeRemotePorts,
+                    restoring = host.restoring,
                 )
             }
         }
@@ -181,6 +209,10 @@ class ForwardingController @Inject constructor(
         val reconnectHook: (() -> Unit)?,
         val tunnelCount: Int,
         val activeRemotePorts: Set<Int> = emptySet(),
+        // Issue #439: the host is registered (user enabled forwarding)
+        // but its transport is currently down and reconnecting, so its
+        // forwards are being restored rather than removed.
+        val restoring: Boolean = false,
     )
 }
 
@@ -188,4 +220,6 @@ data class ForwardingHostSnapshot(
     val active: Boolean,
     val tunnelCount: Int,
     val activeRemotePorts: Set<Int> = emptySet(),
+    // Issue #439: transport down, forwards restoring (transient).
+    val restoring: Boolean = false,
 )

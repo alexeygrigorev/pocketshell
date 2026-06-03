@@ -243,6 +243,48 @@ class ForwardingControllerTest {
         assertEquals(3, controller.flowOfTotalTunnelCount().value)
     }
 
+    @Test
+    fun `setHostRestoring surfaces a transient restoring count and flag`() {
+        val controller = ForwardingController(context)
+        controller.registerActiveHost(hostId = 1, hostName = "alpha")
+        controller.updateTunnelCount(1, 2)
+
+        assertEquals(0, controller.flowOfRestoringHostCount().value)
+
+        // Transport drops -> mark restoring. The host stays registered
+        // (count stays 1) so the indicator/notification reads "restoring"
+        // rather than "removed".
+        controller.setHostRestoring(hostId = 1, restoring = true)
+        assertEquals(1, controller.flowOfRestoringHostCount().value)
+        assertEquals(1, controller.flowOfActiveHostCount().value)
+        assertTrue(controller.flowOfHostSnapshots().value.getValue(1L).restoring)
+
+        // Reconnected -> clear restoring.
+        controller.setHostRestoring(hostId = 1, restoring = false)
+        assertEquals(0, controller.flowOfRestoringHostCount().value)
+        assertTrue(!controller.flowOfHostSnapshots().value.getValue(1L).restoring)
+    }
+
+    @Test
+    fun `setHostRestoring is a no-op for an unregistered host`() {
+        val controller = ForwardingController(context)
+        controller.setHostRestoring(hostId = 99, restoring = true)
+        assertEquals(0, controller.flowOfRestoringHostCount().value)
+    }
+
+    @Test
+    fun `re-registering a restoring host preserves the restoring flag`() {
+        val controller = ForwardingController(context)
+        controller.registerActiveHost(hostId = 1, hostName = "alpha")
+        controller.setHostRestoring(hostId = 1, restoring = true)
+
+        // Panel rebuild re-registers the same host with a new hook.
+        controller.registerActiveHost(hostId = 1, hostName = "alpha", reconnectHook = {})
+
+        assertEquals(1, controller.flowOfRestoringHostCount().value)
+        assertTrue(controller.flowOfHostSnapshots().value.getValue(1L).restoring)
+    }
+
     private fun drainStartedServices() {
         while (shadow.nextStartedService != null) {
             // Iterate to clear the queue.

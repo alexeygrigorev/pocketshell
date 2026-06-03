@@ -135,6 +135,23 @@ public class AutoForwarderSupervisor(
 
     private val mutex = Mutex()
 
+    /**
+     * User-desired manual port forwards (issue #439), independent of the
+     * live transport. The per-session [AutoForwarder] is rebuilt on every
+     * reconnect, so the user's explicit opt-ins (which may be outside the
+     * auto-forward window or not currently listening) would otherwise be
+     * lost on a drop+reconnect. This supervisor-level set is the
+     * authoritative desired state: it is seeded into every freshly-built
+     * forwarder so active forwards auto-restore when SSH comes back.
+     *
+     * Guarded by [desiredLock]. A [java.util.Collections.synchronizedSet]
+     * isn't enough because [togglePort] does a read-modify-write
+     * (contains → add/remove) that must be atomic against the loop's
+     * snapshot read in [runConnectAndReconnectLoop].
+     */
+    private val desiredManualPorts: MutableSet<Int> = mutableSetOf()
+    private val desiredLock = Any()
+
     @Volatile
     private var supervisorScope: CoroutineScope? = null
 
@@ -245,11 +262,37 @@ public class AutoForwarderSupervisor(
     }
 
     /**
-     * Forward a manual port toggle to the currently-running forwarder.
-     * No-op when no forwarder is mounted (between connect attempts).
+     * Forward a manual port toggle to the currently-running forwarder and
+     * record the user's intent in the supervisor-level desired-state set
+     * (issue #439). Recording happens even when no forwarder is mounted
+     * (between connect attempts / during backoff) so a port the user
+     * enabled is restored on the next reconnect rather than dropped.
      */
     public suspend fun togglePort(remotePort: Int) {
-        currentForwarder?.togglePort(remotePort)
+        val nowDesired = synchronized(desiredLock) {
+            if (desiredManualPorts.remove(remotePort)) {
+                false
+            } else {
+                desiredManualPorts.add(remotePort)
+                true
+            }
+        }
+        // Drive the live forwarder from the resolved desired state so the
+        // toggle and the desired-state set never diverge (which would let
+        // a reconnect re-open a port the user just turned off, or skip one
+        // they just turned on). No-op when no forwarder is mounted; the
+        // desired-state record above still survives to the next reconnect.
+        currentForwarder?.ensurePort(remotePort, nowDesired)
+    }
+
+    /**
+     * The set of remote ports the user has explicitly opted into
+     * forwarding — the authoritative desired state that survives
+     * transport drops (issue #439). Exposed for tests so they can assert
+     * the desired-state set independently of the live forwarder.
+     */
+    internal fun desiredManualPortsSnapshot(): Set<Int> = synchronized(desiredLock) {
+        desiredManualPorts.toSet()
     }
 
     private suspend fun runConnectAndReconnectLoop() {
@@ -264,12 +307,21 @@ public class AutoForwarderSupervisor(
 
                 val session = sessionFactory()
                 attemptCount += 1
+                // Snapshot the desired-state set so the fresh forwarder
+                // re-opens every user-enabled manual port (issue #439).
+                // Without this the manual opt-ins live only inside the
+                // previous AutoForwarder instance, which is discarded on
+                // reconnect, so the user's forwards would silently vanish.
+                val manualPortsSnapshot = synchronized(desiredLock) {
+                    desiredManualPorts.toSet()
+                }
                 mutex.withLock {
                     currentSession = session
                     val forwarder = AutoForwarder(
                         session = session,
                         config = config,
                         initialRemappings = initialRemappings,
+                        initialManualPorts = manualPortsSnapshot,
                     )
                     currentForwarder = forwarder
                 }

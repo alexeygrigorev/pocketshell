@@ -476,6 +476,81 @@ class AutoForwarderTest {
         runCurrent()
     }
 
+    @Test
+    fun `initialManualPorts re-forwards an out-of-window port on first scan`() = runTest {
+        // Issue #439: the supervisor seeds a fresh forwarder with the
+        // user's desired manual ports after a reconnect. :22 is below the
+        // auto window and the only way it comes up is via the seeded set.
+        val session = FakeSession()
+        session.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
+
+        val forwarder = AutoForwarder(
+            session,
+            smallConfig(),
+            initialManualPorts = setOf(22),
+        )
+        val job = forwarder.start(this)
+        runCurrent()
+
+        val t = forwarder.flowOfTunnels().first().single { it.remotePort == 22 }
+        assertEquals(TunnelInfo.Status.FORWARDING, t.status)
+        assertEquals(1, session.openForwards.size)
+
+        forwarder.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `initialManualPorts re-forwards a port that is not currently listening`() = runTest {
+        // The desired port may briefly not be listening right after a
+        // reconnect (server restarting). The seeded set still re-opens it.
+        val session = FakeSession() // nothing listening
+        val forwarder = AutoForwarder(
+            session,
+            smallConfig(),
+            initialManualPorts = setOf(8080),
+        )
+        val job = forwarder.start(this)
+        runCurrent()
+
+        val t = forwarder.flowOfTunnels().first().single { it.remotePort == 8080 }
+        assertEquals(TunnelInfo.Status.FORWARDING, t.status)
+        assertEquals(1, session.openForwards.size)
+
+        forwarder.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `ensurePort enable then disable is idempotent and absolute`() = runTest {
+        val session = FakeSession()
+        session.setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))")
+        val forwarder = AutoForwarder(session, smallConfig())
+        val job = forwarder.start(this)
+        runCurrent()
+
+        forwarder.ensurePort(22, enabled = true)
+        forwarder.ensurePort(22, enabled = true) // idempotent — no dup
+        assertEquals(1, session.openForwards.count { it.value.remotePort == 22 })
+        assertEquals(
+            TunnelInfo.Status.FORWARDING,
+            forwarder.flowOfTunnels().first().single { it.remotePort == 22 }.status,
+        )
+
+        forwarder.ensurePort(22, enabled = false)
+        assertTrue(
+            "ensurePort(false) must tear down the forward",
+            forwarder.flowOfTunnels().first()
+                .none { it.remotePort == 22 && it.status == TunnelInfo.Status.FORWARDING },
+        )
+
+        forwarder.stop()
+        job.cancel()
+        runCurrent()
+    }
+
     private fun smallConfig() = AutoForwardConfig(
         scanIntervalSec = 1,
         maxAutoPort = 5_000,

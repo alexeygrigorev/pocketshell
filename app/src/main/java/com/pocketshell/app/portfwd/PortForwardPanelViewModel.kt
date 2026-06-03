@@ -365,6 +365,17 @@ class PortForwardPanelViewModel @Inject constructor(
                         _state.value = _state.value.copy(
                             connectionState = supervisorState.toPanelConnectionState(),
                         )
+                        // Issue #439: mirror the transport-down window out
+                        // to the controller so the indicator / notification
+                        // shows a transient "restoring…" state instead of a
+                        // "removed" / zero-count state while the supervisor
+                        // re-establishes SSH and re-opens the user's
+                        // desired forwards. Only an already-registered host
+                        // is marked (no-op otherwise), so a first-connect
+                        // Connecting doesn't flag "restoring".
+                        val restoring = supervisorState ==
+                            AutoForwarderSupervisor.ConnectionState.Reconnecting
+                        forwardingController.setHostRestoring(host.id, restoring)
                     }
                 }
                 launch {

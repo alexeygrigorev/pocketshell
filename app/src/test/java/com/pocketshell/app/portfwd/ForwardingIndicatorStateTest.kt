@@ -60,4 +60,29 @@ class ForwardingIndicatorStateTest {
     fun defaultStateIsHidden() {
         assertFalse(ForwardingIndicatorState().visible)
     }
+
+    @Test
+    fun restoringFlagSetWhenAHostsTransportIsDown() {
+        // Issue #439: while ≥1 active host is reconnecting, the indicator
+        // stays visible but reads as "restoring" rather than removed.
+        val state = ForwardingIndicatorState(
+            activeHostCount = 1,
+            totalTunnelCount = 0,
+            restoringHostCount = 1,
+        )
+        assertTrue(state.visible)
+        assertTrue(state.restoring)
+        assertEquals("Port forwarding restoring", state.contentDescription)
+    }
+
+    @Test
+    fun notRestoringWhenAllHostsConnected() {
+        val state = ForwardingIndicatorState(
+            activeHostCount = 1,
+            totalTunnelCount = 2,
+            restoringHostCount = 0,
+        )
+        assertFalse(state.restoring)
+        assertEquals("2 ports forwarding active", state.contentDescription)
+    }
 }

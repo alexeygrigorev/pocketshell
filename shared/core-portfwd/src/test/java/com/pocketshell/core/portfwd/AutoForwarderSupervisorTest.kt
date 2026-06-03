@@ -347,6 +347,209 @@ class AutoForwarderSupervisorTest {
         runCurrent()
     }
 
+    @Test
+    fun `manual forward survives drop+reconnect and is auto-restored`() = runTest {
+        // sshd:22 is below skipPortsBelow, so it is NEVER auto-forwarded:
+        // the only way it stays up across a reconnect is if the user's
+        // desired-state opt-in survives the AutoForwarder swap (issue
+        // #439). Both sessions report only :22 listening.
+        val factory = SequentialSessionFactory().apply {
+            addSession { setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))") }
+            addSession { setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))") }
+        }
+        val supervisor = AutoForwarderSupervisor(
+            sessionFactory = { factory.next() },
+            config = smallConfig(),
+            initialReconnectDelayMs = 200L,
+            maxReconnectDelayMs = 200L,
+            sessionHealthPollMs = 100L,
+        )
+
+        val job = supervisor.start(this)
+        runCurrent()
+
+        // User opts port 22 in. It is out of the auto window, so this is
+        // the user's explicit desired state.
+        supervisor.togglePort(22)
+        runCurrent()
+        assertEquals(setOf(22), supervisor.desiredManualPortsSnapshot())
+        val firstSession = requireNotNull(factory.last)
+        assertEquals(1, firstSession.openForwards.size)
+        assertEquals(
+            TunnelInfo.Status.FORWARDING,
+            supervisor.flowOfTunnels().first().single { it.remotePort == 22 }.status,
+        )
+
+        // Drop the transport. Supervisor reconnects and must re-open :22
+        // even though it is outside the auto-forward window.
+        firstSession.simulateDrop()
+        advanceTimeBy(2_500L)
+        runCurrent()
+
+        val secondSession = requireNotNull(factory.last)
+        assertNotSame(firstSession, secondSession)
+        assertEquals(setOf(22), supervisor.desiredManualPortsSnapshot())
+        assertTrue(
+            "manual forward must auto-restore on the reconnected session",
+            secondSession.openForwards.any { it.remotePort == 22 },
+        )
+        assertEquals(
+            TunnelInfo.Status.FORWARDING,
+            supervisor.flowOfTunnels().first().single { it.remotePort == 22 }.status,
+        )
+
+        supervisor.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `no duplicate forwards after multiple reconnect cycles`() = runTest {
+        val factory = SequentialSessionFactory().apply {
+            repeat(4) { addSession { setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))") } }
+        }
+        val supervisor = AutoForwarderSupervisor(
+            sessionFactory = { factory.next() },
+            config = smallConfig(),
+            initialReconnectDelayMs = 200L,
+            maxReconnectDelayMs = 200L,
+            sessionHealthPollMs = 100L,
+        )
+
+        val job = supervisor.start(this)
+        runCurrent()
+        supervisor.togglePort(22)
+        runCurrent()
+
+        // Three drop+reconnect cycles.
+        repeat(3) {
+            val session = requireNotNull(factory.last)
+            session.simulateDrop()
+            advanceTimeBy(2_500L)
+            runCurrent()
+        }
+
+        val latest = requireNotNull(factory.last)
+        // Each fresh session must hold exactly ONE forward for :22 — the
+        // desired-state set is a Set, and the scan loop de-dupes by
+        // `port !in tunnels`, so cycles can't leak duplicates.
+        assertEquals(
+            "each reconnected session must hold exactly one :22 forward",
+            1,
+            latest.openForwards.count { it.remotePort == 22 },
+        )
+        assertEquals(
+            1,
+            supervisor.flowOfTunnels().first().count { it.remotePort == 22 },
+        )
+        assertEquals(setOf(22), supervisor.desiredManualPortsSnapshot())
+
+        supervisor.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `user-disabled port is not restored on reconnect`() = runTest {
+        val factory = SequentialSessionFactory().apply {
+            addSession { setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))") }
+            addSession { setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))") }
+        }
+        val supervisor = AutoForwarderSupervisor(
+            sessionFactory = { factory.next() },
+            config = smallConfig(),
+            initialReconnectDelayMs = 200L,
+            maxReconnectDelayMs = 200L,
+            sessionHealthPollMs = 100L,
+        )
+
+        val job = supervisor.start(this)
+        runCurrent()
+        // Enable, then disable :22 — desired state should be empty again.
+        supervisor.togglePort(22)
+        runCurrent()
+        supervisor.togglePort(22)
+        runCurrent()
+        assertEquals(emptySet<Int>(), supervisor.desiredManualPortsSnapshot())
+
+        val firstSession = requireNotNull(factory.last)
+        firstSession.simulateDrop()
+        advanceTimeBy(2_500L)
+        runCurrent()
+
+        val secondSession = requireNotNull(factory.last)
+        assertNotSame(firstSession, secondSession)
+        // :22 is below the auto window, so a user-disabled port must NOT
+        // be re-forwarded on the reconnected session.
+        assertTrue(
+            "user-disabled out-of-window port must not be restored",
+            secondSession.openForwards.none { it.remotePort == 22 },
+        )
+        assertEquals(emptySet<Int>(), supervisor.desiredManualPortsSnapshot())
+
+        supervisor.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
+    fun `togglePort during backoff still records desired state for next reconnect`() = runTest {
+        // First connect succeeds, then the session drops and the next
+        // connect fails so the supervisor sits in backoff. Toggling a
+        // port during that window must record desired state and restore
+        // it once a session comes back.
+        val factory = SequentialSessionFactory().apply {
+            addSession { setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))") }
+            failNext(1)
+            addSession { setListening("0.0.0.0:22 users:((\"sshd\",pid=1,fd=3))") }
+        }
+        val supervisor = AutoForwarderSupervisor(
+            sessionFactory = { factory.next() },
+            config = smallConfig(),
+            initialReconnectDelayMs = 300L,
+            maxReconnectDelayMs = 300L,
+            sessionHealthPollMs = 50L,
+        )
+
+        val job = supervisor.start(this)
+        runCurrent()
+        val firstSession = requireNotNull(factory.last)
+        firstSession.simulateDrop()
+        // Notice the drop (50ms poll) + sleep the post-drop backoff
+        // (300ms) + the next connect fails -> a second 300ms backoff. We
+        // land squarely inside that second backoff with no forwarder
+        // mounted.
+        advanceTimeBy(450L)
+        runCurrent()
+        assertEquals(2, factory.attempts())
+        assertEquals(
+            AutoForwarderSupervisor.ConnectionState.Reconnecting,
+            supervisor.flowOfConnectionState().value,
+        )
+
+        // No forwarder mounted right now, but the toggle must still be
+        // recorded as desired state.
+        supervisor.togglePort(22)
+        runCurrent()
+        assertEquals(setOf(22), supervisor.desiredManualPortsSnapshot())
+
+        // Let the backoff elapse; the queued success connects and the
+        // seeded desired-state set restores :22 on the first scan.
+        advanceTimeBy(2_000L)
+        runCurrent()
+
+        assertEquals(3, factory.attempts())
+        val restored = requireNotNull(factory.last)
+        assertTrue(
+            "port toggled during backoff must be restored on reconnect",
+            restored.openForwards.any { it.remotePort == 22 },
+        )
+
+        supervisor.stop()
+        job.cancel()
+        runCurrent()
+    }
+
     private fun smallConfig() = AutoForwardConfig(
         scanIntervalSec = 1,
         maxAutoPort = 5_000,

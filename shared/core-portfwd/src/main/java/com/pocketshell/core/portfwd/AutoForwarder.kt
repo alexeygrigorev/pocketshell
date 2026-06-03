@@ -65,6 +65,21 @@ public class AutoForwarder(
      * scan loop starts.
      */
     private val initialRemappings: Map<Int, Int> = emptyMap(),
+    /**
+     * Remote ports the user has explicitly opted into forwarding (issue
+     * #439). Unlike the auto-discovered set, these are forwarded even
+     * when they fall outside the [AutoForwardConfig] window and even when
+     * the remote port is not currently listening — they represent the
+     * user's *desired state*.
+     *
+     * The forwarder swaps once per SSH session (the supervisor builds a
+     * fresh [AutoForwarder] after every reconnect). The user's manual
+     * opt-ins are desired state that must survive that swap, so the
+     * supervisor re-seeds this set on each reconnect. Captured at
+     * construction into [manualPorts] so the first scan re-opens them
+     * automatically.
+     */
+    private val initialManualPorts: Set<Int> = emptySet(),
     // Wall clock for failed-port TTL bookkeeping. Injectable so unit tests
     // can drive time deterministically alongside the coroutine
     // `TestScope` virtual clock — `System.currentTimeMillis()` doesn't
@@ -81,7 +96,9 @@ public class AutoForwarder(
     // loop, public togglePort, public stop go through withLock.
     private val mutex = Mutex()
     private val tunnels = mutableMapOf<Int, SshPortForward>()
-    private val manualPorts = mutableSetOf<Int>()
+    // Seeded from [initialManualPorts] so the user's desired-state ports
+    // (issue #439) are re-forwarded on a fresh forwarder after reconnect.
+    private val manualPorts = initialManualPorts.toMutableSet()
     private val processNames = mutableMapOf<Int, String>()
     private val localPortMap = mutableMapOf<Int, Int>()
     // Remote port -> timestamp (from [clock]) when it landed on the
@@ -168,6 +185,28 @@ public class AutoForwarder(
         }
     }
 
+    /**
+     * Force a remote port's manual-forward state to [enabled] (issue
+     * #439). Unlike [togglePort] this is idempotent and absolute, so the
+     * supervisor can drive the forwarder from its authoritative
+     * desired-state set without first reading the live tunnel map. Used
+     * when the user opts a port in/out so the desired state and the live
+     * forwarder stay consistent across reconnects.
+     */
+    public suspend fun ensurePort(remotePort: Int, enabled: Boolean) {
+        mutex.withLock {
+            if (enabled) {
+                if (manualPorts.add(remotePort) || remotePort !in tunnels) {
+                    forwardPortLocked(remotePort)
+                }
+            } else {
+                manualPorts.remove(remotePort)
+                stopTunnelLocked(remotePort)
+            }
+            updateStateLocked()
+        }
+    }
+
     private suspend fun scanLoop() {
         while (loopScopeActive()) {
             try {
@@ -205,6 +244,19 @@ public class AutoForwarder(
                     if (shouldForwardPort(rp.port)) {
                         forwardPortLocked(rp.port)
                     }
+                }
+            }
+
+            // Re-open user-desired manual ports (issue #439) that aren't
+            // up yet. After a reconnect the fresh forwarder is seeded with
+            // the desired-state set but a manual port may not be in the
+            // current `ss` scan (it can be below `skipPortsBelow`, above
+            // `maxAutoPort`, or briefly not listening). Without this the
+            // forward would only come back if the port happened to fall in
+            // the auto window AND was listening — i.e. the reconnect bug.
+            manualPorts.forEach { remotePort ->
+                if (remotePort !in tunnels && remotePort !in failedPorts) {
+                    forwardPortLocked(remotePort)
                 }
             }
 

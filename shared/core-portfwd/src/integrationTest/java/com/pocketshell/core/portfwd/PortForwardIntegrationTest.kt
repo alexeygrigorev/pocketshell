@@ -307,6 +307,111 @@ class PortForwardIntegrationTest {
         }
     }
 
+    @Test
+    fun `manual forward auto-restores after a real SSH drop and reconnect`() = runTest {
+        // Issue #439: a port the user manually opted into must be
+        // re-forwarded automatically after the transport drops and the
+        // supervisor reconnects. sshd-on-22 is below skipPortsBelow, so it
+        // is NEVER auto-forwarded — the only way it comes back is via the
+        // supervisor's desired-state set surviving the AutoForwarder swap.
+        val config = AutoForwardConfig(
+            scanIntervalSec = 1,
+            maxAutoPort = 10_000,
+            skipPortsBelow = 1024,
+            localPortRange = randomHighPortRange(),
+        )
+        // Each factory call opens a fresh real SSH session to the same
+        // container — exactly what PortForwardPanelViewModel does on
+        // reconnect.
+        val liveSession = java.util.concurrent.atomic.AtomicReference<SshSession?>(null)
+        val supervisor = AutoForwarderSupervisor(
+            sessionFactory = {
+                connect().also { liveSession.set(it) }
+            },
+            config = config,
+            initialReconnectDelayMs = 500L,
+            maxReconnectDelayMs = 500L,
+            sessionHealthPollMs = 200L,
+        )
+        val scope = kotlinx.coroutines.CoroutineScope(
+            kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+        )
+        try {
+            val job = supervisor.start(scope)
+
+            // Wait for the first connect + scan, then opt :22 in.
+            waitUntil(15_000) {
+                supervisor.flowOfConnectionState().value ==
+                    AutoForwarderSupervisor.ConnectionState.Connected
+            }
+            supervisor.togglePort(22)
+            waitUntil(10_000) {
+                supervisor.flowOfTunnels().value().any {
+                    it.remotePort == 22 && it.status == TunnelInfo.Status.FORWARDING
+                }
+            }
+            val firstLocalPort = supervisor.flowOfTunnels().value()
+                .single { it.remotePort == 22 }.localPort
+            assertBannerReadable(firstLocalPort)
+
+            // Simulate a transport drop by closing the live session out
+            // from under the supervisor. The session-health poll notices
+            // and the supervisor reconnects.
+            requireNotNull(liveSession.get()).close()
+
+            // The supervisor must re-establish SSH and re-open :22 from its
+            // desired-state set — without the user touching anything.
+            waitUntil(20_000) {
+                val reconnected = supervisor.flowOfConnectionState().value ==
+                    AutoForwarderSupervisor.ConnectionState.Connected
+                val forwardingAgain = supervisor.flowOfTunnels().value().any {
+                    it.remotePort == 22 && it.status == TunnelInfo.Status.FORWARDING
+                }
+                reconnected && forwardingAgain
+            }
+
+            val restoredLocalPort = supervisor.flowOfTunnels().value()
+                .single { it.remotePort == 22 }.localPort
+            // Traffic must flow again through the restored forward.
+            assertBannerReadable(restoredLocalPort)
+            // No duplicate :22 rows after the reconnect cycle.
+            assertEquals(
+                "exactly one :22 tunnel after auto-restore",
+                1,
+                supervisor.flowOfTunnels().value().count { it.remotePort == 22 },
+            )
+
+            job.cancel()
+        } finally {
+            supervisor.stop()
+            scope.cancel()
+        }
+    }
+
+    private fun assertBannerReadable(localPort: Int) {
+        // The forward's local accept thread can lag a few hundred ms
+        // behind the FORWARDING status flip, so retry the read for a
+        // bounded window rather than racing a single attempt.
+        val deadline = System.currentTimeMillis() + 10_000
+        var lastBanner = ""
+        while (System.currentTimeMillis() < deadline) {
+            val banner = runCatching {
+                Socket().use { client ->
+                    client.connect(InetSocketAddress("127.0.0.1", localPort), 5_000)
+                    client.soTimeout = 5_000
+                    BufferedReader(InputStreamReader(client.getInputStream())).readLine() ?: ""
+                }
+            }.getOrDefault("")
+            if (banner.startsWith("SSH-2.0-")) return
+            lastBanner = banner
+            Thread.sleep(200)
+        }
+        assertTrue(
+            "expected SSH banner through forwarded tunnel on $localPort, got `$lastBanner`",
+            false,
+        )
+    }
+
     /**
      * Snapshot the current value of a [kotlinx.coroutines.flow.Flow] backed by a
      * StateFlow. AutoForwarder.flowOfTunnels() returns a StateFlow up-cast to

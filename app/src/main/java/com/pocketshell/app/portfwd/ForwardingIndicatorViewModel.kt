@@ -28,8 +28,13 @@ class ForwardingIndicatorViewModel @Inject constructor(
     val state: StateFlow<ForwardingIndicatorState> = combine(
         controller.flowOfActiveHostCount(),
         controller.flowOfTotalTunnelCount(),
-    ) { hostCount, tunnelCount ->
-        ForwardingIndicatorState(activeHostCount = hostCount, totalTunnelCount = tunnelCount)
+        controller.flowOfRestoringHostCount(),
+    ) { hostCount, tunnelCount, restoringCount ->
+        ForwardingIndicatorState(
+            activeHostCount = hostCount,
+            totalTunnelCount = tunnelCount,
+            restoringHostCount = restoringCount,
+        )
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
@@ -47,8 +52,20 @@ class ForwardingIndicatorViewModel @Inject constructor(
 data class ForwardingIndicatorState(
     val activeHostCount: Int = 0,
     val totalTunnelCount: Int = 0,
+    // Issue #439: number of active hosts whose transport is currently
+    // down and reconnecting. > 0 surfaces a transient "restoring…" hint
+    // so a transport blip never reads as "removed".
+    val restoringHostCount: Int = 0,
 ) {
     val visible: Boolean get() = activeHostCount > 0
+
+    /**
+     * True while ≥1 active host's transport is down and its forwards are
+     * being restored (issue #439). The indicator stays visible (the host
+     * is still registered) but reads as "restoring" rather than dropping
+     * to a removed-looking zero state.
+     */
+    val restoring: Boolean get() = restoringHostCount > 0
 
     /**
      * Compact pill label. When tunnels are still spinning up the host is
@@ -63,6 +80,7 @@ data class ForwardingIndicatorState(
 
     val contentDescription: String
         get() = when {
+            restoring -> "Port forwarding restoring"
             totalTunnelCount == 1 -> "1 port forwarding active"
             totalTunnelCount > 1 -> "$totalTunnelCount ports forwarding active"
             else -> "Port forwarding active"

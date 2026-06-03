@@ -4400,6 +4400,242 @@ class TmuxSessionViewModelTest {
         )
     }
 
+    // ─── Issue #437 (slice A): same-host switch must NOT blank to ───
+    // the full-screen "Connecting" overlay. The cold same-host switch
+    // (target not yet cached) enters the new [Switching] state, keeps the
+    // previous frame painted, gates input until the new -CC control client
+    // attaches, then flips to [Connected] with the new session's panes.
+
+    @Test
+    fun sameHostSwitchToUncachedSessionEntersSwitchingNotConnecting() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 4)
+        val session = FakeSshSession()
+        val connector = QueueLeaseConnector(session)
+        val registry = ActiveTmuxClients()
+        val vm = newVm(
+            registry = registry,
+            runtimeCache = runtimeCache,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        // Gate the cold client's list-panes so the new -CC attach stays
+        // in flight while we observe the visible state during the switch.
+        val attachGate = CompletableDeferred<Unit>()
+        val coldClient = FakeTmuxClient().withSinglePane("cold", "%6").apply {
+            sendCommandGatePrefix = "list-panes"
+            sendCommandGate = attachGate
+        }
+        vm.setTmuxClientFactoryForTest { _, _, _ -> coldClient }
+
+        // Establish a live same-host session with a rendered pane so the
+        // switch is fast-switch eligible AND has a previous frame to keep.
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = session,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "\$0",
+                    title = "work-pane",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        runCurrent()
+        assertEquals(listOf("%0"), vm.panes.value.map { it.paneId })
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+
+        // Switch to a session that has never been opened this app-session
+        // (cache miss). This is the maintainer's repro.
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "cold",
+        )
+        runCurrent()
+
+        // While the new -CC client is attaching the screen must be in
+        // Switching — NOT the blanking full-screen Connecting overlay —
+        // and the previous frame must still be painted.
+        val midStatus = vm.connectionStatus.value
+        assertTrue(
+            "same-host switch must enter Switching, got $midStatus",
+            midStatus is TmuxSessionViewModel.ConnectionStatus.Switching,
+        )
+        assertFalse(
+            "same-host switch must never show the blanking Connecting overlay",
+            midStatus is TmuxSessionViewModel.ConnectionStatus.Connecting,
+        )
+        assertEquals(
+            "previous frame must stay painted during a same-host switch (no blank)",
+            listOf("%0"),
+            vm.panes.value.map { it.paneId },
+        )
+        // Input is gated: only Connected counts as live (mirrors the
+        // screen's sessionLive = status is Connected).
+        assertFalse(
+            "input must stay gated while switching (status != Connected)",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+
+        // Complete the attach: the viewport now swaps to the new session's
+        // panes and the status flips to Connected (input ungated).
+        attachGate.complete(Unit)
+        advanceUntilIdle()
+
+        assertTrue(
+            "switch must complete to Connected once the new client attaches",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertEquals(
+            "viewport must swap to the new session's panes after attach",
+            listOf("%6"),
+            vm.panes.value.map { it.paneId },
+        )
+        assertTrue("new -CC client must attach", coldClient.connectCalled)
+        assertSame(coldClient, registry.clients.value[1L]?.client)
+    }
+
+    @Test
+    fun firstConnectToHostStillShowsConnectingNotSwitching() = runTest {
+        val session = FakeSshSession()
+        val connector = QueueLeaseConnector(session)
+        val vm = newVm(
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        // Gate the first attach so we can observe the visible state before
+        // it completes.
+        val attachGate = CompletableDeferred<Unit>()
+        val client = FakeTmuxClient().withSinglePane("work", "%0").apply {
+            sendCommandGatePrefix = "list-panes"
+            sendCommandGate = attachGate
+        }
+        vm.setTmuxClientFactoryForTest { _, _, _ -> client }
+
+        // No prior active session => genuine first-connect to the host.
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        runCurrent()
+
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "first-connect must show the full-screen Connecting overlay, got $status",
+            status is TmuxSessionViewModel.ConnectionStatus.Connecting,
+        )
+        assertFalse(
+            "first-connect must NOT use the same-host Switching state",
+            status is TmuxSessionViewModel.ConnectionStatus.Switching,
+        )
+
+        attachGate.complete(Unit)
+        advanceUntilIdle()
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(listOf("%0"), vm.panes.value.map { it.paneId })
+    }
+
+    @Test
+    fun sameHostSwitchDeadSshSessionEscalatesToConnectingAndBlanks() = runTest {
+        // #178 dead-session fallback preserved: if the reused SSH session
+        // died mid-switch we do a genuine reconnect, so the UI must
+        // escalate from Switching to the full-screen Connecting overlay
+        // and drop the now-stale previous frame (no painting a dead pane).
+        // The active session is LIVE at the eligibility check (so the
+        // switch is fast-switch eligible and enters Switching), but the
+        // lease the fast-switch reacquires comes back dead — exactly the
+        // #178 race. The fast-switch fallback then reconnects with a fresh
+        // live lease.
+        val activeSession = FakeSshSession()
+        val deadLeaseSession = FakeSshSession(isConnectedValue = false)
+        val fallbackSession = FakeSshSession()
+        val connector = QueueLeaseConnector(deadLeaseSession, fallbackSession)
+        val vm = newVm(
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        val reconnectGate = CompletableDeferred<Unit>()
+        val fallbackClient = FakeTmuxClient().withSinglePane("cold", "%6").apply {
+            sendCommandGatePrefix = "list-panes"
+            sendCommandGate = reconnectGate
+        }
+        vm.setTmuxClientFactoryForTest { _, _, _ -> fallbackClient }
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = FakeTmuxClient(),
+            session = activeSession,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId = "%0",
+                    windowId = "@0",
+                    sessionId = "\$0",
+                    title = "work-pane",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        runCurrent()
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "cold",
+        )
+        runCurrent()
+
+        // The reused session is dead, so the fast-switch path falls back
+        // to runConnect: UI escalates to Connecting and the stale frame is
+        // dropped while the fresh handshake runs.
+        val midStatus = vm.connectionStatus.value
+        assertTrue(
+            "dead-session fallback must escalate to the full-screen Connecting overlay, got $midStatus",
+            midStatus is TmuxSessionViewModel.ConnectionStatus.Connecting,
+        )
+        assertTrue(
+            "dead-session fallback must drop the stale previous frame",
+            vm.panes.value.isEmpty(),
+        )
+
+        reconnectGate.complete(Unit)
+        advanceUntilIdle()
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(listOf("%6"), vm.panes.value.map { it.paneId })
+    }
+
     @Test
     fun closeCachedRuntimeDetachesClientBeforeReleasingLease() = runTest {
         val session = FakeSshSession()
@@ -4469,7 +4705,12 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun fastSwitchClearsPaneStateBeforeNewSession() = runTest {
+    fun fastSwitchKeepsPreviousFrameUntilNewSessionPanesReconcile() = runTest {
+        // Issue #437 (slice A): a same-host fast switch must NOT blank the
+        // viewport. The previous frame stays painted (no "Connecting"
+        // blank) until the new session's panes reconcile and atomically
+        // replace it. This reverses the old "clear pane state on fast
+        // switch" behaviour — hard-cut, per D22.
         val vm = newVm()
         val session = FakeSshSession()
         val oldClient = FakeTmuxClient()
@@ -4486,10 +4727,9 @@ class TmuxSessionViewModelTest {
             session = session,
         )
 
-        // Populate a pane row so we can assert it is dropped during the
-        // fast-switch teardown. The sessionName must match the active
-        // target's session name; otherwise [applyParsedPanes] filters
-        // it out.
+        // Populate a pane row that represents the previous frame. The
+        // sessionName must match the active target's session name;
+        // otherwise [applyParsedPanes] filters it out.
         vm.applyParsedPanesForTest(
             listOf(
                 TmuxSessionViewModel.ParsedPane(
@@ -4504,6 +4744,9 @@ class TmuxSessionViewModelTest {
         )
         assertEquals(1, vm.panes.value.size)
 
+        // The new client reports no panes here, so nothing reconciles to
+        // replace the previous frame — letting us assert the frame is kept
+        // rather than blanked during the switch.
         val newClient = FakeTmuxClient()
         vm.fastSwitchSessionForTest(
             hostId = 1L,
@@ -4518,11 +4761,11 @@ class TmuxSessionViewModelTest {
         )
         advanceUntilIdle()
 
-        // Pane list is cleared on fast switch — the new tmux session
-        // will report its own panes.
-        assertTrue(
-            "pane state must be cleared on fast switch, was ${vm.panes.value}",
-            vm.panes.value.isEmpty(),
+        // Previous frame stays painted across the switch (no blank).
+        assertEquals(
+            "previous frame must be kept until the new session reconciles, was ${vm.panes.value}",
+            listOf("%0"),
+            vm.panes.value.map { it.paneId },
         )
     }
 

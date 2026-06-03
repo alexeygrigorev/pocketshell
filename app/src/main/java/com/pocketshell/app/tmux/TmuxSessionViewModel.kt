@@ -454,7 +454,23 @@ public class TmuxSessionViewModel @Inject constructor(
         // the coroutine runs.
         connectingTarget = target
         refreshReconnectAvailability()
-        _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+        // Issue #437 (slice A): a same-host switch reuses the already-warm
+        // SSH transport — the only thing happening is a new `-CC` control
+        // client attach over the live channel. Gating the viewport on
+        // [Connecting] (and blanking the panes below) made the user stare
+        // at a full-screen "Connecting" overlay even though no SSH
+        // handshake is occurring, which felt like a fresh reconnect. For
+        // these switches we instead enter [Switching]: the previous frame
+        // (or a cached snapshot) stays painted and the full-screen overlay
+        // is suppressed, while [runFastSessionSwitch] spawns the new client
+        // in the background and flips to [Connected] once panes are ready.
+        // The full-screen [Connecting] overlay is reserved for a genuine
+        // first-connect to a host.
+        _connectionStatus.value = if (willFastSwitch) {
+            ConnectionStatus.Switching(host, port, user)
+        } else {
+            ConnectionStatus.Connecting(host, port, user)
+        }
         // Issue #257 (scope F): drop the previous session's panes from the
         // rendered list SYNCHRONOUSLY, before the teardown coroutine even
         // gets a turn. The actual per-pane producer/scrollback teardown
@@ -472,7 +488,18 @@ public class TmuxSessionViewModel @Inject constructor(
         // and clearing it off-thread would race the event loop. Emptying
         // only the rendered StateFlow is race-free: it is the same flow the
         // teardown sets to empty a moment later.
-        _panes.value = emptyList()
+        //
+        // Issue #437 (slice A): for a same-host [Switching], we deliberately
+        // do NOT blank the rendered panes here. Keeping the previous frame
+        // painted (it is replaced atomically when the new client's panes
+        // reconcile in [runFastSessionSwitch]) is what removes the
+        // perceived "Connecting" blank — exactly mirroring the cache-hit
+        // path, which also keeps a frame on screen and reconciles in the
+        // background. Input stays gated because [Switching] is not
+        // [Connected].
+        if (!willFastSwitch) {
+            _panes.value = emptyList()
+        }
         if (willFastSwitch) {
             recordWarmSwitchMilestone(
                 attempt = attempt,
@@ -512,7 +539,26 @@ public class TmuxSessionViewModel @Inject constructor(
                     // previous tmux/UI runtime warm in the cache. If the
                     // user switches back, activation is a pointer swap
                     // rather than a fresh tmux attach.
+                    //
+                    // Issue #437 (slice A): snapshot the rendered frame
+                    // BEFORE parking the leaving runtime so the viewport
+                    // never blanks during a same-host switch.
+                    // [deactivateCurrentRuntimeToCache] clears [_panes] as
+                    // part of detaching the leaving session's producers;
+                    // we immediately re-publish the snapshot so the user
+                    // keeps seeing content (the previous frame) until
+                    // [runFastSessionSwitch]'s pane reconcile atomically
+                    // swaps in the new session's panes. This mirrors the
+                    // cache-hit path, which also keeps a frame painted and
+                    // reconciles in the background, and removes the
+                    // perceived full-screen "Connecting" blank. Input stays
+                    // gated for the whole window because the status is
+                    // [Switching], not [Connected].
+                    val previousFrame = _panes.value
                     deactivateCurrentRuntimeToCache()
+                    if (previousFrame.isNotEmpty()) {
+                        _panes.value = previousFrame
+                    }
                     runFastSessionSwitch(target, attempt, effectiveTrigger, fastSwitchStartedAtMs)
                 } else {
                     // Slow path: full teardown of both the tmux client
@@ -1643,11 +1689,24 @@ public class TmuxSessionViewModel @Inject constructor(
                 // The previously-live session died between the
                 // eligibility check and now. Fall back to the full
                 // teardown + reconnect path so the user still ends up on
-                // the requested session instead of a Failed state.
+                // the requested session instead of a Failed state (#178).
+                //
+                // Issue #437 (slice A): this is no longer a warm switch —
+                // we are doing a genuine SSH reconnect — so escalate the
+                // UI from [Switching] to the full-screen [Connecting]
+                // overlay and drop the now-stale previous frame. The
+                // overlay is correct here: the user really is waiting on a
+                // fresh handshake, not a same-host control-client swap.
                 withContext(NonCancellable) {
                     runCatching { lease.release() }
                 }
                 sessionRef = null
+                _connectionStatus.value = ConnectionStatus.Connecting(
+                    target.host,
+                    target.port,
+                    target.user,
+                )
+                _panes.value = emptyList()
                 runConnect(target, attempt, trigger)
                 return
             }
@@ -2251,7 +2310,10 @@ public class TmuxSessionViewModel @Inject constructor(
         )
         connectingTarget = target
         refreshReconnectAvailability()
-        _connectionStatus.value = ConnectionStatus.Connecting(host, port, user)
+        // Issue #437 (slice A): mirror production — a same-host fast switch
+        // enters [Switching] (inline indicator, previous frame preserved),
+        // NOT the blanking full-screen [Connecting] overlay.
+        _connectionStatus.value = ConnectionStatus.Switching(host, port, user)
         recordWarmSwitchMilestone(
             attempt = attempt,
             target = target,
@@ -2261,8 +2323,14 @@ public class TmuxSessionViewModel @Inject constructor(
             detail = "paneCount=${_panes.value.size}",
         )
         // Mirror production's ordering: deactivate the previous tmux/UI
-        // runtime into the warm cache before binding the new one.
+        // runtime into the warm cache before binding the new one. Snapshot
+        // the rendered frame first so it stays painted across the
+        // deactivation (#437 slice A: no blank during a same-host switch).
+        val previousFrame = _panes.value
         deactivateCurrentRuntimeToCache()
+        if (previousFrame.isNotEmpty()) {
+            _panes.value = previousFrame
+        }
         sessionRef = session
         // Inline a simplified runFastSessionSwitch: we cannot call the
         // real method directly because it pulls tmuxClientFactory in,
@@ -4844,6 +4912,25 @@ public class TmuxSessionViewModel @Inject constructor(
     public sealed interface ConnectionStatus {
         public object Idle : ConnectionStatus
         public data class Connecting(val host: String, val port: Int, val user: String) :
+            ConnectionStatus
+
+        /**
+         * Issue #437 (slice A): a same-host tmux session switch where the
+         * SSH transport is already warm (reused via the #364/#368 lease
+         * manager). Unlike [Connecting] — which is a genuine first-connect
+         * to a host and warrants the full-screen progress overlay — a
+         * [Switching] state keeps the previous (or cached) terminal frame
+         * on screen and spawns the new `-CC` control client in the
+         * background, mirroring the cache-hit "first cached frame → remote
+         * refresh" path. The full-screen "Connecting" overlay must NOT
+         * appear for [Switching]; the user should never see a blank
+         * "Connecting" screen on a same-host session switch.
+         *
+         * Input stays gated (treated as not-live) until the new control
+         * client is attached and we flip to [Connected], so keystrokes are
+         * never written into a half-attached pane.
+         */
+        public data class Switching(val host: String, val port: Int, val user: String) :
             ConnectionStatus
         public data class Connected(val host: String, val port: Int, val user: String) :
             ConnectionStatus

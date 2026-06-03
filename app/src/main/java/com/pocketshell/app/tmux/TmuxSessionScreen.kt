@@ -670,6 +670,15 @@ public fun TmuxSessionScreen(
                     onCancel = { viewModel.cancelConnect() },
                 )
             }
+            // Issue #437 (slice A): a same-host session switch reuses the
+            // warm SSH transport, so it must NOT show the blanking
+            // full-screen [ConnectingProgressOverlay]. The previous frame
+            // stays painted below; this thin inline bar is the only
+            // affordance, signalling the new control client is attaching
+            // while input remains gated (status != Connected).
+            (status as? ConnectionStatus.Switching)?.let {
+                SwitchingIndicatorRow()
+            }
             (status as? ConnectionStatus.Reconnecting)?.let {
                 ReconnectingProgressRow(
                     status = it,
@@ -1905,6 +1914,14 @@ internal const val TMUX_CONNECTING_PROGRESS_BAR_TAG = "tmux:session:connecting:b
 internal const val TMUX_CONNECTING_SLOW_HINT_TAG = "tmux:session:connecting:slow-hint"
 internal const val TMUX_CONNECTING_CANCEL_TAG = "tmux:session:connecting:cancel"
 
+// Issue #437 (slice A): tag on the unobtrusive inline same-host
+// switch indicator (a thin progress bar above the still-painted
+// terminal frame). Distinct from the full-screen
+// [TMUX_CONNECTING_PROGRESS_TAG] overlay so tests can assert that a
+// same-host switch shows ONLY this inline bar and never the blanking
+// "Connecting" overlay.
+internal const val TMUX_SWITCHING_INDICATOR_TAG = "tmux:session:switching"
+
 /**
  * Issue #165: timings for the SSH-handshake progress overlay. A
  * 2-5s handshake is the common case the audit flagged as "feels
@@ -2201,6 +2218,29 @@ private fun ReconnectingProgressRow(
             )
         }
     }
+}
+
+/**
+ * Issue #437 (slice A): the unobtrusive inline indicator shown during a
+ * same-host tmux session switch. Unlike [ConnectingProgressOverlay] —
+ * which is a full-screen blanking overlay for a genuine first-connect —
+ * this is a single thin progress bar that sits above the still-painted
+ * previous/cached terminal frame. The user keeps seeing terminal content
+ * (no "Connecting" blank) while the new `-CC` control client attaches in
+ * the background and the viewport atomically swaps to the new session's
+ * panes. Input stays gated until the swap completes because the screen
+ * only treats [ConnectionStatus.Connected] as live.
+ */
+@Composable
+private fun SwitchingIndicatorRow() {
+    LinearProgressIndicator(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(2.dp)
+            .testTag(TMUX_SWITCHING_INDICATOR_TAG),
+        color = PocketShellColors.Accent,
+        trackColor = PocketShellColors.SurfaceElev,
+    )
 }
 
 /**
@@ -3714,6 +3754,13 @@ private fun ConnectionStatusPill(
 internal fun ConnectionStatus.toUiStatus(): com.pocketshell.uikit.model.ConnectionStatus =
     when (this) {
         is ConnectionStatus.Connected -> com.pocketshell.uikit.model.ConnectionStatus.Connected
+        // Issue #437 (slice A): a same-host session switch keeps the
+        // terminal frame on screen and only swaps the active `-CC` control
+        // client behind the scenes. Map it to `Connected` so the
+        // breadcrumb dot stays green (no alarming amber "Reconnecting"
+        // flash) — the session is up; we are just changing which session
+        // is rendered.
+        is ConnectionStatus.Switching -> com.pocketshell.uikit.model.ConnectionStatus.Connected
         is ConnectionStatus.Connecting -> com.pocketshell.uikit.model.ConnectionStatus.Connecting
         is ConnectionStatus.Reconnecting -> com.pocketshell.uikit.model.ConnectionStatus.Connecting
         is ConnectionStatus.Failed -> com.pocketshell.uikit.model.ConnectionStatus.Error

@@ -50,10 +50,13 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -61,13 +64,16 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -83,6 +89,7 @@ import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
+import kotlinx.coroutines.launch
 
 /**
  * The Phase 1 prompt composer (issue #15). Visual target:
@@ -382,6 +389,7 @@ public fun PromptComposerSheet(
  * `ModalBottomSheet` itself doesn't preview inside `@Preview` (it needs
  * a window decor view), so the previews target this composable directly.
  */
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 internal fun SheetContent(
     state: PromptComposerViewModel.UiState,
@@ -441,6 +449,50 @@ internal fun SheetContent(
     DisposableEffect(view, keepScreenOnActive) {
         view.keepScreenOn = keepScreenOnActive
         onDispose { view.keepScreenOn = false }
+    }
+
+    // Issue #491: own the composer's editor state as a [TextFieldValue] so
+    // the Send button always sees the live visible text — including any
+    // uncommitted IME composing region (predictive text / autocorrect
+    // underline). With the old `String`-overload BasicTextField the composer
+    // only saw text the IME had decided to *commit*; on a short prompt that
+    // commit may not happen until the user manually presses Enter on the
+    // soft keyboard, which is exactly why Send read an empty draft and did
+    // nothing ("I had to summon the keyboard and hit Enter again").
+    //
+    // [draftFieldValue] is the source of truth for the editor; we mirror its
+    // text into the ViewModel via [onDraftChange] on every edit, and we
+    // re-sync from [state.draft] whenever the ViewModel pushes a draft change
+    // we did not originate (dictation transcript append, send-clear, restore
+    // of a failed send). The selection is clamped to the new length so the
+    // cursor never lands out of bounds after an external append.
+    var draftFieldValue by remember { mutableStateOf(TextFieldValue(state.draft)) }
+    if (state.draft != draftFieldValue.text) {
+        draftFieldValue = TextFieldValue(
+            text = state.draft,
+            selection = TextRange(state.draft.length),
+        )
+    }
+    val draftFocusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    // Issue #491: IME show/hide is driven off the click frame via a coroutine
+    // so a synchronous show()/hide() can never block the tap handler (or the
+    // test framework's main-thread idling). The visible-text commit that makes
+    // Send reliable does NOT depend on the IME call — it is the
+    // [onDraftChange] flush below — so even if the keyboard animation is
+    // mid-flight the send still carries the right text.
+    val imeScope = rememberCoroutineScope()
+
+    // Issue #491: the single Send path used by every Send affordance. Commit
+    // the live editor text (composing region included) into the ViewModel
+    // draft FIRST, then ask the ViewModel to dispatch. The commit is what
+    // makes a Send tap deliver even when the keyboard was never raised / Enter
+    // was never pressed; hiding the keyboard is a cosmetic follow-up dispatched
+    // off-frame.
+    val commitAndSend: () -> Unit = {
+        onDraftChange(draftFieldValue.text)
+        onSend(true)
+        imeScope.launch { keyboardController?.hide() }
     }
 
     Column(
@@ -509,12 +561,22 @@ internal fun SheetContent(
                 // (Auto-send off) the transcript fills this same editable
                 // field for the user to review before Send.
                 ComposerDraftField(
-                    value = state.draft,
-                    onValueChange = onDraftChange,
+                    value = draftFieldValue,
+                    onValueChange = { newValue ->
+                        // Mirror every edit into the ViewModel so the draft
+                        // (and SavedStateHandle) stay in lockstep with the
+                        // editor, then keep our local TextFieldValue as the
+                        // selection-bearing source of truth.
+                        draftFieldValue = newValue
+                        if (newValue.text != state.draft) {
+                            onDraftChange(newValue.text)
+                        }
+                    },
                     placeholder = COMPOSER_PLACEHOLDER,
                     fieldTag = COMPOSER_DRAFT_TAG,
                     minHeight = 96.dp,
                     maxHeight = 220.dp,
+                    focusRequester = draftFocusRequester,
                 )
             }
         }
@@ -640,6 +702,28 @@ internal fun SheetContent(
                 enabled = !isTranscribing && !attachmentBusy && onSnippets != null,
                 modifier = Modifier.testTag(COMPOSER_SNIPPETS_TAG),
             )
+            // Issue #491: keyboard affordance. The maintainer reported having
+            // to "find the keyboard" to type / hit Enter. In the Idle state we
+            // expose a keyboard icon that focuses the composer's draft field
+            // and raises the soft IME on demand, so reaching the keyboard is a
+            // single deliberate tap instead of a hunt. Only meaningful while
+            // the editable draft field is on screen (Idle); during Recording /
+            // Transcribing the surface is the waveform / spinner, so the icon
+            // is hidden.
+            if (state.recording == PromptComposerViewModel.RecordingState.Idle) {
+                KeyboardIconButton(
+                    onClick = {
+                        // Focus the draft field (which raises the IME for it)
+                        // and explicitly request the soft keyboard. Dispatched
+                        // off the click frame so the IME animation never blocks
+                        // the tap handler / main-thread idling.
+                        draftFocusRequester.requestFocus()
+                        imeScope.launch { keyboardController?.show() }
+                    },
+                    enabled = !attachmentBusy,
+                    modifier = Modifier.testTag(COMPOSER_KEYBOARD_TAG),
+                )
+            }
 
             Spacer(modifier = Modifier.weight(1f))
 
@@ -655,9 +739,15 @@ internal fun SheetContent(
                         modifier = Modifier.testTag(COMPOSER_MIC_TAG),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    val sendEnabled = state.draft.isNotEmpty() && !attachmentBusy
+                    // Issue #491: gate on the LIVE editor text, not the
+                    // (possibly stale) ViewModel draft — the IME composing
+                    // region lands in `draftFieldValue.text` immediately, so
+                    // a short typed prompt enables Send without waiting for an
+                    // IME commit. [commitAndSend] flushes that text into the
+                    // ViewModel before dispatching, so the tap always delivers.
+                    val sendEnabled = draftFieldValue.text.isNotEmpty() && !attachmentBusy
                     SendButton(
-                        onClick = { onSend(true) },
+                        onClick = commitAndSend,
                         enabled = sendEnabled,
                         modifier = Modifier.testTag(COMPOSER_SEND_ENTER_TAG),
                     )
@@ -1054,6 +1144,70 @@ private fun SnippetsIconButton(
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold,
         )
+    }
+}
+
+/**
+ * Issue #491: keyboard affordance button. Drawn with a [Canvas] (a rounded
+ * key-cap grid) so it reads as the universal "show keyboard" glyph without a
+ * `material-icons-extended` dependency or an emoji that renders
+ * inconsistently across OEM fonts. Tapping it focuses the composer draft
+ * field and raises the soft IME so the user can type / press Enter without
+ * hunting for the keyboard.
+ */
+@Composable
+private fun KeyboardIconButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val tint = if (enabled) PocketShellColors.TextSecondary else PocketShellColors.TextMuted
+    Box(
+        modifier = modifier
+            .size(40.dp)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Show keyboard" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(modifier = Modifier.size(22.dp)) {
+            val w = size.width
+            val h = size.height
+            val stroke = Stroke(width = w * 0.08f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            // Outer key-cap body: a rounded rectangle spanning most of the
+            // glyph box, slightly inset top/bottom so the keys read as a
+            // keyboard rather than a plain card.
+            val left = w * 0.08f
+            val right = w * 0.92f
+            val top = h * 0.26f
+            val bottom = h * 0.74f
+            val corner = w * 0.10f
+            drawRoundRect(
+                color = tint,
+                topLeft = androidx.compose.ui.geometry.Offset(left, top),
+                size = androidx.compose.ui.geometry.Size(right - left, bottom - top),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(corner, corner),
+                style = stroke,
+            )
+            // Two rows of small keys + a long spacebar on the lower row, the
+            // canonical "keyboard" rhythm.
+            val keyR = w * 0.035f
+            val rowTopY = h * 0.40f
+            val rowMidY = h * 0.53f
+            val xs = listOf(0.22f, 0.36f, 0.50f, 0.64f, 0.78f)
+            for (xf in xs) {
+                drawCircle(color = tint, radius = keyR, center = androidx.compose.ui.geometry.Offset(w * xf, rowTopY))
+                drawCircle(color = tint, radius = keyR, center = androidx.compose.ui.geometry.Offset(w * xf, rowMidY))
+            }
+            // Spacebar on the bottom row.
+            val spaceY = h * 0.65f
+            drawLine(
+                color = tint,
+                start = androidx.compose.ui.geometry.Offset(w * 0.30f, spaceY),
+                end = androidx.compose.ui.geometry.Offset(w * 0.70f, spaceY),
+                strokeWidth = w * 0.07f,
+                cap = StrokeCap.Round,
+            )
+        }
     }
 }
 
@@ -1563,6 +1717,13 @@ internal const val COMPOSER_WAVEFORM_TAG = "prompt-composer-waveform"
 internal const val COMPOSER_MIC_TAG = "prompt-composer-mic"
 internal const val COMPOSER_ATTACH_TAG = "prompt-composer-attach"
 internal const val COMPOSER_SNIPPETS_TAG = "prompt-composer-snippets"
+
+/**
+ * Issue #491: the keyboard affordance in the composer controls row. Focuses
+ * the draft field and raises the soft IME so the user can reach the keyboard
+ * (type / press Enter) without hunting for it.
+ */
+internal const val COMPOSER_KEYBOARD_TAG = "prompt-composer-keyboard"
 internal const val COMPOSER_ATTACHMENT_PROGRESS_TAG = "prompt-composer-attachment-progress"
 
 /** Issue #453: mockup placeholder text for the empty composer input. */

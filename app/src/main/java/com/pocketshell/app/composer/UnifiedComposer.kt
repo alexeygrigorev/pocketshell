@@ -26,11 +26,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -127,6 +130,103 @@ internal fun ComposerDraftField(
     maxHeight: Dp? = null,
     singleLine: Boolean = false,
 ) {
+    DraftFieldBox(
+        isEmpty = value.isEmpty(),
+        placeholder = placeholder,
+        modifier = modifier,
+        fieldTag = fieldTag,
+        minHeight = minHeight,
+        maxHeight = maxHeight,
+        singleLine = singleLine,
+    ) { editableModifier, textStyle, cursorBrush, decorationBox ->
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            singleLine = singleLine,
+            modifier = editableModifier,
+            textStyle = textStyle,
+            cursorBrush = cursorBrush,
+            decorationBox = decorationBox,
+        )
+    }
+}
+
+/**
+ * Issue #491: the [TextFieldValue]-backed draft field.
+ *
+ * The terminal composer ([PromptComposerSheet]) drives its Send button
+ * straight off the live editor state. With the legacy `String` overload of
+ * [BasicTextField] the composer never sees the IME's *composing region*
+ * (predictive-text / autocorrect underline) until the IME decides to commit
+ * it — which, on a short prompt, can be never until the user manually hits
+ * Enter on the soft keyboard. That is the exact "Send is a no-op, I had to
+ * raise the keyboard and press Enter" bug the maintainer reported: the typed
+ * text was still sitting in an uncommitted composing region, so the
+ * ViewModel's draft (and therefore the Send button's enabled gate) read
+ * empty.
+ *
+ * Holding the [TextFieldValue] ourselves means the composer always sees the
+ * full visible text — composing region included — so Send can read and
+ * dispatch it without waiting for the IME to commit. A [focusRequester] is
+ * exposed so a keyboard affordance can raise the IME on demand.
+ */
+@Composable
+internal fun ComposerDraftField(
+    value: TextFieldValue,
+    onValueChange: (TextFieldValue) -> Unit,
+    placeholder: String,
+    modifier: Modifier = Modifier,
+    fieldTag: String? = null,
+    minHeight: Dp = 110.dp,
+    maxHeight: Dp? = null,
+    singleLine: Boolean = false,
+    focusRequester: FocusRequester? = null,
+) {
+    DraftFieldBox(
+        isEmpty = value.text.isEmpty(),
+        placeholder = placeholder,
+        modifier = modifier,
+        fieldTag = fieldTag,
+        minHeight = minHeight,
+        maxHeight = maxHeight,
+        singleLine = singleLine,
+        focusRequester = focusRequester,
+    ) { editableModifier, textStyle, cursorBrush, decorationBox ->
+        BasicTextField(
+            value = value,
+            onValueChange = onValueChange,
+            singleLine = singleLine,
+            modifier = editableModifier,
+            textStyle = textStyle,
+            cursorBrush = cursorBrush,
+            decorationBox = decorationBox,
+        )
+    }
+}
+
+/**
+ * Issue #491: the shared styled chrome (surface-elev fill, accent cursor,
+ * muted placeholder, scroll) hoisted out of [ComposerDraftField] so the
+ * `String` and [TextFieldValue] overloads render byte-identical visuals and
+ * only differ in which [BasicTextField] editor they host.
+ */
+@Composable
+private fun DraftFieldBox(
+    isEmpty: Boolean,
+    placeholder: String,
+    modifier: Modifier,
+    fieldTag: String?,
+    minHeight: Dp,
+    maxHeight: Dp?,
+    singleLine: Boolean,
+    focusRequester: FocusRequester? = null,
+    editor: @Composable (
+        editableModifier: Modifier,
+        textStyle: TextStyle,
+        cursorBrush: SolidColor,
+        decorationBox: @Composable (@Composable () -> Unit) -> Unit,
+    ) -> Unit,
+) {
     val sizeModifier = if (maxHeight != null) {
         Modifier.heightIn(min = minHeight, max = maxHeight)
     } else {
@@ -153,12 +253,12 @@ internal fun ComposerDraftField(
             .padding(horizontal = PocketShellSpacing.lg, vertical = 14.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
-        val fieldModifier = if (fieldTag != null) {
-            Modifier
-                .fillMaxWidth()
-                .testTag(fieldTag)
-        } else {
-            Modifier.fillMaxWidth()
+        var fieldModifier = Modifier.fillMaxWidth()
+        if (focusRequester != null) {
+            fieldModifier = fieldModifier.focusRequester(focusRequester)
+        }
+        if (fieldTag != null) {
+            fieldModifier = fieldModifier.testTag(fieldTag)
         }
         val scrollState = rememberScrollState()
         val editableModifier = if (singleLine) {
@@ -166,29 +266,24 @@ internal fun ComposerDraftField(
         } else {
             fieldModifier.verticalScroll(scrollState)
         }
-        BasicTextField(
-            value = value,
-            onValueChange = onValueChange,
-            singleLine = singleLine,
-            modifier = editableModifier,
-            textStyle = TextStyle(
-                color = MaterialTheme.colorScheme.onSurface,
-                fontSize = MaterialTheme.typography.bodyMedium.fontSize, // 14sp body rung
-            ),
-            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-            decorationBox = { inner ->
-                if (value.isEmpty()) {
-                    Text(
-                        // Placeholder uses the muted text token (no M3 slot maps to
-                        // TextMuted; it stays a centralized raw token).
-                        text = placeholder,
-                        color = PocketShellColors.TextMuted,
-                        fontSize = MaterialTheme.typography.bodyMedium.fontSize, // 14sp
-                    )
-                }
-                inner()
-            },
+        val textStyle = TextStyle(
+            color = MaterialTheme.colorScheme.onSurface,
+            fontSize = MaterialTheme.typography.bodyMedium.fontSize, // 14sp body rung
         )
+        val cursorBrush = SolidColor(MaterialTheme.colorScheme.primary)
+        val decorationBox: @Composable (@Composable () -> Unit) -> Unit = { inner ->
+            if (isEmpty) {
+                Text(
+                    // Placeholder uses the muted text token (no M3 slot maps to
+                    // TextMuted; it stays a centralized raw token).
+                    text = placeholder,
+                    color = PocketShellColors.TextMuted,
+                    fontSize = MaterialTheme.typography.bodyMedium.fontSize, // 14sp
+                )
+            }
+            inner()
+        }
+        editor(editableModifier, textStyle, cursorBrush, decorationBox)
     }
 }
 

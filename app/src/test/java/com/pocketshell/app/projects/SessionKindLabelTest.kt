@@ -89,4 +89,32 @@ class SessionKindLabelTest {
         // The agent process is gone; the session is a plain shell again.
         assertEquals("Shell", sessionKindLabel(entry(SessionAgentKind.Exited)))
     }
+
+    // --- #478: the right-aligned session badge shows the short agent/shell
+    //     identity only (no activity word — that stays on the secondary line). ---
+
+    @Test
+    fun badgeLabelIsAgentNameWithoutState() {
+        assertEquals("Claude", sessionBadgeLabel(entry(SessionAgentKind.Claude)))
+        assertEquals("Codex", sessionBadgeLabel(entry(SessionAgentKind.Codex)))
+        assertEquals("OpenCode", sessionBadgeLabel(entry(SessionAgentKind.OpenCode)))
+    }
+
+    @Test
+    fun badgeLabelForShellAndExitedIsShell() {
+        assertEquals("Shell", sessionBadgeLabel(entry(SessionAgentKind.Shell)))
+        assertEquals("Shell", sessionBadgeLabel(entry(SessionAgentKind.Exited)))
+    }
+
+    @Test
+    fun badgeLabelForProbingIsDetecting() {
+        assertEquals("Detecting", sessionBadgeLabel(entry(SessionAgentKind.Probing)))
+    }
+
+    @Test
+    fun badgeLabelNeverCarriesActivityState() {
+        SessionAgentKind.entries.forEach { kind ->
+            assertEquals(false, sessionBadgeLabel(entry(kind)).contains(" · "))
+        }
+    }
 }

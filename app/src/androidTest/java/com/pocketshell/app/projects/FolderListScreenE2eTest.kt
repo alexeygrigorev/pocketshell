@@ -301,16 +301,23 @@ class FolderListScreenE2eTest {
         compose.onNodeWithTag(folderHeaderLabelTag("/home/u/git/pocketshell"), useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(folderHeaderLabelTag("/home/u/git/llm-zoomcamp"), useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(folderHeaderLabelTag("/home/u/git/empty-pinned"), useUnmergedTree = true).assertDoesNotExist()
+        // #478: the count subtitle is now an inline `· N sessions/agents`
+        // (the active/idle facet moved to the leading status dot, mirroring
+        // the maintainer's target mockup).
         compose.onNodeWithTag(folderCountPillTestTag("/home/u/git/pocketshell"), useUnmergedTree = true)
-            .assertTextEquals("active · 2 sessions · 1 agent")
-        assertProjectNameKeepsReadableWidth("/home/u/git/pocketshell")
+            .assertTextEquals("· 2 sessions · 1 agent")
+        assertProjectNameKeepsReadableWidth("/home/u/git/pocketshell", "pocketshell")
         compose.onNodeWithTag(folderCountPillTestTag("/home/u/git/llm-zoomcamp"), useUnmergedTree = true)
-            .assertTextEquals("active · 1 agent")
-        assertProjectNameKeepsReadableWidth("/home/u/git/llm-zoomcamp")
+            .assertTextEquals("· 1 agent")
+        assertProjectNameKeepsReadableWidth("/home/u/git/llm-zoomcamp", "llm-zoomcamp")
         compose.onNodeWithTag(
             folderStatusDotTestTag("/home/u/git/pocketshell"),
             useUnmergedTree = true,
         ).assertExists()
+        // #478: the per-group list/grid view toggle renders in the group
+        // header and meets the 48 dp touch floor.
+        compose.onNodeWithTag(folderTreeRootViewToggleTag("~/git"), useUnmergedTree = true).assertExists()
+        assertAccessibleTouchTarget(folderTreeRootViewToggleTag("~/git"))
         assertAccessibleTouchTarget(folderTreeRootActionsTestTag("~/git"))
         assertAccessibleTouchTarget(folderTreeRootCreateTestTag("~/git"))
         assertAccessibleTouchTarget(folderTreeRootActionsTestTag("~/tmp"))
@@ -371,17 +378,45 @@ class FolderListScreenE2eTest {
         compose.onNodeWithText("codex conversation active").assertDoesNotExist()
         compose.onNodeWithText("tmux session detached").assertDoesNotExist()
 
-        // Agent / shell rollup labels visible on the expanded project.
-        // #431 renders agent identity and state as one label ("Claude · Idle"),
-        // so match the agent identity and the state word as substrings rather
-        // than as two separate exact-text nodes.
+        // Agent / shell badge labels visible on the expanded project. #478
+        // replaced the inline "Claude · Idle" rollup with a compact right-
+        // aligned badge pill carrying just the agent/shell identity (the mockup
+        // shows no activity word on the row), so match the short badge label.
         compose.onNodeWithText("Claude", substring = true).assertExists()
-        compose.onNodeWithText("Idle", substring = true).assertExists()
+
+        // #478: each expanded session row carries a right-aligned agent-type
+        // badge pill. The pocketshell project has a Claude agent + a Shell
+        // session, so both a purple agent badge and a neutral Shell badge are
+        // present.
+        compose.onNodeWithTag(
+            folderSessionBadgeTestTag("/home/u/git/pocketshell", "claude-main"),
+            useUnmergedTree = true,
+        ).assertExists()
+        compose.onNodeWithTag(
+            folderSessionBadgeTestTag("/home/u/git/pocketshell", "build-shell"),
+            useUnmergedTree = true,
+        ).assertExists()
+        // The agent badge renders "Claude" and the shell badge renders "Shell".
+        compose.onNodeWithText("Claude", useUnmergedTree = true).assertExists()
+        compose.onNodeWithText("Shell", useUnmergedTree = true).assertExists()
+        // The session row keeps its 48 dp touch floor even at compact density.
+        assertAccessibleTouchTarget(
+            folderDetailRowTestTag("/home/u/git/pocketshell", "claude-main"),
+            minDp = 48f,
+        )
 
         // --- Capture viewport before opening any picker/sheet (artifact
         //    path matches the project's `*-viewport.png` convention so
         //    the reviewer's artifact-driven check picks it up).
         captureViewport("issue300-folder-tree-rendered-viewport.png")
+        // #478: the same expanded tree captured under a #478-named artifact so
+        // the reviewer can diff connectors + badges + status dots against the
+        // maintainer's target mockup. The full-device capture is the
+        // authoritative one here (the viewport node capture is best-effort and
+        // can flake when the FAB overlay overlaps the screen node).
+        captureViewport("issue478-folder-tree-target-viewport.png")
+        android.os.SystemClock.sleep(200)
+        captureFullDevice("issue478-folder-tree-target-fulldevice.png")
 
         // --- Assertion 4: inactive scanned folders are sheet-only.
         //    The root add affordance opens RootProjectAddSheet with quick actions and a
@@ -501,37 +536,79 @@ class FolderListScreenE2eTest {
         compose.waitUntil(timeoutMillis = 5_000) { openedPortForwarding }
     }
 
-    private fun assertProjectNameKeepsReadableWidth(folderPath: String) {
-        val labelBounds = compose.onNodeWithTag(
+    private fun assertProjectNameKeepsReadableWidth(
+        folderPath: String,
+        expectedName: String,
+    ) {
+        val labelNode = compose.onNodeWithTag(
             folderHeaderLabelTag(folderPath),
             useUnmergedTree = true,
-        ).fetchSemanticsNode().boundsInRoot
+        )
+        val labelBounds = labelNode.fetchSemanticsNode().boundsInRoot
         compose.onNodeWithTag(
             folderCountPillTestTag(folderPath),
             useUnmergedTree = true,
         ).assertExists()
-        // #455: folding `...`/`E` behind the overflow and shrinking `+` to
-        // 36dp recovers name width. The label `Text` itself measures to its
-        // intrinsic content width (a short word renders narrow regardless of
-        // available space), so we assert the *available name column* instead:
-        // the horizontal gap from the label's left edge to the start of the
-        // overflow/`+` action cluster. With the old 3-button cluster this gap
-        // was ~108dp narrower; assert it is now comfortably wide (≥ 240dp) so
-        // long folder names have room and stop truncating.
+
+        val density = InstrumentationRegistry.getInstrumentation()
+            .targetContext.resources.displayMetrics.density
+
+        // Part 1 (column width): the available name column — the gap from the
+        // label's left edge to the start of the overflow/`+` action cluster —
+        // must stay wide enough that long names have room. #455 widened this by
+        // folding secondary actions behind the kebab and shrinking `+` to 36dp;
+        // #478 added the ~8dp leading status dot, dropping the floor 240→232dp.
         val actionsBounds = compose.onNodeWithTag(
             folderDetailActionsTestTag(folderPath),
             useUnmergedTree = true,
         ).fetchSemanticsNode().boundsInRoot
         val availableNameWidth = actionsBounds.left - labelBounds.left
-        val density = InstrumentationRegistry.getInstrumentation()
-            .targetContext.resources.displayMetrics.density
-        val minPx = 240f * density
+        val minColumnPx = 232f * density
         assertTrue(
             "project name column for $folderPath should keep readable width " +
-                "(>= 240dp = ${minPx}px): ${availableNameWidth}px " +
+                "(>= 232dp = ${minColumnPx}px): ${availableNameWidth}px " +
                 "(label.left=${labelBounds.left}px, actions.left=${actionsBounds.left}px)",
-            availableNameWidth >= minPx,
+            availableNameWidth >= minColumnPx,
         )
+
+        // Part 2 (no truncation): the column being wide is necessary but not
+        // sufficient — a competing trailing `weight(1f)` spacer used to clamp
+        // the name `Text` to ~half the available column, so it ellipsised to
+        // `poc…` even with empty space to its right. The width-only invariant
+        // above passed through that bug. Catch it directly: the label `Text`
+        // node's own rendered width must be at least the width the full string
+        // needs at the same font size, so an ellipsised label fails this.
+        val labelWidthPx = labelBounds.width
+        val expectedTextPx = measureTextWidthPx(expectedName, fontSizeSp = 15f, density = density)
+        // Small tolerance for measurement differences between the platform
+        // Paint estimate and Compose's text layout (kerning, sub-pixel).
+        val tolerancePx = 6f * density
+        assertTrue(
+            "project name `$expectedName` for $folderPath must render in full " +
+                "without truncation: label Text width ${labelWidthPx}px is narrower " +
+                "than the full string needs (${expectedTextPx}px, tol ${tolerancePx}px). " +
+                "A regression to the competing trailing weight(1f) spacer clamps the " +
+                "name and ellipsises it even though the column has room.",
+            labelWidthPx >= expectedTextPx - tolerancePx,
+        )
+
+        // And assert the full text is queryable on the label node (no ellipsis
+        // substitution in the rendered text), as a belt-and-braces semantic
+        // check that pairs with the geometric one above.
+        labelNode.assertTextEquals(expectedName)
+    }
+
+    private fun measureTextWidthPx(text: String, fontSizeSp: Float, density: Float): Float {
+        // Regular weight deliberately: it slightly UNDER-estimates the SemiBold
+        // render width, giving the assertion margin so a genuinely-full label
+        // always clears the bar. A truncated `poc…` label (clamped to roughly
+        // half the column) still falls far below this for the full string, so
+        // the regression is caught. We only need a conservative lower bound on
+        // the full-string width, not a pixel-exact match.
+        val paint = android.graphics.Paint().apply {
+            textSize = fontSizeSp * density
+        }
+        return paint.measureText(text)
     }
 
     // #455: the compact tree icon buttons (overflow kebab + accent `+`)

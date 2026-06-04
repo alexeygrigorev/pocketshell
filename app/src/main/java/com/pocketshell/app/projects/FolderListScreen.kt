@@ -21,10 +21,12 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -81,7 +83,10 @@ import com.pocketshell.app.voice.appendDictationText
 import com.pocketshell.app.voice.toMicButtonState
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.model.SessionAgentKind
+import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellType
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.min
@@ -1149,6 +1154,10 @@ private fun FolderTreeRootGroup(
     onRootActions: (FolderTreeRoot) -> Unit,
     onToggleProjectExpanded: (FolderRow) -> Unit,
 ) {
+    // Per-group list/grid view toggle (#478). Grid is an explicit non-goal —
+    // the toggle is wired and flips the icon + shows a stub so the layout reads
+    // like the target mockup, but the list remains the only real renderer.
+    var gridView by remember(root.path) { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1157,14 +1166,18 @@ private fun FolderTreeRootGroup(
     ) {
         FolderTreeRootHeader(
             root = root,
+            gridView = gridView,
+            onToggleView = { gridView = !gridView },
             onCreateInRoot = { onCreateInRoot(root) },
             onRootActions = { onRootActions(root) },
         )
         if (root.folders.isEmpty()) {
             EmptyRootHint(candidateCount = root.addSheetProjects.size, onCreate = { onCreateInRoot(root) })
+        } else if (gridView) {
+            GridViewStub(root = root)
         } else {
             Column(
-                modifier = Modifier.padding(start = 14.dp),
+                modifier = Modifier.padding(start = PocketShellDensity.treeIndent),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 root.folders.forEachIndexed { index, folder ->
@@ -1185,6 +1198,30 @@ private fun FolderTreeRootGroup(
 }
 
 /**
+ * Placeholder shown behind the list/grid toggle when grid is selected (#478).
+ * Building the real grid is an explicit non-goal for this issue; the stub keeps
+ * the toggle honest (it visibly changes the view) without shipping a half-grid.
+ */
+@Composable
+private fun GridViewStub(root: FolderTreeRoot) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = PocketShellDensity.treeIndent)
+            .background(PocketShellColors.Surface.copy(alpha = 0.48f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 12.dp, vertical = 14.dp)
+            .testTag(folderTreeRootGridStubTag(root.path)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "Grid view is coming soon — tap the list icon to switch back.",
+            color = PocketShellColors.TextMuted,
+            style = PocketShellType.bodyDense,
+        )
+    }
+}
+
+/**
  * Belt-and-suspenders UI fallback (#438): the view-model's
  * [FolderListViewModel.defaultLabelForPath] already guarantees a
  * non-blank, meaningful label, but the header composables defend
@@ -1199,6 +1236,8 @@ private fun folderDisplayLabel(label: String, path: String): String =
 @Composable
 private fun FolderTreeRootHeader(
     root: FolderTreeRoot,
+    gridView: Boolean,
+    onToggleView: () -> Unit,
     onCreateInRoot: () -> Unit,
     onRootActions: () -> Unit,
 ) {
@@ -1224,10 +1263,12 @@ private fun FolderTreeRootHeader(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
+            // Group title — the mockup renders this larger than a project row
+            // (the screen-level "git" heading above its org tree).
             Text(
                 text = folderDisplayLabel(root.label, root.path),
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1238,7 +1279,15 @@ private fun FolderTreeRootHeader(
             RootCountText(root = root)
         }
         Spacer(modifier = Modifier.width(8.dp))
+        // List/grid view toggle (#478). Always available so every group reads
+        // like the target mockup; grid itself is a stub (non-goal).
+        ViewToggleButton(
+            gridView = gridView,
+            onClick = onToggleView,
+            testTag = folderTreeRootViewToggleTag(root.path),
+        )
         if (hasActions) {
+            Spacer(modifier = Modifier.width(6.dp))
             CompactTreeIconButton(
                 label = "⋮",
                 contentDescription = "Root actions",
@@ -1257,22 +1306,124 @@ private fun FolderTreeRootHeader(
     }
 }
 
+/**
+ * List/grid view toggle for a group header — issue #478. Draws a compact
+ * two-icon switch (list rows vs. grid cells) matching the target mockup. The
+ * grid half is a stub; the toggle still flips state and the active half is
+ * highlighted so the affordance reads correctly.
+ */
+@Composable
+private fun ViewToggleButton(
+    gridView: Boolean,
+    onClick: () -> Unit,
+    testTag: String,
+) {
+    Box(
+        modifier = Modifier
+            .defaultMinSize(
+                minWidth = PocketShellDensity.tapTargetMin,
+                minHeight = PocketShellDensity.tapTargetMin,
+            )
+            .semantics {
+                contentDescription = if (gridView) "Switch to list view" else "Switch to grid view"
+            }
+            .clickable(role = Role.Button, onClick = onClick)
+            .testTag(testTag),
+        contentAlignment = Alignment.Center,
+    ) {
+        Row(
+            modifier = Modifier
+                .background(PocketShellColors.SurfaceElev.copy(alpha = 0.72f), RoundedCornerShape(8.dp))
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            ViewToggleHalf(selected = !gridView) { color -> ListGlyph(color) }
+            ViewToggleHalf(selected = gridView) { color -> GridGlyph(color) }
+        }
+    }
+}
+
+@Composable
+private fun ViewToggleHalf(
+    selected: Boolean,
+    glyph: @Composable (Color) -> Unit,
+) {
+    val background = if (selected) PocketShellColors.AccentSoft else Color.Transparent
+    val tint = if (selected) PocketShellColors.Accent else PocketShellColors.TextMuted
+    Box(
+        modifier = Modifier
+            .size(24.dp)
+            .background(background, RoundedCornerShape(6.dp)),
+        contentAlignment = Alignment.Center,
+    ) {
+        glyph(tint)
+    }
+}
+
+@Composable
+private fun ListGlyph(color: Color) {
+    Canvas(modifier = Modifier.size(14.dp)) {
+        val stroke = 1.6.dp.toPx()
+        repeat(3) { row ->
+            val y = size.height * (0.22f + row * 0.28f)
+            drawLine(
+                color = color,
+                start = Offset(0f, y),
+                end = Offset(size.width, y),
+                strokeWidth = stroke,
+                cap = StrokeCap.Round,
+            )
+        }
+    }
+}
+
+@Composable
+private fun GridGlyph(color: Color) {
+    Canvas(modifier = Modifier.size(14.dp)) {
+        val cell = size.width * 0.4f
+        val gap = size.width * 0.2f
+        listOf(0f, cell + gap).forEach { x ->
+            listOf(0f, cell + gap).forEach { y ->
+                drawRoundRect(
+                    color = color,
+                    topLeft = Offset(x, y),
+                    size = androidx.compose.ui.geometry.Size(cell, cell),
+                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(1.5.dp.toPx()),
+                    style = Stroke(width = 1.4.dp.toPx()),
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun RootCountText(root: FolderTreeRoot) {
-    val text = when {
-        root.sessionCount > 0 && root.inactiveProjectCount > 0 ->
-            "${root.activeProjectCount} active · ${root.sessionCount} sessions"
-        root.sessionCount > 0 -> "${root.activeProjectCount} active"
-        root.inactiveProjectCount > 0 -> "${root.inactiveProjectCount} inactive"
-        else -> "empty"
-    }
     Text(
-        text = text,
+        text = rootCountSubtitle(root),
         color = PocketShellColors.TextMuted,
-        fontSize = 11.sp,
+        style = PocketShellType.labelMono,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
+        modifier = Modifier.testTag(folderTreeRootCountTag(root.path)),
     )
+}
+
+/**
+ * Group-header subtitle shown under the root title — issue #478. Mirrors the
+ * maintainer's target mockup: `N orgs · M sessions` (e.g. "10 orgs ·
+ * 14 sessions"). An "org" here is one project folder under the root (active or
+ * inactive/scanned); "sessions" is the live tmux session count across those
+ * projects. Degrades to just the org count when there are no live sessions.
+ */
+internal fun rootCountSubtitle(root: FolderTreeRoot): String {
+    val orgCount = root.activeProjectCount + root.inactiveProjectCount
+    val orgs = orgCount.countLabel("org")
+    return if (root.sessionCount > 0) {
+        "$orgs · ${root.sessionCount.countLabel("session")}"
+    } else {
+        orgs
+    }
 }
 
 @Composable
@@ -1424,11 +1575,24 @@ private fun FolderHeader(
                 .size(16.dp)
                 .testTag(folderDetailDisclosureTestTag(folder.path)),
         )
-        Spacer(modifier = Modifier.width(7.dp))
-        val countText = projectCountText(folder)
-        Column(
+        Spacer(modifier = Modifier.width(5.dp))
+        // Status dot leads the name (mockup: `▼ ● cable-world · 3 agents`).
+        // Green = active agents/attached, amber = idle.
+        StatusDot(
+            active = folder.isActive,
+            modifier = Modifier.testTag(folderStatusDotTestTag(folder.path)),
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        // Name + inline count form a single flexible block that consumes the
+        // row's leftover width via ONE `weight(1f)`, pushing the action cluster
+        // hard right. The name itself fills that block (`weight(1f)`) so it
+        // renders in full and only ellipsizes when the name + count genuinely
+        // exceed the available width. (A second competing `weight(1f)` trailing
+        // spacer used to split the slack 50/50 and clamp the name to ~half the
+        // row — that's removed.)
+        Row(
             modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 text = folderDisplayLabel(folder.label, folder.path),
@@ -1438,30 +1602,23 @@ private fun FolderHeader(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier
+                    .weight(1f, fill = false)
                     .testTag(folderHeaderLabelTag(folder.path))
                     .semantics { contentDescription = folder.path },
             )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                StatusDot(
-                    active = folder.sessions.any { it.attached || it.agentKind.isAgent() },
-                    modifier = Modifier.testTag(folderStatusDotTestTag(folder.path)),
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text(
-                    text = if (folder.sessions.any { it.attached || it.agentKind.isAgent() }) {
-                        "active · $countText"
-                    } else {
-                        "idle · $countText"
-                    },
-                    color = PocketShellColors.TextMuted,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.testTag(folderCountPillTestTag(folder.path)),
-                )
-            }
+            Spacer(modifier = Modifier.width(8.dp))
+            // Inline count subtitle (`· 3 agents` / `· 1 session`) sits right
+            // after the name; it keeps its intrinsic width so the name gets the
+            // remaining space in the flexible block.
+            Text(
+                text = "· ${projectCountText(folder)}",
+                color = PocketShellColors.TextMuted,
+                style = PocketShellType.labelMono,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.testTag(folderCountPillTestTag(folder.path)),
+            )
         }
-        Spacer(modifier = Modifier.width(4.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             // Secondary actions (env files, import, clone, empty project)
             // collapse behind a single overflow kebab — and the row
@@ -1494,26 +1651,17 @@ private fun WorkspaceSessionRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val isAgent = session.agentKind.isAgent()
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(
-                if (isAgent) PocketShellColors.Purple.copy(alpha = 0.10f) else Color.Transparent,
-                RoundedCornerShape(4.dp),
-            )
+            // Compact paint via the density rung, but the interactive row keeps
+            // the 48 dp a11y touch floor (#461 §6.1).
+            .heightIn(min = PocketShellDensity.tapTargetMin)
             .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 6.dp, vertical = 6.dp)
+            .padding(horizontal = 6.dp, vertical = PocketShellDensity.rowPadV)
             .testTag(folderDetailRowTestTag(folderPath, session.sessionName)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            modifier = Modifier
-                .width(2.dp)
-                .height(26.dp)
-                .background(if (isAgent) PocketShellColors.Purple else PocketShellColors.BorderSoft),
-        )
-        Spacer(modifier = Modifier.width(8.dp))
         StatusDot(
             active = session.attached || session.agentKind.isAgent(),
             modifier = Modifier.testTag(folderSessionStatusDotTestTag(folderPath, session.sessionName)),
@@ -1523,7 +1671,7 @@ private fun WorkspaceSessionRow(
             Text(
                 text = sessionDisplayTitle(session),
                 color = PocketShellColors.Text,
-                fontSize = 13.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1532,16 +1680,49 @@ private fun WorkspaceSessionRow(
                 Text(
                     text = secondary,
                     color = PocketShellColors.TextMuted,
-                    fontSize = 11.sp,
+                    style = PocketShellType.labelMono,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
         }
+        Spacer(modifier = Modifier.width(8.dp))
+        AgentTypeBadge(
+            session = session,
+            modifier = Modifier.testTag(folderSessionBadgeTestTag(folderPath, session.sessionName)),
+        )
+    }
+}
+
+/**
+ * Right-aligned agent-type pill on a session row — issue #478. Mockup colours:
+ * Codex/Claude/OpenCode = purple (`agentAccent`), Shell = grey/neutral. The
+ * short label is just the agent/shell name (no activity word — that lives in
+ * the secondary line via [sessionKindLabel]).
+ */
+@Composable
+private fun AgentTypeBadge(
+    session: FolderSessionEntry,
+    modifier: Modifier = Modifier,
+) {
+    val semantic = LocalPocketShellSemantic.current
+    val isAgent = session.agentKind.isAgent()
+    val label = sessionBadgeLabel(session)
+    val fg = if (isAgent) semantic.agentAccent else PocketShellColors.TextSecondary
+    val bg = if (isAgent) {
+        semantic.agentAccent.copy(alpha = 0.16f)
+    } else {
+        PocketShellColors.SurfaceElev.copy(alpha = 0.72f)
+    }
+    Box(
+        modifier = modifier
+            .background(bg, RoundedCornerShape(6.dp))
+            .padding(horizontal = PocketShellDensity.chipPadH, vertical = PocketShellDensity.chipPadV),
+    ) {
         Text(
-            text = sessionKindLabel(session),
-            color = if (isAgent) PocketShellColors.Purple else PocketShellColors.TextMuted,
-            fontSize = 10.sp,
+            text = label,
+            color = fg,
+            style = PocketShellType.labelMono,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
         )
@@ -1593,7 +1774,10 @@ private fun CompactTreeIconButton(
     val foreground = if (accent) PocketShellColors.Accent else PocketShellColors.TextSecondary
     // Inner pill scales with the hit box but stays ~4 dp smaller so the
     // tap target meets the design-system minimum (§6.1) while reading as a
-    // compact glyph.
+    // compact glyph. These tree icon buttons keep the deliberate #455 36 dp
+    // hit box so the folder name column keeps its readable width; the larger
+    // 48 dp a11y floor is reserved for the full-width interactive rows and the
+    // view toggle (#478).
     val pillSize = (size.value - 4f).coerceAtLeast(24f).dp
     Box(
         modifier = modifier
@@ -1625,37 +1809,50 @@ private fun DisclosureIndicator(
     expanded: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    // Filled chevron triangle — ▼ when expanded, ▶ when collapsed — matching
+    // the maintainer's target mockup (#478).
+    val color = PocketShellColors.TextSecondary
     Canvas(modifier = modifier) {
-        val color = PocketShellColors.TextSecondary
-        val stroke = 2.dp.toPx()
-        drawLine(
-            color = color,
-            start = Offset(size.width * 0.25f, size.height * 0.5f),
-            end = Offset(size.width * 0.75f, size.height * 0.5f),
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
-        if (!expanded) {
-            drawLine(
-                color = color,
-                start = Offset(size.width * 0.5f, size.height * 0.25f),
-                end = Offset(size.width * 0.5f, size.height * 0.75f),
-                strokeWidth = stroke,
-                cap = StrokeCap.Round,
-            )
+        val w = size.width
+        val h = size.height
+        val triangle = Path().apply {
+            if (expanded) {
+                // Pointing down (▼).
+                moveTo(w * 0.22f, h * 0.34f)
+                lineTo(w * 0.78f, h * 0.34f)
+                lineTo(w * 0.5f, h * 0.66f)
+            } else {
+                // Pointing right (▶).
+                moveTo(w * 0.34f, h * 0.22f)
+                lineTo(w * 0.66f, h * 0.5f)
+                lineTo(w * 0.34f, h * 0.78f)
+            }
+            close()
         }
+        drawPath(path = triangle, color = color)
     }
 }
 
 @Composable
 private fun StatusDot(active: Boolean, modifier: Modifier = Modifier) {
-    val color = if (active) PocketShellColors.Green else PocketShellColors.Amber
+    val semantic = LocalPocketShellSemantic.current
+    // Green = active agents/attached, amber = idle (#478). Colours come from
+    // the semantic role vocabulary, not raw palette tokens.
+    val color = if (active) semantic.statusActive else semantic.statusAttention
     Box(
         modifier = modifier
-            .size(7.dp)
-            .background(color = color.copy(alpha = 0.82f), shape = CircleShape),
+            .size(8.dp)
+            .background(color = color, shape = CircleShape),
     )
 }
+
+/**
+ * A project folder is "active" when it has at least one attached session or a
+ * live agent (Claude/Codex/OpenCode/probing/exited shell that just ran one) —
+ * the green-dot condition in the mockup. Otherwise it reads idle (amber).
+ */
+private val FolderRow.isActive: Boolean
+    get() = sessions.any { it.attached || it.agentKind.isAgent() }
 
 internal fun projectCountText(folder: FolderRow): String {
     val sessions = folder.sessions.size
@@ -1687,6 +1884,24 @@ private fun Int.countLabel(noun: String): String =
  * is a follow-up once #430/#438 land; this rendering is correct for the data
  * available now and avoids the conflated bare-"Idle" label.
  */
+/**
+ * Short agent-type label for the right-aligned session badge — issue #478.
+ * Unlike [sessionKindLabel] (which carries the activity state for the secondary
+ * line), this is just the agent/shell identity the badge pill shows:
+ *
+ *  - Claude / Codex / OpenCode  -> the agent name.
+ *  - Probing                    -> "Detecting" (identity not yet known).
+ *  - Shell / Exited             -> "Shell".
+ */
+internal fun sessionBadgeLabel(session: FolderSessionEntry): String = when (session.agentKind) {
+    SessionAgentKind.Claude -> "Claude"
+    SessionAgentKind.Codex -> "Codex"
+    SessionAgentKind.OpenCode -> "OpenCode"
+    SessionAgentKind.Probing -> "Detecting"
+    SessionAgentKind.Exited -> "Shell"
+    SessionAgentKind.Shell -> "Shell"
+}
+
 internal fun sessionKindLabel(session: FolderSessionEntry): String = when (session.agentKind) {
     SessionAgentKind.Claude -> "Claude · ${agentStateLabel(session)}"
     SessionAgentKind.Codex -> "Codex · ${agentStateLabel(session)}"
@@ -1806,7 +2021,12 @@ fun folderStatusDotTestTag(folderPath: String): String =
     "folder-list:detail:$folderPath:status"
 fun folderSessionStatusDotTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:status"
+fun folderSessionBadgeTestTag(folderPath: String, sessionName: String): String =
+    "folder-list:detail:$folderPath:$sessionName:badge"
 fun folderTreeRootTestTag(path: String): String = "folder-list:tree-root:$path"
 fun folderTreeRootLabelTag(path: String): String = "folder-list:tree-root:$path:label"
+fun folderTreeRootCountTag(path: String): String = "folder-list:tree-root:$path:count"
 fun folderTreeRootCreateTestTag(path: String): String = "folder-list:tree-root:$path:create"
 fun folderTreeRootActionsTestTag(path: String): String = "folder-list:tree-root:$path:actions"
+fun folderTreeRootViewToggleTag(path: String): String = "folder-list:tree-root:$path:view-toggle"
+fun folderTreeRootGridStubTag(path: String): String = "folder-list:tree-root:$path:grid-stub"

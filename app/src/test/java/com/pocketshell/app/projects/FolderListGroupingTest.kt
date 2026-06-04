@@ -785,6 +785,59 @@ class FolderListGroupingTest {
     }
 
     @Test
+    fun rootCountSubtitleRendersOrgsAndSessions() {
+        // #478: group header subtitle reads `N orgs · M sessions`, mirroring
+        // the maintainer's target mockup ("10 orgs · 14 sessions").
+        val root = FolderTreeRoot(
+            path = "~/git",
+            label = "git",
+            folders = listOf(
+                folderAt(
+                    "/home/u/git/cable-world",
+                    "cable-world",
+                    entry("a", 1L, kind = SessionAgentKind.Codex),
+                    entry("b", 2L, kind = SessionAgentKind.Claude),
+                ),
+                folderAt(
+                    "/home/u/git/pocketshell",
+                    "pocketshell",
+                    entry("c", 3L, kind = SessionAgentKind.Claude),
+                ),
+            ),
+            isWatched = true,
+            addSheetProjects = listOf(
+                RootProjectCandidate("/home/u/git/scanned", "scanned", RootProjectSource.Scanned),
+            ),
+        )
+        // 2 active projects + 1 inactive/scanned = 3 orgs; 3 live sessions.
+        assertEquals("3 orgs · 3 sessions", rootCountSubtitle(root))
+    }
+
+    @Test
+    fun rootCountSubtitleSingularAndSessionless() {
+        val oneOrgNoSessions = FolderTreeRoot(
+            path = "~/git",
+            label = "git",
+            folders = emptyList(),
+            isWatched = true,
+            addSheetProjects = listOf(
+                RootProjectCandidate("/home/u/git/scanned", "scanned", RootProjectSource.Scanned),
+            ),
+        )
+        assertEquals("1 org", rootCountSubtitle(oneOrgNoSessions))
+
+        val oneOrgOneSession = FolderTreeRoot(
+            path = "~/git",
+            label = "git",
+            folders = listOf(
+                folderAt("/home/u/git/solo", "solo", entry("s", 1L)),
+            ),
+            isWatched = true,
+        )
+        assertEquals("1 org · 1 session", rootCountSubtitle(oneOrgOneSession))
+    }
+
+    @Test
     fun rebindingToSecondHostStartsSecondHostProbe() = runTest {
         val dispatcher = StandardTestDispatcher(testScheduler)
         Dispatchers.setMain(dispatcher)
@@ -869,6 +922,14 @@ class FolderListGroupingTest {
         FolderRow(
             path = "/home/alexey/git/pocketshell",
             label = "pocketshell",
+            sessions = sessions.toList(),
+            isWatched = false,
+        )
+
+    private fun folderAt(path: String, label: String, vararg sessions: FolderSessionEntry): FolderRow =
+        FolderRow(
+            path = path,
+            label = label,
             sessions = sessions.toList(),
             isWatched = false,
         )

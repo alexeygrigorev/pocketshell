@@ -11,7 +11,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.Text
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -19,9 +19,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
 
@@ -51,10 +51,12 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * - [MicButtonState.Disabled] — surface-elev fill, muted glyph, no
  *   shadow, not tappable (callback is wired but `clickable` is disabled).
  *
- * The glyph is a filled circle (`●`) sized to look like a microphone
- * icon's body. When PocketShell bundles a proper icon set the glyph
- * will be replaced — the surface is structured to swap in an
- * `ImageVector` without touching the call sites.
+ * The glyph is the shared filled-microphone [MicGlyphIcon] `ImageVector`
+ * (see `MicIcon.kt`) rendered via [Icon]. Issue #453: this replaced the
+ * old `Text("●")` dot (a black dot in a cyan disc that read as a
+ * record/power button — the maintainer's #1 complaint), so the band's mic
+ * now shows a real microphone glyph everywhere this shared component is
+ * used.
  */
 @Composable
 fun MicButton(
@@ -117,14 +119,19 @@ fun MicButton(
                 color = baseColor.copy(alpha = baseColor.alpha * pulseAlpha),
                 shape = CircleShape,
             )
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Dictate" },
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = "●",
-            color = glyphColor,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.SemiBold,
+        // Issue #453: the shared filled-microphone glyph (MicGlyphIcon),
+        // replacing the old `Text("●")` dot. This is the band's mic — the
+        // first thing the user sees on the agent/Conversation pane — so the
+        // fix lands here at the source for every MicButton call site.
+        Icon(
+            imageVector = MicGlyphIcon,
+            contentDescription = null,
+            tint = glyphColor,
+            modifier = Modifier.size(24.dp),
         )
     }
 }

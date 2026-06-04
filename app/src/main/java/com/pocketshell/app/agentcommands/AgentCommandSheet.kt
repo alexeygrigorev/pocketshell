@@ -78,6 +78,12 @@ public fun AgentCommandSheet(
     onCommandSend: (AgentCommand) -> Unit,
     modifier: Modifier = Modifier,
     sheetState: SheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+    // Issue #453: send a session-control action (interrupt / end-input) into
+    // the focused agent pane as control bytes. These were the `Ctrl-C x2` /
+    // `Ctrl-D x2` band chips; the band is decluttered to "/ commands + mic",
+    // so the two controls live at the top of this palette instead. Optional
+    // so previews / tests that only exercise slash commands keep compiling.
+    onControlSend: ((SessionControlAction) -> Unit)? = null,
 ) {
     var query by remember { mutableStateOf("") }
     val filtered = remember(query, agent) {
@@ -101,8 +107,31 @@ public fun AgentCommandSheet(
                 onDismiss()
             },
             onClose = onDismiss,
+            // Only show the controls when query is empty so a command search
+            // doesn't keep them pinned; firing one dismisses the sheet.
+            onControlSend = if (onControlSend != null) {
+                { action ->
+                    onControlSend(action)
+                    onDismiss()
+                }
+            } else null,
         )
     }
+}
+
+/**
+ * Issue #453: a session-control action surfaced at the top of the agent
+ * command palette. These replace the `Ctrl-C x2` / `Ctrl-D x2` band chips —
+ * the band is decluttered to "/ commands + mic", so interrupt / end-input
+ * move here. The caller maps each to the corresponding control bytes
+ * (`Ctrl-C` ×2 / `Ctrl-D` ×2) sent into the focused pane.
+ */
+public enum class SessionControlAction(
+    public val label: String,
+    public val hint: String,
+) {
+    Interrupt(label = "Interrupt", hint = "Ctrl-C ×2 — stop the running agent"),
+    EndInput(label = "End input", hint = "Ctrl-D ×2 — send EOF / exit the REPL"),
 }
 
 /**
@@ -119,6 +148,7 @@ internal fun AgentCommandSheetContent(
     onCommandSend: (AgentCommand) -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    onControlSend: ((SessionControlAction) -> Unit)? = null,
 ) {
     Column(
         modifier = modifier
@@ -155,6 +185,27 @@ internal fun AgentCommandSheetContent(
                     color = PocketShellColors.TextSecondary,
                     fontSize = 20.sp,
                 )
+            }
+        }
+
+        // Issue #453: session controls (interrupt / end-input) live at the
+        // top of the palette — these are the former `Ctrl-C x2` / `Ctrl-D x2`
+        // band chips, moved here so the session band stays "/ commands + mic".
+        // Hidden while the user is searching commands so they don't pin.
+        if (onControlSend != null && query.isEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                SessionControlAction.values().forEach { action ->
+                    SessionControlChip(
+                        action = action,
+                        onClick = { onControlSend(action) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
         }
 
@@ -331,6 +382,50 @@ private fun AgentCommandSendChip(
  */
 internal fun agentCommandSendChipTag(command: String): String =
     "agent-command-send-${command.removePrefix("/")}"
+
+/**
+ * Issue #453: a session-control chip (interrupt / end-input) shown at the
+ * top of the palette. A bordered "danger-soft" chip so it reads as a system
+ * action distinct from the accent-filled slash-command Send chips.
+ */
+@Composable
+private fun SessionControlChip(
+    action: SessionControlAction,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .background(PocketShellColors.SurfaceElev, RoundedCornerShape(10.dp))
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = RoundedCornerShape(10.dp),
+            )
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+            .testTag(sessionControlChipTag(action))
+            .semantics { contentDescription = "${action.label}: ${action.hint}" },
+    ) {
+        Text(
+            text = action.label,
+            color = PocketShellColors.Text,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = action.hint,
+            color = PocketShellColors.TextMuted,
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+internal fun sessionControlChipTag(action: SessionControlAction): String =
+    "agent-command-control-${action.name}"
 
 internal const val AGENT_COMMAND_SHEET_TAG: String = "agent-command-sheet"
 internal const val AGENT_COMMAND_SEARCH_TAG: String = "agent-command-search"

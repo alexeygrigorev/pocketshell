@@ -39,6 +39,7 @@ import com.pocketshell.app.assistant.FolderCandidate
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.uikit.components.CommandChip
 import com.pocketshell.uikit.components.MicButton
+import com.pocketshell.uikit.components.MicGlyphIcon
 import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
 
@@ -489,81 +490,20 @@ internal const val ADD_COMMAND_CHIP_LABEL: String = "+ command"
 
 /**
  * A 24x24 microphone glyph used by accent chips and as the
- * inline-dictation mic slot's idle/transcribing fallback. We build
- * the [ImageVector] inline rather than pull in `material-icons-extended`
- * for one glyph — the icon set already in the classpath
- * (`material-icons-core`, transitively from material3) does not ship a
- * standalone `Filled.Mic`. The shape traces Material's filled-mic
- * silhouette: a rounded-rect capsule body (radius 3) centred at x=12, a
- * U-shaped stand cradle just below it, a vertical stem, and a horizontal
- * base bar — readable as a microphone at 14dp through 24dp.
+ * inline-dictation mic slot's idle/transcribing fallback, and by the
+ * composer sheet's mic trigger.
  *
- * Renamed from `DictateDotIcon` (a filled circle) in response to the
- * UI/UX audit (#108) finding that the cyan dot was ambiguous without the
+ * Issue #453: this is now an alias of the shared
+ * [com.pocketshell.uikit.components.MicGlyphIcon] in `:shared:ui-kit`, so
+ * the session-band [com.pocketshell.uikit.components.MicButton] and every
+ * app-side mic affordance render the exact same microphone path — one
+ * shared source of truth, no skew, and no leftover `●` dot anywhere.
+ *
+ * Renamed from a filled circle to a microphone in response to the UI/UX
+ * audit (#108) finding that the cyan dot was ambiguous without the
  * adjacent "dictate" caption.
  */
-internal val DictateDotIcon: ImageVector = ImageVector.Builder(
-    name = "DictateMic",
-    defaultWidth = 24.dp,
-    defaultHeight = 24.dp,
-    viewportWidth = 24f,
-    viewportHeight = 24f,
-).addMicPath(
-    fill = SolidColor(Color.White),
-).build()
-
-/**
- * Trace a Material-style filled microphone into this [ImageVector.Builder].
- *
- * The path has three sub-shapes, all rendered as one filled even-odd path:
- * 1. Capsule body: a 6x9 rounded rectangle (corner radius 3) centred at
- *    x=12, spanning y=2..11.
- * 2. Stand cradle: an open arc from (5, 11) → (19, 11) curving downward
- *    through (12, 18), closed back along the top via a thinner inner arc
- *    so the cradle reads as a U rather than a filled bowl.
- * 3. Stem + base: a short vertical stem from (12, 18) to (12, 21) and a
- *    horizontal base bar from (8, 21) to (16, 21).
- *
- * Coordinates are absolute for readability — the icon is small enough
- * that a few extra moveTo / lineTo calls cost nothing at runtime.
- */
-private fun ImageVector.Builder.addMicPath(fill: SolidColor): ImageVector.Builder {
-    val builder = PathBuilder()
-
-    // Mic body: rounded rectangle, x in [9, 15], y in [2, 11], radius 3.
-    builder.moveTo(12f, 2f)
-    builder.arcToRelative(3f, 3f, 0f, false, false, -3f, 3f)
-    builder.lineToRelative(0f, 6f)
-    builder.arcToRelative(3f, 3f, 0f, false, false, 6f, 0f)
-    builder.lineToRelative(0f, -6f)
-    builder.arcToRelative(3f, 3f, 0f, false, false, -3f, -3f)
-    builder.close()
-
-    // Stand cradle (U-shape) — outer arc down, inner arc back up so the
-    // result is a 1.5-unit-thick curve, not a filled bowl.
-    builder.moveTo(19f, 11f)
-    builder.arcToRelative(7f, 7f, 0f, false, true, -14f, 0f)
-    builder.lineToRelative(1.5f, 0f)
-    builder.arcToRelative(5.5f, 5.5f, 0f, false, false, 11f, 0f)
-    builder.close()
-
-    // Stem from cradle bottom (12, 18) down to base bar at y=21.
-    builder.moveTo(11.25f, 18f)
-    builder.lineToRelative(1.5f, 0f)
-    builder.lineToRelative(0f, 3f)
-    builder.lineToRelative(-1.5f, 0f)
-    builder.close()
-
-    // Base bar centred on x=12.
-    builder.moveTo(8f, 20.25f)
-    builder.lineToRelative(8f, 0f)
-    builder.lineToRelative(0f, 1.5f)
-    builder.lineToRelative(-8f, 0f)
-    builder.close()
-
-    addPath(pathData = builder.nodes, fill = fill)
-    return this
-}
+internal val DictateDotIcon: ImageVector = MicGlyphIcon
 
 /**
  * Issue #131: stable test tag for the show-keyboard chip. Lives next to

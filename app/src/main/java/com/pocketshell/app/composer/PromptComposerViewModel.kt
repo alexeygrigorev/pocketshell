@@ -119,6 +119,15 @@ public class PromptComposerViewModel @Inject constructor(
             } else {
                 null
             },
+            // Issue #453: restore the user's Auto-send choice across a
+            // ViewModel recreate. The toggle is a sticky session preference,
+            // so a screen-lock / low-memory recreate (common while a
+            // dictation is in flight) must NOT silently flip it back off —
+            // the maintainer reported "автосенд снялся автоматически" (it
+            // auto-unchecked itself). Persisting it through [SavedStateHandle]
+            // makes the on-state survive the recreate the same way the draft
+            // text does.
+            autoSend = savedStateHandle.get<Boolean>(KEY_AUTO_SEND) == true,
         ),
     )
 
@@ -387,6 +396,11 @@ public class PromptComposerViewModel @Inject constructor(
      * Whisper returns.
      */
     public fun setAutoSend(enabled: Boolean) {
+        // Issue #453: persist the choice so it survives a ViewModel recreate
+        // (process death / config change). Without this the toggle reset to
+        // its `false` default on the next recreate — the "auto-unchecked
+        // itself" bug the maintainer hit. Written the same way as KEY_DRAFT.
+        savedStateHandle[KEY_AUTO_SEND] = enabled
         _uiState.update { it.copy(autoSend = enabled) }
         // Keep the in-flight queued-send flag in sync with the toggle while
         // a dictation is active so flipping the switch mid-recording is
@@ -1440,6 +1454,15 @@ public class PromptComposerViewModel @Inject constructor(
          * [RECORDING_INTERRUPTED_MESSAGE] banner once, and resets it.
          */
         internal const val KEY_WAS_RECORDING: String = "prompt-composer-was-recording"
+
+        /**
+         * Issue #453: [SavedStateHandle] key for the sticky Auto-send
+         * toggle. Persisting it makes the user's on-choice survive a
+         * ViewModel recreate (process death / config change) instead of
+         * silently resetting to the `false` default — the maintainer's
+         * "auto-unchecked itself" bug.
+         */
+        internal const val KEY_AUTO_SEND: String = "prompt-composer-auto-send"
 
         /**
          * Issue #169 Part 2: user-facing message surfaced via

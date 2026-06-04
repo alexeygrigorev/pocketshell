@@ -147,8 +147,12 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
-    fun agentBottomChipControlsRenderPromptsAndExitChipsWithoutShellCommands() {
-        var snippetTaps = 0
+    fun agentBottomChipBandIsDeclutteredToSlashCommandsAndMic() {
+        // Issue #453: the agent-pane band is decluttered to "/ commands" + the
+        // mic FAB. The former `Ctrl-C x2` / `Ctrl-D x2` chips moved into the
+        // "/ commands" palette (session-control rows), and `+ prompt` is gone
+        // (the composer sheet's `{}` already inserts prompts). On TmuxScreen
+        // the agent band passes `onAddSnippetTap = null` for agent panes.
         var dictateTaps = 0
         val chipTaps = mutableListOf<String>()
         compose.setContent {
@@ -158,8 +162,8 @@ class TmuxSessionVoiceSurfaceUiTest {
                     onChipTap = { chipTaps += it },
                     onDictateTap = { dictateTaps++ },
                     onShowKeyboardTap = null,
-                    onAddSnippetTap = { snippetTaps += 1 },
-                    addSnippetLabel = ADD_PROMPT_CHIP_LABEL,
+                    onAddSnippetTap = null,
+                    addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
                     addSnippetIcon = null,
                     onProjectNavigationTap = null,
                 )
@@ -168,16 +172,18 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed().performClick()
         assertEquals(1, dictateTaps)
-        compose.onNodeWithText(CtrlC2Chip).assertIsDisplayed().assertHasClickAction().performClick()
-        compose.onNodeWithText(CtrlD2Chip).assertIsDisplayed().assertHasClickAction().performClick()
-        compose.onNodeWithTag(SESSION_ADD_SNIPPET_CHIP_TAG).assertIsDisplayed().performClick()
-        compose.onNodeWithText(ADD_PROMPT_CHIP_LABEL).assertIsDisplayed()
-        compose.onNodeWithText("git status").assertDoesNotExist()
+        // "/ commands" is the only chip in the agent band now.
+        compose.onNodeWithText(AgentCommandsChip).assertIsDisplayed().assertHasClickAction().performClick()
+        // The interrupt/EOF chips are no longer in the band (they live in the palette).
+        compose.onNodeWithText(CtrlC2Chip).assertDoesNotExist()
+        compose.onNodeWithText(CtrlD2Chip).assertDoesNotExist()
+        // No `+ prompt` / `+ command` / shell-command chips in the agent band.
+        compose.onNodeWithText(ADD_PROMPT_CHIP_LABEL).assertDoesNotExist()
         compose.onNodeWithText(ADD_COMMAND_CHIP_LABEL).assertDoesNotExist()
+        compose.onNodeWithText("git status").assertDoesNotExist()
         captureViewportArtifact("agent-prompt-bottom-strip.png")
 
-        assertEquals(listOf(CtrlC2Chip, CtrlD2Chip), chipTaps)
-        assertEquals(1, snippetTaps)
+        assertEquals(listOf(AgentCommandsChip), chipTaps)
     }
 
     // ─── Issue #459: Conversation shares the unified composer bottom with

@@ -113,12 +113,12 @@ import com.pocketshell.app.sessions.StartDirectoryAutocompleteField
 import com.pocketshell.app.sessions.rememberStartDirectoryAutocompleteController
 import com.pocketshell.app.sessions.resolveTmuxSessionCreation
 import com.pocketshell.app.agentcommands.AgentCommandSheet
+import com.pocketshell.app.agentcommands.SessionControlAction
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
-import com.pocketshell.app.voice.ADD_PROMPT_CHIP_LABEL
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.AssistantStrip
@@ -1014,18 +1014,10 @@ public fun TmuxSessionScreen(
                             when (chip) {
                                 // Issue #436 (Slice A): open the agent
                                 // slash-command palette rather than typing the
-                                // chip label into the pane.
+                                // chip label into the pane. Issue #453: the
+                                // interrupt/EOF controls moved INTO that
+                                // palette, so the band only carries this chip.
                                 AgentCommandsChip -> showAgentCommands = true
-                                CtrlC2Chip -> viewModel.sendControlInputToPane(
-                                    pane.paneId,
-                                    CtrlCByte,
-                                    repeatCount = 2,
-                                )
-                                CtrlD2Chip -> viewModel.sendControlInputToPane(
-                                    pane.paneId,
-                                    CtrlDByte,
-                                    repeatCount = 2,
-                                )
                                 else -> {
                                     // Chip taps run literal commands in the
                                     // focused pane. Mirrors
@@ -1069,10 +1061,17 @@ public fun TmuxSessionScreen(
                             )
                         }
                     },
-                    onAddSnippetTap = if (hostId != 0L) {
+                    // Issue #453: drop the `+ prompt` chip on agent panes —
+                    // the composer sheet's `{}` snippets affordance already
+                    // covers inserting a prompt/snippet, so the band chip was
+                    // a redundant third way to do the same thing and cluttered
+                    // the "/ commands + mic" idle the maintainer asked for.
+                    // Terminal panes keep `+ command` (no in-band composer
+                    // snippet entry there).
+                    onAddSnippetTap = if (hostId != 0L && !isAgentPane) {
                         { showSnippetPicker = true }
                     } else null,
-                    addSnippetLabel = if (isAgentPane) ADD_PROMPT_CHIP_LABEL else ADD_COMMAND_CHIP_LABEL,
+                    addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
                     addSnippetIcon = null,
                     // Project navigation on tmux panes is a separate
                     // follow-up — see #123 notes on per-pane cwd /
@@ -1471,6 +1470,25 @@ public fun TmuxSessionScreen(
                 if (sessionLive) {
                     currentPane?.let { pane ->
                         viewModel.sendToAgentPane(pane.paneId, command.command)
+                    }
+                }
+            },
+            // Issue #453: the former `Ctrl-C x2` / `Ctrl-D x2` band chips now
+            // live in this palette as session-control rows. Map each to the
+            // control bytes sent into the focused pane (×2 — the agent REPLs
+            // need a double interrupt/EOF to actually break out).
+            onControlSend = { action ->
+                if (sessionLive) {
+                    currentPane?.let { pane ->
+                        val byte = when (action) {
+                            SessionControlAction.Interrupt -> CtrlCByte
+                            SessionControlAction.EndInput -> CtrlDByte
+                        }
+                        viewModel.sendControlInputToPane(
+                            pane.paneId,
+                            byte,
+                            repeatCount = 2,
+                        )
                     }
                 }
             },
@@ -4473,4 +4491,11 @@ internal const val CtrlD2Chip: String = "Ctrl-D x2"
 // special-cases it (like the Ctrl-C/Ctrl-D chips) instead of writing it into
 // the pane.
 internal const val AgentCommandsChip: String = "/ commands"
-internal val AgentExitChips: List<String> = listOf(AgentCommandsChip, CtrlC2Chip, CtrlD2Chip)
+
+// Issue #453: the agent-pane band is decluttered to a single "/ commands"
+// chip + the mic FAB (matching the maintainer's "clean / command + mic"
+// ask). The former `Ctrl-C x2` / `Ctrl-D x2` interrupt/EOF chips moved into
+// the "/ commands" palette as session-control rows (see [AgentCommandSheet]
+// `onControlSend`). `CtrlC2Chip` / `CtrlD2Chip` are kept as the literal
+// labels the palette controls map to, but no longer appear in the band.
+internal val AgentExitChips: List<String> = listOf(AgentCommandsChip)

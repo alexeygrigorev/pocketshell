@@ -187,15 +187,14 @@ class PromptComposerSendNoKeyboardTest {
     }
 
     /**
-     * Issue #491 part 2: the keyboard affordance is present in the Idle
-     * controls row, is enabled, and a tap (which focuses the draft field and
-     * raises the soft IME) does not throw. The actual IME visibility is an OS
-     * surface we cannot assert deterministically in an instrumentation test,
-     * so we pin the affordance + that the focus/show request is wired without
-     * crashing.
+     * Issue #453: the separate keyboard icon was removed from the Idle
+     * controls row (not in the mockup; cluttered the clean idle). Tapping
+     * the editable draft field is the single, obvious way to raise the IME.
+     * Here we assert the field is present + accepts text without a separate
+     * keyboard affordance.
      */
     @Test
-    fun keyboardAffordanceIsPresentAndTappable() {
+    fun draftFieldRaisesKeyboardOnFocusWithoutASeparateKeyboardIcon() {
         val vm = newViewModel()
         compose.setContent {
             PocketShellTheme {
@@ -210,13 +209,13 @@ class PromptComposerSendNoKeyboardTest {
             }
         }
 
-        compose.onNodeWithTag(COMPOSER_KEYBOARD_TAG)
+        // The draft field is the only keyboard entry point; tapping it and
+        // typing works (the IME is an OS surface we can't assert directly).
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG)
             .assertIsDisplayed()
-            .assertIsEnabled()
             .performClick()
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).performTextInput("hello")
         compose.waitForIdle()
-
-        // The draft field is still usable after the keyboard affordance fired.
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertIsDisplayed()
     }
 }

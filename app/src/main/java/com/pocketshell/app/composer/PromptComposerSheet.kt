@@ -34,6 +34,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -57,12 +58,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
@@ -84,6 +88,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
+import com.pocketshell.app.voice.DictateDotIcon
 import com.pocketshell.app.voice.PendingTranscriptionItem
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
@@ -702,43 +707,24 @@ internal fun SheetContent(
                 enabled = !isTranscribing && !attachmentBusy && onSnippets != null,
                 modifier = Modifier.testTag(COMPOSER_SNIPPETS_TAG),
             )
-            // Issue #491: keyboard affordance. The maintainer reported having
-            // to "find the keyboard" to type / hit Enter. In the Idle state we
-            // expose a keyboard icon that focuses the composer's draft field
-            // and raises the soft IME on demand, so reaching the keyboard is a
-            // single deliberate tap instead of a hunt. Only meaningful while
-            // the editable draft field is on screen (Idle); during Recording /
-            // Transcribing the surface is the waveform / spinner, so the icon
-            // is hidden.
-            if (state.recording == PromptComposerViewModel.RecordingState.Idle) {
-                KeyboardIconButton(
-                    onClick = {
-                        // Focus the draft field (which raises the IME for it)
-                        // and explicitly request the soft keyboard. Dispatched
-                        // off the click frame so the IME animation never blocks
-                        // the tap handler / main-thread idling.
-                        draftFocusRequester.requestFocus()
-                        imeScope.launch { keyboardController?.show() }
-                    },
-                    enabled = !attachmentBusy,
-                    modifier = Modifier.testTag(COMPOSER_KEYBOARD_TAG),
-                )
-            }
+            // Issue #453: the separate keyboard icon is removed from the Idle
+            // row — it is not in the mockup and cluttered the clean idle. The
+            // editable draft field itself raises the soft IME the moment it is
+            // tapped/focused (ComposerDraftField), so there is a single,
+            // obvious way to bring up the keyboard: tap the input. The
+            // [draftFocusRequester] is still used to focus the field after a
+            // dictation transcript lands.
 
             Spacer(modifier = Modifier.weight(1f))
 
             // Right cluster is state-driven.
             when (state.recording) {
                 PromptComposerViewModel.RecordingState.Idle -> {
-                    // Mic trigger to start a dictation (the entry point into
-                    // the Recording state). Sits to the left of the primary
-                    // Send so the Idle row reads "dictate, or type + send".
-                    MicTriggerButton(
-                        onClick = onMicTap,
-                        enabled = !attachmentBusy,
-                        modifier = Modifier.testTag(COMPOSER_MIC_TAG),
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    // Issue #453: match the mockup's compact toolbar order —
+                    // `Send` (text + arrow) FIRST, then a small mic disc at the
+                    // far right, both sitting tight together. The old order
+                    // (mic-then-Send) was reversed versus the mockup.
+                    //
                     // Issue #491: gate on the LIVE editor text, not the
                     // (possibly stale) ViewModel draft — the IME composing
                     // region lands in `draftFieldValue.text` immediately, so
@@ -750,6 +736,14 @@ internal fun SheetContent(
                         onClick = commitAndSend,
                         enabled = sendEnabled,
                         modifier = Modifier.testTag(COMPOSER_SEND_ENTER_TAG),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    // Small cyan mic disc at the far right (the mockup's mic).
+                    // Sits AFTER Send so the row reads "type + send, or dictate".
+                    MicTriggerButton(
+                        onClick = onMicTap,
+                        enabled = !attachmentBusy,
+                        modifier = Modifier.testTag(COMPOSER_MIC_TAG),
                     )
                 }
 
@@ -869,7 +863,11 @@ private fun TranscribingSurface(
     // `onCancel` is consumed by the bottom-row Cancel button; this surface
     // only renders the status. Kept as a parameter so the surface owns the
     // full transcribing semantics for a11y.
-    Row(
+    // Issue #453: center the spinner + label inside the panel. The old
+    // left-aligned 20dp dot rendered as a tiny smudge at the left edge; the
+    // mockup centers a clear spinner. The Row wraps its content and is then
+    // centered horizontally via the parent Box.
+    Box(
         modifier = modifier
             .fillMaxWidth()
             .height(56.dp)
@@ -882,23 +880,48 @@ private fun TranscribingSurface(
                 color = PocketShellColors.Border,
                 shape = RoundedCornerShape(12.dp),
             )
-            .padding(horizontal = 14.dp)
             .testTag(COMPOSER_TRANSCRIBING_SPINNER_TAG)
             .semantics { contentDescription = "Prompt composer transcribing" },
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        contentAlignment = Alignment.Center,
     ) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(20.dp),
-            strokeWidth = 2.5.dp,
-            color = PocketShellColors.Accent,
-        )
-        Text(
-            text = "Transcribing…",
-            color = PocketShellColors.Text,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            // Issue #453: a clearly visible spinner next to the centered label.
+            // The M3 *indeterminate* indicator draws a sweep whose arc length is
+            // animation-phase-dependent — in a captured still it frequently lands
+            // on a near-zero sweep that reads as the "tiny dot" the reviewer
+            // flagged. We instead draw a DETERMINATE 270° arc (always a thick,
+            // clearly-visible three-quarter ring) and rotate the whole indicator
+            // continuously so it still reads as an active spinner in the live app
+            // while being deterministic in any single frame.
+            val spinTransition = rememberInfiniteTransition(label = "transcribe-spin")
+            val angle by spinTransition.animateFloat(
+                initialValue = 0f,
+                targetValue = 360f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 900, easing = LinearEasing),
+                    repeatMode = RepeatMode.Restart,
+                ),
+                label = "transcribe-spin-angle",
+            )
+            CircularProgressIndicator(
+                progress = { 0.75f },
+                modifier = Modifier
+                    .size(28.dp)
+                    .graphicsLayer { rotationZ = angle },
+                strokeWidth = 3.5.dp,
+                color = PocketShellColors.Accent,
+                trackColor = Color.Transparent,
+            )
+            Text(
+                text = "Transcribing…",
+                color = PocketShellColors.Text,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
+            )
+        }
     }
 }
 
@@ -914,32 +937,28 @@ private fun SendButton(
     enabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    // Issue #453: a borderless ghost text button — just "Send" + the send
+    // arrow, no outline pill and no filled fill. The mockup renders Send as a
+    // plain text+arrow control with the small cyan mic disc to its right as the
+    // ONLY accent shape on the row, so any border/fill here reads as the
+    // "large outlined Send pill" the reviewer flagged. Removing the outline
+    // keeps the row compact and lets the mic carry the lone accent.
+    val contentColor = if (enabled) PocketShellColors.Accent else PocketShellColors.TextMuted
     Row(
         modifier = modifier
             .height(44.dp)
-            .background(
-                color = if (enabled) PocketShellColors.Accent else Color.Transparent,
-                shape = RoundedCornerShape(10.dp),
-            )
-            .border(
-                width = 1.dp,
-                color = if (enabled) PocketShellColors.Accent else PocketShellColors.Border,
-                shape = RoundedCornerShape(10.dp),
-            )
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Text(
             text = "Send",
-            color = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted,
-            fontSize = 13.sp,
+            color = contentColor,
+            fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
         )
-        SendArrowGlyph(
-            color = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted,
-        )
+        SendArrowGlyph(color = contentColor)
     }
 }
 
@@ -1032,21 +1051,26 @@ private fun MicTriggerButton(
             .semantics { contentDescription = "Start dictation" },
         contentAlignment = Alignment.Center,
     ) {
-        // Filled circle glyph standing in for a microphone body (same
-        // treatment as the shared MicButton until an icon set is bundled).
-        Text(
-            text = "●",
-            color = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold,
+        // Issue #453: render the proper Material-style filled microphone
+        // glyph (the shared [DictateDotIcon] ImageVector reused from
+        // VoiceSessionSurface) instead of the old `Text("●")` dot, which
+        // read as a record / power button rather than a mic.
+        Icon(
+            imageVector = DictateDotIcon,
+            contentDescription = null,
+            tint = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted,
+            modifier = Modifier.size(22.dp),
         )
     }
 }
 
 /**
- * Issue #453: paperclip attach button (40dp tap target). Drawn with a
- * [Canvas] path so we don't pull in `material-icons-extended` or rely on an
- * emoji glyph that renders inconsistently across OEM fonts.
+ * Issue #453: paperclip attach button (40dp tap target). Renders the
+ * [AttachFileIcon] ImageVector via [Icon] — a crisp Material-style
+ * paperclip — replacing the old hand-rolled [Canvas] arcs that rendered as
+ * a distorted squiggle at 22dp. We build the vector inline (the same
+ * pattern as [DictateDotIcon]) rather than pull in `material-icons-extended`
+ * for one glyph.
  */
 @Composable
 private fun AttachIconButton(
@@ -1062,61 +1086,58 @@ private fun AttachIconButton(
             .semantics { contentDescription = "Attach files" },
         contentAlignment = Alignment.Center,
     ) {
-        Canvas(modifier = Modifier.size(22.dp)) {
-            val w = size.width
-            val h = size.height
-            val stroke = Stroke(width = w * 0.10f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-            // A single-stroke paperclip drawn on a diagonal, the canonical
-            // "attach" glyph: an outer arm that hooks around the bottom and
-            // back up, with the inner arm one notch shorter so the clip
-            // reads as two nested rounded bends rather than a horseshoe.
-            // Coordinates: the clip leans slightly right, top-open.
-            val xLeft = w * 0.34f
-            val xRight = w * 0.66f
-            val top = h * 0.14f
-            val bottom = h * 0.86f
-            val rOuter = (xRight - xLeft) / 2f
-            // Outer arm: starts near the top-right, runs down the right
-            // side, loops the bottom (semicircle), runs up the left side,
-            // and curves slightly over the top.
-            val outer = Path().apply {
-                moveTo(xRight, top + rOuter * 0.4f)
-                lineTo(xRight, bottom - rOuter)
-                arcTo(
-                    rect = Rect(xLeft, bottom - 2 * rOuter, xRight, bottom),
-                    startAngleDegrees = 0f,
-                    sweepAngleDegrees = 180f,
-                    forceMoveTo = false,
-                )
-                lineTo(xLeft, top + rOuter)
-                arcTo(
-                    rect = Rect(xLeft, top, xLeft + 2 * rOuter, top + 2 * rOuter),
-                    startAngleDegrees = 180f,
-                    sweepAngleDegrees = 90f,
-                    forceMoveTo = false,
-                )
-            }
-            drawPath(outer, color = tint, style = stroke)
-            // Inner arm: the clip's shorter pin, offset inward and stopping
-            // short of both ends so the two arms read as separate.
-            val inLeft = xLeft + rOuter * 0.45f
-            val inRight = xRight - rOuter * 0.0f
-            val inBottom = bottom - rOuter * 0.55f
-            val rInner = (inRight - inLeft) / 2f
-            val inner = Path().apply {
-                moveTo(inLeft, top + rOuter * 0.9f)
-                lineTo(inLeft, inBottom - rInner)
-                arcTo(
-                    rect = Rect(inLeft, inBottom - 2 * rInner, inRight, inBottom),
-                    startAngleDegrees = 180f,
-                    sweepAngleDegrees = -180f,
-                    forceMoveTo = false,
-                )
-                lineTo(inRight, top + rOuter * 1.4f)
-            }
-            drawPath(inner, color = tint, style = stroke)
-        }
+        Icon(
+            imageVector = AttachFileIcon,
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.size(22.dp),
+        )
     }
+}
+
+/**
+ * Issue #453: a clean Material-style paperclip ("attach file") [ImageVector],
+ * built inline so we don't depend on `material-icons-extended`. Traces the
+ * standard diagonal paperclip silhouette as one filled even-odd path: an
+ * outer clip body that hooks the bottom and runs back up, with an inner
+ * cut-out so it reads as a hollow clip rather than a solid blob. Sized for
+ * a 22dp render in the composer's attach button.
+ */
+private val AttachFileIcon: ImageVector = ImageVector.Builder(
+    name = "AttachFile",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).run {
+    // Material's `Filled.AttachFile` path data (the canonical paperclip).
+    val builder = PathBuilder()
+    builder.moveTo(16.5f, 6f)
+    builder.verticalLineToRelative(11.5f)
+    builder.curveToRelative(0f, 2.21f, -1.79f, 4f, -4f, 4f)
+    builder.reflectiveCurveToRelative(-4f, -1.79f, -4f, -4f)
+    builder.verticalLineTo(5f)
+    builder.curveToRelative(0f, -1.38f, 1.12f, -2.5f, 2.5f, -2.5f)
+    builder.reflectiveCurveToRelative(2.5f, 1.12f, 2.5f, 2.5f)
+    builder.verticalLineToRelative(10.5f)
+    builder.curveToRelative(0f, 0.55f, -0.45f, 1f, -1f, 1f)
+    builder.reflectiveCurveToRelative(-1f, -0.45f, -1f, -1f)
+    builder.verticalLineTo(6f)
+    builder.horizontalLineTo(10.5f)
+    builder.verticalLineToRelative(9.5f)
+    builder.curveToRelative(0f, 1.38f, 1.12f, 2.5f, 2.5f, 2.5f)
+    builder.reflectiveCurveToRelative(2.5f, -1.12f, 2.5f, -2.5f)
+    builder.verticalLineTo(5f)
+    builder.curveToRelative(0f, -2.21f, -1.79f, -4f, -4f, -4f)
+    builder.reflectiveCurveToRelative(-4f, 1.79f, -4f, 4f)
+    builder.verticalLineToRelative(12.5f)
+    builder.curveToRelative(0f, 3.04f, 2.46f, 5.5f, 5.5f, 5.5f)
+    builder.reflectiveCurveToRelative(5.5f, -2.46f, 5.5f, -5.5f)
+    builder.verticalLineTo(6f)
+    builder.horizontalLineToRelative(-1.5f)
+    builder.close()
+    addPath(pathData = builder.nodes, fill = SolidColor(Color.White))
+    build()
 }
 
 /**
@@ -1144,70 +1165,6 @@ private fun SnippetsIconButton(
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold,
         )
-    }
-}
-
-/**
- * Issue #491: keyboard affordance button. Drawn with a [Canvas] (a rounded
- * key-cap grid) so it reads as the universal "show keyboard" glyph without a
- * `material-icons-extended` dependency or an emoji that renders
- * inconsistently across OEM fonts. Tapping it focuses the composer draft
- * field and raises the soft IME so the user can type / press Enter without
- * hunting for the keyboard.
- */
-@Composable
-private fun KeyboardIconButton(
-    onClick: () -> Unit,
-    enabled: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    val tint = if (enabled) PocketShellColors.TextSecondary else PocketShellColors.TextMuted
-    Box(
-        modifier = modifier
-            .size(40.dp)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .semantics { contentDescription = "Show keyboard" },
-        contentAlignment = Alignment.Center,
-    ) {
-        Canvas(modifier = Modifier.size(22.dp)) {
-            val w = size.width
-            val h = size.height
-            val stroke = Stroke(width = w * 0.08f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-            // Outer key-cap body: a rounded rectangle spanning most of the
-            // glyph box, slightly inset top/bottom so the keys read as a
-            // keyboard rather than a plain card.
-            val left = w * 0.08f
-            val right = w * 0.92f
-            val top = h * 0.26f
-            val bottom = h * 0.74f
-            val corner = w * 0.10f
-            drawRoundRect(
-                color = tint,
-                topLeft = androidx.compose.ui.geometry.Offset(left, top),
-                size = androidx.compose.ui.geometry.Size(right - left, bottom - top),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(corner, corner),
-                style = stroke,
-            )
-            // Two rows of small keys + a long spacebar on the lower row, the
-            // canonical "keyboard" rhythm.
-            val keyR = w * 0.035f
-            val rowTopY = h * 0.40f
-            val rowMidY = h * 0.53f
-            val xs = listOf(0.22f, 0.36f, 0.50f, 0.64f, 0.78f)
-            for (xf in xs) {
-                drawCircle(color = tint, radius = keyR, center = androidx.compose.ui.geometry.Offset(w * xf, rowTopY))
-                drawCircle(color = tint, radius = keyR, center = androidx.compose.ui.geometry.Offset(w * xf, rowMidY))
-            }
-            // Spacebar on the bottom row.
-            val spaceY = h * 0.65f
-            drawLine(
-                color = tint,
-                start = androidx.compose.ui.geometry.Offset(w * 0.30f, spaceY),
-                end = androidx.compose.ui.geometry.Offset(w * 0.70f, spaceY),
-                strokeWidth = w * 0.07f,
-                cap = StrokeCap.Round,
-            )
-        }
     }
 }
 
@@ -1717,13 +1674,6 @@ internal const val COMPOSER_WAVEFORM_TAG = "prompt-composer-waveform"
 internal const val COMPOSER_MIC_TAG = "prompt-composer-mic"
 internal const val COMPOSER_ATTACH_TAG = "prompt-composer-attach"
 internal const val COMPOSER_SNIPPETS_TAG = "prompt-composer-snippets"
-
-/**
- * Issue #491: the keyboard affordance in the composer controls row. Focuses
- * the draft field and raises the soft IME so the user can reach the keyboard
- * (type / press Enter) without hunting for it.
- */
-internal const val COMPOSER_KEYBOARD_TAG = "prompt-composer-keyboard"
 internal const val COMPOSER_ATTACHMENT_PROGRESS_TAG = "prompt-composer-attachment-progress"
 
 /** Issue #453: mockup placeholder text for the empty composer input. */

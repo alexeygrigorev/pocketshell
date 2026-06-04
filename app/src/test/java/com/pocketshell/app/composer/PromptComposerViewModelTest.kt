@@ -1,5 +1,6 @@
 package com.pocketshell.app.composer
 
+import androidx.lifecycle.SavedStateHandle
 import com.pocketshell.app.composer.PromptComposerViewModel.ApiKeyVault
 import com.pocketshell.app.composer.PromptComposerViewModel.RecordingState
 import com.pocketshell.app.di.WhisperClientFactory
@@ -147,6 +148,7 @@ class PromptComposerViewModelTest {
         samplerDispatcher: TestDispatcher? = null,
         clock: () -> Long = { System.currentTimeMillis() },
         voiceSettings: PromptComposerViewModel.VoiceSettingsSnapshot = FakeVoiceSettings(),
+        savedStateHandle: SavedStateHandle = SavedStateHandle(),
     ): PromptComposerViewModel {
         val factory = WhisperClientFactory { whisper }
         val vm = PromptComposerViewModel(
@@ -154,6 +156,7 @@ class PromptComposerViewModelTest {
             whisperClientFactory = factory,
             apiKeyStorage = storage,
             voiceSettings = voiceSettings,
+            savedStateHandle = savedStateHandle,
         )
         if (samplerDispatcher != null) vm.samplerDispatcher = samplerDispatcher
         vm.clock = clock
@@ -2014,5 +2017,47 @@ class PromptComposerViewModelTest {
         // transcript merely inserts into the editable draft.
         assertEquals(0, sent.size)
         assertEquals("changed my mind", vm.uiState.value.draft)
+    }
+
+    // -- Issue #453: Auto-send persistence (the "auto-unchecked itself" bug) --
+
+    @Test
+    fun setAutoSendPersistsTheChoiceToSavedStateHandle() {
+        val handle = SavedStateHandle()
+        val vm = newVm(savedStateHandle = handle)
+
+        vm.setAutoSend(true)
+        assertTrue(vm.uiState.value.autoSend)
+        // The choice is written to SavedStateHandle so it survives recreate.
+        assertEquals(true, handle.get<Boolean>(PromptComposerViewModel.KEY_AUTO_SEND))
+
+        vm.setAutoSend(false)
+        assertFalse(vm.uiState.value.autoSend)
+        assertEquals(false, handle.get<Boolean>(PromptComposerViewModel.KEY_AUTO_SEND))
+    }
+
+    @Test
+    fun autoSendOnSurvivesAViewModelRecreate() {
+        // Simulate the maintainer's report ("автосенд снялся автоматически"):
+        // the user turns Auto-send ON, then a process-death / config-change
+        // recreate rebuilds the ViewModel from the same SavedStateHandle. The
+        // toggle must STILL be ON — not silently reset to its false default.
+        val handle = SavedStateHandle()
+        val first = newVm(savedStateHandle = handle)
+        first.setAutoSend(true)
+        assertTrue(first.uiState.value.autoSend)
+
+        // Recreate from the same handle (what AndroidX does on recreate).
+        val recreated = newVm(savedStateHandle = handle)
+        assertTrue(
+            "Auto-send must persist its ON state across a ViewModel recreate",
+            recreated.uiState.value.autoSend,
+        )
+    }
+
+    @Test
+    fun autoSendDefaultsToOffWhenSavedStateHandleIsEmpty() {
+        val vm = newVm(savedStateHandle = SavedStateHandle())
+        assertFalse(vm.uiState.value.autoSend)
     }
 }

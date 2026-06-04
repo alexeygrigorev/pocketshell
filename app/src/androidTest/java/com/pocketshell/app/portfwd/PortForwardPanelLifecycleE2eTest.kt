@@ -129,6 +129,7 @@ class PortForwardPanelLifecycleE2eTest {
                 connector = connector,
                 portRemappingDao = database.portRemappingDao(),
                 forwardingController = forwardingController,
+                showAllPortsStore = ShowAllPortsStore(targetContext),
             ).also { it.observeProcessLifecycle(ProcessLifecycleOwner.get()) }
         }
 

@@ -35,6 +35,15 @@ data class PortForwardPanelState(
     val connectionState: PortForwardConnectionState = PortForwardConnectionState.Idle,
     val tunnels: List<TunnelInfo> = emptyList(),
     val error: String? = null,
+    // Issue #492: "Show all ports" — when false (default), the discovery
+    // table only shows ports in InterestingPortFilter.DEFAULT_RANGE
+    // (1000-10000). When true, every discovered port is shown.
+    val showAllPorts: Boolean = false,
+    // Issue #492: number of discovered ports hidden by the default filter,
+    // i.e. how many extra rows "Show all ports" would reveal. Drives the
+    // checkbox label's "(N hidden)" hint. Always reflects the latest scan
+    // regardless of the current showAllPorts value.
+    val hiddenPortCount: Int = 0,
 )
 
 enum class PortForwardConnectionState {
@@ -64,10 +73,28 @@ class PortForwardPanelViewModel @Inject constructor(
     // when the first host registers and stops it when the last
     // unregisters.
     private val forwardingController: ForwardingController,
+    // Issue #492: persists the "Show all ports" checkbox across panel
+    // navigation and app restarts. Global (not per-host) — see store doc.
+    private val showAllPortsStore: ShowAllPortsStore,
 ) : ViewModel() {
 
-    private val _state = MutableStateFlow(PortForwardPanelState())
+    private val _state = MutableStateFlow(PortForwardPanelState(showAllPorts = showAllPortsStore.isShowAll()))
     val state: StateFlow<PortForwardPanelState> = _state.asStateFlow()
+
+    /**
+     * Issue #492: the most recent raw discovery result, kept so toggling
+     * "Show all ports" can re-filter the table without a new SSH scan. Null
+     * until the first discovery completes; reset to null when the panel is
+     * left or a different host is loaded.
+     */
+    private var lastDiscoveredPorts: List<RemotePort> = emptyList()
+
+    /**
+     * Issue #492: the remote->local remappings snapshot used to build the
+     * last discovery table, kept so a "Show all ports" re-filter rebuilds the
+     * rows with the same local-port mapping it scanned with.
+     */
+    private var currentRemappings: Map<Int, Int> = emptyMap()
 
     private var currentHostId: Long? = null
     private var requestedKeyPath: String? = null
@@ -195,7 +222,8 @@ class PortForwardPanelViewModel @Inject constructor(
         keyPath = initialKeyPath
         discoverPortsOnIdle = discoverPorts
         passphrase = initialPassphrase?.copyOf()
-        _state.value = PortForwardPanelState()
+        lastDiscoveredPorts = emptyList()
+        _state.value = PortForwardPanelState(showAllPorts = showAllPortsStore.isShowAll())
         loadJob = viewModelScope.launch {
             val host = hostDao.getById(hostId)
             if (requestGeneration != loadGeneration || !currentCoroutineContext().isActive) {
@@ -213,7 +241,10 @@ class PortForwardPanelViewModel @Inject constructor(
                 return@launch
             }
             keyPath = resolvedKeyPath
-            _state.value = PortForwardPanelState(host = host)
+            _state.value = PortForwardPanelState(
+                host = host,
+                showAllPorts = showAllPortsStore.isShowAll(),
+            )
             if (prefillRemotePort != null) {
                 // One-step forward of the requested port. `startPort`
                 // routes through `setAutoForwardEnabled(true)` which
@@ -241,7 +272,31 @@ class PortForwardPanelViewModel @Inject constructor(
         requestedKeyPath = null
         keyPath = null
         discoverPortsOnIdle = false
-        _state.value = PortForwardPanelState()
+        lastDiscoveredPorts = emptyList()
+        _state.value = PortForwardPanelState(showAllPorts = showAllPortsStore.isShowAll())
+    }
+
+    /**
+     * Issue #492: toggle the "Show all ports" checkbox. Persists the choice
+     * and re-filters the currently discovered ports without a new SSH scan.
+     *
+     * Only the discovery (auto-forward off) table is re-filtered: when
+     * auto-forward is active the rows are the user's chosen tunnels, not a
+     * scan, so the filter doesn't apply. The persisted flag still updates so
+     * the next discovery honours it.
+     */
+    fun setShowAllPorts(showAll: Boolean) {
+        if (showAll == _state.value.showAllPorts) return
+        showAllPortsStore.setShowAll(showAll)
+        _state.value = if (!_state.value.autoForwardEnabled && lastDiscoveredPorts.isNotEmpty()) {
+            val remappings = currentRemappings
+            _state.value.copy(
+                showAllPorts = showAll,
+                tunnels = lastDiscoveredPorts.toAvailableTunnels(remappings, showAll),
+            )
+        } else {
+            _state.value.copy(showAllPorts = showAll)
+        }
     }
 
     fun setAutoForwardEnabled(enabled: Boolean) {
@@ -530,17 +585,23 @@ class PortForwardPanelViewModel @Inject constructor(
                     portRemappingDao.getByHostId(host.id).first()
                         .associate { it.remotePort to it.localPort }
                 }.getOrElse { emptyMap() }
-                val discovered = PortScanner.scan(sshSession)
-                    .toAvailableTunnels(remappings)
+                val rawPorts = PortScanner.scan(sshSession)
+                val showAll = _state.value.showAllPorts
+                val discovered = rawPorts.toAvailableTunnels(remappings, showAll)
                 if (
                     requestGeneration == discoveryGeneration &&
                     requestLoadGeneration == loadGeneration &&
                     _state.value.host?.id == host.id &&
                     !_state.value.autoForwardEnabled
                 ) {
+                    // Issue #492: cache the raw scan + remappings so toggling
+                    // "Show all ports" can re-filter without a new SSH scan.
+                    lastDiscoveredPorts = rawPorts
+                    currentRemappings = remappings
                     _state.value = _state.value.copy(
                         connectionState = PortForwardConnectionState.Connected,
                         tunnels = discovered,
+                        hiddenPortCount = InterestingPortFilter.hiddenCount(rawPorts),
                         error = null,
                     )
                 }
@@ -588,13 +649,16 @@ class PortForwardPanelViewModel @Inject constructor(
         }
 }
 
-private fun List<RemotePort>.toAvailableTunnels(remappings: Map<Int, Int>): List<TunnelInfo> =
-    // Issue #456: drop system/noise ports (22/53/80), de-dupe per port, and
-    // surface the interesting `1000-9999` / `49xxx` dev-server ports first so
-    // the panel table is readable instead of an ~80-row dump. The filter
-    // already orders interesting-before-other and de-duplicates, so we keep
-    // its order rather than re-sorting by port number.
-    InterestingPortFilter.filter(this).map { remotePort ->
+private fun List<RemotePort>.toAvailableTunnels(
+    remappings: Map<Int, Int>,
+    showAll: Boolean = false,
+): List<TunnelInfo> =
+    // Issue #456/#492: de-dupe per port and, by default, keep only the useful
+    // dev-port range (`1000-10000`) so the panel table is readable instead of
+    // an ~80-row dump. When [showAll] is true the out-of-range system/ephemeral
+    // ports are included too. The filter already orders in-range-first and
+    // de-duplicates, so we keep its order rather than re-sorting by port number.
+    InterestingPortFilter.filter(this, showAll).map { remotePort ->
         TunnelInfo(
             remotePort = remotePort.port,
             localPort = remappings[remotePort.port] ?: remotePort.port,

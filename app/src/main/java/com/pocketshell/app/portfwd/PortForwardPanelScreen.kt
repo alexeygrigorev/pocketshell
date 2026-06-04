@@ -26,6 +26,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -37,6 +39,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -46,6 +49,9 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
+
+/** Test tag for the #492 "Show all ports" checkbox row. */
+const val SHOW_ALL_PORTS_TEST_TAG = "port_forward_show_all_ports"
 
 @Composable
 fun PortForwardPanelScreen(
@@ -117,6 +123,18 @@ fun PortForwardPanelScreen(
                 enabled = state.autoForwardEnabled,
                 onEnabledChange = viewModel::setAutoForwardEnabled,
             )
+
+            // Issue #492: the discovery table hides system (<1000) and
+            // high/ephemeral (>10000) ports by default. The checkbox reveals
+            // them. Only relevant for the discovery view; auto-forward rows
+            // are the user's explicit tunnels, not a filtered scan.
+            if (!state.autoForwardEnabled) {
+                ShowAllPortsRow(
+                    checked = state.showAllPorts,
+                    hiddenCount = state.hiddenPortCount,
+                    onCheckedChange = viewModel::setShowAllPorts,
+                )
+            }
 
             state.error?.let { error ->
                 ErrorBanner(error)
@@ -254,6 +272,47 @@ private fun AutoForwardRow(enabled: Boolean, onEnabledChange: (Boolean) -> Unit)
             )
         }
         Switch(checked = enabled, onCheckedChange = onEnabledChange)
+    }
+}
+
+/**
+ * Issue #492: "Show all ports" checkbox. Unchecked = the default filtered
+ * table (only ports in 1000-10000). Checked = every discovered port including
+ * the hidden out-of-range ones. The label surfaces the hidden-row count so the
+ * user knows the table is filtered.
+ */
+@Composable
+private fun ShowAllPortsRow(
+    checked: Boolean,
+    hiddenCount: Int,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Checkbox) { onCheckedChange(!checked) }
+            .testTag(SHOW_ALL_PORTS_TEST_TAG)
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = CheckboxDefaults.colors(
+                checkedColor = PocketShellColors.Accent,
+                uncheckedColor = PocketShellColors.TextSecondary,
+            ),
+        )
+        Spacer(Modifier.width(4.dp))
+        Text(
+            text = if (!checked && hiddenCount > 0) {
+                "Show all ports ($hiddenCount hidden)"
+            } else {
+                "Show all ports"
+            },
+            color = PocketShellColors.Text,
+            fontSize = 13.sp,
+        )
     }
 }
 

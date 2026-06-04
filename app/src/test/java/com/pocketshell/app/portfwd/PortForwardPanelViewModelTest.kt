@@ -54,6 +54,10 @@ class PortForwardPanelViewModelTest {
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
+        // #492: the "Show all ports" checkbox is a persisted global pref;
+        // Robolectric shares the prefs file across test methods, so reset it
+        // to the default (unchecked) before each test for isolation.
+        ShowAllPortsStore(context).setShowAll(false)
         db = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .setQueryExecutor(Runnable::run)
             .setTransactionExecutor(Runnable::run)
@@ -188,6 +192,95 @@ class PortForwardPanelViewModelTest {
         assertEquals("node", state.tunnels.first { it.remotePort == 3000 }.process)
         assertEquals(emptyList<FakePortForward>(), session.openedForwards)
         assertTrue("passive discovery SSH session should close after scan", session.closed)
+    }
+
+    @Test
+    fun discoveryHidesOutOfRangePortsByDefaultAndShowAllRevealsThem() = runTest {
+        // #492: <1000 (22/443) and >10000 (49152/11434) ports are hidden by
+        // default; only the in-range 3000/8080 appear. Toggling "Show all
+        // ports" reveals every discovered port without a new SSH scan.
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1)
+        val session = FakeSshSession(
+            ssOutput = """
+                0.0.0.0:22 users:(("sshd",pid=1,fd=3))
+                0.0.0.0:443 users:(("nginx",pid=2,fd=3))
+                0.0.0.0:3000 users:(("node",pid=42,fd=3))
+                0.0.0.0:8080 users:(("vite",pid=43,fd=3))
+                0.0.0.0:11434 users:(("ollama",pid=44,fd=3))
+                0.0.0.0:49152 users:(("app",pid=45,fd=3))
+            """.trimIndent(),
+        )
+        // Single connector result: a second SSH connect (a re-scan) would
+        // fail the missing-stub assertion, proving the toggle re-filters the
+        // cached scan instead of rescanning.
+        val connector = QueueConnector(listOf(Result.success(session)))
+        val viewModel = newViewModel(connector)
+
+        viewModel.load(hostId, "/tmp/key", discoverPorts = true)
+        runCurrent()
+
+        // Default: only the in-range ports, and the hidden count is surfaced.
+        assertFalse(viewModel.state.value.showAllPorts)
+        assertEquals(listOf(3000, 8080), viewModel.state.value.tunnels.map { it.remotePort })
+        assertEquals(4, viewModel.state.value.hiddenPortCount)
+
+        // Show all: every discovered port, in-range first, no extra connect.
+        viewModel.setShowAllPorts(true)
+        runCurrent()
+        assertTrue(viewModel.state.value.showAllPorts)
+        assertEquals(
+            listOf(3000, 8080, 22, 443, 11434, 49152),
+            viewModel.state.value.tunnels.map { it.remotePort },
+        )
+        assertEquals(1, connector.hosts.size)
+
+        // Toggling back restores the filtered view.
+        viewModel.setShowAllPorts(false)
+        runCurrent()
+        assertFalse(viewModel.state.value.showAllPorts)
+        assertEquals(listOf(3000, 8080), viewModel.state.value.tunnels.map { it.remotePort })
+
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
+    fun showAllPortsChoicePersistsAcrossViewModelInstances() = runTest {
+        // #492: the checkbox is a persisted global pref. A fresh ViewModel
+        // sharing the same store comes up with the saved value, and a fresh
+        // discovery honours it without an explicit re-toggle.
+        val store = ShowAllPortsStore(context)
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1)
+
+        val first = newViewModel(
+            FakeConnector(Result.success(FakeSshSession(ssOutput = ""))),
+            showAllPortsStore = store,
+        )
+        first.setShowAllPorts(true)
+        runCurrent()
+        assertTrue(store.isShowAll())
+
+        val session = FakeSshSession(
+            ssOutput = """
+                0.0.0.0:3000 users:(("node",pid=42,fd=3))
+                0.0.0.0:49152 users:(("app",pid=45,fd=3))
+            """.trimIndent(),
+        )
+        val second = newViewModel(
+            FakeConnector(Result.success(session)),
+            showAllPortsStore = store,
+        )
+        // Fresh instance picks up the persisted choice immediately.
+        assertTrue(second.state.value.showAllPorts)
+
+        second.load(hostId, "/tmp/key", discoverPorts = true)
+        runCurrent()
+        // Discovery honours the persisted show-all flag: out-of-range 49152 stays.
+        assertTrue(second.state.value.showAllPorts)
+        assertEquals(listOf(3000, 49152), second.state.value.tunnels.map { it.remotePort })
+
+        second.leavePanel()
+        runCurrent()
     }
 
     @Test
@@ -1045,6 +1138,7 @@ class PortForwardPanelViewModelTest {
         sshKeyDao: SshKeyDao = db.sshKeyDao(),
         portRemappingDao: com.pocketshell.core.storage.dao.PortRemappingDao = db.portRemappingDao(),
         forwardingController: ForwardingController = ForwardingController(context),
+        showAllPortsStore: ShowAllPortsStore = ShowAllPortsStore(context),
     ): PortForwardPanelViewModel =
         PortForwardPanelViewModel(
             hostDao = hostDao,
@@ -1052,6 +1146,7 @@ class PortForwardPanelViewModelTest {
             connector = connector,
             portRemappingDao = portRemappingDao,
             forwardingController = forwardingController,
+            showAllPortsStore = showAllPortsStore,
         )
 
     private class FakeConnector(

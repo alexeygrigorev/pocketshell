@@ -137,8 +137,6 @@ class SettingsViewModel @Inject constructor(
      */
     val assistantState: StateFlow<AssistantSettingsUiState> = _assistantState.asStateFlow()
 
-    fun setTheme(theme: ThemePreference) = repository.setTheme(theme)
-
     fun setTerminalFontSizeSp(sizeSp: Float) = repository.setTerminalFontSizeSp(sizeSp)
 
     fun setTmuxOnAttachByDefault(enabled: Boolean) =

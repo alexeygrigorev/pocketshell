@@ -129,14 +129,6 @@ class SettingsViewModelTest {
     }
 
     @Test
-    fun `setTheme flows through to repository`() {
-        val vm = newVm()
-        vm.setTheme(ThemePreference.Dark)
-        assertEquals(ThemePreference.Dark, repo.settings.value.theme)
-        assertEquals(ThemePreference.Dark, vm.state.value.theme)
-    }
-
-    @Test
     fun `setTerminalFontSizeSp flows through to repository`() {
         val vm = newVm()
         vm.setTerminalFontSizeSp(18f)

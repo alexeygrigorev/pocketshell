@@ -20,7 +20,6 @@ import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import java.io.File
 import java.io.FileOutputStream
 import java.time.LocalTime
@@ -51,7 +50,7 @@ class ConversationTimestampScreenshotTest {
     @Test
     fun captureConversationTimestampsAndStructuralBlock() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxConversationPane(
                     events = sampleConversationEvents(),
                     onSendToAgent = { true },

@@ -56,7 +56,6 @@ import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -169,7 +168,7 @@ class HostDetailAssistantFlowTest {
         }
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 FolderListScreen(
                     hostId = hostId,
                     hostName = "issue334-host",

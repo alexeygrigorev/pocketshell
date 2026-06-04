@@ -26,11 +26,11 @@ import javax.inject.Singleton
  * [MutableStateFlow] from disk so the first `state.value` after
  * construction is the persisted snapshot. Writes route through the same
  * StateFlow + a synchronous `apply()` to the prefs file — observers see
- * the new value before the call returns, which makes the theme switch
+ * the new value before the call returns, which makes setting changes
  * feel instant from the UI thread.
  *
  * Singleton scope: the same instance is shared between the activity-level
- * theme observation and the [SettingsViewModel], so writes in the
+ * settings observation and the [SettingsViewModel], so writes in the
  * settings screen are immediately visible at the composable root without
  * any cross-scope plumbing.
  */
@@ -46,12 +46,6 @@ class SettingsRepository @Inject constructor(
 
     /** Hot, always-current snapshot of [AppSettings]. */
     val settings: StateFlow<AppSettings> = _settings.asStateFlow()
-
-    fun setTheme(theme: ThemePreference) {
-        if (_settings.value.theme == theme) return
-        prefs.edit().putString(KEY_THEME, theme.name).apply()
-        _settings.value = _settings.value.copy(theme = theme)
-    }
 
     fun setTerminalFontSizeSp(sizeSp: Float) {
         val clamped = sizeSp.coerceIn(
@@ -151,10 +145,6 @@ class SettingsRepository @Inject constructor(
     }
 
     private fun readSnapshot(): AppSettings {
-        val themeName = prefs.safeString(KEY_THEME, ThemePreference.System.name)
-            ?: ThemePreference.System.name
-        val theme = runCatching { ThemePreference.valueOf(themeName) }
-            .getOrDefault(ThemePreference.System)
         val font = prefs.safeFloat(KEY_TERMINAL_FONT_SP, AppSettings.DEFAULT_TERMINAL_FONT_SP)
             .coerceIn(AppSettings.MIN_TERMINAL_FONT_SP, AppSettings.MAX_TERMINAL_FONT_SP)
         val tmux = prefs.safeBoolean(KEY_TMUX_ON_ATTACH, true)
@@ -189,7 +179,6 @@ class SettingsRepository @Inject constructor(
             ),
         )
         return AppSettings(
-            theme = theme,
             terminalFontSizeSp = font,
             tmuxOnAttachByDefault = tmux,
             defaultHostId = defaultHostId,
@@ -259,7 +248,6 @@ class SettingsRepository @Inject constructor(
 
     private companion object {
         const val PREFS_NAME = "app_settings"
-        const val KEY_THEME = "theme"
         const val KEY_TERMINAL_FONT_SP = "terminal_font_sp"
         const val KEY_TMUX_ON_ATTACH = "tmux_on_attach_default"
         const val KEY_DEFAULT_HOST_ID = "default_host_id"

@@ -59,11 +59,6 @@ import kotlin.math.roundToInt
  *
  * Sections (top-to-bottom):
  *
- *  - **Appearance** — radio group bound to [ThemePreference]. Tapping a
- *    row updates the preference; the activity-level
- *    [com.pocketshell.app.settings.SettingsRepository] re-emits and
- *    [com.pocketshell.app.MainActivity] applies the new mode without
- *    restart.
  *  - **Terminal** — slider for default terminal font size (sp) and a
  *    switch for the "use tmux on attach when available" preference.
  *  - **Diagnostics** — single row linking to the existing
@@ -142,12 +137,6 @@ fun SettingsScreen(
             contentPadding = PaddingValues(vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
-            item {
-                AppearanceSection(
-                    selected = settings.theme,
-                    onSelect = viewModel::setTheme,
-                )
-            }
             item {
                 TerminalSection(
                     fontSizeSp = settings.terminalFontSizeSp,
@@ -410,72 +399,6 @@ private fun SectionCard(content: @Composable ColumnScope.() -> Unit) {
 }
 
 @Composable
-private fun AppearanceSection(
-    selected: ThemePreference,
-    onSelect: (ThemePreference) -> Unit,
-) {
-    Column {
-        // First section in the list — no divider above the label.
-        SectionLabel("Appearance", includeTopDivider = false)
-        SectionCard {
-            Text(
-                text = "Theme",
-                color = PocketShellColors.Text,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Choose how PocketShell looks. System follows your device setting.",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            ThemePreference.entries.forEach { option ->
-                ThemeOptionRow(
-                    label = option.label(),
-                    selected = option == selected,
-                    onClick = { onSelect(option) },
-                    testTag = themeOptionTestTag(option),
-                )
-            }
-        }
-    }
-}
-
-private fun ThemePreference.label(): String = when (this) {
-    ThemePreference.System -> "System default"
-    ThemePreference.Light -> "Light"
-    ThemePreference.Dark -> "Dark"
-}
-
-@Composable
-private fun ThemeOptionRow(
-    label: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-    testTag: String,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(role = Role.RadioButton, onClick = onClick)
-            .padding(vertical = 10.dp)
-            .testTag(testTag),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RadioMark(selected = selected)
-        Spacer(modifier = Modifier.width(12.dp))
-        Text(
-            text = label,
-            color = PocketShellColors.Text,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-        )
-    }
-}
-
-@Composable
 private fun RadioMark(selected: Boolean) {
     // Custom radio glyph so the on-screen styling stays consistent with
     // the rest of PocketShell's hand-rolled controls (the app intentionally
@@ -508,7 +431,8 @@ private fun TerminalSection(
     onTmuxOnAttachChange: (Boolean) -> Unit,
 ) {
     Column {
-        SectionLabel("Terminal")
+        // First section in the list — no divider above the label.
+        SectionLabel("Terminal", includeTopDivider = false)
         SectionCard {
             Text(
                 text = "Default font size",
@@ -1667,16 +1591,13 @@ fun watchedFoldersSettingsHostRowTag(hostId: Long): String =
 fun defaultHostOptionTag(hostId: Long): String =
     "settings:startup:default-host:$hostId"
 
-internal fun themeOptionTestTag(theme: ThemePreference): String =
-    "settings:appearance:theme:" + theme.name.lowercase()
-
 internal fun voiceLanguageOptionTestTag(code: String): String =
     "settings:voice:language:" + code.lowercase()
 
 /**
  * Stable test tag for the section label above each [SectionCard].
  * Mirrors the lowercase-without-spaces convention already in use for
- * tags like `settings:appearance:theme:*`.
+ * tags like `settings:voice:language:*`.
  */
 internal fun sectionLabelTestTag(label: String): String =
     "settings:section-label:" + label.lowercase().replace(" ", "-")

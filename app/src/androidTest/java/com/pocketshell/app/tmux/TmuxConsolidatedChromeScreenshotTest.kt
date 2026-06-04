@@ -22,7 +22,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import java.io.File
 import java.io.FileOutputStream
 import org.junit.Rule
@@ -63,7 +62,7 @@ class TmuxConsolidatedChromeScreenshotTest {
     @Test
     fun captureSingleWindowNoAgentChrome() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -101,7 +100,7 @@ class TmuxConsolidatedChromeScreenshotTest {
     @Test
     fun captureMultiWindowWithAgentChrome() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -150,7 +149,7 @@ class TmuxConsolidatedChromeScreenshotTest {
     @Test
     fun captureImeUpCompactChrome() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -188,7 +187,7 @@ class TmuxConsolidatedChromeScreenshotTest {
     @Test
     fun captureRightAnchoredMoreMenu() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 val expanded = remember { mutableStateOf(false) }
                 Column(
                     modifier = Modifier

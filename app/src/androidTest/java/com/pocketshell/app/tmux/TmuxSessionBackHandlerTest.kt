@@ -7,7 +7,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -75,7 +74,7 @@ class TmuxSessionBackHandlerTest {
     fun systemBackInvokesOnBackWhenNoOverlayOpen() {
         var onBackCalls = 0
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxSessionBackHandler(
                     dialogOpen = false,
                     sessionDrawerOpen = false,
@@ -107,7 +106,7 @@ class TmuxSessionBackHandlerTest {
         var dismissCalls = 0
         var onBackCalls = 0
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxSessionBackHandler(
                     dialogOpen = dialogOpen,
                     sessionDrawerOpen = false,
@@ -152,7 +151,7 @@ class TmuxSessionBackHandlerTest {
         var dismissCalls = 0
         var onBackCalls = 0
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxSessionBackHandler(
                     dialogOpen = false,
                     sessionDrawerOpen = drawerOpen,
@@ -187,7 +186,7 @@ class TmuxSessionBackHandlerTest {
         var dismissCalls = 0
         var onBackCalls = 0
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxSessionBackHandler(
                     dialogOpen = false,
                     sessionDrawerOpen = false,
@@ -221,7 +220,7 @@ class TmuxSessionBackHandlerTest {
         var dismissCalls = 0
         var onBackCalls = 0
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxSessionBackHandler(
                     dialogOpen = false,
                     sessionDrawerOpen = false,
@@ -255,7 +254,7 @@ class TmuxSessionBackHandlerTest {
         var dismissCalls = 0
         var onBackCalls = 0
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxSessionBackHandler(
                     dialogOpen = false,
                     sessionDrawerOpen = false,
@@ -298,7 +297,7 @@ class TmuxSessionBackHandlerTest {
         val dismissEvents = mutableListOf<String>()
         var onBackCalls = 0
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxSessionBackHandler(
                     dialogOpen = dialogOpen,
                     sessionDrawerOpen = drawerOpen,
@@ -362,7 +361,7 @@ class TmuxSessionBackHandlerTest {
     @Test
     fun sanityComposablesMountWithoutCrashing() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxSessionBackHandler(
                     dialogOpen = false,
                     sessionDrawerOpen = false,

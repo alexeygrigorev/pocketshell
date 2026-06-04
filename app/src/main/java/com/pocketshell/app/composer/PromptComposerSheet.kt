@@ -74,7 +74,6 @@ import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.model.MicButtonState
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 
 /**
  * The Phase 1 prompt composer (issue #15). Visual target:
@@ -1489,7 +1488,7 @@ internal fun composerPendingSaveTestTag(id: String): String =
 @Preview(name = "Composer · idle", widthDp = 412, heightDp = 360)
 @Composable
 private fun PromptComposerIdlePreview() {
-    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+    PocketShellTheme {
         Box(modifier = Modifier.background(PocketShellColors.Surface)) {
             SheetContent(
                 state = PromptComposerViewModel.UiState(
@@ -1516,7 +1515,7 @@ private fun PromptComposerIdlePreview() {
 @Preview(name = "Composer · recording (listening, pre-speech)", widthDp = 412, heightDp = 360)
 @Composable
 private fun PromptComposerRecordingListeningPreview() {
-    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+    PocketShellTheme {
         Box(modifier = Modifier.background(PocketShellColors.Surface)) {
             SheetContent(
                 state = PromptComposerViewModel.UiState(
@@ -1549,7 +1548,7 @@ private fun PromptComposerRecordingListeningPreview() {
 @Preview(name = "Composer · recording (capturing)", widthDp = 412, heightDp = 360)
 @Composable
 private fun PromptComposerRecordingCapturingPreview() {
-    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+    PocketShellTheme {
         Box(modifier = Modifier.background(PocketShellColors.Surface)) {
             SheetContent(
                 state = PromptComposerViewModel.UiState(
@@ -1581,7 +1580,7 @@ private fun PromptComposerRecordingCapturingPreview() {
 @Preview(name = "Composer · transcription ready", widthDp = 412, heightDp = 360)
 @Composable
 private fun PromptComposerTranscribedPreview() {
-    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+    PocketShellTheme {
         Box(modifier = Modifier.background(PocketShellColors.Surface)) {
             SheetContent(
                 state = PromptComposerViewModel.UiState(

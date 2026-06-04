@@ -28,7 +28,6 @@ import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 
 /**
  * Visual sanity checks for the design tokens. These previews exist so a
@@ -47,7 +46,7 @@ import com.pocketshell.uikit.theme.PocketShellThemeMode
 @Preview(name = "Surface ramp", showBackground = false)
 @Composable
 fun SurfaceSwatchesPreview() {
-    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+    PocketShellTheme {
         SwatchCard(title = "Surface") {
             Swatch(name = "Background", color = PocketShellColors.Background)
             Swatch(name = "Surface", color = PocketShellColors.Surface)
@@ -61,7 +60,7 @@ fun SurfaceSwatchesPreview() {
 @Preview(name = "Text ramp", showBackground = false)
 @Composable
 fun TextSwatchesPreview() {
-    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+    PocketShellTheme {
         SwatchCard(title = "Text") {
             Swatch(name = "Text", color = PocketShellColors.Text)
             Swatch(name = "TextSecondary", color = PocketShellColors.TextSecondary)
@@ -73,7 +72,7 @@ fun TextSwatchesPreview() {
 @Preview(name = "Accent", showBackground = false)
 @Composable
 fun AccentSwatchesPreview() {
-    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+    PocketShellTheme {
         SwatchCard(title = "Accent") {
             Swatch(name = "Accent", color = PocketShellColors.Accent)
             Swatch(name = "AccentSoft (12% alpha)", color = PocketShellColors.AccentSoft)
@@ -86,7 +85,7 @@ fun AccentSwatchesPreview() {
 @Preview(name = "Status", showBackground = false)
 @Composable
 fun StatusSwatchesPreview() {
-    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+    PocketShellTheme {
         SwatchCard(title = "Status") {
             Swatch(name = "Green", color = PocketShellColors.Green)
             Swatch(name = "Amber", color = PocketShellColors.Amber)
@@ -99,7 +98,7 @@ fun StatusSwatchesPreview() {
 @Preview(name = "Terminal", showBackground = false)
 @Composable
 fun TerminalSwatchesPreview() {
-    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+    PocketShellTheme {
         SwatchCard(title = "Terminal") {
             Swatch(name = "TermBg", color = PocketShellColors.TermBg)
             Swatch(name = "TermText", color = PocketShellColors.TermText)

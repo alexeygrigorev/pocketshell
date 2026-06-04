@@ -29,7 +29,6 @@ import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -72,7 +71,7 @@ class TmuxSessionScreenImeChromeTest {
     @Test
     fun chromeIsFullWhenImeHidden() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 ImeAwareChromeUnderTest(chromeCompressed = false)
             }
         }
@@ -89,7 +88,7 @@ class TmuxSessionScreenImeChromeTest {
     fun fullChromeContainsInlineConversationPillForAgentSessions() {
         var selectedIndex = -1
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 ImeAwareChromeUnderTest(
                     chromeCompressed = false,
                     tabLabels = listOf("Terminal", "Conversation"),
@@ -110,7 +109,7 @@ class TmuxSessionScreenImeChromeTest {
     @Test
     fun chromeIsCompressedWhenImeVisible() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 ImeAwareChromeUnderTest(
                     chromeCompressed = true,
                     tabLabels = listOf("Terminal", "Conversation"),
@@ -129,7 +128,7 @@ class TmuxSessionScreenImeChromeTest {
     fun chromeFlipsLiveBetweenStates() {
         val compressedState = mutableStateOf(false)
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column {
                     ImeAwareChromeUnderTest(chromeCompressed = compressedState.value)
                 }
@@ -154,7 +153,7 @@ class TmuxSessionScreenImeChromeTest {
         // Acceptance criterion: the IME-down header chrome must fit
         // inside one Material toolbar slot (≤56dp).
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column {
                     ImeAwareChromeUnderTest(
                         chromeCompressed = false,
@@ -192,7 +191,7 @@ class TmuxSessionScreenImeChromeTest {
         // vendored TerminalView paints the cursor row at its bottom-most
         // row when `mTopRow == 0`.
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column(modifier = Modifier.fillMaxSize()) {
                     ImeAwareChromeUnderTest(chromeCompressed = true)
                     // Weighted "terminal" Box. In TmuxSessionScreen this
@@ -239,7 +238,7 @@ class TmuxSessionScreenImeChromeTest {
     @Test
     fun fullChromeRightEdgeTapOpensMoreMenu() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 ChromeWithAnchoredMenuUnderTest(compact = false)
             }
         }
@@ -258,7 +257,7 @@ class TmuxSessionScreenImeChromeTest {
     @Test
     fun compactChromeRightEdgeTapOpensMoreMenu() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 ChromeWithAnchoredMenuUnderTest(compact = true)
             }
         }
@@ -277,7 +276,7 @@ class TmuxSessionScreenImeChromeTest {
     @Test
     fun topChromeButtonsExposeWideHitTargets() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column {
                     ConsolidatedTopChrome(
                         hostLabel = "host.example",

@@ -15,7 +15,6 @@ import com.pocketshell.core.voice.SpeechAudioGuard
 import com.pocketshell.core.voice.WhisperClient
 import com.pocketshell.core.voice.WhisperException
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
@@ -168,7 +167,7 @@ class PromptComposerPendingTranscriptionTest {
         )
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 val state by vm.uiState.collectAsState()
                 val pending by vm.pendingItems.collectAsState()
                 SheetContent(
@@ -251,7 +250,7 @@ class PromptComposerPendingTranscriptionTest {
         )
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 val state by vm.uiState.collectAsState()
                 val pending by vm.pendingItems.collectAsState()
                 SheetContent(
@@ -308,7 +307,7 @@ class PromptComposerPendingTranscriptionTest {
         )
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 val state by vm.uiState.collectAsState()
                 val pending by vm.pendingItems.collectAsState()
                 SheetContent(

@@ -9,8 +9,6 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
@@ -18,12 +16,9 @@ import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import com.pocketshell.app.share.ShareUploader.Companion.extensionForMimeType
 import com.pocketshell.app.share.ShareUploader.Companion.queryUriDisplayName
-import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.launch
-import javax.inject.Inject
 
 /**
  * System share-target entry point (issue #138). Receives an
@@ -43,9 +38,6 @@ class ShareActivity : FragmentActivity() {
 
     private val viewModel: ShareViewModel by viewModels()
 
-    @Inject
-    lateinit var settingsRepository: SettingsRepository
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val staged = decodeShareIntent(intent)
@@ -56,8 +48,7 @@ class ShareActivity : FragmentActivity() {
         }
         viewModel.setItems(staged)
         setContent {
-            val settings by settingsRepository.settings.collectAsState()
-            PocketShellTheme(mode = settings.theme.toThemeMode()) {
+            PocketShellTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background,
@@ -210,10 +201,3 @@ private fun buildUriItem(
         fallbackExtension = fallback,
     )
 }
-
-private fun com.pocketshell.app.settings.ThemePreference.toThemeMode(): PocketShellThemeMode =
-    when (this) {
-        com.pocketshell.app.settings.ThemePreference.System -> PocketShellThemeMode.System
-        com.pocketshell.app.settings.ThemePreference.Light -> PocketShellThemeMode.Light
-        com.pocketshell.app.settings.ThemePreference.Dark -> PocketShellThemeMode.Dark
-    }

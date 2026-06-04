@@ -59,7 +59,6 @@ import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.settings.SettingsScreen
 import com.pocketshell.app.settings.SettingsViewModel
-import com.pocketshell.app.settings.ThemePreference
 import com.pocketshell.app.systemsurfaces.ForwardingChooserScreen
 import com.pocketshell.app.systemsurfaces.ForwardingTileService
 import com.pocketshell.app.tmux.TmuxConnectTrigger
@@ -73,7 +72,6 @@ import com.pocketshell.app.usage.worstBadgeRecord
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.runBlocking
 import java.io.File
@@ -304,7 +302,7 @@ class MainActivity : FragmentActivity() {
         StartupTiming.mark("main-set-content-called")
         setContent {
             val settings by settingsRepository.settings.collectAsState()
-            PocketShellTheme(mode = settings.theme.toThemeMode()) {
+            PocketShellTheme {
                 Surface(
                     modifier = Modifier
                         .fillMaxSize()
@@ -408,12 +406,6 @@ class MainActivity : FragmentActivity() {
 }
 
 private val DarkSystemBarColor: Int = android.graphics.Color.rgb(13, 17, 23)
-
-private fun ThemePreference.toThemeMode(): PocketShellThemeMode = when (this) {
-    ThemePreference.System -> PocketShellThemeMode.System
-    ThemePreference.Light -> PocketShellThemeMode.Light
-    ThemePreference.Dark -> PocketShellThemeMode.Dark
-}
 
 /**
  * Sealed-class destination state machine. The back-stack is a `List<AppDestination>`

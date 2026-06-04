@@ -14,7 +14,6 @@ import com.pocketshell.app.session.SessionViewModel
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -107,7 +106,7 @@ class SnippetTerminalE2eTest {
 
         try {
             compose.setContent {
-                PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                PocketShellTheme {
                     SnippetPickerContent(
                         snippets = listOf(snippet),
                         totalCount = 1,
@@ -207,7 +206,7 @@ class SnippetTerminalE2eTest {
 
         try {
             compose.setContent {
-                PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                PocketShellTheme {
                     SnippetPickerContent(
                         snippets = listOf(snippet),
                         totalCount = 1,

@@ -12,7 +12,6 @@ import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import java.io.File
 import java.io.FileOutputStream
 import org.junit.Assert.assertTrue
@@ -43,7 +42,7 @@ class TmuxMoreMenuPortForwardingTest {
     fun portForwardingItemIsPresentAndInvokesCallback() {
         var portForwardingClicks = 0
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 val expanded = mutableStateOf(true)
                 TmuxMoreMenu(
                     expanded = expanded.value,

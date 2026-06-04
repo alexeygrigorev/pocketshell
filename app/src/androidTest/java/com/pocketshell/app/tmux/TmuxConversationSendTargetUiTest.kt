@@ -13,7 +13,6 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -39,7 +38,7 @@ class TmuxConversationSendTargetUiTest {
     @Test
     fun conversationComposerShowsNoTargetOrMismatchChrome() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = { true },
@@ -63,7 +62,7 @@ class TmuxConversationSendTargetUiTest {
     @Test
     fun conversationComposerHasSingleSendAction() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = { true },
@@ -88,7 +87,7 @@ class TmuxConversationSendTargetUiTest {
         var sentCount = 0
         var lastSent: String? = null
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = { text ->
@@ -138,7 +137,7 @@ class TmuxConversationSendTargetUiTest {
         var sentCount = 0
         var lastSent: String? = null
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = { text ->
@@ -171,7 +170,7 @@ class TmuxConversationSendTargetUiTest {
     fun failedLiveSendPreservesDraft() {
         var sentCount = 0
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = {
@@ -208,7 +207,7 @@ class TmuxConversationSendTargetUiTest {
         var lastSent: String? = null
         val longDraft = List(160) { "dictated-paste-$it" }.joinToString(separator = " ")
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = { text ->
@@ -245,7 +244,7 @@ class TmuxConversationSendTargetUiTest {
         // Issue #177: a fast-resumed session comes back with the user's
         // half-typed message restored into the composer.
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxConversationPane(
                     events = emptyList(),
                     onSendToAgent = { true },

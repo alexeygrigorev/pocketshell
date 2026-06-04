@@ -26,7 +26,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import java.io.File
 import java.io.FileOutputStream
 import org.junit.Rule
@@ -63,7 +62,7 @@ class UnifiedComposerParityScreenshotTest {
     @Test
     fun captureTerminalComposer() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -93,7 +92,7 @@ class UnifiedComposerParityScreenshotTest {
     @Test
     fun captureAgentComposer() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -112,7 +111,7 @@ class UnifiedComposerParityScreenshotTest {
     @Test
     fun captureSideBySide() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()

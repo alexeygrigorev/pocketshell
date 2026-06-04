@@ -48,7 +48,6 @@ import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 
 /**
  * Modal bottom sheet listing the agent slash-commands available for [agent]
@@ -341,7 +340,7 @@ internal const val AGENT_COMMAND_SEARCH_TAG: String = "agent-command-search"
 @Preview(name = "Agent commands - Claude", widthDp = 412, heightDp = 600)
 @Composable
 private fun AgentCommandSheetClaudePreview() {
-    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+    PocketShellTheme {
         Box(modifier = Modifier.background(PocketShellColors.Surface)) {
             AgentCommandSheetContent(
                 agent = AgentKind.ClaudeCode,
@@ -358,7 +357,7 @@ private fun AgentCommandSheetClaudePreview() {
 @Preview(name = "Agent commands - OpenCode", widthDp = 412, heightDp = 600)
 @Composable
 private fun AgentCommandSheetOpenCodePreview() {
-    PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+    PocketShellTheme {
         Box(modifier = Modifier.background(PocketShellColors.Surface)) {
             AgentCommandSheetContent(
                 agent = AgentKind.OpenCode,

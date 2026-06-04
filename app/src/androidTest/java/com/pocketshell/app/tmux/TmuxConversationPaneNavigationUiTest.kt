@@ -24,7 +24,6 @@ import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -57,7 +56,7 @@ class TmuxConversationPaneNavigationUiTest {
     fun jumpToLatestPillAppearsWhenScrolledAwayAndHidesAfterTap() {
         val events = sampleMessageEvents(count = 80)
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxConversationPane(
                     events = events,
                     onSendToAgent = { true },
@@ -108,7 +107,7 @@ class TmuxConversationPaneNavigationUiTest {
     fun conversationOpensAtLatestMessage() {
         val events = sampleMessageEvents(count = 80)
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxConversationPane(
                     events = events,
                     onSendToAgent = { true },
@@ -145,7 +144,7 @@ class TmuxConversationPaneNavigationUiTest {
             ),
         )
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxConversationPane(
                     events = events,
                     onSendToAgent = { true },
@@ -188,7 +187,7 @@ class TmuxConversationPaneNavigationUiTest {
             ),
         )
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TmuxConversationPane(
                     events = events,
                     onSendToAgent = { true },
@@ -228,7 +227,7 @@ class TmuxConversationPaneNavigationUiTest {
         // and writes to the hoisted state — is what makes the query
         // survive a Terminal ↔ Conversation tab flip in the screen.
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 var query by remember { mutableStateOf("") }
                 TmuxConversationPane(
                     events = sampleMessageEvents(count = 3),

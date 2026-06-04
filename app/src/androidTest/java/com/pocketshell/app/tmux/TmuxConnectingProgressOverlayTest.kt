@@ -6,7 +6,6 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -48,7 +47,7 @@ class TmuxConnectingProgressOverlayTest {
     fun progressBarVisibleImmediatelyAndSlowHintHiddenAtZero() {
         compose.mainClock.autoAdvance = false
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 ConnectingProgressOverlay(
                     user = "alex",
                     host = "10.0.2.2",
@@ -72,7 +71,7 @@ class TmuxConnectingProgressOverlayTest {
     fun slowHintAppearsAfterFiveSecondsWithoutCancel() {
         compose.mainClock.autoAdvance = false
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 ConnectingProgressOverlay(
                     user = "alex",
                     host = "10.0.2.2",
@@ -97,7 +96,7 @@ class TmuxConnectingProgressOverlayTest {
         compose.mainClock.autoAdvance = false
         var cancelCalls = 0
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 ConnectingProgressOverlay(
                     user = "alex",
                     host = "10.0.2.2",
@@ -139,7 +138,7 @@ class TmuxConnectingProgressOverlayTest {
     fun progressOverlayRemainsVisibleThroughoutEightSecondSlowConnect() {
         compose.mainClock.autoAdvance = false
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 ConnectingProgressOverlay(
                     user = "alex",
                     host = "10.0.2.2",

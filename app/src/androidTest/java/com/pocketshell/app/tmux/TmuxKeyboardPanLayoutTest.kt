@@ -19,7 +19,6 @@ import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -65,7 +64,7 @@ class TmuxKeyboardPanLayoutTest {
     fun panKeepsTerminalRegionHeightConstantAcrossImeFlip() {
         var imeOverlapPx by mutableStateOf(0)
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 TerminalColumnUnderTest(
                     modifier = Modifier
                         .fillMaxSize()
@@ -101,7 +100,7 @@ class TmuxKeyboardPanLayoutTest {
         // assertion above is meaningful (a no-op layout would pass both).
         var bottomPadPx by mutableStateOf(0)
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 val padDp = with(compose.density) { bottomPadPx.toDp() }
                 TerminalColumnUnderTest(
                     modifier = Modifier

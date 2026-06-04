@@ -28,7 +28,6 @@ import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -201,7 +200,7 @@ class ConversationInteractE2eTest {
             assertTrue("expected Claude tail job", tailJob != null)
 
             compose.setContent {
-                PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                PocketShellTheme {
                     val state by viewModel.agentConversation.collectAsState()
                     ConversationPane(
                         events = state.events,
@@ -414,7 +413,7 @@ class ConversationInteractE2eTest {
 
             // Drive the composer through the real UI.
             compose.setContent {
-                PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+                PocketShellTheme {
                     val state by viewModel.agentConversation.collectAsState()
                     ConversationPane(
                         events = state.events,

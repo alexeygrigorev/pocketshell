@@ -13,7 +13,6 @@ import com.pocketshell.core.agents.ClaudeCodeParser
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -81,7 +80,7 @@ class ConversationSystemNoteRowE2eTest {
         val rowTag = SESSION_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX + note.id
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 ConversationPane(
                     events = events,
                     onSendToAgent = { true },
@@ -145,7 +144,7 @@ class ConversationSystemNoteRowE2eTest {
         // not render but the user prose must stay.
         val showNotes = mutableStateOf(false)
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 ConversationPane(
                     events = events,
                     onSendToAgent = { true },

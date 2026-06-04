@@ -19,7 +19,6 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -95,7 +94,7 @@ class AddEditHostScreenTest {
         val vm = AddEditHostViewModel(db.hostDao(), db.sshKeyDao())
         val keysVm = SshKeysViewModel(db.sshKeyDao())
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 AddEditHostScreen(
                     hostId = hostId,
                     onDone = onDone,

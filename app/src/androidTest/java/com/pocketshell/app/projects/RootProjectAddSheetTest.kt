@@ -8,7 +8,6 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -41,7 +40,7 @@ class RootProjectAddSheetTest {
         val events = mutableListOf<String>()
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 RootProjectAddSheetContent(
                     root = root,
                     candidates = candidates,
@@ -95,7 +94,7 @@ class RootProjectAddSheetTest {
         )
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 RootProjectAddSheetContent(
                     root = root,
                     candidates = candidates,

@@ -40,7 +40,6 @@ class SettingsRepositoryTest {
     fun `defaults match documented values`() = runTest {
         val repo = SettingsRepository(context)
         val snap = repo.settings.first()
-        assertEquals(ThemePreference.System, snap.theme)
         assertEquals(AppSettings.DEFAULT_TERMINAL_FONT_SP, snap.terminalFontSizeSp, 0f)
         assertTrue(snap.tmuxOnAttachByDefault)
         assertEquals(AppSettings.VOICE_LANGUAGE_AUTO, snap.voiceLanguage)
@@ -56,18 +55,6 @@ class SettingsRepositoryTest {
         assertTrue("expected default to be ON", snap.showSystemNotes)
         assertEquals(null, snap.defaultHostId)
         assertEquals(HostDetailViewMode.Tree, snap.hostDetailViewMode)
-    }
-
-    @Test
-    fun `setTheme persists and re-emits`() = runTest {
-        val repo = SettingsRepository(context)
-        repo.setTheme(ThemePreference.Light)
-        assertEquals(ThemePreference.Light, repo.settings.value.theme)
-
-        // New instance reading from the same prefs file should observe
-        // the persisted value, proving the write went to disk.
-        val reread = SettingsRepository(context)
-        assertEquals(ThemePreference.Light, reread.settings.value.theme)
     }
 
     @Test
@@ -98,15 +85,6 @@ class SettingsRepositoryTest {
         repo.setTmuxOnAttachByDefault(false)
         assertEquals(false, repo.settings.value.tmuxOnAttachByDefault)
         assertEquals(false, SettingsRepository(context).settings.value.tmuxOnAttachByDefault)
-    }
-
-    @Test
-    fun `unknown theme name falls back to System`() {
-        // Seed a junk value directly so the migration path is exercised.
-        context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
-            .edit().putString("theme", "Polkadot").commit()
-        val repo = SettingsRepository(context)
-        assertEquals(ThemePreference.System, repo.settings.value.theme)
     }
 
     @Test

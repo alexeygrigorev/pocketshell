@@ -12,7 +12,6 @@ import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -40,7 +39,7 @@ class SessionTypePickerSkipPermissionsUiTest {
     fun skipPermissionsCheckboxIsCheckedByDefaultAndHiddenForOpenCode() {
         var lastChoice: SessionTypeChoice? = null
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 SessionTypePickerContent(
                     folderPath = "/home/alexey/git/pocketshell",
                     folderLabel = "pocketshell",
@@ -76,7 +75,7 @@ class SessionTypePickerSkipPermissionsUiTest {
     fun uncheckingSkipPermissionsProducesBareCommand() {
         var lastChoice: SessionTypeChoice? = null
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 SessionTypePickerContent(
                     folderPath = "/srv/app",
                     folderLabel = "app",

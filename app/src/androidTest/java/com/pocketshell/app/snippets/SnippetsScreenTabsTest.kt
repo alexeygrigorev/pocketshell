@@ -14,7 +14,6 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -85,7 +84,7 @@ class SnippetsScreenTabsTest {
         )
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 SnippetsScreen(
                     hostId = hostId,
                     onBack = {},
@@ -108,7 +107,7 @@ class SnippetsScreenTabsTest {
     @Test
     fun addSnippet_defaultsToSelectedTabKind() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 SnippetsScreen(
                     hostId = hostId,
                     onBack = {},

@@ -8,7 +8,6 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -45,7 +44,7 @@ class WindowStripChromeUiTest {
     fun activePillExposesKillAffordanceForThatWindow() {
         var killedWindowId: String? = null
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column {
                     WindowStrip(
                         windows = sampleWindows(3),
@@ -77,7 +76,7 @@ class WindowStripChromeUiTest {
     fun tappingPillSwitchesWindow() {
         var selectedWindowId: String? = null
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column {
                     WindowStrip(
                         windows = sampleWindows(3),
@@ -99,7 +98,7 @@ class WindowStripChromeUiTest {
     fun newWindowAffordanceIsPresentOnStrip() {
         var newWindowTapped = false
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column {
                     WindowStrip(
                         windows = sampleWindows(2),
@@ -124,7 +123,7 @@ class WindowStripChromeUiTest {
         // exposes a kill on a window the user is not on.
         var killed: WindowSummary? = null
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column {
                     WindowStrip(
                         windows = sampleWindows(3),

@@ -7,7 +7,6 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -57,7 +56,7 @@ class RepoBrowserScreenTest {
     fun readyState_rendersOpenAndClonePillsAndDispatchesTap() {
         var tapped: RepoRow? = null
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 RepoBrowserScaffold(
                     hostName = "issue230-host",
                     state = RepoBrowserUiState.Ready(repos = listOf(clonedRow, uncloned)),
@@ -87,7 +86,7 @@ class RepoBrowserScreenTest {
     fun pendingState_showsRowSpinnerAndBlocksFurtherTaps() {
         var tapCount = 0
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 RepoBrowserScaffold(
                     hostName = "host",
                     state = RepoBrowserUiState.Ready(
@@ -114,7 +113,7 @@ class RepoBrowserScreenTest {
     fun actionError_showsDismissibleBanner() {
         var dismissed = false
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 RepoBrowserScaffold(
                     hostName = "host",
                     state = RepoBrowserUiState.Ready(
@@ -138,7 +137,7 @@ class RepoBrowserScreenTest {
     @Test
     fun toolUnavailable_rendersHint() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 RepoBrowserScaffold(
                     hostName = "no-tool-host",
                     state = RepoBrowserUiState.ToolUnavailable,
@@ -158,7 +157,7 @@ class RepoBrowserScreenTest {
     fun failedState_retryButtonInvokesCallback() {
         var retried = false
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 RepoBrowserScaffold(
                     hostName = "host",
                     state = RepoBrowserUiState.Failed("boom"),
@@ -178,7 +177,7 @@ class RepoBrowserScreenTest {
     @Test
     fun loadingState_showsSpinner() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 RepoBrowserScaffold(
                     hostName = "host",
                     state = RepoBrowserUiState.Loading,

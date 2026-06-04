@@ -17,7 +17,6 @@ import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.model.HostSetupState
 import com.pocketshell.uikit.model.HostStatus
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -31,7 +30,7 @@ class HostCardConnectingIndicatorTest {
     @Test
     fun connectingLabelRendersInlineWithSpinner() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()

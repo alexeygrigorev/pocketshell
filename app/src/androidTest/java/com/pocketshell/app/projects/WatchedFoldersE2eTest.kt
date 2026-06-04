@@ -13,7 +13,6 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -108,7 +107,7 @@ class WatchedFoldersE2eTest {
         )
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 WatchedFoldersScreen(
                     hostId = hostId,
                     hostName = "ci-host",
@@ -159,7 +158,7 @@ class WatchedFoldersE2eTest {
         var lastChip: String? = null
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 WatchedFoldersChipRow(
                     hostId = hostId,
                     onChipTap = { path -> lastChip = path },
@@ -184,7 +183,7 @@ class WatchedFoldersE2eTest {
     fun chipRowShowsEmptyNudgeWhenNoFolders(): Unit = runBlocking {
         val chipsVm = WatchedFoldersChipsViewModel(projectRootDao = db.projectRootDao())
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 WatchedFoldersChipRow(
                     hostId = 99L,
                     onChipTap = { /* unused — empty path */ },
@@ -209,7 +208,7 @@ class WatchedFoldersE2eTest {
         )
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 WatchedFoldersScreen(
                     hostId = hostId,
                     hostName = "h",
@@ -241,7 +240,7 @@ class WatchedFoldersE2eTest {
         var selected = HostDetailViewMode.Tree
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 WatchedFoldersScreen(
                     hostId = 7L,
                     hostName = "h7",

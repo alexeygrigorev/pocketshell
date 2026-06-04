@@ -32,7 +32,6 @@ import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -56,7 +55,7 @@ class TmuxSessionVoiceSurfaceUiTest {
     fun tmuxKeyBarExposesInlineMicSlot() {
         var micTaps = 0
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 KeyBarWithMic(
                     keys = TmuxKeyBarLayout,
                     onKey = {},
@@ -78,7 +77,7 @@ class TmuxSessionVoiceSurfaceUiTest {
     fun tmuxKeyBarExposesCtrlCAndCtrlDKeys() {
         val taps = mutableListOf<String>()
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 KeyBarWithMic(
                     keys = TmuxKeyBarLayout,
                     onKey = { taps += it.label },
@@ -104,7 +103,7 @@ class TmuxSessionVoiceSurfaceUiTest {
         var dictateTaps = 0
         val chipTaps = mutableListOf<String>()
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 BottomChipControls(
                     chips = DefaultSessionChips,
                     onChipTap = { chipTaps += it },
@@ -153,7 +152,7 @@ class TmuxSessionVoiceSurfaceUiTest {
         var dictateTaps = 0
         val chipTaps = mutableListOf<String>()
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 BottomChipControls(
                     chips = AgentExitChips,
                     onChipTap = { chipTaps += it },
@@ -187,7 +186,7 @@ class TmuxSessionVoiceSurfaceUiTest {
         var micTaps = 0
         val dictated = mutableStateOf<AssistantDictationTextEvent?>(null)
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 AssistantStrip(
                     state = AssistantUiState.Confirming(
                         AssistantAgentLoop.Candidate(
@@ -232,7 +231,7 @@ class TmuxSessionVoiceSurfaceUiTest {
     fun assistantStripConfirmRunsCandidate() {
         val events = mutableListOf<String>()
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 AssistantStrip(
                     state = AssistantUiState.Confirming(
                         AssistantAgentLoop.Candidate(
@@ -257,7 +256,7 @@ class TmuxSessionVoiceSurfaceUiTest {
         val events = mutableListOf<String>()
         val retryableState = mutableStateOf(true)
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 AssistantStrip(
                     state = AssistantUiState.Error(
                         message = "The assistant model transport failed. Try again.",
@@ -284,7 +283,7 @@ class TmuxSessionVoiceSurfaceUiTest {
     fun inlineDictationErrorStripDismissesOnTap() {
         var dismissed = false
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 InlineDictationErrorStrip(
                     message = "Microphone permission denied.",
                     onDismiss = { dismissed = true },

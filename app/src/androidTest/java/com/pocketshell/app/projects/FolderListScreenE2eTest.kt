@@ -30,7 +30,6 @@ import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -202,7 +201,7 @@ class FolderListScreenE2eTest {
         var editedEnvPath: String? = null
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 FolderListScreen(
                     hostId = hostId,
                     hostName = "issue171-host",
@@ -521,7 +520,7 @@ class FolderListScreenE2eTest {
         var openedPortForwarding = false
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 FolderListScreen(
                     hostId = hostId,
                     hostName = "issue171-host",

@@ -19,7 +19,6 @@ import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertFalse
@@ -109,7 +108,7 @@ class EnvScreenE2eTest {
         val viewModel = EnvViewModel(gateway = gateway, hostDao = db.hostDao())
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 EnvScreen(
                     hostId = hostId,
                     hostName = "issue264-host",

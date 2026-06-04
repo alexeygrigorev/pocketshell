@@ -40,7 +40,6 @@ import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertTrue
@@ -220,7 +219,7 @@ class FolderListScrollE2eTest {
         var hostDetailViewMode by mutableStateOf(HostDetailViewMode.Tree)
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 FolderListScreen(
                     hostId = hostId,
                     hostName = "issue274-host",

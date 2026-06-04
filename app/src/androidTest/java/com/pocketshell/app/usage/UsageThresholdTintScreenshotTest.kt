@@ -22,7 +22,6 @@ import com.pocketshell.core.usage.UsageStatus
 import com.pocketshell.core.usage.UsageWindow
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import java.io.File
 import java.io.FileOutputStream
 import org.junit.Rule
@@ -66,7 +65,7 @@ class UsageThresholdTintScreenshotTest {
     @Test
     fun capturePerProviderStateList() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -105,7 +104,7 @@ class UsageThresholdTintScreenshotTest {
     @Test
     fun captureInlineBadges() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -143,7 +142,7 @@ class UsageThresholdTintScreenshotTest {
     @Test
     fun captureBannerSet() {
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()

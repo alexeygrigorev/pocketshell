@@ -1,26 +1,6 @@
 package com.pocketshell.app.settings
 
 /**
- * User-selectable theme preference applied at the composable root.
- *
- * `System` follows the platform `isSystemInDarkTheme()` flag and reacts to
- * changes without a process restart. `Light` and `Dark` pin the app to
- * the requested colour scheme regardless of the OS setting.
- *
- * The default is [System] — first launch matches whatever the device is
- * already set to, which is the least-surprising choice for a fresh
- * install. Existing PocketShell builds were dark-only (per
- * `Theme.kt`'s D8 comment); the new repository defaults align with that
- * historical look on dark-mode devices while letting light-mode devices
- * see the new light scheme by default.
- */
-enum class ThemePreference {
-    System,
-    Light,
-    Dark,
-}
-
-/**
  * Default presentation for the per-host workspace screen.
  *
  * [Tree] groups active projects under the configured workspace roots.
@@ -42,8 +22,6 @@ enum class HostDetailViewMode {
  * any field changes so observers can react with a single
  * `collectAsState()` call rather than wiring three separate flows.
  *
- * @property theme drives the colour scheme at the composable root — see
- *   [ThemePreference].
  * @property terminalFontSizeSp user-preferred terminal text size in
  *   scale-independent pixels. Stored as a `Float` even though the UI
  *   exposes integer steps so callers can pass it directly into Compose
@@ -73,7 +51,6 @@ enum class HostDetailViewMode {
  *   from a distant phone do not cut dictation off mid-thought.
  */
 data class AppSettings(
-    val theme: ThemePreference = ThemePreference.System,
     val terminalFontSizeSp: Float = DEFAULT_TERMINAL_FONT_SP,
     val tmuxOnAttachByDefault: Boolean = true,
     val defaultHostId: Long? = null,

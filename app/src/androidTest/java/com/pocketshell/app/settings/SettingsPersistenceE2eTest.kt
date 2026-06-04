@@ -30,26 +30,25 @@ import org.junit.runner.RunWith
  *
  * 1. User opens Settings, picks a non-default Voice language (French) via
  *    the radio group.
- * 2. User picks a non-default Appearance theme (Light) via the radio group.
- * 3. User navigates back, the app is force-stopped (or its activity
+ * 2. User navigates back, the app is force-stopped (or its activity
  *    process state is dropped), and the user reopens it.
- * 4. The user opens Settings again. The previously selected values must
- *    still be the active ones.
+ * 3. The user opens Settings again. The previously selected value must
+ *    still be the active one.
  *
- * Why the user-facing settings under test are Voice → French and
- * Appearance → Light:
+ * Why the user-facing setting under test is Voice → French:
  *
- *  - Both are radio groups with deterministic non-default options. The
+ *  - It is a radio group with a deterministic non-default option. The
  *    `voice language` default is [AppSettings.VOICE_LANGUAGE_AUTO] (the
  *    sentinel "auto" string), so "French" (code `fr`) is a stable second
  *    value that cannot be reached by accident.
- *  - The `theme` default is [ThemePreference.System], so [ThemePreference.Light]
- *    is a stable second value (Dark is also valid, but Light is closer to
- *    what a user would realistically toggle on first install).
- *  - Both rows already carry test tags
- *    ([voiceLanguageOptionTestTag] / [themeOptionTestTag]) introduced
- *    when the Settings screen first shipped, so this test adds no
- *    production-side instrumentation.
+ *  - The row already carries a test tag ([voiceLanguageOptionTestTag])
+ *    introduced when the Settings screen first shipped, so this test adds
+ *    no production-side instrumentation.
+ *
+ * (Issue #477 removed the Settings → Appearance theme toggle: PocketShell
+ * is a single dark dev-tool scheme app-wide, so there is no longer a theme
+ * preference to persist. The Voice language toggle is the surviving radio
+ * group this persistence journey exercises.)
  *
  * **Why we don't actually invoke `adb shell am force-stop com.pocketshell.app`:**
  *
@@ -86,16 +85,15 @@ import org.junit.runner.RunWith
  *
  * **Production paths the test breaks against:**
  *
- *  - [SettingsRepository.setVoiceLanguage] /
- *    [SettingsRepository.setTheme] would regress if the prefs write was
- *    accidentally deferred, dropped, or routed to an in-memory-only
- *    store.
+ *  - [SettingsRepository.setVoiceLanguage] would regress if the prefs
+ *    write was accidentally deferred, dropped, or routed to an
+ *    in-memory-only store.
  *  - [SettingsRepository.readSnapshot] would regress if a future change
- *    silently re-introduced defaults for these keys (the constructor is
+ *    silently re-introduced the default for this key (the constructor is
  *    the cold-read path that runs on every process restart).
- *  - The Settings → Voice / Appearance UI bindings would regress if the
- *    radio rows stopped emitting their `onSelect` callback or if the
- *    callback no longer routed to `setVoiceLanguage` / `setTheme`.
+ *  - The Settings → Voice UI binding would regress if the radio rows
+ *    stopped emitting their `onSelect` callback or if the callback no
+ *    longer routed to `setVoiceLanguage`.
  *
  * The test does not depend on Docker, SSH, or any remote fixture; it
  * runs on the bare emulator and finishes in seconds.
@@ -133,11 +131,6 @@ class SettingsPersistenceE2eTest {
             "expected voice language default after wipe",
             AppSettings.VOICE_LANGUAGE_AUTO,
             baseline.voiceLanguage,
-        )
-        assertEquals(
-            "expected theme default after wipe",
-            ThemePreference.System,
-            baseline.theme,
         )
     }
 
@@ -177,18 +170,7 @@ class SettingsPersistenceE2eTest {
         }
 
         // ---------------------------------------------------------------
-        // Phase 2 — toggle Appearance → Light. The Appearance section is
-        // the first item in the LazyColumn so it's already on screen,
-        // but we still scroll to it to keep the test resilient to layout
-        // changes that move it below the fold on smaller viewports.
-        // ---------------------------------------------------------------
-        val lightTag = themeOptionTestTag(ThemePreference.Light)
-        compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG)
-            .performScrollToNode(hasTestTag(lightTag))
-        compose.onNodeWithTag(lightTag, useUnmergedTree = true).performClick()
-
-        // ---------------------------------------------------------------
-        // Phase 3 — toggle Voice → French. The Voice section lives below
+        // Phase 2 — toggle Voice → French. The Voice section lives below
         // the fold on a Pixel 7 viewport (~854dp) so we scroll the
         // language radio into view via the parent LazyColumn before
         // tapping, matching the pattern used by `UsageScreenE2eTest` for
@@ -212,7 +194,7 @@ class SettingsPersistenceE2eTest {
         ).assertExists()
 
         // ---------------------------------------------------------------
-        // Phase 4 — ground-truth: the toggles wrote to SharedPreferences
+        // Phase 3 — ground-truth: the toggle wrote to SharedPreferences
         // synchronously. A fresh repository instance reads the same on-
         // disk state the OS would re-read after a process kill, so this
         // assertion is exactly the contract of "survived a process
@@ -226,12 +208,7 @@ class SettingsPersistenceE2eTest {
             FRENCH_LANGUAGE_CODE,
             afterWriteSnap.voiceLanguage,
         )
-        assertEquals(
-            "theme should be Light after Settings UI toggle",
-            ThemePreference.Light,
-            afterWriteSnap.theme,
-        )
-        // Sanity: the toggled values are genuinely non-default so a
+        // Sanity: the toggled value is genuinely non-default so a
         // future default change can't accidentally make the test pass
         // without driving the UI.
         assertNotEquals(
@@ -239,19 +216,14 @@ class SettingsPersistenceE2eTest {
             AppSettings.VOICE_LANGUAGE_AUTO,
             afterWriteSnap.voiceLanguage,
         )
-        assertNotEquals(
-            "Light should differ from the default theme",
-            ThemePreference.System,
-            afterWriteSnap.theme,
-        )
 
         // ---------------------------------------------------------------
-        // Phase 5 — navigate back, then drop the activity. Closing the
+        // Phase 4 — navigate back, then drop the activity. Closing the
         // ActivityScenario finishes MainActivity; any in-memory state
         // that was NOT persisted to disk would be lost here. The
         // singleton SettingsRepository survives in the same process, so
-        // the relaunch in phase 6 also exercises the warm-process path;
-        // the fresh-repository read in phase 4 covers the actual cold-
+        // the relaunch in phase 5 also exercises the warm-process path;
+        // the fresh-repository read in phase 3 covers the actual cold-
         // read-from-disk path that a real `am force-stop` would
         // exercise.
         // ---------------------------------------------------------------
@@ -274,11 +246,11 @@ class SettingsPersistenceE2eTest {
         // Process crashed.`. We reproduced exactly that on a first
         // implementation attempt that called `am kill` here. The
         // persistence guarantee under test lives on disk anyway, and
-        // the cold-read assertion below (and in Phase 4) is the
+        // the cold-read assertion below (and in Phase 3) is the
         // ground-truth equivalent of a process-restart re-read.
 
         // ---------------------------------------------------------------
-        // Phase 6 — relaunch and reopen Settings. The activity remounts
+        // Phase 5 — relaunch and reopen Settings. The activity remounts
         // against the same singleton repository, which itself reflects
         // the disk-persisted state. We re-assert from a freshly-built
         // repository (so even if the singleton somehow held a stale
@@ -297,21 +269,15 @@ class SettingsPersistenceE2eTest {
                 .fetchSemanticsNodes().isNotEmpty()
         }
 
-        // Scroll both rows into view so we know the screen rendered with
-        // the new state mounted, not a stale cached version. The
-        // existence of the LazyColumn item proves the screen recomposed
+        // Scroll the Voice language row into view so we know the screen
+        // rendered with the new state mounted, not a stale cached version.
+        // The existence of the LazyColumn item proves the screen recomposed
         // with the persisted [AppSettings] in hand; the radio's visual
         // selection lives in a hand-rolled `RadioMark` glyph rather than
         // a Compose `Modifier.selectable` semantics property, so we
         // cannot use `assertIsSelected()`. We instead rely on the disk
         // read below for the value assertion, and on the node existing
         // for the "screen mounted" assertion.
-        compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG)
-            .performScrollToNode(hasTestTag(themeOptionTestTag(ThemePreference.Light)))
-        compose.onNodeWithTag(
-            themeOptionTestTag(ThemePreference.Light),
-            useUnmergedTree = true,
-        ).assertExists()
         compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG)
             .performScrollToNode(hasTestTag(voiceLanguageOptionTestTag(FRENCH_LANGUAGE_CODE)))
         compose.onNodeWithTag(
@@ -320,32 +286,23 @@ class SettingsPersistenceE2eTest {
         ).assertExists()
 
         // Cold-read the prefs file from a fresh repository to assert the
-        // values survived. This is the canonical disk-persistence check
+        // value survived. This is the canonical disk-persistence check
         // and the strongest evidence that a real `am force-stop` +
-        // relaunch would observe the same values.
+        // relaunch would observe the same value.
         val afterRelaunchSnap = SettingsRepository(ctx).settings.value
         assertEquals(
             "voice language should remain French after activity close + relaunch",
             FRENCH_LANGUAGE_CODE,
             afterRelaunchSnap.voiceLanguage,
         )
-        assertEquals(
-            "theme should remain Light after activity close + relaunch",
-            ThemePreference.Light,
-            afterRelaunchSnap.theme,
-        )
 
-        // Touch the test-tag constants once so static analysis doesn't
-        // flag them as unused from this test file. They are passive
-        // references; the production code's constants are the canonical
+        // Touch the test-tag constant once so static analysis doesn't
+        // flag it as unused from this test file. It is a passive
+        // reference; the production code's constant is the canonical
         // copy.
         assertTrue(
             "voice French tag should be non-empty",
             voiceLanguageOptionTestTag(FRENCH_LANGUAGE_CODE).isNotEmpty(),
-        )
-        assertTrue(
-            "theme Light tag should be non-empty",
-            themeOptionTestTag(ThemePreference.Light).isNotEmpty(),
         )
     }
 

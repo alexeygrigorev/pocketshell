@@ -37,7 +37,6 @@ import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SETTINGS_LAZY_COLUMN_TAG
 import com.pocketshell.app.settings.SETTINGS_TITLE_TAG
 import com.pocketshell.app.settings.SettingsRepository
-import com.pocketshell.app.settings.ThemePreference
 import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import com.pocketshell.app.tmux.TMUX_SESSION_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
@@ -92,7 +91,7 @@ import org.junit.runner.RunWith
  *    assertion survives a soft-wrap at the right margin.
  * 8. Re-launch the activity into the host list, open Settings, and
  *    assert the default settings snapshot matches [AppSettings] defaults
- *    (theme = System, terminal font = 14sp, tmux-on-attach = true,
+ *    (terminal font = 14sp, tmux-on-attach = true,
  *    voice language = auto, voice silence threshold = 30s).
  *
  * **Production paths the test breaks against:**
@@ -366,11 +365,6 @@ class ColdInstallE2eTest {
             InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,
         )
         val cold = cachedRepository.settings.value
-        assertEquals(
-            "cold-install theme default should be System",
-            ThemePreference.System,
-            cold.theme,
-        )
         assertEquals(
             "cold-install terminal font size default should be ${AppSettings.DEFAULT_TERMINAL_FONT_SP}sp",
             AppSettings.DEFAULT_TERMINAL_FONT_SP,

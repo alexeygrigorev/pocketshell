@@ -46,7 +46,6 @@ import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.PocketShellTheme
-import com.pocketshell.uikit.theme.PocketShellThemeMode
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -183,7 +182,7 @@ class HostDetailAssistantFolderDisambiguationTest {
         }
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 FolderListScreen(
                     hostId = hostId,
                     hostName = "issue442-host",
@@ -304,7 +303,7 @@ class HostDetailAssistantFolderDisambiguationTest {
         }
 
         compose.setContent {
-            PocketShellTheme(mode = PocketShellThemeMode.Dark) {
+            PocketShellTheme {
                 FolderListScreen(
                     hostId = hostId,
                     hostName = "issue442-host",

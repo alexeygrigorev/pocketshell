@@ -47,6 +47,7 @@ public fun UsageScreenState.dashboardRows(
                 blocked = record.isBlocked,
                 nearLimit = record.isNearLimit,
                 thresholdState = record.thresholdState(warnPercent = warnPercent),
+                soonestReset = soonestReset(record),
             )
         }
 
@@ -65,4 +66,10 @@ public data class UsageDashboardRow(
     val blocked: Boolean,
     val nearLimit: Boolean,
     val thresholdState: UsageThresholdState = UsageThresholdState.Ok,
+    /**
+     * Issue #501: soonest `reset_at` across the provider's windows, so
+     * the host-list strip can show who resets next. Null when the
+     * provider reports no reset times.
+     */
+    val soonestReset: Instant? = null,
 )

@@ -23,10 +23,73 @@ class UsageFormatTest {
     }
 
     @Test
-    fun formatResetTime_usesDateForLaterReset() {
+    fun formatResetTime_normalizesRoundedMinutes() {
         assertEquals(
-            "May 28",
+            "in 2h",
             formatResetTime(
+                now = Instant.parse("2026-05-21T00:00:00Z"),
+                resetAt = Instant.parse("2026-05-21T01:59:59Z"),
+                zoneId = ZoneId.of("UTC"),
+            ),
+        )
+    }
+
+    // --- Issue #501: relative "time until reset" across all buckets ---
+
+    @Test
+    fun formatResetRelative_underAMinuteReadsLessThanOneMinute() {
+        assertEquals(
+            "in <1m",
+            formatResetRelative(
+                now = Instant.parse("2026-06-04T12:00:00Z"),
+                resetAt = Instant.parse("2026-06-04T12:00:30Z"),
+                zoneId = ZoneId.of("UTC"),
+            ),
+        )
+    }
+
+    @Test
+    fun formatResetRelative_minutesOnly() {
+        assertEquals(
+            "in 15m",
+            formatResetRelative(
+                now = Instant.parse("2026-06-04T12:00:00Z"),
+                resetAt = Instant.parse("2026-06-04T12:15:00Z"),
+                zoneId = ZoneId.of("UTC"),
+            ),
+        )
+    }
+
+    @Test
+    fun formatResetRelative_hoursAndMinutes() {
+        assertEquals(
+            "in 2h 15m",
+            formatResetRelative(
+                now = Instant.parse("2026-06-04T11:00:00Z"),
+                resetAt = Instant.parse("2026-06-04T13:15:00Z"),
+                zoneId = ZoneId.of("UTC"),
+            ),
+        )
+    }
+
+    @Test
+    fun formatResetRelative_oneDaySingular() {
+        // Exactly 24h away rounds up to a single day bucket.
+        assertEquals(
+            "in 1 day",
+            formatResetRelative(
+                now = Instant.parse("2026-06-04T12:00:00Z"),
+                resetAt = Instant.parse("2026-06-05T12:00:00Z"),
+                zoneId = ZoneId.of("UTC"),
+            ),
+        )
+    }
+
+    @Test
+    fun formatResetRelative_multipleDaysPlural() {
+        assertEquals(
+            "in 7 days",
+            formatResetRelative(
                 now = Instant.parse("2026-05-21T11:49:00Z"),
                 resetAt = Instant.parse("2026-05-28T09:00:00Z"),
                 zoneId = ZoneId.of("UTC"),
@@ -35,12 +98,83 @@ class UsageFormatTest {
     }
 
     @Test
-    fun formatResetTime_normalizesRoundedMinutes() {
+    fun formatResetRelative_pastResetReadsNow() {
         assertEquals(
-            "in 2h",
-            formatResetTime(
-                now = Instant.parse("2026-05-21T00:00:00Z"),
-                resetAt = Instant.parse("2026-05-21T01:59:59Z"),
+            "now",
+            formatResetRelative(
+                now = Instant.parse("2026-06-04T12:00:00Z"),
+                resetAt = Instant.parse("2026-06-04T11:59:00Z"),
+                zoneId = ZoneId.of("UTC"),
+            ),
+        )
+    }
+
+    @Test
+    fun formatResetRelative_nullReadsPlaceholder() {
+        assertEquals(
+            "—",
+            formatResetRelative(
+                now = Instant.parse("2026-06-04T12:00:00Z"),
+                resetAt = null,
+                zoneId = ZoneId.of("UTC"),
+            ),
+        )
+    }
+
+    @Test
+    fun formatResetAbsolute_rendersLocalDateAndTime() {
+        // 13:10 UTC is 15:10 in Berlin (CEST, +02:00) — proves zone-aware.
+        assertEquals(
+            "Jun 4, 15:10",
+            formatResetAbsolute(
+                resetAt = Instant.parse("2026-06-04T13:10:00Z"),
+                zoneId = ZoneId.of("Europe/Berlin"),
+            ),
+        )
+    }
+
+    @Test
+    fun formatAbsolute_nullReturnsNull() {
+        assertEquals(
+            null,
+            formatResetAbsolute(resetAt = null, zoneId = ZoneId.of("UTC")),
+        )
+    }
+
+    @Test
+    fun soonestReset_picksEarliestNonNullWindow() {
+        val record = UsageProviderRecord(
+            provider = "claude",
+            status = UsageStatus.Ok,
+            rawStatus = "ok",
+            windows = listOf(
+                UsageWindow("5h", 10.0, 100.0, "percent", Instant.parse("2026-06-04T15:00:00Z")),
+                UsageWindow("7d", 20.0, 100.0, "percent", Instant.parse("2026-06-04T13:10:00Z")),
+            ),
+        )
+        assertEquals(Instant.parse("2026-06-04T13:10:00Z"), soonestReset(record))
+    }
+
+    @Test
+    fun soonestReset_nullWhenNoWindowReportsReset() {
+        val record = UsageProviderRecord(
+            provider = "codex",
+            status = UsageStatus.Ok,
+            rawStatus = "ok",
+            windows = listOf(UsageWindow("weekly", 10.0, 100.0, "percent", null)),
+        )
+        assertEquals(null, soonestReset(record))
+    }
+
+    @Test
+    fun formatWindowFoot_nullResetStillShowsPlaceholder() {
+        val window = UsageWindow("5h", 10.0, 100.0, "percent", null)
+        assertEquals(
+            "resets —",
+            formatWindowFoot(
+                window = window,
+                now = Instant.parse("2026-06-04T12:00:00Z"),
+                blockReason = null,
                 zoneId = ZoneId.of("UTC"),
             ),
         )

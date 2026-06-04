@@ -42,6 +42,7 @@ import com.pocketshell.uikit.model.ProgressKind
 import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
 import java.time.Instant
+import java.time.ZoneId
 
 @Composable
 fun UsageScreen(
@@ -94,8 +95,10 @@ fun UsageDashboardStrip(
     rows: List<UsageDashboardRow>,
     modifier: Modifier = Modifier,
     onClick: () -> Unit = {},
+    now: Instant = Instant.now(),
 ) {
     if (rows.isEmpty()) return
+    val zone = ZoneId.systemDefault()
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -121,6 +124,18 @@ fun UsageDashboardStrip(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
                 )
+                // Issue #501: soonest reset, so a scan of the strip shows
+                // who has runway. Only rendered when the provider reports
+                // a reset time (the placeholder "—" would be noise here).
+                row.soonestReset?.let { reset ->
+                    Text(
+                        text = formatResetRelative(now, reset, zone),
+                        color = PocketShellColors.TextMuted,
+                        fontFamily = JetBrainsMonoFamily,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(end = 8.dp),
+                    )
+                }
                 Text(
                     text = formatPercent(row.percent),
                     color = thresholdTextColor(row.thresholdState),
@@ -432,14 +447,44 @@ private fun UsageWindowRow(
             progress = (window.percent / 100.0).toFloat(),
             kind = progressKind(window.percent, record.isBlocked),
         )
-        val foot = formatWindowFoot(window, now, record.blockReason)
-        if (foot.isNotBlank()) {
+        UsageResetFoot(window = window, now = now, blockReason = record.blockReason)
+    }
+}
+
+/**
+ * Issue #501: per-window "time until reset" foot. Primary line is the
+ * relative countdown ("resets in 2h 15m" / "resets in 3 days" / "resets
+ * —" when the provider reports none); the absolute local date+time is a
+ * dimmer secondary line so providers stay scannable but the exact moment
+ * is still available. The block reason, if any, rides on the primary
+ * line as it did before.
+ */
+@Composable
+private fun UsageResetFoot(
+    window: UsageWindow,
+    now: Instant,
+    blockReason: String?,
+) {
+    val zone = ZoneId.systemDefault()
+    val primary = formatWindowFoot(window, now, blockReason, zone)
+    val absolute = formatResetAbsolute(window.resetAt, zone)
+    if (primary.isBlank() && absolute == null) return
+    Column(modifier = Modifier.padding(top = 6.dp)) {
+        if (primary.isNotBlank()) {
             Text(
-                text = foot,
+                text = primary,
                 color = PocketShellColors.TextMuted,
                 fontFamily = JetBrainsMonoFamily,
                 fontSize = 11.sp,
-                modifier = Modifier.padding(top = 6.dp),
+            )
+        }
+        if (absolute != null) {
+            Text(
+                text = absolute,
+                color = PocketShellColors.TextSecondary,
+                fontFamily = JetBrainsMonoFamily,
+                fontSize = 10.sp,
+                modifier = Modifier.padding(top = 1.dp),
             )
         }
     }

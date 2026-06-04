@@ -293,6 +293,57 @@ class HostListViewModelTest {
     }
 
     @Test
+    fun onUpdateDownloadStarted_setsConfirmationMessage_thenClears() = runTest {
+        // Issue #476: a successful download-intent launch must produce a
+        // visible "download started" confirmation so the tap is never a
+        // silent no-op.
+        val viewModel = newViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
+            settingsRepository = newSettingsRepository(),
+        )
+
+        assertNull(viewModel.updateMessage.value)
+
+        viewModel.onUpdateDownloadStarted("v0.4.0")
+        val message = viewModel.updateMessage.value
+        assertNotNull(message)
+        assertTrue(message!!.contains("v0.4.0"))
+        assertTrue(message.contains("Downloading"))
+
+        viewModel.clearUpdateMessage()
+        assertNull(viewModel.updateMessage.value)
+    }
+
+    @Test
+    fun onUpdateDownloadFailed_setsReasonAndFallbackMessage() = runTest {
+        // Issue #476: the failure path must name a concrete reason and tell
+        // the user the release page was opened as a fallback.
+        val viewModel = newViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = FakeReleaseChecker(result = null),
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
+            settingsRepository = newSettingsRepository(),
+        )
+
+        viewModel.onUpdateDownloadFailed("no app can open the download link")
+        val message = viewModel.updateMessage.value
+        assertNotNull(message)
+        assertTrue(message!!.contains("Couldn't start the download"))
+        assertTrue(message.contains("no app can open the download link"))
+        assertTrue(message.contains("release page"))
+    }
+
+    @Test
     fun updateAvailable_staysNull_whenCheckerReturnsNull() = runTest {
         val fake = FakeReleaseChecker(result = null)
         val viewModel = newViewModel(

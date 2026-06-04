@@ -1,5 +1,7 @@
 package com.pocketshell.app.hosts
 
+import android.content.ActivityNotFoundException
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.foundation.Image
@@ -157,6 +159,9 @@ fun HostListScreen(
     // status reacts the moment a register / unregister happens.
     val attachedHostIds by viewModel.attachedHostIds.collectAsState()
     val updateInfo by viewModel.updateAvailable.collectAsState()
+    // Issue #476: one-shot feedback for the update-banner tap so a working
+    // download no longer looks like a silent no-op.
+    val updateMessage by viewModel.updateMessage.collectAsState()
     val bootstrapState by viewModel.bootstrapState.collectAsState()
     val bootstrapHostName by viewModel.bootstrapHostName.collectAsState()
     val pendingNavigation by viewModel.pendingNavigation.collectAsState()
@@ -381,11 +386,13 @@ fun HostListScreen(
                     .entries
                     .sortedBy { it.key }
                 val hasUpdateBanner = updateInfo != null
+                val hasUpdateMessageBanner = updateMessage != null
                 val hasShareBanner = shareMessage != null
                 val hasRecheckBanner = recheckMessage != null
                 val hasUsageWarningBanners = activeUsageBanners.isNotEmpty() && onOpenUsage != null
                 val hasUsageStrip = hasUsageInstalledHost && onOpenUsage != null
-                val hasAnyNotice = hasUpdateBanner || hasShareBanner || hasRecheckBanner ||
+                val hasAnyNotice = hasUpdateBanner || hasUpdateMessageBanner ||
+                    hasShareBanner || hasRecheckBanner ||
                     hasUsageWarningBanners || hasUsageStrip
                 if (hasAnyNotice) {
                     item(key = "notices") {
@@ -401,10 +408,51 @@ fun HostListScreen(
                                 UpdateBanner(
                                     info = info,
                                     onUpdate = {
-                                        context.startActivity(
-                                            Intent(Intent.ACTION_VIEW, Uri.parse(info.apkUrl)),
-                                        )
+                                        // Issue #476: the tap used to fire a
+                                        // bare ACTION_VIEW with no feedback and
+                                        // no error handling, so a working
+                                        // download looked like a silent no-op
+                                        // and a failed one threw. Now we always
+                                        // show what happened: on success a
+                                        // "download started" confirmation, on
+                                        // failure a concrete reason plus a
+                                        // fallback to the release page (which a
+                                        // browser always handles).
+                                        try {
+                                            context.startActivity(
+                                                Intent(
+                                                    Intent.ACTION_VIEW,
+                                                    Uri.parse(info.apkUrl),
+                                                ),
+                                            )
+                                            viewModel.onUpdateDownloadStarted(info.tagName)
+                                        } catch (e: ActivityNotFoundException) {
+                                            launchReleasePageFallback(
+                                                context,
+                                                info,
+                                                viewModel,
+                                                e.message ?: "no app can open the download link",
+                                            )
+                                        } catch (e: SecurityException) {
+                                            launchReleasePageFallback(
+                                                context,
+                                                info,
+                                                viewModel,
+                                                e.message ?: "the download was blocked",
+                                            )
+                                        }
                                     },
+                                )
+                            }
+
+                            // Issue #476: result of the most recent update
+                            // tap. Reuses the dismissible banner so the
+                            // "download started" / "couldn't start" feedback
+                            // reads consistently with the other notices.
+                            updateMessage?.let { msg ->
+                                ShareMessageBanner(
+                                    message = msg,
+                                    onDismiss = viewModel::clearUpdateMessage,
                                 )
                             }
 
@@ -771,6 +819,32 @@ internal const val IMPORT_CONFLICT_ADD_AS_NEW_TAG = "host-list:import-conflict:a
 internal const val HOST_USAGE_BADGE_TAG_PREFIX = "host:usage-badge:"
 
 /**
+ * Issue #476: shared fallback path for the update tap. When the primary
+ * APK-download intent ([ReleaseInfo.apkUrl] via `ACTION_VIEW`) can't be
+ * launched, open the release page instead — a browser always handles an
+ * `https` page URL — and record a concrete failure reason so the user
+ * sees what happened rather than a silent no-op. If even the release page
+ * can't be opened, the failure message still surfaces.
+ */
+internal fun launchReleasePageFallback(
+    context: Context,
+    info: ReleaseInfo,
+    viewModel: HostListViewModel,
+    reason: String,
+) {
+    try {
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(info.htmlUrl)),
+        )
+    } catch (_: ActivityNotFoundException) {
+        // Even the release page couldn't be opened; the failure message
+        // below still tells the user the tap didn't succeed.
+    } catch (_: SecurityException) {
+    }
+    viewModel.onUpdateDownloadFailed(reason)
+}
+
+/**
  * Top-of-screen banner advertising a newer GitHub Release. Tapping
  * "Update" fires `Intent.ACTION_VIEW` against the APK download URL —
  * the system browser / download manager handles the rest. We do NOT
@@ -783,7 +857,7 @@ internal const val HOST_USAGE_BADGE_TAG_PREFIX = "host:usage-badge:"
  * dragged in a Material elevation overlay that fights the dark theme.
  */
 @Composable
-private fun UpdateBanner(info: ReleaseInfo, onUpdate: () -> Unit) {
+internal fun UpdateBanner(info: ReleaseInfo, onUpdate: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1185,7 +1259,7 @@ private fun KebabIcon() {
 }
 
 @Composable
-private fun ShareMessageBanner(message: String, onDismiss: () -> Unit) {
+internal fun ShareMessageBanner(message: String, onDismiss: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()

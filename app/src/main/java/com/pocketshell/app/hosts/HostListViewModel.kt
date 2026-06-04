@@ -342,6 +342,45 @@ class HostListViewModel internal constructor(
     val updateAvailable: StateFlow<ReleaseInfo?> = _updateAvailable.asStateFlow()
 
     /**
+     * Issue #476: transient feedback for the update-banner tap. The
+     * download itself is launched from the screen (it needs an Android
+     * `Context` to fire `ACTION_VIEW`), but the user-visible "what
+     * happened" message lives here so it's testable and surfaces through
+     * the same one-shot banner pattern as [shareMessage] /
+     * [recheckMessage]. A working download used to look like a silent
+     * failure; this gives every tap a clear started/failed result.
+     * `null` hides the banner; the screen consumes via
+     * [clearUpdateMessage].
+     */
+    private val _updateMessage = MutableStateFlow<String?>(null)
+    val updateMessage: StateFlow<String?> = _updateMessage.asStateFlow()
+
+    /**
+     * Records that the APK download intent was launched successfully. The
+     * download lands in the system Downloads / a notification, so we point
+     * the user there rather than implying the install is automatic.
+     */
+    fun onUpdateDownloadStarted(tagName: String) {
+        _updateMessage.value =
+            "Downloading $tagName — check your notifications / Downloads"
+    }
+
+    /**
+     * Records that the primary APK-download intent could not be launched
+     * (no handler / security denial). The screen falls back to opening the
+     * release page in a browser, so the message names the reason and tells
+     * the user we opened the release page instead.
+     */
+    fun onUpdateDownloadFailed(reason: String) {
+        _updateMessage.value =
+            "Couldn't start the download: $reason — opened the release page instead"
+    }
+
+    fun clearUpdateMessage() {
+        _updateMessage.value = null
+    }
+
+    /**
      * Bootstrap sheet state. `null` means the sheet is hidden. The
      * sheet's lifecycle is bound to a `pendingNavigation`: when the user
      * skips or completes install, the screen calls

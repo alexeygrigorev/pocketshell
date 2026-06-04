@@ -10,9 +10,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -36,6 +38,12 @@ internal fun ConversationMessageTurn(
     val glyph = if (isUser) "›" else "A"
     val startIndent = if (isUser) 0.dp else 10.dp
 
+    // Issue #474: compact per-message timestamp so the user can tell WHEN
+    // the message was sent (e.g. when the agent reported it finished)
+    // without reading terminal logs. Null when the transcript entry had no
+    // timestamp — render nothing rather than an empty chip.
+    val timestamp = remember(event.atMillis) { ConversationTimeFormat.format(event.atMillis) }
+
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -56,8 +64,25 @@ internal fun ConversationMessageTurn(
                 .padding(start = 2.dp),
             verticalArrangement = Arrangement.spacedBy(3.dp),
         ) {
-            if (event.streaming) {
-                StreamingBadge(roleColor = roleColor)
+            if (event.streaming || timestamp != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    if (event.streaming) {
+                        StreamingBadge(roleColor = roleColor)
+                    }
+                    if (timestamp != null) {
+                        Text(
+                            text = timestamp,
+                            color = PocketShellColors.TextMuted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            modifier = Modifier.testTag(CONVERSATION_TIMESTAMP_TAG_PREFIX + event.id),
+                        )
+                    }
+                }
             }
             MarkdownText(
                 text = event.text,
@@ -68,6 +93,12 @@ internal fun ConversationMessageTurn(
         }
     }
 }
+
+/**
+ * Issue #474: test tag prefix for the per-message timestamp label so
+ * instrumentation/unit-screenshot checks can locate it deterministically.
+ */
+internal const val CONVERSATION_TIMESTAMP_TAG_PREFIX: String = "conversation-timestamp-"
 
 @Composable
 private fun StreamingBadge(roleColor: Color) {

@@ -134,4 +134,93 @@ class ClaudeCodeParserTest {
         assertEquals(ids.toSet().size, ids.size)
         assertTrue("expected ids to include the base uuid; got $ids", ids.all { it.startsWith("u-stable") })
     }
+
+    // ---- Issue #474: per-message timestamps from ISO-8601 `timestamp` ----
+
+    @Test
+    fun extractsIsoTimestampForUserMessage() {
+        val event = parser.parseLine(
+            """{"uuid":"u-ts","timestamp":"2026-05-22T10:00:00Z","message":{"role":"user","content":"hello"}}""",
+        ).single() as ConversationEvent.Message
+
+        // 2026-05-22T10:00:00Z == 1779444000000 ms epoch.
+        assertEquals(1779444000000L, event.atMillis)
+    }
+
+    @Test
+    fun extractsIsoTimestampWithMillisForAssistantContent() {
+        val events = parser.parseLine(
+            """{"uuid":"a-ts","timestamp":"2026-05-20T15:12:00.878Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}""",
+        )
+        val msg = events.single() as ConversationEvent.Message
+        assertEquals(1779289920878L, msg.atMillis)
+    }
+
+    @Test
+    fun missingTimestampLeavesAtMillisNull() {
+        val event = parser.parseLine(
+            """{"uuid":"u-no-ts","message":{"role":"user","content":"hi"}}""",
+        ).single() as ConversationEvent.Message
+        assertEquals(null, event.atMillis)
+    }
+
+    // ---- Issue #474: previously-unparsed structural blocks ----
+
+    @Test
+    fun parsesScheduledTaskFireSystemEntryAsSystemNote() {
+        // The maintainer's "Task Notification"-like block: a real Claude
+        // Code top-level system entry, previously dropped entirely.
+        val note = parser.parseLine(
+            """{"type":"system","subtype":"scheduled_task_fire","content":"Claude resuming /loop wakeup (May 20 5:12pm)","timestamp":"2026-05-20T15:12:00.878Z","uuid":"sys-1"}""",
+        ).single() as ConversationEvent.SystemNote
+
+        assertEquals("scheduled_task_fire", note.tag)
+        assertEquals("Claude resuming /loop wakeup (May 20 5:12pm)", note.content)
+        assertEquals(1779289920878L, note.atMillis)
+    }
+
+    @Test
+    fun parsesCompactBoundarySystemEntry() {
+        val note = parser.parseLine(
+            """{"type":"system","subtype":"compact_boundary","content":"Conversation compacted","uuid":"sys-2"}""",
+        ).single() as ConversationEvent.SystemNote
+        assertEquals("compact_boundary", note.tag)
+        assertEquals("Conversation compacted", note.content)
+    }
+
+    @Test
+    fun synthesizesTurnDurationSystemEntry() {
+        val note = parser.parseLine(
+            """{"type":"system","subtype":"turn_duration","durationMs":88254,"messageCount":23,"uuid":"sys-3"}""",
+        ).single() as ConversationEvent.SystemNote
+        assertEquals("turn_duration", note.tag)
+        assertEquals("Turn took 88s across 23 messages", note.content)
+    }
+
+    @Test
+    fun dropsContentlessSystemEntry() {
+        val events = parser.parseLine(
+            """{"type":"system","subtype":"api_error","content":null,"uuid":"sys-4"}""",
+        )
+        assertTrue("contentless system entries should be dropped; got $events", events.isEmpty())
+    }
+
+    @Test
+    fun dropsThinkingContentBlockButKeepsText() {
+        // Issue #474: thinking blocks stay dropped (not rendered as SystemNotes)
+        // to avoid flooding the conversation with ~135 muted rows per transcript.
+        // Compressed thinking display is deferred to the #459 redesign.
+        val events = parser.parseLine(
+            """{"type":"assistant","uuid":"a-think","message":{"role":"assistant","content":[
+              {"type":"thinking","thinking":"Let me reconsider the approach.","signature":"abc"},
+              {"type":"text","text":"Here is my answer."}
+            ]}}""".trimIndent(),
+        )
+        assertTrue(
+            "thinking blocks should be dropped, not rendered; got $events",
+            events.none { it is ConversationEvent.SystemNote && it.tag == "thinking" },
+        )
+        val msg = events.filterIsInstance<ConversationEvent.Message>().single()
+        assertEquals("Here is my answer.", msg.text)
+    }
 }

@@ -28,7 +28,82 @@ public class ClaudeCodeParser : ConversationParser {
             )
         }
 
+        // Issue #474: Claude Code emits top-level `type:"system"` entries
+        // that the conversation pane previously dropped, so a structural
+        // notice the user could see in the CLI never reached the app.
+        // Real transcripts carry subtypes like `scheduled_task_fire`
+        // ("Claude resuming /loop wakeup …" — the maintainer's
+        // "Task Notification"-like block), `away_summary`, `compact_boundary`
+        // ("Conversation compacted"), `stop_hook_summary`, `informational`
+        // ("Unknown command: /nenew…"), `turn_duration`, `api_error`, and
+        // `local_command`. Surface them as muted [SystemNote]s tagged with
+        // the subtype so the renderer de-emphasizes them the same way it
+        // already does for `<system-reminder>` blocks (#176), instead of
+        // showing nothing.
+        if (json.stringOrNull("type") == "system") {
+            return parseSystemEntry(json, baseId, agent, atMillis)
+        }
+
         return emptyList()
+    }
+
+    /**
+     * Issue #474: turn a top-level Claude Code `type:"system"` entry into a
+     * [ConversationEvent.SystemNote]. The note [tag] is the entry's
+     * `subtype` (e.g. `scheduled_task_fire`, `compact_boundary`); the
+     * [content] is the human-readable `content` string when present, or a
+     * concise synthesized summary for the structured subtypes that carry
+     * their information in dedicated fields rather than a `content` string
+     * (`turn_duration`, `stop_hook_summary`). Entries with no presentable
+     * text (e.g. an `api_error` with `content:null`) are dropped.
+     */
+    private fun parseSystemEntry(
+        json: JSONObject,
+        baseId: String,
+        agent: AgentKind,
+        atMillis: Long?,
+    ): List<ConversationEvent> {
+        val subtype = json.stringOrNull("subtype") ?: "system"
+        val content = json.stringOrNull("content")
+            ?: synthesizeSystemContent(subtype, json)
+            ?: return emptyList()
+        return listOf(
+            ConversationEvent.SystemNote(
+                id = "$baseId:system",
+                agent = agent,
+                atMillis = atMillis,
+                tag = subtype,
+                content = content,
+            ),
+        )
+    }
+
+    /**
+     * For the structured `system` subtypes that don't carry a `content`
+     * string, build a short readable line from their dedicated fields.
+     * Returns null for subtypes with nothing presentable (so the caller
+     * drops them rather than rendering an empty note).
+     */
+    private fun synthesizeSystemContent(subtype: String, json: JSONObject): String? = when (subtype) {
+        "turn_duration" -> {
+            val durationMs = json.longOrNull("durationMs")
+            val messageCount = json.longOrNull("messageCount")
+            when {
+                durationMs != null && messageCount != null ->
+                    "Turn took ${durationMs / 1000}s across $messageCount messages"
+                durationMs != null -> "Turn took ${durationMs / 1000}s"
+                else -> null
+            }
+        }
+        "stop_hook_summary" -> {
+            val hooks = json.arrayOrNull("hookInfos")
+                ?.objects()
+                ?.mapNotNull { it.stringOrNull("command") ?: it.stringOrNull("promptText") }
+                ?.toList()
+                .orEmpty()
+            if (hooks.isEmpty()) "Stop hook fired" else "Stop hook: ${hooks.joinToString(", ")}"
+        }
+        else -> null
     }
 
     private fun parseContent(
@@ -66,6 +141,16 @@ public class ClaudeCodeParser : ConversationParser {
                             events += produced
                             textIndex += produced.size
                         }
+                        // Extended-thinking content blocks are intentionally
+                        // dropped here. A thinking-heavy transcript carries
+                        // ~135 of these blocks, so rendering one muted row per
+                        // block would flood the conversation against the
+                        // maintainer's "compress" direction (#459). Surfacing
+                        // thinking in a compressed/collapsed form is deferred to
+                        // the #459 conversation redesign and is out of scope for
+                        // #474 (these blocks were silently dropped before, not
+                        // shown raw, so they are not the unparsed block #474
+                        // asked about).
                         "tool_use" -> events += ConversationEvent.ToolCall(
                             id = part.stringOrNull("id") ?: "$baseId:tool:$index",
                             agent = agent,

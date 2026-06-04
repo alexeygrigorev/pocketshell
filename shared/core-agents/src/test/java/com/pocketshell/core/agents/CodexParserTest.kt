@@ -55,6 +55,17 @@ class CodexParserTest {
     }
 
     @Test
+    fun parsesIsoTimestampFromEnvelope() {
+        // Issue #474: real Codex rollout JSONL carries an ISO-8601
+        // `timestamp` on the envelope; it must reach the model's atMillis.
+        val user = parser.parseLine(
+            """{"type":"event_msg","payload":{"type":"user_message","message":"add a smoke test"},"timestamp":"2026-05-22T10:01:00Z"}""",
+        ).single() as ConversationEvent.Message
+        // 2026-05-22T10:01:00Z == 1779444060000 ms epoch.
+        assertEquals(1779444060000L, user.atMillis)
+    }
+
+    @Test
     fun parsesPayloadWrappedResponseItems() {
         val message = parser.parseLine(
             """{"type":"response_item","payload":{"type":"message","id":"m2","role":"assistant","content":[{"type":"output_text","text":"Done from payload"}]}}""",

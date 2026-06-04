@@ -641,6 +641,12 @@ public fun TmuxSessionScreen(
                             ConsolidatedTopChrome(
                                 hostLabel = host,
                                 sessionName = sessionName,
+                                // Issue #481: surface the detected agent/model
+                                // name as the header title when the visible
+                                // pane has a conversation (mockup shows
+                                // `claude-3-5-sonnet`), else fall back to the
+                                // session name.
+                                agentName = currentAgentConversation?.detection?.agent?.displayName,
                                 tabLabels = tabState.labels,
                                 selectedTabIndex = tabState.selectedIndex,
                                 onTabSelected = onTabSelected,
@@ -3581,6 +3587,11 @@ internal fun ConsolidatedTopChrome(
     onMore: () -> Unit,
     modifier: Modifier = Modifier,
     moreMenu: @Composable () -> Unit = {},
+    // Issue #481: when the visible pane has a detected agent, the header
+    // title is the agent/model name (e.g. `claude-3-5-sonnet`) per the
+    // maintainer's terminal mockup, instead of the tmux session name. Null
+    // (no agent / plain shell) falls back to [sessionName].
+    agentName: String? = null,
     tabLabels: List<String> = emptyList(),
     selectedTabIndex: Int = 0,
     onTabSelected: (Int) -> Unit = {},
@@ -3622,23 +3633,28 @@ internal fun ConsolidatedTopChrome(
         com.pocketshell.uikit.components.StatusDot(
             status = connectionStatus,
         )
-        Spacer(modifier = Modifier.width(6.dp))
-        ConnectionStatusPill(connectionStatus)
+        Spacer(modifier = Modifier.width(8.dp))
 
-        // Session crumb (current destination). Takes the remaining width
-        // so the kebab sits flush right.
+        // Issue #481: the title — the agent/model name when a conversation
+        // is detected (`claude-3-5-sonnet` in the mockup), otherwise the
+        // tmux session name. `weight(1f, fill = false)` hugs the status dot
+        // at the leading edge: the title measures at its natural width
+        // (ellipsising when it would overflow the remaining row space) while
+        // the unused slack inside its weighted slot pushes the segmented
+        // toggle + kebab flush right, matching the mockup.
         Text(
-            text = sessionName,
+            text = agentName ?: sessionName,
             color = PocketShellColors.Text,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 4.dp)
+                .weight(1f, fill = false)
+                .padding(end = 4.dp)
                 .testTag(TMUX_CONSOLIDATED_SESSION_LABEL_TAG),
         )
+        ConnectionStatusPill(connectionStatus)
 
         if (tabLabels.size > 1) {
             Spacer(modifier = Modifier.width(4.dp))
@@ -3698,50 +3714,27 @@ private fun ConsolidatedTabPill(
     onSelected: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val shape = RoundedCornerShape(10.dp)
-    Row(
-        modifier = modifier
-            .height(32.dp)
-            .background(color = PocketShellColors.SurfaceElev, shape = shape)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = shape)
-            .padding(2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        labels.forEachIndexed { index, label ->
-            val selected = index == selectedIndex
-            // Issue #216: index 0 is conventionally the Terminal segment.
-            // Apply [TMUX_TERMINAL_TAB_TAG] as a named alias for tests that
-            // previously asserted on the visible "Terminal" text (now
-            // suppressed in single-tab shell-only sessions); the per-index
-            // prefix tag stays as the generic per-segment hook.
-            val segmentTag = if (index == 0) {
+    // Issue #481: the inline Terminal/Conversation toggle now composes the
+    // shared [com.pocketshell.uikit.components.SegmentedToggle] so it reads
+    // identically to every other segmented control in the app (cyan-active,
+    // dark-on-cyan label). The per-segment test tags stay: index 0 is the
+    // Terminal segment ([TMUX_TERMINAL_TAB_TAG] — a named alias kept for
+    // tests that previously asserted on the visible "Terminal" text, now
+    // suppressed in single-tab shell-only sessions); other indices use the
+    // generic per-index prefix hook.
+    com.pocketshell.uikit.components.SegmentedToggle(
+        labels = labels,
+        selectedIndex = selectedIndex,
+        onSelected = onSelected,
+        modifier = modifier,
+        segmentTag = { index ->
+            if (index == 0) {
                 TMUX_TERMINAL_TAB_TAG
             } else {
                 TMUX_CONSOLIDATED_TAB_PILL_TAG_PREFIX + index
             }
-            Box(
-                modifier = Modifier
-                    .background(
-                        color = if (selected) PocketShellColors.Accent else PocketShellColors.SurfaceElev,
-                        shape = RoundedCornerShape(8.dp),
-                    )
-                    .clickable(
-                        role = androidx.compose.ui.semantics.Role.Tab,
-                        onClick = { onSelected(index) },
-                    )
-                    .padding(horizontal = 10.dp, vertical = 4.dp)
-                    .testTag(segmentTag),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = label,
-                    color = if (selected) PocketShellColors.Background else PocketShellColors.TextSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-                )
-            }
-        }
-    }
+        },
+    )
 }
 
 /**

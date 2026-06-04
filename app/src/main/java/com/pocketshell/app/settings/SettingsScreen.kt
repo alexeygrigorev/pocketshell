@@ -50,6 +50,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.assistant.AssistantProvider
+import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlin.math.roundToInt
 
@@ -57,17 +58,23 @@ import kotlin.math.roundToInt
  * Settings home — landing surface for app-level preferences introduced
  * in issue #112.
  *
- * Sections (top-to-bottom):
+ * Issue #486 regrouped + reordered the sections most-useful-first and
+ * routed every heading through the shared [SectionHeader] (#480) for
+ * consistent styling. Sections (top-to-bottom):
  *
- *  - **Terminal** — slider for default terminal font size (sp) and a
- *    switch for the "use tmux on attach when available" preference.
- *  - **Diagnostics** — single row linking to the existing
- *    `CrashReportsScreen`. The actual relocation of the Crashes top-bar
- *    affordance is left to a follow-up (so as not to clash with the
- *    parallel #110 tab work).
- *  - **About footer** — installed `versionName` / build code read from
- *    `PackageManager`, kept at the bottom so debug metadata stays
- *    discoverable without competing with primary Settings controls.
+ *  1. **Terminal** — default font-size slider, the "use tmux on attach"
+ *     switch, and the open-on-launch startup destination (the former
+ *     standalone "Startup" section is folded in here).
+ *  2. **Voice & dictation** — Whisper key, language, silence threshold,
+ *     AI costs entry.
+ *  3. **Assistant** — voice→command assistant LLM config.
+ *  4. **Usage** — quota panel entry, provider state, warn threshold.
+ *  5. **Workspace** — per-host workspace roots / tree-flat defaults.
+ *  6. **Hosts** — QR/file host import.
+ *  7. **Diagnostics** — crash reports.
+ *  8. **About footer** — installed `versionName` / build code read from
+ *     `PackageManager`, kept at the bottom so debug metadata stays
+ *     discoverable without competing with primary Settings controls.
  *
  * The screen draws its own chrome (no `Scaffold`) to stay consistent
  * with the rest of the app's hand-rolled bars (`HostsAppBar`,
@@ -137,31 +144,20 @@ fun SettingsScreen(
             contentPadding = PaddingValues(vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
+            // Settings are ordered most-useful-first (issue #486):
+            // Terminal (incl. startup) → Voice → Assistant → Usage →
+            // Workspace → Hosts → Diagnostics → About. Every section uses
+            // the shared SectionHeader (#480) via SectionLabel for
+            // consistent styling.
             item {
                 TerminalSection(
                     fontSizeSp = settings.terminalFontSizeSp,
                     onFontSizeChange = viewModel::setTerminalFontSizeSp,
                     tmuxOnAttach = settings.tmuxOnAttachByDefault,
                     onTmuxOnAttachChange = viewModel::setTmuxOnAttachByDefault,
-                )
-            }
-            item {
-                HostImportSection(
-                    onScanQr = onScanHostImport,
-                    onChooseFile = { hostImportFilePicker.launch("*/*") },
-                )
-            }
-            item {
-                StartupSection(
                     hosts = hosts,
                     selectedHostId = settings.defaultHostId,
                     onSelectDefaultHost = viewModel::setDefaultHostId,
-                )
-            }
-            item {
-                WorkspaceRootsSection(
-                    hosts = hosts,
-                    onPickHost = onOpenWatchedFoldersForHost,
                 )
             }
             item {
@@ -195,6 +191,18 @@ fun SettingsScreen(
                 )
             }
             item {
+                WorkspaceRootsSection(
+                    hosts = hosts,
+                    onPickHost = onOpenWatchedFoldersForHost,
+                )
+            }
+            item {
+                HostImportSection(
+                    onScanQr = onScanHostImport,
+                    onChooseFile = { hostImportFilePicker.launch("*/*") },
+                )
+            }
+            item {
                 DiagnosticsSection(onOpenCrashReports = onOpenCrashReports)
             }
             item {
@@ -212,7 +220,7 @@ private fun HostImportSection(
     var showImportDialog by remember { mutableStateOf(false) }
 
     Column {
-        SectionLabel("Host import")
+        SectionLabel("Hosts")
         SectionCard {
             Row(
                 modifier = Modifier
@@ -330,27 +338,23 @@ private fun SettingsAppBar(onBack: () -> Unit) {
 /**
  * Section label rendered above each [SectionCard].
  *
- * Issue #157 polish item 1: prior to this issue the label used 11 sp
- * `TextMuted` (the "labelSmall" tier from `docs/design-system.md` §2)
- * which made consecutive sections read as one continuous stack on a
- * Pixel 7 viewport — the 2026-05-27 UX audit specifically flagged that
- * Appearance / Terminal / Voice / Usage / Diagnostics had "no dividers
- * or section cards" visually separating them. The fix here is twofold:
+ * Issue #486 polish: every Settings section now routes its heading
+ * through the shared [SectionHeader] (#480) so the section vocabulary is
+ * identical across surfaces (Hosts / Sessions / Settings). This replaces
+ * the old hand-rolled `Text` heading and keeps the per-section behaviour
+ * the screen relies on:
  *
- *  - Bump the label to 12 sp `TextSecondary` so the section name reads
- *    as a heading rather than a caption (still under the `titleMedium`
- *    16 sp bar so it doesn't compete with body content inside the
- *    card).
- *  - Render a 1 dp `BorderSoft` divider above the label whenever
- *    [includeTopDivider] is true. The host screen passes `false` for
- *    the very first section so the divider only ever appears BETWEEN
- *    sections and never above the top of the list. The divider colour
- *    matches the card border (`BorderSoft`) so the eye reads
- *    "card-edge → gap → next card-edge" rather than introducing a new
- *    visual token.
+ *  - A 1 dp `BorderSoft` divider above the heading whenever
+ *    [includeTopDivider] is true. The first section passes `false` so
+ *    the divider only ever appears BETWEEN sections, never above the top
+ *    of the list. The divider colour matches the card border
+ *    (`BorderSoft`) so the eye reads "card-edge → gap → next card-edge".
+ *  - The stable `settings:section-label:*` test tag carried by the
+ *    heading so existing instrumentation can still target it.
  *
- * Padding mirrors the previous values (22 dp gutter, 8 dp bottom) so
- * the rest of the screen layout doesn't shift.
+ * The shared header owns the label styling (uppercased `labelSmall`
+ * SemiBold on the muted token) and the Slice 0 spacing/density tokens, so
+ * spacing stays consistent with the rest of the app.
  */
 @Composable
 private fun SectionLabel(text: String, includeTopDivider: Boolean = true) {
@@ -365,14 +369,10 @@ private fun SectionLabel(text: String, includeTopDivider: Boolean = true) {
             )
             Spacer(modifier = Modifier.height(12.dp))
         }
-        Text(
-            text = text.uppercase(),
-            color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.8.sp,
+        SectionHeader(
+            label = text,
             modifier = Modifier
-                .padding(start = 22.dp, end = 22.dp, bottom = 8.dp)
+                .padding(horizontal = 10.dp)
                 .testTag(sectionLabelTestTag(text)),
         )
     }
@@ -423,13 +423,29 @@ private fun RadioMark(selected: Boolean) {
     }
 }
 
+/**
+ * Terminal section — issue #486 folds the former standalone "Startup"
+ * section in here so the terminal/startup knobs live in one card:
+ *
+ *  - **Default font size** slider (sp).
+ *  - **Use tmux when available** switch.
+ *  - **Open on launch** startup-destination radio group (was the
+ *    `StartupSection`, issue #305). Exactly one saved host can be the
+ *    launch default, or "Host list" clears it. The launch resolver still
+ *    validates the host/key before routing, so a deleted host lands back
+ *    on the host list.
+ */
 @Composable
 private fun TerminalSection(
     fontSizeSp: Float,
     onFontSizeChange: (Float) -> Unit,
     tmuxOnAttach: Boolean,
     onTmuxOnAttachChange: (Boolean) -> Unit,
+    hosts: List<com.pocketshell.core.storage.entity.HostEntity>,
+    selectedHostId: Long?,
+    onSelectDefaultHost: (Long?) -> Unit,
 ) {
+    val selectedExists = selectedHostId != null && hosts.any { it.id == selectedHostId }
     Column {
         // First section in the list — no divider above the label.
         SectionLabel("Terminal", includeTopDivider = false)
@@ -498,27 +514,10 @@ private fun TerminalSection(
                     modifier = Modifier.testTag(TMUX_SWITCH_TAG),
                 )
             }
-        }
-    }
-}
 
-/**
- * Issue #305: startup destination preference. Exactly one saved host
- * can be selected as the launch default, or the selection can be
- * cleared with the "Host list" row. The actual launch resolver still
- * validates that the host and key exist before routing, so a deleted
- * host gracefully lands back on the host list.
- */
-@Composable
-private fun StartupSection(
-    hosts: List<com.pocketshell.core.storage.entity.HostEntity>,
-    selectedHostId: Long?,
-    onSelectDefaultHost: (Long?) -> Unit,
-) {
-    val selectedExists = selectedHostId != null && hosts.any { it.id == selectedHostId }
-    Column {
-        SectionLabel("Startup")
-        SectionCard {
+            // -- Startup: open-on-launch destination (folded in from the
+            //    former standalone "Startup" section, issue #486) --------
+            Spacer(modifier = Modifier.height(16.dp))
             Text(
                 text = "Open on launch",
                 color = PocketShellColors.Text,
@@ -635,7 +634,7 @@ private fun VoiceSection(
     var showKeyDialog by remember { mutableStateOf(false) }
 
     Column {
-        SectionLabel("Voice")
+        SectionLabel("Voice & dictation")
         SectionCard {
             // -- API key row --------------------------------------------
             Text(
@@ -1423,7 +1422,7 @@ private fun WorkspaceRootsSection(
     onPickHost: (Long, String) -> Unit,
 ) {
     Column {
-        SectionLabel("Workspace roots")
+        SectionLabel("Workspace")
         SectionCard {
             Text(
                 text = "Per-host workspace roots",

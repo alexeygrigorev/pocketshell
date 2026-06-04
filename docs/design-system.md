@@ -4,6 +4,11 @@ Locked design targets for PocketShell. Every future UX issue (#152–#157, #160,
 …) should reference this document by section number, and every new UI surface
 should reach for the tokens defined here rather than invent values.
 
+**This document is the authoritative design-system spec** (#461/#472). When a
+token value here and a `.dp`/`.sp`/colour literal in code disagree, this spec
+plus the codified token objects in `shared/ui-kit/.../theme/` win — fix the
+literal, don't fork the spec.
+
 This document is the **spec**. The **code** lives in `shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/`:
 
 - [`Color.kt`](../shared/ui-kit/src/main/java/com/pocketshell/uikit/theme/Color.kt) — colour tokens (§1)
@@ -119,32 +124,68 @@ today; JetBrains Mono once bundled).
 | `labelSmall` | 11 sp | Medium (500) | Captions, section labels, timestamps, breadcrumb | Used for de-emphasis |
 | *Monospace* | 12 sp | Normal (400) | Terminal viewport, inline code, command chips | Fixed-width; user-scalable |
 
+**Dense + mono rungs (Codified, #472 — `PocketShellType` in `Type.kt`).** Three
+extra rungs for compact dev-tool rows and terminal-adjacent UI (§7 Δ7/Δ8). They
+are **standalone `TextStyle` constants**, deliberately *not* Material `Typography`
+slots — overriding a previously-default M3 slot would silently restyle every
+component reading `MaterialTheme.typography.*` for it. Call sites opt in
+explicitly (`PocketShellType.bodyMono`):
+
+| Rung | Size / Weight | Family | Line-height | Usage |
+|------|---------------|--------|-------------|-------|
+| `PocketShellType.bodyDense` | 13 sp / Normal | sans | ~1.35× (18 sp) | dense list/tree rows, conversation lines, settings rows — promotes the de-facto 13sp literal |
+| `PocketShellType.bodyMono` | 13 sp / Normal | mono | ~1.4× (18 sp) | host subtitles, paths, command chips, tmux names, tool-call previews |
+| `PocketShellType.labelMono` | 11 sp / Normal | mono | ~1.3× (14 sp) | inline counts/IDs in a mono context |
+
+Mono rungs use the system monospace family (`JetBrainsMonoFamily`); bundling
+JetBrains Mono is deferred (#461 decision #5).
+
 Line-height: Material 3 defaults for chrome; terminal uses 1.65× multiplier
 for readability.
 
 Only the four UI slots above are overridden in `PocketShellTypography`;
 everything else inherits Material 3's defaults so unanticipated components
-fail loud (with default sizing) rather than silently mis-render.
+fail loud (with default sizing) rather than silently mis-render. The dense/mono
+rungs live outside `PocketShellTypography` for the same fail-loud reason.
 
 ---
 
 ## 3. Spacing scale
 
-**8 dp grid.** All padding, margin, and gap values are multiples of 8 dp,
-with a single 4 dp half-step (`xs`) for micro-gaps.
+**4 dp grid (Codified, #472 — `PocketShellSpacing` in `Spacing.kt`).** All
+padding, margin, and gap values land on this 4 dp grid (shared by Linear and
+Material 3). The defaults favour the tighter rungs for dev-tool density (§7 Δ6).
 
 | Token | Value | Usage |
 |-------|-------|-------|
 | `xs` | 4 dp | Micro-gaps (icon-to-label, breadcrumb separators) |
 | `sm` | 8 dp | Standard gap (chip-to-chip, row-to-row padding), key bar gap |
-| `md` | 12 dp | Card padding (internal top/bottom + sides), section divider height |
+| `md` | 12 dp | Card internal padding, row vertical padding (the compact default), section divider height |
 | `lg` | 16 dp | Large padding (app bar, sheet header, host-card internal), modal dialog padding |
 | `xl` | 20 dp | Extra-large spacing (section label top margin, breadcrumb padding) |
-| `2xl` | 24 dp | Screen-level padding, largest list-item spacing |
+| `xxl` | 24 dp | Screen-level padding, largest list-item spacing |
 
-Spacing tokens are not (yet) codified in code — call sites use the
-`.dp` literal directly. If a value above this list appears anywhere
-outside terminal-viewport rendering, it's a bug or a scope creep.
+If a padding/gap/margin value off this grid appears anywhere outside
+terminal-viewport rendering, it's a bug or a scope creep.
+
+### 3.1 Density (Codified, #472 — `PocketShellDensity` in `Spacing.kt`)
+
+The compact knob (§7 Δ6). **Visual density is kept separate from the touch
+floor:** `rowPadV`/`chipPadV` shrink the *paint* so more rows fit per screen,
+while `tapTargetMin` (48 dp) is the a11y hit-area floor every interactive element
+must still honour (`Modifier.sizeIn` / `minimumInteractiveComponentSize`).
+Shrinking the paint never shrinks the hit area below 48 dp.
+
+| Token | Value | Usage |
+|-------|-------|-------|
+| `rowMinHeight` | 44 dp | List / tree row minimum height (down from M3's 56–72) |
+| `rowPadV` | 8 dp | Row vertical padding (visual density, not the touch floor) |
+| `rowPadH` | 12 dp | Row horizontal padding |
+| `chipPadV` | 6 dp | Chip vertical padding |
+| `chipPadH` | 10 dp | Chip horizontal padding |
+| `sectionGap` | 8 dp | Gap between sections / stacked groups |
+| `treeIndent` | 16 dp | Indent per workspace-tree nesting level |
+| `tapTargetMin` | 48 dp | a11y touch-target floor |
 
 ---
 
@@ -302,7 +343,7 @@ legitimate refreshes update rows in place.
 
 ---
 
-## 7. Material 3 deltas (the 5 justified divergences)
+## 7. Material 3 deltas (the 8 justified divergences)
 
 Default position: PocketShell is a **Material 3 dialect**. Divergence is
 always explicit and always justified.
@@ -314,8 +355,11 @@ always explicit and always justified.
 | **Δ3** | **No drop-shadows except FAB; hairline borders for surface separation** | Mobile battery + visual restraint ("very busy, very crowded" → favour subtraction). M3 defaults to elevation shadows on cards; we use hairline 1 dp `BorderSoft` borders instead. | Cards, sheets, key bar. Cleaner, faster rendering, less visual clutter. The FAB shadow (`0 12 px 32 px Accent @ 40 %`) is allowed because the FAB is the primary action. |
 | **Δ4** | **Terminal viewport background (`#010409`) is blacker than app background (`#0D1117`)** | Preserves the xterm-style dark terminal on a slightly-lighter UI background. Keeps the terminal layer visually separable from the surrounding chrome. M3 would collapse these to a single tone. | `TermBg` token + custom styles on `TerminalSurface`. Users immediately see "terminal content vs UI chrome" without cognitive load. |
 | **Δ5** | **Typography scale 11 – 20 sp only** (no `displayLarge` / `headlineMedium`) | Mobile-first design. Large display sizes waste viewport. Restrained 4-tier scale matches the "reduce clutter" directive. | All text sizes defined in `PocketShellTypography`. This is a scope reduction, not a content change. |
+| **Δ6** | **Compact density** (`PocketShellDensity`): list rows ~44 dp, 8 dp row / 6 dp chip vertical padding, tight section gaps | Dev-tool density — the most-requested change (#454/#455/#459 all ask for compact). Roughly M3 density −2…−3. | Rows/chips/trees. Visual density stays separate from the 48 dp touch floor (§3.1). |
+| **Δ7** | **Mono as a real type role** (`PocketShellType.bodyMono`/`labelMono`) instead of a stray `FontFamily` | Terminal-adjacent UI (paths, host subtitles, command chips, tmux names, tool-call previews) should read consistently as code, like VS Code/Warp treat mono as a first-class UI role. | Standalone `TextStyle` constants; system monospace until JetBrains Mono is bundled (deferred). |
+| **Δ8** | **13 sp `bodyDense` rung** between `labelSmall`(11) and `bodyMedium`(14) | 13 sp is already the 2nd most-used size in the app (×87) — a de-facto token. Promote it instead of fighting it. | Dense list/tree rows, conversation lines, settings rows. Standalone `TextStyle`, not an M3 slot. |
 
-All five deltas are justified by either (a) PocketShell's mobile-terminal
+All eight deltas are justified by either (a) PocketShell's mobile-terminal
 context, (b) existing implementation in the CSS mockups and codebase, or
 (c) explicit design principles in [`decisions.md`](decisions.md).
 
@@ -435,10 +479,17 @@ viewport.
 | Surface | State | Notes |
 |---------|-------|-------|
 | `Color.kt` | Codified | Surfaces, text, accent, semantic, borders, terminal. |
-| `Type.kt` | Codified | 4 UI slots + monospace alias. |
+| ColorScheme slots | Partial (#472 Slice 0) | Slice 0 fills only the provably-inert `inverseSurface`/`inverseOnSurface`/`inversePrimary` trio (no `Snackbar`/`NavigationBar` is instantiated, so nothing reads them today) → zero rendered-pixel change. **Deferred to Slice 1:** `surfaceContainer*` (read by all `DropdownMenu` call sites via `MenuTokens.ContainerColor`, the unchecked `Switch` track, and the M3 `Card` default) and `secondaryContainer`/`onSecondaryContainer` (M3 selected-chip/segmented-button/drawer state). Completing those onto the dev-tool palette is an *intended* visual change (menus shift `#211F26`→`#1C2129`, switch track + cards likewise), so it lands in Slice 1 with an emulator visual audit + maintainer sign-off — not silently inside the zero-change Slice 0. |
+| Semantic roles | Codified (#472) | `PocketShellSemanticColors` + `LocalPocketShellSemantic` carry the non-M3 roles (status `active/idle/connecting/error/attention`, `agentAccent`, `accentSoft/accent/accentDim`), sourced from the same palette constants screens use today. |
+| `Type.kt` | Codified | 4 UI slots + monospace alias. **+ `PocketShellType` dense/mono rungs (#472):** `bodyDense`(13) / `bodyMono`(13, mono) / `labelMono`(11, mono), standalone `TextStyle`s (not M3 slots). |
 | `Shape.kt` | Codified | 14 / 8 / 20 / 28 dp + `FabShape`. |
-| `Motion.kt` | Codified (this issue) | `MotionDurations` (`fast`, `normal`, `slow`, `idlePulse`, `blink`) + `MotionEasing` (`standard`, `linear`, `stepsTwo`). |
-| Spacing | **Not yet codified.** | Used as `.dp` literals against the §3 ladder. Codifying as an object is a follow-up. |
+| `Motion.kt` | Codified | `MotionDurations` (`fast`, `normal`, `slow`, `idlePulse`, `blink`) + `MotionEasing` (`standard`, `linear`, `stepsTwo`). |
+| Spacing | **Codified (#472).** | `PocketShellSpacing` (`xs`/`sm`/`md`/`lg`/`xl`/`xxl`) on the 4 dp grid (§3). |
+| Density | **Codified (#472).** | `PocketShellDensity` (`rowMinHeight`/`rowPadV`/`rowPadH`/`chipPadV`/`chipPadH`/`sectionGap`/`treeIndent`/`tapTargetMin`) — the compact knob (§3.1, §7 Δ6). |
+
+`UnifiedComposer` (the shared compose/send surface, #196) is re-sourced off these
+tokens as of #472 (Slice 0) — zero visual change, proven by a before/after
+emulator screenshot diff of the composer body (0 differing pixels).
 
 Migrating existing screens onto the codified tokens is **per-surface
 follow-up work**, tracked as small issues against the consumer screens

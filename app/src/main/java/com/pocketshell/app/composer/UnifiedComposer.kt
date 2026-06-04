@@ -15,6 +15,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -41,7 +42,11 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Issue #196: single source of truth for PocketShell's composer surface.
@@ -127,20 +132,25 @@ internal fun ComposerDraftField(
     } else {
         Modifier.heightIn(min = minHeight)
     }
+    // 12dp draft-box radius — the same value as the `md` spacing rung; reused as a
+    // local Shape so the box corner stays on the token grid (no shape-scale token
+    // exists between small(8) and medium(14)). 14dp vertical padding is off the
+    // 4dp grid, so it stays a literal until the composer is re-spec'd in #453.
+    val draftShape = RoundedCornerShape(PocketShellSpacing.md)
     Box(
         modifier = modifier
             .fillMaxWidth()
             .then(sizeModifier)
             .background(
-                color = PocketShellColors.SurfaceElev,
-                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = draftShape,
             )
             .border(
                 width = 1.dp,
-                color = PocketShellColors.Border,
-                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.outline,
+                shape = draftShape,
             )
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = PocketShellSpacing.lg, vertical = 14.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
         val fieldModifier = if (fieldTag != null) {
@@ -162,16 +172,18 @@ internal fun ComposerDraftField(
             singleLine = singleLine,
             modifier = editableModifier,
             textStyle = TextStyle(
-                color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontSize = MaterialTheme.typography.bodyMedium.fontSize, // 14sp body rung
             ),
-            cursorBrush = SolidColor(PocketShellColors.Accent),
+            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
             decorationBox = { inner ->
                 if (value.isEmpty()) {
                     Text(
+                        // Placeholder uses the muted text token (no M3 slot maps to
+                        // TextMuted; it stays a centralized raw token).
                         text = placeholder,
                         color = PocketShellColors.TextMuted,
-                        fontSize = 14.sp,
+                        fontSize = MaterialTheme.typography.bodyMedium.fontSize, // 14sp
                     )
                 }
                 inner()
@@ -201,10 +213,10 @@ internal fun ComposerSendButton(
         modifier = modifier,
         enabled = enabled,
         containerColor = Color.Transparent,
-        contentColor = PocketShellColors.Accent,
+        contentColor = MaterialTheme.colorScheme.primary,
         disabledContentColor = PocketShellColors.TextMuted,
-        borderColor = PocketShellColors.Accent,
-        disabledBorderColor = PocketShellColors.Border,
+        borderColor = MaterialTheme.colorScheme.primary,
+        disabledBorderColor = MaterialTheme.colorScheme.outline,
     )
 }
 
@@ -227,11 +239,11 @@ internal fun ComposerSendEnterButton(
         onClick = onClick,
         modifier = modifier,
         enabled = enabled,
-        containerColor = PocketShellColors.Accent,
-        contentColor = PocketShellColors.OnAccent,
+        containerColor = MaterialTheme.colorScheme.primary,
+        contentColor = MaterialTheme.colorScheme.onPrimary,
         disabledContentColor = PocketShellColors.TextMuted,
-        borderColor = PocketShellColors.Accent,
-        disabledBorderColor = PocketShellColors.Border,
+        borderColor = MaterialTheme.colorScheme.primary,
+        disabledBorderColor = MaterialTheme.colorScheme.outline,
     )
 }
 
@@ -263,17 +275,20 @@ internal fun ComposerTooltipButton(
     disabledBorderColor: Color = PocketShellColors.Border,
 ) {
     var showTooltip by remember { mutableStateOf(false) }
+    // 10dp button radius is off the 4dp grid (a #153 affordance), so it stays a
+    // literal until #453 re-specs the composer buttons.
+    val buttonShape = RoundedCornerShape(10.dp)
     Box(
         modifier = modifier
-            .height(44.dp)
+            .height(PocketShellDensity.rowMinHeight) // 44dp
             .background(
                 color = if (enabled) containerColor else Color.Transparent,
-                shape = RoundedCornerShape(10.dp),
+                shape = buttonShape,
             )
             .border(
                 width = 1.dp,
                 color = if (enabled) borderColor else disabledBorderColor,
-                shape = RoundedCornerShape(10.dp),
+                shape = buttonShape,
             )
             .combinedClickable(
                 enabled = enabled,
@@ -286,13 +301,15 @@ internal fun ComposerTooltipButton(
         Text(
             text = label,
             color = if (enabled) contentColor else disabledContentColor,
-            fontSize = 13.sp,
+            // 13sp dense rung; weight stays SemiBold (the composer button's own
+            // emphasis) rather than bodyDense's Normal.
+            fontSize = PocketShellType.bodyDense.fontSize,
             fontWeight = FontWeight.SemiBold,
             // Horizontal breathing room so a wrap-content Send button
             // (the agent pane's single primary) never clips its label.
             // The terminal Send buttons use `weight(1f)`, so the centred
             // label there is unaffected.
-            modifier = Modifier.padding(horizontal = 16.dp),
+            modifier = Modifier.padding(horizontal = PocketShellSpacing.lg),
         )
 
         if (showTooltip) {
@@ -306,20 +323,25 @@ internal fun ComposerTooltipButton(
                 ),
             ) {
                 Surface(
-                    color = PocketShellColors.SurfaceElev,
-                    contentColor = PocketShellColors.Text,
-                    shape = RoundedCornerShape(8.dp),
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    shape = MaterialTheme.shapes.small, // 8dp chip/pill radius
                     border = androidx.compose.foundation.BorderStroke(
                         width = 1.dp,
-                        color = PocketShellColors.Border,
+                        color = MaterialTheme.colorScheme.outline,
                     ),
                     modifier = Modifier.testTag(composerSendTooltipTestTag(tooltipLabel)),
                 ) {
                     Text(
+                        // 12sp tooltip text is off the type scale (a terminal-
+                        // adjacent micro size); kept literal until #453.
                         text = tooltipLabel,
-                        color = PocketShellColors.Text,
+                        color = MaterialTheme.colorScheme.onSurface,
                         fontSize = 12.sp,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.padding(
+                            horizontal = PocketShellSpacing.md,
+                            vertical = PocketShellSpacing.sm,
+                        ),
                     )
                 }
             }
@@ -391,16 +413,17 @@ internal fun AgentComposerSurface(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(top = 8.dp),
+            .padding(top = PocketShellSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(PocketShellSpacing.sm),
     ) {
         ComposerDraftField(
             value = value,
             onValueChange = onValueChange,
             placeholder = placeholder,
             fieldTag = inputFieldTag,
-            minHeight = 48.dp,
+            // Single-row agent draft: keep the field on the 48dp touch floor.
+            minHeight = PocketShellDensity.tapTargetMin,
             singleLine = true,
             modifier = Modifier.weight(1f),
         )
@@ -423,19 +446,21 @@ internal fun UnsentPromptBanner(
     modifier: Modifier = Modifier,
 ) {
     if (!visible) return
+    // accentSoft fill + accent text = the §3.1 accent trio (hint banner).
+    val semantic = LocalPocketShellSemantic.current
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(top = 8.dp)
+            .padding(top = PocketShellSpacing.sm)
             .background(
-                color = PocketShellColors.AccentSoft,
-                shape = RoundedCornerShape(8.dp),
+                color = semantic.accentSoft,
+                shape = MaterialTheme.shapes.small, // 8dp
             )
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = PocketShellSpacing.md, vertical = PocketShellSpacing.sm),
     ) {
         Text(
             text = "Prompt saved. Reconnect, then send it when ready.",
-            color = PocketShellColors.Accent,
+            color = semantic.accent,
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,
         )

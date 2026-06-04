@@ -77,3 +77,58 @@ val PocketShellTypography: Typography = Typography(
         fontSize = 11.sp,
     ),
 )
+
+/**
+ * The new dense/mono type rungs (#461 §3.2 / Δ7 / Δ8).
+ *
+ * **Deliberately NOT M3 `Typography` slots.** Overriding a previously-default
+ * Material slot (e.g. `titleSmall`, `bodyLarge`, `labelMedium`) would silently
+ * restyle every component that already reads `MaterialTheme.typography.*` for
+ * that slot — including the app-bar title and section labels, which would flip
+ * to monospace. Slice 0 must be a no-op visually, so these rungs ship as
+ * standalone [TextStyle] constants that call sites opt into explicitly:
+ *
+ * ```kotlin
+ * Text(text = path, style = PocketShellType.bodyMono)
+ * ```
+ *
+ * Font bundling stays deferred (#461 decision #5): the mono rungs use the system
+ * monospace family via [JetBrainsMonoFamily].
+ */
+object PocketShellType {
+    /**
+     * 13sp dense body (Δ8) — the canonical dense-row size between `labelSmall`(11)
+     * and `bodyMedium`(14). Promotes the de-facto 13sp literal (the 2nd most-used
+     * size in the app) into a real rung: dense list/tree rows, conversation lines,
+     * settings rows.
+     */
+    val bodyDense: TextStyle = TextStyle(
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Normal,
+        fontSize = 13.sp,
+        lineHeight = 18.sp, // ~1.35× of 13sp
+    )
+
+    /**
+     * 13sp mono body (Δ7) — terminal-adjacent UI: host subtitles, paths, command
+     * chips, tmux names, tool-call previews. System monospace via
+     * [JetBrainsMonoFamily] (bundling deferred).
+     */
+    val bodyMono: TextStyle = TextStyle(
+        fontFamily = JetBrainsMonoFamily,
+        fontWeight = FontWeight.Normal,
+        fontSize = 13.sp,
+        lineHeight = 18.sp, // ~1.4× of 13sp
+    )
+
+    /**
+     * 11sp mono label (Δ7) — inline counts/IDs in a mono context. System
+     * monospace via [JetBrainsMonoFamily] (bundling deferred).
+     */
+    val labelMono: TextStyle = TextStyle(
+        fontFamily = JetBrainsMonoFamily,
+        fontWeight = FontWeight.Normal,
+        fontSize = 11.sp,
+        lineHeight = 14.sp, // ~1.3× of 11sp
+    )
+}

@@ -13,6 +13,8 @@ import com.pocketshell.app.bootstrap.PocketshellDaemonStatus
 import com.pocketshell.app.bootstrap.TmuxStatus
 import com.pocketshell.app.bootstrap.ToolStatus
 import com.pocketshell.app.bootstrap.cliUpdateFailureMessage
+import com.pocketshell.app.notifications.DefaultUpdateNotifier
+import com.pocketshell.app.notifications.UpdateNotifier
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -135,6 +137,12 @@ class HostListViewModel internal constructor(
         },
     ),
     private val sessionOpener: HostSessionOpener = HostSessionOpener { _, _, _ -> null },
+    // Issue #502: posts a local "new version available" notification when
+    // the foreground [releaseChecker] detects a strictly-newer release.
+    // De-dupes per version so the user isn't re-notified on every cold
+    // launch / pull-to-refresh. Defaulted to the production notifier so
+    // unit tests can inject a recording fake.
+    private val updateNotifier: UpdateNotifier = DefaultUpdateNotifier(applicationContext),
 ) : ViewModel() {
 
     @Inject
@@ -746,7 +754,17 @@ class HostListViewModel internal constructor(
                 _updateAvailable.value = null
                 return@launch
             }
-            _updateAvailable.value = releaseChecker.check(currentVersion)
+            val release = releaseChecker.check(currentVersion)
+            _updateAvailable.value = release
+            // Issue #502: surface the newer release as a local notification
+            // so the user notices it even when they've skipped the host
+            // list (the [UpdateBanner] home) and gone straight into a
+            // session. The notifier de-dupes per version, so re-running the
+            // check (cold launch / pull-to-refresh) never re-spams the same
+            // release.
+            if (release != null) {
+                updateNotifier.notifyUpdateAvailable(release)
+            }
         }
     }
 

@@ -9,6 +9,7 @@ import androidx.lifecycle.ViewModelStore
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.bootstrap.HostBootstrapper
+import com.pocketshell.app.notifications.UpdateNotifier
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -129,6 +130,7 @@ class HostListViewModelTest {
         activeClients: ActiveTmuxClients = ActiveTmuxClients(),
         settingsRepository: SettingsRepository = newSettingsRepository(),
         sessionOpener: HostSessionOpener = HostSessionOpener { _, _, _ -> null },
+        updateNotifier: UpdateNotifier = RecordingUpdateNotifier(),
     ): HostListViewModel =
         HostListViewModel(
             applicationContext = applicationContext,
@@ -140,7 +142,23 @@ class HostListViewModelTest {
             activeClients = activeClients,
             settingsRepository = settingsRepository,
             sessionOpener = sessionOpener,
+            updateNotifier = updateNotifier,
         ).also { viewModelStore.put("HostListViewModel-${nextViewModelKey++}", it) }
+
+    /**
+     * Records every [ReleaseInfo] the ViewModel asks to notify about so a
+     * test can assert detection triggers exactly one notify (issue #502).
+     * Does NOT apply de-dupe itself — de-dupe is the production
+     * [com.pocketshell.app.notifications.DefaultUpdateNotifier]'s job and
+     * is covered by [UpdateNotifierTest]. This double captures the raw
+     * ViewModel→notifier call so the per-detection trigger is observable.
+     */
+    private class RecordingUpdateNotifier : UpdateNotifier {
+        val notified = mutableListOf<ReleaseInfo>()
+        override fun notifyUpdateAvailable(info: ReleaseInfo) {
+            notified.add(info)
+        }
+    }
 
     private fun neverOpeningSession(): HostSessionOpener =
         HostSessionOpener { _, _, _ -> kotlinx.coroutines.awaitCancellation() }
@@ -290,6 +308,40 @@ class HostListViewModelTest {
         // the launch synchronously, so the state is settled by here.
         assertEquals(1, fake.callCount)
         assertEquals(info, viewModel.updateAvailable.value)
+    }
+
+    @Test
+    fun updateDetection_triggersNotification_withTheDetectedRelease() = runTest {
+        // Issue #502: when the foreground checker finds a newer release,
+        // the ViewModel must hand it to the update notifier so a local
+        // notification can be posted — the host-list banner alone is
+        // missed by users who skip straight to a session.
+        val info = ReleaseInfo(
+            tagName = "v0.6.0",
+            htmlUrl = "https://github.com/alexeygrigorev/pocketshell/releases/tag/v0.6.0",
+            apkUrl = "https://example.com/pocketshell-0.6.0-debug.apk",
+        )
+        val notifier = RecordingUpdateNotifier()
+        val viewModel = newViewModel(
+            releaseChecker = FakeReleaseChecker(result = info),
+            updateNotifier = notifier,
+        )
+
+        assertEquals(info, viewModel.updateAvailable.value)
+        assertEquals(listOf(info), notifier.notified)
+    }
+
+    @Test
+    fun updateDetection_doesNotNotify_whenNoNewerRelease() = runTest {
+        // Issue #502: no newer release → nothing to notify about.
+        val notifier = RecordingUpdateNotifier()
+        val viewModel = newViewModel(
+            releaseChecker = FakeReleaseChecker(result = null),
+            updateNotifier = notifier,
+        )
+
+        assertNull(viewModel.updateAvailable.value)
+        assertTrue(notifier.notified.isEmpty())
     }
 
     @Test

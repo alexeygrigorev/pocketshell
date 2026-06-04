@@ -24,7 +24,6 @@ import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.HOST_LIST_CONTENT_TAG
 import com.pocketshell.app.hosts.SshKeyStorage
-import com.pocketshell.app.hosts.USAGE_DASHBOARD_STRIP_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_EMPTY_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_ERROR_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_LOADING_TAG
@@ -599,8 +598,12 @@ class EmulatorDockerSshSmokeTest {
         hostRowTag,
     ) + hostListUsageDiagnosticTags()
 
+    // Issue #483: the cross-host `usage:dashboard-strip` surface was
+    // removed from the host list (usage is now per-host on each card),
+    // so the "no Usage chrome before tapping the host" guard keys off the
+    // dismissible per-provider warning banners that still mount above the
+    // list.
     private fun hostListUsageDiagnosticTags(): List<String> = listOf(
-        USAGE_DASHBOARD_STRIP_TAG,
         usageBannerTagFor("claude"),
         usageBannerTagFor("codex"),
         usageBannerTagFor("github-copilot"),

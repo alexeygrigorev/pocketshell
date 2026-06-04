@@ -63,9 +63,16 @@ import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.SessionsDashboardViewModel
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.app.usage.formatResetRelative
+import com.pocketshell.app.usage.formatPercent
+import com.pocketshell.app.usage.thresholdAccentColor
+import com.pocketshell.app.usage.thresholdTextColor
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.model.HostSetupState
+import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
+import java.time.Instant
+import java.time.ZoneId
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlin.math.PI
@@ -175,10 +182,12 @@ fun HostListScreen(
     val importConflict by viewModel.importConflict.collectAsState()
     val recheckMessage by viewModel.recheckMessage.collectAsState()
     val setupStates by viewModel.setupStates.collectAsState()
-    // Issue #116 (usage-panel Fix B): per-card chip + cross-host strip.
+    // Issue #116 (usage-panel Fix B): per-card warning record in the kebab.
     val usageBadges by viewModel.usageBadges.collectAsState()
-    val usageDashboardRows by viewModel.usageDashboardRows.collectAsState()
-    val hasUsageInstalledHost by viewModel.hasUsageInstalledHost.collectAsState()
+    // Issue #483: per-host usage summary chip. Usage is server-tied, so it
+    // is surfaced on the host it comes from — the global cross-host strip
+    // that used to sit above the list has been removed.
+    val usageSummaries by viewModel.usageSummaries.collectAsState()
     // Issue #214: per-provider warning records + dismissed-this-session
     // set. The host list renders one banner per provider that warrants
     // a warning AND that the user hasn't dismissed for this app session.
@@ -390,10 +399,9 @@ fun HostListScreen(
                 val hasShareBanner = shareMessage != null
                 val hasRecheckBanner = recheckMessage != null
                 val hasUsageWarningBanners = activeUsageBanners.isNotEmpty() && onOpenUsage != null
-                val hasUsageStrip = hasUsageInstalledHost && onOpenUsage != null
                 val hasAnyNotice = hasUpdateBanner || hasUpdateMessageBanner ||
                     hasShareBanner || hasRecheckBanner ||
-                    hasUsageWarningBanners || hasUsageStrip
+                    hasUsageWarningBanners
                 if (hasAnyNotice) {
                     item(key = "notices") {
                         Column(
@@ -487,18 +495,13 @@ fun HostListScreen(
                                 }
                             }
 
-                            // Issue #116 (usage-panel Fix B): cross-host
-                            // usage strip. Gated on `hasUsageInstalledHost`
-                            // so a workspace with no pocketshell hosts
-                            // never renders an empty rail. Tapping routes
-                            // to `AppDestination.Usage`.
-                            if (hasUsageStrip) {
-                                com.pocketshell.app.usage.UsageDashboardStrip(
-                                    rows = usageDashboardRows,
-                                    onClick = onOpenUsage,
-                                    modifier = Modifier.testTag(USAGE_DASHBOARD_STRIP_TAG),
-                                )
-                            }
+                            // Issue #483: the cross-host usage strip that
+                            // used to sit here has been removed. Usage is
+                            // server-tied (it comes from the `pocketshell`
+                            // CLI on a specific host), so a global card
+                            // above the list was the wrong place — it is
+                            // now surfaced per-host on each host card via
+                            // [HostUsageChip] and the kebab "Usage" item.
                         }
                     }
                 }
@@ -525,10 +528,11 @@ fun HostListScreen(
                         // width so the `user@host:port` line can wrap at
                         // large font scales instead of truncating.
                         var menuOpen by remember(host.id) { mutableStateOf(false) }
-                        Box(
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
                             // Issue #120: derive the per-host setup state from
                             // the ViewModel's persisted-column projection.
@@ -536,18 +540,20 @@ fun HostListScreen(
                             // map (race-free fallback while the DAO emission
                             // catches up).
                             val setupState = setupStates[host.id] ?: HostSetupState.Unknown
-                            // Issue #155: the per-host usage record is
-                            // no longer rendered as an inline chip in the
-                            // primary status row — it would compete with
-                            // the setup-state badge for attention while
-                            // the cross-host Usage dashboard strip ABOVE
-                            // this list already surfaces blocked state.
-                            // Instead the record (when present) is
-                            // surfaced inside the kebab overflow menu so
-                            // a user who long-presses / taps the kebab
-                            // sees the per-host quota status alongside
-                            // Ports / Share / Re-check setup.
+                            // Issue #155: the per-host usage *warning* record
+                            // (blocked / near-limit) is surfaced inside the
+                            // kebab overflow menu so it doesn't compete with
+                            // the setup-state badge in the primary status row.
                             val usageRecord = usageBadges[host.id]
+                            // Issue #483: the at-a-glance per-host usage
+                            // summary (top provider % + soonest reset) that
+                            // used to live in the global cross-host strip
+                            // now renders as a compact chip on THIS host's
+                            // card, so usage reads as server-tied. Present
+                            // only when the host's latest snapshot reported
+                            // usage records; tapping it opens the Usage
+                            // detail for the same host.
+                            val usageSummary = usageSummaries[host.id]
                             // Issue #201: resolve the per-host status from
                             // the setup-probe state, the cross-host
                             // session aggregate, and the registered tmux
@@ -607,6 +613,18 @@ fun HostListScreen(
                                         onDismiss = { menuOpen = false },
                                         usageRecord = usageRecord,
                                         usageBadgeTestTag = HOST_USAGE_BADGE_TAG_PREFIX + host.id,
+                                        // Issue #483: discoverable, labelled
+                                        // per-host entry to the Usage detail.
+                                        // Only wired when the nav graph
+                                        // supplied a route (mirrors the
+                                        // banner / chip gate).
+                                        onOpenUsage = onOpenUsage?.let { route ->
+                                            {
+                                                menuOpen = false
+                                                route()
+                                            }
+                                        },
+                                        usageMenuItemTestTag = HOST_USAGE_MENU_ITEM_TAG_PREFIX + host.id,
                                         onOpenPorts = {
                                             menuOpen = false
                                             portPanelRequests.trySend(host.id)
@@ -629,6 +647,20 @@ fun HostListScreen(
                                     .fillMaxWidth()
                                     .testTag(HOST_ROW_TAG_PREFIX + host.id),
                             )
+
+                            // Issue #483: compact per-host usage chip. Tapping
+                            // it opens the Usage detail for this host (the
+                            // one-tap path the maintainer asked for, logically
+                            // tied to the server that runs `pocketshell`).
+                            if (usageSummary != null) {
+                                HostUsageChip(
+                                    summary = usageSummary,
+                                    onClick = onOpenUsage,
+                                    modifier = Modifier.testTag(
+                                        HOST_USAGE_CHIP_TAG_PREFIX + host.id,
+                                    ),
+                                )
+                            }
                         }
                     }
                 }
@@ -770,8 +802,9 @@ internal const val HOST_ROW_TAG_PREFIX = "host:row:"
 /**
  * Issue #418: stable test tag for the single compact "notices" block
  * that collapses the update / share / re-check / usage-warning banners
- * and the cross-host usage strip above the Hosts label, so they no
- * longer stack as separate full-gap LazyColumn items.
+ * above the Hosts label, so they no longer stack as separate full-gap
+ * LazyColumn items. Issue #483 removed the cross-host usage strip from
+ * this block — usage is now surfaced per-host on each host card.
  */
 internal const val HOST_LIST_NOTICES_TAG = "host-list:notices"
 
@@ -791,8 +824,20 @@ internal const val HOST_LIST_ADD_FAB_TAG = "host-list:add-fab"
  */
 internal const val HOST_LIST_EMPTY_STATE_TAG = "host-list:empty-state"
 
-/** Issue #116: stable test tag for the cross-host usage dashboard strip. */
-internal const val USAGE_DASHBOARD_STRIP_TAG = "usage:dashboard-strip"
+/**
+ * Issue #483: stable test-tag prefix for the per-host usage summary chip
+ * rendered under each host card. The full tag is
+ * `host:usage-chip:<hostId>`. The cross-host `usage:dashboard-strip`
+ * surface it replaced was removed in the same issue.
+ */
+const val HOST_USAGE_CHIP_TAG_PREFIX = "host:usage-chip:"
+
+/**
+ * Issue #483: stable test-tag prefix for the kebab "Usage" item that
+ * opens the Usage detail for a specific host. The full tag is
+ * `host:overflow:usage:<hostId>`.
+ */
+const val HOST_USAGE_MENU_ITEM_TAG_PREFIX = "host:overflow:usage:"
 
 /**
  * Issue #157: stable test tags for the import-conflict dialog. The
@@ -1138,12 +1183,14 @@ private fun SettingsGearIcon() {
  * setup-state badge in the row.
  */
 @Composable
-private fun HostOverflowMenuAnchor(
+internal fun HostOverflowMenuAnchor(
     expanded: Boolean,
     onExpand: () -> Unit,
     onDismiss: () -> Unit,
     usageRecord: com.pocketshell.core.usage.UsageProviderRecord?,
     usageBadgeTestTag: String,
+    onOpenUsage: (() -> Unit)?,
+    usageMenuItemTestTag: String,
     onOpenPorts: () -> Unit,
     onOpenWatchedFolders: () -> Unit,
     onShare: () -> Unit,
@@ -1193,6 +1240,18 @@ private fun HostOverflowMenuAnchor(
                     onClick = {},
                 )
             }
+            // Issue #483: discoverable, labelled per-host entry to the
+            // Usage detail. Sits at the top of the action list (above
+            // Ports) so the quota glance is one obvious tap from the
+            // host it belongs to. Only rendered when the nav graph
+            // supplied a route.
+            if (onOpenUsage != null) {
+                DropdownMenuItem(
+                    text = { Text("Usage") },
+                    onClick = onOpenUsage,
+                    modifier = Modifier.testTag(usageMenuItemTestTag),
+                )
+            }
             DropdownMenuItem(
                 text = { Text("Ports") },
                 onClick = onOpenPorts,
@@ -1219,6 +1278,78 @@ private fun HostOverflowMenuAnchor(
                 modifier = Modifier.testTag(HOST_RECHECK_SETUP_ITEM_TAG),
             )
         }
+    }
+}
+
+/**
+ * Issue #483: compact per-host usage chip rendered under each host card.
+ *
+ * Usage in PocketShell is server-tied — it comes from the `pocketshell`
+ * CLI on a specific host — so the maintainer rejected the global
+ * cross-host strip that used to sit above the host list. This chip
+ * surfaces the host's most-constrained provider (top provider name +
+ * percent), threshold-tinted, plus its soonest reset (issue #501 reset
+ * display reused) so a scan still shows which host is hot and who has
+ * runway. Tapping it opens the Usage detail (one tap, logically tied to
+ * the host). The visual language mirrors the old strip row — a small
+ * threshold dot, provider label, monospace reset, monospace percent —
+ * on the same `Surface` / `BorderSoft` chrome as the host card.
+ */
+@Composable
+internal fun HostUsageChip(
+    summary: HostUsageSummary,
+    onClick: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+    now: Instant = Instant.now(),
+) {
+    val zone = remember { ZoneId.systemDefault() }
+    val dotColor = thresholdAccentColor(summary.thresholdState)
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
+            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
+            .let { base ->
+                if (onClick != null) {
+                    base.clickable(role = Role.Button, onClick = onClick)
+                } else {
+                    base
+                }
+            }
+            .padding(horizontal = 12.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(color = dotColor, shape = CircleShape),
+        )
+        Text(
+            text = summary.topProvider,
+            color = PocketShellColors.Text,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 8.dp),
+        )
+        summary.soonestReset?.let { reset ->
+            Text(
+                text = formatResetRelative(now, reset, zone),
+                color = PocketShellColors.TextMuted,
+                fontFamily = JetBrainsMonoFamily,
+                fontSize = 11.sp,
+                modifier = Modifier.padding(end = 8.dp),
+            )
+        }
+        Text(
+            text = formatPercent(summary.percent),
+            color = thresholdTextColor(summary.thresholdState),
+            fontFamily = JetBrainsMonoFamily,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+        )
     }
 }
 

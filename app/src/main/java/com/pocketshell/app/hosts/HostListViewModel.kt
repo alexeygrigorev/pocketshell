@@ -22,9 +22,9 @@ import com.pocketshell.app.sessions.SshOpenTelemetry
 import com.pocketshell.app.settings.AppSettings
 import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.startup.StartupTiming
-import com.pocketshell.app.usage.UsageDashboardRow
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
+import com.pocketshell.app.usage.soonestReset
 import com.pocketshell.app.usage.worstBadgeRecord
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshKey
@@ -192,41 +192,12 @@ class HostListViewModel internal constructor(
         .map { rows -> rows.associate { it.id to deriveSetupState(it) } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyMap())
 
-    /**
-     * `true` when at least one persisted host has `pocketshellInstalled == true`,
-     * i.e. there is something for the usage panel to surface. Drives the
-     * "render strip / hide strip" gate on [HostListScreen] (issue #116:
-     * "When no host has pocketshell installed, the dashboard strip is not
-     * rendered — no empty rail.").
-     */
-    val hasUsageInstalledHost: StateFlow<Boolean> = hostDao.getAll()
-        .map { rows -> rows.any { it.pocketshellInstalled == true && it.pocketshellVersionCompatible != false } }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), false)
-
-    /**
-     * Rows for the cross-host [com.pocketshell.app.usage.UsageDashboardStrip]
-     * derived from [UsageScheduler.snapshots]. Empty when no pocketshell host has
-     * reported yet — the screen also hides the strip via
-     * [hasUsageInstalledHost] until a record exists, so the strip never
-     * renders an empty rail.
-     *
-     * Issue #214: each row's `thresholdState` is computed against the
-     * user-configurable `usageWarnThresholdPercent` so a user
-     * who pulled the slider down to 50 % sees the amber tint earlier.
-     */
-    val usageDashboardRows: StateFlow<List<UsageDashboardRow>> = combine(
-        usageScheduler.snapshots,
-        settingsRepository.settings,
-    ) { snapshots, settings ->
-        val records = snapshots.values
-            .filterIsInstance<UsageSnapshot.Records>()
-            .flatMap { it.records }
-        buildDashboardRows(
-            records = records,
-            warnPercent = settings.usageWarnThresholdPercent.toDouble(),
-        )
-    }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyList())
+    // Issue #483: the cross-host `usageDashboardRows` flow and the
+    // strip-gating `hasUsageInstalledHost` flow that fed the global usage
+    // strip at the top of the host list were removed with the strip
+    // itself (D22 hard-cut — usage is now per-host via [usageSummaries]).
+    // Settings keeps its own independent `hasUsageInstalledHost` for the
+    // Settings → Usage entry gate.
 
     /**
      * Read-only projection of [ActiveTmuxClients.clients] used by the
@@ -258,6 +229,33 @@ class HostListViewModel internal constructor(
         val warn = settings.usageWarnThresholdPercent.toDouble()
         snapshots.mapNotNull { (id, snap) ->
             snap.worstBadgeRecord(warnPercent = warn)?.let { id to it }
+        }.toMap()
+    }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyMap())
+
+    /**
+     * Issue #483: per-host usage summary surfaced as a compact chip on
+     * the host card so usage reads as *server-tied* — it belongs to the
+     * host that runs `pocketshell`, not to a global card above the list.
+     * This replaces the cross-host [com.pocketshell.app.usage.UsageDashboardStrip]
+     * that previously sat at the top of the host list (the maintainer
+     * called that the wrong place because usage is server-specific).
+     *
+     * Keyed by [HostEntity.id]; a host appears only when its latest
+     * scheduler snapshot reported provider records with a constrained
+     * window. The summary carries the host's *most-constrained* provider
+     * (top provider %) plus its soonest reset and threshold tint, so a
+     * scan of the list shows which host is hot and who has runway —
+     * the same at-a-glance information the old strip showed, but
+     * anchored to the host. Tapping the chip opens the Usage detail.
+     */
+    val usageSummaries: StateFlow<Map<Long, HostUsageSummary>> = combine(
+        usageScheduler.snapshots,
+        settingsRepository.settings,
+    ) { snapshots, settings ->
+        val warn = settings.usageWarnThresholdPercent.toDouble()
+        snapshots.mapNotNull { (id, snap) ->
+            hostUsageSummary(snap, warnPercent = warn)?.let { id to it }
         }.toMap()
     }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyMap())
@@ -1688,32 +1686,45 @@ internal fun resolveHostStatus(
 }
 
 /**
- * Build [UsageDashboardRow] entries from the union of every host's
- * fetched [UsageProviderRecord]s. Mirrors the existing extension on
- * [com.pocketshell.app.usage.UsageScreenState] but operates on a flat
- * record list so the host list can render the same strip without
- * shaping a full [com.pocketshell.app.usage.UsageScreenState] from the
- * scheduler snapshots (issue #116, usage-panel Fix B).
+ * Issue #483: compact per-host usage summary rendered as a chip on the
+ * host card. Picks the host's *most-constrained* provider — the one with
+ * the highest used-percent across its most-constrained windows — so a
+ * single chip conveys "how hot is this host" the way the old cross-host
+ * strip's worst row did, but scoped to the server it came from.
  *
- * Rows are sorted by provider so a Claude row consistently appears
- * above Codex regardless of which host the record came from, and the
- * most-constrained window is what's shown — the same rule the panel
- * itself uses for the at-a-glance percent.
+ * `topProvider` is the display name (e.g. "Claude Code"), `percent` is
+ * that provider's most-constrained window percent, `thresholdState`
+ * tints the chip, and `soonestReset` is the earliest reset across that
+ * provider's windows (issue #501 display rule reused) so the chip can
+ * show who has runway. Returns `null` for any snapshot that carries no
+ * provider record with a constrained window (tool-missing / failed /
+ * empty), so the chip simply doesn't render for that host.
  */
-internal fun buildDashboardRows(
-    records: List<UsageProviderRecord>,
+internal fun hostUsageSummary(
+    snapshot: UsageSnapshot,
     warnPercent: Double = UsageProviderRecord.DEFAULT_WARN_PERCENT,
-): List<UsageDashboardRow> =
-    records
-        .sortedWith(compareBy<UsageProviderRecord> { it.provider })
-        .mapNotNull { record ->
-            val window = record.mostConstrainedWindow ?: return@mapNotNull null
-            UsageDashboardRow(
-                provider = record.displayName,
-                status = record.status,
-                percent = window.percent,
-                blocked = record.isBlocked,
-                nearLimit = record.isNearLimit,
-                thresholdState = record.thresholdState(warnPercent = warnPercent),
-            )
-        }
+): HostUsageSummary? {
+    if (snapshot !is UsageSnapshot.Records) return null
+    val record = snapshot.records
+        .filter { it.mostConstrainedWindow != null }
+        .maxByOrNull { it.mostConstrainedWindow?.percent ?: 0.0 }
+        ?: return null
+    val window = record.mostConstrainedWindow ?: return null
+    return HostUsageSummary(
+        topProvider = record.displayName,
+        percent = window.percent,
+        thresholdState = record.thresholdState(warnPercent = warnPercent),
+        soonestReset = soonestReset(record),
+    )
+}
+
+/**
+ * Issue #483: at-a-glance usage state for a single host, rendered as a
+ * compact chip on its host card. See [hostUsageSummary] for derivation.
+ */
+public data class HostUsageSummary(
+    val topProvider: String,
+    val percent: Double,
+    val thresholdState: com.pocketshell.core.usage.UsageThresholdState,
+    val soonestReset: java.time.Instant? = null,
+)

@@ -1535,53 +1535,10 @@ class HostListViewModelTest {
         )
     }
 
-    /**
-     * Issue #116 (usage-panel Fix B): `hasUsageInstalledHost` flips
-     * to `true` exactly when at least one persisted host has
-     * `pocketshellInstalled = true`. This is the gate the host list uses to
-     * decide whether to render the cross-host usage strip.
-     */
-    @Test
-    fun hasUsageInstalledHost_reflectsPersistedPocketshellFlag() = runTest {
-        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
-        // First: no hosts at all → false.
-        val viewModel = newViewModel(
-            applicationContext = context,
-            hostDao = db.hostDao(),
-            sshKeyDao = db.sshKeyDao(),
-            releaseChecker = FakeReleaseChecker(result = null),
-            bootstrapper = HostBootstrapper(),
-            usageScheduler = newUsageScheduler(),
-            activeClients = ActiveTmuxClients(),
-            settingsRepository = newSettingsRepository(),
-        )
-        assertEquals(
-            false,
-            db.hostDao().getAll().first().any { it.pocketshellInstalled == true },
-        )
-
-        // Add a host with pocketshellInstalled = false → still false.
-        db.hostDao().insert(
-            HostEntity(name = "no-pocketshell", hostname = "n.example", username = "u", keyId = keyId, pocketshellInstalled = false),
-        )
-        assertEquals(
-            false,
-            db.hostDao().getAll().first().any { it.pocketshellInstalled == true },
-        )
-
-        // Add a host with pocketshellInstalled = true → flag flips on.
-        db.hostDao().insert(
-            HostEntity(name = "with-pocketshell", hostname = "q.example", username = "u", keyId = keyId, pocketshellInstalled = true),
-        )
-        assertEquals(
-            true,
-            db.hostDao().getAll().first().any { it.pocketshellInstalled == true },
-        )
-
-        // The view model exposes the same predicate via the
-        // `hasUsageInstalledHost` flow; sanity-check it is non-null.
-        assertNotNull(viewModel.hasUsageInstalledHost)
-    }
+    // Issue #483: the `hasUsageInstalledHost` strip gate on the host-list
+    // view model was removed with the cross-host usage strip (usage is now
+    // per-host). The equivalent gate for the Settings → Usage entry lives
+    // on SettingsViewModel and is covered by SettingsViewModelTest.
 
     /**
      * Issue #116: when the scheduler reports a blocked record for a
@@ -1679,6 +1636,104 @@ class HostListViewModelTest {
         // `viewModel.usageBadges` is non-null even before the flow
         // collector lands; sanity-check it is reachable.
         assertNotNull(viewModel.usageBadges)
+    }
+
+    // -- Issue #483: per-host usage summary chip ---------------------------
+
+    /**
+     * Issue #483: `hostUsageSummary` picks the host's *most-constrained*
+     * provider (highest used-percent) and carries its display name,
+     * percent, threshold tint, and soonest reset — the at-a-glance data
+     * the per-host chip renders in place of the removed cross-host strip.
+     */
+    @Test
+    fun hostUsageSummary_picksMostConstrainedProviderWithReset() {
+        val resetSoon = java.time.Instant.now().plusSeconds(3_600)
+        val resetLater = java.time.Instant.now().plusSeconds(7_200)
+        val snapshot = UsageSnapshot.Records(
+            hostId = 1L,
+            hostName = "hetzner",
+            records = listOf(
+                com.pocketshell.core.usage.UsageProviderRecord(
+                    provider = "claude",
+                    status = com.pocketshell.core.usage.UsageStatus.Ok,
+                    windows = listOf(
+                        com.pocketshell.core.usage.UsageWindow(
+                            name = "5h",
+                            used = 41.0,
+                            limit = 100.0,
+                            unit = "percent",
+                            resetAt = resetLater,
+                        ),
+                    ),
+                    rawStatus = "ok",
+                ),
+                com.pocketshell.core.usage.UsageProviderRecord(
+                    provider = "codex",
+                    status = com.pocketshell.core.usage.UsageStatus.Warn,
+                    windows = listOf(
+                        com.pocketshell.core.usage.UsageWindow(
+                            name = "5h",
+                            used = 97.0,
+                            limit = 100.0,
+                            unit = "percent",
+                            resetAt = resetSoon,
+                        ),
+                    ),
+                    rawStatus = "warn",
+                ),
+            ),
+            fetchedAt = java.time.Instant.now(),
+            command = UsageRemoteSource.defaultUsageCommand,
+        )
+
+        val summary = hostUsageSummary(snapshot)
+        assertNotNull("a host with records must yield a summary", summary)
+        // Codex at 97% is the most-constrained provider, not Claude at 41%.
+        assertEquals("Codex", summary!!.topProvider)
+        assertEquals(97.0, summary.percent, 0.001)
+        // Soonest reset is Codex's window (earlier of the two).
+        assertEquals(resetSoon, summary.soonestReset)
+        // 97% sits in the critical band (>= 95%, < 100%).
+        assertEquals(
+            com.pocketshell.core.usage.UsageThresholdState.Critical,
+            summary.thresholdState,
+        )
+    }
+
+    /**
+     * Issue #483: a tool-missing / failed / empty snapshot yields no
+     * summary, so the per-host chip simply does not render for that host.
+     */
+    @Test
+    fun hostUsageSummary_isNullForNonRecordSnapshots() {
+        val now = java.time.Instant.now()
+        assertNull(
+            hostUsageSummary(
+                UsageSnapshot.ToolMissing(hostId = 1L, hostName = "h", fetchedAt = now),
+            ),
+        )
+        assertNull(
+            hostUsageSummary(
+                UsageSnapshot.Failed(
+                    hostId = 1L,
+                    hostName = "h",
+                    reason = "boom",
+                    fetchedAt = now,
+                ),
+            ),
+        )
+        assertNull(
+            hostUsageSummary(
+                UsageSnapshot.Records(
+                    hostId = 1L,
+                    hostName = "h",
+                    records = emptyList(),
+                    fetchedAt = now,
+                    command = UsageRemoteSource.defaultUsageCommand,
+                ),
+            ),
+        )
     }
 
     // -- Issue #214: in-app usage warning banner ---------------------------

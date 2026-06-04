@@ -1533,10 +1533,3 @@ def daemon_handler_open(params: dict[str, Any]) -> dict[str, Any]:
         "path": repo.local.path,
         "full_name": repo.full_name,
     }
-
-
-# Back-compat re-export so any in-tree caller that imports
-# ``daemon_handler`` (the original single-handler name) keeps working
-# until the next refactor moves them over. The daemon module itself
-# uses the explicit ``daemon_handler_local`` name.
-daemon_handler = daemon_handler_local

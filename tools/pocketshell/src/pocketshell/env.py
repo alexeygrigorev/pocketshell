@@ -465,18 +465,15 @@ def render_export(directory: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_dir(ctx: click.Context, directory: str, *, must_exist: bool) -> Path:
-    """Expand ``directory`` and validate it as needed.
+def _resolve_dir(ctx: click.Context, directory: str) -> Path:
+    """Expand ``directory`` and require it to be an existing folder.
 
-    ``must_exist`` enforces that the folder is present (read paths);
-    write paths only require the *parent* to exist so a fresh ``.env``
-    can be created in an existing folder.
+    Exits with code 2 if the folder is missing. A fresh ``.env`` / ``.envrc``
+    is created inside an already-existing folder, so the directory itself must
+    be present for both read and write paths.
     """
     path = Path(os.path.expanduser(directory))
-    if must_exist and not path.is_dir():
-        click.echo(f"pocketshell env: directory does not exist: {path}", err=True)
-        ctx.exit(2)
-    if not must_exist and not path.is_dir():
+    if not path.is_dir():
         click.echo(f"pocketshell env: directory does not exist: {path}", err=True)
         ctx.exit(2)
     return path
@@ -514,7 +511,7 @@ def env_list(ctx: click.Context, directory: str, json_output: bool) -> None:
 
     Never prints values (write-only default, D24).
     """
-    path = _resolve_dir(ctx, directory, must_exist=True)
+    path = _resolve_dir(ctx, directory)
     keys = list_keys(path)
     if json_output:
         payload = [
@@ -558,7 +555,7 @@ def env_get(
     Missing keys are simply absent from the output; only a hard error
     (e.g. missing directory) is non-zero.
     """
-    path = _resolve_dir(ctx, directory, must_exist=True)
+    path = _resolve_dir(ctx, directory)
     values = get_values(path, list(keys))
     if json_output:
         click.echo(json.dumps(values, indent=2, sort_keys=True))
@@ -589,7 +586,7 @@ def env_set(ctx: click.Context, directory: str, file_name: str) -> None:
     `ps`/scrollback. Comments, ordering, and untouched keys are
     preserved (surgical rewrite).
     """
-    path = _resolve_dir(ctx, directory, must_exist=True)
+    path = _resolve_dir(ctx, directory)
     raw = sys.stdin.read()
     if not raw.strip():
         click.echo("pocketshell env set: no JSON on stdin", err=True)
@@ -627,7 +624,7 @@ def env_set(ctx: click.Context, directory: str, file_name: str) -> None:
 @click.pass_context
 def env_unset(ctx: click.Context, directory: str, keys: tuple[str, ...]) -> None:
     """Delete the named key(s) from both files, leaving the rest intact."""
-    path = _resolve_dir(ctx, directory, must_exist=True)
+    path = _resolve_dir(ctx, directory)
     unset_keys(path, list(keys))
 
 
@@ -662,8 +659,8 @@ def env_copy(
     file_name: str,
 ) -> None:
     """Copy named keys' values from source folder into the destination."""
-    src = _resolve_dir(ctx, src_dir, must_exist=True)
-    dst = _resolve_dir(ctx, dst_dir, must_exist=True)
+    src = _resolve_dir(ctx, src_dir)
+    dst = _resolve_dir(ctx, dst_dir)
     copy_keys(src, dst, list(keys), dst_file=file_name)
 
 
@@ -675,7 +672,7 @@ def env_copy(
 @click.pass_context
 def env_export(ctx: click.Context, directory: str) -> None:
     """Emit an `eval`-safe `export KEY=value` block merging both files."""
-    path = _resolve_dir(ctx, directory, must_exist=True)
+    path = _resolve_dir(ctx, directory)
     rendered = render_export(path)
     if rendered:
         sys.stdout.write(rendered)

@@ -63,16 +63,9 @@ import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.SessionsDashboardViewModel
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
-import com.pocketshell.app.usage.formatResetRelative
-import com.pocketshell.app.usage.formatPercent
-import com.pocketshell.app.usage.thresholdAccentColor
-import com.pocketshell.app.usage.thresholdTextColor
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.model.HostSetupState
-import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
-import java.time.Instant
-import java.time.ZoneId
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlin.math.PI
@@ -184,10 +177,6 @@ fun HostListScreen(
     val setupStates by viewModel.setupStates.collectAsState()
     // Issue #116 (usage-panel Fix B): per-card warning record in the kebab.
     val usageBadges by viewModel.usageBadges.collectAsState()
-    // Issue #483: per-host usage summary chip. Usage is server-tied, so it
-    // is surfaced on the host it comes from — the global cross-host strip
-    // that used to sit above the list has been removed.
-    val usageSummaries by viewModel.usageSummaries.collectAsState()
     // Issue #214: per-provider warning records + dismissed-this-session
     // set. The host list renders one banner per provider that warrants
     // a warning AND that the user hasn't dismissed for this app session.
@@ -495,13 +484,13 @@ fun HostListScreen(
                                 }
                             }
 
-                            // Issue #483: the cross-host usage strip that
-                            // used to sit here has been removed. Usage is
-                            // server-tied (it comes from the `pocketshell`
-                            // CLI on a specific host), so a global card
-                            // above the list was the wrong place — it is
-                            // now surfaced per-host on each host card via
-                            // [HostUsageChip] and the kebab "Usage" item.
+                            // Issue #483 / #506: the cross-host usage strip
+                            // that used to sit here was removed, and the
+                            // per-host usage chip that briefly replaced it
+                            // (under each host card) was also dropped — both
+                            // read as a cryptic floating row. Usage is
+                            // server-tied and stays reachable per-host via the
+                            // kebab → "Usage" item.
                         }
                     }
                 }
@@ -545,15 +534,6 @@ fun HostListScreen(
                             // kebab overflow menu so it doesn't compete with
                             // the setup-state badge in the primary status row.
                             val usageRecord = usageBadges[host.id]
-                            // Issue #483: the at-a-glance per-host usage
-                            // summary (top provider % + soonest reset) that
-                            // used to live in the global cross-host strip
-                            // now renders as a compact chip on THIS host's
-                            // card, so usage reads as server-tied. Present
-                            // only when the host's latest snapshot reported
-                            // usage records; tapping it opens the Usage
-                            // detail for the same host.
-                            val usageSummary = usageSummaries[host.id]
                             // Issue #201: resolve the per-host status from
                             // the setup-probe state, the cross-host
                             // session aggregate, and the registered tmux
@@ -615,9 +595,11 @@ fun HostListScreen(
                                         usageBadgeTestTag = HOST_USAGE_BADGE_TAG_PREFIX + host.id,
                                         // Issue #483: discoverable, labelled
                                         // per-host entry to the Usage detail.
+                                        // Issue #506: this kebab item is now
+                                        // the sole host-list usage affordance.
                                         // Only wired when the nav graph
-                                        // supplied a route (mirrors the
-                                        // banner / chip gate).
+                                        // supplied a route (mirrors the banner
+                                        // gate).
                                         onOpenUsage = onOpenUsage?.let { route ->
                                             {
                                                 menuOpen = false
@@ -647,20 +629,10 @@ fun HostListScreen(
                                     .fillMaxWidth()
                                     .testTag(HOST_ROW_TAG_PREFIX + host.id),
                             )
-
-                            // Issue #483: compact per-host usage chip. Tapping
-                            // it opens the Usage detail for this host (the
-                            // one-tap path the maintainer asked for, logically
-                            // tied to the server that runs `pocketshell`).
-                            if (usageSummary != null) {
-                                HostUsageChip(
-                                    summary = usageSummary,
-                                    onClick = onOpenUsage,
-                                    modifier = Modifier.testTag(
-                                        HOST_USAGE_CHIP_TAG_PREFIX + host.id,
-                                    ),
-                                )
-                            }
+                            // Issue #506: the per-host usage chip that used to
+                            // render here was dropped — it read as a cryptic
+                            // floating row under the card. Usage stays one tap
+                            // away via the kebab → "Usage" item.
                         }
                     }
                 }
@@ -823,14 +795,6 @@ internal const val HOST_LIST_ADD_FAB_TAG = "host-list:add-fab"
  * (no hosts in the DB) before tapping the FAB.
  */
 internal const val HOST_LIST_EMPTY_STATE_TAG = "host-list:empty-state"
-
-/**
- * Issue #483: stable test-tag prefix for the per-host usage summary chip
- * rendered under each host card. The full tag is
- * `host:usage-chip:<hostId>`. The cross-host `usage:dashboard-strip`
- * surface it replaced was removed in the same issue.
- */
-const val HOST_USAGE_CHIP_TAG_PREFIX = "host:usage-chip:"
 
 /**
  * Issue #483: stable test-tag prefix for the kebab "Usage" item that
@@ -1278,78 +1242,6 @@ internal fun HostOverflowMenuAnchor(
                 modifier = Modifier.testTag(HOST_RECHECK_SETUP_ITEM_TAG),
             )
         }
-    }
-}
-
-/**
- * Issue #483: compact per-host usage chip rendered under each host card.
- *
- * Usage in PocketShell is server-tied — it comes from the `pocketshell`
- * CLI on a specific host — so the maintainer rejected the global
- * cross-host strip that used to sit above the host list. This chip
- * surfaces the host's most-constrained provider (top provider name +
- * percent), threshold-tinted, plus its soonest reset (issue #501 reset
- * display reused) so a scan still shows which host is hot and who has
- * runway. Tapping it opens the Usage detail (one tap, logically tied to
- * the host). The visual language mirrors the old strip row — a small
- * threshold dot, provider label, monospace reset, monospace percent —
- * on the same `Surface` / `BorderSoft` chrome as the host card.
- */
-@Composable
-internal fun HostUsageChip(
-    summary: HostUsageSummary,
-    onClick: (() -> Unit)?,
-    modifier: Modifier = Modifier,
-    now: Instant = Instant.now(),
-) {
-    val zone = remember { ZoneId.systemDefault() }
-    val dotColor = thresholdAccentColor(summary.thresholdState)
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
-            .let { base ->
-                if (onClick != null) {
-                    base.clickable(role = Role.Button, onClick = onClick)
-                } else {
-                    base
-                }
-            }
-            .padding(horizontal = 12.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .background(color = dotColor, shape = CircleShape),
-        )
-        Text(
-            text = summary.topProvider,
-            color = PocketShellColors.Text,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-            modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 8.dp),
-        )
-        summary.soonestReset?.let { reset ->
-            Text(
-                text = formatResetRelative(now, reset, zone),
-                color = PocketShellColors.TextMuted,
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 11.sp,
-                modifier = Modifier.padding(end = 8.dp),
-            )
-        }
-        Text(
-            text = formatPercent(summary.percent),
-            color = thresholdTextColor(summary.thresholdState),
-            fontFamily = JetBrainsMonoFamily,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-        )
     }
 }
 

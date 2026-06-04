@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -17,91 +16,34 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
-import com.pocketshell.core.usage.UsageThresholdState
-import com.pocketshell.uikit.components.HostCard
-import com.pocketshell.uikit.model.HostStatus
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 import java.io.File
 import java.io.FileOutputStream
-import java.time.Instant
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Issue #483 — screenshot evidence that usage is now surfaced *per-host*
- * after the global cross-host strip was removed from the top of the host
- * list. Two artifacts:
+ * Issue #506 — screenshot evidence that host-list usage is reachable via
+ * the host kebab "Usage" item. The per-host usage chip that briefly
+ * rendered under each host card (issue #483) was dropped because it read
+ * as a cryptic floating row; usage is server-tied and now stays one tap
+ * away through the kebab.
  *
- *  - `host-usage-per-host-list.png` — a host-list region with NO global
- *    usage card at the top; each host card carries its own compact
- *    [HostUsageChip] (top provider % + soonest reset, threshold-tinted)
- *    so usage reads as server-tied.
  *  - `host-usage-kebab-usage-item.png` — the host kebab expanded showing
  *    the labelled "Usage" item, the discoverable one-tap path to the
  *    Usage detail for that host.
  *
- * Rendered in isolation (no Hilt / SSH) so the surfaces are deterministic
+ * Rendered in isolation (no Hilt / SSH) so the surface is deterministic
  * for the reviewer; the wiring into the live host list is covered by the
- * `HostListScreen` call site and the `hostUsageSummary` unit tests.
+ * `HostListScreen` call site.
  */
 @RunWith(AndroidJUnit4::class)
 class HostUsagePerHostAccessScreenshotTest {
 
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
-
-    @Test
-    fun capturePerHostUsageChipsOnHostList() {
-        val now = Instant.parse("2026-06-04T10:00:00Z")
-        compose.setContent {
-            PocketShellTheme {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(PocketShellColors.Background)
-                        .padding(horizontal = 12.dp, vertical = 20.dp)
-                        .testTag(LIST_ROOT_TAG),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    HostRowWithChip(
-                        name = "hetzner",
-                        subtitle = "alex@65.108.42.11:22",
-                        summary = HostUsageSummary(
-                            topProvider = "Claude Code",
-                            percent = 41.0,
-                            thresholdState = UsageThresholdState.Ok,
-                            soonestReset = now.plusSeconds(4 * 3_600),
-                        ),
-                        now = now,
-                    )
-                    HostRowWithChip(
-                        name = "build-box",
-                        subtitle = "ci@10.0.0.7:2222",
-                        summary = HostUsageSummary(
-                            topProvider = "Codex",
-                            percent = 96.0,
-                            thresholdState = UsageThresholdState.Critical,
-                            soonestReset = now.plusSeconds(40 * 60),
-                        ),
-                        now = now,
-                    )
-                }
-            }
-        }
-        compose.onNodeWithTag(LIST_ROOT_TAG).assertExists()
-        compose.waitForIdle()
-        // Per-host chips are present, one per host.
-        compose.onNodeWithTag(HOST_USAGE_CHIP_TAG_PREFIX + "hetzner").assertExists()
-        compose.onNodeWithTag(HOST_USAGE_CHIP_TAG_PREFIX + "build-box").assertExists()
-        compose.onAllNodesWithText("Claude Code").assertCountEquals(1)
-        compose.onAllNodesWithText("Codex").assertCountEquals(1)
-        compose.onAllNodesWithText("41%").assertCountEquals(1)
-        compose.onAllNodesWithText("96%").assertCountEquals(1)
-        SystemClock.sleep(200)
-        captureFullDevice(File(ensureArtifactDir(), "host-usage-per-host-list.png"))
-    }
 
     @Test
     fun captureKebabUsageItem() {
@@ -169,36 +111,6 @@ class HostUsagePerHostAccessScreenshotTest {
     }
 
     private companion object {
-        const val LIST_ROOT_TAG: String = "host-usage-per-host:list"
         const val KEBAB_ROOT_TAG: String = "host-usage-per-host:kebab"
-    }
-}
-
-/**
- * Mirror of the live host-list row composition for issue #483: a
- * [HostCard] with the per-host [HostUsageChip] rendered directly beneath
- * it. The chip's test tag uses the host name as the key so the screenshot
- * test can assert one chip per host.
- */
-@androidx.compose.runtime.Composable
-private fun HostRowWithChip(
-    name: String,
-    subtitle: String,
-    summary: HostUsageSummary,
-    now: Instant,
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        HostCard(
-            name = name,
-            subtitle = subtitle,
-            status = HostStatus.NoActiveSessions,
-            onClick = {},
-        )
-        HostUsageChip(
-            summary = summary,
-            onClick = {},
-            modifier = Modifier.testTag(HOST_USAGE_CHIP_TAG_PREFIX + name),
-            now = now,
-        )
     }
 }

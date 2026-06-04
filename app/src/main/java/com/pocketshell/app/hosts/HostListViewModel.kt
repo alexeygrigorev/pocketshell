@@ -26,7 +26,6 @@ import com.pocketshell.app.settings.SettingsRepository
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.app.usage.UsageSnapshot
-import com.pocketshell.app.usage.soonestReset
 import com.pocketshell.app.usage.worstBadgeRecord
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshKey
@@ -203,9 +202,10 @@ class HostListViewModel internal constructor(
     // Issue #483: the cross-host `usageDashboardRows` flow and the
     // strip-gating `hasUsageInstalledHost` flow that fed the global usage
     // strip at the top of the host list were removed with the strip
-    // itself (D22 hard-cut — usage is now per-host via [usageSummaries]).
-    // Settings keeps its own independent `hasUsageInstalledHost` for the
-    // Settings → Usage entry gate.
+    // itself (D22 hard-cut). Issue #506 also removed the per-host usage
+    // chip that briefly replaced the strip; usage is reachable per-host
+    // via the kebab → "Usage" item. Settings keeps its own independent
+    // `hasUsageInstalledHost` for the Settings → Usage entry gate.
 
     /**
      * Read-only projection of [ActiveTmuxClients.clients] used by the
@@ -241,32 +241,11 @@ class HostListViewModel internal constructor(
     }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyMap())
 
-    /**
-     * Issue #483: per-host usage summary surfaced as a compact chip on
-     * the host card so usage reads as *server-tied* — it belongs to the
-     * host that runs `pocketshell`, not to a global card above the list.
-     * This replaces the cross-host [com.pocketshell.app.usage.UsageDashboardStrip]
-     * that previously sat at the top of the host list (the maintainer
-     * called that the wrong place because usage is server-specific).
-     *
-     * Keyed by [HostEntity.id]; a host appears only when its latest
-     * scheduler snapshot reported provider records with a constrained
-     * window. The summary carries the host's *most-constrained* provider
-     * (top provider %) plus its soonest reset and threshold tint, so a
-     * scan of the list shows which host is hot and who has runway —
-     * the same at-a-glance information the old strip showed, but
-     * anchored to the host. Tapping the chip opens the Usage detail.
-     */
-    val usageSummaries: StateFlow<Map<Long, HostUsageSummary>> = combine(
-        usageScheduler.snapshots,
-        settingsRepository.settings,
-    ) { snapshots, settings ->
-        val warn = settings.usageWarnThresholdPercent.toDouble()
-        snapshots.mapNotNull { (id, snap) ->
-            hostUsageSummary(snap, warnPercent = warn)?.let { id to it }
-        }.toMap()
-    }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptyMap())
+    // Issue #483 introduced a per-host usage summary chip (`usageSummaries`)
+    // rendered under each host card; issue #506 dropped that chip because it
+    // read as a cryptic floating row. Usage is reachable per-host via the
+    // kebab → "Usage" item, so the dedicated summary flow is gone (D22
+    // hard-cut — no dead state).
 
     /**
      * Records that should drive a dismissible in-app banner above the
@@ -1702,47 +1681,3 @@ internal fun resolveHostStatus(
         appAttached = appAttached,
     )
 }
-
-/**
- * Issue #483: compact per-host usage summary rendered as a chip on the
- * host card. Picks the host's *most-constrained* provider — the one with
- * the highest used-percent across its most-constrained windows — so a
- * single chip conveys "how hot is this host" the way the old cross-host
- * strip's worst row did, but scoped to the server it came from.
- *
- * `topProvider` is the display name (e.g. "Claude Code"), `percent` is
- * that provider's most-constrained window percent, `thresholdState`
- * tints the chip, and `soonestReset` is the earliest reset across that
- * provider's windows (issue #501 display rule reused) so the chip can
- * show who has runway. Returns `null` for any snapshot that carries no
- * provider record with a constrained window (tool-missing / failed /
- * empty), so the chip simply doesn't render for that host.
- */
-internal fun hostUsageSummary(
-    snapshot: UsageSnapshot,
-    warnPercent: Double = UsageProviderRecord.DEFAULT_WARN_PERCENT,
-): HostUsageSummary? {
-    if (snapshot !is UsageSnapshot.Records) return null
-    val record = snapshot.records
-        .filter { it.mostConstrainedWindow != null }
-        .maxByOrNull { it.mostConstrainedWindow?.percent ?: 0.0 }
-        ?: return null
-    val window = record.mostConstrainedWindow ?: return null
-    return HostUsageSummary(
-        topProvider = record.displayName,
-        percent = window.percent,
-        thresholdState = record.thresholdState(warnPercent = warnPercent),
-        soonestReset = soonestReset(record),
-    )
-}
-
-/**
- * Issue #483: at-a-glance usage state for a single host, rendered as a
- * compact chip on its host card. See [hostUsageSummary] for derivation.
- */
-public data class HostUsageSummary(
-    val topProvider: String,
-    val percent: Double,
-    val thresholdState: com.pocketshell.core.usage.UsageThresholdState,
-    val soonestReset: java.time.Instant? = null,
-)

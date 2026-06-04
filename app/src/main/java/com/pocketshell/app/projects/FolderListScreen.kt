@@ -81,6 +81,9 @@ import com.pocketshell.app.voice.DictateDotIcon
 import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.appendDictationText
 import com.pocketshell.app.voice.toMicButtonState
+import com.pocketshell.uikit.components.Badge
+import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
@@ -285,6 +288,7 @@ fun FolderListScreen(
                 is FolderListUiState.Ready -> FolderListContent(
                     folders = s.folders,
                     treeRoots = s.treeRoots,
+                    flatSessions = s.flatSessions,
                     expandedProjectPaths = s.expandedProjectPaths,
                     portForwarding = s.portForwarding,
                     showFlatFolderList = showFlatFolderList,
@@ -933,6 +937,7 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
 private fun FolderListContent(
     folders: List<FolderRow>,
     treeRoots: List<FolderTreeRoot>,
+    flatSessions: List<FolderSessionEntry>,
     expandedProjectPaths: Set<String>,
     portForwarding: HostPortForwardingSummary,
     showFlatFolderList: Boolean,
@@ -945,6 +950,15 @@ private fun FolderListContent(
     onRootActions: (FolderTreeRoot) -> Unit,
     onToggleProjectExpanded: (FolderRow) -> Unit,
 ) {
+    // session→folder map derived from the grouped `folders` set so a flat-view
+    // tap still carries the session's cwd into the picker/attach path (#485).
+    // Computed once per `folders` change, outside the LazyListScope which is not
+    // a @Composable context.
+    val sessionFolderPaths = remember(folders) {
+        folders.flatMap { folder ->
+            folder.sessions.map { it.sessionName to folder.path }
+        }.toMap()
+    }
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -965,11 +979,36 @@ private fun FolderListContent(
                 )
             }
         }
-        if (!showFlatFolderList && treeRoots.isEmpty()) {
+        if (showFlatFolderList) {
+            // Flat view (#485): a clean, ungrouped list of EVERY session on the
+            // host — no folder headers, no tree connectors. Each row reuses the
+            // shared design language so it reads identically to a tree session
+            // row (#479): status dot + session name + agent-type badge. The
+            // session→folder map is derived from the grouped `folders` set so a
+            // tap still carries the session's cwd into the picker/attach path.
+            if (flatSessions.isEmpty()) {
+                item {
+                    FlatEmptyState()
+                }
+            } else {
+                items(flatSessions, key = { it.sessionName }) { session ->
+                    FlatSessionRow(
+                        session = session,
+                        onClick = {
+                            onSessionClick(
+                                sessionFolderPaths[session.sessionName]
+                                    ?: FolderListViewModel.UNTRACKED_PATH,
+                                session.sessionName,
+                            )
+                        },
+                    )
+                }
+            }
+        } else if (treeRoots.isEmpty()) {
             item {
                 EmptyState()
             }
-        } else if (!showFlatFolderList) {
+        } else {
             items(treeRoots, key = { it.path }) { root ->
                 FolderTreeRootGroup(
                     root = root,
@@ -979,20 +1018,6 @@ private fun FolderListContent(
                     onCreateInRoot = onCreateInRoot,
                     onRootActions = onRootActions,
                     onToggleProjectExpanded = onToggleProjectExpanded,
-                )
-            }
-        } else if (folders.isEmpty()) {
-            item {
-                EmptyState()
-            }
-        } else {
-            items(folders, key = { it.path }) { folder ->
-                FolderGroup(
-                    folder = folder,
-                    expanded = true,
-                    onSessionClick = onSessionClick,
-                    onFolderActions = onFolderActions,
-                    onToggleExpanded = {},
                 )
             }
         }
@@ -1121,6 +1146,75 @@ private fun EmptyState() {
             .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
             .padding(horizontal = 16.dp, vertical = 14.dp)
             .testTag(FOLDER_LIST_EMPTY_TAG),
+    ) {
+        Text(
+            text = "No active sessions",
+            color = PocketShellColors.Text,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Spacer(modifier = Modifier.height(4.dp))
+        Text(
+            text = "Tap + to start a new session here.",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+        )
+    }
+}
+
+/**
+ * One row in the flat host-detail view (#485). Renders a single tmux session as
+ * a plain, ungrouped row using the shared [ListRow] + [Badge] + [StatusDot] so
+ * it reads identically to a tree session row (#479 consistency principle) minus
+ * the folder grouping / tree connectors. Tap routes through the same
+ * `onOpenSession` handler the tree rows use.
+ *
+ *  - leading: [StatusDot] — green when attached or an agent is live, amber idle.
+ *  - title: the session name; subtitle: extra windows (when present).
+ *  - trailing: agent-type [Badge] — purple for Claude/Codex/OpenCode, grey for
+ *    Shell.
+ */
+@Composable
+private fun FlatSessionRow(
+    session: FolderSessionEntry,
+    onClick: () -> Unit,
+) {
+    val isAgent = session.agentKind.isAgent()
+    ListRow(
+        title = sessionDisplayTitle(session),
+        subtitle = sessionSecondaryText(session),
+        onClick = onClick,
+        modifier = Modifier.testTag(folderListFlatRowTestTag(session.sessionName)),
+        leading = {
+            StatusDot(
+                active = session.attached || isAgent,
+                modifier = Modifier.testTag(folderListFlatRowStatusDotTestTag(session.sessionName)),
+            )
+        },
+        trailing = {
+            Badge(
+                label = sessionBadgeLabel(session),
+                role = if (isAgent) BadgeRole.Agent else BadgeRole.Shell,
+                modifier = Modifier.testTag(folderListFlatRowBadgeTestTag(session.sessionName)),
+            )
+        },
+    )
+}
+
+/**
+ * Empty state for the flat view (#485) — shown when the host has zero tmux
+ * sessions. Distinct test tag ([FOLDER_LIST_FLAT_EMPTY_TAG]) so the flat path is
+ * independently assertable from the tree empty state.
+ */
+@Composable
+private fun FlatEmptyState() {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface, RoundedCornerShape(12.dp))
+            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
+            .padding(horizontal = 16.dp, vertical = 14.dp)
+            .testTag(FOLDER_LIST_FLAT_EMPTY_TAG),
     ) {
         Text(
             text = "No active sessions",
@@ -1995,6 +2089,10 @@ fun folderHeaderClickTestTag(path: String): String = "folder-list:header-click:$
 fun folderHeaderLabelTag(path: String): String = "folder-list:header:$path"
 fun folderCountPillTestTag(path: String): String = "folder-list:count:$path"
 fun folderListFlatRowTestTag(sessionName: String): String = "folder-list:flat-row:$sessionName"
+fun folderListFlatRowStatusDotTestTag(sessionName: String): String =
+    "folder-list:flat-row:$sessionName:status"
+fun folderListFlatRowBadgeTestTag(sessionName: String): String =
+    "folder-list:flat-row:$sessionName:badge"
 fun folderDetailRowTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName"
 fun folderDetailCreateTestTag(folderPath: String): String =

@@ -2,13 +2,18 @@ package com.pocketshell.app.projects
 
 import android.graphics.Bitmap
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertHasClickAction
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -23,6 +28,7 @@ import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.session.InlineDictationViewModel
+import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.core.portfwd.RemotePort
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
@@ -508,6 +514,212 @@ class FolderListScreenE2eTest {
         // screenshot taken right after is guaranteed to include it.
         android.os.SystemClock.sleep(250)
         captureFullDevice("issue300-session-type-picker-viewport.png")
+    }
+
+    /**
+     * Flat-view regression test (#485). The #478 tree redesign reworked only
+     * the tree render path and left the [HostDetailViewMode.Flat] path rendering
+     * a folder-grouped list (or nothing). This locks the fixed behaviour:
+     *
+     *  - Flat view renders a clean, ungrouped list of EVERY session on the host
+     *    using the shared `ListRow` rows (`folder-list:flat-row:<name>`), with no
+     *    folder headers / tree roots / tree connectors.
+     *  - Each row carries a status dot + agent-type badge (purple for agents,
+     *    grey for shell) so it reads consistently with a tree session row (#479).
+     *  - Tapping a flat row fires `onOpenSession` with the session's cwd.
+     *  - Toggling tree↔flat works both ways.
+     */
+    @Test
+    fun flatViewRendersUngroupedSessionRowsAndTapsThrough() {
+        val fakeGateway = FakeFolderListGateway(
+            rows = listOf(
+                FolderSessionRow(
+                    sessionName = "claude-main",
+                    lastActivity = 1_700_004_000L,
+                    attached = true,
+                    cwd = "/home/u/git/pocketshell",
+                    agentKind = SessionAgentKind.Claude,
+                ),
+                FolderSessionRow(
+                    sessionName = "build-shell",
+                    lastActivity = 1_700_003_500L,
+                    attached = false,
+                    cwd = "/home/u/git/pocketshell",
+                    agentKind = SessionAgentKind.Shell,
+                ),
+                FolderSessionRow(
+                    sessionName = "codex-llm",
+                    lastActivity = 1_700_001_000L,
+                    attached = true,
+                    cwd = "/home/u/git/llm-zoomcamp",
+                    agentKind = SessionAgentKind.Codex,
+                ),
+            ),
+            projectFoldersByRoot = mapOf(
+                "~/git" to listOf(
+                    "/home/u/git/pocketshell",
+                    "/home/u/git/llm-zoomcamp",
+                ),
+            ),
+            resolvedWatchedRootPaths = mapOf("~/git" to "/home/u/git"),
+        )
+        val viewModel = constructFolderListViewModel(fakeGateway)
+        var mode by mutableStateOf(HostDetailViewMode.Tree)
+        var openedSession: String? = null
+        var openedDirectory: String? = null
+
+        compose.setContent {
+            PocketShellTheme {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "issue485-host",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue485",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { name, dir ->
+                        openedSession = name
+                        openedDirectory = dir
+                    },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                    hostDetailViewMode = mode,
+                )
+            }
+        }
+
+        // Tree mode first: the workspace tree root renders, the flat rows do not.
+        compose.waitUntil(timeoutMillis = 10_000) {
+            fakeGateway.callCount.get() >= 1 &&
+                compose.onAllNodesWithTag(folderTreeRootTestTag("~/git"))
+                    .fetchSemanticsNodes().isNotEmpty()
+        }
+        assertTrue(
+            "flat rows must not render in tree mode",
+            compose.onAllNodesWithTag(folderListFlatRowTestTag("claude-main"))
+                .fetchSemanticsNodes().isEmpty(),
+        )
+
+        // Switch to flat view.
+        compose.runOnIdle { mode = HostDetailViewMode.Flat }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(folderListFlatRowTestTag("claude-main"))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Every session renders as an ungrouped flat row — no folder grouping.
+        compose.onNodeWithTag(folderListFlatRowTestTag("claude-main")).assertIsDisplayed()
+        compose.onNodeWithTag(folderListFlatRowTestTag("build-shell")).assertIsDisplayed()
+        compose.onNodeWithTag(folderListFlatRowTestTag("codex-llm")).assertIsDisplayed()
+        compose.onNodeWithText("claude-main").assertIsDisplayed()
+        compose.onNodeWithText("build-shell").assertIsDisplayed()
+        compose.onNodeWithText("codex-llm").assertIsDisplayed()
+
+        // No tree roots / folder headers / tree session rows in flat mode.
+        assertTrue(
+            compose.onAllNodesWithTag(folderTreeRootTestTag("~/git"))
+                .fetchSemanticsNodes().isEmpty(),
+        )
+        assertTrue(
+            compose.onAllNodesWithTag(
+                folderHeaderLabelTag("/home/u/git/pocketshell"),
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isEmpty(),
+        )
+
+        // Each row carries the shared status dot + agent-type badge so it reads
+        // consistently with a tree session row (#479). Agent rows get the agent
+        // badge; the shell row gets a "Shell" badge.
+        compose.onNodeWithTag(
+            folderListFlatRowStatusDotTestTag("claude-main"),
+            useUnmergedTree = true,
+        ).assertExists()
+        compose.onNodeWithTag(
+            folderListFlatRowBadgeTestTag("claude-main"),
+            useUnmergedTree = true,
+        ).assertTextEquals("Claude")
+        compose.onNodeWithTag(
+            folderListFlatRowBadgeTestTag("codex-llm"),
+            useUnmergedTree = true,
+        ).assertTextEquals("Codex")
+        compose.onNodeWithTag(
+            folderListFlatRowBadgeTestTag("build-shell"),
+            useUnmergedTree = true,
+        ).assertTextEquals("Shell")
+
+        // The flat row is the tap target and routes to onOpenSession with cwd.
+        compose.onNodeWithTag(folderListFlatRowTestTag("codex-llm")).assertHasClickAction()
+        compose.onNodeWithTag(folderListFlatRowTestTag("codex-llm")).performClick()
+        compose.runOnIdle {
+            assertEquals("codex-llm", openedSession)
+            assertEquals("/home/u/git/llm-zoomcamp", openedDirectory)
+        }
+
+        captureViewport("issue485-flat-view-rendered-viewport.png")
+        android.os.SystemClock.sleep(200)
+        captureFullDevice("issue485-flat-view-rendered-fulldevice.png")
+
+        // Toggling back to tree restores the tree (both directions work).
+        compose.runOnIdle { mode = HostDetailViewMode.Tree }
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(folderTreeRootTestTag("~/git"))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        assertTrue(
+            compose.onAllNodesWithTag(folderListFlatRowTestTag("claude-main"))
+                .fetchSemanticsNodes().isEmpty(),
+        )
+    }
+
+    /**
+     * Flat-view empty state (#485): a host with zero sessions shows the
+     * dedicated [FOLDER_LIST_FLAT_EMPTY_TAG] panel rather than rendering blank.
+     */
+    @Test
+    fun flatViewShowsEmptyStateWhenNoSessions() {
+        val fakeGateway = FakeFolderListGateway(rows = emptyList())
+        val viewModel = constructFolderListViewModel(fakeGateway)
+
+        compose.setContent {
+            PocketShellTheme {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "issue485-empty-host",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue485",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                    hostDetailViewMode = HostDetailViewMode.Flat,
+                )
+            }
+        }
+
+        compose.waitUntil(timeoutMillis = 10_000) {
+            fakeGateway.callCount.get() >= 1 &&
+                compose.onAllNodesWithTag(FOLDER_LIST_FLAT_EMPTY_TAG)
+                    .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(FOLDER_LIST_FLAT_EMPTY_TAG).assertIsDisplayed()
+        assertTrue(
+            "no flat rows when the host has zero sessions",
+            compose.onAllNodesWithText("session").fetchSemanticsNodes().isEmpty(),
+        )
+        captureViewport("issue485-flat-view-empty-viewport.png")
+        android.os.SystemClock.sleep(200)
+        captureFullDevice("issue485-flat-view-empty-fulldevice.png")
     }
 
     @Test

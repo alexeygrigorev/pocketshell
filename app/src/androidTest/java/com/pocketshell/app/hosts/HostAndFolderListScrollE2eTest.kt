@@ -32,6 +32,7 @@ import com.pocketshell.app.projects.FolderListScreen
 import com.pocketshell.app.projects.FolderListViewModel
 import com.pocketshell.app.projects.FolderSessionRow
 import com.pocketshell.app.projects.folderDetailRowTestTag
+import com.pocketshell.app.projects.folderListFlatRowTestTag
 import com.pocketshell.app.proof.clearLastSessionPrefs
 import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.core.storage.AppDatabase
@@ -253,15 +254,20 @@ class FolderListScrollE2eTest {
         compose.onNodeWithTag(lastRowTag, useUnmergedTree = true).assertIsDisplayed()
         captureFullDevice("04-folder-tree-bottom-viewport.png")
 
+        // Flat view (#485): an ungrouped list of every session — the session
+        // detail rows that the tree path renders are gone, replaced by flat
+        // rows keyed by session name. `session-01` is the oldest session so it
+        // sorts to the bottom of the recency-ordered flat list.
+        val lastFlatRowTag = folderListFlatRowTestTag(rows.first().sessionName)
         compose.runOnIdle { hostDetailViewMode = HostDetailViewMode.Flat }
         compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithTag(FOLDER_LIST_CONTENT_TAG, useUnmergedTree = true)
+            compose.onAllNodesWithTag(lastFlatRowTag, useUnmergedTree = true)
                 .fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag(FOLDER_LIST_CONTENT_TAG, useUnmergedTree = true)
             .performScrollToNode(hasTestTag(FOLDER_LIST_BOTTOM_SPACER_TAG))
         compose.waitForIdle()
-        compose.onNodeWithTag(lastRowTag, useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithTag(lastFlatRowTag, useUnmergedTree = true).assertIsDisplayed()
         captureFullDevice("05-folder-flat-bottom-viewport.png")
     }
 

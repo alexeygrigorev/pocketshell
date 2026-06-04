@@ -271,12 +271,7 @@ class FolderListSessionClickTest {
                 ),
             ),
         )
-        val viewModel = FolderListViewModel(
-            gateway = fakeGateway,
-            hostDao = db.hostDao(),
-            projectRootDao = db.projectRootDao(),
-            forwardingController = ForwardingController(InstrumentationRegistry.getInstrumentation().targetContext),
-        )
+        val viewModel = constructViewModelOnMainThread(fakeGateway)
         var mode by mutableStateOf(HostDetailViewMode.Tree)
 
         compose.setContent {
@@ -312,13 +307,24 @@ class FolderListSessionClickTest {
         compose.onNodeWithText("git-cable-world-map").assertIsDisplayed()
         assertTrue(compose.onAllNodesWithText("Git Cable World Map").fetchSemanticsNodes().isEmpty())
 
+        // Flat view (#485): a clean, ungrouped list of EVERY session — no
+        // folder headers. The raw session names still render verbatim as flat
+        // rows; the "cable-world" folder label is gone (no grouping).
         compose.runOnIdle { mode = HostDetailViewMode.Flat }
         compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithText("git-cable-world-map").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithTag(folderListFlatRowTestTag("git-cable-world-map"))
+                .fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithText("cable-world").assertIsDisplayed()
+        compose.onNodeWithTag(folderListFlatRowTestTag("git-cable-world")).assertIsDisplayed()
+        compose.onNodeWithTag(folderListFlatRowTestTag("git-cable-world-map")).assertIsDisplayed()
         compose.onNodeWithText("git-cable-world").assertIsDisplayed()
         compose.onNodeWithText("git-cable-world-map").assertIsDisplayed()
+        // No folder grouping in flat mode — the "cable-world" folder header is
+        // gone and the folder-header tag no longer renders.
+        assertTrue(
+            compose.onAllNodesWithTag(folderHeaderLabelTag(cableWorldPath), useUnmergedTree = true)
+                .fetchSemanticsNodes().isEmpty(),
+        )
     }
 
     @Test
@@ -349,12 +355,7 @@ class FolderListSessionClickTest {
                 ),
             ),
         )
-        val viewModel = FolderListViewModel(
-            gateway = fakeGateway,
-            hostDao = db.hostDao(),
-            projectRootDao = db.projectRootDao(),
-            forwardingController = ForwardingController(InstrumentationRegistry.getInstrumentation().targetContext),
-        )
+        val viewModel = constructViewModelOnMainThread(fakeGateway)
         var mode by mutableStateOf(HostDetailViewMode.Tree)
 
         compose.setContent {
@@ -385,7 +386,11 @@ class FolderListSessionClickTest {
                 useUnmergedTree = true,
             ).fetchSemanticsNodes().isNotEmpty()
         }
-        compose.onNodeWithTag(folderTreeRootLabelTag("/root/work")).assertIsDisplayed()
+        // The action-bearing root header Row wraps its label in a
+        // semantics-merging `combinedClickable` (#455), so the label `Text` is
+        // not an independently-keyed node in the merged tree — assert on the
+        // unmerged tree (mirrors FolderListScreenE2eTest).
+        compose.onNodeWithTag(folderTreeRootLabelTag("/root/work"), useUnmergedTree = true).assertIsDisplayed()
         compose.onNodeWithTag(folderHeaderLabelTag("/root/work/app"), useUnmergedTree = true).assertIsDisplayed()
         assertTrue(
             compose.onAllNodesWithTag(
@@ -395,10 +400,15 @@ class FolderListSessionClickTest {
         )
         assertTrue(compose.onAllNodesWithText("codex-app").fetchSemanticsNodes().isEmpty())
 
+        // Flat view (#485): the tree roots and folder headers disappear; the
+        // single session renders as a plain flat row keyed by its name.
         compose.runOnIdle { mode = HostDetailViewMode.Flat }
         compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithText("service").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithTag(folderListFlatRowTestTag("codex-app"))
+                .fetchSemanticsNodes().isNotEmpty()
         }
+        compose.onNodeWithTag(folderListFlatRowTestTag("codex-app")).assertIsDisplayed()
+        compose.onNodeWithText("codex-app").assertIsDisplayed()
         assertTrue(compose.onAllNodesWithTag(folderTreeRootTestTag("/root/work")).fetchSemanticsNodes().isEmpty())
         assertTrue(
             compose.onAllNodesWithTag(
@@ -406,7 +416,35 @@ class FolderListSessionClickTest {
                 useUnmergedTree = true,
             ).fetchSemanticsNodes().isEmpty(),
         )
-        compose.onNodeWithTag(folderHeaderLabelTag("/root/work/app/service"), useUnmergedTree = true).assertIsDisplayed()
+        assertTrue(
+            compose.onAllNodesWithTag(
+                folderHeaderLabelTag("/root/work/app/service"),
+                useUnmergedTree = true,
+            ).fetchSemanticsNodes().isEmpty(),
+        )
+    }
+
+    /**
+     * Constructs the view model on the main thread. [FolderListViewModel] attaches
+     * a main-thread-affine ProcessLifecycleOwner observer in its init block (#430),
+     * so building it directly from the off-main instrumentation thread throws
+     * "addObserver must be called on the main thread". Mirrors the helper in
+     * FolderListScreenE2eTest.
+     */
+    private fun constructViewModelOnMainThread(
+        gateway: FolderListGateway,
+    ): FolderListViewModel {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        lateinit var vm: FolderListViewModel
+        instrumentation.runOnMainSync {
+            vm = FolderListViewModel(
+                gateway = gateway,
+                hostDao = db.hostDao(),
+                projectRootDao = db.projectRootDao(),
+                forwardingController = ForwardingController(instrumentation.targetContext),
+            )
+        }
+        return vm
     }
 }
 

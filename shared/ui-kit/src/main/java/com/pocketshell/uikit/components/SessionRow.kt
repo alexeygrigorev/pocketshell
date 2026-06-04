@@ -8,13 +8,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -26,10 +27,13 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.model.Tag
 import com.pocketshell.uikit.model.TagKind
+import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Compact row for a session inside the per-host folder list.
@@ -38,6 +42,17 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * deliberately renders only the session name plus chips. The retired
  * all-host dashboard badge, host suffix, timestamp, preview/status
  * prose, and legend are not part of this component.
+ *
+ * ### Density tokens — #461 §3.5 (Slice 1a)
+ *
+ * The row now consumes the list/tree-row tokens: [PocketShellDensity.rowMinHeight]
+ * `(44)` floor, [PocketShellDensity.rowPadV]`(8)` / [PocketShellDensity.rowPadH]`(12)`
+ * padding, `medium`(14) card shape, and the [PocketShellType.bodyDense]`(13)`
+ * Medium title. The visual padding is the compact dev-tool density, but the
+ * whole-row tap target is kept at [PocketShellDensity.tapTargetMin]`(48)` via
+ * `Modifier.defaultMinSize` so shrinking the paint never drops the hit area
+ * below the a11y floor (the 44dp row floor already clears this, but it is held
+ * explicitly so the contract is unambiguous).
  *
  * ### Tag vocabulary — issue #202
  *
@@ -70,32 +85,42 @@ fun SessionRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(color = PocketShellColors.Surface, shape = RoundedCornerShape(14.dp))
+            // Compact row floor (44dp) and a11y touch floor (48dp): the row
+            // paints at compact density but never drops the whole-row hit area
+            // below the touch floor.
+            .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
+            .background(
+                color = PocketShellColors.Surface,
+                shape = PocketShellShapes.medium,
+            )
             .border(
                 width = 1.dp,
                 color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(14.dp),
+                shape = PocketShellShapes.medium,
             )
             .combinedClickable(
                 role = Role.Button,
                 onClick = onClick,
                 onLongClick = onLongClick,
             )
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellDensity.rowPadV,
+            ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = name,
                 color = PocketShellColors.Text,
-                fontSize = 15.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
 
             if (tags.isNotEmpty()) {
-                Spacer(modifier = Modifier.size(8.dp))
+                Spacer(modifier = Modifier.size(PocketShellDensity.sectionGap))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     tags.forEach { tag -> TagChip(tag = tag) }
                 }
@@ -109,6 +134,13 @@ fun SessionRow(
  * uppercase `.tag` block in `docs/mockups/styles.css`; per issue #202
  * the label is now rendered mixed-case so a first-time user can read
  * it without decoding letter-spaced ALL-CAPS.
+ *
+ * Shape/type tokens (#461 §3.5 chip/pill): `small`(8) shape (was the
+ * off-ladder 6dp), `labelSmall`(11) count/label text, `chipPadH`(10) /
+ * `chipPadV`(6) padding. Neutral chips use the always-dark `SurfaceElev` /
+ * `TextMuted` tokens (so the pill stays dark alongside the rest of the
+ * screen); the accent and status classifier colours are sourced from
+ * [LocalPocketShellSemantic].
  *
  * Two slot categories:
  *
@@ -127,26 +159,30 @@ fun SessionRow(
  */
 @Composable
 private fun TagChip(tag: Tag) {
+    val semantic = LocalPocketShellSemantic.current
     val (textColor: Color, bgColor: Color) = when (tag.kind) {
         TagKind.Default -> PocketShellColors.TextMuted to PocketShellColors.SurfaceElev
-        TagKind.Agent -> PocketShellColors.Accent to PocketShellColors.AccentSoft
-        TagKind.Deploy -> PocketShellColors.Amber to PocketShellColors.Amber.copy(alpha = 0.12f)
-        TagKind.Ml -> PocketShellColors.Purple to PocketShellColors.Purple.copy(alpha = 0.12f)
-        TagKind.Attached -> PocketShellColors.Green to PocketShellColors.Green.copy(alpha = 0.12f)
+        TagKind.Agent -> semantic.accent to semantic.accentSoft
+        TagKind.Deploy -> semantic.statusConnecting to semantic.statusConnecting.copy(alpha = 0.12f)
+        TagKind.Ml -> semantic.agentAccent to semantic.agentAccent.copy(alpha = 0.12f)
+        TagKind.Attached -> semantic.statusActive to semantic.statusActive.copy(alpha = 0.12f)
         TagKind.Detached -> PocketShellColors.TextMuted to PocketShellColors.SurfaceElev
     }
 
     val showLeadingDot: Boolean = tag.kind == TagKind.Attached || tag.kind == TagKind.Detached
     val dotColor: Color = if (tag.kind == TagKind.Attached) {
-        PocketShellColors.Green
+        semantic.statusActive
     } else {
-        PocketShellColors.TextMuted
+        semantic.statusIdle
     }
 
     Row(
         modifier = Modifier
-            .background(color = bgColor, shape = RoundedCornerShape(6.dp))
-            .padding(horizontal = 8.dp, vertical = 3.dp)
+            .background(color = bgColor, shape = PocketShellShapes.small)
+            .padding(
+                horizontal = PocketShellDensity.chipPadH,
+                vertical = PocketShellDensity.chipPadV,
+            )
             .semantics { contentDescription = "${tag.label} tag" },
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -161,7 +197,7 @@ private fun TagChip(tag: Tag) {
         Text(
             text = tag.label,
             color = textColor,
-            fontSize = 11.sp,
+            style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
         )
     }

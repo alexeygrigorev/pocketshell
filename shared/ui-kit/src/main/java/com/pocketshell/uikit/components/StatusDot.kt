@@ -13,13 +13,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.pocketshell.uikit.model.ConnectionStatus
-import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.LocalPocketShellSemantic
+import com.pocketshell.uikit.theme.PocketShellSpacing
 
 /**
  * Small status indicator dot. Matches `.status-dot` and its variants
  * (`.connected`, `.connecting`, `.error`) in `docs/mockups/styles.css`.
  *
- * Sizing: 8dp circle (the CSS uses `width: 8px; height: 8px;`).
+ * Sizing: 8dp circle sourced from [PocketShellSpacing.sm] (the CSS uses
+ * `width: 8px; height: 8px;`). Colours are sourced from the semantic role
+ * vocabulary via [LocalPocketShellSemantic] (status active/connecting/
+ * idle/error) rather than raw palette tokens, per #461 §3.5.
  *
  * Connected glow approximation: the CSS uses
  * `box-shadow: 0 0 7px rgba(34,197,94,0.7)`, which renders as a soft
@@ -45,11 +49,12 @@ fun StatusDot(
     status: ConnectionStatus,
     modifier: Modifier = Modifier,
 ) {
+    val semantic = LocalPocketShellSemantic.current
     val baseColor: Color = when (status) {
-        ConnectionStatus.Idle -> PocketShellColors.TextMuted
-        ConnectionStatus.Connecting -> PocketShellColors.Amber
-        ConnectionStatus.Connected -> PocketShellColors.Green
-        ConnectionStatus.Error -> PocketShellColors.Red
+        ConnectionStatus.Idle -> semantic.statusIdle
+        ConnectionStatus.Connecting -> semantic.statusConnecting
+        ConnectionStatus.Connected -> semantic.statusActive
+        ConnectionStatus.Error -> semantic.statusError
     }
 
     // Drive the pulse animation only for the Connecting state — every
@@ -76,7 +81,7 @@ fun StatusDot(
     // Compose `Canvas` does NOT clip its drawing to its bounds, so we
     // can render the wider halo outside the 8dp box without changing
     // layout — same as CSS `box-shadow` extending past the element box.
-    Canvas(modifier = modifier.size(8.dp)) {
+    Canvas(modifier = modifier.size(PocketShellSpacing.sm)) {
         val coreRadius: Float = size.minDimension / 2f
         // Outer halo for Connected only, matching the CSS
         // `box-shadow: 0 0 7px rgba(34,197,94,0.7)`. Two stacked discs

@@ -8,14 +8,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -29,11 +30,14 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.pocketshell.uikit.model.HostSetupState
 import com.pocketshell.uikit.model.HostStatus
-import com.pocketshell.uikit.theme.JetBrainsMonoFamily
+import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellShapes
+import com.pocketshell.uikit.theme.PocketShellSpacing
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Row item for the "Hosts" section of the dashboard. Matches the
@@ -77,8 +81,15 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * [onSetupBadgeClick] is retained for that wiring but no longer paints a
  * separate affordance.
  *
- * The outer card keeps `Surface` background, `BorderSoft` 1dp border, and
- * 14dp corner radius. Long-press is forwarded to the caller via
+ * The outer card uses the always-dark `Surface` token background, the
+ * `BorderSoft` 1dp border, and the `medium`(14) card shape from
+ * [PocketShellShapes] — sourced from named tokens rather than freehand
+ * shape/dp literals (#461 §3.5). The chrome colours intentionally stay on the
+ * raw dark tokens (not the flippable M3 `colorScheme` slots) so the card reads
+ * dark alongside every other raw-token screen regardless of the system light/
+ * dark setting; the semantic status/accent roles come from
+ * [LocalPocketShellSemantic]. Row density follows [PocketShellDensity] (44dp
+ * floor, 8dp pad-v / 12dp pad-h). Long-press is forwarded to the caller via
  * [onLongClick]; the card stays presentational and the caller wires the
  * menu against the trailing slot.
  */
@@ -103,11 +114,18 @@ fun HostCard(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .background(color = PocketShellColors.Surface, shape = RoundedCornerShape(14.dp))
+            // Compact row floor (44dp) + a11y touch floor (48dp): the whole card
+            // is the single tap target, so its min height is held at the touch
+            // floor while the paint follows the compact density tokens below.
+            .defaultMinSize(minHeight = PocketShellDensity.tapTargetMin)
+            .background(
+                color = PocketShellColors.Surface,
+                shape = PocketShellShapes.medium,
+            )
             .border(
                 width = 1.dp,
                 color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(14.dp),
+                shape = PocketShellShapes.medium,
             )
             .combinedClickable(
                 role = Role.Button,
@@ -115,7 +133,10 @@ fun HostCard(
                 onLongClick = if (connectingLabel == null) onLongClick else null,
                 enabled = connectingLabel == null,
             )
-            .padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(
+                horizontal = PocketShellDensity.rowPadH,
+                vertical = PocketShellDensity.rowPadV,
+            ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // Avatar: 40dp circle filled with the deterministic per-host
@@ -132,14 +153,16 @@ fun HostCard(
                 // Empty-name safety: an empty avatar is fine; we don't
                 // want to crash on a host with a blank label.
                 text = name.take(1).uppercase(),
+                // White-on-hashed-hue is structural to the avatar (not a theme
+                // surface), so it stays a literal. The glyph size rides the
+                // `titleMedium`(16) rung instead of the retired 15sp literal.
                 color = Color.White,
-                fontSize = 15.sp,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
-                letterSpacing = (-0.5).sp,
             )
         }
 
-        Spacer(modifier = Modifier.width(12.dp))
+        Spacer(modifier = Modifier.width(PocketShellSpacing.md))
 
         // Name + subtitle. The Column takes the flex space between the
         // avatar and the single trailing status dot / overflow slot. The
@@ -149,7 +172,7 @@ fun HostCard(
             Text(
                 text = name,
                 color = PocketShellColors.Text,
-                fontSize = 15.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.Medium,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
@@ -157,14 +180,15 @@ fun HostCard(
             Spacer(modifier = Modifier.size(2.dp))
             Text(
                 text = subtitle,
+                // Muted mono subtitle: `bodyMono`(13) on the always-dark muted
+                // text token (stays dark alongside the rest of the screen).
                 color = PocketShellColors.TextMuted,
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 12.sp,
+                style = PocketShellType.bodyMono,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             connectingLabel?.let { label ->
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(PocketShellSpacing.sm))
                 HostConnectingRow(label = label)
             }
         }
@@ -175,12 +199,12 @@ fun HostCard(
         // drop the dot so the row doesn't show two competing progress
         // affordances.
         if (connectingLabel == null) {
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(PocketShellSpacing.md))
             HostStatusDot(state = resolveHostDotState(status = status, setupState = setupState))
         }
 
         if (trailingContent != null) {
-            Spacer(modifier = Modifier.width(4.dp))
+            Spacer(modifier = Modifier.width(PocketShellSpacing.xs))
             trailingContent()
         }
     }
@@ -188,6 +212,8 @@ fun HostCard(
 
 @Composable
 private fun HostConnectingRow(label: String) {
+    // Connecting accent rides the semantic `statusConnecting` role (amber).
+    val connectingColor = LocalPocketShellSemantic.current.statusConnecting
     Row(
         modifier = Modifier.testTag(HOST_CONNECTING_ROW_TAG),
         verticalAlignment = Alignment.CenterVertically,
@@ -196,14 +222,14 @@ private fun HostConnectingRow(label: String) {
             modifier = Modifier
                 .size(14.dp)
                 .testTag(HOST_CONNECTING_SPINNER_TAG),
-            color = PocketShellColors.Amber,
+            color = connectingColor,
             strokeWidth = 1.5.dp,
         )
-        Spacer(modifier = Modifier.width(8.dp))
+        Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
         Text(
             text = label,
-            color = PocketShellColors.Amber,
-            fontSize = 11.sp,
+            color = connectingColor,
+            style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
         )
     }
@@ -276,6 +302,10 @@ internal fun resolveHostDotState(status: HostStatus, setupState: HostSetupState)
  */
 @Composable
 private fun HostStatusDot(state: HostDotState) {
+    // The dot is decorative + semantic-only (no onClick) — the whole card is the
+    // tap target — so the 8dp paint never needs the 48dp touch floor. Colours are
+    // sourced from the semantic status roles via [LocalPocketShellSemantic].
+    val semantic = LocalPocketShellSemantic.current
     if (state == HostDotState.Unverified) {
         Box(
             modifier = Modifier
@@ -288,7 +318,7 @@ private fun HostStatusDot(state: HostDotState) {
                 modifier = Modifier
                     .size(14.dp)
                     .testTag(HOST_STATUS_SPINNER_TAG),
-                color = PocketShellColors.TextMuted,
+                color = semantic.statusIdle,
                 strokeWidth = 1.5.dp,
             )
         }
@@ -296,10 +326,10 @@ private fun HostStatusDot(state: HostDotState) {
     }
 
     val (color, description) = when (state) {
-        HostDotState.Attention -> PocketShellColors.Amber to HOST_STATUS_DESCRIPTION_ATTENTION
-        HostDotState.Error -> PocketShellColors.Red to HOST_STATUS_DESCRIPTION_ERROR
-        HostDotState.Active -> PocketShellColors.Green to HOST_STATUS_DESCRIPTION_ACTIVE
-        HostDotState.Idle -> PocketShellColors.TextMuted to HOST_STATUS_DESCRIPTION_IDLE
+        HostDotState.Attention -> semantic.statusAttention to HOST_STATUS_DESCRIPTION_ATTENTION
+        HostDotState.Error -> semantic.statusError to HOST_STATUS_DESCRIPTION_ERROR
+        HostDotState.Active -> semantic.statusActive to HOST_STATUS_DESCRIPTION_ACTIVE
+        HostDotState.Idle -> semantic.statusIdle to HOST_STATUS_DESCRIPTION_IDLE
         // Handled above; included so the `when` is exhaustive.
         HostDotState.Unverified -> return
     }
@@ -312,7 +342,7 @@ private fun HostStatusDot(state: HostDotState) {
     ) {
         Box(
             modifier = Modifier
-                .size(10.dp)
+                .size(PocketShellSpacing.sm)
                 .background(color = color, shape = CircleShape),
         )
     }

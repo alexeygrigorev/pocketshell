@@ -1397,12 +1397,10 @@ private fun FolderTreeRootGroup(
                 modifier = Modifier.padding(start = PocketShellDensity.treeIndent),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                root.folders.forEachIndexed { index, folder ->
+                root.folders.forEach { folder ->
                     FolderGroup(
                         folder = folder,
                         expanded = folder.path in expandedProjectPaths,
-                        showTreeBranch = true,
-                        lastInTree = index == root.folders.lastIndex,
                         onSessionClick = onSessionClick,
                         onFolderActions = onFolderActions,
                         onToggleExpanded = { onToggleProjectExpanded(folder) },
@@ -1557,8 +1555,6 @@ private fun EmptyRootHint(candidateCount: Int, onCreate: () -> Unit) {
 private fun FolderGroup(
     folder: FolderRow,
     expanded: Boolean,
-    showTreeBranch: Boolean = false,
-    lastInTree: Boolean = true,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onToggleExpanded: () -> Unit,
@@ -1570,46 +1566,34 @@ private fun FolderGroup(
             .testTag(folderRowTestTag(folder.path)),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(IntrinsicSize.Min),
-        ) {
-            if (showTreeBranch) {
-                TreeBranchConnector(
-                    last = lastInTree && !expanded,
-                    modifier = Modifier
-                        .width(22.dp)
-                        .fillMaxHeight(),
-                )
-            }
-            FolderHeader(
-                folder = folder,
-                expanded = expanded,
-                onToggleExpanded = onToggleExpanded,
-                onFolderActions = { onFolderActions(folder) },
-                modifier = Modifier.weight(1f),
-            )
-        }
-        if (expanded) {
+        // The project row reads as the mockup's group header: chevron + status
+        // dot + name lead it directly, with NO left connector spine of its own
+        // (#503). Only the session children below get the `├─/└─` tree spine.
+        FolderHeader(
+            folder = folder,
+            expanded = expanded,
+            onToggleExpanded = onToggleExpanded,
+            onFolderActions = { onFolderActions(folder) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        if (expanded && folder.sessions.isNotEmpty()) {
+            // Session children hang off ONE continuous vertical spine (#503).
+            // The spine + per-row `├─/└─` stub is drawn by [TreeChildRow]; the
+            // column carries NO inter-row gap so adjacent connector canvases
+            // abut pixel-to-pixel and the spine never seams. Visual breathing
+            // room lives inside each row's own vertical padding instead.
             Column(
-                modifier = Modifier.padding(start = if (showTreeBranch) 22.dp else 26.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.padding(start = treeChildIndent),
+                verticalArrangement = Arrangement.spacedBy(0.dp),
             ) {
                 folder.sessions.forEachIndexed { index, session ->
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(IntrinsicSize.Min),
+                    TreeChildRow(
+                        last = index == folder.sessions.lastIndex,
+                        connectorTestTag = folderSessionConnectorTestTag(
+                            folder.path,
+                            session.sessionName,
+                        ),
                     ) {
-                        if (showTreeBranch) {
-                            TreeBranchConnector(
-                                last = index == folder.sessions.lastIndex,
-                                modifier = Modifier
-                                    .width(22.dp)
-                                    .fillMaxHeight(),
-                            )
-                        }
                         WorkspaceSessionRow(
                             folderPath = folder.path,
                             session = session,
@@ -1814,32 +1798,86 @@ private fun AgentTypeBadge(
     }
 }
 
+/**
+ * Indent applied to the session-children column under an expanded project so the
+ * `├─/└─` spine sits under the project's chevron/dot lead (#503). The connector
+ * cell ([treeConnectorCellWidth]) lives inside this column and the spine's
+ * vertical x ([treeSpineX]) is the visual left edge of the child sub-tree.
+ */
+private val treeChildIndent = 12.dp
+
+/** Width of the per-row connector cell that carries the spine + horizontal stub. */
+private val treeConnectorCellWidth = 22.dp
+
+/** Horizontal position of the vertical spine inside the connector cell. */
+private val treeSpineX = 6.dp
+
+/**
+ * One session row hung off the project's tree spine (#503).
+ *
+ * The connector is split into a leading fixed-width [Canvas] cell plus the row
+ * content so the whole child block reads as ONE continuous vertical spine with a
+ * clean `├─` per row and a `└─` terminating the last child:
+ *
+ *  - **Continuous spine:** every non-last row draws the vertical from the very
+ *    top edge (`y = 0`) to the very bottom edge (`y = height`) with a butt cap,
+ *    and the child [Column] carries no inter-row gap, so adjacent cells abut
+ *    pixel-to-pixel and the spine never seams. The last row draws the vertical
+ *    only down to the stub's `y` (the `└` corner), so the spine stops exactly at
+ *    the last child rather than dangling below it.
+ *  - **No stray stripes:** the spine x and stub y are snapped to whole device
+ *    pixels so a 1 dp hairline lands on a single column/row of pixels instead of
+ *    smearing across two and reading as a broken/double line.
+ *  - **Clean stub:** the horizontal stub runs from the spine to the cell's right
+ *    edge (the session row's leading edge) at the row's vertical centre, where
+ *    the session status dot sits.
+ */
 @Composable
-private fun TreeBranchConnector(
+private fun TreeChildRow(
     last: Boolean,
-    modifier: Modifier = Modifier,
+    connectorTestTag: String,
+    content: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit,
 ) {
-    Canvas(modifier = modifier) {
-        val color = PocketShellColors.Border
-        val stroke = 1.dp.toPx()
-        val x = 10.dp.toPx()
-        val midY = size.height * 0.5f
-        drawLine(
-            color = color,
-            start = Offset(x, 0f),
-            end = Offset(x, if (last) midY else size.height),
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
-        drawLine(
-            color = color,
-            start = Offset(x, midY),
-            end = Offset(size.width, midY),
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(IntrinsicSize.Min),
+    ) {
+        val connectorColor = PocketShellColors.Border
+        Canvas(
+            modifier = Modifier
+                .width(treeConnectorCellWidth)
+                .fillMaxHeight()
+                .testTag(connectorTestTag),
+        ) {
+            val stroke = 1.dp.toPx()
+            // Snap the spine x and stub y to whole device pixels so the 1 dp
+            // hairline paints on a single pixel column/row — sub-pixel placement
+            // is what made the spine read as discontinuous between rows (#503).
+            val x = snapToPixel(treeSpineX.toPx())
+            val stubY = snapToPixel(size.height * 0.5f) + 0.5f
+            val verticalEnd = if (last) stubY else size.height
+            drawLine(
+                color = connectorColor,
+                start = Offset(x, 0f),
+                end = Offset(x, verticalEnd),
+                strokeWidth = stroke,
+                cap = StrokeCap.Butt,
+            )
+            drawLine(
+                color = connectorColor,
+                start = Offset(x, stubY),
+                end = Offset(size.width, stubY),
+                strokeWidth = stroke,
+                cap = StrokeCap.Butt,
+            )
+        }
+        content()
     }
 }
+
+/** Round a px value to the nearest whole device pixel (for crisp 1 dp hairlines). */
+private fun snapToPixel(px: Float): Float = kotlin.math.round(px)
 
 @Composable
 private fun CompactTreeIconButton(
@@ -2122,6 +2160,9 @@ fun folderSessionStatusDotTestTag(folderPath: String, sessionName: String): Stri
     "folder-list:detail:$folderPath:$sessionName:status"
 fun folderSessionBadgeTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:badge"
+/** Tags the `├─/└─` tree connector cell on an expanded session child row (#503). */
+fun folderSessionConnectorTestTag(folderPath: String, sessionName: String): String =
+    "folder-list:detail:$folderPath:$sessionName:connector"
 fun folderTreeRootTestTag(path: String): String = "folder-list:tree-root:$path"
 fun folderTreeRootLabelTag(path: String): String = "folder-list:tree-root:$path:label"
 fun folderTreeRootCountTag(path: String): String = "folder-list:tree-root:$path:count"

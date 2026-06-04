@@ -450,6 +450,55 @@ class FolderListScreenE2eTest {
         // The agent badge renders "Claude" and the shell badge renders "Shell".
         compose.onNodeWithText("Claude", useUnmergedTree = true).assertExists()
         compose.onNodeWithText("Shell", useUnmergedTree = true).assertExists()
+
+        // #503: every expanded session child hangs off a `├─/└─` tree connector
+        // cell. Both children of the expanded pocketshell project carry a
+        // connector node.
+        compose.onNodeWithTag(
+            folderSessionConnectorTestTag("/home/u/git/pocketshell", "claude-main"),
+            useUnmergedTree = true,
+        ).assertExists()
+        compose.onNodeWithTag(
+            folderSessionConnectorTestTag("/home/u/git/pocketshell", "build-shell"),
+            useUnmergedTree = true,
+        ).assertExists()
+        // #503: the connector renders only under EXPANDED projects, never on a
+        // collapsed project or as a stray spine on the project rows themselves.
+        // llm-zoomcamp is still collapsed, so its session carries no connector
+        // and neither does the project row.
+        compose.onAllNodesWithTag(
+            folderSessionConnectorTestTag("/home/u/git/llm-zoomcamp", "codex-llm"),
+            useUnmergedTree = true,
+        ).fetchSemanticsNodes().also {
+            assertTrue("collapsed project must not render a tree connector (#503)", it.isEmpty())
+        }
+        // The spine geometry is anchored to the child block: the first child's
+        // connector top aligns with the row block start and the connector cell's
+        // left edge sits at the same x for every child (one continuous spine, no
+        // per-row x drift). Assert the two children's connector cells share a
+        // left edge.
+        val claudeConnectorBounds = compose.onNodeWithTag(
+            folderSessionConnectorTestTag("/home/u/git/pocketshell", "claude-main"),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        val shellConnectorBounds = compose.onNodeWithTag(
+            folderSessionConnectorTestTag("/home/u/git/pocketshell", "build-shell"),
+            useUnmergedTree = true,
+        ).fetchSemanticsNode().boundsInRoot
+        assertEquals(
+            "tree connector cells must share a left edge so the spine is one continuous line (#503)",
+            claudeConnectorBounds.left,
+            shellConnectorBounds.left,
+            0.5f,
+        )
+        // And the connector cells abut vertically with no gap (the child column
+        // carries zero inter-row spacing) so adjacent spine segments are
+        // continuous, not seamed (#503).
+        assertTrue(
+            "adjacent tree connector cells must abut so the spine has no seam (#503): " +
+                "claude.bottom=${claudeConnectorBounds.bottom}px shell.top=${shellConnectorBounds.top}px",
+            kotlin.math.abs(claudeConnectorBounds.bottom - shellConnectorBounds.top) <= 1.0f,
+        )
         // The session row keeps its 48 dp touch floor even at compact density.
         assertAccessibleTouchTarget(
             folderDetailRowTestTag("/home/u/git/pocketshell", "claude-main"),

@@ -878,6 +878,10 @@ public fun TmuxSessionScreen(
                         onRetryAgentStream = {
                             viewModel.retryAgentConversationStreamForPane(paneIdForSend)
                         },
+                        // Issue #494: retry a failed optimistic send.
+                        onRetryFailedSend = { id ->
+                            viewModel.retryFailedAgentSend(paneIdForSend, id)
+                        },
                     )
                 } else if (panes.isEmpty()) {
                     EmptyPanesPlaceholder()
@@ -2983,6 +2987,9 @@ internal fun TmuxConversationPane(
     onQueryChange: (String) -> Unit = NoOpStringChange,
     syncStatus: AgentConversationSyncStatus = AgentConversationSyncStatus.Live,
     onRetryAgentStream: () -> Unit = {},
+    // Issue #494: retry a failed optimistic user send (passes its optimistic
+    // id). Default no-op for screenshot/legacy callers.
+    onRetryFailedSend: (String) -> Unit = {},
 ) {
     // Issue #459: this pane is now read-only chrome — search + the
     // conversation feed. Sending is owned by the shared unified composer
@@ -3094,6 +3101,7 @@ internal fun TmuxConversationPane(
                         onToggleSystemNoteExpand = { id ->
                             expandedSystemNotes.value = expandedSystemNotes.value.toggle(id)
                         },
+                        onRetryFailedSend = onRetryFailedSend,
                     )
                 }
             }
@@ -3306,9 +3314,10 @@ private fun ConversationEventRow(
     onToggleExpand: (String) -> Unit,
     isSystemNoteExpanded: Boolean,
     onToggleSystemNoteExpand: (String) -> Unit,
+    onRetryFailedSend: (String) -> Unit = {},
 ) {
     when (event) {
-        is ConversationEvent.Message -> ConversationMessageRow(event)
+        is ConversationEvent.Message -> ConversationMessageRow(event, onRetryFailedSend)
         is ConversationEvent.ToolCall -> ConversationToolCallRow(
             toolCall = event,
             result = eventsById.findToolResultFor(event.id),
@@ -3332,8 +3341,11 @@ private fun ConversationEventRow(
 }
 
 @Composable
-private fun ConversationMessageRow(event: ConversationEvent.Message) {
-    ConversationMessageTurn(event = event)
+private fun ConversationMessageRow(
+    event: ConversationEvent.Message,
+    onRetryFailedSend: (String) -> Unit = {},
+) {
+    ConversationMessageTurn(event = event, onRetrySend = onRetryFailedSend)
 }
 
 private fun Map<String, ConversationEvent>.findToolResultFor(

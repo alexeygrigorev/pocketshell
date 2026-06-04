@@ -395,6 +395,15 @@ class ConversationInteractE2eTest {
                 detection = detection,
                 initialEvents = emptyList(),
             )
+            // Issue #494: the composer Send path requires a live (Connected)
+            // session before it delivers bytes to the agent. The journey
+            // attaches its terminal bytes via the external producer above
+            // (independent of `sessionRef`), so this seam only flips the
+            // connection status to Connected — exactly the production state
+            // when the user types in the Conversation tab. Without it the
+            // optimistic turn is marked Failed and never reaches the remote
+            // PTY, which is the regression this test guards.
+            viewModel.attachSessionForAgentRetryForTest(tailSession)
 
             // Snapshot the seed line count and start the tail from
             // that boundary so the JSONL append below is the first

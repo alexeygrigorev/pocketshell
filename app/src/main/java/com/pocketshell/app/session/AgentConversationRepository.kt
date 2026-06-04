@@ -170,6 +170,27 @@ private fun ConversationEvent.Message.isOptimistic(): Boolean =
     id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX)
 
 /**
+ * Issue #494: return a copy of this feed where the optimistic user turn
+ * with id [optimisticId] is flipped to
+ * [com.pocketshell.core.agents.MessageSendState.Failed]. Used by both the
+ * raw-SSH and tmux send paths to mark a send that could not be delivered,
+ * so the conversation pane shows a failed turn with a retry affordance
+ * instead of a turn stuck on "sending…" forever or no turn at all.
+ *
+ * Non-matching events are returned unchanged; if no optimistic turn with
+ * that id exists the list is returned as-is.
+ */
+internal fun List<ConversationEvent>.markOptimisticFailed(
+    optimisticId: String,
+): List<ConversationEvent> = map { event ->
+    if (event is ConversationEvent.Message && event.id == optimisticId) {
+        event.copy(sendState = com.pocketshell.core.agents.MessageSendState.Failed)
+    } else {
+        event
+    }
+}
+
+/**
  * Default upper bound on the events kept by the conversation feed.
  * The constant matches the legacy in-VM `MaxAgentEvents` value so the
  * bounded-distinct contract stays unchanged for non-optimistic callers.

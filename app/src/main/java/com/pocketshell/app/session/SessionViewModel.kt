@@ -958,9 +958,16 @@ public class SessionViewModel @Inject constructor(
     public fun sendToAgentResult(text: String): Boolean {
         val payload = text.trim()
         if (payload.isEmpty()) return true
-        if (_connectionStatus.value !is ConnectionStatus.Connected) return false
         val current = _agentConversation.value
         val detection = current.detection ?: return false
+        // Issue #494: insert the optimistic pending turn FIRST — before any
+        // delivery attempt — so the user always sees their own message the
+        // instant they hit Send, with no "did it send?" gap. The turn starts
+        // as [MessageSendState.Pending] ("sending…") and is reconciled away
+        // when the real transcript entry arrives via the tail. If delivery
+        // can't even be attempted (no live session), the turn flips to
+        // [MessageSendState.Failed] so it is never silently dropped.
+        val optimisticId = "$OPTIMISTIC_USER_MESSAGE_ID_PREFIX${System.nanoTime()}"
         val optimistic = ConversationEvent.Message(
             // Issue #160 round 2: prefix used by [reconcileAgentEvents]
             // to recognise the placeholder so it can be replaced by the
@@ -968,15 +975,53 @@ public class SessionViewModel @Inject constructor(
             // [System.nanoTime] keeps each optimistic id unique so two
             // back-to-back identical prompts both stay visible until
             // their respective tails arrive.
-            id = "$OPTIMISTIC_USER_MESSAGE_ID_PREFIX${System.nanoTime()}",
+            id = optimisticId,
             agent = detection.agent,
             atMillis = System.currentTimeMillis(),
             role = com.pocketshell.core.agents.ConversationRole.User,
             text = payload,
+            sendState = com.pocketshell.core.agents.MessageSendState.Pending,
         )
         appendAgentEvents(listOf(optimistic))
+        if (_connectionStatus.value !is ConnectionStatus.Connected) {
+            // Issue #494: no live session — mark the optimistic turn failed
+            // (with a retry affordance) instead of dropping the user's text.
+            markOptimisticSendFailed(optimisticId)
+            return false
+        }
         sendText(payload, withEnter = true)
         return true
+    }
+
+    /**
+     * Issue #494: flip the optimistic user turn [optimisticId] to
+     * [com.pocketshell.core.agents.MessageSendState.Failed] so the
+     * conversation feed shows it failed (with a retry affordance) rather
+     * than leaving it stuck on "sending…" or dropping it entirely.
+     */
+    private fun markOptimisticSendFailed(optimisticId: String) {
+        _agentConversation.update { current ->
+            current.copy(events = current.events.markOptimisticFailed(optimisticId))
+        }
+    }
+
+    /**
+     * Issue #494: retry a previously-failed optimistic user turn. Drops the
+     * failed placeholder and re-sends its text (which re-inserts a fresh
+     * pending turn), so there is no double-send: the original failed turn is
+     * removed before the new send is attempted.
+     */
+    public fun retryFailedAgentSend(optimisticId: String): Boolean {
+        val failed = _agentConversation.value.events
+            .filterIsInstance<ConversationEvent.Message>()
+            .firstOrNull {
+                it.id == optimisticId &&
+                    it.sendState == com.pocketshell.core.agents.MessageSendState.Failed
+            } ?: return false
+        _agentConversation.update { current ->
+            current.copy(events = current.events.filterNot { it.id == optimisticId })
+        }
+        return sendToAgentResult(failed.text)
     }
 
     /**

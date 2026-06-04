@@ -22,9 +22,11 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.clickable
 import com.pocketshell.app.composer.MarkdownText
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
+import com.pocketshell.core.agents.MessageSendState
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellType
 
@@ -36,6 +38,11 @@ import com.pocketshell.uikit.theme.PocketShellType
 internal fun ConversationMessageTurn(
     event: ConversationEvent.Message,
     modifier: Modifier = Modifier,
+    // Issue #494: invoked when the user taps the retry affordance on a
+    // failed optimistic user turn. The optimistic id is passed so the
+    // ViewModel can drop the failed placeholder and re-send its text. No-op
+    // by default for confirmed/pending turns and for screenshot callers.
+    onRetrySend: (String) -> Unit = {},
 ) {
     val isUser = event.role == ConversationRole.User
     val roleColor = if (isUser) PocketShellColors.Accent else PocketShellColors.Purple
@@ -75,7 +82,9 @@ internal fun ConversationMessageTurn(
             // timestamp/streaming row and the message body.
             verticalArrangement = Arrangement.spacedBy(1.dp),
         ) {
-            if (event.streaming || timestamp != null) {
+            val isPending = event.sendState == MessageSendState.Pending
+            val isFailed = event.sendState == MessageSendState.Failed
+            if (event.streaming || timestamp != null || isPending || isFailed) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -83,6 +92,32 @@ internal fun ConversationMessageTurn(
                 ) {
                     if (event.streaming) {
                         StreamingBadge(roleColor = roleColor)
+                    }
+                    // Issue #494: optimistic send-state affordance. "sending…"
+                    // until the transcript confirms the turn; "failed · retry"
+                    // (tappable) if the send could not be delivered.
+                    if (isPending) {
+                        Text(
+                            text = "sending…",
+                            color = PocketShellColors.TextMuted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            modifier = Modifier.testTag(
+                                CONVERSATION_PENDING_TAG_PREFIX + event.id,
+                            ),
+                        )
+                    }
+                    if (isFailed) {
+                        Text(
+                            text = "failed · retry",
+                            color = PocketShellColors.Red,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 10.sp,
+                            modifier = Modifier
+                                .clickable { onRetrySend(event.id) }
+                                .testTag(CONVERSATION_RETRY_TAG_PREFIX + event.id),
+                        )
                     }
                     if (timestamp != null) {
                         Text(
@@ -124,6 +159,18 @@ internal fun ConversationMessageTurn(
  * instrumentation/unit-screenshot checks can locate it deterministically.
  */
 internal const val CONVERSATION_TIMESTAMP_TAG_PREFIX: String = "conversation-timestamp-"
+
+/**
+ * Issue #494: test tag prefix for the "sending…" pending indicator shown on
+ * an optimistic user turn that has not yet been confirmed by the transcript.
+ */
+internal const val CONVERSATION_PENDING_TAG_PREFIX: String = "conversation-pending-"
+
+/**
+ * Issue #494: test tag prefix for the tappable "failed · retry" affordance
+ * shown on an optimistic user turn whose send could not be delivered.
+ */
+internal const val CONVERSATION_RETRY_TAG_PREFIX: String = "conversation-retry-"
 
 @Composable
 private fun StreamingBadge(roleColor: Color) {

@@ -4,6 +4,7 @@ import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
+import com.pocketshell.core.agents.MessageSendState
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshPortForward
@@ -164,6 +165,113 @@ class AgentConversationRepositoryTest {
         assertEquals("user-prompt", bounded.first().id)
         assertEquals("assistant-reply", bounded.last().id)
         assertTrue(bounded.any { it is ConversationEvent.ToolResult })
+    }
+
+    @Test
+    fun reconcileCollapsesOptimisticPendingTurnIntoMatchingTranscriptEntry() {
+        // Issue #494: an optimistic pending turn followed by the real
+        // transcript entry with the same text must render as ONE turn —
+        // the authoritative (non-optimistic, Confirmed) one.
+        val optimistic = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}1",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.User,
+            text = "run the tests",
+            sendState = MessageSendState.Pending,
+        )
+        val real = ConversationEvent.Message(
+            id = "claude-real-1",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.User,
+            text = "run the tests",
+        )
+
+        val reconciled = reconcileAgentEvents(listOf(optimistic, real))
+
+        val userMessages = reconciled.filterIsInstance<ConversationEvent.Message>()
+            .filter { it.role == ConversationRole.User && it.text == "run the tests" }
+        assertEquals(1, userMessages.size)
+        val survivor = userMessages.single()
+        assertEquals("claude-real-1", survivor.id)
+        assertFalse(survivor.id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX))
+        assertEquals(MessageSendState.Confirmed, survivor.sendState)
+    }
+
+    @Test
+    fun reconcileKeepsOptimisticTurnWhenNoMatchingTranscriptEntryArrives() {
+        // Issue #494: a transcript entry with DIFFERENT text must not
+        // collapse the optimistic turn — both are real, distinct turns.
+        val optimistic = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}1",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.User,
+            text = "run the tests",
+            sendState = MessageSendState.Pending,
+        )
+        val unrelated = ConversationEvent.Message(
+            id = "claude-real-2",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.User,
+            text = "now ship it",
+        )
+
+        val reconciled = reconcileAgentEvents(listOf(optimistic, unrelated))
+
+        val userMessages = reconciled.filterIsInstance<ConversationEvent.Message>()
+            .filter { it.role == ConversationRole.User }
+        assertEquals(2, userMessages.size)
+        assertTrue(userMessages.any { it.text == "run the tests" && it.sendState == MessageSendState.Pending })
+        assertTrue(userMessages.any { it.text == "now ship it" })
+    }
+
+    @Test
+    fun markOptimisticFailedFlipsOnlyTheTargetTurn() {
+        // Issue #494: marking a failed send flips exactly the target
+        // optimistic turn to Failed and leaves every other event untouched.
+        val target = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}99",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.User,
+            text = "deliver this",
+            sendState = MessageSendState.Pending,
+        )
+        val other = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}100",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.User,
+            text = "another pending",
+            sendState = MessageSendState.Pending,
+        )
+        val assistant = ConversationEvent.Message(
+            id = "assistant-1",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.Assistant,
+            text = "ok",
+        )
+
+        val result = listOf(target, other, assistant).markOptimisticFailed(target.id)
+
+        val byId = result.filterIsInstance<ConversationEvent.Message>().associateBy { it.id }
+        assertEquals(MessageSendState.Failed, byId.getValue(target.id).sendState)
+        assertEquals(MessageSendState.Pending, byId.getValue(other.id).sendState)
+        assertEquals(MessageSendState.Confirmed, byId.getValue("assistant-1").sendState)
+    }
+
+    @Test
+    fun markOptimisticFailedIsNoOpForUnknownId() {
+        // Issue #494: a defensive no-op when the id is not present (e.g.
+        // the turn was already reconciled away by an in-flight tail).
+        val pending = ConversationEvent.Message(
+            id = "${OPTIMISTIC_USER_MESSAGE_ID_PREFIX}1",
+            agent = AgentKind.ClaudeCode,
+            role = ConversationRole.User,
+            text = "deliver this",
+            sendState = MessageSendState.Pending,
+        )
+
+        val result = listOf<ConversationEvent>(pending).markOptimisticFailed("does-not-exist")
+
+        assertEquals(listOf(pending), result)
     }
 
     @Test

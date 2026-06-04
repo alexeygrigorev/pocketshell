@@ -28,6 +28,7 @@ import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.session.canRetryAgentStream
+import com.pocketshell.app.session.markOptimisticFailed
 import com.pocketshell.app.session.reconcileAgentEvents
 import com.pocketshell.app.startup.StartupTiming
 import com.pocketshell.core.assistant.AssistantLlmClientFactory
@@ -3721,26 +3722,68 @@ public class TmuxSessionViewModel @Inject constructor(
     internal suspend fun sendToAgentPaneResult(paneId: String, text: String): Result<Unit> {
         val payload = text.trim()
         if (payload.isEmpty()) return Result.success(Unit)
-        if (_connectionStatus.value !is ConnectionStatus.Connected) {
-            return Result.failure(IllegalStateException("Session is disconnected."))
-        }
         val current = _agentConversations.value[paneId]
             ?: return Result.failure(IllegalStateException("No agent conversation for pane $paneId."))
         val detection = current.detection
             ?: return Result.failure(IllegalStateException("No detected agent for pane $paneId."))
+        // Issue #494: insert the optimistic pending turn FIRST — before any
+        // delivery attempt — so the Conversation tab shows the user's own
+        // message the instant they hit Send, not after the JSONL round-trip.
+        // The turn starts as [MessageSendState.Pending] ("sending…") and is
+        // reconciled away when the real transcript entry arrives via the
+        // tail. If the send can't be delivered the turn flips to
+        // [MessageSendState.Failed] (with a retry affordance) so the user's
+        // text is never silently lost.
+        val optimisticId = "$OPTIMISTIC_USER_MESSAGE_ID_PREFIX${System.nanoTime()}"
+        val optimistic = ConversationEvent.Message(
+            // Issue #160 round 2: see [OPTIMISTIC_USER_MESSAGE_ID_PREFIX].
+            id = optimisticId,
+            agent = detection.agent,
+            atMillis = System.currentTimeMillis(),
+            role = ConversationRole.User,
+            text = payload,
+            sendState = com.pocketshell.core.agents.MessageSendState.Pending,
+        )
+        appendAgentEvents(paneId, listOf(optimistic))
+        if (_connectionStatus.value !is ConnectionStatus.Connected) {
+            markOptimisticSendFailed(paneId, optimisticId)
+            return Result.failure(IllegalStateException("Session is disconnected."))
+        }
         val result = sendAgentPayloadToPaneResult(paneId, payload, detection.agent)
-        if (result.isSuccess) {
-            val optimistic = ConversationEvent.Message(
-                // Issue #160 round 2: see [OPTIMISTIC_USER_MESSAGE_ID_PREFIX].
-                id = "$OPTIMISTIC_USER_MESSAGE_ID_PREFIX${System.nanoTime()}",
-                agent = detection.agent,
-                atMillis = System.currentTimeMillis(),
-                role = ConversationRole.User,
-                text = payload,
-            )
-            appendAgentEvents(paneId, listOf(optimistic))
+        if (result.isFailure) {
+            markOptimisticSendFailed(paneId, optimisticId)
         }
         return result
+    }
+
+    /**
+     * Issue #494: flip the optimistic user turn [optimisticId] in pane
+     * [paneId] to [com.pocketshell.core.agents.MessageSendState.Failed].
+     */
+    private fun markOptimisticSendFailed(paneId: String, optimisticId: String) {
+        updateAgentConversation(paneId) { current ->
+            current.copy(events = current.events.markOptimisticFailed(optimisticId))
+        }
+    }
+
+    /**
+     * Issue #494: retry a previously-failed optimistic user turn in pane
+     * [paneId]. Drops the failed placeholder and re-sends its text, so there
+     * is no double-send (the failed turn is removed before the new send).
+     */
+    public fun retryFailedAgentSend(paneId: String, optimisticId: String) {
+        val failed = _agentConversations.value[paneId]?.events
+            ?.filterIsInstance<ConversationEvent.Message>()
+            ?.firstOrNull {
+                it.id == optimisticId &&
+                    it.sendState == com.pocketshell.core.agents.MessageSendState.Failed
+            } ?: return
+        updateAgentConversation(paneId) { current ->
+            current.copy(events = current.events.filterNot { it.id == optimisticId })
+        }
+        bridgeScope.launch {
+            sendToAgentPaneResult(paneId, failed.text)
+        }
     }
 
     internal suspend fun sendAgentPayloadToPaneResult(

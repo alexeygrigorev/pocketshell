@@ -11,6 +11,7 @@ import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
+import com.pocketshell.core.agents.MessageSendState
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.ssh.SshKey
 import com.pocketshell.core.ssh.SshLease
@@ -2669,14 +2670,15 @@ class TmuxSessionViewModelTest {
         assertTrue("expected forced send failure", result.isFailure)
         assertTrue("forced failure should close fake client", client.closed)
         assertTrue("Reconnect must remain available after paste disconnect", vm.canReconnect.value)
-        assertTrue(
-            "failed paste must not append an optimistic user message",
-            vm.agentConversations.value["%0"]!!.events.isEmpty(),
-        )
+        // Issue #494: a failed send no longer drops the user's text. The
+        // optimistic turn is shown and flipped to Failed (with retry).
+        val failed = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
+        assertEquals(MessageSendState.Failed, failed.sendState)
+        assertTrue(failed.id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX))
     }
 
     @Test
-    fun sendToAgentPaneResultPasteChunkTmuxErrorDoesNotAppendOptimisticMessage() = runTest {
+    fun sendToAgentPaneResultPasteChunkTmuxErrorMarksOptimisticMessageFailed() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
             responses.addLast(CommandResponse(number = 1L, output = emptyList(), isError = false))
@@ -2698,10 +2700,9 @@ class TmuxSessionViewModelTest {
         runCurrent()
 
         assertTrue("expected tmux %error to fail the paste result", result.isFailure)
-        assertTrue(
-            "failed paste chunk must not append an optimistic user message",
-            vm.agentConversations.value["%0"]!!.events.isEmpty(),
-        )
+        // Issue #494: the optimistic turn is shown and flipped to Failed.
+        val failed = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
+        assertEquals(MessageSendState.Failed, failed.sendState)
         assertTrue(
             "failed paste must stop before submitting Enter: ${client.sentCommands}",
             client.sentCommands.none { it == "send-keys -t %0 Enter" },
@@ -2709,7 +2710,7 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneResultFinalEnterTmuxErrorDoesNotAppendOptimisticMessage() = runTest {
+    fun sendToAgentPaneResultFinalEnterTmuxErrorMarksOptimisticMessageFailed() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient().apply {
             repeat(5) {
@@ -2735,10 +2736,9 @@ class TmuxSessionViewModelTest {
         runCurrent()
 
         assertTrue("expected tmux %error from final Enter to fail the send result", result.isFailure)
-        assertTrue(
-            "failed final Enter must not append an optimistic user message",
-            vm.agentConversations.value["%0"]!!.events.isEmpty(),
-        )
+        // Issue #494: the optimistic turn is shown and flipped to Failed.
+        val failed = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
+        assertEquals(MessageSendState.Failed, failed.sendState)
         assertEquals(
             "send-keys -t %0 Enter",
             client.sentCommands.filter { it.startsWith("send-keys") }.last(),
@@ -2760,7 +2760,11 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentPaneResultFailsWithoutOptimisticMessageWhenDisconnected() = runTest {
+    fun sendToAgentPaneResultMarksOptimisticMessageFailedWhenDisconnected() = runTest {
+        // Issue #494: a disconnected send no longer silently drops the
+        // user's text. The optimistic turn is shown and flipped to Failed
+        // (with a retry affordance), while the result still reports failure
+        // so the unified composer can keep the draft editable.
         val vm = newVm()
         vm.startAgentConversationForTest("%0", newClaudeDetection())
 
@@ -2768,9 +2772,43 @@ class TmuxSessionViewModelTest {
         runCurrent()
 
         assertTrue("disconnected tmux agent send must report failure", result.isFailure)
+        val failed = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
+        assertEquals("preserve this prompt", failed.text)
+        assertEquals(ConversationRole.User, failed.role)
+        assertEquals(MessageSendState.Failed, failed.sendState)
+        assertTrue(failed.id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX))
+    }
+
+    @Test
+    fun retryFailedAgentSendDropsFailedTurnAndReSendsWithoutDoubleSend() = runTest {
+        // Issue #494: retrying a failed tmux send drops the failed
+        // placeholder and re-sends. With a live client the re-send inserts
+        // a fresh pending turn and submits the keys — exactly one user turn
+        // remains (no double-send, no orphaned failed row).
+        val vm = newVm()
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+
+        // First attempt: disconnected -> Failed turn.
+        assertTrue(vm.sendToAgentPaneResult("%0", "retry me").isFailure)
+        runCurrent()
+        val failed = vm.agentConversations.value["%0"]!!.events.single() as ConversationEvent.Message
+        assertEquals(MessageSendState.Failed, failed.sendState)
+
+        // Bring up a live client and retry.
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.retryFailedAgentSend("%0", failed.id)
+        advanceUntilIdle()
+
+        val events = vm.agentConversations.value["%0"]!!.events
+        assertEquals("retry must leave exactly one user turn (no double-send)", 1, events.size)
+        val pending = events.single() as ConversationEvent.Message
+        assertEquals("retry me", pending.text)
+        assertEquals(MessageSendState.Pending, pending.sendState)
+        assertTrue("retried turn must be a fresh optimistic id", pending.id != failed.id)
         assertTrue(
-            "disconnected send must not append optimistic messages",
-            vm.agentConversations.value["%0"]!!.events.isEmpty(),
+            "retried send must submit Enter to the pane: ${client.sentCommands}",
+            client.sentCommands.any { it == "send-keys -t %0 Enter" },
         )
     }
 

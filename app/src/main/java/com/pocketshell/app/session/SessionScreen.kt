@@ -364,6 +364,8 @@ public fun SessionScreen(
                         agentName = detection.agent.displayName,
                         syncStatus = agentConversation.syncStatus,
                         onRetryAgentStream = viewModel::retryAgentConversationStream,
+                        // Issue #494: retry a failed optimistic send.
+                        onRetryFailedSend = { id -> viewModel.retryFailedAgentSend(id) },
                     )
                 } else {
                     TerminalSurface(
@@ -605,6 +607,9 @@ internal fun ConversationPane(
     agentName: String = "agent",
     syncStatus: AgentConversationSyncStatus = AgentConversationSyncStatus.Live,
     onRetryAgentStream: () -> Unit = {},
+    // Issue #494: retry a failed optimistic user send (passes its optimistic
+    // id). Default no-op for screenshot/legacy callers.
+    onRetryFailedSend: (String) -> Unit = {},
 ) {
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     var composerText by remember { mutableStateOf("") }
@@ -688,6 +693,7 @@ internal fun ConversationPane(
                             val current = expandedSystemNotes.value
                             expandedSystemNotes.value = if (current.contains(id)) current - id else current + id
                         },
+                        onRetryFailedSend = onRetryFailedSend,
                     )
                 }
             }
@@ -854,9 +860,10 @@ private fun ConversationEventRow(
     onToggleExpand: (String) -> Unit,
     isSystemNoteExpanded: Boolean,
     onToggleSystemNoteExpand: (String) -> Unit,
+    onRetryFailedSend: (String) -> Unit = {},
 ) {
     when (event) {
-        is ConversationEvent.Message -> ConversationMessageRow(event)
+        is ConversationEvent.Message -> ConversationMessageRow(event, onRetryFailedSend)
         is ConversationEvent.ToolCall -> ConversationToolCallRow(
             toolCall = event,
             result = eventsById.findToolResultFor(event.id),
@@ -874,8 +881,11 @@ private fun ConversationEventRow(
 }
 
 @Composable
-private fun ConversationMessageRow(event: ConversationEvent.Message) {
-    ConversationMessageTurn(event = event)
+private fun ConversationMessageRow(
+    event: ConversationEvent.Message,
+    onRetryFailedSend: (String) -> Unit = {},
+) {
+    ConversationMessageTurn(event = event, onRetrySend = onRetryFailedSend)
 }
 
 @Composable

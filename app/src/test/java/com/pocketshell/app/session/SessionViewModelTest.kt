@@ -10,6 +10,7 @@ import com.pocketshell.core.agents.AgentDetection
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
+import com.pocketshell.core.agents.MessageSendState
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshPortForward
@@ -770,7 +771,13 @@ class SessionViewModelTest {
     }
 
     @Test
-    fun sendToAgentResultFailsWithoutClearingWhenDisconnected() = runBlocking {
+    fun sendToAgentResultMarksOptimisticTurnFailedWhenDisconnected() = runBlocking {
+        // Issue #494: a send that cannot be delivered (no live session)
+        // must NOT silently drop the user's text. The optimistic turn is
+        // shown immediately and flipped to `Failed` (with a retry
+        // affordance) so the user sees what happened. The composer still
+        // reports failure (false) so the draft / unsent-prompt banner can
+        // keep the text editable.
         val vm = newVm()
         vm.startAgentConversationForTest(
             detection = AgentDetection(
@@ -785,10 +792,72 @@ class SessionViewModelTest {
         val sent = vm.sendToAgentResult("preserve this prompt")
 
         assertFalse("disconnected raw SSH agent send must report failure", sent)
+        val events = vm.agentConversation.value.events
+        assertEquals(1, events.size)
+        val failed = events.single() as ConversationEvent.Message
+        assertEquals("preserve this prompt", failed.text)
+        assertEquals(ConversationRole.User, failed.role)
+        assertEquals(MessageSendState.Failed, failed.sendState)
         assertTrue(
-            "failed disconnected send must not append optimistic conversation events",
-            vm.agentConversation.value.events.isEmpty(),
+            "failed optimistic turn keeps the optimistic id prefix for retry",
+            failed.id.startsWith(OPTIMISTIC_USER_MESSAGE_ID_PREFIX),
         )
+    }
+
+    @Test
+    fun retryFailedAgentSendDropsFailedTurnAndReSendsWithoutDoubleSend() = runBlocking {
+        // Issue #494: retrying a failed send drops the failed placeholder
+        // and re-sends the text. With a live session the re-send inserts a
+        // fresh pending turn and delivers the bytes — exactly one user turn
+        // remains (no double-send, no orphaned failed row).
+        val vm = newVm()
+        vm.startAgentConversationForTest(
+            detection = AgentDetection(
+                agent = AgentKind.ClaudeCode,
+                sourcePath = "/tmp/claude.jsonl",
+                sessionId = "claude",
+                confidence = AgentDetection.Confidence.ProcessConfirmed,
+            ),
+            initialEvents = emptyList(),
+        )
+
+        // First attempt: disconnected -> Failed turn.
+        assertFalse(vm.sendToAgentResult("retry me"))
+        val failed = vm.agentConversation.value.events.single() as ConversationEvent.Message
+        assertEquals(MessageSendState.Failed, failed.sendState)
+
+        // Now bring the session up and retry.
+        vm.attachSessionForAgentRetryForTest(FakeSshSession())
+        val stdin = ByteArrayOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerJob = vm.terminalState.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = stdin,
+        )
+        try {
+            assertTrue(vm.retryFailedAgentSend(failed.id))
+
+            val events = vm.agentConversation.value.events
+            assertEquals(
+                "retry must leave exactly one user turn (no double-send)",
+                1,
+                events.size,
+            )
+            val pending = events.single() as ConversationEvent.Message
+            assertEquals("retry me", pending.text)
+            assertEquals(MessageSendState.Pending, pending.sendState)
+            assertFalse(
+                "retried turn must be a fresh optimistic id, not the failed one",
+                pending.id == failed.id,
+            )
+            waitForStdin(stdin, "retry me\r")
+        } finally {
+            producerJob.cancel()
+            producerScope.cancel()
+            vm.terminalState.detachExternalProducer()
+        }
     }
 
     @Test

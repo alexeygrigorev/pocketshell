@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketshell.app.notifications.ShareUploadNotifications
+import com.pocketshell.app.projects.SshFolderListGateway
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.tmux.TMUX_PASTE_BODY_CHUNK_BYTES
 import com.pocketshell.app.tmux.buildBracketedPasteHexChunks
@@ -172,23 +173,33 @@ internal class ShareViewModel @Inject constructor(
     }
 
     /**
-     * Issue #473: user tapped a host in the picker. Instead of uploading
-     * straight to the host inbox, surface the per-host target chooser so
-     * the file can land in either `~/inbox/pocketshell/` (default) or a
-     * specific project's `.inbox/`.
+     * Issue #473 / #507: user tapped a host in the picker. Instead of
+     * uploading straight to the host inbox, surface the per-host target
+     * chooser so the file can land in either `~/inbox/pocketshell/`
+     * (default), one of the user's current/open session projects, or a
+     * top-level watched root's `.inbox/`.
      *
      * Resolves the target options off the main thread:
      *
-     *  - the host's known projects from [ProjectRootDao] (the inactive
-     *    case — watched roots / recent folders); and
-     *  - the live attached session's project as a one-tap quick target
-     *    when [host] has a registered `tmux -CC` client (queried via
-     *    `display-message -p '#{pane_current_path}'`).
+     *  - Issue #507: the current/open sessions' PROJECTS — each live
+     *    `tmux -CC` session's active-pane cwd — so the user can drop a
+     *    file into the project they are actually working in (e.g.
+     *    `~/git/pocketshell/.inbox/`), not just a top-level watched
+     *    root. The focused session leads. Resolved by enumerating the
+     *    live client's sessions via `list-panes -a` (one round-trip).
+     *  - the host's known projects / watched roots from [ProjectRootDao]
+     *    (kept as options — a user may still want a root's `.inbox/`).
+     *
+     * The two lists are de-duplicated on path: a session project that is
+     * also a watched root is listed only once, in the prominent
+     * session-project slot.
      */
     fun selectTargetHost(host: HostEntity) {
         if (_uploadState.value is UploadState.Running) return
         _targetSelection.value = TargetSelection(host = host, loading = true)
         viewModelScope.launch {
+            val sessionProjects = resolveSessionProjects(host)
+            val sessionPaths = sessionProjects.map { it.path }.toSet()
             val knownProjects = runCatching {
                 projectRootDao.getByHostId(host.id).first()
             }.getOrDefault(emptyList())
@@ -200,11 +211,14 @@ internal class ShareViewModel @Inject constructor(
                             .ifBlank { defaultLabelForPath(root.path) },
                     )
                 }
-            val activeProject = resolveActiveSessionProject(host)
+                // Issue #507: a watched root that is also a live session
+                // project is already surfaced (prominently) above, so
+                // drop it here to avoid a double-listing.
+                .filter { it.path !in sessionPaths }
             _targetSelection.value = TargetSelection(
                 host = host,
                 loading = false,
-                activeSessionProject = activeProject,
+                sessionProjects = sessionProjects,
                 knownProjects = knownProjects,
             )
         }
@@ -216,20 +230,60 @@ internal class ShareViewModel @Inject constructor(
     }
 
     /**
-     * Issue #473: resolve the live attached session's project path for
-     * [host] (the "share to what I'm working on" quick target). Returns
-     * null when the host has no registered `tmux -CC` client or the cwd
-     * query fails / yields an unusable path.
+     * Issue #507: enumerate the current/open sessions' projects for
+     * [host] (the "share to what I'm working on" targets). Returns an
+     * empty list when the host has no registered `tmux -CC` client or the
+     * enumeration fails / yields no usable path.
+     *
+     * Each open tmux session contributes its active pane's
+     * `pane_current_path` (the project the user is working in for that
+     * session). The currently-focused session's project leads so the
+     * most likely destination is at the top; remaining session projects
+     * follow in session order. Paths are de-duplicated so two sessions
+     * sharing a cwd surface a single destination.
+     *
+     * Implementation: a single `list-panes -a` control-mode round-trip
+     * (reusing [SshFolderListGateway.CONTROL_LIST_PANES_COMMAND] /
+     * [FolderListGateway.parseSessionWindowRows]) yields every window's
+     * active-pane cwd plus `#{window_active}` / `#{pane_active}`, from
+     * which the per-session active pane and the globally focused pane are
+     * derived without a second query.
      */
-    private suspend fun resolveActiveSessionProject(host: HostEntity): ProjectTarget? {
-        val entry = activeTmuxClients.clients.value[host.id] ?: return null
-        val cwd = runCatching {
-            val response = entry.client.sendCommand("display-message -p '#{pane_current_path}'")
-            if (response.isError) return@runCatching null
-            response.output.firstOrNull()?.trim()
-        }.getOrNull() ?: return null
-        if (cwd.isBlank() || !cwd.startsWith("/")) return null
-        return ProjectTarget(path = cwd, label = defaultLabelForPath(cwd))
+    private suspend fun resolveSessionProjects(host: HostEntity): List<ProjectTarget> {
+        val entry = activeTmuxClients.clients.value[host.id] ?: return emptyList()
+        val windows = runCatching {
+            val response =
+                entry.client.sendCommand(SshFolderListGateway.CONTROL_LIST_PANES_COMMAND)
+            if (response.isError) return@runCatching emptyList()
+            SshFolderListGateway.parseSessionWindowRows(response.output.joinToString("\n"))
+        }.getOrDefault(emptyList())
+        if (windows.isEmpty()) return emptyList()
+
+        // The focused session is the one whose active window is also the
+        // active pane row tmux reports; `parseSessionWindowRows` already
+        // filtered to active panes, so `active == true` marks the
+        // focused window. Sort that session's cwd first.
+        val activePanes = SshFolderListGateway.activePaneRowsBySession(windows)
+        val focusedSession = windows.firstOrNull { it.active }?.sessionName
+
+        val ordered = buildList {
+            focusedSession?.let { add(it) }
+            // Preserve session enumeration order for the rest.
+            windows.map { it.sessionName }.distinct().forEach { name ->
+                if (name != focusedSession) add(name)
+            }
+        }
+
+        val seenPaths = linkedSetOf<String>()
+        val projects = mutableListOf<ProjectTarget>()
+        for (sessionName in ordered) {
+            val cwd = activePanes[sessionName]?.cwd?.trim().orEmpty()
+            if (cwd.isBlank() || !cwd.startsWith("/")) continue
+            val normalised = cwd.trimEnd('/').ifBlank { "/" }
+            if (!seenPaths.add(normalised)) continue
+            projects += ProjectTarget(path = normalised, label = defaultLabelForPath(normalised))
+        }
+        return projects
     }
 
     /**
@@ -650,18 +704,21 @@ internal data class ProjectTarget(
  * the host inbox or a specific project's `.inbox/`.
  *
  * @property host the host the file will land on.
- * @property loading true while the known-project list + active-session
- *   quick target are still resolving (DAO read + a `display-message`
- *   round-trip to the live client).
- * @property activeSessionProject the live attached session's project,
- *   offered as a one-tap quick target at the top of the chooser. Null
- *   when the host has no attached session.
- * @property knownProjects the host's known projects (watched roots /
- *   recent folders) for the inactive case.
+ * @property loading true while the session-project list + known-project
+ *   list are still resolving (a `list-panes -a` round-trip to the live
+ *   client + a DAO read).
+ * @property sessionProjects the current/open sessions' projects (issue
+ *   #507) — each live tmux session's active-pane cwd, focused session
+ *   first — offered as prominent one-tap quick targets at the top of the
+ *   chooser. Empty when the host has no attached session.
+ * @property knownProjects the host's known projects (top-level watched
+ *   roots / recent folders) for the inactive case. De-duplicated against
+ *   [sessionProjects] so a root that is also an open-session project is
+ *   not listed twice.
  */
 internal data class TargetSelection(
     val host: HostEntity,
     val loading: Boolean = false,
-    val activeSessionProject: ProjectTarget? = null,
+    val sessionProjects: List<ProjectTarget> = emptyList(),
     val knownProjects: List<ProjectTarget> = emptyList(),
 )

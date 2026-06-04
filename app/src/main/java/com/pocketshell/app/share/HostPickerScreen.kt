@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
@@ -211,9 +212,11 @@ internal fun HostPickerScreen(
  *
  * Layout (top to bottom):
  *  - "Host inbox" — the default, always present.
- *  - The live attached session's project, when present, as a one-tap
- *    quick target ("share to what I'm working on").
- *  - The host's known projects (watched roots / recent folders).
+ *  - Issue #507: the current/open sessions' projects (each live tmux
+ *    session's active-pane cwd, focused session first), as prominent
+ *    one-tap quick targets ("share to the project I'm working in").
+ *  - The host's top-level watched roots / recent folders, de-duplicated
+ *    against the session projects above.
  */
 @Composable
 private fun TargetPickerScreen(
@@ -254,15 +257,37 @@ private fun TargetPickerScreen(
             )
         }
 
-        selection.activeSessionProject?.let { active ->
+        // Issue #507: the current/open sessions' projects, prominent at
+        // the top so the user can drop a file into the project they are
+        // actually working in (not just a top-level watched root). The
+        // first entry is the focused session.
+        if (selection.sessionProjects.isNotEmpty()) {
             item {
-                TargetRow(
-                    title = "${active.label} (active session)",
-                    subtitle = "${active.path}/.inbox/",
-                    testTag = SHARE_TARGET_ACTIVE_PROJECT_TAG,
-                    onClick = { onChooseProject(active) },
+                Text(
+                    text = "Open session projects",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+        itemsIndexed(
+            selection.sessionProjects,
+            key = { _, project -> "session:" + project.path },
+        ) { index, project ->
+            TargetRow(
+                title = if (index == 0) {
+                    "${project.label} (active session)"
+                } else {
+                    "${project.label} (session)"
+                },
+                subtitle = "${project.path}/.inbox/",
+                testTag = if (index == 0) {
+                    SHARE_TARGET_ACTIVE_PROJECT_TAG
+                } else {
+                    SHARE_TARGET_SESSION_PROJECT_ROW_TAG_PREFIX + project.path
+                },
+                onClick = { onChooseProject(project) },
+            )
         }
 
         if (selection.loading) {
@@ -275,9 +300,16 @@ private fun TargetPickerScreen(
             }
         }
 
-        val activePath = selection.activeSessionProject?.path
-        val otherProjects = selection.knownProjects.filter { it.path != activePath }
-        items(otherProjects, key = { it.path }) { project ->
+        if (selection.knownProjects.isNotEmpty()) {
+            item {
+                Text(
+                    text = "Watched roots",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        items(selection.knownProjects, key = { it.path }) { project ->
             TargetRow(
                 title = project.label,
                 subtitle = "${project.path}/.inbox/",
@@ -563,5 +595,7 @@ internal const val SHARE_EMPTY_STATE_TAG: String = "share:picker:empty"
 internal const val SHARE_TARGET_PICKER_TAG: String = "share:target:picker"
 internal const val SHARE_TARGET_HOST_INBOX_TAG: String = "share:target:host-inbox"
 internal const val SHARE_TARGET_ACTIVE_PROJECT_TAG: String = "share:target:active-project"
+internal const val SHARE_TARGET_SESSION_PROJECT_ROW_TAG_PREFIX: String =
+    "share:target:session-project:"
 internal const val SHARE_TARGET_PROJECT_ROW_TAG_PREFIX: String = "share:target:project:"
 internal const val SHARE_TARGET_BACK_TAG: String = "share:target:back"

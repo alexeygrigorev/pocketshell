@@ -13,16 +13,22 @@ import androidx.room.Room
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import android.graphics.Bitmap
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
+import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.tmux.TmuxClient
+import com.pocketshell.core.tmux.TmuxClientFactory
+import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -34,6 +40,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
+import java.io.FileOutputStream
 
 /**
  * End-to-end connected-emulator test for the Android share-target
@@ -58,6 +65,14 @@ class ShareTargetE2eTest {
     private var stagedFile: File? = null
     private val stagedFiles = mutableListOf<File>()
 
+    // Issue #507: live `tmux -CC` client + registry handle for the
+    // open-session-project journey. Torn down here so a re-run starts
+    // clean and the shared Docker fixture is not leaked a named session.
+    private var tmuxClient: TmuxClient? = null
+    private var sshSession: SshSession? = null
+    private var registeredHostId: Long? = null
+    private var registeredSessionName: String = ""
+
     @After
     fun teardown() {
         launchedActivity?.close()
@@ -66,6 +81,43 @@ class ShareTargetE2eTest {
         stagedFile = null
         stagedFiles.forEach { it.delete() }
         stagedFiles.clear()
+
+        registeredHostId?.let { hostId ->
+            runCatching {
+                val ctx = InstrumentationRegistry.getInstrumentation()
+                    .targetContext
+                    .applicationContext
+                EntryPointAccessors
+                    .fromApplication(ctx, ShareTestAccessEntryPoint::class.java)
+                    .activeTmuxClients()
+                    .unregister(hostId)
+            }
+        }
+        registeredHostId = null
+        runCatching { tmuxClient?.close() }
+        tmuxClient = null
+        runCatching { sshSession?.close() }
+        sshSession = null
+        if (registeredSessionName.isNotBlank()) {
+            runCatching {
+                runBlocking {
+                    val key = readTestKeyOrNull() ?: return@runBlocking
+                    SshConnection.connect(
+                        host = DEFAULT_HOST,
+                        port = DEFAULT_PORT,
+                        user = DEFAULT_USER,
+                        key = SshKey.Pem(key),
+                        knownHosts = KnownHostsPolicy.AcceptAll,
+                        timeoutMs = 10_000,
+                    ).getOrNull()?.use { session ->
+                        session.exec(
+                            "tmux kill-session -t '$registeredSessionName' 2>/dev/null || true",
+                        )
+                    }
+                }
+            }
+        }
+        registeredSessionName = ""
     }
 
     @Test
@@ -498,6 +550,239 @@ class ShareTargetE2eTest {
         }
         Unit
     }
+
+    /**
+     * Issue #507: the share destination picker must offer the
+     * current/open session's PROJECT (its active-pane cwd), not only the
+     * top-level watched roots. This connected journey brings up a real
+     * `tmux -CC` session whose pane is `cd`'d into a project directory on
+     * the Docker fixture, registers it against the production
+     * [ActiveTmuxClients] singleton, then drives the share intent and
+     * verifies:
+     *
+     *  1. the picker surfaces the open-session project row
+     *     ([SHARE_TARGET_ACTIVE_PROJECT_TAG]) — proving the destination
+     *     list includes session projects, not just watched roots; and
+     *  2. tapping it lands the file in that project's `.inbox/`.
+     *
+     * A screenshot of the destination picker (showing the session
+     * project) is captured as authoritative UI evidence.
+     */
+    @Test
+    fun shareIntentUploadsFileToOpenSessionProject() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val targetContext = instrumentation.targetContext
+        val key = instrumentation.context
+            .assets
+            .open("test_key")
+            .bufferedReader()
+            .use { it.readText() }
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        val marker = "pssession${System.currentTimeMillis()}"
+        val sessionName = "issue507-$marker"
+        registeredSessionName = sessionName
+        val projectRelative = "psproject-$marker"
+        val homePath = remoteHome(key)
+        val projectPath = "$homePath/$projectRelative"
+        val hostId = seedHost(targetContext, key, marker)
+        val (sharedFile, fileContents) = stageSharedFile(targetContext, marker)
+        stagedFile = sharedFile
+
+        val entryPoint = EntryPointAccessors.fromApplication(
+            targetContext.applicationContext,
+            ShareTestAccessEntryPoint::class.java,
+        )
+        val activeClients: ActiveTmuxClients = entryPoint.activeTmuxClients()
+        val tmuxFactory: TmuxClientFactory = entryPoint.tmuxClientFactory()
+
+        try {
+            // Create the project dir on the remote so tmux can `cd` into
+            // it; clean any stale `.inbox/` from a prior run.
+            cleanProjectOnRemote(key, projectPath)
+            withTimeout(20_000) {
+                SshConnection.connect(
+                    host = DEFAULT_HOST,
+                    port = DEFAULT_PORT,
+                    user = DEFAULT_USER,
+                    key = SshKey.Pem(key),
+                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    timeoutMs = 15_000,
+                ).getOrThrow().use { session ->
+                    session.exec("mkdir -p \"$projectPath\"")
+                }
+            }
+
+            val ssh = withTimeout(20_000) {
+                SshConnection.connect(
+                    host = DEFAULT_HOST,
+                    port = DEFAULT_PORT,
+                    user = DEFAULT_USER,
+                    key = SshKey.Pem(key),
+                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    timeoutMs = 15_000,
+                ).getOrThrow()
+            }
+            sshSession = ssh
+            runCatching { ssh.exec("tmux kill-session -t '$sessionName' 2>/dev/null || true") }
+
+            // Start the session with its working directory set to the
+            // project so `pane_current_path` resolves there.
+            val client = tmuxFactory.create(
+                session = ssh,
+                sessionName = sessionName,
+                startDirectory = projectPath,
+            )
+            tmuxClient = client
+            client.connect()
+
+            // Wait until the live client reports the project as the
+            // active pane's cwd (tmux start-directory takes a beat).
+            withTimeout(15_000) {
+                while (true) {
+                    val resp = client.sendCommand("display-message -p '#{pane_current_path}'")
+                    val cwd = resp.output.firstOrNull()?.trim().orEmpty()
+                    if (!resp.isError && cwd.trimEnd('/') == projectPath.trimEnd('/')) break
+                    delay(200)
+                }
+            }
+
+            activeClients.register(
+                hostId = hostId,
+                hostName = "Share Session Docker $marker",
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyPath = "/tmp/${marker}-test-key",
+                client = client,
+            )
+            registeredHostId = hostId
+
+            val sharedUri = FileProvider.getUriForFile(
+                targetContext,
+                "${targetContext.packageName}.shareprovider",
+                sharedFile,
+            )
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                setClassName(targetContext, ShareActivity::class.java.name)
+                type = "application/octet-stream"
+                putExtra(Intent.EXTRA_STREAM, sharedUri)
+                putExtra(Intent.EXTRA_TITLE, sharedFile.name)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+
+            launchedActivity = ActivityScenario.launch(shareIntent)
+            compose.waitUntil(timeoutMillis = 15_000) {
+                compose.onAllNodesWithTag(SHARE_PICKER_ROOT_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            val hostTag = SHARE_HOST_ROW_TAG_PREFIX + hostId
+            compose.waitUntil(timeoutMillis = 15_000) {
+                compose.onAllNodesWithTag(hostTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag(hostTag, useUnmergedTree = true).performClick()
+
+            // Issue #507: the open-session project must surface as a
+            // prominent quick target (NOT just the watched roots).
+            compose.waitUntil(timeoutMillis = 15_000) {
+                compose.onAllNodesWithTag(SHARE_TARGET_ACTIVE_PROJECT_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            captureScreenshot("issue507-share-session-project-picker")
+
+            compose.onNodeWithTag(SHARE_TARGET_ACTIVE_PROJECT_TAG, useUnmergedTree = true)
+                .performClick()
+
+            compose.waitUntil(timeoutMillis = 60_000) {
+                val success = compose
+                    .onAllNodesWithTag(SHARE_RESULT_SUCCESS_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+                val failure = compose
+                    .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+                success || failure
+            }
+            val showedFailure = compose
+                .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+            if (showedFailure) {
+                val detailText = compose
+                    .onAllNodesWithTag(SHARE_RESULT_DETAIL_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .joinToString(" / ") { it.toString() }
+                throw AssertionError("session-project upload reported a failure: $detailText")
+            }
+
+            val remoteName = withTimeout(20_000) {
+                pollRemoteUntilProjectFileExists(key, projectPath, marker)
+            }
+            assertNotNull(
+                "expected a share file under $projectPath/.inbox/ on remote",
+                remoteName,
+            )
+            val remotePath = "$projectPath/.inbox/$remoteName"
+            val readBack = SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+            ).getOrThrow().use { session ->
+                session.exec("cat \"$remotePath\"")
+            }
+            assertEquals(
+                "expected session-project inbox contents to round-trip, stderr='${readBack.stderr}'",
+                0,
+                readBack.exitCode,
+            )
+            assertEquals(
+                "expected uploaded contents to match the local payload",
+                fileContents,
+                readBack.stdout,
+            )
+        } finally {
+            cleanProjectOnRemote(key, projectPath)
+        }
+        Unit
+    }
+
+    private fun captureScreenshot(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        instrumentation.waitForIdleSync()
+        val bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return
+        val mediaRoot = instrumentation.targetContext.externalMediaDirs
+            .firstOrNull { it != null }
+            ?: instrumentation.targetContext.getExternalFilesDir(null)
+        val dir = File(mediaRoot, "additional_test_output/share-target")
+        check(dir.exists() || dir.mkdirs()) {
+            "could not create artifact directory ${dir.absolutePath}"
+        }
+        val file = File(dir, "$name.png")
+        FileOutputStream(file).use { out ->
+            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                "failed to write screenshot to ${file.absolutePath}"
+            }
+        }
+        bitmap.recycle()
+        println("ISSUE507_SCREENSHOT ${file.absolutePath}")
+    }
+
+    private fun readTestKeyOrNull(): String? = runCatching {
+        InstrumentationRegistry.getInstrumentation()
+            .context
+            .assets
+            .open("test_key")
+            .bufferedReader()
+            .use { it.readText() }
+    }.getOrNull()
 
     private fun clickHostInboxTarget() {
         compose.waitUntil(timeoutMillis = 15_000) {

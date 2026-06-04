@@ -585,7 +585,10 @@ class ShareViewModelTest {
 
         val selection = vm.targetSelection.first { it != null && !it.loading }!!
         assertEquals(host.id, selection.host.id)
-        assertEquals(null, selection.activeSessionProject)
+        assertTrue(
+            "no live client -> no session projects",
+            selection.sessionProjects.isEmpty(),
+        )
         assertEquals(
             "known projects must carry their paths",
             setOf("/home/alexey/git/pocketshell", "/home/alexey/git/other"),
@@ -598,16 +601,25 @@ class ShareViewModelTest {
     }
 
     @Test
-    fun selectTargetHostSurfacesActiveSessionProjectAsQuickTarget() = runTest {
+    fun selectTargetHostSurfacesOpenSessionProjectsFocusedFirst() = runTest {
+        // Issue #507: the picker must list the current/open sessions'
+        // PROJECTS (their active-pane cwd), not only top-level watched
+        // roots. Two open sessions in different projects -> two session
+        // targets; the focused session leads.
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)
         val host = seededHost(id = 41L, name = "gpu-box")
         val client = FakeTmuxClient().apply {
-            // display-message -p '#{pane_current_path}' -> the live cwd.
+            // list-panes -a active-pane rows. Fields:
+            // session::window_index::window_name::window_active::
+            // pane_active::pane_current_path::pane_tty::pane_current_command
             responses.addLast(
                 CommandResponse(
                     number = 0L,
-                    output = listOf("/home/alexey/git/live-project"),
+                    output = listOf(
+                        "work::0::main::0::1::/home/alexey/git/pocketshell::/dev/pts/1::bash",
+                        "scratch::0::main::1::1::/home/alexey/git/live-project::/dev/pts/2::bash",
+                    ),
                     isError = false,
                 ),
             )
@@ -628,10 +640,121 @@ class ShareViewModelTest {
 
         val selection = vm.targetSelection.first { it != null && !it.loading }!!
         assertEquals(
-            "/home/alexey/git/live-project",
-            selection.activeSessionProject?.path,
+            "both open sessions' projects must be surfaced",
+            listOf("/home/alexey/git/live-project", "/home/alexey/git/pocketshell"),
+            selection.sessionProjects.map { it.path },
         )
-        assertEquals("live-project", selection.activeSessionProject?.label)
+        assertEquals(
+            "the focused session's project must lead",
+            "/home/alexey/git/live-project",
+            selection.sessionProjects.first().path,
+        )
+        assertEquals("live-project", selection.sessionProjects.first().label)
+        assertTrue(
+            "the command must enumerate all sessions' panes, got ${client.sentCommands}",
+            client.sentCommands.single().startsWith("list-panes -a"),
+        )
+    }
+
+    @Test
+    fun selectTargetHostDedupesSessionProjectAgainstWatchedRoot() = runTest {
+        // Issue #507: a watched root that is ALSO an open-session project
+        // must appear once (in the prominent session slot), not twice.
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = seededHost(id = 45L, name = "gpu-box")
+        db.projectRootDao().insert(
+            com.pocketshell.core.storage.entity.ProjectRootEntity(
+                hostId = host.id,
+                label = "[10] PocketShell",
+                path = "/home/alexey/git/pocketshell",
+            ),
+        )
+        db.projectRootDao().insert(
+            com.pocketshell.core.storage.entity.ProjectRootEntity(
+                hostId = host.id,
+                label = "Other",
+                path = "/home/alexey/git/other",
+            ),
+        )
+        val client = FakeTmuxClient().apply {
+            responses.addLast(
+                CommandResponse(
+                    number = 0L,
+                    output = listOf(
+                        // Trailing slash on the cwd must normalise to the
+                        // watched-root path so the dedupe still fires.
+                        "ps::0::main::1::1::/home/alexey/git/pocketshell/::/dev/pts/1::bash",
+                    ),
+                    isError = false,
+                ),
+            )
+        }
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key",
+            client = client,
+        )
+        vm.setItem(uriItem("shot.png"))
+
+        vm.selectTargetHost(host)
+        advanceUntilIdle()
+
+        val selection = vm.targetSelection.first { it != null && !it.loading }!!
+        assertEquals(
+            "the shared project must appear once, in the session slot",
+            listOf("/home/alexey/git/pocketshell"),
+            selection.sessionProjects.map { it.path },
+        )
+        assertEquals(
+            "the watched root that is an open project must be dropped from the root list",
+            listOf("/home/alexey/git/other"),
+            selection.knownProjects.map { it.path },
+        )
+    }
+
+    @Test
+    fun selectTargetHostDedupesTwoSessionsSharingACwd() = runTest {
+        // Issue #507: two open sessions whose active panes share a cwd
+        // must surface a single destination.
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = seededHost(id = 46L, name = "gpu-box")
+        val client = FakeTmuxClient().apply {
+            responses.addLast(
+                CommandResponse(
+                    number = 0L,
+                    output = listOf(
+                        "a::0::main::0::1::/home/alexey/git/pocketshell::/dev/pts/1::bash",
+                        "b::0::main::1::1::/home/alexey/git/pocketshell::/dev/pts/2::bash",
+                    ),
+                    isError = false,
+                ),
+            )
+        }
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key",
+            client = client,
+        )
+        vm.setItem(uriItem("shot.png"))
+
+        vm.selectTargetHost(host)
+        advanceUntilIdle()
+
+        val selection = vm.targetSelection.first { it != null && !it.loading }!!
+        assertEquals(
+            listOf("/home/alexey/git/pocketshell"),
+            selection.sessionProjects.map { it.path },
+        )
     }
 
     @Test

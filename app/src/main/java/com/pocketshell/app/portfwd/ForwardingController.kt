@@ -137,20 +137,27 @@ class ForwardingController @Inject constructor(
     }
 
     /**
-     * Update the exact set of remote ports currently forwarding for
-     * [hostId]. Host-detail surfaces use this to label per-port rows;
-     * aggregate-only counts are insufficient because a host can have
-     * one active tunnel alongside several discovered-but-idle ports.
+     * Update the exact set of remote ports currently forwarding for [hostId],
+     * together with the local (phone-loopback) port each one maps to. Host-detail
+     * surfaces use this to label per-port rows; aggregate-only counts are
+     * insufficient because a host can have one active tunnel alongside several
+     * discovered-but-idle ports.
+     *
+     * Issue #488: the `remotePort → localPort` mapping is carried so a tapped
+     * `localhost:<remotePort>` terminal link can resolve the working local URL
+     * (`http://127.0.0.1:<localPort>`) without re-opening the panel. By default
+     * `localPort == remotePort`; a user remapping makes them differ.
      */
     @Synchronized
-    fun updateActiveTunnels(hostId: Long, remotePorts: Set<Int>) {
+    fun updateActiveTunnels(hostId: Long, tunnels: Map<Int, Int>) {
         val entry = activeHosts.firstOrNull { it.hostId == hostId } ?: return
-        val normalized = remotePorts.toSortedSet()
-        if (entry.activeRemotePorts == normalized && entry.tunnelCount == normalized.size) return
+        val normalized = tunnels.toSortedMap()
+        if (entry.forwardedPortMap == normalized && entry.tunnelCount == normalized.size) return
         activeHosts.remove(entry)
         activeHosts += entry.copy(
             tunnelCount = normalized.size,
-            activeRemotePorts = normalized,
+            activeRemotePorts = normalized.keys.toSortedSet(),
+            forwardedPortMap = normalized,
         )
         recomputeSnapshot()
     }
@@ -191,6 +198,7 @@ class ForwardingController @Inject constructor(
                     active = true,
                     tunnelCount = host.tunnelCount,
                     activeRemotePorts = host.activeRemotePorts,
+                    forwardedPortMap = host.forwardedPortMap,
                     restoring = host.restoring,
                 )
             }
@@ -209,6 +217,8 @@ class ForwardingController @Inject constructor(
         val reconnectHook: (() -> Unit)?,
         val tunnelCount: Int,
         val activeRemotePorts: Set<Int> = emptySet(),
+        // Issue #488: remote → local port mapping for the active forwards.
+        val forwardedPortMap: Map<Int, Int> = emptyMap(),
         // Issue #439: the host is registered (user enabled forwarding)
         // but its transport is currently down and reconnecting, so its
         // forwards are being restored rather than removed.
@@ -220,6 +230,9 @@ data class ForwardingHostSnapshot(
     val active: Boolean,
     val tunnelCount: Int,
     val activeRemotePorts: Set<Int> = emptySet(),
+    // Issue #488: remote → local port mapping for the active forwards, so a
+    // tapped `localhost:<remotePort>` link resolves the working local URL.
+    val forwardedPortMap: Map<Int, Int> = emptyMap(),
     // Issue #439: transport down, forwards restoring (transient).
     val restoring: Boolean = false,
 )

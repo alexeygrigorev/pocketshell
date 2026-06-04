@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -87,5 +88,34 @@ class SessionForwardingIndicatorViewModelTest {
         assertTrue(state.visible)
         assertTrue(state.restoring)
         assertEquals("Port forwarding restoring for this host", state.contentDescription)
+    }
+
+    // --- Issue #488: forwarded-vs-not decision + local port lookup ----------
+
+    @Test
+    fun `forwardedLocalPortFor returns local port when the remote port is forwarded`() {
+        val controller = ForwardingController(context)
+        val vm = SessionForwardingIndicatorViewModel(controller)
+
+        controller.registerActiveHost(hostId = 7L, hostName = "beta")
+        // server:3000 -> phone:3000 (straight), server:8080 -> phone:18080 (remap).
+        controller.updateActiveTunnels(7L, mapOf(3000 to 3000, 8080 to 18080))
+
+        assertEquals(3000, vm.forwardedLocalPortFor(hostId = 7L, remotePort = 3000))
+        assertEquals(18080, vm.forwardedLocalPortFor(hostId = 7L, remotePort = 8080))
+    }
+
+    @Test
+    fun `forwardedLocalPortFor returns null when the remote port is not forwarded`() {
+        val controller = ForwardingController(context)
+        val vm = SessionForwardingIndicatorViewModel(controller)
+
+        controller.registerActiveHost(hostId = 7L, hostName = "beta")
+        controller.updateActiveTunnels(7L, mapOf(3000 to 3000))
+
+        // A port that isn't in the active map -> not forwarded.
+        assertNull(vm.forwardedLocalPortFor(hostId = 7L, remotePort = 9999))
+        // A host that isn't forwarding at all -> not forwarded.
+        assertNull(vm.forwardedLocalPortFor(hostId = 42L, remotePort = 3000))
     }
 }

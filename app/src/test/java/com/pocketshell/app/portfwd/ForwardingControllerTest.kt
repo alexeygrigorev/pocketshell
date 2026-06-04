@@ -181,17 +181,20 @@ class ForwardingControllerTest {
     }
 
     @Test
-    fun `host snapshots expose active remote ports when known`() {
+    fun `host snapshots expose active remote ports and local mapping when known`() {
         val controller = ForwardingController(context)
 
         controller.registerActiveHost(hostId = 1, hostName = "alpha")
-        controller.updateActiveTunnels(hostId = 1, remotePorts = setOf(8080, 3000))
+        // Issue #488: remote -> local mapping; 3000 maps straight through,
+        // 8080 is remapped to a different local port.
+        controller.updateActiveTunnels(hostId = 1, tunnels = mapOf(8080 to 18080, 3000 to 3000))
 
         assertEquals(
             ForwardingHostSnapshot(
                 active = true,
                 tunnelCount = 2,
                 activeRemotePorts = setOf(3000, 8080),
+                forwardedPortMap = mapOf(3000 to 3000, 8080 to 18080),
             ),
             controller.flowOfHostSnapshots().value[1L],
         )

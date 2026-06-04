@@ -408,6 +408,15 @@ public fun TmuxSessionScreen(
     val composeRootView = LocalView.current
     val context = LocalContext.current
 
+    // Issue #488: a tapped server-local (loopback) URL whose remote port is not
+    // yet forwarded for this host. Non-null drives the "Forward port N from
+    // <host>?" confirm dialog; confirming routes through the existing
+    // port-forward flow (#447/#448 prefill), which opens the panel and sets up
+    // the tunnel so the user can open the working local URL.
+    var pendingLocalhostForward by remember {
+        mutableStateOf<com.pocketshell.core.terminal.selection.LocalhostUrl?>(null)
+    }
+
     // Runtime RECORD_AUDIO permission flow for the inline-dictation path.
     // Mirrors SessionScreen so the tmux route uses the same right-side mic
     // affordance instead of falling back to a separate terminal-only path.
@@ -905,6 +914,35 @@ public fun TmuxSessionScreen(
                                 onLocalTerminalError = { cause ->
                                     viewModel.reportTerminalSurfaceFailure(pane.paneId, cause)
                                 },
+                                // Issue #488: a tapped URL is routed here so
+                                // server-local (loopback) links go through the
+                                // port-forward flow instead of a dead browser
+                                // open. A real-host URL keeps the default
+                                // browser behaviour (openUrlWithFallback).
+                                onUrlTap = { url ->
+                                    val local = com.pocketshell.core.terminal.selection
+                                        .classifyLocalhostUrl(url)
+                                    if (local == null) {
+                                        // Real remote host → normal browser open.
+                                        com.pocketshell.core.terminal.ui
+                                            .openUrlWithFallback(context, url)
+                                    } else {
+                                        val localPort = sessionForwardingIndicatorViewModel
+                                            .forwardedLocalPortFor(hostId, local.remotePort)
+                                        if (localPort != null) {
+                                            // Already forwarded → open the working
+                                            // local URL pointed at the live port.
+                                            com.pocketshell.core.terminal.ui
+                                                .openUrlWithFallback(
+                                                    context,
+                                                    local.toLocalUrl(localPort),
+                                                )
+                                        } else {
+                                            // Not forwarded → offer to forward it.
+                                            pendingLocalhostForward = local
+                                        }
+                                    }
+                                },
                                 // Issue #500: detect file paths the agent
                                 // emits in the terminal and make them tappable
                                 // → open in the in-app file viewer (#497). The
@@ -1262,6 +1300,41 @@ public fun TmuxSessionScreen(
                 if (accepted != null) onOpenPortForwardingWithPort(accepted)
             },
             onDismiss = { viewModel.dismissDetectedPort() },
+        )
+    }
+
+    // Issue #488: confirm dialog for a tapped server-local URL whose remote
+    // port is not yet forwarded. Confirming routes through the existing
+    // port-forward flow (#447/#448 prefill) which opens the panel and sets up
+    // the tunnel, then the user opens the working local URL from there.
+    pendingLocalhostForward?.let { pending ->
+        val targetHost = hostName.ifBlank { host }
+        AlertDialog(
+            onDismissRequest = { pendingLocalhostForward = null },
+            title = { Text("Forward port ${pending.remotePort}?") },
+            text = {
+                Text(
+                    "${pending.remotePort} is a port on $targetHost, " +
+                        "not reachable directly from this phone. Forward it " +
+                        "to open it here.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val port = pending.remotePort
+                        pendingLocalhostForward = null
+                        onOpenPortForwardingWithPort(port)
+                    },
+                ) {
+                    Text("Forward")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingLocalhostForward = null }) {
+                    Text("Cancel")
+                }
+            },
         )
     }
 

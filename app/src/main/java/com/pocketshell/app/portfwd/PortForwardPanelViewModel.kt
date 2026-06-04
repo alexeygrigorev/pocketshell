@@ -408,11 +408,13 @@ class PortForwardPanelViewModel @Inject constructor(
                         // render `N tunnels active`. Count only FORWARDING
                         // tunnels — AVAILABLE / FAILED / STOPPED rows
                         // shouldn't inflate the notification count.
-                        val activeRemotePorts = tunnels
+                        // Issue #488: carry the remote → local mapping so a
+                        // tapped `localhost:<remotePort>` link can open the
+                        // working local URL for an already-forwarded port.
+                        val activeTunnelMap = tunnels
                             .filter { tunnel -> tunnel.status == TunnelInfo.Status.FORWARDING }
-                            .map { tunnel -> tunnel.remotePort }
-                            .toSet()
-                        forwardingController.updateActiveTunnels(host.id, activeRemotePorts)
+                            .associate { tunnel -> tunnel.remotePort to tunnel.localPort }
+                        forwardingController.updateActiveTunnels(host.id, activeTunnelMap)
                     }
                 }
                 launch {

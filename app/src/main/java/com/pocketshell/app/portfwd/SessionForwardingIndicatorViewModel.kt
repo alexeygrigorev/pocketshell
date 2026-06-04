@@ -41,6 +41,19 @@ class SessionForwardingIndicatorViewModel @Inject constructor(
                 started = SharingStarted.WhileSubscribed(5_000),
                 initialValue = SessionForwardingIndicatorState(),
             )
+
+    /**
+     * Issue #488: if [remotePort] is currently forwarding for [hostId], return
+     * the local (phone-loopback) port it maps to; otherwise `null`. Read
+     * synchronously off the controller's latest snapshot so the terminal
+     * URL-tap path can decide "already forwarded → open the local URL" vs
+     * "not forwarded → offer to forward" without subscribing to a flow.
+     */
+    fun forwardedLocalPortFor(hostId: Long, remotePort: Int): Int? =
+        controller.flowOfHostSnapshots().value[hostId]
+            ?.takeIf { it.active }
+            ?.forwardedPortMap
+            ?.get(remotePort)
 }
 
 private fun ForwardingHostSnapshot?.toIndicatorState(): SessionForwardingIndicatorState {

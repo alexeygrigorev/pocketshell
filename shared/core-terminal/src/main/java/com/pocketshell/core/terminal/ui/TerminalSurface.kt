@@ -147,7 +147,7 @@ internal const val TOAST_PREVIEW_CHARS: Int = 60
  * the `QUERY_ALL_PACKAGES` permission on API 30+. The exception path is
  * cheap on the common case where a browser is present.
  */
-internal fun openUrlWithFallback(context: Context, url: String) {
+public fun openUrlWithFallback(context: Context, url: String) {
     val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }

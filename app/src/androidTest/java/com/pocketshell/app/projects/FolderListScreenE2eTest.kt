@@ -652,6 +652,27 @@ class FolderListScreenE2eTest {
             useUnmergedTree = true,
         ).assertTextEquals("Shell")
 
+        // #489: sessions group into ACTIVE / IDLE sections (SectionHeaders with
+        // counts) and a host header carries the `N active · M idle · K sessions`
+        // split. claude-main (attached Claude) + codex-llm (attached Codex) are
+        // active; build-shell (detached shell) is idle.
+        compose.onNodeWithTag(FOLDER_LIST_FLAT_HEADER_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(
+            FOLDER_LIST_FLAT_HEADER_COUNTS_TAG,
+            useUnmergedTree = true,
+        ).assertTextEquals("2 active · 1 idle · 3 sessions")
+        compose.onNodeWithTag(FOLDER_LIST_FLAT_ACTIVE_SECTION_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(FOLDER_LIST_FLAT_IDLE_SECTION_TAG).assertIsDisplayed()
+        // Section labels render uppercased (shared SectionHeader contract).
+        compose.onNodeWithText("ACTIVE").assertIsDisplayed()
+        compose.onNodeWithText("IDLE").assertIsDisplayed()
+        // The folder context now lives in the row subtitle (the directory label
+        // the tree grouping otherwise carries).
+        compose.onAllNodesWithText("pocketshell")
+            .fetchSemanticsNodes().isNotEmpty().let { found ->
+                assertTrue("flat row subtitle should show the folder label", found)
+            }
+
         // The flat row is the tap target and routes to onOpenSession with cwd.
         compose.onNodeWithTag(folderListFlatRowTestTag("codex-llm")).assertHasClickAction()
         compose.onNodeWithTag(folderListFlatRowTestTag("codex-llm")).performClick()
@@ -660,9 +681,9 @@ class FolderListScreenE2eTest {
             assertEquals("/home/u/git/llm-zoomcamp", openedDirectory)
         }
 
-        captureViewport("issue485-flat-view-rendered-viewport.png")
+        captureViewport("issue489-flat-view-grouped-viewport.png")
         android.os.SystemClock.sleep(200)
-        captureFullDevice("issue485-flat-view-rendered-fulldevice.png")
+        captureFullDevice("issue489-flat-view-grouped-fulldevice.png")
 
         // Toggling back to tree restores the tree (both directions work).
         compose.runOnIdle { mode = HostDetailViewMode.Tree }

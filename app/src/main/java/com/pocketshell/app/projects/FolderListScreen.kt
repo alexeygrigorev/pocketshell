@@ -85,10 +85,12 @@ import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.MicButton
+import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
+import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
 import kotlin.math.PI
 import kotlin.math.cos
@@ -286,6 +288,7 @@ fun FolderListScreen(
                     onRetry = viewModel::refresh,
                 )
                 is FolderListUiState.Ready -> FolderListContent(
+                    hostName = hostName,
                     folders = s.folders,
                     treeRoots = s.treeRoots,
                     flatSessions = s.flatSessions,
@@ -935,6 +938,7 @@ private fun ErrorPanel(message: String, onRetry: () -> Unit) {
 
 @Composable
 private fun FolderListContent(
+    hostName: String,
     folders: List<FolderRow>,
     treeRoots: List<FolderTreeRoot>,
     flatSessions: List<FolderSessionEntry>,
@@ -959,6 +963,21 @@ private fun FolderListContent(
             folder.sessions.map { it.sessionName to folder.path }
         }.toMap()
     }
+    // session→folder label map for the flat-view subtitle (#489). The subtitle is
+    // `<folder>` (mono muted) so a flat row carries its directory context that the
+    // tree grouping otherwise provides. The agent type stays on the trailing
+    // [Badge] pill — the SAME treatment the tree session rows use — so the two
+    // views read as one design language rather than diverging on where the agent
+    // type lives.
+    val sessionFolderLabels = remember(folders) {
+        folders.associate { folder ->
+            folder.path to folderDisplayLabel(folder.label, folder.path)
+        }
+    }
+    // Active/Idle partition for the flat view (#489). Derived purely from the
+    // already-sorted `flatSessions` (no re-sort) so each section preserves the
+    // upstream order and a row's section always agrees with its status-dot colour.
+    val flatGroups = remember(flatSessions) { FlatSessionGroups.from(flatSessions) }
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -980,28 +999,73 @@ private fun FolderListContent(
             }
         }
         if (showFlatFolderList) {
-            // Flat view (#485): a clean, ungrouped list of EVERY session on the
-            // host — no folder headers, no tree connectors. Each row reuses the
-            // shared design language so it reads identically to a tree session
-            // row (#479): status dot + session name + agent-type badge. The
-            // session→folder map is derived from the grouped `folders` set so a
-            // tap still carries the session's cwd into the picker/attach path.
+            // Flat view (#485 render fix, #489 visual polish): EVERY session on the
+            // host, grouped by status into ACTIVE and IDLE sections instead of by
+            // folder. Each section is a shared [SectionHeader] with its count; each
+            // row reuses the shared [ListRow] + [StatusDot] + [Badge] so it reads
+            // identically to a tree session row (#479 consistency). A header band
+            // carries the host name + `N active · M idle · K sessions`. The
+            // session→folder map is derived from the grouped `folders` set so a tap
+            // still carries the session's cwd into the picker/attach path.
             if (flatSessions.isEmpty()) {
                 item {
                     FlatEmptyState()
                 }
             } else {
-                items(flatSessions, key = { it.sessionName }) { session ->
-                    FlatSessionRow(
-                        session = session,
-                        onClick = {
-                            onSessionClick(
-                                sessionFolderPaths[session.sessionName]
-                                    ?: FolderListViewModel.UNTRACKED_PATH,
-                                session.sessionName,
-                            )
-                        },
-                    )
+                item(key = FLAT_HEADER_KEY) {
+                    FlatHostHeader(hostName = hostName, groups = flatGroups)
+                }
+                if (flatGroups.active.isNotEmpty()) {
+                    item(key = FLAT_ACTIVE_SECTION_KEY) {
+                        SectionHeader(
+                            label = "Active",
+                            count = flatGroups.activeCount,
+                            modifier = Modifier.testTag(FOLDER_LIST_FLAT_ACTIVE_SECTION_TAG),
+                        )
+                    }
+                    items(flatGroups.active, key = { "active:${it.sessionName}" }) { session ->
+                        FlatSessionRow(
+                            session = session,
+                            folderLabel = flatSessionFolderLabel(
+                                session = session,
+                                sessionFolderPaths = sessionFolderPaths,
+                                sessionFolderLabels = sessionFolderLabels,
+                            ),
+                            onClick = {
+                                onSessionClick(
+                                    sessionFolderPaths[session.sessionName]
+                                        ?: FolderListViewModel.UNTRACKED_PATH,
+                                    session.sessionName,
+                                )
+                            },
+                        )
+                    }
+                }
+                if (flatGroups.idle.isNotEmpty()) {
+                    item(key = FLAT_IDLE_SECTION_KEY) {
+                        SectionHeader(
+                            label = "Idle",
+                            count = flatGroups.idleCount,
+                            modifier = Modifier.testTag(FOLDER_LIST_FLAT_IDLE_SECTION_TAG),
+                        )
+                    }
+                    items(flatGroups.idle, key = { "idle:${it.sessionName}" }) { session ->
+                        FlatSessionRow(
+                            session = session,
+                            folderLabel = flatSessionFolderLabel(
+                                session = session,
+                                sessionFolderPaths = sessionFolderPaths,
+                                sessionFolderLabels = sessionFolderLabels,
+                            ),
+                            onClick = {
+                                onSessionClick(
+                                    sessionFolderPaths[session.sessionName]
+                                        ?: FolderListViewModel.UNTRACKED_PATH,
+                                    session.sessionName,
+                                )
+                            },
+                        )
+                    }
                 }
             }
         } else if (treeRoots.isEmpty()) {
@@ -1163,26 +1227,101 @@ private fun EmptyState() {
 }
 
 /**
- * One row in the flat host-detail view (#485). Renders a single tmux session as
- * a plain, ungrouped row using the shared [ListRow] + [Badge] + [StatusDot] so
- * it reads identically to a tree session row (#479 consistency principle) minus
- * the folder grouping / tree connectors. Tap routes through the same
- * `onOpenSession` handler the tree rows use.
+ * Header band above the flat session list (#489). Mirrors the maintainer's
+ * mockup's top strip, harmonised with the design language: the host name (bright
+ * [PocketShellType.bodyDense]) preceded by a green [StatusDot] when any session
+ * is active, with a muted `N active · M idle · K sessions` count line beneath.
+ * It is the flat-view analogue of the tree's per-root count line, so the screen
+ * always tells the user the active/idle/total split at a glance.
+ */
+@Composable
+private fun FlatHostHeader(
+    hostName: String,
+    groups: FlatSessionGroups,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = PocketShellDensity.rowPadH, vertical = 2.dp)
+            .testTag(FOLDER_LIST_FLAT_HEADER_TAG),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            StatusDot(
+                active = groups.activeCount > 0,
+                modifier = Modifier.testTag(FOLDER_LIST_FLAT_HEADER_DOT_TAG),
+            )
+            Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
+            Text(
+                text = hostName,
+                color = PocketShellColors.Text,
+                style = PocketShellType.bodyDense,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Text(
+            text = flatHostCountText(groups),
+            color = PocketShellColors.TextMuted,
+            style = PocketShellType.labelMono,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.testTag(FOLDER_LIST_FLAT_HEADER_COUNTS_TAG),
+        )
+    }
+}
+
+/**
+ * `N active · M idle · K sessions` count summary for the flat-view header (#489).
+ * Always shows all three facets so the active/idle/total split is legible even
+ * when one section is empty (e.g. `0 active · 4 idle · 4 sessions`).
+ */
+internal fun flatHostCountText(groups: FlatSessionGroups): String {
+    val total = groups.totalCount
+    return "${groups.activeCount} active · ${groups.idleCount} idle · " +
+        if (total == 1) "1 session" else "$total sessions"
+}
+
+/**
+ * Folder label shown as the flat-row subtitle (#489) — the directory context the
+ * tree grouping otherwise carries. Resolves the session's folder path via the
+ * `folders`-derived maps, then falls back to a path-derived label or the
+ * untracked label so the subtitle is never blank.
+ */
+internal fun flatSessionFolderLabel(
+    session: FolderSessionEntry,
+    sessionFolderPaths: Map<String, String>,
+    sessionFolderLabels: Map<String, String>,
+): String {
+    val path = sessionFolderPaths[session.sessionName] ?: FolderListViewModel.UNTRACKED_PATH
+    return sessionFolderLabels[path] ?: FolderListViewModel.defaultLabelForPath(path)
+}
+
+/**
+ * One row in the flat host-detail view (#485, polished in #489). Renders a single
+ * tmux session as a row using the shared [ListRow] + [Badge] + [StatusDot] so it
+ * reads identically to a tree session row (#479 consistency principle). The
+ * folder context lives in the subtitle (the tree provides it via grouping); the
+ * agent type lives on the trailing [Badge] pill — the SAME treatment the tree
+ * session rows use — so the two views never diverge on where the agent type sits.
  *
  *  - leading: [StatusDot] — green when attached or an agent is live, amber idle.
- *  - title: the session name; subtitle: extra windows (when present).
+ *  - title: the session name.
+ *  - subtitle: the session's folder label (`bodyMono` muted, via [ListRow]).
  *  - trailing: agent-type [Badge] — purple for Claude/Codex/OpenCode, grey for
  *    Shell.
  */
 @Composable
 private fun FlatSessionRow(
     session: FolderSessionEntry,
+    folderLabel: String,
     onClick: () -> Unit,
 ) {
     val isAgent = session.agentKind.isAgent()
     ListRow(
         title = sessionDisplayTitle(session),
-        subtitle = sessionSecondaryText(session),
+        subtitle = folderLabel,
         onClick = onClick,
         modifier = Modifier.testTag(folderListFlatRowTestTag(session.sessionName)),
         leading = {
@@ -2070,6 +2209,16 @@ const val FOLDER_LIST_RETRY_TAG: String = "folder-list:retry"
 const val FOLDER_LIST_EMPTY_TAG: String = "folder-list:empty"
 const val FOLDER_LIST_SHOW_ALL_TAG: String = "folder-list:show-all"
 const val FOLDER_LIST_FLAT_EMPTY_TAG: String = "folder-list:flat:empty"
+const val FOLDER_LIST_FLAT_HEADER_TAG: String = "folder-list:flat:header"
+const val FOLDER_LIST_FLAT_HEADER_DOT_TAG: String = "folder-list:flat:header:dot"
+const val FOLDER_LIST_FLAT_HEADER_COUNTS_TAG: String = "folder-list:flat:header:counts"
+const val FOLDER_LIST_FLAT_ACTIVE_SECTION_TAG: String = "folder-list:flat:section:active"
+const val FOLDER_LIST_FLAT_IDLE_SECTION_TAG: String = "folder-list:flat:section:idle"
+
+// Stable LazyColumn item keys for the flat-view header / section rows (#489).
+private const val FLAT_HEADER_KEY: String = "flat-header"
+private const val FLAT_ACTIVE_SECTION_KEY: String = "flat-section-active"
+private const val FLAT_IDLE_SECTION_KEY: String = "flat-section-idle"
 const val FOLDER_LIST_NEW_SESSION_FAB_TAG: String = "folder-list:new-session-fab"
 const val FOLDER_LIST_BROWSE_REPOS_TAG: String = "folder-list:browse-repos"
 const val FOLDER_LIST_VIEW_TOGGLE_TAG: String = "folder-list:view-toggle"

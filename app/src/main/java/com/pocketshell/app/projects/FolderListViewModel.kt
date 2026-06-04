@@ -189,6 +189,52 @@ sealed interface FolderActionStatus {
 }
 
 /**
+ * Active/idle split of the flat host-detail session list (#489).
+ *
+ * The flat view groups every session into an **Active** and an **Idle**
+ * section instead of by folder. A session reads *active* when it is attached or
+ * is running an agent (Claude / Codex / OpenCode / probing / exited-agent) — the
+ * same green-dot condition the row [com.pocketshell.uikit.components.StatusDot]
+ * paints, so the section a row lands in always agrees with its dot colour.
+ * Everything else (plain idle shells) is *idle* (amber).
+ *
+ * Order inside each section is preserved from the already-sorted `flatSessions`
+ * input (agents first, then most-recent activity, then name — see
+ * `sessionEntrySort`), so the split is purely a partition and never re-sorts.
+ */
+data class FlatSessionGroups(
+    val active: List<FolderSessionEntry>,
+    val idle: List<FolderSessionEntry>,
+) {
+    val activeCount: Int get() = active.size
+    val idleCount: Int get() = idle.size
+    val totalCount: Int get() = active.size + idle.size
+
+    companion object {
+        /**
+         * Partition [sessions] into the Active / Idle sections (#489). A session
+         * is active when [FolderSessionEntry.attached] is set or its
+         * [FolderSessionEntry.agentKind] is an agent kind. Relative order within
+         * each section is the input order (already sorted upstream).
+         */
+        fun from(sessions: List<FolderSessionEntry>): FlatSessionGroups {
+            val (active, idle) = sessions.partition { it.attached || it.agentKind.isFlatActiveAgent() }
+            return FlatSessionGroups(active = active, idle = idle)
+        }
+
+        private fun SessionAgentKind.isFlatActiveAgent(): Boolean = when (this) {
+            SessionAgentKind.Claude,
+            SessionAgentKind.Codex,
+            SessionAgentKind.OpenCode,
+            SessionAgentKind.Probing,
+            SessionAgentKind.Exited,
+            -> true
+            SessionAgentKind.Shell -> false
+        }
+    }
+}
+
+/**
  * Backs [FolderListScreen] — issue #171.
  *
  * The view model owns:

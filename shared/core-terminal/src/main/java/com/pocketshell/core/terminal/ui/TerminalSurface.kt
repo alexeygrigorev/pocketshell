@@ -25,12 +25,15 @@ import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import com.pocketshell.core.terminal.selection.FilePathOverlay
+import com.pocketshell.core.terminal.selection.FilePathRegion
 import com.pocketshell.core.terminal.selection.SelectionOverlay
 import com.pocketshell.core.terminal.selection.SmartSelectionAffordanceOverlay
 import com.pocketshell.core.terminal.selection.TerminalMatch
 import com.pocketshell.core.terminal.selection.TerminalMatchRegion
 import com.pocketshell.core.terminal.selection.UrlRegion
 import com.pocketshell.core.terminal.selection.findVisibleUrls
+import com.pocketshell.core.terminal.selection.hitTestFilePath
 import com.pocketshell.core.terminal.selection.hitTestUrl
 import com.termux.terminal.TextStyle
 import com.termux.terminal.TerminalSessionClient
@@ -214,6 +217,11 @@ fun TerminalSurface(
     onKeyEvent: ((ComposeKeyEvent) -> Boolean)? = null,
     onUrlTap: ((String) -> Unit)? = null,
     urlsEnabled: Boolean = true,
+    // Issue #500: when non-null, file paths detected on the visible viewport
+    // become tappable and the tapped path (verbatim, project-relative paths
+    // resolved by the host against the session cwd) is delivered here. When
+    // null, file-path detection is off and only URLs are tappable.
+    onFilePathTap: ((String) -> Unit)? = null,
 ) {
     // Hoist the bridge so the same instance survives recompositions and we
     // do not leak listeners across configuration changes. AndroidView's
@@ -307,6 +315,7 @@ fun TerminalSurface(
     // view-coordinate concept, not a transcript-bytes concept — the same
     // session can render different URL sets at different sizes.
     var visibleUrls by remember { mutableStateOf<List<UrlRegion>>(emptyList()) }
+    var visibleFilePaths by remember { mutableStateOf<List<FilePathRegion>>(emptyList()) }
     var visibleMatchRegions by remember { mutableStateOf<List<TerminalMatchRegion>>(emptyList()) }
 
     LaunchedEffect(state, terminalView, effectiveUrlTap, viewportTick) {
@@ -332,26 +341,43 @@ fun TerminalSurface(
         }
     }
 
+    // Issue #500: file-path detection is driven by the FilePathOverlay below
+    // (gated on onFilePathTap != null). The overlay scans the visible viewport
+    // and reports its FilePathRegion snapshot via onFilePathsChanged, which we
+    // capture into `visibleFilePaths` for the tap hit-test. Keeping a single
+    // scan source (the overlay) avoids double-scanning per render tick.
+
     // Install the tap-hook on the view client every time `visibleUrls`,
     // `terminalView`, or `effectiveUrlTap` changes. The hook receives a tap
     // in view-local pixels and returns true if the tap landed on a URL —
     // PocketShellTerminalViewClient.onSingleTapUp then suppresses the
     // keyboard summon for that gesture and the host's onUrlTap callback
     // fires.
-    DisposableEffect(viewClient, terminalView, visibleUrls, effectiveUrlTap) {
+    DisposableEffect(viewClient, terminalView, visibleUrls, visibleFilePaths, effectiveUrlTap, onFilePathTap) {
         val view = terminalView
         val tap = effectiveUrlTap
-        if (view == null || tap == null) {
+        if (view == null || (tap == null && onFilePathTap == null)) {
             viewClient.onTapMaybeUrl = null
         } else {
             val urlsSnapshot = visibleUrls
+            val pathsSnapshot = visibleFilePaths
+            val pathTap = onFilePathTap
             viewClient.onTapMaybeUrl = { x, y ->
-                val hit = hitTestUrl(view, urlsSnapshot, x, y)
-                if (hit != null) {
-                    tap(hit.url)
+                // URLs first: a URL's `/path` tail is already excluded from
+                // file-path detection, but keeping URL precedence here is
+                // belt-and-braces and matches the established browser route.
+                val urlHit = if (tap != null) hitTestUrl(view, urlsSnapshot, x, y) else null
+                if (urlHit != null) {
+                    tap?.invoke(urlHit.url)
                     true
                 } else {
-                    false
+                    val pathHit = if (pathTap != null) hitTestFilePath(view, pathsSnapshot, x, y) else null
+                    if (pathHit != null) {
+                        pathTap?.invoke(pathHit.path)
+                        true
+                    } else {
+                        false
+                    }
                 }
             }
         }
@@ -417,6 +443,15 @@ fun TerminalSurface(
                     viewportChangeKey = viewportTick,
                     matcher = state.currentMatcher(),
                     onMatchesChanged = { visibleMatchRegions = it },
+                )
+            }
+            // Issue #500: tappable file-path affordance + hit-test snapshot.
+            if (onFilePathTap != null) {
+                FilePathOverlay(
+                    view = terminalView,
+                    renderRequests = state.renderRequests,
+                    viewportChangeKey = viewportTick,
+                    onFilePathsChanged = { visibleFilePaths = it },
                 )
             }
         },

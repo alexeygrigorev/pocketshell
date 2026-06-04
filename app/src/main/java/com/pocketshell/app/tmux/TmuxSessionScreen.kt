@@ -905,6 +905,15 @@ public fun TmuxSessionScreen(
                                 onLocalTerminalError = { cause ->
                                     viewModel.reportTerminalSurfaceFailure(pane.paneId, cause)
                                 },
+                                // Issue #500: detect file paths the agent
+                                // emits in the terminal and make them tappable
+                                // → open in the in-app file viewer (#497). The
+                                // pane's cwd resolves project-relative paths
+                                // (`out/report.png`) server-side in the viewer.
+                                onFilePathTap = { path ->
+                                    val cwd = pane.cwd.takeIf { it.isNotBlank() }
+                                    onOpenFile(path, cwd)
+                                },
                                 modifier = Modifier
                                     .fillMaxSize()
                                     .padding(horizontal = 2.dp, vertical = 4.dp),

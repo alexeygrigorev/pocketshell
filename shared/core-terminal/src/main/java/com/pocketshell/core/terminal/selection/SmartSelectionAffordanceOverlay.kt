@@ -201,6 +201,74 @@ public fun UrlOverlay(
     }
 }
 
+/**
+ * Issue #500: paints a quiet path hairline under every tappable file path the
+ * [findVisibleFilePaths] scanner reports on the visible viewport, and keeps the
+ * host's [FilePathRegion] snapshot in sync for hit-testing. Mirrors
+ * [UrlOverlay]; the actual tap routing happens in the View's gesture pipeline
+ * via [com.pocketshell.core.terminal.ui.PocketShellTerminalViewClient.onTapMaybeUrl].
+ */
+@Composable
+public fun FilePathOverlay(
+    view: TerminalView?,
+    renderRequests: Flow<Unit>,
+    viewportChangeKey: Any? = Unit,
+    onFilePathsChanged: (List<FilePathRegion>) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var paths by remember { mutableStateOf<List<FilePathRegion>>(emptyList()) }
+    val latestOnPathsChanged by rememberUpdatedState(onFilePathsChanged)
+
+    LaunchedEffect(view, renderRequests, viewportChangeKey) {
+        if (view == null) {
+            latestOnPathsChanged(emptyList())
+            return@LaunchedEffect
+        }
+        val initial = findVisibleFilePaths(view)
+        paths = initial
+        latestOnPathsChanged(initial)
+        renderRequests.collect {
+            val fresh = findVisibleFilePaths(view)
+            if (fresh != paths) {
+                paths = fresh
+                latestOnPathsChanged(fresh)
+            }
+        }
+    }
+
+    val regions = remember(paths) {
+        paths.map { region ->
+            TerminalMatchRegion(
+                match = TerminalMatch.Path(region.path),
+                row = region.row,
+                startCol = region.startCol,
+                endColExclusive = region.endColExclusive,
+            )
+        }
+    }
+
+    Layout(
+        content = {},
+        modifier = modifier.drawBehind {
+            for (segment in smartSelectionAffordanceSegments(view, regions, size.width, size.height)) {
+                drawRect(
+                    color = segment.color,
+                    topLeft = Offset(segment.left, segment.top),
+                    size = Size(
+                        width = segment.right - segment.left,
+                        height = segment.thicknessPx,
+                    ),
+                )
+            }
+        },
+    ) { _, constraints ->
+        layout(
+            constraints.maxWidth.coerceAtLeast(0),
+            constraints.maxHeight.coerceAtLeast(0),
+        ) {}
+    }
+}
+
 internal data class SmartSelectionAffordanceSegment(
     val match: TerminalMatch,
     val left: Float,

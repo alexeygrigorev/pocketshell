@@ -58,12 +58,10 @@ class TmuxConversationTurnDensityScreenshotTest {
             PocketShellTheme {
                 TmuxConversationPane(
                     events = sampleConversationEvents(),
-                    onSendToAgent = { true },
                     modifier = Modifier
                         .fillMaxSize()
                         .background(PocketShellColors.Background)
                         .testTag(TMUX_CONVERSATION_PANE_TAG),
-                    agentName = "Claude Code",
                 )
             }
         }

@@ -154,8 +154,12 @@ import kotlin.math.abs
  *    live dot is wired up post-#18 patterns.
  * 3. **[HorizontalPager]** of [TerminalSurface]s — one page per pane in
  *    the current window order.
- * 4. **[KeyBar]** above the keyboard. Taps route to the currently visible
- *    pane via [TmuxSessionViewModel.onKeyBarKey].
+ * 4. **[KeyBar]** above the keyboard (Terminal tab only — issue #459). Taps
+ *    route raw keys to the currently visible pane via
+ *    [TmuxSessionViewModel.onKeyBarKey]. The Conversation tab never shows the
+ *    key bar; it shares the unified composer band
+ *    ([com.pocketshell.app.composer.PromptComposerSheet]) with Terminal as
+ *    its only send affordance.
  *
  * The screen does not own any business state — the panes list, the active
  * tmux client, and the per-pane terminal state holders all live in the
@@ -206,13 +210,17 @@ public fun TmuxSessionScreen(
      * host id; `null` when no chip should render.
      */
     usageBadgeProvider: com.pocketshell.core.usage.UsageProviderRecord? = null,
-    // Issue #177: composer-draft persistence for fast resume. The
-    // restored draft (from the persisted last session) seeds the agent
-    // composer once; edits are reported back up so the next `onStop`
-    // persists them. Defaults keep direct callers / unit tests unchanged.
-    initialComposerDraft: String = "",
-    onInitialComposerDraftConsumed: () -> Unit = {},
-    onComposerDraftChanged: (String) -> Unit = {},
+    // Issue #177 / #459: composer-draft persistence for fast resume.
+    // Historically these seeded + reported the bespoke in-pane
+    // Conversation composer's draft. Issue #459 collapsed the Conversation
+    // bottom onto the shared unified composer ([PromptComposerSheet]),
+    // whose draft now persists inside its own [PromptComposerViewModel].
+    // The params remain on the screen signature because MainActivity still
+    // passes them; they are intentionally inert here now. Defaults keep
+    // direct callers / unit tests unchanged.
+    @Suppress("UNUSED_PARAMETER") initialComposerDraft: String = "",
+    @Suppress("UNUSED_PARAMETER") onInitialComposerDraftConsumed: () -> Unit = {},
+    @Suppress("UNUSED_PARAMETER") onComposerDraftChanged: (String) -> Unit = {},
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
     connectTrigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
 ) {
@@ -261,21 +269,11 @@ public fun TmuxSessionScreen(
     // reported. We disable those affordances and surface a visible
     // "Reconnecting" / "Disconnected" pill instead.
     val sessionLive = status is ConnectionStatus.Connected
-    // Issue #177: a one-shot holder for the restored composer draft. The
-    // conversation pane mounts/unmounts as the user flips the Terminal ↔
-    // Conversation tab, so we cannot rely on the pane's own `remember` to
-    // consume the draft exactly once — we consume it here at the screen
-    // level (returns the draft the first time, "" after) and notify the
-    // activity it was consumed so a later launch won't re-seed it.
-    var restoredDraftRemaining by rememberSaveable { mutableStateOf(initialComposerDraft) }
-    val consumeRestoredDraft: () -> String = {
-        val draft = restoredDraftRemaining
-        if (draft.isNotEmpty()) {
-            restoredDraftRemaining = ""
-            onInitialComposerDraftConsumed()
-        }
-        draft
-    }
+    // Issue #459: the per-screen restored-draft holder used to seed the
+    // bespoke in-pane Conversation composer is gone. The Conversation
+    // bottom now shares the unified [PromptComposerSheet], whose draft
+    // persists in [PromptComposerViewModel], so there is nothing to seed
+    // here on the screen.
     val startDirectoryAutocompleteController =
         rememberStartDirectoryAutocompleteController(suggestStartDirectories)
     val agentConversations by viewModel.agentConversations.collectAsState()
@@ -802,11 +800,16 @@ public fun TmuxSessionScreen(
             ) {
                 if (showConversation) {
                     val paneIdForSend = currentPane!!.paneId
+                    // Issue #459: the Conversation pane is now read-only
+                    // chrome — search field + conversation feed. Sending is
+                    // owned by the shared unified composer band below (the
+                    // same [PromptComposerSheet] the Terminal uses), so the
+                    // pane no longer hosts a bespoke "Message …" field. The
+                    // composer's mic FAB opens the sheet; its Send routes to
+                    // the focused agent pane via the screen's `onSend`
+                    // wiring (see the [PromptComposerSheet] call below).
                     TmuxConversationPane(
                         events = visibleConversation.events,
-                        onSendToAgent = { text ->
-                            viewModel.sendToAgentPaneResult(paneIdForSend, text).isSuccess
-                        },
                         modifier = Modifier
                             .fillMaxSize()
                             .testTag(TMUX_CONVERSATION_PANE_TAG),
@@ -819,16 +822,6 @@ public fun TmuxSessionScreen(
                         onQueryChange = { next ->
                             viewModel.setAgentSearchQuery(paneIdForSend, next)
                         },
-                        // Issue #249: don't let the agent composer deliver
-                        // -then-clear a message while the session is down.
-                        sendEnabled = sessionLive,
-                        // Issue #177: seed the restored draft once (the
-                        // holder consumes it on first read so a tab toggle
-                        // that re-mounts the pane doesn't re-seed a stale
-                        // draft), and report edits up for re-persistence.
-                        initialDraft = consumeRestoredDraft(),
-                        onDraftChanged = onComposerDraftChanged,
-                        agentName = visibleConversation.detection.agent.displayName,
                         syncStatus = visibleConversation.syncStatus,
                         onRetryAgentStream = {
                             viewModel.retryAgentConversationStreamForPane(paneIdForSend)
@@ -892,7 +885,17 @@ public fun TmuxSessionScreen(
                 onCancelChoice = viewModel::cancelAssistantChoice,
             )
 
-            if (isImeVisible && currentPane != null) {
+            // Issue #459: the Conversation tab and the Terminal tab now
+            // share an identical bottom — the unified composer band
+            // ([BottomChipControls], which opens the #453
+            // [PromptComposerSheet] via the mic). The terminal key bar
+            // ([KeyBarWithMic]) is a Terminal-only, keyboard-up affordance
+            // for sending raw keys into the focused pane; in Conversation
+            // you only ever send via the composer, so the key bar must NOT
+            // appear there even if the IME happens to be up. Gating it on
+            // `!showConversation` keeps it Terminal-only and leaves
+            // Conversation with just the unified composer band below.
+            if (isImeVisible && currentPane != null && !showConversation) {
                 KeyBarWithMic(
                     keys = TmuxKeyBarLayout,
                     onKey = if (sessionLive) {
@@ -908,7 +911,7 @@ public fun TmuxSessionScreen(
                     onMicTap = ::onInlineMicTap,
                     inputEnabled = sessionLive,
                 )
-            } else if (!isImeVisible && currentPane != null) {
+            } else if (currentPane != null && (showConversation || !isImeVisible)) {
                 val isAgentPane = currentAgentConversation?.detection != null
                 BottomChipControls(
                     chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
@@ -951,15 +954,26 @@ public fun TmuxSessionScreen(
                     // pager renders one pane at a time, so there is only
                     // ever a single attached `TerminalView` to find under
                     // the Compose root).
-                    onShowKeyboardTap = {
-                        showTerminalSoftKeyboard(
-                            composeRootView,
-                            onLocalTerminalError = { cause ->
-                                currentPane?.paneId?.let { paneId ->
-                                    viewModel.reportTerminalSurfaceFailure(paneId, cause)
-                                }
-                            },
-                        )
+                    //
+                    // Issue #459: the show-keyboard chip raises the soft
+                    // keyboard to type raw keys straight into the focused
+                    // terminal pane. In the Conversation tab there is no
+                    // attached `TerminalView` and you only ever send via the
+                    // composer, so the chip would be a dead no-op — hide it
+                    // (null) there. Terminal keeps it.
+                    onShowKeyboardTap = if (showConversation) {
+                        null
+                    } else {
+                        {
+                            showTerminalSoftKeyboard(
+                                composeRootView,
+                                onLocalTerminalError = { cause ->
+                                    currentPane?.paneId?.let { paneId ->
+                                        viewModel.reportTerminalSurfaceFailure(paneId, cause)
+                                    }
+                                },
+                            )
+                        }
                     },
                     onAddSnippetTap = if (hostId != 0L) {
                         { showSnippetPicker = true }
@@ -1170,6 +1184,17 @@ public fun TmuxSessionScreen(
         // here too). `onSend` routes through writeInputToPane so the
         // composer's Send / Send+Enter buttons reach the focused tmux pane
         // via `send-keys`, identical to chip taps and snippet picks.
+        //
+        // Issue #459: the Conversation tab now shares this same composer as
+        // its only send affordance (the bespoke in-pane "Message …" field
+        // is gone). When the focused pane is showing its Conversation tab we
+        // route through `sendToAgentPaneResult`, which submits to the agent
+        // AND appends the optimistic user Message into the conversation feed
+        // so the sent prompt appears in the transcript — exactly what the
+        // old in-pane composer did. Terminal-tab sends keep the raw
+        // write-bytes path.
+        val viewingConversation = currentAgentConversation?.detection != null &&
+            currentAgentConversation.selectedTab == SessionTab.Conversation
         PromptComposerSheet(
             onDismiss = { showMicSheet = false },
             onSend = { text, withEnter ->
@@ -1182,14 +1207,20 @@ public fun TmuxSessionScreen(
                     false
                 } else {
                     val agent = currentAgentConversation?.detection?.agent
-                    val sent = if (withEnter && agent == AgentKind.Codex) {
-                        viewModel.sendAgentPayloadToPaneResult(pane.paneId, text, agent).isSuccess
-                    } else {
-                        val payload = if (withEnter) text + "\r" else text
-                        viewModel.writeInputToPaneResult(
-                            pane.paneId,
-                            payload.toByteArray(Charsets.UTF_8),
-                        ).isSuccess
+                    val sent = when {
+                        // Conversation tab: submit to the agent and echo the
+                        // optimistic user Message into the feed (#459).
+                        viewingConversation ->
+                            viewModel.sendToAgentPaneResult(pane.paneId, text).isSuccess
+                        withEnter && agent == AgentKind.Codex ->
+                            viewModel.sendAgentPayloadToPaneResult(pane.paneId, text, agent).isSuccess
+                        else -> {
+                            val payload = if (withEnter) text + "\r" else text
+                            viewModel.writeInputToPaneResult(
+                                pane.paneId,
+                                payload.toByteArray(Charsets.UTF_8),
+                            ).isSuccess
+                        }
                     }
                     if (sent) {
                         showMicSheet = false
@@ -1945,8 +1976,9 @@ internal const val TMUX_CONVERSATION_PANE_TAG = "tmux:conversation"
 // rebuild the surface without reconnecting SSH.
 internal const val TMUX_TERMINAL_SURFACE_ERROR_TAG = "tmux:terminal-surface-error"
 internal const val TMUX_TERMINAL_SURFACE_RECREATE_TAG = "tmux:terminal-surface-recreate"
-internal const val TMUX_CONVERSATION_COMPOSER_INPUT_TAG = "tmux:conversation:composer-input"
-internal const val TMUX_CONVERSATION_COMPOSER_SEND_TAG = "tmux:conversation:composer-send"
+// Issue #459: the bespoke in-pane conversation composer (and its
+// composer-input / composer-send test tags) was removed — the Conversation
+// tab now shares the unified [PromptComposerSheet] at the screen level.
 internal const val TMUX_CONVERSATION_TOOL_ROW_TAG_PREFIX = "tmux:conversation:tool:"
 /** Issue #176: stable test tag prefix for a `SystemNote` row in the tmux conversation pane. */
 internal const val TMUX_CONVERSATION_SYSTEM_NOTE_ROW_TAG_PREFIX = "tmux:conversation:system-note:"
@@ -2677,7 +2709,6 @@ private fun WindowSwitcherOverlay(
 @Composable
 internal fun TmuxConversationPane(
     events: List<ConversationEvent>,
-    onSendToAgent: suspend (String) -> Boolean,
     modifier: Modifier = Modifier,
     // Issue #176: when false, XML-tagged SystemNote events are filtered
     // from the visible feed entirely. The default keeps the existing
@@ -2694,28 +2725,15 @@ internal fun TmuxConversationPane(
     // search field still types. See [rememberHoistedQuery] below.
     query: String = "",
     onQueryChange: (String) -> Unit = NoOpStringChange,
-    // Issue #249: gate the "Send" button on whether the SSH/tmux session
-    // is live. When false the button is disabled so a tap cannot route a
-    // message into a dead pane and then clear the composer — the draft
-    // stays in [composerText] (a `remember`, so it survives the
-    // disconnected -> reconnect recomposition) and the user re-sends once
-    // the session is live again. Defaults to true so direct callers
-    // (unit tests, the connected E2E) keep the always-enabled behaviour.
-    sendEnabled: Boolean = true,
-    // Issue #177: seed the composer with a draft restored from a
-    // persisted session, and report draft edits up so the activity can
-    // re-persist them on the next `onStop`. The default empty seed +
-    // no-op reporter keep direct callers unchanged.
-    initialDraft: String = "",
-    onDraftChanged: (String) -> Unit = {},
-    agentName: String = "agent",
     syncStatus: AgentConversationSyncStatus = AgentConversationSyncStatus.Live,
     onRetryAgentStream: () -> Unit = {},
 ) {
+    // Issue #459: this pane is now read-only chrome — search + the
+    // conversation feed. Sending is owned by the shared unified composer
+    // ([PromptComposerSheet]) mounted at the screen level, identical to the
+    // Terminal tab's bottom. The bespoke in-pane "Message …" field, its
+    // draft/unsent-prompt state, and the `onSendToAgent` callback are gone.
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
-    var composerText by rememberSaveable { mutableStateOf(initialDraft) }
-    var sendInFlight by remember { mutableStateOf(false) }
-    var hasUnsentPrompt by rememberSaveable { mutableStateOf(false) }
     val visibleEvents = remember(events, showSystemNotes) {
         if (showSystemNotes) events else events.filterNot { it is ConversationEvent.SystemNote }
     }
@@ -2836,60 +2854,8 @@ internal fun TmuxConversationPane(
                     .padding(end = 12.dp, bottom = 12.dp),
             )
         }
-        com.pocketshell.app.composer.UnsentPromptBanner(
-            visible = hasUnsentPrompt || (!sendEnabled && composerText.isNotBlank()),
-            canRetry = sendEnabled && !sendInFlight,
-            onRetry = {
-                val trimmed = composerText.trim()
-                if (trimmed.isNotEmpty() && !sendInFlight) {
-                    coroutineScope.launch {
-                        sendInFlight = true
-                        try {
-                            if (onSendToAgent(trimmed)) {
-                                composerText = ""
-                                hasUnsentPrompt = false
-                                onDraftChanged("")
-                            }
-                        } finally {
-                            sendInFlight = false
-                        }
-                    }
-                }
-            },
-            onDiscard = {
-                composerText = ""
-                hasUnsentPrompt = false
-                onDraftChanged("")
-            },
-        )
-        AgentComposerRow(
-            text = composerText,
-            onTextChange = {
-                composerText = it
-                onDraftChanged(it)
-            },
-            onSend = {
-                val trimmed = composerText.trim()
-                if (trimmed.isNotEmpty() && !sendInFlight) {
-                    coroutineScope.launch {
-                        sendInFlight = true
-                        try {
-                            if (onSendToAgent(trimmed)) {
-                                composerText = ""
-                                hasUnsentPrompt = false
-                                onDraftChanged("")
-                            } else {
-                                hasUnsentPrompt = true
-                            }
-                        } finally {
-                            sendInFlight = false
-                        }
-                    }
-                }
-            },
-            sendEnabled = sendEnabled && !sendInFlight,
-            agentName = agentName,
-        )
+        // Issue #459: no in-pane composer / unsent-prompt banner any more —
+        // the shared unified composer band at the screen level owns sending.
     }
 }
 
@@ -3200,32 +3166,10 @@ private fun ConversationEvent.searchText(): String = when (this) {
     is ConversationEvent.SystemNote -> "$tag $content"
 }
 
-@Composable
-private fun AgentComposerRow(
-    text: String,
-    onTextChange: (String) -> Unit,
-    onSend: () -> Unit,
-    // Issue #249: extra gate on top of the non-blank check so a
-    // disconnected session can't deliver-then-clear the draft.
-    sendEnabled: Boolean = true,
-    agentName: String = "agent",
-) {
-    // Issue #196: the agent-pane composer now uses the shared
-    // [com.pocketshell.app.composer.AgentComposerSurface] so it has the
-    // identical styled draft box (surface-elev fill, accent cursor, muted
-    // placeholder) and the identical accent primary Send button as the
-    // terminal-shell prompt composer. The surface-specific test tags keep
-    // the existing tmux connected tests resolving the same nodes.
-    com.pocketshell.app.composer.AgentComposerSurface(
-        value = text,
-        onValueChange = onTextChange,
-        onSend = onSend,
-        inputFieldTag = TMUX_CONVERSATION_COMPOSER_INPUT_TAG,
-        sendButtonTag = TMUX_CONVERSATION_COMPOSER_SEND_TAG,
-        sendEnabled = sendEnabled,
-        placeholder = "Message ${agentName.ifBlank { "agent" }}",
-    )
-}
+// Issue #459: `AgentComposerRow` (the bespoke in-pane "Message …" field +
+// Send) was removed. The Conversation tab now shares the unified
+// [com.pocketshell.app.composer.PromptComposerSheet] mounted at the screen
+// level, identical to the Terminal tab's bottom.
 
 /**
  * Render a single tool-call invocation as either a one-line collapsed

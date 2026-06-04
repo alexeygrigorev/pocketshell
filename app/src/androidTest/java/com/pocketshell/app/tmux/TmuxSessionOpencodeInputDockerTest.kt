@@ -31,6 +31,8 @@ import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
+import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -388,6 +390,14 @@ class TmuxSessionOpencodeInputDockerTest {
             assertTabsInsideToolbar("issue303_agent_terminal")
             compose.onNodeWithText("Terminal", useUnmergedTree = true).assertIsDisplayed()
             compose.onNodeWithText("Conversation", useUnmergedTree = true).assertIsDisplayed()
+            // Issue #459: the Terminal tab bottom is the unified composer
+            // band — the mic FAB (opens the shared PromptComposerSheet) plus
+            // the Terminal-only "show keyboard" chip (raises the soft keyboard
+            // / key bar for raw keys).
+            compose.onNodeWithTag(SESSION_MIC_FAB_TAG, useUnmergedTree = true)
+                .assertIsDisplayed()
+            compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+                .assertIsDisplayed()
             captureArtifact("issue303-01-agent-terminal")
             captureFullFrame("issue303-01-agent-terminal-full")
 
@@ -407,6 +417,21 @@ class TmuxSessionOpencodeInputDockerTest {
                 SystemClock.elapsedRealtime() - conversationTapAt,
             )
             assertTabsInsideToolbar("issue303_agent_conversation")
+            // Issue #459: the Conversation tab now shares the IDENTICAL
+            // unified composer bottom as Terminal — the mic FAB is present
+            // (its only send affordance, opening the shared
+            // PromptComposerSheet). The Terminal-only affordances must NOT
+            // appear in Conversation:
+            //  - the "show keyboard" chip (raw-key entry) is hidden, and
+            //  - the terminal key bar (the "Esc" soft-key row) is absent.
+            // There is also no bespoke in-pane "Message …" composer field.
+            compose.onNodeWithTag(SESSION_MIC_FAB_TAG, useUnmergedTree = true)
+                .assertIsDisplayed()
+            compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG, useUnmergedTree = true)
+                .assertDoesNotExist()
+            compose.onAllNodesWithText("Esc", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .let { assertEquals("key bar must NOT appear in Conversation (#459)", 0, it.size) }
             captureFullFrame("issue303-02-agent-conversation-full")
 
             val terminalTapAt = SystemClock.elapsedRealtime()

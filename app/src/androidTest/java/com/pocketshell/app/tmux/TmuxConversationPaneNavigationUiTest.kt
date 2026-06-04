@@ -59,7 +59,6 @@ class TmuxConversationPaneNavigationUiTest {
             PocketShellTheme {
                 TmuxConversationPane(
                     events = events,
-                    onSendToAgent = { true },
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -110,7 +109,6 @@ class TmuxConversationPaneNavigationUiTest {
             PocketShellTheme {
                 TmuxConversationPane(
                     events = events,
-                    onSendToAgent = { true },
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -147,7 +145,6 @@ class TmuxConversationPaneNavigationUiTest {
             PocketShellTheme {
                 TmuxConversationPane(
                     events = events,
-                    onSendToAgent = { true },
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -190,7 +187,6 @@ class TmuxConversationPaneNavigationUiTest {
             PocketShellTheme {
                 TmuxConversationPane(
                     events = events,
-                    onSendToAgent = { true },
                     modifier = Modifier.fillMaxSize(),
                 )
             }
@@ -231,7 +227,6 @@ class TmuxConversationPaneNavigationUiTest {
                 var query by remember { mutableStateOf("") }
                 TmuxConversationPane(
                     events = sampleMessageEvents(count = 3),
-                    onSendToAgent = { true },
                     query = query,
                     onQueryChange = { query = it },
                 )

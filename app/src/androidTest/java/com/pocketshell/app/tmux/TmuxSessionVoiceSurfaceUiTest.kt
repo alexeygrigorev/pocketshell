@@ -180,6 +180,89 @@ class TmuxSessionVoiceSurfaceUiTest {
         assertEquals(1, snippetTaps)
     }
 
+    // ─── Issue #459: Conversation shares the unified composer bottom with
+    //     Terminal; the key bar is Terminal-only ────────────────────────
+
+    /**
+     * Issue #459: in the Conversation tab the bottom band is the unified
+     * composer entry — the mic FAB that opens the shared
+     * `PromptComposerSheet`. The Terminal-only "show keyboard" chip (raw-key
+     * entry, the gateway to the key bar) must NOT appear. This mirrors how
+     * [com.pocketshell.app.tmux.TmuxSessionScreen] wires `BottomChipControls`
+     * for an agent pane on its Conversation tab (`onShowKeyboardTap = null`).
+     */
+    @Test
+    fun conversationBottomIsUnifiedComposerWithoutShowKeyboardChip() {
+        var dictateTaps = 0
+        compose.setContent {
+            PocketShellTheme {
+                // Exactly how TmuxSessionScreen renders the bottom band when
+                // the focused agent pane is showing its Conversation tab:
+                // agent exit chips, the snippet/prompt chip, the mic FAB, and
+                // NO show-keyboard chip (raw keys aren't sent from
+                // Conversation — that's Terminal-only, #459).
+                BottomChipControls(
+                    chips = AgentExitChips,
+                    onChipTap = {},
+                    onDictateTap = { dictateTaps++ },
+                    onShowKeyboardTap = null,
+                    onAddSnippetTap = {},
+                    addSnippetLabel = ADD_PROMPT_CHIP_LABEL,
+                    addSnippetIcon = null,
+                    onProjectNavigationTap = null,
+                )
+            }
+        }
+
+        captureViewportArtifact("issue459-conversation-bottom-unified-composer.png")
+
+        // The unified composer entry (mic FAB) is present — Conversation's
+        // only send affordance.
+        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed().performClick()
+        assertEquals(1, dictateTaps)
+        // The Terminal-only "show keyboard" chip is absent in Conversation.
+        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertDoesNotExist()
+        compose.onNodeWithText("show keyboard").assertDoesNotExist()
+        // No key bar (Esc/Tab/Ctrl raw-key row) in Conversation.
+        compose.onNodeWithText("Esc").assertDoesNotExist()
+        compose.onNodeWithText("Tab").assertDoesNotExist()
+    }
+
+    /**
+     * Issue #459: the Terminal tab keeps the same unified composer mic FAB
+     * AND the Terminal-only "show keyboard" chip (which raises the soft
+     * keyboard / key bar for raw-key entry). Paired with
+     * [conversationBottomIsUnifiedComposerWithoutShowKeyboardChip] this proves
+     * the two bottoms share the composer while the show-keyboard / key-bar
+     * affordance is Terminal-only.
+     */
+    @Test
+    fun terminalBottomKeepsUnifiedComposerPlusShowKeyboardChip() {
+        compose.setContent {
+            PocketShellTheme {
+                // How TmuxSessionScreen renders the bottom band on the
+                // Terminal tab of an agent pane: same mic FAB, plus the
+                // show-keyboard chip.
+                BottomChipControls(
+                    chips = AgentExitChips,
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = {},
+                    addSnippetLabel = ADD_PROMPT_CHIP_LABEL,
+                    addSnippetIcon = null,
+                    onProjectNavigationTap = null,
+                )
+            }
+        }
+
+        captureViewportArtifact("issue459-terminal-bottom-unified-composer.png")
+
+        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertIsDisplayed()
+        compose.onNodeWithText("show keyboard").assertIsDisplayed()
+    }
+
     @Test
     fun assistantStripConfirmOrCorrectRoutesThroughCallbacks() {
         val events = mutableListOf<String>()

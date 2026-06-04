@@ -297,9 +297,6 @@ fun FolderListScreen(
                             folderPath.takeUnless { it == FolderListViewModel.UNTRACKED_PATH },
                         )
                     },
-                    onCreateInFolder = { row ->
-                        pickerFolder = PickerTarget(path = row.path, label = row.label)
-                    },
                     onFolderActions = { row ->
                         // Copy-source set = every real (non-untracked)
                         // discovered folder the user can see, so the env
@@ -943,7 +940,6 @@ private fun FolderListContent(
     onDismissActionStatus: () -> Unit,
     onOpenPortForwarding: () -> Unit,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
-    onCreateInFolder: (FolderRow) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onCreateInRoot: (FolderTreeRoot) -> Unit,
     onRootActions: (FolderTreeRoot) -> Unit,
@@ -979,7 +975,6 @@ private fun FolderListContent(
                     root = root,
                     expandedProjectPaths = expandedProjectPaths,
                     onSessionClick = onSessionClick,
-                    onCreateInFolder = onCreateInFolder,
                     onFolderActions = onFolderActions,
                     onCreateInRoot = onCreateInRoot,
                     onRootActions = onRootActions,
@@ -996,7 +991,6 @@ private fun FolderListContent(
                     folder = folder,
                     expanded = true,
                     onSessionClick = onSessionClick,
-                    onCreateInFolder = onCreateInFolder,
                     onFolderActions = onFolderActions,
                     onToggleExpanded = {},
                 )
@@ -1148,7 +1142,6 @@ private fun FolderTreeRootGroup(
     root: FolderTreeRoot,
     expandedProjectPaths: Set<String>,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
-    onCreateInFolder: (FolderRow) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onCreateInRoot: (FolderTreeRoot) -> Unit,
     onRootActions: (FolderTreeRoot) -> Unit,
@@ -1187,7 +1180,6 @@ private fun FolderTreeRootGroup(
                         showTreeBranch = true,
                         lastInTree = index == root.folders.lastIndex,
                         onSessionClick = onSessionClick,
-                        onCreateInFolder = onCreateInFolder,
                         onFolderActions = onFolderActions,
                         onToggleExpanded = { onToggleProjectExpanded(folder) },
                     )
@@ -1469,7 +1461,6 @@ private fun FolderGroup(
     showTreeBranch: Boolean = false,
     lastInTree: Boolean = true,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
-    onCreateInFolder: (FolderRow) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onToggleExpanded: () -> Unit,
 ) {
@@ -1497,7 +1488,6 @@ private fun FolderGroup(
                 folder = folder,
                 expanded = expanded,
                 onToggleExpanded = onToggleExpanded,
-                onCreateInFolder = { onCreateInFolder(folder) },
                 onFolderActions = { onFolderActions(folder) },
                 modifier = Modifier.weight(1f),
             )
@@ -1540,7 +1530,6 @@ private fun FolderHeader(
     folder: FolderRow,
     expanded: Boolean,
     onToggleExpanded: () -> Unit,
-    onCreateInFolder: () -> Unit,
     onFolderActions: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -1550,10 +1539,12 @@ private fun FolderHeader(
             .fillMaxWidth()
             .background(PocketShellColors.Surface.copy(alpha = 0.10f), RoundedCornerShape(4.dp))
             // Long-press the row to reach the consolidated folder-actions
-            // sheet (env files, import, clone, empty project) so the inline
-            // affordances stay down to one `+` plus the overflow kebab and
-            // the folder name keeps its width (#455). Untracked has no
-            // filesystem path to manage, so it only toggles.
+            // sheet (new session, env files, import, clone, empty project) so
+            // the trailing cluster stays down to just the overflow kebab and
+            // the folder name keeps its width (#478 — the per-row inline `+`
+            // was dropped to match the maintainer's mockup; "New session" now
+            // lives in the kebab sheet). Untracked has no filesystem path to
+            // manage, so it only toggles.
             .then(
                 if (hasActions) {
                     Modifier.combinedClickable(
@@ -1619,13 +1610,15 @@ private fun FolderHeader(
                 modifier = Modifier.testTag(folderCountPillTestTag(folder.path)),
             )
         }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            // Secondary actions (env files, import, clone, empty project)
-            // collapse behind a single overflow kebab — and the row
-            // long-press — so the name column keeps its width (#455). Only
-            // real folders have a filesystem path to manage; the synthetic
-            // Untracked group shows just the inline `+`.
-            if (folder.path != FolderListViewModel.UNTRACKED_PATH) {
+        // Per-row actions — including "New session" — collapse behind a
+        // single overflow kebab (and the row long-press) so the trailing
+        // cluster is just the kebab and the name column keeps its width
+        // (#478: the inline `+` was dropped to match the maintainer's
+        // mockup). Only real folders have a filesystem path to manage; the
+        // synthetic Untracked group has no kebab — its sessions are created
+        // via the screen-level FAB.
+        if (folder.path != FolderListViewModel.UNTRACKED_PATH) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 CompactTreeIconButton(
                     label = "⋮",
                     contentDescription = "Project actions",
@@ -1633,13 +1626,6 @@ private fun FolderHeader(
                     testTag = folderDetailActionsTestTag(folder.path),
                 )
             }
-            CompactTreeIconButton(
-                label = "+",
-                contentDescription = "New session",
-                onClick = onCreateInFolder,
-                testTag = folderDetailCreateTestTag(folder.path),
-                accent = true,
-            )
         }
     }
 }

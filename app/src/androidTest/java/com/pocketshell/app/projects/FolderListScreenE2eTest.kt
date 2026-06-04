@@ -322,26 +322,57 @@ class FolderListScreenE2eTest {
         assertAccessibleTouchTarget(folderTreeRootCreateTestTag("~/git"))
         assertAccessibleTouchTarget(folderTreeRootActionsTestTag("~/tmp"))
         assertAccessibleTouchTarget(folderTreeRootCreateTestTag("~/tmp"))
-        // #455: the per-folder inline cluster is now just the overflow
-        // kebab + the accent `+`. The former inline `E` (env) button is
-        // gone; env folds into the overflow sheet (asserted below).
+        // #478: the per-project trailing cluster is now JUST the overflow
+        // kebab — the inline `+` (new-session) button was dropped to match
+        // the maintainer's mockup. Start-session moved into the kebab sheet
+        // (asserted below). Confirm the kebab still meets its touch target
+        // and the inline `+` node no longer exists for a visible project.
         assertAccessibleTouchTarget(folderDetailActionsTestTag("/home/u/git/pocketshell"))
-        assertAccessibleTouchTarget(folderDetailCreateTestTag("/home/u/git/pocketshell"))
+        compose.onAllNodesWithTag(
+            folderDetailCreateTestTag("/home/u/git/pocketshell"),
+            useUnmergedTree = true,
+        ).fetchSemanticsNodes().also {
+            assertTrue(
+                "#478: the per-project inline `+` button must be gone (start-session moved to the kebab)",
+                it.isEmpty(),
+            )
+        }
         compose.onNodeWithText("+ New", useUnmergedTree = true).assertDoesNotExist()
 
-        // #455 evidence: compact tree with single overflow kebab + `+`,
-        // full folder names visible, more rows per screen.
-        captureViewport("issue455-folder-tree-compact-viewport.png")
+        // #478 evidence: compact tree with the single overflow kebab (no
+        // inline `+`), full folder names visible, more rows per screen.
+        captureViewport("issue478b-folder-tree-kebab-only-viewport.png")
 
-        // #455: opening the per-folder overflow sheet surfaces the "Env
-        // files" row (it replaced the inline `E` button). Tapping it routes
-        // to the env editor (no-op onEditEnv in this test) and dismisses the
-        // sheet, leaving the tree untouched for the remaining assertions.
+        // #478: opening the per-folder overflow kebab surfaces both the
+        // "+ New session here" row (the start-session action that the inline
+        // `+` used to provide) and the "Env files" row. Tapping New session
+        // routes to the SessionTypePickerSheet pre-filled with this folder,
+        // proving start-session is still reachable via the kebab.
+        compose.onNodeWithTag(folderDetailActionsTestTag("/home/u/git/pocketshell")).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(FOLDER_CONTEXT_NEW_SESSION_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
+        captureFullDevice("issue478b-overflow-sheet-with-new-session.png")
+        compose.onNodeWithTag(FOLDER_CONTEXT_NEW_SESSION_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(SESSION_TYPE_PICKER_SHELL_TAG).fetchSemanticsNodes().isNotEmpty()
+        }
+        // The picker is scoped to the tapped project's folder.
+        compose.onNodeWithText("in pocketshell").assertExists()
+        compose.onNodeWithTag(SESSION_TYPE_PICKER_CANCEL_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(SESSION_TYPE_PICKER_SHELL_TAG).fetchSemanticsNodes().isEmpty()
+        }
+
+        // The kebab sheet also still folds in the "Env files" row (#455).
+        // Tapping it routes to the env editor (no-op onEditEnv in this test)
+        // and dismisses the sheet, leaving the tree untouched for the
+        // remaining assertions.
         compose.onNodeWithTag(folderDetailActionsTestTag("/home/u/git/pocketshell")).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(FOLDER_CONTEXT_ENV_TAG).fetchSemanticsNodes().isNotEmpty()
         }
-        captureFullDevice("issue455-overflow-sheet-with-env.png")
+        captureFullDevice("issue478b-overflow-sheet-with-env.png")
         compose.onNodeWithTag(FOLDER_CONTEXT_ENV_TAG).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithTag(FOLDER_CONTEXT_ENV_TAG).fetchSemanticsNodes().isEmpty()

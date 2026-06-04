@@ -265,6 +265,186 @@ class SshTerminalBridgeTest {
         }
     }
 
+    // -------------------------------------------------------------------
+    // Issue #468: seed gate — live %output must never race the capture-pane
+    // seed. The garble in the report is a stale snapshot landing AFTER live
+    // deltas: the snapshot's ESC[2J clears live state and repaints an old
+    // frame, then the next cursor-relative live delta paints onto a grid that
+    // does not match (stranded/mashed frames, blank screen). The gate makes
+    // seed-before-live deterministic.
+    // -------------------------------------------------------------------
+
+    /**
+     * Reproduces the garble WITHOUT the gate: live deltas land, then the
+     * (now-stale) capture-pane seed clears and repaints over them. The visible
+     * row ends up holding the seeded frame, not the latest live frame — the
+     * exact corruption from the screenshot. This is the negative control that
+     * proves the test fixture actually exercises the race.
+     */
+    @Test
+    fun ungatedSeedRacingLiveOutputCorruptsTheVisibleRow() {
+        val bridge = SshTerminalBridge(columns = 40, rows = 4, transcriptRows = 100)
+
+        // Live frames arrive first (no gate). A bare CR rewrites column 0 of
+        // the current row in place — the agent-spinner pattern.
+        bridge.feedBytes("frame-LIVE-LATEST".toByteArray(Charsets.US_ASCII))
+        bridge.feedBytes("\rframe-LIVE-NEWEST".toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        // The seed snapshot was captured at an OLDER instant; it clears the
+        // screen and repaints the stale frame, with the cursor restored at the
+        // end of the captured line.
+        val staleSeed = "\u001b[H\u001b[2Jframe-SEED-STALE\u001b[0m\u001b[H".toByteArray(Charsets.US_ASCII)
+        bridge.feedBytes(staleSeed)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val visibleRow0 = bridge.emulator.screen.transcriptText.lineSequence().first().trimEnd()
+        // The bug: the stale seed wins, the latest live frame is gone.
+        assertEquals("frame-SEED-STALE", visibleRow0)
+    }
+
+    /**
+     * The fix: with the gate closed up front, live deltas are buffered until
+     * the seed is applied, then replayed in order. The seed paints first, the
+     * latest live frame overwrites it cleanly — the visible row holds the live
+     * frame, not the stale snapshot. No reordering, no stranded frame.
+     */
+    @Test
+    fun gatedSeedAppliesBeforeBufferedLiveOutputSoLatestLiveFrameWins() {
+        val bridge = SshTerminalBridge(columns = 40, rows = 4, transcriptRows = 100)
+        bridge.closeSeedGate()
+
+        // Live frames arrive WHILE gated — buffered, not yet on the emulator.
+        bridge.feedBytes("frame-LIVE-LATEST".toByteArray(Charsets.US_ASCII))
+        bridge.feedBytes("\rframe-LIVE-NEWEST".toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(
+            "gated live output must not reach the emulator yet",
+            "",
+            bridge.emulator.screen.transcriptText.trimEnd(),
+        )
+
+        // Seed lands: snapshot first, then the buffered live deltas in order.
+        val seed = "\u001b[H\u001b[2Jframe-SEED-STALE\u001b[0m\u001b[H".toByteArray(Charsets.US_ASCII)
+        bridge.seedThenOpenGate(seed)
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val visibleRow0 = bridge.emulator.screen.transcriptText.lineSequence().first().trimEnd()
+        assertEquals("frame-LIVE-NEWEST", visibleRow0)
+    }
+
+    /**
+     * After the gate opens, subsequent live bytes flow straight through with
+     * no buffering and stay in order relative to the seed and the earlier
+     * buffered burst.
+     */
+    @Test
+    fun liveOutputAfterSeedFlowsThroughInOrder() {
+        val bridge = SshTerminalBridge(columns = 40, rows = 8, transcriptRows = 100)
+        bridge.closeSeedGate()
+
+        bridge.feedBytes("buffered-1\r\n".toByteArray(Charsets.US_ASCII))
+        bridge.feedBytes("buffered-2\r\n".toByteArray(Charsets.US_ASCII))
+        bridge.seedThenOpenGate("seed-line\r\n".toByteArray(Charsets.US_ASCII))
+        bridge.feedBytes("post-seed-1\r\n".toByteArray(Charsets.US_ASCII))
+        bridge.feedBytes("post-seed-2".toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val visible = bridge.emulator.screen.transcriptText
+            .lineSequence()
+            .map { it.trimEnd() }
+            .filter { it.isNotEmpty() }
+            .toList()
+        assertEquals(
+            listOf("seed-line", "buffered-1", "buffered-2", "post-seed-1", "post-seed-2"),
+            visible,
+        )
+    }
+
+    /**
+     * Seed-failure fallback: when no snapshot ever arrives (capture-pane
+     * failed / older tmux), [openGateFlushingPending] flushes the buffered
+     * live output in order rather than swallowing it. This is the
+     * self-recovery / no-permanent-blank guarantee.
+     */
+    @Test
+    fun openGateWithoutSeedFlushesBufferedLiveOutputInOrder() {
+        val bridge = SshTerminalBridge(columns = 40, rows = 8, transcriptRows = 100)
+        bridge.closeSeedGate()
+
+        bridge.feedBytes("live-a\r\n".toByteArray(Charsets.US_ASCII))
+        bridge.feedBytes("live-b".toByteArray(Charsets.US_ASCII))
+        shadowOf(Looper.getMainLooper()).idle()
+        assertEquals("", bridge.emulator.screen.transcriptText.trimEnd())
+
+        bridge.openGateFlushingPending()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        val visible = bridge.emulator.screen.transcriptText
+            .lineSequence()
+            .map { it.trimEnd() }
+            .filter { it.isNotEmpty() }
+            .toList()
+        assertEquals(listOf("live-a", "live-b"), visible)
+    }
+
+    /**
+     * Heavy/bursty deterministic stress: while gated, drive a large burst of
+     * numbered live frames concurrently with the seed. The final grid must be
+     * exactly seed-then-ordered-live with every byte present and in order — no
+     * dropped frame, no reorder, no stranded snapshot. This is the
+     * deterministic burst fixture the issue asks for.
+     */
+    @Test(timeout = 10_000)
+    fun heavyBurstWhileGatedThenSeedKeepsEveryFrameInOrder() {
+        val bridge = SshTerminalBridge(
+            columns = 60,
+            rows = 24,
+            transcriptRows = SEED_BURST_LINES + 100,
+        )
+        bridge.closeSeedGate()
+
+        // A producer thread blasts numbered frames while gated — mirrors the
+        // Dispatchers.IO producer in attachExternalProducer.
+        val executor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "SshTerminalBridgeSeedBurstStressTest").apply { isDaemon = true }
+        }
+        val burst = executor.submit {
+            for (line in 0 until SEED_BURST_LINES) {
+                val text = "live-burst-%05d ".format(line) +
+                    ('a'.code + (line % 26)).toChar().toString().repeat(20) +
+                    "\r\n"
+                bridge.feedBytes(text.toByteArray(Charsets.US_ASCII))
+            }
+        }
+
+        try {
+            burst.get(5, TimeUnit.SECONDS)
+            // Seed lands after the whole burst is buffered.
+            bridge.seedThenOpenGate("seed-header\r\n".toByteArray(Charsets.US_ASCII))
+            drainMainLooperUntil { true }
+            shadowOf(Looper.getMainLooper()).idle()
+
+            val lines = bridge.emulator.screen.transcriptText
+                .lineSequence()
+                .map { it.trimEnd() }
+                .filter { it.isNotEmpty() }
+                .toList()
+            assertEquals("seed-header", lines.first())
+            // Every live frame present, in order, immediately after the seed.
+            val liveLines = lines.drop(1)
+            assertEquals(SEED_BURST_LINES, liveLines.size)
+            liveLines.forEachIndexed { index, line ->
+                assertTrue(
+                    "frame $index out of order or missing: '$line'",
+                    line.startsWith("live-burst-%05d ".format(index)),
+                )
+            }
+        } finally {
+            executor.shutdownNow()
+        }
+    }
+
     private data class Payload(
         val bytes: ByteArray,
         val transcriptText: String,
@@ -426,5 +606,10 @@ class SshTerminalBridgeTest {
         private const val LINES_LARGER_THAN_PROCESS_QUEUE = 900
         private const val RAW_BURST_LINES = 5_000
         private const val TMUX_BURST_LINES = 1_200
+
+        // Issue #468: deterministic seed/live burst fixture size. Large enough
+        // that the buffered live burst spans many process-to-terminal queue
+        // drains while gated, so a reorder/drop would show up.
+        private const val SEED_BURST_LINES = 2_000
     }
 }

@@ -1186,6 +1186,10 @@ public class TmuxSessionViewModel @Inject constructor(
                         jobs = paneInputJobs,
                     ),
                     suppressQueryResponses = true,
+                    // Issue #468: buffer live %output behind the seed gate
+                    // until seedPrewarmedPane applies the capture-pane snapshot,
+                    // so the snapshot cannot race the live stream.
+                    awaitSeed = true,
                 )
                 val row = TmuxPaneState(
                     paneId = pane.paneId,
@@ -1224,16 +1228,26 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private suspend fun seedPrewarmedPane(client: TmuxClient, pane: TmuxPaneState) {
-        val capture = client.sendCommand("capture-pane -p -e -S -200 -t ${pane.paneId}")
-        if (capture.isError || capture.output.isEmpty()) return
-        val cursor = runCatching {
-            client.sendCommand("display-message -p -t ${pane.paneId} '#{cursor_x},#{cursor_y}'")
-        }.getOrNull()
-            ?.takeUnless { it.isError }
-            ?.output
-            ?.firstOrNull()
-            .let { parseTmuxPaneCursor(it) }
-        pane.terminalState.appendRemoteOutput(capture.output.toTerminalViewportBytes(cursor))
+        // Issue #468: the live %output producer is gated behind the seed.
+        // appendRemoteOutput opens the gate when a snapshot lands; if the
+        // capture fails (or anything throws) we must still open the gate so
+        // buffered live output is flushed in order rather than swallowed.
+        var seeded = false
+        try {
+            val capture = client.sendCommand("capture-pane -p -e -S -200 -t ${pane.paneId}")
+            if (capture.isError || capture.output.isEmpty()) return
+            val cursor = runCatching {
+                client.sendCommand("display-message -p -t ${pane.paneId} '#{cursor_x},#{cursor_y}'")
+            }.getOrNull()
+                ?.takeUnless { it.isError }
+                ?.output
+                ?.firstOrNull()
+                .let { parseTmuxPaneCursor(it) }
+            pane.terminalState.appendRemoteOutput(capture.output.toTerminalViewportBytes(cursor))
+            seeded = true
+        } finally {
+            if (!seeded) pane.terminalState.openSeedGateWithoutSeed()
+        }
     }
 
     /**
@@ -2976,6 +2990,12 @@ public class TmuxSessionViewModel @Inject constructor(
                 // input queue is bridged to tmux `send-keys`.
                 remoteStdin = inputSinkForPane(paneId),
                 suppressQueryResponses = true,
+                // Issue #468: buffer live %output behind the seed gate until
+                // preloadVisibleContentForNewPanes applies the capture-pane
+                // snapshot, so the snapshot's ESC[2J clear cannot wipe live
+                // deltas and strand frames. The gate opens when the seed lands
+                // (or via the seed-failure fallback below).
+                awaitSeed = true,
             )
         }.onSuccess { job ->
             paneProducerJobs[paneId] = job
@@ -3151,6 +3171,23 @@ public class TmuxSessionViewModel @Inject constructor(
         _panes.update { rows ->
             rows.map { row -> if (row.paneId == paneId) recovered else row }
         }
+        reseedRecoveredSurface(recovered, client)
+    }
+
+    /**
+     * Issue #468: re-seed a freshly re-attached (recovered) terminal surface
+     * from a `capture-pane` snapshot so it self-recovers to the correct grid
+     * without a reconnect, and open its seed gate so buffered live `%output`
+     * flushes in order. The producer was attached with [awaitSeed] = true, so
+     * without this the recovered surface would stay blank with live output
+     * buffered behind a never-opened gate.
+     */
+    private fun reseedRecoveredSurface(pane: TmuxPaneState, client: TmuxClient?) {
+        if (client != null && !client.disconnected.value) {
+            bridgeScope.launch { seedPrewarmedPane(client, pane) }
+        } else {
+            pane.terminalState.openSeedGateWithoutSeed()
+        }
     }
 
     /**
@@ -3188,6 +3225,7 @@ public class TmuxSessionViewModel @Inject constructor(
         _panes.update { rows ->
             rows.map { row -> if (row.paneId == paneId) recovered else row }
         }
+        reseedRecoveredSurface(recovered, client)
     }
 
     @androidx.annotation.VisibleForTesting
@@ -3199,7 +3237,17 @@ public class TmuxSessionViewModel @Inject constructor(
         newPanes: List<TmuxPaneState>,
         refreshGuard: RuntimeRefreshGuard? = null,
     ) {
-        val client = clientRef ?: return
+        // Issue #468: each pane's live %output producer was attached with the
+        // seed gate closed (awaitSeed). appendRemoteOutput opens the gate when
+        // a snapshot lands; any pane we bail on (capture failed, runtime
+        // superseded, exception) must still have its gate opened so buffered
+        // live output flushes in order rather than being swallowed.
+        val seededPaneIds = HashSet<String>()
+        val client = clientRef ?: run {
+            for (pane in newPanes) pane.terminalState.openSeedGateWithoutSeed()
+            return
+        }
+        try {
         for (pane in newPanes) {
             if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
             val captureStartedAtMs = SystemClock.elapsedRealtime()
@@ -3249,6 +3297,7 @@ public class TmuxSessionViewModel @Inject constructor(
             pane.terminalState.appendRemoteOutput(
                 response.output.toTerminalViewportBytes(cursor),
             )
+            seededPaneIds.add(pane.paneId)
             activeAttachMilestone?.let { milestone ->
                 if (!milestone.firstCaptureReadyLogged) {
                     milestone.firstCaptureReadyLogged = true
@@ -3267,6 +3316,17 @@ public class TmuxSessionViewModel @Inject constructor(
                 paneId = pane.paneId,
                 trigger = activeAttachMilestone?.trigger,
             )
+        }
+        } finally {
+            // Issue #468: open the gate for every pane that did not get a seed
+            // applied (capture failed/empty, runtime superseded mid-loop, or an
+            // exception), so buffered live output is flushed in order instead
+            // of being swallowed.
+            for (pane in newPanes) {
+                if (pane.paneId !in seededPaneIds) {
+                    pane.terminalState.openSeedGateWithoutSeed()
+                }
+            }
         }
     }
 

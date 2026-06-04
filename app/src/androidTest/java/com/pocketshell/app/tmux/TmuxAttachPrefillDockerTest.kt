@@ -11,6 +11,7 @@ import android.view.ViewGroup
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
@@ -24,7 +25,10 @@ import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.proof.DEFAULT_HOST
 import com.pocketshell.app.proof.DEFAULT_PORT
 import com.pocketshell.app.proof.DEFAULT_USER
+import com.pocketshell.app.proof.preGrantRuntimePermissions
 import com.pocketshell.app.proof.waitForSshFixtureReady
+import com.pocketshell.app.projects.FOLDER_LIST_ERROR_TAG
+import com.pocketshell.app.projects.FOLDER_LIST_RETRY_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
@@ -136,6 +140,10 @@ class TmuxAttachPrefillDockerTest {
                 lastSeedLine in remoteCapture,
             )
 
+            // Issue #468 blocker #1: grant runtime permissions before launch
+            // so the system permission dialog never steals focus from the
+            // Compose hierarchy ("No compose hierarchies found").
+            preGrantRuntimePermissions()
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
             compose.waitUntil(timeoutMillis = 10_000) {
                 compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
@@ -143,9 +151,10 @@ class TmuxAttachPrefillDockerTest {
                     .isNotEmpty()
             }
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-            compose.waitUntil(timeoutMillis = 20_000) {
-                compose.onAllNodesWithText(sessionName).fetchSemanticsNodes().isNotEmpty()
-            }
+            // Issue #468 blocker #2: deterministic session-list readiness wait
+            // with retry-once, replacing the bare 20s waitUntil that flaked on
+            // a cold AVD's slow tmux -CC enumeration.
+            waitForSessionInPicker(sessionName)
 
             // ---- Authoritative "before" capture: terminal not attached yet. ----
             recordStamp("picker_visible")
@@ -333,6 +342,10 @@ class TmuxAttachPrefillDockerTest {
                 longFrame in remoteCapture,
             )
 
+            // Issue #468 blocker #1: grant runtime permissions before launch
+            // so the system permission dialog never steals focus from the
+            // Compose hierarchy ("No compose hierarchies found").
+            preGrantRuntimePermissions()
             launchedActivity = ActivityScenario.launch(MainActivity::class.java)
             compose.waitUntil(timeoutMillis = 10_000) {
                 compose.onAllNodesWithTag(hostRowTag, useUnmergedTree = true)
@@ -340,9 +353,10 @@ class TmuxAttachPrefillDockerTest {
                     .isNotEmpty()
             }
             compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-            compose.waitUntil(timeoutMillis = 20_000) {
-                compose.onAllNodesWithText(sessionName).fetchSemanticsNodes().isNotEmpty()
-            }
+            // Issue #468 blocker #2: deterministic session-list readiness wait
+            // with retry-once, replacing the bare 20s waitUntil that flaked on
+            // a cold AVD's slow tmux -CC enumeration.
+            waitForSessionInPicker(sessionName)
             compose.onNodeWithText(sessionName).performClick()
             compose.waitUntil(timeoutMillis = 20_000) {
                 compose.onAllNodesWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true)
@@ -724,6 +738,66 @@ class TmuxAttachPrefillDockerTest {
         }
     }
 
+    /**
+     * Issue #468 (blocker #2): a deterministic readiness wait for the
+     * host's tmux session list, replacing the bare ~20s `waitUntil` that
+     * flaked when a healthy-but-cold AVD took longer than 20s to complete
+     * the in-emulator SSH connect + tmux `-CC` session enumeration.
+     *
+     * The FolderList picker reaches exactly one of three terminal states
+     * after the host row is tapped:
+     *  - the session-name row appears (success),
+     *  - the `ErrorPanel` (`FOLDER_LIST_ERROR_TAG` + `FOLDER_LIST_RETRY_TAG`)
+     *    appears (connect failed / timed out), or
+     *  - it stays in `Loading` past our bound (the AVD is wedged).
+     *
+     * This helper waits on those real UI signals (not a clock-racing sleep)
+     * with a generous [SESSION_LIST_TIMEOUT_MS] bound, and retries the
+     * connect exactly once via the production Retry button if the picker
+     * lands on the error panel — so a cold-but-healthy enumeration that
+     * blew the first window still completes on the second attempt. It fails
+     * loudly only when neither attempt surfaces the session within the
+     * bound.
+     */
+    private fun waitForSessionInPicker(sessionName: String) {
+        var retried = false
+        val deadline = SystemClock.elapsedRealtime() + SESSION_LIST_TIMEOUT_MS
+        while (SystemClock.elapsedRealtime() < deadline) {
+            // 1. Session row visible — enumeration succeeded.
+            if (compose.onAllNodesWithText(sessionName).fetchSemanticsNodes().isNotEmpty()) {
+                recordStamp("session_list_ready")
+                return
+            }
+            // 2. Connect-error panel — retry once via the production Retry
+            //    button so a cold first attempt does not fail the run.
+            val errorVisible = compose
+                .onAllNodesWithTag(FOLDER_LIST_ERROR_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+            if (errorVisible && !retried) {
+                retried = true
+                recordStamp("session_list_connect_error_retrying")
+                val retryNodes = compose
+                    .onAllNodesWithTag(FOLDER_LIST_RETRY_TAG, useUnmergedTree = true)
+                if (retryNodes.fetchSemanticsNodes().isNotEmpty()) {
+                    retryNodes.onFirst().performClick()
+                }
+            }
+            SystemClock.sleep(100)
+        }
+        val errorStillVisible = compose
+            .onAllNodesWithTag(FOLDER_LIST_ERROR_TAG, useUnmergedTree = true)
+            .fetchSemanticsNodes()
+            .isNotEmpty()
+        assertTrue(
+            "expected tmux session `$sessionName` to list in the picker within " +
+                "${SESSION_LIST_TIMEOUT_MS}ms (retried=$retried, error_panel_visible=$errorStillVisible). " +
+                "This indicates the in-emulator SSH+tmux -CC session enumeration stalled " +
+                "(blocker #2 / infra #470), not the seed-gate path.",
+            false,
+        )
+    }
+
     private fun waitForVisibleTerminalToContain(needle: String): Long {
         val deadline = SystemClock.elapsedRealtime() + 20_000
         while (SystemClock.elapsedRealtime() < deadline) {
@@ -1011,6 +1085,13 @@ class TmuxAttachPrefillDockerTest {
         // full-screen prefill, not only the first few lines.
         const val SEED_LINE_COUNT: Int = 23
         const val TIMING_TARGET_MS: Long = 500L
+
+        // Issue #468 blocker #2: a generous bound for the in-emulator SSH
+        // connect + tmux -CC session enumeration on a cold AVD. The bare 20s
+        // wait flaked when a healthy-but-cold first enumeration ran long;
+        // 45s plus a single production Retry tolerates that without masking a
+        // genuinely wedged AVD (which still fails the run loudly).
+        const val SESSION_LIST_TIMEOUT_MS: Long = 45_000L
 
         // Helpers to silence "unused" warnings on min/max in static analysis
         // when the inner loop in countBrightPixels gets folded.

@@ -121,6 +121,36 @@ public class SshTerminalBridge(
     private val stopped = AtomicBoolean(false)
     private val feedLock = Any()
 
+    /**
+     * Issue #468: seed gate. tmux reattach paints a pane from a
+     * `capture-pane` snapshot ([seedThenOpenGate]) *and* attaches a live
+     * `%output` producer that starts streaming immediately. If those two
+     * sources race, the snapshot's `ESC[2J` clear can wipe live deltas that
+     * already landed, and the snapshot (taken at a different instant than the
+     * live grid) leaves the emulator in a state the next cursor-relative live
+     * delta does not expect — stranding lines, mashing spinner frames, and
+     * leaving most of the screen blank (the reported garble under heavy
+     * output, same family as #259).
+     *
+     * The gate makes seed-before-live deterministic: while gated, live
+     * [feedBytes] bytes are appended to [gatedLiveBuffer] in arrival order
+     * instead of reaching the emulator. [seedThenOpenGate] applies the
+     * snapshot, then flushes the buffered live bytes in order, then opens the
+     * gate so subsequent live bytes flow straight through. If no seed ever
+     * arrives (capture-pane failed, or the surface is a plain non-tmux SSH
+     * shell that never seeds), [openGateFlushingPending] flushes the buffer
+     * ungated so output is never permanently swallowed.
+     *
+     * A bridge that is never gated ([gated] starts `false`) behaves exactly
+     * as before: every [feedBytes] reaches the emulator synchronously.
+     */
+    private val gateLock = Any()
+
+    @Volatile
+    private var gated: Boolean = false
+
+    private val gatedLiveBuffer = java.io.ByteArrayOutputStream()
+
     @Volatile
     private var remoteStdin: OutputStream? = null
 
@@ -170,6 +200,25 @@ public class SshTerminalBridge(
         require(count <= data.size - offset) { "offset + count > data.size" }
         if (count == 0) return
 
+        // Issue #468: hold live output behind the seed gate (in arrival
+        // order) until the `capture-pane` snapshot has been applied. Snapshot
+        // both the flag and append inside [gateLock] so a concurrent
+        // [seedThenOpenGate] cannot flush the buffer between our read of
+        // [gated] and our append (which would reorder live bytes around the
+        // seed). The lock is held only for the cheap buffer copy; the emulator
+        // feed below runs without it.
+        synchronized(gateLock) {
+            if (gated) {
+                gatedLiveBuffer.write(data, offset, count)
+                return
+            }
+        }
+
+        feedBytesToEmulator(data, offset, count)
+    }
+
+    private fun feedBytesToEmulator(data: ByteArray, offset: Int, count: Int) {
+        if (count == 0) return
         val traceState = traceState
         if (traceState == null) {
             feedBytesUntraced(data = data, offset = offset, count = count)
@@ -272,6 +321,75 @@ public class SshTerminalBridge(
             handler.dispatchMessage(Message.obtain(handler, MSG_NEW_INPUT))
             onDispatched(drainBudget, System.nanoTime() - dispatchStartedAtNanos)
             remaining -= drainBudget
+        }
+    }
+
+    /**
+     * Issue #468: close the seed gate. Subsequent live [feedBytes] bytes are
+     * buffered (in arrival order) instead of reaching the emulator until
+     * [seedThenOpenGate] or [openGateFlushingPending] runs. Called by the
+     * Compose surface immediately after attaching a tmux pane's live
+     * `%output` producer, so the live stream cannot paint the emulator before
+     * the `capture-pane` seed lands.
+     *
+     * Idempotent. No-op once the gate is already closed.
+     */
+    public fun closeSeedGate() {
+        synchronized(gateLock) {
+            gated = true
+        }
+    }
+
+    /**
+     * Issue #468: apply the seed snapshot, then flush any live bytes that
+     * arrived while the gate was closed (in their original arrival order),
+     * then open the gate so future live bytes flow straight through.
+     *
+     * The whole operation is atomic with respect to concurrent [feedBytes]:
+     * we drain and clear the pending buffer under [gateLock], so a live
+     * `feedBytes` racing this call either lands in the buffer we are about to
+     * flush (ordered before the post-seed flush) or sees `gated == false`
+     * and feeds the emulator after the flush. Either way the emulator sees
+     * `seed -> all buffered live -> later live` with no reordering and no
+     * `ESC[2J` clear wiping live state.
+     *
+     * Safe to call when the gate was never closed: the seed is applied and
+     * the (empty) buffer flush is a no-op.
+     */
+    public fun seedThenOpenGate(seedBytes: ByteArray) {
+        synchronized(gateLock) {
+            if (seedBytes.isNotEmpty()) {
+                feedBytesToEmulator(seedBytes, 0, seedBytes.size)
+            }
+            flushAndOpenGateLocked()
+        }
+    }
+
+    /**
+     * Issue #468: open the gate without a seed, flushing buffered live bytes
+     * in order. Used when the `capture-pane` seed never arrives (capture
+     * failed, older tmux, or a bounded fallback timeout) so live output is
+     * never permanently swallowed.
+     *
+     * Safe and idempotent when the gate is already open.
+     */
+    public fun openGateFlushingPending() {
+        synchronized(gateLock) {
+            flushAndOpenGateLocked()
+        }
+    }
+
+    private fun flushAndOpenGateLocked() {
+        // Caller holds [gateLock].
+        val pending = if (gatedLiveBuffer.size() > 0) {
+            gatedLiveBuffer.toByteArray()
+        } else {
+            null
+        }
+        gatedLiveBuffer.reset()
+        gated = false
+        if (pending != null) {
+            feedBytesToEmulator(pending, 0, pending.size)
         }
     }
 

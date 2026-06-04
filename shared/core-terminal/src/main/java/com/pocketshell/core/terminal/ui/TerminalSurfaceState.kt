@@ -261,9 +261,26 @@ class TerminalSurfaceState internal constructor(
             bytes
         }
         if (clean.isEmpty()) return
-        activeBridge.feedBytes(clean)
+        // Issue #468: apply this seed snapshot, then release any live `%output`
+        // bytes that were buffered behind the seed gate while the
+        // `capture-pane` round-trip was in flight — in their original arrival
+        // order, after the seed. When the gate was never closed (plain SSH
+        // surface, or a re-seed) this is just an ordinary feed plus an
+        // already-open-gate no-op.
+        activeBridge.seedThenOpenGate(clean)
         _output.tryEmit(clean)
         bufferTick.value = bufferTick.value + 1
+    }
+
+    /**
+     * Issue #468: open the seed gate without applying a snapshot, flushing any
+     * buffered live `%output` in order. Called when the `capture-pane` seed
+     * never arrives (capture failed, older tmux) so live output is never
+     * permanently swallowed. No-op when no producer is attached or the gate
+     * is already open.
+     */
+    fun openSeedGateWithoutSeed() {
+        bridge?.openGateFlushingPending()
     }
 
     /**
@@ -472,12 +489,24 @@ class TerminalSurfaceState internal constructor(
         stdout: Flow<ByteArray>,
         remoteStdin: OutputStream? = null,
         suppressQueryResponses: Boolean = false,
+        awaitSeed: Boolean = false,
     ): Job {
         // Tear down any existing bridge so we never have two producers
         // racing on the same emulator.
         detachExternalProducer()
 
         val newBridge = SshTerminalBridge(client = sessionClient)
+        // Issue #468: for tmux panes the live `%output` producer is attached
+        // here but the pane is painted from a `capture-pane` snapshot a moment
+        // later (via [appendRemoteOutput]). Close the seed gate up front so
+        // live deltas are buffered in order and cannot race the snapshot —
+        // the snapshot's `ESC[2J` clear would otherwise wipe live bytes and
+        // strand frames (the #468 garble). The gate is opened by the seed in
+        // [appendRemoteOutput], or by [openSeedGateWithoutSeed] if no seed
+        // ever lands.
+        if (awaitSeed) {
+            newBridge.closeSeedGate()
+        }
         newBridge.setRemoteStdin(remoteStdin)
         newBridge.emulator.setSuppressQueryResponses(suppressQueryResponses)
         // Issue #248: tmux control-mode bridges also strip inbound query

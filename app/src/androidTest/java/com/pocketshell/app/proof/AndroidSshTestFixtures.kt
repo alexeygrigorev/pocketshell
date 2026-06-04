@@ -2,6 +2,7 @@ package com.pocketshell.app.proof
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.os.Build
 import android.os.SystemClock
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.core.ssh.SshConnection
@@ -124,6 +125,44 @@ fun clearLastSessionPrefs() {
         .edit()
         .clear()
         .commit()
+}
+
+/**
+ * Issue #468 (blocker #1): pre-grant every runtime permission MainActivity
+ * (or a downstream screen) may request so that the system
+ * `GrantPermissionsActivity` never pops over MainActivity at launch and
+ * steals window focus from the Compose hierarchy.
+ *
+ * On a freshly rebooted emulator the install-time grants survive but the
+ * **runtime** dangerous permissions (`POST_NOTIFICATIONS`, `RECORD_AUDIO`,
+ * `CAMERA`) are reset to "ask". MainActivity requests `POST_NOTIFICATIONS`
+ * on the Android-13+ path at launch (`MainActivity.requestNotificationPermission`),
+ * and voice (`RECORD_AUDIO`) / QR (`CAMERA`) screens request the other two.
+ * If any of those system dialogs is on screen when the test queries the
+ * Compose tree, the runner throws `IllegalStateException: No compose
+ * hierarchies found in the app` (the reviewer's blocker #1). Granting them
+ * up-front via `UiAutomation` mirrors `ForwardingIndicatorE2eTest` and
+ * `TmuxDetectedPortForwardDockerTest` and removes that focus theft.
+ *
+ * Each grant is wrapped in `runCatching` so a device that has already
+ * granted (or does not declare) a given permission is a no-op rather than a
+ * hard failure. Must be called BEFORE `ActivityScenario.launch`.
+ */
+fun preGrantRuntimePermissions() {
+    val instrumentation = InstrumentationRegistry.getInstrumentation()
+    val packageName = instrumentation.targetContext.packageName
+    val permissions = buildList {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            add(android.Manifest.permission.POST_NOTIFICATIONS)
+        }
+        add(android.Manifest.permission.RECORD_AUDIO)
+        add(android.Manifest.permission.CAMERA)
+    }
+    permissions.forEach { permission ->
+        runCatching {
+            instrumentation.uiAutomation.grantRuntimePermission(packageName, permission)
+        }
+    }
 }
 
 object WalkthroughScreenshotArtifacts {

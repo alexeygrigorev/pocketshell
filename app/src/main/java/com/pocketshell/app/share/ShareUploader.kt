@@ -52,7 +52,41 @@ internal interface ShareItemUploader {
         host: HostEntity,
         keyEntity: SshKeyEntity,
         item: ShareableItem,
+        target: ShareTarget = ShareTarget.HostInbox,
     ): Result<String>
+}
+
+/**
+ * Where a shared file/screenshot should land on the chosen host
+ * (issue #473).
+ *
+ * Two destinations coexist (D22 hard-cut — no compatibility flag, both
+ * are always available):
+ *
+ *  - [HostInbox] — the original behavior: `~/inbox/pocketshell/<file>`.
+ *    The global drop point an agent reads via the absolute inbox path.
+ *  - [Project] — drops the file into a specific project's local
+ *    `.inbox/` folder (`<project>/.inbox/<file>`, creating `.inbox/` on
+ *    demand) so an agent/orchestrator working *in that project* sees it
+ *    via a relative `.inbox/` rather than the global inbox path.
+ */
+internal sealed interface ShareTarget {
+
+    /** Existing behavior — `~/inbox/pocketshell/<file>`. */
+    data object HostInbox : ShareTarget
+
+    /**
+     * Drop into `<remoteProjectPath>/.inbox/<file>`.
+     *
+     * [remoteProjectPath] is the project root as known to the app
+     * (a watched-root [com.pocketshell.core.storage.entity.ProjectRootEntity.path]
+     * or a live session's `pane_current_path`). It may be absolute
+     * (`/home/alexey/git/foo`) or `~`/`$HOME`-relative (`~/git/foo`);
+     * the uploader expands it to an absolute path via the exec channel
+     * before creating the `.inbox/` directory inside the project root
+     * (never inside the home dir).
+     */
+    data class Project(val remoteProjectPath: String) : ShareTarget
 }
 
 internal class ShareUploader(
@@ -88,6 +122,7 @@ internal class ShareUploader(
         host: HostEntity,
         keyEntity: SshKeyEntity,
         item: ShareableItem,
+        target: ShareTarget,
     ): Result<String> = withContext(Dispatchers.IO) {
         val keyFile = File(keyEntity.privateKeyPath)
         if (!keyFile.exists()) {
@@ -104,23 +139,28 @@ internal class ShareUploader(
         }
         try {
             session.use { live ->
-                ensureInboxDirectory(live)
                 val timestamp = formatTimestamp(now())
                 val sanitised = FilenameSanitiser.sanitise(
                     item.displayName,
                     defaultExtension = item.fallbackExtension,
                 )
                 val remoteName = FilenameSanitiser.composeRemoteName(timestamp, sanitised)
-                val remotePath = "$INBOX_DIRECTORY/$remoteName"
+
+                // Resolve the destination directory + the user-visible
+                // path string. For [ShareTarget.HostInbox] this is the
+                // home-relative inbox; for a project target we create the
+                // project's `.inbox/` and resolve its ABSOLUTE path so the
+                // SCP write lands inside the project root (never the home
+                // dir).
+                val destination = ensureDestinationDirectory(live, target)
+                val remotePath = "${destination.uploadDirectory}/$remoteName"
 
                 when (item) {
                     is ShareableItem.UriItem -> uploadUri(live, item, remotePath)
                     is ShareableItem.TextItem -> uploadText(live, item, remotePath, remoteName)
                     is ShareableItem.FileItem -> live.uploadFile(item.file, remotePath)
                 }
-                // Render the user-visible path with the `~/` prefix
-                // even though SFTP itself sees a home-relative path.
-                Result.success("$INBOX_DISPLAY_PATH/$remoteName")
+                Result.success("${destination.displayDirectory}/$remoteName")
             }
         } catch (e: SshException) {
             Result.failure(e)
@@ -129,7 +169,37 @@ internal class ShareUploader(
         }
     }
 
-    private suspend fun ensureInboxDirectory(session: SshSession) {
+    /**
+     * Resolved destination for one upload.
+     *
+     * @property uploadDirectory the directory the SCP/SFTP write targets.
+     *   For the host inbox this is the home-relative path
+     *   ([INBOX_DIRECTORY]); for a project it is the project's ABSOLUTE
+     *   `.inbox/` directory so SCP writes inside the project root rather
+     *   than the home dir (`~` does not expand on the SFTP path).
+     * @property displayDirectory the user-visible directory shown in the
+     *   success state.
+     */
+    private data class ResolvedDestination(
+        val uploadDirectory: String,
+        val displayDirectory: String,
+    )
+
+    private suspend fun ensureDestinationDirectory(
+        session: SshSession,
+        target: ShareTarget,
+    ): ResolvedDestination = when (target) {
+        ShareTarget.HostInbox -> {
+            ensureHostInboxDirectory(session)
+            ResolvedDestination(
+                uploadDirectory = INBOX_DIRECTORY,
+                displayDirectory = INBOX_DISPLAY_PATH,
+            )
+        }
+        is ShareTarget.Project -> ensureProjectInboxDirectory(session, target.remoteProjectPath)
+    }
+
+    private suspend fun ensureHostInboxDirectory(session: SshSession) {
         // SFTP `open(path)` requires every parent directory of the
         // remote path to already exist. We resolve `$HOME` and create
         // the inbox hierarchy via the exec channel because the SFTP
@@ -142,6 +212,50 @@ internal class ShareUploader(
                 "Permission denied on /inbox: ${mk.stderr.ifBlank { mk.stdout.trim() }}",
             )
         }
+    }
+
+    /**
+     * Create `<project>/.inbox/` on demand and resolve its ABSOLUTE
+     * path so the subsequent SCP write lands inside the project root.
+     *
+     * `~` / `$HOME` only expand through the login shell (the exec
+     * channel), never on the SFTP/SCP path, so we run one exec that:
+     *
+     *  1. `mkdir -p "<expandable>/.inbox"` — creates the project inbox.
+     *  2. `cd "<expandable>/.inbox" && pwd` — echoes the resolved
+     *     absolute directory we then feed to [SshSession.uploadFile] /
+     *     [SshSession.uploadStream].
+     *
+     * The project path is rewritten to a shell-expandable form (`~` /
+     * `~/` → `$HOME`) before quoting so `$HOME` expands inside the
+     * double-quoted argument (per the [ensureHostInboxDirectory]
+     * pattern).
+     */
+    private suspend fun ensureProjectInboxDirectory(
+        session: SshSession,
+        rawProjectPath: String,
+    ): ResolvedDestination {
+        val shellPath = toShellExpandablePath(rawProjectPath)
+        val command =
+            "mkdir -p \"$shellPath/.inbox\" && cd \"$shellPath/.inbox\" && pwd"
+        val result = session.exec(command)
+        if (result.exitCode != 0) {
+            throw SshException(
+                "Couldn't create $rawProjectPath/.inbox: " +
+                    result.stderr.ifBlank { result.stdout.trim() }.ifBlank { "exit ${result.exitCode}" },
+            )
+        }
+        val absoluteInbox = result.stdout.lineSequence()
+            .map { it.trim() }
+            .lastOrNull { it.isNotEmpty() }
+            ?.takeIf { it.startsWith("/") }
+            ?: throw SshException(
+                "Couldn't resolve $rawProjectPath/.inbox (no path returned)",
+            )
+        return ResolvedDestination(
+            uploadDirectory = absoluteInbox,
+            displayDirectory = absoluteInbox,
+        )
     }
 
     private suspend fun uploadUri(
@@ -283,6 +397,29 @@ internal class ShareUploader(
             val format = SimpleDateFormat(TIMESTAMP_PATTERN, Locale.US)
             format.timeZone = TimeZone.getDefault()
             return format.format(Date(epochMillis))
+        }
+
+        /**
+         * Rewrite a project path into a form whose `~` / `$HOME` prefix
+         * expands inside a double-quoted shell argument (issue #473).
+         *
+         *  - `~`            → `$HOME`
+         *  - `~/git/foo`    → `$HOME/git/foo`
+         *  - `$HOME/...`    → unchanged (already expandable)
+         *  - `/abs/path`    → unchanged (absolute)
+         *
+         * Trailing slashes are trimmed so `<path>/.inbox` never becomes
+         * `<path>//.inbox`. The result is meant to be embedded inside a
+         * double-quoted argument (`"<result>/.inbox"`), where `$HOME`
+         * expands but the rest is treated literally.
+         */
+        fun toShellExpandablePath(rawPath: String): String {
+            val trimmed = rawPath.trim().trimEnd('/').ifEmpty { return "\$HOME" }
+            return when {
+                trimmed == "~" -> "\$HOME"
+                trimmed.startsWith("~/") -> "\$HOME/" + trimmed.removePrefix("~/")
+                else -> trimmed
+            }
         }
 
         /**

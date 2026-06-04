@@ -70,6 +70,7 @@ internal fun HostPickerScreen(
     val dispatchChoice by viewModel.dispatchChoice.collectAsStateWithLifecycle()
     val hasAttached by viewModel.hasAttachedSession.collectAsStateWithLifecycle()
     val attachedHostIds by viewModel.hostsWithAttachedSession.collectAsStateWithLifecycle()
+    val targetSelection by viewModel.targetSelection.collectAsStateWithLifecycle()
 
     Surface(
         modifier = modifier
@@ -79,7 +80,26 @@ internal fun HostPickerScreen(
     ) {
         when (val state = uploadState) {
             is UploadState.Idle -> {
+                val selection = targetSelection
                 when {
+                    // Issue #473: once a host is picked (file-save mode),
+                    // show the per-host target chooser ("Host inbox" +
+                    // the active-session quick target + known projects)
+                    // before the upload runs.
+                    selection != null ->
+                        TargetPickerScreen(
+                            selection = selection,
+                            onChooseHostInbox = {
+                                viewModel.startUpload(selection.host, ShareTarget.HostInbox)
+                            },
+                            onChooseProject = { project ->
+                                viewModel.startUpload(
+                                    selection.host,
+                                    ShareTarget.Project(project.path),
+                                )
+                            },
+                            onBack = { viewModel.clearTargetSelection() },
+                        )
                     dispatchChoice == TextDispatchChoice.PromptUser ->
                         TextDispatchDialog(
                             hasAttachedSession = hasAttached,
@@ -128,8 +148,11 @@ internal fun HostPickerScreen(
                             } else {
                                 "Send to host"
                             },
-                            subtitle = "Files land under ${ShareUploader.INBOX_DISPLAY_PATH}",
-                            onHostClick = { host -> viewModel.startUpload(host) },
+                            // Issue #473: tapping a host now opens the
+                            // target chooser (host inbox vs. a project's
+                            // .inbox/) rather than uploading immediately.
+                            subtitle = "Choose host inbox or a project's .inbox",
+                            onHostClick = { host -> viewModel.selectTargetHost(host) },
                         )
                 }
             }
@@ -177,6 +200,131 @@ internal fun HostPickerScreen(
                     },
                 )
             }
+        }
+    }
+}
+
+/**
+ * Issue #473: per-host target chooser. Lets the user route the staged
+ * file(s) to either the host inbox (`~/inbox/pocketshell/`, default) or
+ * a specific project's `.inbox/` on that host.
+ *
+ * Layout (top to bottom):
+ *  - "Host inbox" — the default, always present.
+ *  - The live attached session's project, when present, as a one-tap
+ *    quick target ("share to what I'm working on").
+ *  - The host's known projects (watched roots / recent folders).
+ */
+@Composable
+private fun TargetPickerScreen(
+    selection: TargetSelection,
+    onChooseHostInbox: () -> Unit,
+    onChooseProject: (ProjectTarget) -> Unit,
+    onBack: () -> Unit,
+) {
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp, vertical = 24.dp)
+            .testTag(SHARE_TARGET_PICKER_TAG),
+        contentPadding = PaddingValues(bottom = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        item {
+            Text(
+                text = "Send to ${selection.host.name}",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Pick the destination on this host",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(16.dp))
+        }
+
+        item {
+            TargetRow(
+                title = "Host inbox",
+                subtitle = "${ShareUploader.INBOX_DISPLAY_PATH}/",
+                testTag = SHARE_TARGET_HOST_INBOX_TAG,
+                onClick = onChooseHostInbox,
+            )
+        }
+
+        selection.activeSessionProject?.let { active ->
+            item {
+                TargetRow(
+                    title = "${active.label} (active session)",
+                    subtitle = "${active.path}/.inbox/",
+                    testTag = SHARE_TARGET_ACTIVE_PROJECT_TAG,
+                    onClick = { onChooseProject(active) },
+                )
+            }
+        }
+
+        if (selection.loading) {
+            item {
+                Text(
+                    text = "Loading projects…",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
+        val activePath = selection.activeSessionProject?.path
+        val otherProjects = selection.knownProjects.filter { it.path != activePath }
+        items(otherProjects, key = { it.path }) { project ->
+            TargetRow(
+                title = project.label,
+                subtitle = "${project.path}/.inbox/",
+                testTag = SHARE_TARGET_PROJECT_ROW_TAG_PREFIX + project.path,
+                onClick = { onChooseProject(project) },
+            )
+        }
+
+        item {
+            Spacer(Modifier.height(8.dp))
+            TextButton(
+                onClick = onBack,
+                modifier = Modifier.testTag(SHARE_TARGET_BACK_TAG),
+            ) {
+                Text(text = "Back")
+            }
+        }
+    }
+}
+
+@Composable
+private fun TargetRow(
+    title: String,
+    subtitle: String,
+    testTag: String,
+    onClick: () -> Unit,
+) {
+    Surface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .testTag(testTag),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(12.dp),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
@@ -412,3 +560,8 @@ internal const val SHARE_RESULT_COPY_TAG: String = "share:result:copy"
 internal const val SHARE_TEXT_PASTE_TAG: String = "share:text:paste"
 internal const val SHARE_TEXT_SAVE_TAG: String = "share:text:save"
 internal const val SHARE_EMPTY_STATE_TAG: String = "share:picker:empty"
+internal const val SHARE_TARGET_PICKER_TAG: String = "share:target:picker"
+internal const val SHARE_TARGET_HOST_INBOX_TAG: String = "share:target:host-inbox"
+internal const val SHARE_TARGET_ACTIVE_PROJECT_TAG: String = "share:target:active-project"
+internal const val SHARE_TARGET_PROJECT_ROW_TAG_PREFIX: String = "share:target:project:"
+internal const val SHARE_TARGET_BACK_TAG: String = "share:target:back"

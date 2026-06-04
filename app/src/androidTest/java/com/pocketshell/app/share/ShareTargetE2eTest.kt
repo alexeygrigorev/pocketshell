@@ -134,6 +134,9 @@ class ShareTargetE2eTest {
                 )
             }
             compose.onNodeWithTag(hostTag, useUnmergedTree = true).performClick()
+            // Issue #473: the host tap now opens the target chooser;
+            // pick "Host inbox" to keep the original upload path.
+            clickHostInboxTarget()
 
             try {
                 compose.waitUntil(timeoutMillis = 60_000) {
@@ -184,10 +187,16 @@ class ShareTargetE2eTest {
                 "expected the remote filename to carry the marker '$marker' but got $remotePath",
                 remotePath.contains(marker),
             )
+            // The success surface copies the user-visible display path
+            // (`~/inbox/pocketshell/<name>`), while [remotePath] is the
+            // `$HOME`-expanded form used for the remote `cat`. Compare the
+            // clipboard against the display form built from the same
+            // remote filename.
+            val displayPath = "~/inbox/pocketshell/" + remotePath.substringAfterLast('/')
             compose.onNodeWithTag(SHARE_RESULT_COPY_TAG, useUnmergedTree = true)
                 .performClick()
             compose.waitUntil(timeoutMillis = 5_000) {
-                clipboardText(targetContext) == remotePath
+                clipboardText(targetContext) == displayPath
             }
 
             val readBack = SshConnection.connect(
@@ -280,6 +289,8 @@ class ShareTargetE2eTest {
                     .isNotEmpty()
             }
             compose.onNodeWithTag(hostTag, useUnmergedTree = true).performClick()
+            // Issue #473: pick "Host inbox" in the per-host target chooser.
+            clickHostInboxTarget()
 
             compose.waitUntil(timeoutMillis = 90_000) {
                 val success = compose
@@ -361,6 +372,233 @@ class ShareTargetE2eTest {
             cleanInboxOnRemote(key)
         }
         Unit
+    }
+
+    /**
+     * Issue #473: share a file targeting a specific PROJECT. Seeds a
+     * watched project root on the host, drives the share intent → host
+     * picker → target chooser → project row, then verifies the file
+     * landed in `<project>/.inbox/<file>` on the Docker remote with its
+     * round-tripped contents (and that `.inbox/` was created on demand).
+     */
+    @Test
+    fun shareIntentUploadsFileToProjectInbox() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val targetContext = instrumentation.targetContext
+        val key = instrumentation.context
+            .assets
+            .open("test_key")
+            .bufferedReader()
+            .use { it.readText() }
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        val marker = "psproj${System.currentTimeMillis()}"
+        // A project path under $HOME. `.inbox/` is created on demand by
+        // the uploader; we resolve the absolute path for the assertions.
+        val projectRelative = "psproject-$marker"
+        val homePath = remoteHome(key)
+        val projectPath = "$homePath/$projectRelative"
+        val hostId = seedHostWithProject(targetContext, key, marker, projectPath)
+        val (sharedFile, fileContents) = stageSharedFile(targetContext, marker)
+        stagedFile = sharedFile
+
+        try {
+            cleanProjectOnRemote(key, projectPath)
+            val sharedUri = FileProvider.getUriForFile(
+                targetContext,
+                "${targetContext.packageName}.shareprovider",
+                sharedFile,
+            )
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                setClassName(targetContext, ShareActivity::class.java.name)
+                type = "text/plain"
+                putExtra(Intent.EXTRA_STREAM, sharedUri)
+                putExtra(Intent.EXTRA_TITLE, sharedFile.name)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+
+            launchedActivity = ActivityScenario.launch(shareIntent)
+            compose.waitUntil(timeoutMillis = 15_000) {
+                compose.onAllNodesWithTag(SHARE_PICKER_ROOT_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            val hostTag = SHARE_HOST_ROW_TAG_PREFIX + hostId
+            compose.waitUntil(timeoutMillis = 15_000) {
+                compose.onAllNodesWithTag(hostTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag(hostTag, useUnmergedTree = true).performClick()
+
+            // Issue #473: the per-host target chooser must surface the
+            // seeded project row; tap it to route into <project>/.inbox/.
+            val projectTag = SHARE_TARGET_PROJECT_ROW_TAG_PREFIX + projectPath
+            compose.waitUntil(timeoutMillis = 15_000) {
+                compose.onAllNodesWithTag(projectTag, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+            }
+            compose.onNodeWithTag(projectTag, useUnmergedTree = true).performClick()
+
+            compose.waitUntil(timeoutMillis = 60_000) {
+                val success = compose
+                    .onAllNodesWithTag(SHARE_RESULT_SUCCESS_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+                val failure = compose
+                    .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .isNotEmpty()
+                success || failure
+            }
+            val showedFailure = compose
+                .onAllNodesWithTag(SHARE_RESULT_FAILURE_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+            if (showedFailure) {
+                val detailText = compose
+                    .onAllNodesWithTag(SHARE_RESULT_DETAIL_TAG, useUnmergedTree = true)
+                    .fetchSemanticsNodes()
+                    .joinToString(" / ") { it.toString() }
+                throw AssertionError("project upload reported a failure state: $detailText")
+            }
+
+            // The file must exist in <project>/.inbox/ on the remote.
+            val remoteName = withTimeout(20_000) {
+                pollRemoteUntilProjectFileExists(key, projectPath, marker)
+            }
+            assertNotNull(
+                "expected a share file under $projectPath/.inbox/ on remote",
+                remoteName,
+            )
+            val remotePath = "$projectPath/.inbox/$remoteName"
+            val readBack = SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+            ).getOrThrow().use { session ->
+                session.exec("cat \"$remotePath\"")
+            }
+            assertEquals(
+                "expected project-inbox contents to round-trip, stderr='${readBack.stderr}'",
+                0,
+                readBack.exitCode,
+            )
+            assertEquals(
+                "expected uploaded contents to match the local payload",
+                fileContents,
+                readBack.stdout,
+            )
+        } finally {
+            cleanProjectOnRemote(key, projectPath)
+        }
+        Unit
+    }
+
+    private fun clickHostInboxTarget() {
+        compose.waitUntil(timeoutMillis = 15_000) {
+            compose.onAllNodesWithTag(SHARE_TARGET_HOST_INBOX_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(SHARE_TARGET_HOST_INBOX_TAG, useUnmergedTree = true).performClick()
+    }
+
+    private suspend fun remoteHome(key: String): String {
+        val result = SshConnection.connect(
+            host = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            user = DEFAULT_USER,
+            key = SshKey.Pem(key),
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrThrow().use { session ->
+            session.exec("printf '%s' \"\$HOME\"")
+        }
+        return result.stdout.trim().ifEmpty { "/root" }
+    }
+
+    private suspend fun pollRemoteUntilProjectFileExists(
+        key: String,
+        projectPath: String,
+        marker: String,
+    ): String? {
+        while (true) {
+            val listing = SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+            ).getOrThrow().use { session ->
+                session.exec(
+                    "ls -1 \"$projectPath/.inbox\" 2>/dev/null | grep \"$marker\" | head -n 1",
+                )
+            }
+            if (listing.exitCode == 0) {
+                val name = listing.stdout.trim()
+                if (name.isNotEmpty()) return name
+            }
+            delay(500)
+        }
+    }
+
+    private suspend fun cleanProjectOnRemote(key: String, projectPath: String) {
+        runCatching {
+            SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+            ).getOrThrow().use { session ->
+                session.exec("rm -rf \"$projectPath\"")
+            }
+        }
+    }
+
+    private suspend fun seedHostWithProject(
+        context: Context,
+        key: String,
+        marker: String,
+        projectPath: String,
+    ): Long {
+        val db = Room.databaseBuilder(context, AppDatabase::class.java, DATABASE_NAME)
+            .fallbackToDestructiveMigration(dropAllTables = true)
+            .build()
+        try {
+            db.clearAllTables()
+            val storedKey = SshKeyStorage.persistKey(
+                context = context,
+                sshKeyDao = db.sshKeyDao(),
+                name = "share-project-test-key-$marker",
+                content = key,
+            )
+            val hostId = db.hostDao().insert(
+                HostEntity(
+                    name = "Share Docker",
+                    hostname = DEFAULT_HOST,
+                    port = DEFAULT_PORT,
+                    username = DEFAULT_USER,
+                    keyId = storedKey.id,
+                    tmuxInstalled = true,
+                    lastBootstrapAt = System.currentTimeMillis(),
+                ),
+            )
+            db.projectRootDao().insert(
+                com.pocketshell.core.storage.entity.ProjectRootEntity(
+                    hostId = hostId,
+                    label = "Share Project",
+                    path = projectPath,
+                ),
+            )
+            return hostId
+        } finally {
+            db.close()
+        }
     }
 
     private suspend fun pollRemoteUntilFileExists(key: String, marker: String): String? {

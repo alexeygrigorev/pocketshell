@@ -558,6 +558,117 @@ class ShareViewModelTest {
         assertTrue(vm.uploadState.first() is UploadState.Idle)
     }
 
+    // ---- Issue #473: project target selection + routing ----
+
+    @Test
+    fun selectTargetHostListsKnownProjectsForInactiveHost() = runTest {
+        val vm = newVm(ActiveTmuxClients())
+        val host = seededHost(id = 40L, name = "hetzner")
+        db.projectRootDao().insert(
+            com.pocketshell.core.storage.entity.ProjectRootEntity(
+                hostId = host.id,
+                label = "[10] PocketShell",
+                path = "/home/alexey/git/pocketshell",
+            ),
+        )
+        db.projectRootDao().insert(
+            com.pocketshell.core.storage.entity.ProjectRootEntity(
+                hostId = host.id,
+                label = "Other",
+                path = "/home/alexey/git/other",
+            ),
+        )
+        vm.setItem(uriItem("shot.png"))
+
+        vm.selectTargetHost(host)
+        advanceUntilIdle()
+
+        val selection = vm.targetSelection.first { it != null && !it.loading }!!
+        assertEquals(host.id, selection.host.id)
+        assertEquals(null, selection.activeSessionProject)
+        assertEquals(
+            "known projects must carry their paths",
+            setOf("/home/alexey/git/pocketshell", "/home/alexey/git/other"),
+            selection.knownProjects.map { it.path }.toSet(),
+        )
+        assertTrue(
+            "order prefix must be stripped from the project label, got ${selection.knownProjects.map { it.label }}",
+            selection.knownProjects.any { it.label == "PocketShell" },
+        )
+    }
+
+    @Test
+    fun selectTargetHostSurfacesActiveSessionProjectAsQuickTarget() = runTest {
+        val registry = ActiveTmuxClients()
+        val vm = newVm(registry)
+        val host = seededHost(id = 41L, name = "gpu-box")
+        val client = FakeTmuxClient().apply {
+            // display-message -p '#{pane_current_path}' -> the live cwd.
+            responses.addLast(
+                CommandResponse(
+                    number = 0L,
+                    output = listOf("/home/alexey/git/live-project"),
+                    isError = false,
+                ),
+            )
+        }
+        registry.register(
+            hostId = host.id,
+            hostName = host.name,
+            hostname = host.hostname,
+            port = host.port,
+            username = host.username,
+            keyPath = "/tmp/key",
+            client = client,
+        )
+        vm.setItem(uriItem("shot.png"))
+
+        vm.selectTargetHost(host)
+        advanceUntilIdle()
+
+        val selection = vm.targetSelection.first { it != null && !it.loading }!!
+        assertEquals(
+            "/home/alexey/git/live-project",
+            selection.activeSessionProject?.path,
+        )
+        assertEquals("live-project", selection.activeSessionProject?.label)
+    }
+
+    @Test
+    fun startUploadToProjectTargetRoutesEveryItemToTheProject() = runTest {
+        val vm = newVm(ActiveTmuxClients())
+        val host = seededHost(id = 42L, name = "hetzner")
+        val fake = FakeUploader().also { vm.uploader = it }
+        vm.setItem(uriItem("shot.png"))
+
+        vm.startUpload(host, ShareTarget.Project("/home/alexey/git/foo"))
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf<ShareTarget>(ShareTarget.Project("/home/alexey/git/foo")),
+            fake.uploadedTargets,
+        )
+        val success = vm.uploadState.first { it is UploadState.Success } as UploadState.Success
+        assertEquals(
+            "success detail must show the project .inbox path",
+            "/home/alexey/git/foo/.inbox/shot.png",
+            success.remotePath,
+        )
+    }
+
+    @Test
+    fun startUploadDefaultsToHostInboxTarget() = runTest {
+        val vm = newVm(ActiveTmuxClients())
+        val host = seededHost(id = 43L, name = "hetzner")
+        val fake = FakeUploader().also { vm.uploader = it }
+        vm.setItem(uriItem("shot.png"))
+
+        vm.startUpload(host)
+        advanceUntilIdle()
+
+        assertEquals(listOf<ShareTarget>(ShareTarget.HostInbox), fake.uploadedTargets)
+    }
+
     /**
      * Records the order of uploaded item names and lets a test pin which
      * items fail, so the [ShareViewModel] multi-file loop + partial-
@@ -568,17 +679,25 @@ class ShareViewModelTest {
     ) : ShareItemUploader {
         val uploadedNames = mutableListOf<String>()
 
+        val uploadedTargets = mutableListOf<ShareTarget>()
+
         override suspend fun upload(
             host: HostEntity,
             keyEntity: SshKeyEntity,
             item: ShareableItem,
+            target: ShareTarget,
         ): Result<String> {
             val name = item.displayName.orEmpty()
             uploadedNames += name
+            uploadedTargets += target
             return if (name in failNames) {
                 Result.failure(IllegalStateException("Permission denied"))
             } else {
-                Result.success("~/inbox/pocketshell/$name")
+                when (target) {
+                    ShareTarget.HostInbox -> Result.success("~/inbox/pocketshell/$name")
+                    is ShareTarget.Project ->
+                        Result.success("${target.remoteProjectPath}/.inbox/$name")
+                }
             }
         }
     }
@@ -601,7 +720,7 @@ class ShareViewModelTest {
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "key-$id", privateKeyPath = "/tmp/key-$id"),
         )
-        return HostEntity(
+        val host = HostEntity(
             id = id,
             name = name,
             hostname = "$name.example",
@@ -609,6 +728,10 @@ class ShareViewModelTest {
             username = "alex",
             keyId = keyId,
         )
+        // Persist the host so child rows (e.g. project_roots, issue
+        // #473) satisfy the foreign-key constraint.
+        db.hostDao().insert(host)
+        return host
     }
 
     private fun newVm(registry: ActiveTmuxClients): ShareViewModel {
@@ -617,6 +740,7 @@ class ShareViewModelTest {
             hostDao = db.hostDao(),
             sshKeyDao = db.sshKeyDao(),
             activeTmuxClients = registry,
+            projectRootDao = db.projectRootDao(),
         )
     }
 

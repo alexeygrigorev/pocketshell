@@ -5,6 +5,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.share.ShareItemUploader
+import com.pocketshell.app.share.ShareTarget
 import com.pocketshell.app.share.ShareableItem
 import com.pocketshell.core.ssh.SshException
 import com.pocketshell.core.storage.AppDatabase
@@ -191,6 +192,7 @@ class CrashReportsViewModelTest {
             host: HostEntity,
             keyEntity: SshKeyEntity,
             item: ShareableItem,
+            target: ShareTarget,
         ): Result<String> {
             captured = item
             if (item is ShareableItem.FileItem) {

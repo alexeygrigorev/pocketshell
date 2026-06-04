@@ -8,6 +8,7 @@ import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.tmux.TMUX_PASTE_BODY_CHUNK_BYTES
 import com.pocketshell.app.tmux.buildBracketedPasteHexChunks
 import com.pocketshell.core.storage.dao.HostDao
+import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.dao.SshKeyDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.tmux.TmuxClient
@@ -17,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -52,6 +54,7 @@ internal class ShareViewModel @Inject constructor(
     private val hostDao: HostDao,
     private val sshKeyDao: SshKeyDao,
     private val activeTmuxClients: ActiveTmuxClients,
+    private val projectRootDao: ProjectRootDao,
 ) : ViewModel() {
 
     val hosts: StateFlow<List<HostEntity>> = hostDao.getAll()
@@ -110,6 +113,16 @@ internal class ShareViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000L), emptySet())
 
     /**
+     * Issue #473: target selection for the picked host. When non-null,
+     * the picker shows the per-host target chooser ("Host inbox" + the
+     * active-session quick target + the host's known projects) instead
+     * of immediately uploading. Cleared when the user backs out or the
+     * upload starts.
+     */
+    private val _targetSelection = MutableStateFlow<TargetSelection?>(null)
+    val targetSelection: StateFlow<TargetSelection?> = _targetSelection.asStateFlow()
+
+    /**
      * The per-file uploader. A `var` so unit tests can substitute a
      * fake that records calls and drives success/failure per item,
      * exercising the multi-file loop + partial-failure aggregation
@@ -159,8 +172,69 @@ internal class ShareViewModel @Inject constructor(
     }
 
     /**
-     * User tapped a host in the picker. Upload every staged item to that
-     * host's inbox.
+     * Issue #473: user tapped a host in the picker. Instead of uploading
+     * straight to the host inbox, surface the per-host target chooser so
+     * the file can land in either `~/inbox/pocketshell/` (default) or a
+     * specific project's `.inbox/`.
+     *
+     * Resolves the target options off the main thread:
+     *
+     *  - the host's known projects from [ProjectRootDao] (the inactive
+     *    case — watched roots / recent folders); and
+     *  - the live attached session's project as a one-tap quick target
+     *    when [host] has a registered `tmux -CC` client (queried via
+     *    `display-message -p '#{pane_current_path}'`).
+     */
+    fun selectTargetHost(host: HostEntity) {
+        if (_uploadState.value is UploadState.Running) return
+        _targetSelection.value = TargetSelection(host = host, loading = true)
+        viewModelScope.launch {
+            val knownProjects = runCatching {
+                projectRootDao.getByHostId(host.id).first()
+            }.getOrDefault(emptyList())
+                .map { root ->
+                    ProjectTarget(
+                        path = root.path,
+                        label = com.pocketshell.app.projects.WatchedFoldersViewModel
+                            .stripOrderPrefix(root.label)
+                            .ifBlank { defaultLabelForPath(root.path) },
+                    )
+                }
+            val activeProject = resolveActiveSessionProject(host)
+            _targetSelection.value = TargetSelection(
+                host = host,
+                loading = false,
+                activeSessionProject = activeProject,
+                knownProjects = knownProjects,
+            )
+        }
+    }
+
+    /** Dismiss the target chooser and return to the host list. */
+    fun clearTargetSelection() {
+        _targetSelection.value = null
+    }
+
+    /**
+     * Issue #473: resolve the live attached session's project path for
+     * [host] (the "share to what I'm working on" quick target). Returns
+     * null when the host has no registered `tmux -CC` client or the cwd
+     * query fails / yields an unusable path.
+     */
+    private suspend fun resolveActiveSessionProject(host: HostEntity): ProjectTarget? {
+        val entry = activeTmuxClients.clients.value[host.id] ?: return null
+        val cwd = runCatching {
+            val response = entry.client.sendCommand("display-message -p '#{pane_current_path}'")
+            if (response.isError) return@runCatching null
+            response.output.firstOrNull()?.trim()
+        }.getOrNull() ?: return null
+        if (cwd.isBlank() || !cwd.startsWith("/")) return null
+        return ProjectTarget(path = cwd, label = defaultLabelForPath(cwd))
+    }
+
+    /**
+     * Issue #473: upload every staged item to [host], routing to either
+     * the host inbox or a specific project's `.inbox/` per [target].
      *
      * Issue #258: a multi-file share stages more than one item; the loop
      * uploads each in turn and aggregates the outcome so the result
@@ -169,10 +243,11 @@ internal class ShareViewModel @Inject constructor(
      * file share still produces the familiar one-path success/failure
      * surface because [UploadState.totalCount] is 1.
      */
-    fun startUpload(host: HostEntity) {
+    fun startUpload(host: HostEntity, target: ShareTarget = ShareTarget.HostInbox) {
         val payload = _items.value
         if (payload.isEmpty()) return
         if (_uploadState.value is UploadState.Running) return
+        _targetSelection.value = null
         _uploadState.value = UploadState.Running(host.name)
         viewModelScope.launch {
             val keyEntity = sshKeyDao.getById(host.keyId)
@@ -191,7 +266,7 @@ internal class ShareViewModel @Inject constructor(
 
             for (item in payload) {
                 val itemLabel = item.displayName?.takeIf { it.isNotBlank() } ?: "file"
-                uploader.upload(host, keyEntity, item).fold(
+                uploader.upload(host, keyEntity, item, target).fold(
                     onSuccess = { remotePath ->
                         android.util.Log.i(LOG_TAG, "share upload succeeded: $remotePath")
                         succeededPaths += remotePath
@@ -436,6 +511,18 @@ internal class ShareViewModel @Inject constructor(
         /** Truncation cap for the paste preview surfaced in UploadState.Success. */
         const val PASTE_PREVIEW_LENGTH: Int = 80
 
+        /**
+         * Issue #473: derive a short, non-blank label from a project
+         * path — the trailing path segment
+         * (`/home/alexey/git/pocketshell` → `pocketshell`), falling back
+         * to the trimmed path itself when there is no usable tail.
+         */
+        fun defaultLabelForPath(path: String): String {
+            val stripped = path.trim().trimEnd('/')
+            if (stripped.isEmpty()) return path.trim().ifBlank { "project" }
+            return stripped.substringAfterLast('/').ifBlank { stripped }
+        }
+
         fun previewFor(text: String): String {
             val firstLine = text.lineSequence().firstOrNull().orEmpty()
             return if (firstLine.length > PASTE_PREVIEW_LENGTH) {
@@ -540,3 +627,41 @@ internal enum class TextDispatchChoice {
      */
     PasteIntoSession,
 }
+
+/**
+ * Issue #473: a project on the chosen host that a shared file can land
+ * in (under `<path>/.inbox/`).
+ *
+ * @property path the project's remote path as known to the app — a
+ *   watched-root path, a recent folder, or a live session's
+ *   `pane_current_path`. May be absolute or `~`-relative; the uploader
+ *   resolves it to an absolute path before creating `.inbox/`.
+ * @property label the user-visible folder name (trailing path segment or
+ *   the watched-root label).
+ */
+internal data class ProjectTarget(
+    val path: String,
+    val label: String,
+)
+
+/**
+ * Issue #473: the per-host target chooser state. Surfaced after the user
+ * taps a host in the share picker so they can route the file to either
+ * the host inbox or a specific project's `.inbox/`.
+ *
+ * @property host the host the file will land on.
+ * @property loading true while the known-project list + active-session
+ *   quick target are still resolving (DAO read + a `display-message`
+ *   round-trip to the live client).
+ * @property activeSessionProject the live attached session's project,
+ *   offered as a one-tap quick target at the top of the chooser. Null
+ *   when the host has no attached session.
+ * @property knownProjects the host's known projects (watched roots /
+ *   recent folders) for the inactive case.
+ */
+internal data class TargetSelection(
+    val host: HostEntity,
+    val loading: Boolean = false,
+    val activeSessionProject: ProjectTarget? = null,
+    val knownProjects: List<ProjectTarget> = emptyList(),
+)

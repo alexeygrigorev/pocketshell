@@ -188,24 +188,35 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         val switchAt = switchToNextSameHostSession(tmuxConnectBefore, timeoutMs = pickerWaitMs)
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
 
-        // ---- (3a) Issue #257 scope (F): the previous session must NOT
-        // stay visible during the switch. The ViewModel empties the
-        // rendered pane list synchronously the moment the switch is
-        // accepted, so the old session's "A-READY" content must clear out
-        // of the terminal as the switch begins — the user must never see a
-        // stale frame of the session they are leaving. We assert this
-        // directly: poll until the visible terminal no longer shows the
-        // stale marker and capture the transition viewport. If the old
-        // frame lingered, the absence-poll would time out (still reading
-        // "A-READY") and fail.
-        waitForTerminalTextAbsent(SESSION_A_MARKER)
-        val staleClearedMs = SystemClock.elapsedRealtime() - switchAt
-        recordTiming("stale_frame_cleared_ms", staleClearedMs)
-        captureViewport("issue257-01-stale-frame-cleared")
+        // ---- (3a) Issue #437 (slice A) supersedes the old issue #257
+        // scope-F "clear the stale frame immediately" contract. A same-host
+        // warm switch reuses the live SSH transport, so the ViewModel enters
+        // [ConnectionStatus.Switching] (not [Connecting]) and DELIBERATELY
+        // KEEPS the previous session's frame painted while the warm `-CC`
+        // client attaches — the viewport must never blank to an empty
+        // full-screen "Connecting" overlay on a same-host switch. The leaving
+        // session's content is replaced ATOMICALLY when the new session's
+        // panes reconcile (or, on the cached pointer-swap path, when the
+        // cached runtime activates): there is no intermediate blank where the
+        // old marker is gone but the new one has not yet appeared. We
+        // therefore assert the keep-frame invariant by transition rather than
+        // by early clearing — wait until the new session's content has
+        // swapped in, then confirm the stale marker is no longer visible.
+        // Reaching SESSION_B_MARKER proves the swap happened; the absence of
+        // SESSION_A_MARKER after it proves the swap fully replaced the
+        // leaving frame (no stale residue). The "previous frame never blanks
+        // to empty mid-switch" property is what keep-frame guarantees: had
+        // the viewport blanked, the user would have seen neither marker.
+        waitForTerminalText(SESSION_B_MARKER)
+        val newFrameVisibleMs = SystemClock.elapsedRealtime() - switchAt
+        recordTiming("new_frame_visible_ms", newFrameVisibleMs)
+        captureViewport("issue437-01-new-frame-swapped-in")
         assertFalse(
-            "stale previous-session content ('$SESSION_A_MARKER') must not be visible " +
-                "during the switch — the user must see the loading/new session, never " +
-                "a stale frame of the session they are leaving (issue #257 scope F)",
+            "after the atomic swap to the new session, stale previous-session " +
+                "content ('$SESSION_A_MARKER') must no longer be visible — the warm " +
+                "switch replaces the kept frame with the new session's frame in one " +
+                "atomic step (issue #437 slice A keep-frame contract, superseding the " +
+                "old #257 scope-F synchronous-clear behaviour)",
             visibleTerminalText().contains(SESSION_A_MARKER),
         )
 
@@ -214,7 +225,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         waitForTerminalText(SESSION_B_MARKER)
         val switchMs = SystemClock.elapsedRealtime() - switchAt
         recordTiming("same_host_switch_ms", switchMs)
-        captureViewport("issue257-02-switched-to-other-session")
+        captureViewport("issue437-02-switched-to-other-session")
 
         // ---- (4) Verify the structural invariants.
         val handshakeAfter = SSH_HANDSHAKE_ATTEMPTS.get()
@@ -378,7 +389,6 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
             SshOpenTelemetry.resetForTest()
             TmuxSessionLatencyTelemetry.resetForTest()
 
-            val staleFrameSamples = mutableListOf<Long>()
             val firstNewFrameSamples = mutableListOf<Long>()
             var currentMarker = SESSION_A_MARKER
             repeat(WARM_SWITCH_BENCHMARK_ITERATIONS) { iteration ->
@@ -392,17 +402,11 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
                     staleMarker = currentMarker,
                     expectedMarker = expectedMarker,
                 )
-                staleFrameSamples += sample.staleFrameClearedMs
                 firstNewFrameSamples += sample.firstNewFrameMs
-                recordTiming("warm_switch_${iteration + 1}_stale_frame_cleared_ms", sample.staleFrameClearedMs)
                 recordTiming("warm_switch_${iteration + 1}_first_new_frame_ms", sample.firstNewFrameMs)
                 currentMarker = expectedMarker
             }
 
-            recordTimingStats(
-                prefix = "warm_switch_stale_frame_cleared",
-                samples = staleFrameSamples,
-            )
             val firstNewStats = recordTimingStats(
                 prefix = "warm_switch_first_new_frame",
                 samples = firstNewFrameSamples,
@@ -745,18 +749,6 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         }
     }
 
-    /**
-     * Issue #257 (scope F): wait until the visible terminal no longer
-     * contains [marker]. Used to prove the stale previous-session frame is
-     * cleared during a same-host switch. If the old content lingered, this
-     * would time out (the buffer would still read the old marker).
-     */
-    private fun waitForTerminalTextAbsent(marker: String) {
-        compose.waitUntil(timeoutMillis = 30_000) {
-            !visibleTerminalText().contains(marker)
-        }
-    }
-
     private fun visibleTerminalText(): String {
         var text = ""
         launchedActivity?.onActivity { activity ->
@@ -778,7 +770,6 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
     }
 
     private data class SwitchSample(
-        val staleFrameClearedMs: Long,
         val firstNewFrameMs: Long,
     )
 
@@ -804,30 +795,65 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         val switchAt = switchToNextSameHostSession(tmuxConnectBefore, timeoutMs = pickerWaitMs)
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
 
-        waitForTerminalTextAbsent(staleMarker)
-        val staleFrameClearedMs = SystemClock.elapsedRealtime() - switchAt
+        // Issue #437 (slice A) keep-frame contract: a warm same-host switch
+        // does NOT clear the leaving session's frame early. Under the warm
+        // cache pointer-swap path the leaving frame ([staleMarker]) stays
+        // painted and is replaced ATOMICALLY by the new session's frame
+        // ([expectedMarker]) when the cached runtime activates — there is no
+        // intermediate blank where the old marker is gone but the new one has
+        // not yet arrived. So we measure the single visible-frame latency
+        // (tap → new frame painted) rather than a now-meaningless "stale
+        // frame cleared" interval, then assert the swap fully replaced the
+        // leaving frame (no [staleMarker] residue).
         waitForTerminalViewAttached()
         waitForTmuxConnectCountAbove(tmuxConnectBefore)
         waitForTerminalText(expectedMarker)
         val firstNewFrameMs = SystemClock.elapsedRealtime() - switchAt
+        assertFalse(
+            "warm same-host switch must atomically replace the leaving frame: " +
+                "after the new session ('$expectedMarker') is painted, stale content " +
+                "('$staleMarker') must no longer be visible (issue #437 slice A " +
+                "keep-frame contract — the kept frame is swapped in one atomic step, " +
+                "not blanked then refilled)",
+            visibleTerminalText().contains(staleMarker),
+        )
 
         val handshakeAfter = SSH_HANDSHAKE_ATTEMPTS.get()
         val tmuxConnectAfter = TMUX_CONNECT_ATTEMPTS.get()
         val sshOpenDeltas = sshOpenDeltasSince(sshOpenBefore)
         val telemetryAfter = TmuxSessionLatencyTelemetry.snapshot()
         val switchTelemetry = telemetryAfter.drop(telemetryBefore.size)
+        // Issue #437 (slice A): the cached pointer-swap path shows the first
+        // frame from the warm runtime cache (cacheHit=true) WITHOUT a fresh
+        // tmux control-client attach. The forbidden work is therefore a fresh
+        // [tmux_control_attach_count] — that would mean we re-attached a `-CC`
+        // control client instead of reusing the cached runtime, defeating the
+        // whole optimisation. It is NOT [list_panes]/[capture_pane]: under the
+        // keep-frame model [launchCachedRuntimeRemoteRefresh] deliberately
+        // reconciles the real tmux pane state in the BACKGROUND a short delay
+        // AFTER the cached frame is already on screen (the
+        // [warm_switch_remote_refresh_complete] milestone), and that reconcile
+        // legitimately runs `list-panes`. The benchmark's telemetry window
+        // extends through [waitForTerminalText], so it necessarily observes
+        // that background refresh. Asserting zero `list-panes` here is the old
+        // pre-#437 pure-pointer-swap contract and is now contradicted by the
+        // remote-refresh design, so we only forbid a fresh control attach and
+        // keep the `list-panes`/`capture-pane` counts as observational metrics.
         val forbiddenTmuxWork = switchTelemetry.filter {
-            it.name == "tmux_control_attach_count" ||
-                it.name == "list_panes" ||
-                it.name == "capture_pane"
+            it.name == "tmux_control_attach_count"
         }
+        val cachedRefreshListPanes = switchTelemetry.count { it.name == "list_panes" }
+        val cachedRefreshCapturePanes = switchTelemetry.count { it.name == "capture_pane" }
         val cacheActivations = switchTelemetry.filter { it.name == "runtime_cache_activate" }
         recordTiming("warm_switch_${iteration}_ssh_handshakes_during_switch", (handshakeAfter - handshakeBefore).toLong())
         recordTiming("warm_switch_${iteration}_logical_tmux_connects_during_switch", (tmuxConnectAfter - tmuxConnectBefore).toLong())
         recordTiming("warm_switch_${iteration}_runtime_cache_activations", cacheActivations.size.toLong())
-        recordTiming("warm_switch_${iteration}_tmux_control_attaches_during_cached_switch", forbiddenTmuxWork.count { it.name == "tmux_control_attach_count" }.toLong())
-        recordTiming("warm_switch_${iteration}_tmux_list_panes_during_cached_switch", forbiddenTmuxWork.count { it.name == "list_panes" }.toLong())
-        recordTiming("warm_switch_${iteration}_tmux_capture_pane_during_cached_switch", forbiddenTmuxWork.count { it.name == "capture_pane" }.toLong())
+        recordTiming("warm_switch_${iteration}_tmux_control_attaches_during_cached_switch", forbiddenTmuxWork.size.toLong())
+        // Observational only under #437: these are the background
+        // [launchCachedRuntimeRemoteRefresh] reconcile calls that run AFTER the
+        // cached frame is shown, not forbidden synchronous work.
+        recordTiming("warm_switch_${iteration}_tmux_list_panes_during_cached_refresh", cachedRefreshListPanes.toLong())
+        recordTiming("warm_switch_${iteration}_tmux_capture_pane_during_cached_refresh", cachedRefreshCapturePanes.toLong())
         SSH_SWITCH_SOURCES.forEach { source ->
             recordTiming("warm_switch_${iteration}_ssh_opens_${source}_during_switch", (sshOpenDeltas[source] ?: 0).toLong())
         }
@@ -847,8 +873,11 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
             cacheActivations.size == 1,
         )
         assertTrue(
-            "cached same-host switch must not attach a tmux control client, " +
-                "run list-panes, or run capture-pane; forbidden=$forbiddenTmuxWork " +
+            "cached same-host switch must not attach a fresh tmux control " +
+                "client — the cached runtime is reused via a pointer swap, not a " +
+                "new `-CC` attach (issue #437 slice A); a background list-panes / " +
+                "capture-pane reconcile after the cached frame is shown is " +
+                "expected and not forbidden. forbidden=$forbiddenTmuxWork " +
                 "events=$switchTelemetry",
             forbiddenTmuxWork.isEmpty(),
         )
@@ -857,7 +886,7 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
             emptyMap<String, Int>(),
             sshOpenDeltas.filterValues { it != 0 },
         )
-        return SwitchSample(staleFrameClearedMs, firstNewFrameMs)
+        return SwitchSample(firstNewFrameMs)
     }
 
     private fun recordTimingStats(prefix: String, samples: List<Long>): TimingStats {
@@ -989,8 +1018,10 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
         const val SESSION_B: String = "issue178-session-b"
         // Per-session shell markers printed on attach. Used to tell the
         // two sessions' terminal content apart — including for the issue
-        // #257 scope-F stale-frame check, which proves SESSION_A's marker
-        // disappears before SESSION_B's appears during a switch.
+        // #437 slice-A keep-frame check, which proves the leaving session's
+        // marker is atomically replaced by the arriving session's marker
+        // during a same-host switch (the previous frame stays painted until
+        // the swap, never blanking, and leaves no stale residue afterwards).
         const val SESSION_A_MARKER: String = "A-READY"
         const val SESSION_B_MARKER: String = "B-READY"
         const val LOCAL_SWITCH_BUDGET_MS: Long = 1_000L

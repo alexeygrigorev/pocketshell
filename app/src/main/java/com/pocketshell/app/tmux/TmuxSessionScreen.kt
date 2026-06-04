@@ -86,6 +86,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
@@ -181,6 +183,13 @@ public fun TmuxSessionScreen(
     modifier: Modifier = Modifier,
     sessionPickerViewModel: HostTmuxSessionPickerViewModel = hiltViewModel(),
     inlineDictationViewModel: InlineDictationViewModel = hiltViewModel(),
+    // Issue #487: per-host "port forwarding is active for THIS host" chip in
+    // the in-session chrome, so the user doesn't forget a tunnel is open on
+    // the server they're looking at. Pure read surface over the forwarding
+    // controller; the chip taps through to the same per-host panel as the
+    // kebab's "Port forwarding" action.
+    sessionForwardingIndicatorViewModel:
+        com.pocketshell.app.portfwd.SessionForwardingIndicatorViewModel = hiltViewModel(),
     // Issue #176: needed for the Settings → Conversation → "Show system
     // notes" toggle to take effect inside the conversation pane without
     // restarting the session.
@@ -264,6 +273,12 @@ public fun TmuxSessionScreen(
 
     val panes by viewModel.panes.collectAsState()
     val status by viewModel.connectionStatus.collectAsState()
+    // Issue #487: active-forwarding state for the host this session belongs
+    // to. `remember(hostId)` re-subscribes if the screen is reused for a
+    // different host. Drives the in-session forwarding chip in the chrome.
+    val sessionForwardingState by remember(hostId) {
+        sessionForwardingIndicatorViewModel.stateFor(hostId)
+    }.collectAsState()
     // Issue #448 (epic #432 slice C): a confirmed newly-listening remote
     // port (regex over output + `ss` confirm). Non-null drives the
     // non-blocking forward overlay rendered over the terminal.
@@ -784,6 +799,18 @@ public fun TmuxSessionScreen(
                         provider = usageBadgeProvider,
                     )
                 }
+            }
+
+            // Issue #487: in-session "port forwarding active for THIS host"
+            // chip. Only renders while the current host has ≥1 active tunnel,
+            // so the user is reminded a tunnel is open on the server they're
+            // looking at. Tapping it opens the same per-host port-forward
+            // panel as the kebab's "Port forwarding" action.
+            if (sessionForwardingState.visible) {
+                SessionForwardingChip(
+                    state = sessionForwardingState,
+                    onClick = onOpenPortForwarding,
+                )
             }
 
             // Issue #192: the [WindowStrip] (rendered above with the top
@@ -2082,6 +2109,79 @@ internal const val TMUX_CONVERSATION_TAB_PULSE_TAG =
     "tmux:tabs:conversation-pulse"
 /** Issue #116: stable test tag for the in-tmux-session blocked / near-limit chip. */
 internal const val TMUX_SESSION_USAGE_BADGE_TAG = "tmux:usage-badge"
+
+/**
+ * Issue #487: stable test tag for the in-session "port forwarding active for
+ * this host" chip. Tests assert it shows only while the current host has ≥1
+ * active tunnel and routes to the per-host port-forward panel on tap.
+ */
+internal const val TMUX_SESSION_FORWARDING_CHIP_TAG = "tmux:forwarding-chip"
+
+/**
+ * Compact chip surfaced in the in-session chrome (issue #487) while ≥1 port
+ * forward is active for the host this session belongs to. Built from the
+ * shared [com.pocketshell.uikit.components.StatusDot] (#480) — Connected =
+ * solid "active" green; Connecting pulse while a transport blip is restoring —
+ * plus a short label, consistent with the design language. The whole chip is a
+ * tap target into the per-host port-forward panel so the user can stop or
+ * inspect a tunnel they'd otherwise forget was open.
+ */
+@Composable
+internal fun SessionForwardingChip(
+    state: com.pocketshell.app.portfwd.SessionForwardingIndicatorState,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color = PocketShellColors.Surface)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .testTag(TMUX_SESSION_FORWARDING_CHIP_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Row(
+            modifier = Modifier
+                .background(
+                    color = PocketShellColors.SurfaceElev,
+                    shape = RoundedCornerShape(16.dp),
+                )
+                .border(
+                    width = 1.dp,
+                    color = PocketShellColors.BorderSoft,
+                    shape = RoundedCornerShape(16.dp),
+                )
+                .clickable(
+                    role = androidx.compose.ui.semantics.Role.Button,
+                    onClick = onClick,
+                )
+                .semantics { contentDescription = state.contentDescription }
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            com.pocketshell.uikit.components.StatusDot(
+                status = if (state.restoring) {
+                    com.pocketshell.uikit.model.ConnectionStatus.Connecting
+                } else {
+                    com.pocketshell.uikit.model.ConnectionStatus.Connected
+                },
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = if (state.restoring) {
+                    "Port forwarding · restoring"
+                } else {
+                    buildString {
+                        append("Port forwarding active")
+                        if (state.label.isNotEmpty()) append(" · ${state.label}")
+                    }
+                },
+                color = PocketShellColors.Text,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+    }
+}
 
 /**
  * Issue #184 + #189: stable test tags for the IME-aware top chrome on

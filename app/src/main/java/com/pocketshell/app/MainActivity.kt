@@ -32,6 +32,10 @@ import androidx.compose.ui.Modifier
 import androidx.core.view.WindowCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import kotlinx.coroutines.launch
 import com.pocketshell.app.costs.CostsScreen
 import com.pocketshell.app.crash.CrashReportsScreen
 import com.pocketshell.app.hosts.AddEditHostScreen
@@ -160,6 +164,19 @@ class MainActivity : FragmentActivity() {
 
     @Inject
     lateinit var hostDao: HostDao
+
+    /**
+     * Issue #487: the singleton coordinator that knows when ≥1 host is
+     * actively port forwarding. The maintainer reported never seeing the
+     * D21 ongoing notification — the root cause is that on Android 13+ the
+     * POST_NOTIFICATIONS grant was only requested once at first launch, so a
+     * user who dismissed it (or who first forwards a port much later) never
+     * gets the notification. We observe this controller and re-request the
+     * permission exactly when forwarding goes active (0 → ≥1), the moment the
+     * notification actually has something to show.
+     */
+    @Inject
+    lateinit var forwardingController: com.pocketshell.app.portfwd.ForwardingController
 
     @Inject
     lateinit var sshKeyDao: SshKeyDao
@@ -349,7 +366,35 @@ class MainActivity : FragmentActivity() {
             }
         }
         maybeRequestNotificationPermission()
+        observeForwardingForNotificationPermission()
         StartupTiming.mark("main-on-create-end")
+    }
+
+    /**
+     * Issue #487: re-request POST_NOTIFICATIONS the moment port forwarding
+     * actually goes active (0 → ≥1 active hosts). The first-launch request in
+     * [maybeRequestNotificationPermission] is best-effort and can be dismissed
+     * before the user ever forwards a port — which is exactly the maintainer's
+     * "I didn't see it" case. By re-prompting on the activation edge we give
+     * the runtime grant a second chance precisely when the ongoing
+     * notification has something to show. No-op below API 33 and when already
+     * granted; harmless if the user permanently denied (the launcher just
+     * returns immediately without a dialog).
+     */
+    private fun observeForwardingForNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                var wasActive = false
+                forwardingController.flowOfActiveHostCount().collect { count ->
+                    val active = count > 0
+                    if (active && !wasActive) {
+                        maybeRequestNotificationPermission()
+                    }
+                    wasActive = active
+                }
+            }
+        }
     }
 
     /**

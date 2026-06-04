@@ -360,11 +360,16 @@ class ForwardingService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
+        // Issue #487: the maintainer wants an always-on "port forwarding is
+        // active" status with the Spotify / Google-Recorder ongoing feel.
+        // Title carries the steady "Port forwarding active" headline (the part
+        // that reads as the persistent status), the body carries the live
+        // host + tunnel detail.
         val contentText = contentTextOverride ?: buildString {
             if (hostName.isNotEmpty()) {
                 append(hostName)
                 if (hostCount > 1) append(" + ${hostCount - 1} more")
-                append(" • ")
+                append(" · ")
             }
             // Issue #439: while a host's transport is down the supervisor
             // is re-establishing SSH and re-opening the user's desired
@@ -375,18 +380,26 @@ class ForwardingService : Service() {
             } else {
                 append("$tunnelCount tunnel")
                 if (tunnelCount != 1) append("s")
-                append(" active")
             }
         }
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("PocketShell Port Forwarding")
+            .setContentTitle("Port forwarding active")
             .setContentText(contentText)
+            // A larger body so the host + tunnel detail is fully readable when
+            // the user expands the notification shade, like Recorder's
+            // "Recording in progress · 00:42" expanded row.
+            .setStyle(NotificationCompat.BigTextStyle().bigText(contentText))
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(contentIntent)
+            // Ongoing + the no-clear flag make the notification persistent and
+            // non-dismissable while ≥1 tunnel is active (the user stops it via
+            // the Stop action or by disabling forwarding), matching the
+            // ongoing-media feel the maintainer asked for in #487.
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .addAction(
                 android.R.drawable.ic_menu_close_clear_cancel,
                 "Stop",
@@ -398,10 +411,10 @@ class ForwardingService : Service() {
     private fun createNotificationChannel() {
         val channel = NotificationChannel(
             CHANNEL_ID,
-            "Port Forwarding",
+            "Port forwarding",
             NotificationManager.IMPORTANCE_LOW,
         ).apply {
-            description = "Shows active SSH port forwarding tunnels"
+            description = "Always-on status while SSH port forwarding is active"
             setShowBadge(false)
         }
         val manager = getSystemService(NotificationManager::class.java)

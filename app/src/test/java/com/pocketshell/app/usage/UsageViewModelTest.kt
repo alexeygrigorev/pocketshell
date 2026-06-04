@@ -236,7 +236,6 @@ class UsageViewModelTest {
         )
         val session = FakeSshSession(
             canned = mapOf(
-                UsageRemoteSource.DETECT_POCKETSHELL_COMMAND to ExecResult("/usr/bin/pocketshell\n", "", 0),
                 "mycorp-usage --json" to ExecResult(
                     stdout = """{"provider":"codex","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
                     stderr = "",
@@ -253,11 +252,90 @@ class UsageViewModelTest {
         val result = fetcher.fetch(host)
 
         assertTrue(result is HostUsageFetch.Records)
+        // #490: the detail fetcher no longer pre-gates on a separate detect
+        // probe. It runs the SAME single usage command the host-list summary
+        // scheduler runs (here the per-host override, verbatim), so the two
+        // surfaces can never disagree about "installed vs not".
         assertEquals(
-            listOf(UsageRemoteSource.DETECT_POCKETSHELL_COMMAND, "mycorp-usage --json"),
+            listOf("mycorp-usage --json"),
             session.recorded,
         )
         assertTrue("session should be closed after fetch", session.closed)
+    }
+
+    @Test
+    fun sshHostUsageFetcher_offPathPocketshellResolvesViaWrapper_notReportedMissing() = runTest {
+        // #484 / #490: a host whose `pocketshell` is in ~/.local/bin but off the
+        // non-interactive SSH PATH. A bare `command -v pocketshell` fails, yet
+        // the PATH-robust wrapper resolves and runs it. The detail must show
+        // Records (NOT "not installed"), matching the summary.
+        val keyFile = Files.createTempFile("pocketshell-offpath", ".key").toFile()
+        keyFile.deleteOnExit()
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = keyFile.absolutePath),
+        )
+        val host = HostEntity(
+            name = "offpath",
+            hostname = "offpath.example",
+            username = "u",
+            keyId = keyId,
+        )
+        val wrappedUsage = com.pocketshell.app.pocketshell.PocketshellCommand.wrap(
+            UsageRemoteSource.DEFAULT_USAGE_ARGS,
+        )
+        val session = FakeSshSession(
+            canned = mapOf(
+                // Only the PATH-robust wrapped command succeeds; a bare probe
+                // (modelled by `barePocketshellFails`) would have failed.
+                wrappedUsage to ExecResult(
+                    stdout = """{"provider":"claude","status":"ok","short_term":null,"long_term":null,"block_reason":null,"error":null,"details":{}}""",
+                    stderr = "",
+                    exitCode = 0,
+                ),
+            ),
+            barePocketshellFails = true,
+        )
+        val fetcher = SshHostUsageFetcher(
+            sshKeyDao = db.sshKeyDao(),
+            remoteSource = UsageRemoteSource(),
+            connector = SshHostUsageConnector { _, _ -> Result.success(session) },
+        )
+
+        val result = fetcher.fetch(host)
+
+        assertTrue("off-PATH pocketshell must resolve, not read as missing", result is HostUsageFetch.Records)
+        assertEquals(listOf(wrappedUsage), session.recorded)
+    }
+
+    @Test
+    fun sshHostUsageFetcher_genuinelyAbsentReportsToolMissing() = runTest {
+        // The wrapper resolved nothing and exited 127 -> genuinely absent.
+        val keyFile = Files.createTempFile("pocketshell-absent", ".key").toFile()
+        keyFile.deleteOnExit()
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = keyFile.absolutePath),
+        )
+        val host = HostEntity(
+            name = "absent",
+            hostname = "absent.example",
+            username = "u",
+            keyId = keyId,
+        )
+        val wrappedUsage = com.pocketshell.app.pocketshell.PocketshellCommand.wrap(
+            UsageRemoteSource.DEFAULT_USAGE_ARGS,
+        )
+        val session = FakeSshSession(
+            canned = mapOf(wrappedUsage to ExecResult("", "", 127)),
+        )
+        val fetcher = SshHostUsageFetcher(
+            sshKeyDao = db.sshKeyDao(),
+            remoteSource = UsageRemoteSource(),
+            connector = SshHostUsageConnector { _, _ -> Result.success(session) },
+        )
+
+        val result = fetcher.fetch(host)
+
+        assertEquals(HostUsageFetch.ToolMissing, result)
     }
 
     private class FakeFetcher(
@@ -276,6 +354,7 @@ class UsageViewModelTest {
 
     private class FakeSshSession(
         private val canned: Map<String, ExecResult>,
+        private val barePocketshellFails: Boolean = false,
     ) : SshSession {
         val recorded = mutableListOf<String>()
         var closed: Boolean = false
@@ -285,6 +364,10 @@ class UsageViewModelTest {
 
         override suspend fun exec(command: String): ExecResult {
             recorded += command
+            // Model the #484 PATH bug: a bare, non-PATH-robust probe fails.
+            if (barePocketshellFails && command == "command -v pocketshell") {
+                return ExecResult("", "", 1)
+            }
             return canned[command] ?: ExecResult("", "missing stub", 127)
         }
 

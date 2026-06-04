@@ -1,5 +1,6 @@
 package com.pocketshell.app.usage
 
+import com.pocketshell.app.pocketshell.PocketshellCommand
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
 import com.pocketshell.core.ssh.SshSession
@@ -17,35 +18,57 @@ class UsageRemoteSourceTest {
 
     private val source = UsageRemoteSource()
 
+    private val detectCommand = PocketshellCommand.detect()
+    private val defaultFetchCommand = PocketshellCommand.wrap(UsageRemoteSource.DEFAULT_USAGE_ARGS)
+
     @Test
-    fun detectPocketshell_installedWhenCommandExists() = runTest {
+    fun detectPocketshell_installedWhenResolverPrintsPath() = runTest {
+        // The PATH-robust resolver prints the absolute binary path it found.
         val session = FakeSshSession(
-            mapOf(UsageRemoteSource.DETECT_POCKETSHELL_COMMAND to ExecResult("/usr/bin/pocketshell\n", "", 0)),
+            mapOf(detectCommand to ExecResult("/home/me/.local/bin/pocketshell\n", "", 0)),
         )
 
         assertEquals(UsageToolStatus.Installed, source.detectPocketshell(session))
-        assertEquals(listOf(UsageRemoteSource.DETECT_POCKETSHELL_COMMAND), session.recorded)
+        assertEquals(listOf(detectCommand), session.recorded)
     }
 
     @Test
-    fun detectPocketshell_missingWhenCommandFails() = runTest {
+    fun detectPocketshell_missingWhenResolverExits127() = runTest {
+        // Genuinely absent: neither `command -v` nor any absolute candidate hit,
+        // so the wrapper exits 127.
         val session = FakeSshSession(
-            mapOf(UsageRemoteSource.DETECT_POCKETSHELL_COMMAND to ExecResult("", "", 1)),
+            mapOf(detectCommand to ExecResult("", "", 127)),
         )
 
         assertEquals(UsageToolStatus.Missing, source.detectPocketshell(session))
     }
 
     @Test
-    fun fetchUsage_runsDefaultCommandAndParsesRecords() = runTest {
+    fun detect_command_isPathRobust_probesLocalBinAndExits127WhenAbsent() {
+        // The detection command must (a) prepend ~/.local/bin to PATH, (b) probe
+        // the absolute ~/.local/bin/pocketshell candidate, and (c) exit 127 when
+        // nothing resolves — so "not installed" only fires on a real absence.
+        assertTrue(detectCommand.contains("\$HOME/.local/bin"))
+        assertTrue(detectCommand.contains("\$HOME/.local/bin/pocketshell"))
+        assertTrue(detectCommand.contains("command -v pocketshell"))
+        assertTrue(detectCommand.contains("exit 127"))
+    }
+
+    @Test
+    fun fetchUsage_offPathPocketshellStillResolvesAndParses() = runTest {
+        // Simulate the #484 bug: a plain `command -v pocketshell` would fail
+        // (binary off the non-interactive PATH), but the PATH-robust wrapper
+        // resolves ~/.local/bin/pocketshell and runs it successfully.
         val session = FakeSshSession(
-            mapOf(
-                UsageRemoteSource.defaultUsageCommand to ExecResult(
+            canned = mapOf(
+                defaultFetchCommand to ExecResult(
                     """{"provider":"codex","status":"blocked","short_term":null,"long_term":null,"block_reason":"weekly limit reached","error":null,"details":{}}""",
                     "",
                     0,
                 ),
             ),
+            // A bare `command -v pocketshell` (no PATH prefix) fails for this host.
+            barePocketshellFails = true,
         )
 
         val result = source.fetchUsage(session)
@@ -53,11 +76,13 @@ class UsageRemoteSourceTest {
         assertTrue(result is UsageFetchResult.Success)
         val success = result as UsageFetchResult.Success
         assertEquals(UsageStatus.Blocked, success.records.single().status)
-        assertEquals(listOf(UsageRemoteSource.defaultUsageCommand), session.recorded)
+        assertEquals(listOf(defaultFetchCommand), session.recorded)
     }
 
     @Test
-    fun fetchUsage_usesCommandOverride() = runTest {
+    fun fetchUsage_usesCommandOverrideVerbatim() = runTest {
+        // A per-host override is the maintainer's own script; it is run as-is,
+        // NOT re-wrapped.
         val session = FakeSshSession(
             mapOf(
                 "custom-usage --json" to ExecResult(
@@ -75,9 +100,10 @@ class UsageRemoteSourceTest {
     }
 
     @Test
-    fun fetchUsage_exit127IsToolMissing() = runTest {
+    fun fetchUsage_genuinelyAbsentIsToolMissing() = runTest {
+        // The wrapper resolved nothing and exited 127 -> tool genuinely missing.
         val session = FakeSshSession(
-            mapOf(UsageRemoteSource.defaultUsageCommand to ExecResult("", "pocketshell: not found", 127)),
+            mapOf(defaultFetchCommand to ExecResult("", "", 127)),
         )
 
         assertEquals(UsageFetchResult.ToolMissing, source.fetchUsage(session))
@@ -103,6 +129,7 @@ class UsageRemoteSourceTest {
 
     private class FakeSshSession(
         private val canned: Map<String, ExecResult>,
+        private val barePocketshellFails: Boolean = false,
     ) : SshSession {
         val recorded = mutableListOf<String>()
 
@@ -110,6 +137,11 @@ class UsageRemoteSourceTest {
 
         override suspend fun exec(command: String): ExecResult {
             recorded += command
+            // A bare `command -v pocketshell` (the old, non-PATH-robust probe)
+            // returns "not found" for this host to model the #484 PATH bug.
+            if (barePocketshellFails && command == "command -v pocketshell") {
+                return ExecResult("", "", 1)
+            }
             return canned[command] ?: ExecResult("", "missing stub", 127)
         }
 

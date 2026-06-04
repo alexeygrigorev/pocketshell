@@ -292,8 +292,17 @@ class SshEnvGateway @Inject constructor() : EnvGateway {
         }
     }
 
+    // Route every `pocketshell env ...` invocation through the centralised
+    // PATH-robust resolver (issue #484) so the CLI is found even when the
+    // non-interactive SSH `PATH` lacks `~/.local/bin`. The command strings
+    // built above always start with the literal `pocketshell ` prefix; it is
+    // stripped and the remaining args (including any `< file` redirection and
+    // cleanup tail) are handed to the wrapper, which re-resolves and runs the
+    // binary in a single non-interactive shell.
     private fun pathAware(command: String): String =
-        "PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH\"; $command"
+        com.pocketshell.app.pocketshell.PocketshellCommand.wrap(
+            command.removePrefix("pocketshell ").trim(),
+        )
 
     companion object {
         private fun shellQuote(value: String): String =

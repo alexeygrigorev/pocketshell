@@ -198,6 +198,8 @@ class RecurringJobsViewModelTest {
             exitCode = 0,
         )
 
+    // Delegate to the production wrapper so these stubs/assertions track the
+    // real PATH-robust invocation (issue #484).
     private fun pathAware(command: String): String =
-        "PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH\"; $command"
+        PocketshellJobsRemoteSource.pathAwareCommand(command)
 }

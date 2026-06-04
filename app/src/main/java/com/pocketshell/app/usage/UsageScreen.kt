@@ -28,6 +28,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.pocketshell.app.pocketshell.PocketshellCommand
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageStatus
 import com.pocketshell.core.usage.UsageThresholdState
@@ -463,6 +464,15 @@ private fun UsageEmptyHost(host: UsageMissingToolHost) {
             text = "server-side usage tracking unavailable",
             color = PocketShellColors.TextSecondary,
             fontFamily = JetBrainsMonoFamily,
+            fontSize = 11.sp,
+            modifier = Modifier.padding(top = 8.dp),
+        )
+        // Issue #484: this state now only appears when pocketshell is genuinely
+        // absent (the PATH-robust resolver probed ~/.local/bin and the other
+        // candidates and found nothing). Point the user at the server fix.
+        Text(
+            text = PocketshellCommand.NOT_INSTALLED_HINT,
+            color = PocketShellColors.TextMuted,
             fontSize = 11.sp,
             modifier = Modifier.padding(top = 8.dp),
         )

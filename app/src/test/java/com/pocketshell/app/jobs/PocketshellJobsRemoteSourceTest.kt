@@ -189,6 +189,8 @@ class PocketshellJobsRemoteSourceTest {
         override fun close() = Unit
     }
 
+    // Delegate to the production wrapper so these assertions track the real
+    // PATH-robust invocation (issue #484) instead of a hand-rolled copy.
     private fun pathAware(command: String): String =
-        "PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH\"; $command"
+        PocketshellJobsRemoteSource.pathAwareCommand(command)
 }

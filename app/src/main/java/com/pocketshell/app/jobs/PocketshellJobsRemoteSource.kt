@@ -1,5 +1,6 @@
 package com.pocketshell.app.jobs
 
+import com.pocketshell.app.pocketshell.PocketshellCommand
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshSession
 import kotlinx.coroutines.CancellationException
@@ -115,8 +116,19 @@ public class PocketshellJobsRemoteSource @Inject constructor(
     }
 
     public companion object {
-        public fun pathAwareCommand(command: String): String =
-            "PATH=\"\$HOME/.local/bin:\$HOME/.cargo/bin:\$PATH\"; $command"
+        /**
+         * Wrap a `pocketshell jobs ...` command string through the centralised
+         * PATH-robust resolver (issue #484) so the CLI is found even when the
+         * non-interactive SSH `PATH` lacks `~/.local/bin`. [command] always
+         * starts with the literal `pocketshell ` prefix produced by the verb
+         * builders above; that prefix is stripped and the remaining arguments
+         * are handed to [PocketshellCommand.wrap], which re-resolves and runs
+         * the binary.
+         */
+        public fun pathAwareCommand(command: String): String {
+            val args = command.removePrefix("pocketshell ").trim()
+            return PocketshellCommand.wrap(args)
+        }
 
         public fun shellQuote(value: String): String =
             "'" + value.replace("'", "'\"'\"'") + "'"

@@ -112,21 +112,24 @@ public class SshHostUsageFetcher : HostUsageFetcher {
         }
 
         return try {
-            when (remoteSource.detectPocketshell(session)) {
-                UsageToolStatus.Installed -> {
-                    when (val fetch = remoteSource.fetchUsage(session, commandOverride = host.usageCommandOverride)) {
-                        is UsageFetchResult.Success -> HostUsageFetch.Records(
-                            records = fetch.records,
-                            syncedAt = Instant.now(),
-                        )
+            // Issue #490: the Usage DETAIL screen and the host-list SUMMARY
+            // strip must agree. The summary's [UsageScheduler.fetchHostOverSsh]
+            // calls [UsageRemoteSource.fetchUsage] DIRECTLY and infers
+            // "tool missing" only from a genuine exit-127. The detail used to
+            // pre-gate on a SEPARATE `detectPocketshell` probe, so a host where
+            // the binary resolves for `fetchUsage` but the bare `command -v`
+            // probe failed (the #484 PATH bug) showed live data on the summary
+            // yet "not installed" on the detail. We now run the SAME single
+            // path: fetch usage directly and derive the state from its result,
+            // so both surfaces are consistent by construction.
+            when (val fetch = remoteSource.fetchUsage(session, commandOverride = host.usageCommandOverride)) {
+                is UsageFetchResult.Success -> HostUsageFetch.Records(
+                    records = fetch.records,
+                    syncedAt = Instant.now(),
+                )
 
-                        UsageFetchResult.ToolMissing -> HostUsageFetch.ToolMissing
-                        is UsageFetchResult.Failed -> HostUsageFetch.Skipped
-                    }
-                }
-
-                UsageToolStatus.Missing -> HostUsageFetch.ToolMissing
-                is UsageToolStatus.Unknown -> HostUsageFetch.Skipped
+                UsageFetchResult.ToolMissing -> HostUsageFetch.ToolMissing
+                is UsageFetchResult.Failed -> HostUsageFetch.Skipped
             }
         } finally {
             runCatching { session.close() }

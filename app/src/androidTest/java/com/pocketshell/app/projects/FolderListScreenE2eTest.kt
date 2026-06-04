@@ -25,6 +25,7 @@ import androidx.room.Room
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.composer.PromptComposerViewModel
+import com.pocketshell.app.proof.WalkthroughScreenshotArtifacts
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.session.InlineDictationViewModel
@@ -319,10 +320,24 @@ class FolderListScreenE2eTest {
             folderStatusDotTestTag("/home/u/git/pocketshell"),
             useUnmergedTree = true,
         ).assertExists()
-        // #478: the per-group list/grid view toggle renders in the group
-        // header and meets the 48 dp touch floor.
-        compose.onNodeWithTag(folderTreeRootViewToggleTag("~/git"), useUnmergedTree = true).assertExists()
-        assertAccessibleTouchTarget(folderTreeRootViewToggleTag("~/git"))
+        // #504: the per-group list/grid view toggle was removed (grid view is
+        // not wanted). No toggle node should exist in the group header; the
+        // tree (list) view is the only renderer.
+        compose.onAllNodesWithTag("folder-list:tree-root:~/git:view-toggle", useUnmergedTree = true)
+            .fetchSemanticsNodes().also {
+                require(it.isEmpty()) { "list/grid view toggle should be removed (#504)" }
+            }
+        compose.onAllNodesWithTag("folder-list:tree-root:~/git:grid-stub", useUnmergedTree = true)
+            .fetchSemanticsNodes().also {
+                require(it.isEmpty()) { "grid view stub should be removed (#504)" }
+            }
+        // #504 evidence: the group header (title + `N orgs · M sessions`
+        // counts + kebab + `+`) renders with NO list/grid toggle between the
+        // counts and the kebab. Full-device capture via uiAutomation is the
+        // reliable artifact path on this AVD (captureToImage is best-effort
+        // and can return blank), so this is the authoritative #504 screenshot.
+        WalkthroughScreenshotArtifacts.capture("issue504-folder-tree-header-no-grid-toggle")
+        captureViewport("issue504-folder-tree-header-no-grid-toggle-viewport.png")
         assertAccessibleTouchTarget(folderTreeRootActionsTestTag("~/git"))
         assertAccessibleTouchTarget(folderTreeRootCreateTestTag("~/git"))
         assertAccessibleTouchTarget(folderTreeRootActionsTestTag("~/tmp"))

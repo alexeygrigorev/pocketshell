@@ -21,7 +21,6 @@ import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -1380,10 +1379,6 @@ private fun FolderTreeRootGroup(
     onRootActions: (FolderTreeRoot) -> Unit,
     onToggleProjectExpanded: (FolderRow) -> Unit,
 ) {
-    // Per-group list/grid view toggle (#478). Grid is an explicit non-goal —
-    // the toggle is wired and flips the icon + shows a stub so the layout reads
-    // like the target mockup, but the list remains the only real renderer.
-    var gridView by remember(root.path) { mutableStateOf(false) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1392,15 +1387,11 @@ private fun FolderTreeRootGroup(
     ) {
         FolderTreeRootHeader(
             root = root,
-            gridView = gridView,
-            onToggleView = { gridView = !gridView },
             onCreateInRoot = { onCreateInRoot(root) },
             onRootActions = { onRootActions(root) },
         )
         if (root.folders.isEmpty()) {
             EmptyRootHint(candidateCount = root.addSheetProjects.size, onCreate = { onCreateInRoot(root) })
-        } else if (gridView) {
-            GridViewStub(root = root)
         } else {
             Column(
                 modifier = Modifier.padding(start = PocketShellDensity.treeIndent),
@@ -1423,30 +1414,6 @@ private fun FolderTreeRootGroup(
 }
 
 /**
- * Placeholder shown behind the list/grid toggle when grid is selected (#478).
- * Building the real grid is an explicit non-goal for this issue; the stub keeps
- * the toggle honest (it visibly changes the view) without shipping a half-grid.
- */
-@Composable
-private fun GridViewStub(root: FolderTreeRoot) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = PocketShellDensity.treeIndent)
-            .background(PocketShellColors.Surface.copy(alpha = 0.48f), RoundedCornerShape(8.dp))
-            .padding(horizontal = 12.dp, vertical = 14.dp)
-            .testTag(folderTreeRootGridStubTag(root.path)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = "Grid view is coming soon — tap the list icon to switch back.",
-            color = PocketShellColors.TextMuted,
-            style = PocketShellType.bodyDense,
-        )
-    }
-}
-
-/**
  * Belt-and-suspenders UI fallback (#438): the view-model's
  * [FolderListViewModel.defaultLabelForPath] already guarantees a
  * non-blank, meaningful label, but the header composables defend
@@ -1461,8 +1428,6 @@ private fun folderDisplayLabel(label: String, path: String): String =
 @Composable
 private fun FolderTreeRootHeader(
     root: FolderTreeRoot,
-    gridView: Boolean,
-    onToggleView: () -> Unit,
     onCreateInRoot: () -> Unit,
     onRootActions: () -> Unit,
 ) {
@@ -1503,14 +1468,6 @@ private fun FolderTreeRootHeader(
             )
             RootCountText(root = root)
         }
-        Spacer(modifier = Modifier.width(8.dp))
-        // List/grid view toggle (#478). Always available so every group reads
-        // like the target mockup; grid itself is a stub (non-goal).
-        ViewToggleButton(
-            gridView = gridView,
-            onClick = onToggleView,
-            testTag = folderTreeRootViewToggleTag(root.path),
-        )
         if (hasActions) {
             Spacer(modifier = Modifier.width(6.dp))
             CompactTreeIconButton(
@@ -1527,97 +1484,6 @@ private fun FolderTreeRootHeader(
                 testTag = folderTreeRootCreateTestTag(root.path),
                 accent = true,
             )
-        }
-    }
-}
-
-/**
- * List/grid view toggle for a group header — issue #478. Draws a compact
- * two-icon switch (list rows vs. grid cells) matching the target mockup. The
- * grid half is a stub; the toggle still flips state and the active half is
- * highlighted so the affordance reads correctly.
- */
-@Composable
-private fun ViewToggleButton(
-    gridView: Boolean,
-    onClick: () -> Unit,
-    testTag: String,
-) {
-    Box(
-        modifier = Modifier
-            .defaultMinSize(
-                minWidth = PocketShellDensity.tapTargetMin,
-                minHeight = PocketShellDensity.tapTargetMin,
-            )
-            .semantics {
-                contentDescription = if (gridView) "Switch to list view" else "Switch to grid view"
-            }
-            .clickable(role = Role.Button, onClick = onClick)
-            .testTag(testTag),
-        contentAlignment = Alignment.Center,
-    ) {
-        Row(
-            modifier = Modifier
-                .background(PocketShellColors.SurfaceElev.copy(alpha = 0.72f), RoundedCornerShape(8.dp))
-                .padding(horizontal = 4.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            ViewToggleHalf(selected = !gridView) { color -> ListGlyph(color) }
-            ViewToggleHalf(selected = gridView) { color -> GridGlyph(color) }
-        }
-    }
-}
-
-@Composable
-private fun ViewToggleHalf(
-    selected: Boolean,
-    glyph: @Composable (Color) -> Unit,
-) {
-    val background = if (selected) PocketShellColors.AccentSoft else Color.Transparent
-    val tint = if (selected) PocketShellColors.Accent else PocketShellColors.TextMuted
-    Box(
-        modifier = Modifier
-            .size(24.dp)
-            .background(background, RoundedCornerShape(6.dp)),
-        contentAlignment = Alignment.Center,
-    ) {
-        glyph(tint)
-    }
-}
-
-@Composable
-private fun ListGlyph(color: Color) {
-    Canvas(modifier = Modifier.size(14.dp)) {
-        val stroke = 1.6.dp.toPx()
-        repeat(3) { row ->
-            val y = size.height * (0.22f + row * 0.28f)
-            drawLine(
-                color = color,
-                start = Offset(0f, y),
-                end = Offset(size.width, y),
-                strokeWidth = stroke,
-                cap = StrokeCap.Round,
-            )
-        }
-    }
-}
-
-@Composable
-private fun GridGlyph(color: Color) {
-    Canvas(modifier = Modifier.size(14.dp)) {
-        val cell = size.width * 0.4f
-        val gap = size.width * 0.2f
-        listOf(0f, cell + gap).forEach { x ->
-            listOf(0f, cell + gap).forEach { y ->
-                drawRoundRect(
-                    color = color,
-                    topLeft = Offset(x, y),
-                    size = androidx.compose.ui.geometry.Size(cell, cell),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(1.5.dp.toPx()),
-                    style = Stroke(width = 1.4.dp.toPx()),
-                )
-            }
         }
     }
 }
@@ -2261,5 +2127,3 @@ fun folderTreeRootLabelTag(path: String): String = "folder-list:tree-root:$path:
 fun folderTreeRootCountTag(path: String): String = "folder-list:tree-root:$path:count"
 fun folderTreeRootCreateTestTag(path: String): String = "folder-list:tree-root:$path:create"
 fun folderTreeRootActionsTestTag(path: String): String = "folder-list:tree-root:$path:actions"
-fun folderTreeRootViewToggleTag(path: String): String = "folder-list:tree-root:$path:view-toggle"
-fun folderTreeRootGridStubTag(path: String): String = "folder-list:tree-root:$path:grid-stub"

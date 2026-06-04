@@ -116,6 +116,7 @@ internal class ShareUploader(
                 when (item) {
                     is ShareableItem.UriItem -> uploadUri(live, item, remotePath)
                     is ShareableItem.TextItem -> uploadText(live, item, remotePath, remoteName)
+                    is ShareableItem.FileItem -> live.uploadFile(item.file, remotePath)
                 }
                 // Render the user-visible path with the `~/` prefix
                 // even though SFTP itself sees a home-relative path.
@@ -342,5 +343,19 @@ internal sealed interface ShareableItem {
         val text: String,
         override val displayName: String?,
         override val fallbackExtension: String? = "txt",
+    ) : ShareableItem
+
+    /**
+     * A local file on disk (no content provider). Used by the "Share all
+     * reports" action (issue #466), which packs the local crash/diagnostic
+     * reports into a single zip under the cache dir and uploads it via the
+     * same inbox path. The uploader streams it straight through
+     * [SshSession.uploadFile]; the caller deletes [file] once the upload
+     * completes.
+     */
+    data class FileItem(
+        val file: File,
+        override val displayName: String?,
+        override val fallbackExtension: String? = null,
     ) : ShareableItem
 }

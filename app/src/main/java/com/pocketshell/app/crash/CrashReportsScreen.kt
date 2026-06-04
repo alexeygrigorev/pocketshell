@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -24,38 +23,52 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.uikit.theme.PocketShellColors
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+
+private val DialogScrimColor = Color(0xCC000000)
+
+internal const val CRASH_REPORTS_SHARE_ALL_TAG = "crash:shareAll"
+internal const val CRASH_REPORTS_DELETE_ALL_TAG = "crash:deleteAll"
+internal const val CRASH_REPORTS_DELETE_ALL_CONFIRM_TAG = "crash:deleteAll:confirm"
 
 @Composable
 fun CrashReportsScreen(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val viewModel: CrashReportsViewModel = hiltViewModel()
     val context = LocalContext.current
-    val store = remember(context) { CrashReporter.store(context) }
-    var reports by remember { mutableStateOf(store.list()) }
-    var selected by remember(reports) { mutableStateOf(reports.firstOrNull()) }
-    var selectedBody by remember(selected) {
-        mutableStateOf(selected?.let { store.read(it) }.orEmpty())
-    }
+    val reports by viewModel.reports.collectAsStateWithLifecycle()
+    val shareAllState by viewModel.shareAllState.collectAsStateWithLifecycle()
 
-    fun reload() {
-        reports = store.list()
-    }
+    var selectedId by remember(reports) { mutableStateOf(reports.firstOrNull()?.id) }
+    val selected = reports.firstOrNull { it.id == selectedId } ?: reports.firstOrNull()
+    val selectedBody = remember(selected) { selected?.let { viewModel.read(it) }.orEmpty() }
+    var confirmDeleteAll by remember { mutableStateOf(false) }
+
+    // Re-list whenever the screen is (re)composed onto the back stack so a
+    // crash that happened mid-session shows up without a manual refresh.
+    LaunchedEffect(Unit) { viewModel.reload() }
 
     fun shareSelected() {
         val body = selectedBody.takeIf { it.isNotBlank() } ?: return
@@ -74,46 +87,248 @@ fun CrashReportsScreen(
     ) {
         CrashReportsAppBar(onBack = onBack)
 
+        BulkActionsBar(
+            reportCount = reports.size,
+            shareAllState = shareAllState,
+            onShareAll = { viewModel.shareAll() },
+            onDeleteAll = { confirmDeleteAll = true },
+        )
+
         if (reports.isEmpty()) {
             EmptyCrashReports(modifier = Modifier.weight(1f))
-            return@Column
-        }
-
-        LazyColumn(
-            modifier = Modifier.weight(1f),
-            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            item {
-                Text(
-                    text = "Reports are stored only on this device. Sharing opens Android's chooser.",
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 12.sp,
-                )
-            }
-
-            items(reports, key = { it.id }) { report ->
-                CrashReportRow(
-                    report = report,
-                    selected = report.id == selected?.id,
-                    onClick = { selected = report },
-                )
-            }
-
-            item {
-                selected?.let { report ->
-                    CrashReportDetail(
-                        report = report,
-                        body = selectedBody,
-                        onShare = ::shareSelected,
-                        onDelete = {
-                            store.delete(report)
-                            selectedBody = ""
-                            reload()
-                        },
+        } else {
+            LazyColumn(
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                item {
+                    Text(
+                        text = "Reports are stored only on this device. " +
+                            "\"Share all\" zips every report and uploads it to " +
+                            "~/inbox/pocketshell/ on a host.",
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 12.sp,
                     )
                 }
+
+                items(reports, key = { it.id }) { report ->
+                    CrashReportRow(
+                        report = report,
+                        selected = report.id == selected?.id,
+                        onClick = { selectedId = report.id },
+                    )
+                }
+
+                item {
+                    selected?.let { report ->
+                        CrashReportDetail(
+                            report = report,
+                            body = selectedBody,
+                            onShare = ::shareSelected,
+                            onDelete = { viewModel.deleteOne(report) },
+                        )
+                    }
+                }
             }
+        }
+    }
+
+    when (val state = shareAllState) {
+        is ShareAllState.PickingHost -> HostPickerDialog(
+            hosts = state.hosts,
+            onPick = { viewModel.shareAllTo(it) },
+            onDismiss = { viewModel.clearShareAllState() },
+        )
+        is ShareAllState.Success -> ShareAllResultDialog(
+            title = "Reports shared",
+            message = "${state.reportCount} report(s) uploaded to ${state.hostName}:\n" +
+                state.remotePath,
+            onDismiss = { viewModel.clearShareAllState() },
+        )
+        is ShareAllState.Failed -> ShareAllResultDialog(
+            title = "Share failed",
+            message = "${state.message}\n\nReports were kept on this device.",
+            onDismiss = { viewModel.clearShareAllState() },
+        )
+        else -> Unit
+    }
+
+    if (confirmDeleteAll) {
+        ConfirmDeleteAllDialog(
+            count = reports.size,
+            onConfirm = {
+                viewModel.deleteAll()
+                confirmDeleteAll = false
+            },
+            onDismiss = { confirmDeleteAll = false },
+        )
+    }
+}
+
+@Composable
+private fun BulkActionsBar(
+    reportCount: Int,
+    shareAllState: ShareAllState,
+    onShareAll: () -> Unit,
+    onDeleteAll: () -> Unit,
+) {
+    val uploading = shareAllState is ShareAllState.Uploading
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Background)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val label = when {
+            uploading -> "Sharing…"
+            else -> "Share all ($reportCount)"
+        }
+        ActionButton(
+            label = label,
+            onClick = onShareAll,
+            enabled = reportCount > 0 && !uploading,
+            modifier = Modifier.testTag(CRASH_REPORTS_SHARE_ALL_TAG),
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        ActionButton(
+            label = "Delete all",
+            onClick = onDeleteAll,
+            enabled = reportCount > 0 && !uploading,
+            modifier = Modifier.testTag(CRASH_REPORTS_DELETE_ALL_TAG),
+        )
+        Spacer(modifier = Modifier.weight(1f))
+        Text(
+            text = "$reportCount report(s)",
+            color = PocketShellColors.TextMuted,
+            fontSize = 12.sp,
+        )
+    }
+}
+
+@Composable
+private fun HostPickerDialog(
+    hosts: List<HostEntity>,
+    onPick: (HostEntity) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    DialogScrim(onDismiss = onDismiss) {
+        Text(
+            text = "Share reports to which host?",
+            color = PocketShellColors.Text,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(modifier = Modifier.height(12.dp))
+        hosts.forEach { host ->
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp)
+                    .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
+                    .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
+                    .clickable(role = Role.Button) { onPick(host) }
+                    .padding(horizontal = 12.dp, vertical = 12.dp),
+            ) {
+                Text(
+                    text = host.name,
+                    color = PocketShellColors.Text,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(12.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            AppBarTextButton(label = "Cancel", onClick = onDismiss)
+        }
+    }
+}
+
+@Composable
+private fun ShareAllResultDialog(
+    title: String,
+    message: String,
+    onDismiss: () -> Unit,
+) {
+    DialogScrim(onDismiss = onDismiss) {
+        Text(
+            text = title,
+            color = PocketShellColors.Text,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        Text(
+            text = message,
+            color = PocketShellColors.TextSecondary,
+            fontSize = 13.sp,
+            fontFamily = FontFamily.Monospace,
+        )
+        Spacer(modifier = Modifier.height(14.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            ActionButton(label = "OK", onClick = onDismiss, enabled = true)
+        }
+    }
+}
+
+@Composable
+private fun ConfirmDeleteAllDialog(
+    count: Int,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    DialogScrim(onDismiss = onDismiss) {
+        Text(
+            text = "Delete all reports?",
+            color = PocketShellColors.Text,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(modifier = Modifier.height(10.dp))
+        Text(
+            text = "This permanently removes $count report(s) from this device. " +
+                "Share them first if you want to keep a copy.",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 13.sp,
+        )
+        Spacer(modifier = Modifier.height(14.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            AppBarTextButton(label = "Cancel", onClick = onDismiss)
+            Spacer(modifier = Modifier.width(8.dp))
+            ActionButton(
+                label = "Delete all",
+                onClick = onConfirm,
+                enabled = true,
+                modifier = Modifier.testTag(CRASH_REPORTS_DELETE_ALL_CONFIRM_TAG),
+            )
+        }
+    }
+}
+
+@Composable
+private fun DialogScrim(
+    onDismiss: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(DialogScrimColor)
+            .clickable(role = Role.Button, onClick = onDismiss),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth(0.9f)
+                .background(PocketShellColors.SurfaceElev, RoundedCornerShape(12.dp))
+                .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
+                // Swallow clicks on the card so they don't dismiss the dialog.
+                .clickable(enabled = false) {}
+                .padding(16.dp),
+        ) {
+            content()
         }
     }
 }
@@ -199,9 +414,9 @@ private fun CrashReportDetail(
                     fontSize = 11.sp,
                 )
             }
-            ActionButton(label = "Share", onClick = onShare)
+            ActionButton(label = "Share", onClick = onShare, enabled = true)
             Spacer(modifier = Modifier.width(8.dp))
-            ActionButton(label = "Delete", onClick = onDelete)
+            ActionButton(label = "Delete", onClick = onDelete, enabled = true)
         }
 
         Spacer(modifier = Modifier.height(10.dp))
@@ -264,12 +479,18 @@ private fun AppBarTextButton(label: String, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ActionButton(label: String, onClick: () -> Unit) {
+private fun ActionButton(
+    label: String,
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val background = if (enabled) PocketShellColors.Accent else PocketShellColors.BorderSoft
     Box(
-        modifier = Modifier
+        modifier = modifier
             .height(36.dp)
-            .background(PocketShellColors.Accent, RoundedCornerShape(8.dp))
-            .clickable(role = Role.Button, onClick = onClick)
+            .background(background, RoundedCornerShape(8.dp))
+            .clickable(role = Role.Button, enabled = enabled, onClick = onClick)
             .padding(horizontal = 12.dp),
         contentAlignment = Alignment.Center,
     ) {

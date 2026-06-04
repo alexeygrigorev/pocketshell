@@ -322,6 +322,12 @@ public class TmuxSessionViewModel @Inject constructor(
     private var controlClientSizeGeneration: Long = 0L
     private var windowSizePolicyAppliedForAttach: Boolean = false
     private val agentRepository: AgentConversationRepository = AgentConversationRepository()
+    // Issue #495: remember which tmux windows are agent windows (and which
+    // agent + the user's last tab choice) keyed by stable
+    // host/session/window identity, so a reconnect restores the
+    // Conversation tab immediately instead of bouncing the user to Terminal
+    // while live re-detection round-trips. See [AgentSessionMemory].
+    private val agentSessionMemory: AgentSessionMemory = AgentSessionMemory()
     private val paneAgentJobs: MutableMap<String, Job> = ConcurrentHashMap()
     private val paneAgentTailGenerations: MutableMap<String, Long> = ConcurrentHashMap()
     private val nextAgentTailGeneration: AtomicInteger = AtomicInteger(0)
@@ -2950,6 +2956,13 @@ public class TmuxSessionViewModel @Inject constructor(
                 ).also { newRows += it }
             }
             nextById[p.paneId] = row
+            // Issue #495: before live detection round-trips, seed the
+            // window's remembered agent status so a reconnect restores the
+            // Conversation tab immediately (and re-selects it if the user
+            // was on Conversation). The seed reads windowId off the
+            // freshly-built `row` directly, so it does not depend on
+            // paneRows being repopulated yet.
+            seedAgentConversationFromMemory(row)
             startAgentDetectionForPane(row, refreshGuard)
         }
         if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return emptyList()
@@ -3361,6 +3374,84 @@ public class TmuxSessionViewModel @Inject constructor(
             .firstOrNull()
     }
 
+    /**
+     * Issue #495: persist the current agent verdict + tab choice for the
+     * pane's window into [agentSessionMemory], keyed by stable
+     * host/session/window identity. Called whenever a pane's conversation
+     * state lands a detection or the user flips its tab, so a later
+     * reconnect can seed the window immediately. No-op when there is no
+     * detection (nothing worth remembering) or the window/target identity
+     * is not yet known.
+     */
+    private fun rememberAgentStatusForPane(paneId: String) {
+        val target = activeTarget ?: return
+        val windowId = paneRows[paneId]?.windowId ?: return
+        if (windowId.isBlank()) return
+        val state = _agentConversations.value[paneId] ?: return
+        val detection = state.detection ?: return
+        agentSessionMemory.remember(
+            hostId = target.hostId,
+            sessionName = target.sessionName,
+            windowId = windowId,
+            detection = detection,
+            wasOnConversation = state.selectedTab == SessionTab.Conversation,
+        )
+    }
+
+    /**
+     * Issue #495: drop the remembered agent status for the pane's window
+     * after live detection has confirmed the window no longer hosts an
+     * agent (the agent exited). Reconcile, don't trust forever — this stops
+     * a phantom Conversation tab from reappearing on a later reconnect.
+     */
+    private fun forgetAgentStatusForPane(paneId: String) {
+        val target = activeTarget ?: return
+        val windowId = paneRows[paneId]?.windowId ?: return
+        if (windowId.isBlank()) return
+        agentSessionMemory.forget(
+            hostId = target.hostId,
+            sessionName = target.sessionName,
+            windowId = windowId,
+        )
+    }
+
+    /**
+     * Issue #495: seed [_agentConversations] for a freshly-created pane from
+     * the remembered agent status for its window, so the Conversation tab is
+     * available — and, if the user was on it before the reconnect,
+     * re-selected — immediately on reattach, before live re-detection
+     * completes its SSH round-trip. Live detection
+     * ([startAgentDetectionForPane]) then confirms/refines this seed and
+     * [clearAgentDetectionForPane] reconciles it away if the agent has
+     * actually exited.
+     *
+     * Only seeds when there is no existing conversation row for the pane
+     * (a fresh attach), so it never clobbers live state mid-session.
+     */
+    private fun seedAgentConversationFromMemory(pane: TmuxPaneState) {
+        val target = activeTarget ?: return
+        if (pane.windowId.isBlank()) return
+        if (_agentConversations.value.containsKey(pane.paneId)) return
+        val remembered = agentSessionMemory.recall(
+            hostId = target.hostId,
+            sessionName = target.sessionName,
+            windowId = pane.windowId,
+        ) ?: return
+        setAgentConversation(
+            pane.paneId,
+            AgentConversationUiState(
+                detection = remembered.detection,
+                events = emptyList(),
+                selectedTab = if (remembered.wasOnConversation) {
+                    SessionTab.Conversation
+                } else {
+                    SessionTab.Terminal
+                },
+                syncStatus = AgentConversationSyncStatus.Live,
+            ),
+        )
+    }
+
     private fun startAgentDetectionForPane(
         pane: TmuxPaneState,
         refreshGuard: RuntimeRefreshGuard? = null,
@@ -3431,6 +3522,12 @@ public class TmuxSessionViewModel @Inject constructor(
      * [_agentConversations].
      */
     private fun clearAgentDetectionForPane(paneId: String) {
+        // Issue #495: live detection says this window no longer hosts an
+        // agent (the user exited Claude/Codex/OpenCode). Reconcile the
+        // remembered status so a later reconnect does not resurrect a
+        // phantom Conversation tab. Forget BEFORE dropping the row so the
+        // window lookup still resolves.
+        forgetAgentStatusForPane(paneId)
         updateAgentConversation(paneId) { current ->
             if (current.detection == null) current else null
         }
@@ -3684,6 +3781,9 @@ public class TmuxSessionViewModel @Inject constructor(
                 current.copy(selectedTab = tab)
             }
         }
+        // Issue #495: remember the tab choice keyed by window so a reconnect
+        // puts the user back on whichever tab they were on.
+        rememberAgentStatusForPane(paneId)
     }
 
     /**
@@ -3831,6 +3931,19 @@ public class TmuxSessionViewModel @Inject constructor(
                     syncStatus = AgentConversationSyncStatus.Live,
                 )
                 current.detection != detection && preserveDifferentDetection -> current
+                // Issue #495: when live detection refines the SAME agent on
+                // the SAME log for this window (only confidence/sessionId
+                // drifted — e.g. a seeded reconnect verdict promoted from
+                // RecentFile to ProcessConfirmed), keep the user's selected
+                // tab. The previous unconditional reset-to-Terminal here
+                // bounced a user who was in Conversation back to Terminal on
+                // every reconnect, which is the bug this issue fixes.
+                current.detection != detection && sameAgentSource(current.detection, detection) ->
+                    current.copy(
+                        detection = detection,
+                        events = boundedDistinctEvents(current.events + initialEvents),
+                        syncStatus = AgentConversationSyncStatus.Live,
+                    )
                 current.detection != detection -> AgentConversationUiState(
                     detection = detection,
                     events = boundedDistinctEvents(initialEvents),
@@ -3844,7 +3957,21 @@ public class TmuxSessionViewModel @Inject constructor(
             }
             if (updated == current) conversations else conversations + (paneId to updated)
         }
+        rememberAgentStatusForPane(paneId)
     }
+
+    /**
+     * Issue #495: two detections describe the same live agent session when
+     * the agent kind and the log source path match. Confidence and
+     * sessionId can drift between a seeded reconnect verdict and the live
+     * re-detection without meaning "a different agent" — treating that as a
+     * new agent would discard the user's tab choice.
+     */
+    private fun sameAgentSource(left: AgentDetection?, right: AgentDetection?): Boolean =
+        left != null &&
+            right != null &&
+            left.agent == right.agent &&
+            left.sourcePath == right.sourcePath
 
     private fun setAgentConversation(paneId: String, state: AgentConversationUiState) {
         _agentConversations.update { it + (paneId to state) }
@@ -3956,6 +4083,20 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     internal fun clearAgentDetectionForPaneForTest(paneId: String) {
         clearAgentDetectionForPane(paneId)
+    }
+
+    /**
+     * Issue #495 test seam: drive the live-detection landing path
+     * ([markAgentTailLive]) so tests can assert that a same-agent refinement
+     * preserves the user's selected tab (and remembers the window status)
+     * without standing up the SSH/JSONL detection round-trip.
+     */
+    internal fun markAgentTailLiveForTest(
+        paneId: String,
+        detection: AgentDetection,
+        initialEvents: List<ConversationEvent> = emptyList(),
+    ) {
+        markAgentTailLive(paneId, detection, initialEvents)
     }
 
     /**

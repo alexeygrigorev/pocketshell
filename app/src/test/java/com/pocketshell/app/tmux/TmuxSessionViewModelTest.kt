@@ -2357,6 +2357,177 @@ class TmuxSessionViewModelTest {
         assertEquals(before, vm.agentConversations.value)
     }
 
+    // ─── Issue #495: remember agent sessions across reconnect ─────────
+
+    /**
+     * Connects the VM to a stable host/session and applies a single pane in
+     * window @0, so reconnect simulations can re-apply panes under the same
+     * window with a rotated pane id.
+     */
+    private fun TmuxSessionViewModel.connectWithPaneForTest(
+        paneId: String,
+        windowId: String = "@0",
+        sessionName: String = "work",
+    ) {
+        replaceClientForTest(
+            hostId = 42L,
+            hostName = "docker",
+            host = "10.0.2.2",
+            port = 2222,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = sessionName,
+            client = FakeTmuxClient(),
+        )
+        applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    paneId,
+                    windowId,
+                    "$0",
+                    "shell",
+                    paneIndex = 0,
+                    sessionName = sessionName,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun agentSessionRememberedAndRestoredImmediatelyAfterReconnect() = runTest {
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        // The user opens Conversation — this remembers the window's status.
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        runCurrent()
+
+        // Reconnect: tmux re-attach assigns a NEW pane id under the SAME
+        // window. The old pane row is gone; nothing is seeded by the live
+        // detection round-trip yet.
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%7", "@0", "$0", "shell", paneIndex = 0, sessionName = "work")),
+        )
+        runCurrent()
+
+        // Conversation tab is available immediately on the new pane id,
+        // without waiting for live re-detection.
+        assertNull("old pane id is gone after reattach", vm.agentConversations.value["%0"])
+        val restored = vm.agentConversations.value["%7"]
+        assertNotNull("agent status restored immediately on the new pane", restored)
+        assertEquals(AgentKind.ClaudeCode, restored!!.detection?.agent)
+        assertEquals(
+            "the Conversation tab is gated on agentForWindow being non-null",
+            AgentKind.ClaudeCode,
+            vm.agentForWindow("@0"),
+        )
+    }
+
+    @Test
+    fun reconnectReselectsConversationWhenUserWasOnConversation() = runTest {
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        runCurrent()
+
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%7", "@0", "$0", "shell", paneIndex = 0, sessionName = "work")),
+        )
+        runCurrent()
+
+        assertEquals(
+            "user who was in Conversation stays on Conversation after reconnect",
+            SessionTab.Conversation,
+            vm.agentConversations.value["%7"]!!.selectedTab,
+        )
+    }
+
+    @Test
+    fun reconnectKeepsTerminalWhenUserWasOnTerminal() = runTest {
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        // User saw the agent but stayed on Terminal — remember Terminal.
+        vm.selectSessionTab("%0", SessionTab.Terminal)
+        runCurrent()
+
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%7", "@0", "$0", "shell", paneIndex = 0, sessionName = "work")),
+        )
+        runCurrent()
+
+        val restored = vm.agentConversations.value["%7"]!!
+        assertEquals(AgentKind.ClaudeCode, restored.detection?.agent)
+        assertEquals(
+            "Conversation tab available but Terminal stays selected",
+            SessionTab.Terminal,
+            restored.selectedTab,
+        )
+    }
+
+    @Test
+    fun reconnectDoesNotResurrectAgentThatExited() = runTest {
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        runCurrent()
+
+        // Live detection reports the window no longer hosts an agent (the
+        // user exited Claude). This reconciles the remembered status.
+        vm.clearAgentDetectionForPaneForTest("%0")
+        runCurrent()
+
+        // Reconnect: the same window must NOT light up a phantom
+        // Conversation tab.
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%7", "@0", "$0", "shell", paneIndex = 0, sessionName = "work")),
+        )
+        runCurrent()
+
+        assertNull(
+            "an exited agent must not be restored on reconnect",
+            vm.agentConversations.value["%7"],
+        )
+        assertNull("no Conversation tab for the exited agent's window", vm.agentForWindow("@0"))
+    }
+
+    @Test
+    fun liveDetectionRefiningSameAgentKeepsRestoredConversationTab() = runTest {
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        runCurrent()
+
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%7", "@0", "$0", "shell", paneIndex = 0, sessionName = "work")),
+        )
+        runCurrent()
+        // Seed restored Conversation.
+        assertEquals(SessionTab.Conversation, vm.agentConversations.value["%7"]!!.selectedTab)
+
+        // Live re-detection lands for the SAME agent + same log but with a
+        // drifted confidence. The user must NOT be bounced to Terminal.
+        vm.markAgentTailLiveForTest(
+            "%7",
+            newClaudeDetection().copy(confidence = AgentDetection.Confidence.RecentFile),
+        )
+        runCurrent()
+
+        val state = vm.agentConversations.value["%7"]!!
+        assertEquals(
+            "same-agent refinement preserves the user's Conversation tab",
+            SessionTab.Conversation,
+            state.selectedTab,
+        )
+        assertEquals(
+            AgentDetection.Confidence.RecentFile,
+            state.detection?.confidence,
+        )
+    }
+
     @Test
     fun sendToAgentPaneAppendsOptimisticMessageAndWritesCarriageReturn() = runTest {
         val vm = newVm()

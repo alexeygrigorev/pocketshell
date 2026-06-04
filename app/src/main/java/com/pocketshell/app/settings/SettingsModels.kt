@@ -27,6 +27,13 @@ enum class HostDetailViewMode {
  *   exposes integer steps so callers can pass it directly into Compose
  *   `.sp` (which takes a `Float`). Range: [MIN_TERMINAL_FONT_SP] to
  *   [MAX_TERMINAL_FONT_SP].
+ * @property conversationFontSizeSp user-preferred conversation message-body
+ *   text size in scale-independent pixels. Issue #496. Mirrors
+ *   [terminalFontSizeSp] but scales the agent-conversation turns instead of
+ *   the raw terminal. Defaults to [DEFAULT_CONVERSATION_FONT_SP] — the
+ *   compact `bodyDense` (13sp, #493) rung — so a fresh install renders
+ *   exactly as before; the Settings slider lets the user bump it up or
+ *   down. Range: [MIN_CONVERSATION_FONT_SP] to [MAX_CONVERSATION_FONT_SP].
  * @property tmuxOnAttachByDefault when true, the host picker bootstrap
  *   prefers to attach via tmux when the remote has it installed. When
  *   false, the bootstrap defaults to plain SSH even on hosts where tmux
@@ -52,6 +59,7 @@ enum class HostDetailViewMode {
  */
 data class AppSettings(
     val terminalFontSizeSp: Float = DEFAULT_TERMINAL_FONT_SP,
+    val conversationFontSizeSp: Float = DEFAULT_CONVERSATION_FONT_SP,
     val tmuxOnAttachByDefault: Boolean = true,
     val defaultHostId: Long? = null,
     val voiceLanguage: String = VOICE_LANGUAGE_AUTO,
@@ -74,6 +82,21 @@ data class AppSettings(
         const val MAX_TERMINAL_FONT_SP: Float = 22f
         const val DEFAULT_TERMINAL_FONT_SP: Float = 14f
         const val FONT_STEP_SP: Float = 1f
+
+        /**
+         * Issue #496: bounds for the Settings → conversation font-size
+         * slider. The default matches the compact `bodyDense` rung
+         * (13sp, #493) so a fresh install renders the agent conversation
+         * exactly as it did before this setting existed. The lower bound
+         * (11sp) keeps the text legible without breaking the dense-row
+         * layout; the upper bound (22sp) matches the terminal slider's
+         * ceiling so neither control lets the user push text so large the
+         * turn layout falls apart. The same [FONT_STEP_SP] 1sp grain is
+         * reused, so the slider snaps to whole sp like the terminal one.
+         */
+        const val MIN_CONVERSATION_FONT_SP: Float = 11f
+        const val MAX_CONVERSATION_FONT_SP: Float = 22f
+        const val DEFAULT_CONVERSATION_FONT_SP: Float = 13f
 
         /**
          * Sentinel value for "no language hint" — Whisper auto-detects

@@ -136,6 +136,13 @@ class SettingsViewModelTest {
     }
 
     @Test
+    fun `setConversationFontSizeSp flows through to repository`() {
+        val vm = newVm()
+        vm.setConversationFontSizeSp(18f)
+        assertEquals(18f, repo.settings.value.conversationFontSizeSp, 0f)
+    }
+
+    @Test
     fun `setTmuxOnAttachByDefault flows through to repository`() {
         val vm = newVm()
         vm.setTmuxOnAttachByDefault(false)

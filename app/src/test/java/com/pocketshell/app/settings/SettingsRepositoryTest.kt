@@ -41,6 +41,10 @@ class SettingsRepositoryTest {
         val repo = SettingsRepository(context)
         val snap = repo.settings.first()
         assertEquals(AppSettings.DEFAULT_TERMINAL_FONT_SP, snap.terminalFontSizeSp, 0f)
+        // Issue #496: the conversation font defaults to the compact
+        // bodyDense rung (13sp) so a fresh install renders unchanged.
+        assertEquals(AppSettings.DEFAULT_CONVERSATION_FONT_SP, snap.conversationFontSizeSp, 0f)
+        assertEquals(13f, AppSettings.DEFAULT_CONVERSATION_FONT_SP, 0f)
         assertTrue(snap.tmuxOnAttachByDefault)
         assertEquals(AppSettings.VOICE_LANGUAGE_AUTO, snap.voiceLanguage)
         assertEquals(
@@ -75,6 +79,65 @@ class SettingsRepositoryTest {
         assertEquals(
             AppSettings.MAX_TERMINAL_FONT_SP,
             repo.settings.value.terminalFontSizeSp,
+            0f,
+        )
+    }
+
+    // -- Issue #496: conversation font size -------------------------------
+
+    @Test
+    fun `setConversationFontSize persists and round-trips`() {
+        val repo = SettingsRepository(context)
+        repo.setConversationFontSizeSp(18f)
+        assertEquals(18f, repo.settings.value.conversationFontSizeSp, 0f)
+        // A fresh repository instance reads the persisted value back.
+        assertEquals(18f, SettingsRepository(context).settings.value.conversationFontSizeSp, 0f)
+    }
+
+    @Test
+    fun `setConversationFontSize clamps below minimum`() {
+        val repo = SettingsRepository(context)
+        repo.setConversationFontSizeSp(2f)
+        assertEquals(
+            AppSettings.MIN_CONVERSATION_FONT_SP,
+            repo.settings.value.conversationFontSizeSp,
+            0f,
+        )
+    }
+
+    @Test
+    fun `setConversationFontSize clamps above maximum`() {
+        val repo = SettingsRepository(context)
+        repo.setConversationFontSizeSp(99f)
+        assertEquals(
+            AppSettings.MAX_CONVERSATION_FONT_SP,
+            repo.settings.value.conversationFontSizeSp,
+            0f,
+        )
+    }
+
+    @Test
+    fun `conversation font wrong-typed prefs blob falls back to default`() {
+        context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+            .edit()
+            .putString("conversation_font_sp", "huge")
+            .commit()
+
+        val snap = SettingsRepository(context).settings.value
+        assertEquals(AppSettings.DEFAULT_CONVERSATION_FONT_SP, snap.conversationFontSizeSp, 0f)
+    }
+
+    @Test
+    fun `legacy out-of-range conversation font blob is clamped on read`() {
+        context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+            .edit()
+            .putFloat("conversation_font_sp", 99f)
+            .commit()
+
+        val snap = SettingsRepository(context).settings.value
+        assertEquals(
+            AppSettings.MAX_CONVERSATION_FONT_SP,
+            snap.conversationFontSizeSp,
             0f,
         )
     }

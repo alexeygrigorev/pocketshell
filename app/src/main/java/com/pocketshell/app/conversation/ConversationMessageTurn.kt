@@ -12,7 +12,9 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -138,21 +140,49 @@ internal fun ConversationMessageTurn(
             // leading is what made the line spacing feel too large. The
             // monospace family is kept for the terminal-flavored turn look;
             // only the size and line height come from `bodyDense`.
+            //
+            // Issue #496: the user can scale the conversation body via
+            // Settings → Terminal → "Conversation font size". The chosen
+            // size flows in through [LocalConversationFontSizeSp]; the base
+            // bodyDense line-height is scaled by the same ratio so the
+            // ~1.35× leading is preserved at every size. The local defaults
+            // to the bodyDense size (13sp), so an app that never provides it
+            // — and the default-config user — renders exactly as before.
+            val baseFontSize = PocketShellType.bodyDense.fontSize
+            val baseLineHeight = PocketShellType.bodyDense.lineHeight
+            val targetFontSp = LocalConversationFontSizeSp.current
+            val scale = if (baseFontSize.value > 0f) targetFontSp / baseFontSize.value else 1f
+            val scaledLineHeight = (baseLineHeight.value * scale).sp
             CompositionLocalProvider(
                 LocalTextStyle provides LocalTextStyle.current.merge(
-                    TextStyle(lineHeight = PocketShellType.bodyDense.lineHeight),
+                    TextStyle(lineHeight = scaledLineHeight),
                 ),
             ) {
                 MarkdownText(
                     text = event.text,
                     color = PocketShellColors.Text,
-                    fontSize = PocketShellType.bodyDense.fontSize,
+                    fontSize = targetFontSp.sp,
                     fontFamily = FontFamily.Monospace,
                 )
             }
         }
     }
 }
+
+/**
+ * Issue #496: the conversation message-body font size in scale-independent
+ * pixels, supplied from the app root (which observes the persisted
+ * `AppSettings.conversationFontSizeSp`). [ConversationMessageTurn] reads this
+ * to scale the agent-conversation body text up or down.
+ *
+ * The default is the compact `bodyDense` rung (13sp, #493), so any composition
+ * that does NOT provide it — including the density screenshot tests — renders
+ * exactly as it did before this setting existed. The provider lives at the
+ * activity root so both the plain-SSH and tmux session screens pick up the
+ * same value without each having to thread it through.
+ */
+internal val LocalConversationFontSizeSp: ProvidableCompositionLocal<Float> =
+    staticCompositionLocalOf { PocketShellType.bodyDense.fontSize.value }
 
 /**
  * Issue #474: test tag prefix for the per-message timestamp label so

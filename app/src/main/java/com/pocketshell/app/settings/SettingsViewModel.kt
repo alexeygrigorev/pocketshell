@@ -139,6 +139,10 @@ class SettingsViewModel @Inject constructor(
 
     fun setTerminalFontSizeSp(sizeSp: Float) = repository.setTerminalFontSizeSp(sizeSp)
 
+    /** Issue #496: persist the conversation message-body font size (sp). */
+    fun setConversationFontSizeSp(sizeSp: Float) =
+        repository.setConversationFontSizeSp(sizeSp)
+
     fun setTmuxOnAttachByDefault(enabled: Boolean) =
         repository.setTmuxOnAttachByDefault(enabled)
 

@@ -57,6 +57,23 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(terminalFontSizeSp = clamped)
     }
 
+    /**
+     * Persist the user's preferred conversation message-body font size.
+     * Issue #496. Clamped to [AppSettings.MIN_CONVERSATION_FONT_SP] /
+     * [AppSettings.MAX_CONVERSATION_FONT_SP] so a hand-edited prefs file
+     * or a slider rounding error can't push the conversation text below a
+     * legible floor or above a size that breaks the dense-turn layout.
+     */
+    fun setConversationFontSizeSp(sizeSp: Float) {
+        val clamped = sizeSp.coerceIn(
+            AppSettings.MIN_CONVERSATION_FONT_SP,
+            AppSettings.MAX_CONVERSATION_FONT_SP,
+        )
+        if (_settings.value.conversationFontSizeSp == clamped) return
+        prefs.edit().putFloat(KEY_CONVERSATION_FONT_SP, clamped).apply()
+        _settings.value = _settings.value.copy(conversationFontSizeSp = clamped)
+    }
+
     fun setTmuxOnAttachByDefault(enabled: Boolean) {
         if (_settings.value.tmuxOnAttachByDefault == enabled) return
         prefs.edit().putBoolean(KEY_TMUX_ON_ATTACH, enabled).apply()
@@ -147,6 +164,13 @@ class SettingsRepository @Inject constructor(
     private fun readSnapshot(): AppSettings {
         val font = prefs.safeFloat(KEY_TERMINAL_FONT_SP, AppSettings.DEFAULT_TERMINAL_FONT_SP)
             .coerceIn(AppSettings.MIN_TERMINAL_FONT_SP, AppSettings.MAX_TERMINAL_FONT_SP)
+        val conversationFont = prefs.safeFloat(
+            KEY_CONVERSATION_FONT_SP,
+            AppSettings.DEFAULT_CONVERSATION_FONT_SP,
+        ).coerceIn(
+            AppSettings.MIN_CONVERSATION_FONT_SP,
+            AppSettings.MAX_CONVERSATION_FONT_SP,
+        )
         val tmux = prefs.safeBoolean(KEY_TMUX_ON_ATTACH, true)
         val language = prefs.safeString(KEY_VOICE_LANGUAGE, AppSettings.VOICE_LANGUAGE_AUTO)
             ?.trim()
@@ -180,6 +204,7 @@ class SettingsRepository @Inject constructor(
         )
         return AppSettings(
             terminalFontSizeSp = font,
+            conversationFontSizeSp = conversationFont,
             tmuxOnAttachByDefault = tmux,
             defaultHostId = defaultHostId,
             voiceLanguage = language,
@@ -249,6 +274,7 @@ class SettingsRepository @Inject constructor(
     private companion object {
         const val PREFS_NAME = "app_settings"
         const val KEY_TERMINAL_FONT_SP = "terminal_font_sp"
+        const val KEY_CONVERSATION_FONT_SP = "conversation_font_sp"
         const val KEY_TMUX_ON_ATTACH = "tmux_on_attach_default"
         const val KEY_DEFAULT_HOST_ID = "default_host_id"
         const val KEY_VOICE_LANGUAGE = "voice_language"

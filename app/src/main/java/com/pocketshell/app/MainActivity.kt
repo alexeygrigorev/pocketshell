@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -36,6 +37,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.launch
+import com.pocketshell.app.conversation.LocalConversationFontSizeSp
 import com.pocketshell.app.costs.CostsScreen
 import com.pocketshell.app.crash.CrashReportsScreen
 import com.pocketshell.app.hosts.AddEditHostScreen
@@ -320,6 +322,14 @@ class MainActivity : FragmentActivity() {
         StartupTiming.mark("main-set-content-called")
         setContent {
             val settings by settingsRepository.settings.collectAsState()
+            // Issue #496: publish the user's conversation font size to the
+            // whole composition so the agent-conversation turns
+            // (ConversationMessageTurn) scale their body text. Provided once
+            // at the root so both the plain-SSH and tmux session screens
+            // observe the same value.
+            CompositionLocalProvider(
+                LocalConversationFontSizeSp provides settings.conversationFontSizeSp,
+            ) {
             PocketShellTheme {
                 Surface(
                     modifier = Modifier
@@ -363,6 +373,7 @@ class MainActivity : FragmentActivity() {
                         restoredTmuxDestination = restoredTmuxDestination,
                     )
                 }
+            }
             }
         }
         maybeRequestNotificationPermission()

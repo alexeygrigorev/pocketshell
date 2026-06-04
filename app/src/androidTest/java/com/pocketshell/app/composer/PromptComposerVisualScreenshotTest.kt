@@ -12,7 +12,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.core.view.WindowCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -30,15 +32,16 @@ class PromptComposerVisualScreenshotTest {
     val compose = createAndroidComposeRule<ComponentActivity>()
 
     @Test
-    fun capturesRecordingAndTranscribingStates() {
-        // Issue #195: the visual `Recording` state now splits into two
-        // sub-states (pre-speech "LISTENING" + idle waveform, then
-        // post-speech "CAPTURING" + active waveform). Capture both so
-        // the walkthrough screenshot strip reflects what the user sees end
-        // to end during a single dictation.
+    fun capturesAllFourComposerStates() {
+        // Issue #453: capture the four redesigned composer states matching
+        // the maintainer's `issue-453-composer-states-mockup.png`:
+        //  1. Idle — empty input "Compose prompt…", 📎/{} + mic + Send.
+        //  2. Recording — waveform + mm:ss timer + Stop; Auto-send + red stop.
+        //  3. Transcribing — "Transcribing…" spinner + Cancel + Auto-send.
+        //  4. Text-inserted — transcript fills the editable input + Send.
         var state by mutableStateOf(
             PromptComposerViewModel.UiState(
-                draft = "check the deploy log and tell me what failed",
+                draft = "",
                 recording = PromptComposerViewModel.RecordingState.Idle,
                 amplitude = 0f,
                 hasDetectedSpeech = false,
@@ -46,56 +49,43 @@ class PromptComposerVisualScreenshotTest {
         )
         renderComposer { state }
 
-        // Issue #153 fix 1: capture the idle "composer-draft" state too
-        // so the walkthrough visual pass has authoritative evidence the
-        // idle waveform's subtle pulse is rendering. The
-        // [WalkthroughVisualScreenshotTest] also produces a
-        // `05-composer-draft.png` from inside the real app journey; this
-        // lab-render variant under `05b-` lets the reviewer compare the
-        // two surfaces without standing up the whole emulator + SSH
-        // journey.
+        // Warm-up: force one real recompose + draw cycle before the first
+        // PixelCopy. The very first frame after `setContent` can still be
+        // blank when the capture races it; nudging the state and back lands
+        // the Idle capture on a fully-drawn frame (the same mechanism that
+        // makes the later `runOnIdle`-driven captures reliable).
+        compose.onNodeWithText("Compose prompt…").assertExists()
+        compose.runOnIdle { state = state.copy(draft = " ") }
         compose.waitForIdle()
+        compose.runOnIdle { state = state.copy(draft = "") }
+        compose.onNodeWithText("Compose prompt…").assertExists()
+        compose.waitForIdle()
+        // State 1: Idle. Filename kept as `05b-composer-idle-draft` so the
+        // walkthrough capture scripts
+        // (`scripts/capture-walkthrough-screenshots.sh`,
+        // `scripts/phone-walkthrough.sh`) keep resolving their expected
+        // composer screenshot.
         WalkthroughScreenshotArtifacts.capture("05b-composer-idle-draft")
 
-        // Pre-speech sub-state: mic is open, no amplitude has crossed
-        // the threshold yet — waveform stays in its idle rest pose.
+        // State 2: Recording — waveform + timer + Stop. No status text.
         compose.runOnIdle {
             state = state.copy(
                 recording = PromptComposerViewModel.RecordingState.Recording,
-                amplitude = 0f,
-                hasDetectedSpeech = false,
-            )
-        }
-        compose.onNodeWithText("LISTENING").assertExists()
-        compose.waitForIdle()
-        // New for issue #195: dedicated screenshot of the pre-speech
-        // sub-state. The historic `06-composer-recording.png` is kept
-        // below for the active-speech (capturing) view so the existing
-        // walkthrough-visual-pass scripts and docs still resolve their
-        // expected filenames.
-        WalkthroughScreenshotArtifacts.capture("06b-composer-listening")
-
-        // Active-speech sub-state: the sampler loop saw at least one
-        // amplitude sample over `SILENCE_AMPLITUDE_THRESHOLD`; the
-        // label flips to "CAPTURING" and the waveform animates by the
-        // live amplitude. This is the screen the user sees while
-        // actually dictating.
-        compose.runOnIdle {
-            state = state.copy(
                 amplitude = 0.8f,
                 hasDetectedSpeech = true,
+                recordingElapsedMs = 17_000L,
             )
         }
-        compose.onNodeWithText("CAPTURING").assertExists()
+        compose.onNodeWithTag(COMPOSER_TIMER_TAG).assertIsDisplayed()
+        compose.onNodeWithText("00:17").assertExists()
+        compose.onNodeWithText("Stop").assertExists()
+        compose.onNodeWithTag(COMPOSER_AUTO_SEND_TAG).assertExists()
+        // Declutter: no LISTENING/CAPTURING text.
+        compose.onNodeWithText("CAPTURING").assertDoesNotExist()
         compose.waitForIdle()
-        // `06-composer-recording.png` historically captured what the user
-        // sees while actively dictating — that's the "capturing" sub-state
-        // post issue #195. The scripts/walkthrough-visual-pass list refers
-        // to this exact filename so we keep it stable; the new
-        // pre-speech screenshot lives under `06b-composer-listening.png`
-        // above.
         WalkthroughScreenshotArtifacts.capture("06-composer-recording")
 
+        // State 3: Transcribing — spinner + "Transcribing…" + Cancel.
         compose.runOnIdle {
             state = state.copy(
                 recording = PromptComposerViewModel.RecordingState.Transcribing,
@@ -103,9 +93,24 @@ class PromptComposerVisualScreenshotTest {
                 hasDetectedSpeech = false,
             )
         }
-        compose.onNodeWithText("TRANSCRIBING").assertExists()
+        compose.onNodeWithText("Transcribing…").assertExists()
+        compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
+        compose.onNodeWithText("TRANSCRIBING").assertDoesNotExist()
         compose.waitForIdle()
         WalkthroughScreenshotArtifacts.capture("07-composer-transcribing")
+
+        // State 4: Text inserted — transcript fills the editable input.
+        compose.runOnIdle {
+            state = PromptComposerViewModel.UiState(
+                draft = "check the deploy log and tell me what failed in the last run",
+                recording = PromptComposerViewModel.RecordingState.Idle,
+                amplitude = 0f,
+            )
+        }
+        compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).assertIsDisplayed()
+        compose.waitForIdle()
+        WalkthroughScreenshotArtifacts.capture("08-composer-text-inserted")
     }
 
     private fun renderComposer(state: () -> PromptComposerViewModel.UiState) {

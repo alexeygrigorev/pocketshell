@@ -227,6 +227,12 @@ public class PromptComposerViewModel @Inject constructor(
     // window is exercised deterministically.
     internal var clock: () -> Long = { System.currentTimeMillis() }
 
+    // Issue #453: wall-clock timestamp (via [clock]) of the current
+    // recording's start, used by the sampler loop to publish the mm:ss
+    // elapsed timer onto [UiState.recordingElapsedMs]. Reset on each
+    // [startRecording]; meaningless outside [RecordingState.Recording].
+    private var recordingStartedAtMs: Long = 0L
+
     // The amplitude loop's dispatcher. Production wires this to
     // Dispatchers.Default (CPU-only sleep + amplitude poll). Tests
     // substitute a virtual TestDispatcher so `delay` advances under
@@ -367,6 +373,35 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Issue #453: flip the Auto-send toggle shown in the Recording /
+     * Transcribing states. When Auto-send is ON, a completed dictation is
+     * sent immediately (Whisper transcript → draft → SendRequest) instead
+     * of merely being inserted into the editable input for the user to
+     * review before tapping Send. When OFF, the transcript lands in the
+     * input and the user edits/sends it manually (the mockup's "Text
+     * inserted" state).
+     *
+     * The toggle is sticky for the rest of the session — flipping it while
+     * recording also arms / disarms the queued auto-send for the in-flight
+     * dictation so the choice the user makes mid-recording is honoured when
+     * Whisper returns.
+     */
+    public fun setAutoSend(enabled: Boolean) {
+        _uiState.update { it.copy(autoSend = enabled) }
+        // Keep the in-flight queued-send flag in sync with the toggle while
+        // a dictation is active so flipping the switch mid-recording is
+        // honoured when the transcript lands. `withEnter = true` mirrors the
+        // primary Send affordance (auto-send always submits with Enter).
+        when (_uiState.value.recording) {
+            RecordingState.Recording, RecordingState.Transcribing -> {
+                pendingSendOnTranscribeSuccess = enabled
+                pendingSendWithEnter = true
+            }
+            RecordingState.Idle -> Unit
+        }
+    }
+
+    /**
      * Issue #211: emit a [SendRequest] for the current draft and clear
      * the draft so the next composer open is a fresh slate. No-op when
      * the draft is empty — the FSM-Idle case where the user has nothing
@@ -458,17 +493,30 @@ public class PromptComposerViewModel @Inject constructor(
         val windowMs = voiceSettings.silenceWindowMs()
         val thresholdSeconds = windowMs / 1000f
 
+        // Issue #453: stamp the wall-clock recording start so the sampler
+        // loop can publish a deterministic mm:ss elapsed timer onto
+        // [UiState.recordingElapsedMs]. The clock seam keeps this testable.
+        recordingStartedAtMs = clock()
+
+        // Issue #453: if Auto-send is already toggled on when the user taps
+        // the mic, arm the queued send up front so the completed dictation
+        // dispatches without a second tap. `withEnter = true` mirrors the
+        // primary Send affordance (auto-send always submits).
+        if (_uiState.value.autoSend) {
+            pendingSendOnTranscribeSuccess = true
+            pendingSendWithEnter = true
+        }
+
         _uiState.update {
             it.copy(
                 recording = RecordingState.Recording,
                 amplitude = 0f,
                 // Issue #195: every fresh recording starts in the
                 // "listening, no speech yet" sub-state. The sampling loop
-                // below flips this to true on the first amplitude crossing
-                // so the status label can switch from "LISTENING" (waiting)
-                // to "CAPTURING" (active speech) within one poll cycle.
+                // below flips this to true on the first amplitude crossing.
                 hasDetectedSpeech = false,
                 silenceThresholdSeconds = thresholdSeconds,
+                recordingElapsedMs = 0L,
                 error = null,
             )
         }
@@ -518,11 +566,15 @@ public class PromptComposerViewModel @Inject constructor(
             // is 50ms, so the user-visible transition is well inside the
             // 200ms responsiveness budget called out in the issue.
             val crossedThresholdNow = amp >= SILENCE_AMPLITUDE_THRESHOLD
+            // Issue #453: publish the elapsed mm:ss timer each tick. The
+            // value is derived from [clock] so a fixed test clock yields a
+            // deterministic timer.
+            val elapsedMs = (clock() - recordingStartedAtMs).coerceAtLeast(0L)
             _uiState.update {
                 if (crossedThresholdNow && !it.hasDetectedSpeech) {
-                    it.copy(amplitude = amp, hasDetectedSpeech = true)
+                    it.copy(amplitude = amp, hasDetectedSpeech = true, recordingElapsedMs = elapsedMs)
                 } else {
-                    it.copy(amplitude = amp)
+                    it.copy(amplitude = amp, recordingElapsedMs = elapsedMs)
                 }
             }
 
@@ -1040,6 +1092,38 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Issue #453: cancel the in-flight transcription.
+     *
+     * Called by the Transcribing-state "Cancel" affordance the sheet
+     * renders (the mockup's Transcribing-state Cancel). Cancels the Whisper
+     * round-trip coroutine, drops any queued auto-send, and restores the
+     * composer to [RecordingState.Idle] with the existing typed draft
+     * preserved. The persisted audio row (if one was enqueued via #180)
+     * stays on disk so the user can still retry it from the pending-queue
+     * banner — cancelling the live round-trip is not the same as discarding
+     * the recording.
+     *
+     * No-op when the FSM is not in [RecordingState.Transcribing].
+     */
+    public fun cancelTranscription() {
+        if (_uiState.value.recording != RecordingState.Transcribing) {
+            return
+        }
+        transcribeJob?.cancel()
+        transcribeJob = null
+        pendingSendOnTranscribeSuccess = false
+        pendingSendWithEnter = false
+        savedStateHandle[KEY_WAS_RECORDING] = false
+        _uiState.update {
+            it.copy(
+                recording = RecordingState.Idle,
+                amplitude = 0f,
+                error = null,
+            )
+        }
+    }
+
+    /**
      * Called by the sheet when the runtime `RECORD_AUDIO` prompt comes
      * back denied. Surfaces the message in [UiState.error] so the user
      * sees why nothing happened.
@@ -1141,6 +1225,21 @@ public class PromptComposerViewModel @Inject constructor(
         val savedAudioPath: String? = null,
         val silenceThresholdSeconds: Float = 0f,
         val attachmentUpload: AttachmentUploadState = AttachmentUploadState.Idle,
+        /**
+         * Issue #453: elapsed time (ms) of the current recording, published
+         * by the sampler loop each tick. Drives the mm:ss timer rendered
+         * next to the waveform in the Recording state. Zero outside
+         * [RecordingState.Recording]. Render with [formatElapsed].
+         */
+        val recordingElapsedMs: Long = 0L,
+        /**
+         * Issue #453: the "Auto-send" toggle shown in the Recording /
+         * Transcribing states. When `true`, a completed dictation is sent
+         * immediately; when `false`, the transcript is inserted into the
+         * editable input for the user to review before tapping Send. Sticky
+         * across recordings within the session.
+         */
+        val autoSend: Boolean = false,
     )
 
     /**
@@ -1364,6 +1463,21 @@ public class PromptComposerViewModel @Inject constructor(
         public const val NO_SPEECH_DETECTED_MESSAGE: String =
             "No speech detected — nothing to send. Tap the mic and speak."
     }
+}
+
+/**
+ * Issue #453: format an elapsed-recording duration (milliseconds) as a
+ * zero-padded `mm:ss` timer (e.g. `00:17`, `01:05`, `12:34`). Minutes are
+ * not capped at 99 — a very long dictation renders `120:00` rather than
+ * rolling over — but in practice the silence watchdog stops well before
+ * that. Exposed at file scope so the unit tests can pin the formatting
+ * without composing the sheet.
+ */
+internal fun formatElapsed(elapsedMs: Long): String {
+    val totalSeconds = (elapsedMs.coerceAtLeast(0L)) / 1000L
+    val minutes = totalSeconds / 60L
+    val seconds = totalSeconds % 60L
+    return "%02d:%02d".format(minutes, seconds)
 }
 
 internal fun appendAttachmentPaths(draft: String, paths: List<String>): String {

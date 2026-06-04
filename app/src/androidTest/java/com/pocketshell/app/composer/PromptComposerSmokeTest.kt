@@ -55,38 +55,42 @@ class PromptComposerSmokeTest {
 
     @Test
     fun recordingAndTranscribingStatesAreVisible() {
-        // Issue #195: the visual `Recording` state now has two sub-states.
-        // Step through them in order — pre-speech, then capturing, then
-        // transcribing — so the smoke test pins the label distinguishing
-        // "speak when ready" from "actively heard".
+        // Issue #453: the recording UI is now indicator-driven (no
+        // redundant "CAPTURING"/"LISTENING"/"TRANSCRIBING" text). Step
+        // through pre-speech, capturing, and transcribing and assert on the
+        // authoritative surfaces: the waveform a11y description + the mm:ss
+        // timer (Recording) and the transcribing surface + "Transcribing…".
         var state by mutableStateOf(
             PromptComposerViewModel.UiState(
                 draft = "check deploy logs",
                 recording = PromptComposerViewModel.RecordingState.Recording,
                 amplitude = 0f,
                 hasDetectedSpeech = false,
+                recordingElapsedMs = 3_000L,
             ),
         )
         renderComposer { state }
 
-        compose.onNodeWithTag(COMPOSER_STATUS_TAG)
-            .assertExists()
-        // Pre-speech sub-state: "LISTENING" + idle waveform a11y label.
-        compose.onNodeWithText("LISTENING")
-            .assertExists()
+        // Pre-speech sub-state: idle waveform a11y label + the timer.
         compose.onNodeWithTag(COMPOSER_WAVEFORM_TAG)
             .assert(hasContentDescription("Prompt composer waiting for speech"))
+        compose.onNodeWithTag(COMPOSER_TIMER_TAG).assertIsDisplayed()
+        compose.onNodeWithText("00:03").assertExists()
+        // No redundant status text any more (declutter).
+        compose.onNodeWithText("CAPTURING").assertDoesNotExist()
+        compose.onNodeWithText("LISTENING").assertDoesNotExist()
+        // The Auto-send toggle is present in the Recording state.
+        compose.onNodeWithTag(COMPOSER_AUTO_SEND_TAG).assertIsDisplayed()
 
         compose.runOnIdle {
             // Active-speech sub-state: the sampler loop has seen at least
             // one amplitude sample over `SILENCE_AMPLITUDE_THRESHOLD`.
-            state = state.copy(amplitude = 0.8f, hasDetectedSpeech = true)
+            state = state.copy(amplitude = 0.8f, hasDetectedSpeech = true, recordingElapsedMs = 17_000L)
         }
 
-        compose.onNodeWithText("CAPTURING")
-            .assertExists()
         compose.onNodeWithTag(COMPOSER_WAVEFORM_TAG)
             .assert(hasContentDescription("Prompt composer capturing speech"))
+        compose.onNodeWithText("00:17").assertExists()
 
         compose.runOnIdle {
             state = PromptComposerViewModel.UiState(
@@ -97,10 +101,14 @@ class PromptComposerSmokeTest {
             )
         }
 
-        compose.onNodeWithText("TRANSCRIBING")
-            .assertExists()
-        compose.onNodeWithTag(COMPOSER_WAVEFORM_TAG)
+        // Transcribing surface: the spinner row + the "Transcribing…" label.
+        compose.onNodeWithTag(COMPOSER_TRANSCRIBING_SPINNER_TAG)
             .assert(hasContentDescription("Prompt composer transcribing"))
+        compose.onNodeWithText("Transcribing…").assertExists()
+        compose.onNodeWithText("TRANSCRIBING").assertDoesNotExist()
+        // Cancel + Auto-send are available during transcription.
+        compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_AUTO_SEND_TAG).assertIsDisplayed()
     }
 
     @Test
@@ -131,16 +139,19 @@ class PromptComposerSmokeTest {
             }
         }
 
+        // Issue #453: the Idle controls collapse to attach + mic + a single
+        // Send (the Insert button is gone). With a non-empty draft the Send
+        // affordance is enabled and tappable even under a tall draft.
         compose.onNodeWithTag(COMPOSER_DRAFT_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_ATTACH_TAG).assertIsDisplayed().performClick()
         compose.onNodeWithTag(COMPOSER_MIC_TAG).assertIsDisplayed().performClick()
-        compose.onNodeWithTag(COMPOSER_SEND_TAG).assertIsDisplayed().performClick()
         compose.onNodeWithTag(COMPOSER_SEND_ENTER_TAG).assertIsDisplayed().performClick()
 
         compose.runOnIdle {
             assertEquals(1, attachTaps)
             assertEquals(1, micTaps)
-            assertEquals(listOf(false, true), sendModes)
+            // The single Send always submits with Enter.
+            assertEquals(listOf(true), sendModes)
         }
     }
 

@@ -12,6 +12,7 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -37,6 +38,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SheetState
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -51,9 +54,16 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -70,8 +80,7 @@ import com.pocketshell.app.snippets.SnippetKind
 import com.pocketshell.app.snippets.SnippetPickerSheet
 import com.pocketshell.app.voice.PendingTranscriptionItem
 import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
-import com.pocketshell.uikit.components.MicButton
-import com.pocketshell.uikit.model.MicButtonState
+import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
 
@@ -283,7 +292,12 @@ public fun PromptComposerSheet(
                 }
                 viewModel.onMicTap()
             },
-            onCancelRecording = viewModel::cancelRecording,
+            // Issue #453: the only Cancel affordance in the redesigned
+            // composer lives in the Transcribing state and cancels the
+            // in-flight Whisper round-trip. (Recording is stopped via the
+            // red Stop button, which always transcribes.)
+            onCancelRecording = viewModel::cancelTranscription,
+            onAutoSendChange = viewModel::setAutoSend,
             onSend = { withEnter ->
                 // Issue #211: route through the ViewModel so the FSM
                 // decides whether to dispatch now (Idle) or queue for
@@ -384,6 +398,10 @@ internal fun SheetContent(
     // no-op so existing previews and the legacy connected tests that
     // bypass the ViewModel keep compiling.
     onCancelRecording: () -> Unit = {},
+    // Issue #453: flip the Auto-send toggle. Defaults to a no-op so
+    // previews / legacy tests that don't exercise the toggle keep
+    // compiling.
+    onAutoSendChange: (Boolean) -> Unit = {},
     // Issue #180: queued failed / offline transcriptions. Defaults to
     // an empty list so older previews + tests that pre-date the queue
     // render the same composer shape they always did.
@@ -461,19 +479,45 @@ internal fun SheetContent(
             }
         }
 
-        // The composer text area. Issue #196: shared with the agent-pane
-        // composer via [ComposerDraftField] so both surfaces have an
-        // identical surface-elev fill, accent cursor, and muted
-        // placeholder. `.composer-text` in the mockup is a surface-elev
-        // fill with a single border and 12dp radius.
-        ComposerDraftField(
-            value = state.draft,
-            onValueChange = onDraftChange,
-            placeholder = state.placeholderHint(),
-            fieldTag = COMPOSER_DRAFT_TAG,
-            minHeight = 110.dp,
-            maxHeight = 220.dp,
-        )
+        // Issue #453: the composer's primary surface is state-driven.
+        //  - Idle / Text-inserted: the editable input (`Compose prompt…`).
+        //  - Recording: an amplitude-driven waveform + mm:ss timer + Stop.
+        //  - Transcribing: a "Transcribing…" spinner row.
+        // The mockup collapses these into one panel whose height adjusts to
+        // the content, so we swap the surface in place rather than stacking
+        // extra rows.
+        when (state.recording) {
+            PromptComposerViewModel.RecordingState.Recording -> {
+                RecordingSurface(
+                    amplitude = state.amplitude,
+                    capturing = state.hasDetectedSpeech,
+                    elapsedLabel = formatElapsed(state.recordingElapsedMs),
+                    onStop = onMicTap,
+                )
+            }
+
+            PromptComposerViewModel.RecordingState.Transcribing -> {
+                TranscribingSurface(onCancel = onCancelRecording)
+            }
+
+            PromptComposerViewModel.RecordingState.Idle -> {
+                // The composer text area. Issue #196: shared with the
+                // agent-pane composer via [ComposerDraftField] so both
+                // surfaces have an identical surface-elev fill, accent
+                // cursor, and muted placeholder. Issue #453: placeholder is
+                // the mockup's "Compose prompt…". After a dictation lands
+                // (Auto-send off) the transcript fills this same editable
+                // field for the user to review before Send.
+                ComposerDraftField(
+                    value = state.draft,
+                    onValueChange = onDraftChange,
+                    placeholder = COMPOSER_PLACEHOLDER,
+                    fieldTag = COMPOSER_DRAFT_TAG,
+                    minHeight = 96.dp,
+                    maxHeight = 220.dp,
+                )
+            }
+        }
 
         Spacer(modifier = Modifier.height(4.dp))
 
@@ -566,238 +610,502 @@ internal fun SheetContent(
             Spacer(modifier = Modifier.height(8.dp))
         }
 
-        // Mic row: waveform takes the slack on the left, status label
-        // sits centre-right, and the mic FAB anchors the right edge so
-        // the primary dictation control lives inside the right-thumb
-        // reach arc (issue #208 right-hand ergonomics; design-system §9
-        // already pins the tmux mic FAB bottom-right, the composer now
-        // matches). The cancel chip from #174 travels with the mic and
-        // renders immediately to its left during Recording, keeping the
-        // abort affordance inside the same thumb arc.
+        // Issue #453: the single decluttered controls row at the bottom of
+        // the composer, matching all four mockup states:
+        //  - Left: 📎 attach (paperclip) + `{}` snippets — always present.
+        //  - Right, Idle / Text-inserted: a single primary Send button with
+        //    a send-arrow glyph (the old Insert/Send pair collapses to one).
+        //  - Right, Recording: an Auto-send toggle + a red record/stop FAB.
+        //  - Right, Transcribing: an Auto-send toggle + a Cancel button.
+        val isRecording = state.recording == PromptComposerViewModel.RecordingState.Recording
+        val attachmentBusy = attachmentUploading != null
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 4.dp, bottom = 18.dp),
+                .padding(top = 4.dp, bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // Issue #195: the visual `Recording` state has two sub-states
-            // keyed on `state.hasDetectedSpeech`. Before the first speech
-            // amplitude crosses the threshold the waveform stays in its
-            // idle (collapsed) rest pose so the user understands "the mic
-            // is open but I haven't been heard yet"; once amplitude
-            // crosses, the bars animate from the live amplitude and the
-            // label flips to "CAPTURING". Anything that ties an animation
-            // to `state.amplitude` should also gate on `hasDetectedSpeech`
-            // — otherwise pre-speech sub-threshold mic noise would jiggle
-            // the strip and contradict the "waiting for you" label.
-            val isCapturing = state.recording == PromptComposerViewModel.RecordingState.Recording &&
-                state.hasDetectedSpeech
-            Waveform(
-                amplitude = state.amplitude,
-                active = isCapturing,
-                transcribing = isTranscribing,
-                modifier = Modifier
-                    .weight(1f)
-                    .height(32.dp)
-                    .testTag(COMPOSER_WAVEFORM_TAG)
-                    .semantics {
-                        contentDescription = when {
-                            state.recording == PromptComposerViewModel.RecordingState.Recording &&
-                                state.hasDetectedSpeech ->
-                                "Prompt composer capturing speech"
-                            state.recording == PromptComposerViewModel.RecordingState.Recording ->
-                                "Prompt composer waiting for speech"
-                            state.recording == PromptComposerViewModel.RecordingState.Transcribing ->
-                                "Prompt composer transcribing"
-                            else ->
-                                "Prompt composer idle waveform"
-                        }
-                    },
+            // Left cluster: paperclip attach + `{}` snippets. Disabled while
+            // a Whisper round-trip / attachment upload is in flight so the
+            // user can't land a stale snippet over the about-to-arrive
+            // transcript.
+            AttachIconButton(
+                onClick = { onAttachFiles?.invoke() },
+                enabled = !isTranscribing && !attachmentBusy && onAttachFiles != null,
+                modifier = Modifier.testTag(COMPOSER_ATTACH_TAG),
             )
-            Text(
-                // Issue #195: pre-speech vs active-speech sub-states under
-                // the same `Recording` FSM node. "LISTENING" reads as
-                // "system is open but waiting"; "CAPTURING" reads as
-                // "system is hearing you right now". The flip happens
-                // within one 50ms sampler poll of the first amplitude
-                // crossing — well inside the 200ms responsiveness budget
-                // called out in the issue acceptance criteria.
-                text = when {
-                    state.recording == PromptComposerViewModel.RecordingState.Recording &&
-                        state.hasDetectedSpeech -> "CAPTURING"
-                    state.recording == PromptComposerViewModel.RecordingState.Recording -> "LISTENING"
-                    state.recording == PromptComposerViewModel.RecordingState.Transcribing -> "TRANSCRIBING"
-                    else -> ""
-                },
-                color = PocketShellColors.Accent,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.testTag(COMPOSER_STATUS_TAG),
+            SnippetsIconButton(
+                onClick = { onSnippets?.invoke() },
+                enabled = !isTranscribing && !attachmentBusy && onSnippets != null,
+                modifier = Modifier.testTag(COMPOSER_SNIPPETS_TAG),
             )
-            // Issue #174: small `X` discard chip rendered only while the
-            // FSM is in Recording so the user can abort a dictation
-            // without paying the Whisper round-trip. Hidden outside
-            // Recording (no buffer to discard during Idle; the audio is
-            // already in flight during Transcribing). The chip uses
-            // `TextSecondary` (the design-system muted-secondary token
-            // from #162) so it never competes for attention with the
-            // accent-tinted mic FAB / waveform.
-            //
-            // Issue #208: the chip travels with the mic. The mic FAB now
-            // anchors the right edge for right-thumb reach, so the
-            // cancel chip renders immediately to its left — still inside
-            // the same thumb arc, still adjacent to the affordance it
-            // aborts.
-            if (state.recording == PromptComposerViewModel.RecordingState.Recording) {
-                CancelRecordingChip(onClick = onCancelRecording)
-            }
-            MicButton(
-                state = when (state.recording) {
-                    PromptComposerViewModel.RecordingState.Idle -> MicButtonState.Idle
-                    PromptComposerViewModel.RecordingState.Recording -> MicButtonState.Recording
-                    PromptComposerViewModel.RecordingState.Transcribing -> MicButtonState.Disabled
-                },
-                onClick = { if (!isTranscribing) onMicTap() },
-                modifier = Modifier.testTag(COMPOSER_MIC_TAG),
-            )
-        }
 
-        // Issue #185: silence-threshold hint. Rendered only while
-        // RecordingState.Recording. PocketShellColors.TextMuted token.
-        if (state.recording == PromptComposerViewModel.RecordingState.Recording &&
-            state.silenceThresholdSeconds > 0f
-        ) {
-            Text(
-                text = "Auto-stops after ${formatSilenceThresholdLabel(state.silenceThresholdSeconds)}s silence",
-                color = PocketShellColors.TextMuted,
-                fontSize = 11.sp,
-                modifier = Modifier
-                    .padding(bottom = 8.dp)
-                    .testTag(COMPOSER_SILENCE_THRESHOLD_HINT_TAG),
-            )
-        }
+            Spacer(modifier = Modifier.weight(1f))
 
-        // Issue #211: Send remains tappable while the FSM is in
-        // Recording or Transcribing — the ViewModel queues the send
-        // and fires it after Whisper returns. Collapses the historic
-        // three-tap "stop, wait, send" into a single tap.
-        val isRecording = state.recording == PromptComposerViewModel.RecordingState.Recording
-        val hasQueuedAffordance = isRecording || isTranscribing
-        val sendEnabled = hasQueuedAffordance || state.draft.isNotEmpty()
-        val attachmentBusy = attachmentUploading != null
-        // Action row: Snippets (ghost) / Insert / Send (primary).
-        // Matches `.composer-actions` in the mockup. Snippets stays
-        // disabled while a Whisper round-trip is in flight (browsing
-        // snippets during transcription is at best a UX paper-cut and
-        // at worst lands a stale snippet over the about-to-arrive
-        // transcript) but the Send buttons stay live.
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                GhostButton(
-                    label = "Snippets",
-                    onClick = {
-                        // Issue #17 wired the snippet picker. When the sheet
-                        // is hosted from a context without a known host id
-                        // (e.g. a non-session entry point), [onSnippets] is
-                        // null and tapping the ghost button stays a no-op so
-                        // the row's visual proportion still matches the mockup.
-                        onSnippets?.invoke()
-                    },
-                    modifier = Modifier.weight(1f),
-                    enabled = !isTranscribing && !attachmentBusy,
-                )
-                GhostButton(
-                    label = "Attach",
-                    onClick = {
-                        onAttachFiles?.invoke()
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag(COMPOSER_ATTACH_TAG),
-                    enabled = !isTranscribing && !attachmentBusy && onAttachFiles != null,
-                )
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                // Issue #196: the Insert / Send buttons are shared with the
-                // agent-pane composer via [ComposerSendButton] /
-                // [ComposerSendEnterButton] in `UnifiedComposer.kt` so both
-                // surfaces use the identical tier-differentiated treatment:
-                //  - "Insert" → outline-only (transparent fill, accent
-                //    border + accent text) and writes the draft without Enter.
-                //  - "Send" → solid accent fill + on-accent text — stays
-                //    the primary action (matches the same colour token the
-                //    mic FAB uses, so the user sees one "do the thing"
-                //    coloured affordance per row).
-                //
-                // Each button surfaces a long-press tooltip (the #153 "explain
-                // this control" affordance) via the shared
-                // [ComposerTooltipButton], whose [Modifier.combinedClickable]
-                // keeps `performClick()` in connected tests firing the same
-                // onClick lambda the user's finger does.
-                //
-                // Issue #211: label flips while a queued Whisper round-trip
-                // is in flight so the user knows the tap was registered but
-                // the bytes are not yet flying.
-                ComposerSendButton(
-                    label = if (hasQueuedAffordance) "Insert after transcribe" else "Insert",
-                    tooltipLabel = SEND_TOOLTIP_LABEL,
-                    onClick = { onSend(false) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag(COMPOSER_SEND_TAG),
-                    enabled = sendEnabled && !attachmentBusy,
-                )
-                ComposerSendEnterButton(
-                    label = if (hasQueuedAffordance) "Send after transcribe" else "Send",
-                    tooltipLabel = SEND_ENTER_TOOLTIP_LABEL,
-                    onClick = { onSend(true) },
-                    modifier = Modifier
-                        .weight(1f)
-                        .testTag(COMPOSER_SEND_ENTER_TAG),
-                    enabled = sendEnabled && !attachmentBusy,
-                )
+            // Right cluster is state-driven.
+            when (state.recording) {
+                PromptComposerViewModel.RecordingState.Idle -> {
+                    // Mic trigger to start a dictation (the entry point into
+                    // the Recording state). Sits to the left of the primary
+                    // Send so the Idle row reads "dictate, or type + send".
+                    MicTriggerButton(
+                        onClick = onMicTap,
+                        enabled = !attachmentBusy,
+                        modifier = Modifier.testTag(COMPOSER_MIC_TAG),
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    val sendEnabled = state.draft.isNotEmpty() && !attachmentBusy
+                    SendButton(
+                        onClick = { onSend(true) },
+                        enabled = sendEnabled,
+                        modifier = Modifier.testTag(COMPOSER_SEND_ENTER_TAG),
+                    )
+                }
+
+                PromptComposerViewModel.RecordingState.Recording -> {
+                    AutoSendToggle(
+                        checked = state.autoSend,
+                        onCheckedChange = onAutoSendChange,
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    // Red record/stop FAB: tapping it stops the recording
+                    // and starts transcription (same path as the mockup's
+                    // big red button at the bottom-right of the Recording
+                    // state).
+                    RecordStopButton(
+                        onClick = onMicTap,
+                        modifier = Modifier.testTag(COMPOSER_MIC_TAG),
+                    )
+                }
+
+                PromptComposerViewModel.RecordingState.Transcribing -> {
+                    AutoSendToggle(
+                        checked = state.autoSend,
+                        onCheckedChange = onAutoSendChange,
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    GhostButton(
+                        label = "Cancel",
+                        onClick = onCancelRecording,
+                        modifier = Modifier.testTag(COMPOSER_CANCEL_RECORDING_TAG),
+                    )
+                }
             }
         }
     }
 }
 
 /**
- * 30-bar animated waveform. Matches `.waveform` + `.bar` in the mockup,
- * animated by the live amplitude from [PromptComposerViewModel.uiState].
+ * Issue #453: the Recording-state surface that replaces the editable input
+ * — an amplitude-driven [Waveform] flanked by the elapsed mm:ss timer and a
+ * "Stop" affordance. Matches the mockup's recording card. The animated
+ * waveform alone (plus the live ticking timer) conveys "we are capturing"
+ * — there is no redundant "CAPTURING" text label any more (the maintainer's
+ * declutter request).
+ */
+@Composable
+private fun RecordingSurface(
+    amplitude: Float,
+    capturing: Boolean,
+    elapsedLabel: String,
+    onStop: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(56.dp)
+            .background(
+                color = PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(12.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.Border,
+                shape = RoundedCornerShape(12.dp),
+            )
+            .padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            text = elapsedLabel,
+            color = PocketShellColors.Accent,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.testTag(COMPOSER_TIMER_TAG),
+        )
+        Waveform(
+            amplitude = amplitude,
+            active = capturing,
+            transcribing = false,
+            modifier = Modifier
+                .weight(1f)
+                .height(32.dp)
+                .testTag(COMPOSER_WAVEFORM_TAG)
+                .semantics {
+                    contentDescription = if (capturing) {
+                        "Prompt composer capturing speech"
+                    } else {
+                        "Prompt composer waiting for speech"
+                    }
+                },
+        )
+        Text(
+            text = "Stop",
+            color = PocketShellColors.Accent,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier
+                .clickable(role = Role.Button, onClick = onStop)
+                .padding(horizontal = 6.dp, vertical = 6.dp)
+                .testTag(COMPOSER_STOP_TAG),
+        )
+    }
+}
+
+/**
+ * Issue #453: the Transcribing-state surface that replaces the editable
+ * input — a "Transcribing…" label + spinner. The Cancel affordance lives in
+ * the bottom controls row (so it stays inside the thumb arc, matching the
+ * mockup), and cancels the in-flight transcription, restoring the composer.
+ */
+@Composable
+private fun TranscribingSurface(
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // `onCancel` is consumed by the bottom-row Cancel button; this surface
+    // only renders the status. Kept as a parameter so the surface owns the
+    // full transcribing semantics for a11y.
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(56.dp)
+            .background(
+                color = PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(12.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.Border,
+                shape = RoundedCornerShape(12.dp),
+            )
+            .padding(horizontal = 14.dp)
+            .testTag(COMPOSER_TRANSCRIBING_SPINNER_TAG)
+            .semantics { contentDescription = "Prompt composer transcribing" },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(20.dp),
+            strokeWidth = 2.5.dp,
+            color = PocketShellColors.Accent,
+        )
+        Text(
+            text = "Transcribing…",
+            color = PocketShellColors.Text,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+/**
+ * Issue #453: the single primary Send affordance for the Idle / Text-
+ * inserted states. A pill with the "Send" label + a send-arrow glyph,
+ * replacing the old Insert / Send button pair (declutter). Always submits
+ * with Enter (`onSend(true)`), since the composer's job is to send a prompt.
+ */
+@Composable
+private fun SendButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .height(44.dp)
+            .background(
+                color = if (enabled) PocketShellColors.Accent else Color.Transparent,
+                shape = RoundedCornerShape(10.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = if (enabled) PocketShellColors.Accent else PocketShellColors.Border,
+                shape = RoundedCornerShape(10.dp),
+            )
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = "Send",
+            color = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        SendArrowGlyph(
+            color = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted,
+        )
+    }
+}
+
+/**
+ * Issue #453: the "Auto-send" toggle shown in the Recording / Transcribing
+ * states. When ON, the completed dictation is sent immediately; when OFF,
+ * the transcript lands in the editable input for review before Send.
+ */
+@Composable
+private fun AutoSendToggle(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .clickable(role = Role.Switch) { onCheckedChange(!checked) }
+            .testTag(COMPOSER_AUTO_SEND_TAG),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Text(
+            text = "Auto-send",
+            color = if (checked) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Medium,
+        )
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = PocketShellColors.OnAccent,
+                checkedTrackColor = PocketShellColors.Accent,
+                uncheckedThumbColor = PocketShellColors.TextSecondary,
+                uncheckedTrackColor = PocketShellColors.SurfaceElev,
+                uncheckedBorderColor = PocketShellColors.Border,
+            ),
+        )
+    }
+}
+
+/**
+ * Issue #453: the red record/stop FAB shown at the bottom-right of the
+ * Recording state (the big red button in the mockup). Tapping it stops the
+ * recording and starts transcription.
+ */
+@Composable
+private fun RecordStopButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .size(48.dp)
+            .background(color = PocketShellColors.Red, shape = androidx.compose.foundation.shape.CircleShape)
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Stop recording" },
+        contentAlignment = Alignment.Center,
+    ) {
+        // White rounded square = the universal "stop" glyph.
+        Box(
+            modifier = Modifier
+                .size(16.dp)
+                .background(color = Color.White, shape = RoundedCornerShape(3.dp)),
+        )
+    }
+}
+
+/**
+ * Issue #453: the mic trigger shown in the Idle / Text-inserted states.
+ * Tapping it starts a dictation (transitions the FSM to Recording). Cyan
+ * accent FAB matching the design-system dictation accent (#461). Consumes
+ * [LocalPocketShellSemantic] for the recording accent.
+ */
+@Composable
+private fun MicTriggerButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val accent = LocalPocketShellSemantic.current.accent
+    Box(
+        modifier = modifier
+            .size(44.dp)
+            .background(
+                color = if (enabled) accent else PocketShellColors.SurfaceElev,
+                shape = androidx.compose.foundation.shape.CircleShape,
+            )
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Start dictation" },
+        contentAlignment = Alignment.Center,
+    ) {
+        // Filled circle glyph standing in for a microphone body (same
+        // treatment as the shared MicButton until an icon set is bundled).
+        Text(
+            text = "●",
+            color = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+/**
+ * Issue #453: paperclip attach button (40dp tap target). Drawn with a
+ * [Canvas] path so we don't pull in `material-icons-extended` or rely on an
+ * emoji glyph that renders inconsistently across OEM fonts.
+ */
+@Composable
+private fun AttachIconButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val tint = if (enabled) PocketShellColors.TextSecondary else PocketShellColors.TextMuted
+    Box(
+        modifier = modifier
+            .size(40.dp)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Attach files" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Canvas(modifier = Modifier.size(22.dp)) {
+            val w = size.width
+            val h = size.height
+            val stroke = Stroke(width = w * 0.10f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+            // A single-stroke paperclip drawn on a diagonal, the canonical
+            // "attach" glyph: an outer arm that hooks around the bottom and
+            // back up, with the inner arm one notch shorter so the clip
+            // reads as two nested rounded bends rather than a horseshoe.
+            // Coordinates: the clip leans slightly right, top-open.
+            val xLeft = w * 0.34f
+            val xRight = w * 0.66f
+            val top = h * 0.14f
+            val bottom = h * 0.86f
+            val rOuter = (xRight - xLeft) / 2f
+            // Outer arm: starts near the top-right, runs down the right
+            // side, loops the bottom (semicircle), runs up the left side,
+            // and curves slightly over the top.
+            val outer = Path().apply {
+                moveTo(xRight, top + rOuter * 0.4f)
+                lineTo(xRight, bottom - rOuter)
+                arcTo(
+                    rect = Rect(xLeft, bottom - 2 * rOuter, xRight, bottom),
+                    startAngleDegrees = 0f,
+                    sweepAngleDegrees = 180f,
+                    forceMoveTo = false,
+                )
+                lineTo(xLeft, top + rOuter)
+                arcTo(
+                    rect = Rect(xLeft, top, xLeft + 2 * rOuter, top + 2 * rOuter),
+                    startAngleDegrees = 180f,
+                    sweepAngleDegrees = 90f,
+                    forceMoveTo = false,
+                )
+            }
+            drawPath(outer, color = tint, style = stroke)
+            // Inner arm: the clip's shorter pin, offset inward and stopping
+            // short of both ends so the two arms read as separate.
+            val inLeft = xLeft + rOuter * 0.45f
+            val inRight = xRight - rOuter * 0.0f
+            val inBottom = bottom - rOuter * 0.55f
+            val rInner = (inRight - inLeft) / 2f
+            val inner = Path().apply {
+                moveTo(inLeft, top + rOuter * 0.9f)
+                lineTo(inLeft, inBottom - rInner)
+                arcTo(
+                    rect = Rect(inLeft, inBottom - 2 * rInner, inRight, inBottom),
+                    startAngleDegrees = 180f,
+                    sweepAngleDegrees = -180f,
+                    forceMoveTo = false,
+                )
+                lineTo(inRight, top + rOuter * 1.4f)
+            }
+            drawPath(inner, color = tint, style = stroke)
+        }
+    }
+}
+
+/**
+ * Issue #453: `{}` snippets button. Rendered as the literal curly-brace
+ * glyphs (a stable monospace-friendly symbol, unlike an emoji), matching
+ * the mockup's `{}` affordance.
+ */
+@Composable
+private fun SnippetsIconButton(
+    onClick: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val tint = if (enabled) PocketShellColors.TextSecondary else PocketShellColors.TextMuted
+    Box(
+        modifier = modifier
+            .size(40.dp)
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Insert snippet" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "{ }",
+            color = tint,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+/**
+ * Issue #453: the send-arrow glyph in the primary Send button. A small
+ * paper-plane-style arrow drawn with a [Canvas] so it matches the mockup's
+ * send icon without an icon dependency.
+ */
+@Composable
+private fun SendArrowGlyph(color: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier.size(16.dp)) {
+        val w = size.width
+        val h = size.height
+        // Upward-right arrow (↗): the send/submit direction in the mockup.
+        val stroke = Stroke(width = w * 0.14f, cap = StrokeCap.Round, join = StrokeJoin.Round)
+        val path = Path().apply {
+            // Shaft from bottom-left to top-right.
+            moveTo(w * 0.18f, h * 0.82f)
+            lineTo(w * 0.82f, h * 0.18f)
+            // Arrow head.
+            moveTo(w * 0.40f, h * 0.18f)
+            lineTo(w * 0.82f, h * 0.18f)
+            lineTo(w * 0.82f, h * 0.60f)
+        }
+        drawPath(path, color = color, style = stroke)
+    }
+}
+
+/**
+ * Issue #453: amplitude-driven waveform shown in the Recording state. The
+ * animated strip alone conveys "we are capturing" — there is no redundant
+ * status text any more (the maintainer's declutter request).
  *
- * Bar heights are derived from the latest amplitude scaled by a fixed
- * sine envelope so the strip wiggles even at steady speech levels. Three
- * visual modes:
- *
+ * Two visual modes:
  *  - **Active (capturing)** — [active] true: bars animate from the live
  *    amplitude, multiplied by the per-bar envelope.
- *  - **Idle / pre-speech (listening)** — [active] false, [transcribing]
- *    false: issue #153 fix 1 — the bars subtly pulse between 4dp and
- *    6dp on a 1.5s loop so the strip reads as "alive and waiting" rather
- *    than dormant. Without this pulse the cold composer + pre-speech
- *    Recording sub-state were visually indistinguishable from a dead
- *    surface.
- *  - **Transcribing** — [transcribing] true: issue #153 fix 2 — the bars
- *    collapse to a flat 4dp baseline (no pulse, no live amplitude) and
- *    a small [CircularProgressIndicator] overlays the centre of the
- *    strip. This is what makes "TRANSCRIBING" visually distinct from
- *    "LISTENING" / "CAPTURING": the user can tell at a glance that the
- *    recording has stopped and a network round-trip is in flight,
- *    without relying on the small status label alone.
+ *  - **Pre-speech (waiting)** — [active] false: the bars subtly pulse
+ *    between 4dp and 6dp on a 750ms loop so the strip reads as "alive and
+ *    waiting" rather than dormant (the static-indicator bug the maintainer
+ *    reported on v0.3.19).
+ *
+ * When transcription starts the whole recording surface is replaced by the
+ * "Transcribing…" spinner (see [TranscribingSurface]) — that is the
+ * freeze/settle the #461 §5 motion guidance calls for; the waveform is not
+ * rendered at all during transcription.
  */
 @Composable
 private fun Waveform(
     amplitude: Float,
     active: Boolean,
     modifier: Modifier = Modifier,
-    transcribing: Boolean = false,
+    @Suppress("UNUSED_PARAMETER") transcribing: Boolean = false,
 ) {
     // Smooth amplitude transitions so a sudden spike doesn't jerk the
     // bars. 80ms is faster than the human eye's flicker fusion threshold
@@ -808,15 +1116,10 @@ private fun Waveform(
         label = "waveform-smooth",
     )
 
-    // Issue #153 fix 1: idle pulse. The bars rest at 4dp by default,
-    // which made the cold composer look dormant. A subtle 2dp pulse on a
-    // 1.5s loop (4dp -> 6dp -> 4dp) signals "the mic is ready, tap me"
-    // without competing visually with the live-amplitude animation.
-    //
-    // Gated behind `!active && !transcribing` so the pulse only runs in
-    // the truly-idle states (cold composer + Recording pre-speech).
-    // During Transcribing we explicitly want the strip to look frozen.
-    val idlePulse: Float = if (!active && !transcribing) {
+    // Pre-speech pulse: the bars rest at 4dp, which read as dormant. A
+    // subtle 2dp pulse on a 750ms loop signals "the mic is open, speak"
+    // without competing with the live-amplitude animation.
+    val idlePulse: Float = if (!active) {
         val transition = rememberInfiniteTransition(label = "waveform-idle-pulse")
         val v by transition.animateFloat(
             initialValue = 0f,
@@ -836,101 +1139,34 @@ private fun Waveform(
         modifier = modifier,
         contentAlignment = Alignment.CenterStart,
     ) {
-        if (transcribing) {
-            // Issue #153 fix 2: during Transcribing the waveform
-            // collapses entirely and is replaced by an always-visible
-            // three-dot pulse indicator + a Material 3 spinner anchored
-            // alongside it. This is the "collapse + spinner" variant the
-            // issue called out: a frozen, decorative bar strip would
-            // still read as "recording" at a glance, so we replace it
-            // outright. The three dots are an in-house indeterminate
-            // indicator (always at least two dots painted at any phase)
-            // so the static walkthrough screenshot 07 reliably captures the
-            // distinct state even if the spinner's arc happens to be at
-            // a low-visibility angle in the frame.
-            Row(
-                modifier = Modifier
-                    .testTag(COMPOSER_TRANSCRIBING_SPINNER_TAG)
-                    .padding(start = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(20.dp),
-                    strokeWidth = 2.5.dp,
-                    color = PocketShellColors.Accent,
-                )
-                TranscribingDots()
-            }
-        } else {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(3.dp),
-            ) {
-                val bars = 30
-                for (i in 0 until bars) {
-                    // Mockup-style envelope: a wide hump centred at index 15
-                    // with two smaller side lobes. Multiplied by the live
-                    // amplitude so a quiet user sees a flat strip and a loud
-                    // one sees full-height bars.
-                    val envelope = barEnvelopeHeightDp(i)
-                    val h = when {
-                        active -> (4f + smoothed * envelope).coerceIn(4f, envelope)
-                        // Idle / pre-speech: pulse 4..6dp so the strip
-                        // reads as "alive and waiting".
-                        else -> 4f + idlePulse
-                    }
-                    Box(
-                        modifier = Modifier
-                            .width(3.dp)
-                            .height(h.dp)
-                            .background(
-                                color = PocketShellColors.Accent.copy(alpha = 0.85f),
-                                shape = RoundedCornerShape(2.dp),
-                            ),
-                    )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            val bars = 30
+            for (i in 0 until bars) {
+                // Mockup-style envelope: a wide hump centred at index 15
+                // with two smaller side lobes. Multiplied by the live
+                // amplitude so a quiet user sees a flat strip and a loud
+                // one sees full-height bars.
+                val envelope = barEnvelopeHeightDp(i)
+                val h = when {
+                    active -> (4f + smoothed * envelope).coerceIn(4f, envelope)
+                    // Pre-speech: pulse 4..6dp so the strip reads as
+                    // "alive and waiting".
+                    else -> 4f + idlePulse
                 }
+                Box(
+                    modifier = Modifier
+                        .width(3.dp)
+                        .height(h.dp)
+                        .background(
+                            color = PocketShellColors.Accent.copy(alpha = 0.85f),
+                            shape = RoundedCornerShape(2.dp),
+                        ),
+                )
             }
-        }
-    }
-}
-
-/**
- * Issue #153 fix 2: three-dot pulse indicator rendered alongside the
- * spinner during Transcribing. Each dot's alpha cycles on a 900ms loop
- * staggered by 300ms — so at any frame at least two of the three dots
- * are painted with non-trivial alpha. This makes the static walkthrough
- * screenshot 07 visibly distinct from 06b (LISTENING) regardless of
- * which moment the capture lands on.
- */
-@Composable
-private fun TranscribingDots() {
-    val transition = rememberInfiniteTransition(label = "transcribing-dots")
-    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        for (i in 0 until 3) {
-            val phase by transition.animateFloat(
-                initialValue = 0f,
-                targetValue = 1f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(durationMillis = 900, easing = LinearEasing),
-                    repeatMode = RepeatMode.Reverse,
-                    initialStartOffset = androidx.compose.animation.core.StartOffset(i * 300),
-                ),
-                label = "transcribing-dot-$i",
-            )
-            // Floor alpha at 0.35 so all three dots are always visible
-            // in a static screenshot; the animation just modulates the
-            // brightness.
-            val alpha = 0.35f + 0.65f * phase
-            Box(
-                modifier = Modifier
-                    .size(6.dp)
-                    .background(
-                        color = PocketShellColors.Accent.copy(alpha = alpha),
-                        shape = androidx.compose.foundation.shape.CircleShape,
-                    ),
-            )
         }
     }
 }
@@ -1228,63 +1464,6 @@ internal fun formatRelativeTimestamp(timestampMs: Long, nowMs: Long): String {
     }
 }
 
-/**
- * Issue #174: 32dp circular "discard recording" affordance rendered next
- * to the mic FAB while the composer is in `Recording`. Tapping it
- * dispatches [onClick] which the ViewModel maps to
- * [PromptComposerViewModel.cancelRecording]: the recorder is stopped,
- * the captured audio buffer is discarded (no Whisper call, no API cost),
- * and the FSM lands back on `Idle` with any existing typed draft
- * preserved.
- *
- * Visual recipe:
- *  - 32dp circular tap target sized to land between the 56dp mic FAB
- *    and the waveform without crowding either.
- *  - `SurfaceElev` fill with a 1dp `Border` stroke so the chip reads as
- *    a secondary affordance, not a primary action — design-system #162
- *    keeps cancel / dismiss surfaces visually subordinate to accent
- *    actions like the mic itself.
- *  - Glyph rendered as a centred `×` in `TextSecondary` (the muted
- *    secondary token), matching the close `×` rendered in the sheet
- *    header so the two "dismiss this thing" gestures look consistent.
- *
- * A11y: an explicit `contentDescription` so TalkBack reads "Cancel
- * recording" instead of falling back to the bare glyph.
- */
-@Composable
-private fun CancelRecordingChip(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier = modifier
-            .size(32.dp)
-            .background(
-                color = PocketShellColors.SurfaceElev,
-                shape = androidx.compose.foundation.shape.CircleShape,
-            )
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.Border,
-                shape = androidx.compose.foundation.shape.CircleShape,
-            )
-            .clickable(
-                role = androidx.compose.ui.semantics.Role.Button,
-                onClick = onClick,
-            )
-            .testTag(COMPOSER_CANCEL_RECORDING_TAG)
-            .semantics { contentDescription = "Cancel recording" },
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = "×",
-            color = PocketShellColors.TextSecondary,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold,
-        )
-    }
-}
-
 @Composable
 private fun GhostButton(
     label: String,
@@ -1362,38 +1541,41 @@ internal fun ApiKeyEntryDialog(
     )
 }
 
-/**
- * Placeholder hint surfaced in the empty text area. Lives on [UiState]
- * as an extension so it stays close to the rest of the rendering logic
- * (it changes per recording state — Idle vs Recording — to subtly
- * affirm the recording is active).
- */
-private fun PromptComposerViewModel.UiState.placeholderHint(): String = when {
-    recording == PromptComposerViewModel.RecordingState.Idle ->
-        "Tap the mic to dictate, or type a prompt..."
-    // Issue #195: pre-speech sub-state — mic is open, no amplitude has
-    // crossed the speech threshold yet. The "speak when ready" copy is
-    // load-bearing here: it tells the user the system is open but has
-    // not heard them, which is exactly the user complaint that motivated
-    // the issue (label persisted while user was already speaking).
-    recording == PromptComposerViewModel.RecordingState.Recording && !hasDetectedSpeech ->
-        "Listening — speak when ready"
-    // Issue #195: active-speech sub-state — at least one amplitude sample
-    // crossed [PromptComposerViewModel.SILENCE_AMPLITUDE_THRESHOLD] since
-    // recording started, so the system is actively hearing the user.
-    recording == PromptComposerViewModel.RecordingState.Recording ->
-        "Capturing speech…"
-    else -> "Transcribing..."
-}
-
 internal const val COMPOSER_DRAFT_TAG = "prompt-composer-draft"
+
+/**
+ * Issue #196: the agent-pane Send button tag, shared with
+ * [AgentComposerSurface] and consumed by the tmux / raw-SSH conversation
+ * screens (`TmuxSessionScreen`, `SessionScreen`). The composer sheet itself
+ * no longer renders a separate Insert button (#453 collapsed the pair), but
+ * the agent surfaces still tag their single Send with this value.
+ */
 internal const val COMPOSER_SEND_TAG = "prompt-composer-send"
+
+/**
+ * Issue #453: the single primary Send button (Idle / Text-inserted states).
+ * Always submits with Enter — the Insert/Send pair collapsed to one. The
+ * tag keeps the historic `…-send-enter` value so existing connected tests
+ * that locate the Send affordance keep resolving the same node.
+ */
 internal const val COMPOSER_SEND_ENTER_TAG = "prompt-composer-send-enter"
-internal const val COMPOSER_STATUS_TAG = "prompt-composer-status"
 internal const val COMPOSER_WAVEFORM_TAG = "prompt-composer-waveform"
 internal const val COMPOSER_MIC_TAG = "prompt-composer-mic"
 internal const val COMPOSER_ATTACH_TAG = "prompt-composer-attach"
+internal const val COMPOSER_SNIPPETS_TAG = "prompt-composer-snippets"
 internal const val COMPOSER_ATTACHMENT_PROGRESS_TAG = "prompt-composer-attachment-progress"
+
+/** Issue #453: mockup placeholder text for the empty composer input. */
+internal const val COMPOSER_PLACEHOLDER = "Compose prompt…"
+
+/** Issue #453: elapsed mm:ss recording timer rendered next to the waveform. */
+internal const val COMPOSER_TIMER_TAG = "prompt-composer-timer"
+
+/** Issue #453: the "Stop" affordance inside the recording surface. */
+internal const val COMPOSER_STOP_TAG = "prompt-composer-stop"
+
+/** Issue #453: the Auto-send toggle shown in Recording / Transcribing. */
+internal const val COMPOSER_AUTO_SEND_TAG = "prompt-composer-auto-send"
 
 /**
  * Issue #153 fix 2: test tag for the in-flight transcribing spinner
@@ -1426,28 +1608,6 @@ internal const val SEND_ENTER_TOOLTIP_LABEL: String =
 internal fun composerSendTooltipTestTag(label: String): String =
     "prompt-composer-send-tooltip:" + label.hashCode().toString(16)
 
-/**
- * Issue #185: test tag for the inline "auto-stops after Xs silence"
- * hint rendered below the mic row while the composer is in `Recording`.
- * The hint surfaces the current threshold from
- * [PromptComposerViewModel.UiState.silenceThresholdSeconds] so the user
- * can see how long a silence will trigger the watchdog auto-stop.
- */
-internal const val COMPOSER_SILENCE_THRESHOLD_HINT_TAG = "prompt-composer-silence-hint"
-
-/**
- * Issue #185: pretty-format the silence threshold for the composer's
- * inline hint. Drops the trailing `.0` for whole-second values so the
- * hint reads `Auto-stops after 30s silence` rather than `30.0s`; renders
- * one decimal otherwise (`2.5s`). Mirrors the same rounding rule used
- * by `SettingsScreen.formatThresholdLabel` so the Settings slider value
- * and the composer hint never disagree by a rounding artifact.
- */
-internal fun formatSilenceThresholdLabel(seconds: Float): String {
-    val rounded = kotlin.math.round(seconds * 10f) / 10f
-    val asInt = rounded.toInt()
-    return if (rounded == asInt.toFloat()) asInt.toString() else "%.1f".format(rounded)
-}
 
 /**
  * Issue #174: test tag for the cancel-recording chip rendered next to
@@ -1507,26 +1667,23 @@ private fun PromptComposerIdlePreview() {
 }
 
 /**
- * Recording state — partial text in the area, mic pulsing, waveform
- * idle because no speech has been detected yet. Status reads
- * "LISTENING" and the empty-area placeholder reads "Listening — speak
- * when ready". Issue #195 sub-state: pre-speech.
+ * Issue #453: Recording state — amplitude-driven waveform + the `00:17`
+ * elapsed timer + Stop; below, the Auto-send toggle and the red record/stop
+ * button. No redundant "CAPTURING" text — the animated indicator conveys it.
  */
-@Preview(name = "Composer · recording (listening, pre-speech)", widthDp = 412, heightDp = 360)
+@Preview(name = "Composer · recording", widthDp = 412, heightDp = 360)
 @Composable
-private fun PromptComposerRecordingListeningPreview() {
+private fun PromptComposerRecordingPreview() {
     PocketShellTheme {
         Box(modifier = Modifier.background(PocketShellColors.Surface)) {
             SheetContent(
                 state = PromptComposerViewModel.UiState(
                     draft = "",
                     recording = PromptComposerViewModel.RecordingState.Recording,
-                    amplitude = 0f,
-                    hasDetectedSpeech = false,
-                    // Issue #397: show the inline "auto-stops after 30s
-                    // silence" hint so the design surface reflects what
-                    // the user sees while the mic is open.
-                    silenceThresholdSeconds = 30f,
+                    amplitude = 0.7f,
+                    hasDetectedSpeech = true,
+                    recordingElapsedMs = 17_000L,
+                    autoSend = false,
                     error = null,
                 ),
                 onClose = {},
@@ -1539,27 +1696,20 @@ private fun PromptComposerRecordingListeningPreview() {
 }
 
 /**
- * Recording state — issue #195 sub-state: active speech. At least one
- * amplitude sample crossed the speech-detection threshold, so the
- * label reads "CAPTURING" and the waveform animates by the live
- * amplitude. This is the screen the user sees while actually
- * dictating.
+ * Issue #453: Transcribing state — "Transcribing…" + spinner + Cancel; the
+ * Auto-send toggle is still shown.
  */
-@Preview(name = "Composer · recording (capturing)", widthDp = 412, heightDp = 360)
+@Preview(name = "Composer · transcribing", widthDp = 412, heightDp = 360)
 @Composable
-private fun PromptComposerRecordingCapturingPreview() {
+private fun PromptComposerTranscribingPreview() {
     PocketShellTheme {
         Box(modifier = Modifier.background(PocketShellColors.Surface)) {
             SheetContent(
                 state = PromptComposerViewModel.UiState(
-                    draft = "check the deploy log and tell me what failed",
-                    recording = PromptComposerViewModel.RecordingState.Recording,
-                    amplitude = 0.7f,
-                    hasDetectedSpeech = true,
-                    // Issue #185: hint stays visible across the
-                    // listening -> capturing sub-state flip so the user
-                    // keeps the auto-stop mental model while speaking.
-                    silenceThresholdSeconds = 30f,
+                    draft = "",
+                    recording = PromptComposerViewModel.RecordingState.Transcribing,
+                    amplitude = 0f,
+                    autoSend = true,
                     error = null,
                 ),
                 onClose = {},
@@ -1572,14 +1722,12 @@ private fun PromptComposerRecordingCapturingPreview() {
 }
 
 /**
- * Transcription-ready state — the recording finished and the
- * appended text is visible. The mic FAB is in `Disabled` while
- * the network round-trip is in flight; this preview shows the
- * post-transcribe Idle state with the final text.
+ * Issue #453: Text-inserted state — the transcript fills the editable input
+ * and is editable before Send; 📎/`{}` left, Send + arrow right.
  */
-@Preview(name = "Composer · transcription ready", widthDp = 412, heightDp = 360)
+@Preview(name = "Composer · text inserted", widthDp = 412, heightDp = 360)
 @Composable
-private fun PromptComposerTranscribedPreview() {
+private fun PromptComposerTextInsertedPreview() {
     PocketShellTheme {
         Box(modifier = Modifier.background(PocketShellColors.Surface)) {
             SheetContent(

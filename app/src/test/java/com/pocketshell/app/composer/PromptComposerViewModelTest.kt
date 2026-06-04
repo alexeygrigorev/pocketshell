@@ -1878,4 +1878,141 @@ class PromptComposerViewModelTest {
         assertEquals("old draft text new dictation", sent[0].text)
         assertEquals(true, sent[0].withEnter)
     }
+
+    // -- Issue #453: elapsed timer formatting -----------------------------
+
+    @Test
+    fun formatElapsedRendersZeroPaddedMinutesAndSeconds() {
+        assertEquals("00:00", formatElapsed(0L))
+        assertEquals("00:09", formatElapsed(9_000L))
+        assertEquals("00:17", formatElapsed(17_400L)) // sub-second truncates
+        assertEquals("01:05", formatElapsed(65_000L))
+        assertEquals("12:34", formatElapsed(754_000L))
+        // Defensive: negative durations clamp to zero rather than render "-1".
+        assertEquals("00:00", formatElapsed(-500L))
+    }
+
+    @Test
+    fun recordingElapsedTimerIsDrivenByTheInjectedClock() = runTest {
+        // A fixed, manually-advanced clock so the timer is deterministic.
+        var now = 1_000_000L
+        val vm = newVm(
+            mic = FakeMicCapture(amplitudes = listOf(0.5f, 0.5f, 0.5f, 0.5f)),
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+            clock = { now },
+        )
+        vm.onMicTap()
+        runCurrent()
+        // First sampler tick stamps elapsed = clock() - start = 0.
+        assertEquals("00:00", formatElapsed(vm.uiState.value.recordingElapsedMs))
+
+        // Advance the wall clock by 17s and let one more sampler poll run.
+        now += 17_000L
+        advanceTimeBy(PromptComposerViewModel.SAMPLE_INTERVAL_MS)
+        runCurrent()
+        assertEquals("00:17", formatElapsed(vm.uiState.value.recordingElapsedMs))
+
+        // Settle the recording job so runTest doesn't hang.
+        vm.onMicTap()
+        advanceUntilIdle()
+    }
+
+    // -- Issue #453: Auto-send toggle -------------------------------------
+
+    @Test
+    fun autoSendOnSendsTheTranscriptWithoutASecondTap() = runTest {
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = fakeWhisperClient { Result.success("deploy the app") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val sent = collectSendRequests(vm)
+        // Turn Auto-send ON before recording.
+        vm.setAutoSend(true)
+        assertTrue(vm.uiState.value.autoSend)
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap() // stop -> transcribe
+        advanceUntilIdle()
+
+        // With Auto-send ON the completed dictation is dispatched without a
+        // separate Send tap, and the draft is cleared.
+        assertEquals(1, sent.size)
+        assertEquals("deploy the app", sent[0].text)
+        assertEquals(true, sent[0].withEnter)
+        assertEquals("", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun autoSendOffInsertsTheTranscriptIntoTheEditableDraft() = runTest {
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = fakeWhisperClient { Result.success("deploy the app") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val sent = collectSendRequests(vm)
+        // Auto-send defaults OFF.
+        assertEquals(false, vm.uiState.value.autoSend)
+
+        vm.onMicTap()
+        runCurrent()
+        vm.onMicTap() // stop -> transcribe
+        advanceUntilIdle()
+
+        // With Auto-send OFF nothing is sent — the transcript lands in the
+        // editable draft for the user to review before tapping Send.
+        assertEquals(0, sent.size)
+        assertEquals("deploy the app", vm.uiState.value.draft)
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+    }
+
+    @Test
+    fun togglingAutoSendOnMidRecordingArmsTheQueuedSend() = runTest {
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = fakeWhisperClient { Result.success("mid-record toggle") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val sent = collectSendRequests(vm)
+
+        vm.onMicTap()
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+        // Flip Auto-send ON while the mic is still open.
+        vm.setAutoSend(true)
+        runCurrent()
+
+        vm.onMicTap() // stop -> transcribe
+        advanceUntilIdle()
+
+        // The mid-recording toggle is honoured: the transcript is sent.
+        assertEquals(1, sent.size)
+        assertEquals("mid-record toggle", sent[0].text)
+        assertEquals("", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun togglingAutoSendOffMidRecordingDisarmsTheQueuedSend() = runTest {
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = fakeWhisperClient { Result.success("changed my mind") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val sent = collectSendRequests(vm)
+        // Start with Auto-send ON, then turn it OFF mid-recording.
+        vm.setAutoSend(true)
+        vm.onMicTap()
+        runCurrent()
+        vm.setAutoSend(false)
+        runCurrent()
+
+        vm.onMicTap() // stop -> transcribe
+        advanceUntilIdle()
+
+        // Turning Auto-send OFF mid-recording disarms the queued send; the
+        // transcript merely inserts into the editable draft.
+        assertEquals(0, sent.size)
+        assertEquals("changed my mind", vm.uiState.value.draft)
+    }
 }

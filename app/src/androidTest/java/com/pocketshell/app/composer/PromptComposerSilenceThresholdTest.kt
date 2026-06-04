@@ -3,11 +3,7 @@ package com.pocketshell.app.composer
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.test.assertCountEquals
-import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
-import androidx.compose.ui.test.onAllNodesWithText
-import androidx.compose.ui.test.onNodeWithTag
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.pocketshell.app.di.WhisperClientFactory
 import com.pocketshell.core.voice.WhisperClient
@@ -18,44 +14,22 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Issue #185 connected acceptance tests for the silence-threshold
- * surfacing + the stricter 2s minimum floor.
+ * Issue #185 / #453 connected acceptance test for the silence-watchdog
+ * 2s minimum floor.
  *
- * Two scenarios:
- *
- *  1. **Hint visibility**: when the composer enters Recording the
- *     inline "Auto-stops after Xs silence" hint is rendered with the
- *     threshold from `UiState.silenceThresholdSeconds`. When the user
- *     taps the mic again (manual stop), the hint disappears.
- *  2. **Mid-utterance silence regression**: with the threshold floor
- *     pinned at 2s, a 1.5s pause followed by more speech keeps the
- *     composer in Recording — the watchdog must NOT have auto-stopped
- *     during the pause. This is the canonical reproduction of the
- *     v0.2.8 feedback report.
- *
- * The connected runner exercises the same code path the user hits — a
- * real `PromptComposerViewModel` driving the live `SheetContent`
- * composable — so the threshold value flows through the FSM, into the
- * UiState, and out to the rendered text node end-to-end. Unit-level
- * coverage of the watchdog math lives in
- * [com.pocketshell.app.composer.PromptComposerViewModelTest].
+ * Issue #453 removed the inline "Auto-stops after Xs silence" hint from
+ * the composer UI (maintainer feedback: "Remove the 'Auto-stops after 30s
+ * silence' label — unnecessary noise"). The watchdog *behaviour* — that a
+ * sub-window pause does not auto-stop the recording — is unchanged and is
+ * still pinned here as a connected-FSM regression, plus at the millisecond
+ * level in
+ * [com.pocketshell.app.composer.PromptComposerViewModelTest.silenceWindowAtMinimumFloorTwoSecondsKeepsRecordingThroughOneAndAHalfSecondSilence].
  */
 @RunWith(AndroidJUnit4::class)
 class PromptComposerSilenceThresholdTest {
 
     @get:Rule
     val compose = createAndroidComposeRule<ComponentActivity>()
-
-    /**
-     * In-memory mic that reports a steady loud amplitude so the
-     * watchdog never trips on its own — the test owns the FSM
-     * transitions explicitly via `vm.onMicTap()` / `vm.cancelRecording()`.
-     */
-    private class LoudMic : PromptComposerViewModel.MicCapture {
-        override fun start() = Unit
-        override fun stop(): ByteArray = ByteArray(44) { 0 }
-        override fun currentAmplitude(): Float = 0.5f
-    }
 
     /**
      * In-memory mic that goes silent immediately after `start()`. Used to
@@ -90,122 +64,6 @@ class PromptComposerSilenceThresholdTest {
     ) : PromptComposerViewModel.VoiceSettingsSnapshot {
         override fun silenceWindowMs(): Long = windowMs
         override fun whisperLanguageHint(): String? = null
-    }
-
-    @Test
-    fun silenceThresholdHintVisibleDuringRecordingAndHiddenOutside() {
-        // 5s is the documented default per #185. Render the composer
-        // around a real ViewModel and assert the inline hint surfaces
-        // the value the user configured (or the default) so the user
-        // has a mental model of when the watchdog will auto-stop.
-        val vm = PromptComposerViewModel(
-            audioRecorder = LoudMic(),
-            whisperClientFactory = WhisperClientFactory {
-                object : WhisperClient {
-                    override suspend fun transcribe(
-                        audio: ByteArray,
-                        language: String?,
-                    ): Result<String> = Result.success("noop")
-                }
-            },
-            apiKeyStorage = TestVault(),
-            voiceSettings = FixedSilenceWindowSettings(windowMs = 5_000L),
-        )
-
-        compose.setContent {
-            PocketShellTheme {
-                val state by vm.uiState.collectAsState()
-                SheetContent(
-                    state = state,
-                    onClose = {},
-                    onDraftChange = vm::onDraftChange,
-                    onMicTap = { vm.onMicTap() },
-                    onSend = { _ -> },
-                    onCancelRecording = vm::cancelRecording,
-                )
-            }
-        }
-
-        // Hint is hidden in Idle — the recording isn't running so the
-        // auto-stop window is not relevant.
-        compose.onNodeWithTag(COMPOSER_SILENCE_THRESHOLD_HINT_TAG).assertDoesNotExist()
-
-        // Start recording.
-        compose.runOnUiThread { vm.onMicTap() }
-        compose.waitForIdle()
-        compose.waitUntil(timeoutMillis = 5_000) {
-            vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Recording
-        }
-
-        // Hint is visible with the rendered seconds.
-        compose.onNodeWithTag(COMPOSER_SILENCE_THRESHOLD_HINT_TAG).assertIsDisplayed()
-        // The label text reads `Auto-stops after 5s silence` — pin the
-        // body so a future copy edit is forced through the issue.
-        compose.onAllNodesWithText("Auto-stops after 5s silence")
-            .assertCountEquals(1)
-
-        assertEquals(
-            "the stamped threshold must match the snapshot read at startRecording",
-            5f,
-            vm.uiState.value.silenceThresholdSeconds,
-            0.001f,
-        )
-
-        // Cancel recording. The hint vanishes because the FSM is back
-        // on Idle — the threshold field stays in state (cheap to keep)
-        // but the gate hides it.
-        compose.runOnUiThread { vm.cancelRecording() }
-        compose.waitForIdle()
-        compose.waitUntil(timeoutMillis = 5_000) {
-            vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Idle
-        }
-        compose.onNodeWithTag(COMPOSER_SILENCE_THRESHOLD_HINT_TAG).assertDoesNotExist()
-    }
-
-    @Test
-    fun silenceThresholdHintRendersConfiguredWindowFromSettings() {
-        // A user who picked 3s from the slider must see "3s" inline so
-        // the displayed value and the watchdog never disagree.
-        val vm = PromptComposerViewModel(
-            audioRecorder = LoudMic(),
-            whisperClientFactory = WhisperClientFactory {
-                object : WhisperClient {
-                    override suspend fun transcribe(
-                        audio: ByteArray,
-                        language: String?,
-                    ): Result<String> = Result.success("noop")
-                }
-            },
-            apiKeyStorage = TestVault(),
-            voiceSettings = FixedSilenceWindowSettings(windowMs = 3_000L),
-        )
-
-        compose.setContent {
-            PocketShellTheme {
-                val state by vm.uiState.collectAsState()
-                SheetContent(
-                    state = state,
-                    onClose = {},
-                    onDraftChange = vm::onDraftChange,
-                    onMicTap = { vm.onMicTap() },
-                    onSend = { _ -> },
-                    onCancelRecording = vm::cancelRecording,
-                )
-            }
-        }
-
-        compose.runOnUiThread { vm.onMicTap() }
-        compose.waitForIdle()
-        compose.waitUntil(timeoutMillis = 5_000) {
-            vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Recording
-        }
-        compose.onAllNodesWithText("Auto-stops after 3s silence")
-            .assertCountEquals(1)
-
-        // Clean up so the watchdog coroutine does not bleed into the
-        // next test in the suite.
-        compose.runOnUiThread { vm.cancelRecording() }
-        compose.waitForIdle()
     }
 
     /**
@@ -300,10 +158,9 @@ class PromptComposerSilenceThresholdTest {
             vm.uiState.value.recording,
         )
 
-        // The hint is still showing the configured threshold — the
-        // user sees the same value the watchdog is enforcing.
+        // The stamped threshold still matches the configured window — the
+        // value the watchdog is enforcing.
         assertEquals(2f, vm.uiState.value.silenceThresholdSeconds, 0.001f)
-        compose.onNodeWithTag(COMPOSER_SILENCE_THRESHOLD_HINT_TAG).assertIsDisplayed()
 
         // Tear down via cancel so the watchdog coroutine doesn't keep
         // polling past the test boundary. Using cancel rather than a

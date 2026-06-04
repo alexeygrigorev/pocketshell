@@ -23,6 +23,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
@@ -85,6 +86,12 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 @RunWith(AndroidJUnit4::class)
 class NoBackgroundWorkE2eTest {
+
+    // Issue #470 blocker #1: grant runtime permissions before the activity
+    // launches so the system GrantPermissionsActivity never steals focus
+    // from MainActivity at launch.
+    @get:Rule
+    val grantPermissions = PreGrantPermissionsRule()
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
 

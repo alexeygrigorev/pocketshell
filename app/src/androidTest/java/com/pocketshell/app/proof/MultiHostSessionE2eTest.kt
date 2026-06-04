@@ -64,6 +64,12 @@ class MultiHostSessionE2eTest {
     @get:Rule
     val compose = createEmptyComposeRule()
 
+    // Issue #470 blocker #1: grant runtime permissions before the activity
+    // launches so the system GrantPermissionsActivity never steals focus
+    // from the Compose hierarchy ("No compose hierarchies found").
+    @get:Rule
+    val grantPermissions = PreGrantPermissionsRule()
+
     private var launchedActivity: ActivityScenario<MainActivity>? = null
     private val timings = mutableListOf<String>()
     private var sessionA: String = ""

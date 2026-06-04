@@ -2,7 +2,6 @@ package com.pocketshell.app.portfwd
 
 import android.content.Context
 import android.graphics.Bitmap
-import android.os.Build
 import android.os.SystemClock
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
@@ -15,6 +14,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.testaccess.TestAccessEntryPoint
 import dagger.hilt.android.EntryPointAccessors
 import org.junit.After
@@ -42,6 +42,14 @@ class ForwardingIndicatorE2eTest {
     @get:Rule
     val compose = createEmptyComposeRule()
 
+    // Issue #470 blocker #1: grant runtime permissions before the activity
+    // launches so the system GrantPermissionsActivity never steals focus
+    // from the Compose hierarchy ("No compose hierarchies found"). Replaces
+    // this test's previous inline POST_NOTIFICATIONS-only grant with the
+    // shared rule that also covers RECORD_AUDIO / CAMERA.
+    @get:Rule
+    val grantPermissions = PreGrantPermissionsRule()
+
     private var launchedActivity: ActivityScenario<MainActivity>? = null
     private var registeredHostId: Long? = null
 
@@ -64,20 +72,9 @@ class ForwardingIndicatorE2eTest {
 
     @Test
     fun indicatorHiddenWithNoForwards_thenAppearsAndOpensPanelOnTap() {
-        // Pre-grant POST_NOTIFICATIONS so MainActivity's Android-13+
-        // runtime request does not throw a system dialog over the activity
-        // window (which would steal focus from the compose hierarchy at
-        // launch). This also exercises the "already granted -> no dialog"
-        // branch of the new permission handling.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val instrumentation = InstrumentationRegistry.getInstrumentation()
-            runCatching {
-                instrumentation.uiAutomation.grantRuntimePermission(
-                    instrumentation.targetContext.packageName,
-                    android.Manifest.permission.POST_NOTIFICATIONS,
-                )
-            }
-        }
+        // Runtime permissions are pre-granted by the [grantPermissions]
+        // rule before this body runs, so MainActivity's Android-13+ runtime
+        // request never throws a system dialog over the activity window.
 
         // Make sure no stale registration leaks in from a sibling test.
         controller().activeHostIdsSnapshot().forEach { controller().unregisterActiveHost(it) }

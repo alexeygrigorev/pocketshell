@@ -243,6 +243,18 @@ class FolderListViewModel internal constructor(
         gateway: FolderListGateway,
         hostDao: HostDao,
         projectRootDao: ProjectRootDao,
+        // Issue #470: inject the app-scoped singleton lease manager (the
+        // SAME one [SshFolderListGateway] uses for its `tmux list-sessions`
+        // probe) so the warm host lease and the probe share ONE pooled SSH
+        // connection. Previously this view model used a throwaway
+        // `SshLeaseManager()` for the warm lease while the gateway used the
+        // Hilt singleton, so opening a host detail screen fired TWO
+        // concurrent SSH connects to the same host. On a cold/loaded
+        // emulator the redundant second connect congests the `10.0.2.2` NAT
+        // path and the folder-list enumeration stalls in `Loading` past the
+        // connect bound. Sharing the pool means the probe reuses the warm
+        // connection (reference-counted) instead of racing a second one.
+        sshLeaseManager: SshLeaseManager,
         @ApplicationContext applicationContext: Context,
         assistantClientFactory: AssistantLlmClientFactory?,
         reposRemoteSource: ReposRemoteSource?,
@@ -252,6 +264,7 @@ class FolderListViewModel internal constructor(
         gateway = gateway,
         hostDao = hostDao,
         projectRootDao = projectRootDao,
+        sshLeaseManager = sshLeaseManager,
         applicationContext = applicationContext,
         assistantClientFactory = assistantClientFactory,
         reposRemoteSource = reposRemoteSource,

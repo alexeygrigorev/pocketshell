@@ -11,6 +11,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.app.projects.FOLDER_LIST_BACK_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
 import com.pocketshell.app.settings.SettingsRepository
@@ -33,6 +34,12 @@ class DefaultHostLaunchE2eTest {
 
     @get:Rule
     val compose = createEmptyComposeRule()
+
+    // Issue #470 blocker #1: grant runtime permissions before the activity
+    // launches so the system GrantPermissionsActivity never steals focus
+    // from the Compose hierarchy ("No compose hierarchies found").
+    @get:Rule
+    val grantPermissions = PreGrantPermissionsRule()
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
     private var hostId: Long? = null

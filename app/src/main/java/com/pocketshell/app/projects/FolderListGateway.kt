@@ -1,5 +1,6 @@
 package com.pocketshell.app.projects
 
+import android.util.Log
 import com.pocketshell.app.repos.ReposRemoteSource
 import com.pocketshell.app.repos.ReposListResult
 import com.pocketshell.app.repos.ReposJsonParser
@@ -23,8 +24,11 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import com.pocketshell.uikit.model.SessionAgentKind
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -101,6 +105,40 @@ sealed interface FolderListResult {
     data class Failed(val message: String) : FolderListResult
     data class ConnectFailed(val cause: Throwable) : FolderListResult
 }
+
+/**
+ * Raised when a session-enumeration SSH-exec probe (e.g. `tmux
+ * list-sessions`) connects and authenticates fine but its output read
+ * never reaches EOF within [SshFolderListGateway.EXEC_READ_TIMEOUT_MS].
+ *
+ * Issue #470: this is the robustness contract for the enumeration probe.
+ * A connect can succeed (`destination=FolderList`) and then the post-
+ * connect `session.exec(LIST_SESSIONS_COMMAND)` read can block silently —
+ * `SshSession.exec` reads to EOF with a plain blocking JDK stream, so a
+ * wedged channel (e.g. emulator↔Docker SLIRP back-pressure on heavier
+ * output) would leave the folder screen stuck in `Loading` with no
+ * exception and no `ConnectError` panel, defeating the retry-once
+ * readiness gate. A wedged read MUST instead surface a bounded failure:
+ * the gateway converts this into [FolderListResult.ConnectFailed], which
+ * the view model renders as the retryable `FOLDER_LIST_ERROR_TAG` panel so
+ * the user (and the readiness gate) can retry on a fresh probe. On timeout
+ * the wedged [SshSession] is also closed so no orphaned exec channel/IO
+ * thread outlives the failed probe (see [SshFolderListGateway.execBounded]).
+ *
+ * (In the #470 multi-run AVD repro the enumeration read itself completed
+ * in ~10ms and this bound never tripped — the picker stall was a separate
+ * test-side issue, not an SSH-exec wedge. This bound is kept as defensive
+ * cover so a future genuine read wedge degrades to a bounded retry, not a
+ * silent hang.)
+ */
+class FolderListExecTimeoutException(
+    command: String,
+    timeoutMs: Long,
+) : RuntimeException(
+    "tmux/session-enumeration probe read did not complete within " +
+        "${timeoutMs}ms (connect+auth succeeded; the exec output never " +
+        "reached EOF). Command: $command",
+)
 
 /**
  * Gateway used by [FolderListViewModel] to fetch session rows with
@@ -187,16 +225,39 @@ data class FolderImportPayload(
     val openStream: () -> InputStream?,
 )
 
-class SshFolderListGateway @Inject constructor(
+class SshFolderListGateway internal constructor(
     private val reposRemoteSource: ReposRemoteSource,
     private val activeTmuxClients: ActiveTmuxClients,
-    private val sshLeaseManager: SshLeaseManager = SshLeaseManager(
-        connector = SshLeaseConnector { target ->
-            com.pocketshell.core.ssh.DefaultSshLeaseConnector().connect(target)
-        },
-    ),
-    private val sessionListParser: HostTmuxSessionListParser = HostTmuxSessionListParser(),
+    private val sshLeaseManager: SshLeaseManager,
+    private val sessionListParser: HostTmuxSessionListParser,
+    // Issue #470: bound on a single session-enumeration exec read. Defaults
+    // to [EXEC_READ_TIMEOUT_MS] in production; the unit test overrides it to
+    // a small deterministic value so the wedge/healthy split can be asserted
+    // on a real dispatcher without virtual-vs-real time racing. Kept off the
+    // @Inject constructor below so Hilt never has to provide a raw Long.
+    private val execReadTimeoutMs: Long,
 ) : FolderListGateway {
+
+    // Hilt entry point. The injectable surface is unchanged from before
+    // issue #470; the read-timeout bound defaults to [EXEC_READ_TIMEOUT_MS]
+    // and is only overridden by the gateway's own unit test.
+    @Inject
+    constructor(
+        reposRemoteSource: ReposRemoteSource,
+        activeTmuxClients: ActiveTmuxClients,
+        sshLeaseManager: SshLeaseManager = SshLeaseManager(
+            connector = SshLeaseConnector { target ->
+                com.pocketshell.core.ssh.DefaultSshLeaseConnector().connect(target)
+            },
+        ),
+        sessionListParser: HostTmuxSessionListParser = HostTmuxSessionListParser(),
+    ) : this(
+        reposRemoteSource = reposRemoteSource,
+        activeTmuxClients = activeTmuxClients,
+        sshLeaseManager = sshLeaseManager,
+        sessionListParser = sessionListParser,
+        execReadTimeoutMs = EXEC_READ_TIMEOUT_MS,
+    )
 
     constructor() : this(
         ReposRemoteSource(ReposJsonParser()),
@@ -239,7 +300,7 @@ class SshFolderListGateway @Inject constructor(
                 keyPath = keyPath,
                 passphrase = passphrase,
             ) { session ->
-                val listSessions = session.exec(pathAware(LIST_SESSIONS_COMMAND))
+                val listSessions = session.execBounded(pathAware(LIST_SESSIONS_COMMAND))
                 listSessionsFromNativeOrPocketshell(session, host, watchedRoots, listSessions)
             }.fold(
                 onSuccess = { it },
@@ -251,6 +312,89 @@ class SshFolderListGateway @Inject constructor(
             FolderListResult.Failed("${t.javaClass.simpleName}: ${t.message ?: "unknown error"}")
         }
     }
+
+    /**
+     * Run a session-enumeration probe with a bounded read timeout.
+     *
+     * Issue #470: `SshSession.exec` reads its stdout/stderr to EOF with a
+     * plain blocking JDK stream read (`Command.inputStream.readBytes()`).
+     * A wedged channel (heavier seeded tmux state on a warm pooled
+     * connection over the emulator SLIRP path) leaves that read blocked
+     * indefinitely with no exception. A plain `withTimeout` directly around
+     * the `suspend exec` would NOT fire while the read is blocked, because
+     * the blocking `readBytes()` sits inside `exec`'s own
+     * `withContext(Dispatchers.IO)` and never hits a cancellation/suspension
+     * point — `withTimeout` only resumes the coroutine at a suspension
+     * point, so it would wait for the read to return. So we run the exec in
+     * a CHILD coroutine ([async]) and race it against the timeout via
+     * [deferred.await], which IS a genuine suspension point that the
+     * timeout's cancellation can interrupt even while the underlying read is
+     * still wedged. When the timeout wins, the parent resumes immediately
+     * and we surface a bounded [FolderListExecTimeoutException].
+     *
+     * IMPORTANT — cancellation cannot interrupt the in-flight blocking read.
+     * `deferred.cancel()` only marks the coroutine cancelled; the
+     * `readBytes()` JDK call is not interruptible, so the `exec`'s
+     * `client.startSession().use { … }` block stays parked and its `finally`
+     * (which closes the exec channel) never runs. Left to itself the
+     * orphaned channel + IO thread would survive until the whole pooled
+     * [SshSession] is torn down by lease idle-expiry — and a repeated wedge
+     * before that expiry would pile up orphaned channels/threads on the one
+     * pooled connection. To avoid that leak we CLOSE the session on timeout:
+     * `close()` disconnects the underlying transport, which makes the parked
+     * `readBytes()` throw and unparks the `use {}` finally so the channel is
+     * freed. The lease pool self-heals — once the session reports
+     * `!isConnected`, the next [SshLeaseManager.acquire] for this key opens a
+     * fresh connection instead of handing back the dead one. We deliberately
+     * close rather than relying on idle-expiry so no orphaned channel/thread
+     * outlives the failed probe.
+     *
+     * The whole bounded operation runs inside `withContext(Dispatchers.IO)`
+     * so the timeout timer and `deferred.await()` are serviced on a free IO
+     * worker rather than the caller's dispatcher. On device the probe runs
+     * from the main/Compose dispatcher, which can be busy rendering the
+     * seeded full-screen terminal; if the timeout lived on that thread it
+     * could be starved and never fire. Moving it to IO makes the bound
+     * robust regardless of caller-thread load.
+     *
+     * Under `runTest` this `withContext(Dispatchers.IO)` hop escapes the
+     * test scheduler onto a real dispatcher, so the timeout uses real time
+     * there too — fine, because the fast unit fakes return in microseconds,
+     * far under the bound, so no spurious timeout fires.
+     *
+     * On the healthy sub-second path this adds no meaningful latency:
+     * `await()` completes long before the bound and the timeout coroutine
+     * is cancelled. The bound is generous relative to the normal exec (tens
+     * of ms) but tight relative to the old ~45s silent hang and below the
+     * folder-list poll cadence so the timeout — not an external poll
+     * restart — is what surfaces a wedged read.
+     */
+    private suspend fun SshSession.execBounded(command: String): ExecResult =
+        withContext(Dispatchers.IO) {
+            val deferred = async { exec(command) }
+            withTimeoutOrNull(execReadTimeoutMs) { deferred.await() }
+                ?: run {
+                    Log.w(
+                        PROBE_LOG_TAG,
+                        "session-enumeration exec read wedged >${execReadTimeoutMs}ms; " +
+                            "closing wedged session + surfacing retryable ConnectError. " +
+                            "cmd=${command.takeLast(48)}",
+                    )
+                    // Stop awaiting the wedged read so this coroutine can
+                    // resume, then CLOSE the session: cancellation alone can
+                    // NOT interrupt the in-flight blocking `readBytes()`, so
+                    // close() is what tears down the transport, unparks the
+                    // read (it throws), and lets exec's `use {}` finally free
+                    // the channel — no orphaned channel/thread leak. The
+                    // pooled lease self-heals: a now-disconnected session is
+                    // discarded and re-opened on the next acquire.
+                    deferred.cancel()
+                    withContext(NonCancellable) {
+                        runCatching { close() }
+                    }
+                    throw FolderListExecTimeoutException(command, execReadTimeoutMs)
+                }
+        }
 
     private suspend fun <T> withLeaseSession(
         host: HostEntity,
@@ -324,7 +468,7 @@ class SshFolderListGateway @Inject constructor(
             else -> {
                 val baseRows = parseListSessionsRows(listSessions.stdout)
                 val windowRows = runCatching {
-                    val listPanes = session.exec(pathAware(LIST_PANES_COMMAND))
+                    val listPanes = session.execBounded(pathAware(LIST_PANES_COMMAND))
                     if (listPanes.exitCode == 0) parseSessionWindowRows(listPanes.stdout) else emptyList()
                 }.getOrDefault(emptyList())
                 val paneRows = activePaneRowsBySession(windowRows)
@@ -376,7 +520,7 @@ class SshFolderListGateway @Inject constructor(
         host: HostEntity,
         watchedRoots: List<ProjectRootEntity>,
     ): FolderListResult.Sessions? {
-        val pocketshell = session.exec(pathAware(POCKETSHELL_SESSIONS_COMMAND))
+        val pocketshell = session.execBounded(pathAware(POCKETSHELL_SESSIONS_COMMAND))
         if (pocketshell.exitCode != 0) {
             if (pocketshell.isTmuxServerAbsent()) {
                 return sessionsWithWatchedRootExpansion(
@@ -474,13 +618,13 @@ class SshFolderListGateway @Inject constructor(
     }
 
     private suspend fun listProjectHistoryFromPocketshellLogs(session: SshSession): List<String> {
-        val result = session.exec(pathAware(POCKETSHELL_PROJECT_HISTORY_COMMAND))
+        val result = session.execBounded(pathAware(POCKETSHELL_PROJECT_HISTORY_COMMAND))
         if (result.exitCode != 0 || result.isPocketshellLogsMissing()) return emptyList()
         return parsePocketshellProjectHistory(result.stdout)
     }
 
     private suspend fun remoteHomeDirectory(session: SshSession): String? {
-        val result = session.exec(pathAware("printf '%s\\n' \"\$HOME\""))
+        val result = session.execBounded(pathAware("printf '%s\\n' \"\$HOME\""))
         if (result.exitCode != 0) return null
         return result.stdout.lineSequence()
             .firstOrNull { it.isNotBlank() }
@@ -787,6 +931,33 @@ class SshFolderListGateway @Inject constructor(
     )
 
     internal companion object {
+        /**
+         * Logcat-grep tag for issue #470: emitted only when a
+         * session-enumeration exec read trips its bounded timeout
+         * ([execBounded]) and the gateway surfaces a retryable
+         * `ConnectError` instead of hanging.
+         */
+        const val PROBE_LOG_TAG: String = "PsFolderProbe"
+
+        /**
+         * Upper bound on a single session-enumeration SSH-exec probe read
+         * ([execBounded]). The healthy `tmux list-sessions` /
+         * `list-panes` / `pocketshell sessions` reads complete in tens of
+         * milliseconds; this bound is generous enough to never trip a
+         * slow-but-progressing read, yet tight enough that a fully wedged
+         * read (issue #470's ~45s silent SLIRP hang) surfaces a retryable
+         * `ConnectError` panel in a few seconds instead of leaving the
+         * folder screen stuck in `Loading`.
+         *
+         * Deliberately kept BELOW [FolderListViewModel.POLL_INTERVAL_MS]
+         * (5 s): the folder list re-probes on that cadence, so a bound at or
+         * above the poll interval would let the next poll cancel-and-restart
+         * the in-flight probe before this timeout could fire — and the
+         * wedged read would never surface the error panel (exactly the
+         * failure the readiness gate's retry-once branch needs to recover).
+         */
+        const val EXEC_READ_TIMEOUT_MS: Long = 3_500L
+
         /**
          * Single-quote a value for safe interpolation into a POSIX shell
          * command (`'...'` with embedded single quotes escaped as

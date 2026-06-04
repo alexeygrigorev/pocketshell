@@ -27,7 +27,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
-import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
+import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_MORE_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_FULL_CHROME_MORE_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_PAGE_TAG_PREFIX
@@ -88,6 +88,12 @@ class TmuxSessionSwitchE2eTest {
 
     @get:Rule
     val compose = createEmptyComposeRule()
+
+    // Issue #470 blocker #1: grant runtime permissions before the activity
+    // launches so the system GrantPermissionsActivity never steals focus
+    // from the Compose hierarchy ("No compose hierarchies found").
+    @get:Rule
+    val grantPermissions = PreGrantPermissionsRule()
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
     private val timings = mutableListOf<String>()
@@ -321,14 +327,17 @@ class TmuxSessionSwitchE2eTest {
     }
 
     private fun waitForFolderListReady() {
-        compose.waitUntil(timeoutMillis = 20_000) {
-            compose.onAllNodesWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty() &&
-                compose.onAllNodesWithText(SESSION_CLAUDE, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-        }
+        // Issue #470 blocker #2: shared session-picker readiness gate with a
+        // generous bound and one production Retry, replacing the bare
+        // `waitUntil` that burned its full timeout when a cold-AVD
+        // `tmux list-sessions` SSH-exec probe landed on the connect-error
+        // panel instead of the session row. The folder-list screen is
+        // implicitly up once the SESSION_CLAUDE row is present.
+        waitForSessionInPicker(
+            rule = compose,
+            sessionName = SESSION_CLAUDE,
+            timeoutMs = if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 20_000L,
+        )
     }
 
     private fun forceFlatHostDetailViewMode() {

@@ -64,6 +64,13 @@ abstract class NetworkFaultProofBase {
     @get:Rule
     val compose: ComposeTestRule = createEmptyComposeRule()
 
+    // Issue #470 blocker #1: grant runtime permissions before the activity
+    // launches so the system GrantPermissionsActivity never steals focus
+    // from the Compose hierarchy ("No compose hierarchies found"). Inherited
+    // by every NetworkFaultProofBase subclass.
+    @get:Rule
+    val grantPermissions = PreGrantPermissionsRule()
+
     protected var launchedActivity: ActivityScenario<MainActivity>? = null
     protected val timings: MutableList<String> = mutableListOf()
     private var networkFaultProofEnabled: Boolean = false

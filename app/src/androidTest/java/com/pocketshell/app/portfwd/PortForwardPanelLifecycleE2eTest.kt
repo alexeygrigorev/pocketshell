@@ -7,6 +7,7 @@ import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.proof.PreGrantPermissionsRule
 import com.pocketshell.core.portfwd.TunnelInfo
 import com.pocketshell.core.ssh.ExecResult
 import com.pocketshell.core.ssh.SshPortForward
@@ -25,6 +26,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -62,6 +64,12 @@ import org.junit.runner.RunWith
  */
 @RunWith(AndroidJUnit4::class)
 class PortForwardPanelLifecycleE2eTest {
+
+    // Issue #470 blocker #1: grant runtime permissions before the activity
+    // launches so the system GrantPermissionsActivity never steals focus
+    // from MainActivity at launch.
+    @get:Rule
+    val grantPermissions = PreGrantPermissionsRule()
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
     private var db: AppDatabase? = null

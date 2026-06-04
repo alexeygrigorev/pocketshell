@@ -30,6 +30,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.tmux.TMUX_COMPACT_CHROME_MORE_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_FULL_CHROME_MORE_BUTTON_TAG
 import com.pocketshell.app.tmux.TMUX_SESSION_PAGER_OVERLAY_TAG
@@ -97,6 +98,12 @@ class TmuxSessionWindowNavigationE2eTest {
     @get:Rule
     val compose = createEmptyComposeRule()
 
+    // Issue #470 blocker #1: grant runtime permissions before the activity
+    // launches so the system GrantPermissionsActivity never steals focus
+    // from the Compose hierarchy ("No compose hierarchies found").
+    @get:Rule
+    val grantPermissions = PreGrantPermissionsRule()
+
     private var launchedActivity: ActivityScenario<MainActivity>? = null
     private val timings = mutableListOf<String>()
 
@@ -133,7 +140,11 @@ class TmuxSessionWindowNavigationE2eTest {
         }
         val attachAt = SystemClock.elapsedRealtime()
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        waitForText(SESSION_CLAUDE, timeoutMs = 20_000)
+        // Issue #470 blocker #2: shared session-picker readiness gate
+        // (generous bound + one production Retry) instead of a bare
+        // waitForText that flaked when the cold-AVD tmux list-sessions
+        // SSH-exec probe landed on the connect-error panel.
+        waitForSessionInPicker(rule = compose, sessionName = SESSION_CLAUDE, timeoutMs = 20_000)
         compose.onNodeWithText(SESSION_CLAUDE).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()
@@ -415,7 +426,11 @@ class TmuxSessionWindowNavigationE2eTest {
                 .isNotEmpty()
         }
         compose.onNodeWithTag(hostRowTag, useUnmergedTree = true).performClick()
-        waitForText(SESSION_CLAUDE, timeoutMs = 20_000)
+        // Issue #470 blocker #2: shared session-picker readiness gate
+        // (generous bound + one production Retry) instead of a bare
+        // waitForText that flaked when the cold-AVD tmux list-sessions
+        // SSH-exec probe landed on the connect-error panel.
+        waitForSessionInPicker(rule = compose, sessionName = SESSION_CLAUDE, timeoutMs = 20_000)
         compose.onNodeWithText(SESSION_CLAUDE).performClick()
         compose.onNodeWithTag(TMUX_SESSION_SCREEN_TAG, useUnmergedTree = true).assertExists()
         waitForTerminalViewAttached()

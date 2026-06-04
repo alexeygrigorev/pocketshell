@@ -21,7 +21,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.hosts.HOST_ROW_TAG_PREFIX
 import com.pocketshell.app.hosts.SshKeyStorage
-import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
+import com.pocketshell.app.proof.signals.waitForSessionInPicker
 import com.pocketshell.app.sessions.SSH_SOURCE_FOLDER_LIST_PROBE
 import com.pocketshell.app.sessions.SSH_SOURCE_SESSION_PICKER_LIST
 import com.pocketshell.app.sessions.SSH_SOURCE_START_DIRECTORY_AUTOCOMPLETE
@@ -87,6 +87,12 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
 
     @get:Rule
     val compose = createEmptyComposeRule()
+
+    // Issue #470 blocker #1: grant runtime permissions before the activity
+    // launches so the system GrantPermissionsActivity never steals focus
+    // from the Compose hierarchy ("No compose hierarchies found").
+    @get:Rule
+    val grantPermissions = PreGrantPermissionsRule()
 
     private var launchedActivity: ActivityScenario<MainActivity>? = null
     private val timings = mutableListOf<String>()
@@ -627,14 +633,19 @@ class TmuxSessionSwitchSameHostReusesSshE2eTest {
     }
 
     private fun waitForFolderListReady() {
-        compose.waitUntil(timeoutMillis = pickerWaitMs) {
-            compose.onAllNodesWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true)
-                .fetchSemanticsNodes()
-                .isNotEmpty() &&
-                compose.onAllNodesWithText(SESSION_B, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
-        }
+        // Issue #470 blocker #2: wait on the shared session-picker readiness
+        // gate, which surfaces the folder-list session row (here SESSION_B,
+        // the last seeded session, so the whole enumeration has landed) with
+        // a generous bound and a single production Retry if the cold-AVD
+        // `tmux list-sessions` SSH-exec probe lands on the connect-error
+        // panel — replacing the bare `waitUntil` that burned the full
+        // timeout when the first connect attempt blew its window. The
+        // folder-list screen is implicitly up once the row is present.
+        waitForSessionInPicker(
+            rule = compose,
+            sessionName = SESSION_B,
+            timeoutMs = pickerWaitMs,
+        )
     }
 
     /**

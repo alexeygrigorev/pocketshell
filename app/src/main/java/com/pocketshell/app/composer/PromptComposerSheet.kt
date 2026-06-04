@@ -254,8 +254,26 @@ public fun PromptComposerSheet(
         }
     }
 
+    // Issue #511 / #509: dismissing the composer (× button, scrim tap,
+    // system back, swipe-down) must RELEASE the microphone — not merely
+    // hide the sheet. This [PromptComposerViewModel] is scoped to the
+    // session screen, NOT this sheet, so `onCleared()` (the only other
+    // place the mic is released) does not run when the sheet is dismissed.
+    // Without explicitly stopping here, a recording started in the sheet
+    // keeps the AudioRecord — and the sampler timer — alive after the
+    // sheet closes, holding the mic so the *next* recording captures
+    // silence and Whisper returns "no speech detected" (the maintainer's
+    // lost-recording data loss). [PromptComposerViewModel.cancelRecording]
+    // cancels the sampler job, stops + releases the recorder, and discards
+    // the partial buffer; it is a no-op when the FSM is not Recording, so
+    // dismissing an Idle / Transcribing composer is unaffected.
+    val dismissComposer = {
+        viewModel.cancelRecording()
+        onDismiss()
+    }
+
     ModalBottomSheet(
-        onDismissRequest = onDismiss,
+        onDismissRequest = dismissComposer,
         sheetState = sheetState,
         containerColor = PocketShellColors.Surface,
         contentColor = PocketShellColors.Text,
@@ -286,7 +304,7 @@ public fun PromptComposerSheet(
         SheetContent(
             modifier = Modifier.fillMaxHeight(0.65f),
             state = state,
-            onClose = onDismiss,
+            onClose = dismissComposer,
             onDraftChange = viewModel::onDraftChange,
             onMicTap = {
                 // Three-step gate: permission, then key, then recorder.
@@ -525,7 +543,9 @@ internal fun SheetContent(
             Box(
                 modifier = Modifier
                     .size(32.dp)
-                    .clickable(onClick = onClose),
+                    .clickable(role = Role.Button, onClick = onClose)
+                    .testTag(COMPOSER_CLOSE_TAG)
+                    .semantics { contentDescription = "Close composer" },
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
@@ -1653,6 +1673,13 @@ internal fun ApiKeyEntryDialog(
 }
 
 internal const val COMPOSER_DRAFT_TAG = "prompt-composer-draft"
+
+/**
+ * Issue #511: the header `×` close button. Tagged so the dismiss-releases-
+ * mic regression test can drive the real close affordance (the same path
+ * the maintainer used when mid-recording dismiss leaked the microphone).
+ */
+internal const val COMPOSER_CLOSE_TAG = "prompt-composer-close"
 
 /**
  * Issue #196: the agent-pane Send button tag, shared with

@@ -103,6 +103,40 @@ public interface SshSession : AutoCloseable {
     public suspend fun uploadFile(file: File, remotePath: String): String
 
     /**
+     * Read the contents of a remote file at [remotePath] into memory.
+     *
+     * The path is resolved by the remote login shell, so `~`-relative and
+     * `$VAR`-relative paths are expanded server-side. The transfer streams
+     * the raw bytes over an `exec` channel running `cat`, so it is
+     * binary-safe (no charset round-trip, no line-ending mangling).
+     *
+     * [maxBytes] is a hard ceiling. The remote file size is probed first;
+     * if it exceeds [maxBytes] the call throws [SshFileTooLargeException]
+     * *without* streaming the bytes, so a multi-gigabyte file never lands
+     * in the JVM heap. The cap is also enforced while reading (defence in
+     * depth against a file that grows between the size probe and the read,
+     * or a remote that ignores the size probe): if the stream delivers more
+     * than [maxBytes] the read is aborted and [SshFileTooLargeException] is
+     * thrown.
+     *
+     * Throws [SshFileNotFoundException] when the remote path does not exist
+     * or is not a regular file, [SshFileTooLargeException] when it exceeds
+     * [maxBytes], and [SshException] on transport-level errors.
+     *
+     * This is a blocking call wrapped to play well with coroutines via
+     * `kotlinx.coroutines.Dispatchers.IO`.
+     *
+     * Used by the in-app file viewer (issue #497) to fetch a server file
+     * for image / text preview.
+     *
+     * Has a default body that throws [NotImplementedError] so the many
+     * bespoke per-test [SshSession] fakes don't all have to override it;
+     * the production [RealSshSession] provides the real SFTP/`cat` read.
+     */
+    public suspend fun downloadFile(remotePath: String, maxBytes: Long): ByteArray =
+        throw NotImplementedError("downloadFile is only implemented by RealSshSession")
+
+    /**
      * Upload [length] bytes from [input] to [remotePath] via SCP under
      * the display name [name]. Mirrors [uploadFile] but lets the caller
      * stream from a non-file source (Android `ContentResolver`

@@ -10,7 +10,35 @@ package com.pocketshell.core.ssh
  * sshj exception hierarchy — we wrap them all into [SshException] with the
  * underlying cause preserved on [Throwable.cause].
  */
-public class SshException(
+public open class SshException(
     message: String,
     cause: Throwable? = null,
 ) : Exception(message, cause)
+
+/**
+ * Thrown by [SshSession.downloadFile] when the remote path does not exist or
+ * is not a regular file. A subclass of [SshException] so existing catch-all
+ * `catch (e: SshException)` sites keep working; callers that want to render a
+ * friendly "no such file" message can catch this specifically.
+ */
+public class SshFileNotFoundException(
+    public val remotePath: String,
+    cause: Throwable? = null,
+) : SshException("No such file on remote: $remotePath", cause)
+
+/**
+ * Thrown by [SshSession.downloadFile] when the remote file is larger than the
+ * caller's `maxBytes` ceiling. Carries the observed [sizeBytes] (or `-1` when
+ * the size was only discovered mid-stream) and the [maxBytes] limit so the UI
+ * can render an exact "too large to preview" message.
+ */
+public class SshFileTooLargeException(
+    public val remotePath: String,
+    public val sizeBytes: Long,
+    public val maxBytes: Long,
+    cause: Throwable? = null,
+) : SshException(
+    "Remote file $remotePath is too large to preview " +
+        "(${if (sizeBytes >= 0) "$sizeBytes bytes" else "size unknown"}, limit $maxBytes bytes)",
+    cause,
+)

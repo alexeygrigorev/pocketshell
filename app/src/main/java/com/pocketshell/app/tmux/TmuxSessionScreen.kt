@@ -203,6 +203,14 @@ public fun TmuxSessionScreen(
     /** Route an assistant-requested navigation (issue #266). */
     onAssistantNavigate: (com.pocketshell.app.nav.AppDestination) -> Unit = {},
     /**
+     * Issue #497: open the in-app file viewer for a remote path. [cwd] is
+     * supplied by the screen as the active pane's working directory so a
+     * relative path the agent referenced resolves server-side. MainActivity
+     * wires this to navigate(AppDestination.FileViewer(...)); back returns to
+     * this exact session/window via the hand-rolled back-stack.
+     */
+    onOpenFile: (path: String, cwd: String?) -> Unit = { _, _ -> },
+    /**
      * Issue #116 (usage-panel Fix B): same per-host worst-case
      * [com.pocketshell.core.usage.UsageProviderRecord] surface as
      * [com.pocketshell.app.session.SessionScreen], but for the
@@ -331,6 +339,9 @@ public fun TmuxSessionScreen(
     var showWindowSwitcher by remember { mutableStateOf(false) }
     var showSessionSwitcher by remember { mutableStateOf(false) }
     var showSessionDrawer by remember { mutableStateOf(false) }
+    // Issue #497: in-app file viewer path-entry dialog (kebab "Open file…").
+    var showOpenFileDialog by remember { mutableStateOf(false) }
+    var openFilePath by remember { mutableStateOf("") }
     // Voice/dictation surfaces — mirror SessionScreen so the tmux route
     // gets the prompt composer, the mic FAB, the inline-dictation key bar,
     // and the snippet picker. Without these the user can never dictate
@@ -529,6 +540,11 @@ public fun TmuxSessionScreen(
             onOpenPortForwarding = {
                 moreExpanded = false
                 onOpenPortForwarding()
+            },
+            onOpenFile = {
+                moreExpanded = false
+                openFilePath = ""
+                showOpenFileDialog = true
             },
             onNewWindow = {
                 moreExpanded = false
@@ -1084,6 +1100,56 @@ public fun TmuxSessionScreen(
                         }
                     }
                     dialogMode = null
+                },
+            )
+        }
+
+        // Issue #497: in-app file viewer path-entry dialog. The active
+        // pane's cwd is threaded through so a relative path the agent
+        // referenced resolves server-side in the viewer.
+        if (showOpenFileDialog) {
+            val paneCwd = currentPane?.cwd?.takeIf { it.isNotBlank() }
+            AlertDialog(
+                onDismissRequest = { showOpenFileDialog = false },
+                title = { Text("Open file") },
+                text = {
+                    Column {
+                        Text(
+                            text = if (paneCwd != null) {
+                                "Enter a path. Relative paths resolve against $paneCwd."
+                            } else {
+                                "Enter an absolute path, or a path relative to your home directory."
+                            },
+                            color = PocketShellColors.TextSecondary,
+                            fontSize = 12.sp,
+                        )
+                        OutlinedTextField(
+                            value = openFilePath,
+                            onValueChange = { openFilePath = it },
+                            singleLine = true,
+                            placeholder = { Text("e.g. out/report.png") },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp)
+                                .testTag(TMUX_OPEN_FILE_DIALOG_FIELD_TAG),
+                        )
+                    }
+                },
+                confirmButton = {
+                    TextButton(
+                        enabled = openFilePath.isNotBlank(),
+                        onClick = {
+                            val path = openFilePath.trim()
+                            showOpenFileDialog = false
+                            if (path.isNotEmpty()) onOpenFile(path, paneCwd)
+                        },
+                        modifier = Modifier.testTag(TMUX_OPEN_FILE_DIALOG_CONFIRM_TAG),
+                    ) {
+                        Text("Open")
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showOpenFileDialog = false }) { Text("Cancel") }
                 },
             )
         }
@@ -2094,6 +2160,14 @@ internal const val TMUX_DETACH_BUTTON_TAG = "tmux:session:detach-button"
  * kebab -> port-forward panel -> back-to-session.
  */
 internal const val TMUX_PORT_FORWARDING_BUTTON_TAG = "tmux:session:port-forwarding-button"
+/**
+ * Issue #497: stable test tags for the kebab's "Open file…" item and the
+ * path-entry dialog it opens, so instrumentation can drive
+ * kebab -> enter path -> file viewer.
+ */
+internal const val TMUX_OPEN_FILE_BUTTON_TAG = "tmux:session:open-file-button"
+internal const val TMUX_OPEN_FILE_DIALOG_FIELD_TAG = "tmux:session:open-file-field"
+internal const val TMUX_OPEN_FILE_DIALOG_CONFIRM_TAG = "tmux:session:open-file-confirm"
 /**
  * Issue #448 (epic #432 slice C): stable test tags for the new-port
  * detection overlay and its actions, so instrumentation can assert the
@@ -3403,6 +3477,10 @@ internal fun TmuxMoreMenu(
     onSwitchSession: () -> Unit,
     onOpenJobs: () -> Unit,
     onOpenUsage: () -> Unit,
+    // Issue #497: "Open file…" kebab item — opens the in-app file viewer
+    // path-entry dialog. Defaulted so existing direct callers / tests of
+    // TmuxMoreMenu stay source-compatible.
+    onOpenFile: () -> Unit = {},
     // Issue #445: "Port forwarding" kebab item — opens the per-host
     // port-forward panel. Defaulted so existing direct callers / tests
     // of TmuxMoreMenu stay source-compatible.
@@ -3468,6 +3546,13 @@ internal fun TmuxMoreMenu(
             text = { Text("Port forwarding") },
             onClick = onOpenPortForwarding,
             modifier = Modifier.testTag(TMUX_PORT_FORWARDING_BUTTON_TAG),
+        )
+        // Issue #497: open a server file (image / text) in the in-app viewer.
+        // Host-scoped affordance, so it lives in the "On this host" group.
+        DropdownMenuItem(
+            text = { Text("Open file…") },
+            onClick = onOpenFile,
+            modifier = Modifier.testTag(TMUX_OPEN_FILE_BUTTON_TAG),
         )
         HorizontalDivider()
         // Issue #235: explicit "I'm done with this session for now"

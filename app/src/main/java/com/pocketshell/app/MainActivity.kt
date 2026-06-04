@@ -40,6 +40,7 @@ import com.pocketshell.app.hosts.HostListViewModel
 import com.pocketshell.app.hosts.QrScannerScreen
 import com.pocketshell.app.env.EnvCopySourceFolder
 import com.pocketshell.app.env.EnvScreen
+import com.pocketshell.app.fileviewer.FileViewerScreen
 import com.pocketshell.app.jobs.RecurringJobsScreen
 import com.pocketshell.app.jobs.RecurringJobsViewModel
 import com.pocketshell.app.nav.AppDestination
@@ -952,6 +953,18 @@ private fun AppNavigator(
             },
         )
 
+        is AppDestination.FileViewer -> FileViewerScreen(
+            hostName = dest.hostName,
+            hostname = dest.hostname,
+            port = dest.port,
+            username = dest.username,
+            keyPath = dest.keyPath,
+            passphrase = dest.passphrase,
+            remotePath = dest.remotePath,
+            cwd = dest.cwd,
+            onBack = ::back,
+        )
+
         is AppDestination.RecurringJobs -> {
             val jobsViewModel = hiltViewModel<RecurringJobsViewModel>()
             androidx.compose.runtime.LaunchedEffect(dest) {
@@ -1046,6 +1059,24 @@ private fun AppNavigator(
                 )
             },
             onAssistantNavigate = ::navigate,
+            // Issue #497: kebab -> in-app file viewer. The active pane's cwd
+            // is passed so a relative path the agent referenced resolves
+            // correctly. Back returns to this exact tmux session/window.
+            onOpenFile = { path, cwd ->
+                navigate(
+                    AppDestination.FileViewer(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        remotePath = path,
+                        cwd = cwd,
+                    ),
+                )
+            },
             // Issue #116: same per-host chip as the plain-SSH route.
             usageBadgeProvider = usageBadgesByHost[dest.hostId],
             // Issue #177: seed the restored composer draft into the agent
@@ -1246,6 +1277,7 @@ internal fun AppDestination.timingName(): String = when (this) {
     is AppDestination.FolderList -> "FolderList(hostId=$hostId)"
     is AppDestination.RepoBrowser -> "RepoBrowser(hostId=$hostId)"
     is AppDestination.EnvFiles -> "EnvFiles(hostId=$hostId)"
+    is AppDestination.FileViewer -> "FileViewer(hostId=$hostId)"
     is AppDestination.RecurringJobs -> "RecurringJobs(session=$sessionName)"
 }
 

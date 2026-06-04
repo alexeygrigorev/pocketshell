@@ -288,6 +288,92 @@ internal class RealSshSession(
         remotePath
     }
 
+    override suspend fun downloadFile(remotePath: String, maxBytes: Long): ByteArray =
+        withContext(Dispatchers.IO) {
+            ensureConnected()
+            // 1. Size + existence probe. A single shell command prints either
+            //    the regular-file byte count or a `no file` sentinel. This
+            //    lets us refuse a huge file *before* streaming any bytes, so
+            //    a multi-gigabyte file never reaches the JVM heap.
+            val probe = exec(buildSizeProbeCommand(remotePath))
+            when (val size = parseSizeProbe(probe.stdout)) {
+                SIZE_PROBE_NO_FILE -> throw SshFileNotFoundException(remotePath)
+                SIZE_PROBE_UNPARSEABLE -> {
+                    // Size probe failed unexpectedly (shell missing wc, weird
+                    // output). Fall through to a capped streaming read rather
+                    // than assuming the file is fine or missing — the read
+                    // itself enforces the cap.
+                }
+                else -> if (size > maxBytes) {
+                    throw SshFileTooLargeException(remotePath, size, maxBytes)
+                }
+            }
+            // 2. Stream the raw bytes via `cat`, enforcing the cap a second
+            //    time while reading (defence against TOCTOU growth / a remote
+            //    that ignored the probe).
+            readRemoteBytesCapped(remotePath, maxBytes)
+        }
+
+    /**
+     * Stream the raw bytes of [remotePath] over an `exec` channel running
+     * `cat`, aborting with [SshFileTooLargeException] if more than [maxBytes]
+     * arrive. Binary-safe — reads from sshj's raw channel stream with no
+     * charset round-trip.
+     */
+    private fun readRemoteBytesCapped(remotePath: String, maxBytes: Long): ByteArray {
+        val sessionChannel = try {
+            client.startSession()
+        } catch (t: Throwable) {
+            throw SshException("Could not open session channel to read $remotePath: ${t.message}", t)
+        }
+        try {
+            val quoted = remotePath.replace("'", "'\\''")
+            val command: Command = try {
+                sessionChannel.exec("cat '$quoted'")
+            } catch (t: Throwable) {
+                throw SshException("Could not start remote `cat` for $remotePath: ${t.message}", t)
+            }
+            try {
+                val buffer = java.io.ByteArrayOutputStream()
+                val chunk = ByteArray(64 * 1024)
+                var total = 0L
+                command.inputStream.use { input ->
+                    while (true) {
+                        val read = input.read(chunk)
+                        if (read < 0) break
+                        total += read
+                        if (total > maxBytes) {
+                            throw SshFileTooLargeException(remotePath, -1, maxBytes)
+                        }
+                        buffer.write(chunk, 0, read)
+                    }
+                }
+                command.join()
+                val exit = command.exitStatus ?: -1
+                if (exit != 0) {
+                    val stderr = runCatching {
+                        command.errorStream.readBytes().toString(Charsets.UTF_8)
+                    }.getOrDefault("").trim()
+                    // `cat` on a missing/unreadable file exits non-zero; map a
+                    // "No such file" stderr to the friendly not-found type.
+                    if (stderr.contains("No such file", ignoreCase = true)) {
+                        throw SshFileNotFoundException(remotePath)
+                    }
+                    throw SshException("Remote `cat` exited with status $exit reading $remotePath: $stderr")
+                }
+                return buffer.toByteArray()
+            } finally {
+                runCatching { command.close() }
+            }
+        } catch (e: SshException) {
+            throw e
+        } catch (t: Throwable) {
+            throw SshException("Reading $remotePath failed: ${t.message}", t)
+        } finally {
+            runCatching { sessionChannel.close() }
+        }
+    }
+
     /**
      * Stream-to-remote-file primitive shared by [uploadFile] and
      * [uploadStream]. Uploads via an `exec` channel that runs
@@ -544,3 +630,58 @@ private val CLOSE_LOGGER: Logger = Logger.getLogger(RealSshSession::class.java.n
 internal const val TAIL_LOG_TAG: String = "issue239-tail-recover"
 
 private val TAIL_LOGGER: Logger = Logger.getLogger(RealSshSession::class.java.name + ".tail")
+
+/**
+ * Sentinel emitted by [buildSizeProbeCommand] when the remote path is not a
+ * regular file (missing, a directory, a device, ...). Kept distinct from any
+ * numeric byte count so [parseSizeProbe] can map it to
+ * [SshFileNotFoundException].
+ */
+internal const val SIZE_PROBE_NO_FILE_SENTINEL: String = "__PS_NOFILE__"
+
+/** [parseSizeProbe] result for the [SIZE_PROBE_NO_FILE_SENTINEL] case. */
+internal const val SIZE_PROBE_NO_FILE: Long = -1L
+
+/** [parseSizeProbe] result when the probe output couldn't be parsed at all. */
+internal const val SIZE_PROBE_UNPARSEABLE: Long = -2L
+
+/**
+ * Build the remote size-probe command for [remotePath] (issue #497).
+ *
+ * For a regular file it prints the byte count (`wc -c` — busybox-safe on the
+ * Alpine fixtures and present on any POSIX shell); for anything that is not a
+ * regular file it prints [SIZE_PROBE_NO_FILE_SENTINEL]. The path is resolved
+ * by the remote login shell, so `~`-relative paths expand server-side.
+ *
+ * Single-quoted with the standard `'\''` escape so arbitrary filenames don't
+ * break shell parsing.
+ */
+internal fun buildSizeProbeCommand(remotePath: String): String {
+    val quoted = remotePath.replace("'", "'\\''")
+    return "if [ -f '$quoted' ]; then wc -c < '$quoted'; else echo $SIZE_PROBE_NO_FILE_SENTINEL; fi"
+}
+
+/**
+ * Parse the stdout of [buildSizeProbeCommand] into a byte count.
+ *
+ * Returns:
+ *  - the parsed non-negative size for a regular file,
+ *  - [SIZE_PROBE_NO_FILE] when the sentinel was printed,
+ *  - [SIZE_PROBE_UNPARSEABLE] when the output is neither (e.g. `wc` missing).
+ *
+ * `wc -c` on busybox may emit leading whitespace, so the numeric line is
+ * trimmed before parsing. Visible-for-test so the parse rules are pinned
+ * without a live SSH server.
+ */
+internal fun parseSizeProbe(stdout: String): Long {
+    val trimmed = stdout.trim()
+    if (trimmed == SIZE_PROBE_NO_FILE_SENTINEL) return SIZE_PROBE_NO_FILE
+    // Take the last non-blank token — guards against a shell that prints a
+    // banner before the count. `wc -c < file` outputs just the number.
+    val token = trimmed.lines()
+        .map { it.trim() }
+        .lastOrNull { it.isNotEmpty() }
+        ?: return SIZE_PROBE_UNPARSEABLE
+    if (token == SIZE_PROBE_NO_FILE_SENTINEL) return SIZE_PROBE_NO_FILE
+    return token.toLongOrNull()?.takeIf { it >= 0 } ?: SIZE_PROBE_UNPARSEABLE
+}

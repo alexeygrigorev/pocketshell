@@ -258,6 +258,31 @@ sealed interface AppDestination {
         val copySources: List<Pair<String, String>>,
     ) : AppDestination
 
+    /**
+     * In-app file viewer — issue #497.
+     *
+     * Fetches [remotePath] over the host's SSH/SFTP session and renders it
+     * read-only: images (zoom/pan), UTF-8 text (scrollable monospace), or a
+     * "can't preview" message for binary/too-large files. Reachable from the
+     * in-session kebab's "Open file…" action; [cwd] is the active pane's
+     * working directory so a relative path the agent referenced resolves
+     * correctly.
+     *
+     * SSH connection parameters are required because the screen opens a
+     * one-shot [com.pocketshell.core.ssh.SshSession] to read the file.
+     */
+    data class FileViewer(
+        val hostId: Long,
+        val hostName: String,
+        val hostname: String,
+        val port: Int,
+        val username: String,
+        val keyPath: String,
+        val passphrase: CharArray?,
+        val remotePath: String,
+        val cwd: String?,
+    ) : AppDestination
+
     /** Per-session recurring jobs backed by the host's `pocketshell jobs` CLI. */
     data class RecurringJobs(
         val hostName: String,

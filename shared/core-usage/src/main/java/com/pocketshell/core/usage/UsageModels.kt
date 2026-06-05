@@ -1,7 +1,6 @@
 package com.pocketshell.core.usage
 
 import java.time.Instant
-import kotlin.math.roundToInt
 
 /**
  * Normalized provider status emitted by server-side usage tools.
@@ -30,17 +29,11 @@ public data class UsageWindow(
     val unit: String,
     val resetAt: Instant?,
 ) {
-    public val ratio: Double
-        get() = if (limit > 0.0) used / limit else 0.0
-
     public val percent: Double
         get() = when (unit.lowercase()) {
             "percent", "%" -> used
-            else -> ratio * 100.0
+            else -> if (limit > 0.0) used / limit * 100.0 else 0.0
         }
-
-    public val roundedPercent: Int
-        get() = percent.roundToInt().coerceAtLeast(0)
 }
 
 /**

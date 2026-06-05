@@ -34,10 +34,3 @@ val PocketShellShapes: Shapes = Shapes(
     // mockups use.
     extraLarge = RoundedCornerShape(28.dp),
 )
-
-/**
- * Named alias for the FAB / mic-button corner radius (28dp). Exposed
- * separately because consumers typically reach for it by intent ("FAB
- * shape") rather than by Material's t-shirt sizing.
- */
-val FabShape = RoundedCornerShape(28.dp)

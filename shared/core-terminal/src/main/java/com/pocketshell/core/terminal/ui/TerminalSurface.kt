@@ -247,8 +247,7 @@ fun TerminalSurface(
     // alone, since the activity context would re-create the closure on
     // every recomposition) so the sink is installed once per composition
     // and detached cleanly when the surface leaves the tree. Toast feedback
-    // matches the smart-selection MatchActions UX so users get visual
-    // confirmation the copy succeeded.
+    // gives users visual confirmation the copy succeeded.
     DisposableEffect(state, context.applicationContext) {
         val appContext = context.applicationContext
         state.setOnCopySelection { selectedText ->

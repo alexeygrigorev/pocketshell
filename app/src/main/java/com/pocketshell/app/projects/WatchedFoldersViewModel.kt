@@ -5,7 +5,6 @@ import androidx.lifecycle.viewModelScope
 import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
-import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -64,7 +63,6 @@ import javax.inject.Inject
 @HiltViewModel
 class WatchedFoldersViewModel @Inject constructor(
     internal val projectRootDao: ProjectRootDao,
-    @Suppress("UNUSED_PARAMETER") private val hostDao: HostDao,
 ) : ViewModel() {
 
     private val _state: MutableStateFlow<WatchedFoldersUiState> =

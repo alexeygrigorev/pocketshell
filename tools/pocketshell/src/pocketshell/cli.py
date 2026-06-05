@@ -6,10 +6,10 @@ PRs add subgroups: `jobs` (#170 second PR), `sessions` (#218),
 `agent-log` (#217), `daemon` (#219), and `repos` (#220).
 
 Per the D22 locked principle (no backwards compatibility, hard cuts only)
-the eventual goal is for the PocketShell Android app to probe for this
-single binary instead of `quse` / `tmuxctl`. The first PR keeps the
-existing probes in place — parallel detection, not legacy detection — so
-the app keeps working while we ramp up `pocketshell`'s feature parity.
+the PocketShell Android app probes for this single binary instead of
+`quse` / `tmuxctl`: usage runs `pocketshell usage --json` (#231) and jobs
+run `pocketshell jobs ...` (a direct namespace swap from `tmuxctl jobs`).
+The cutover is complete; the app no longer probes the old binaries.
 """
 
 from __future__ import annotations

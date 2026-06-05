@@ -103,7 +103,6 @@ class WatchedFoldersE2eTest {
 
         val vm = WatchedFoldersViewModel(
             projectRootDao = dao,
-            hostDao = db.hostDao(),
         )
 
         compose.setContent {
@@ -204,7 +203,6 @@ class WatchedFoldersE2eTest {
 
         val vm = WatchedFoldersViewModel(
             projectRootDao = dao,
-            hostDao = db.hostDao(),
         )
 
         compose.setContent {
@@ -235,7 +233,6 @@ class WatchedFoldersE2eTest {
     fun hostDetailViewModeRowsDispatchPreferenceChanges(): Unit = runBlocking {
         val vm = WatchedFoldersViewModel(
             projectRootDao = db.projectRootDao(),
-            hostDao = db.hostDao(),
         )
         var selected = HostDetailViewMode.Tree
 

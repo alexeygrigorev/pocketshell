@@ -82,7 +82,6 @@ class TmuxConsolidatedChromeScreenshotTest {
                     // Single window, no agent: just the header row.
                     // No strip (nothing to switch to), no toggle.
                     ConsolidatedTopChrome(
-                        hostLabel = "hetzner",
                         sessionName = "scratch",
                         onBack = {},
                         onMore = {},
@@ -121,7 +120,6 @@ class TmuxConsolidatedChromeScreenshotTest {
                     // row, per-window strip (Window 2 active, carrying
                     // the ✕ kill affordance), per-window toggle.
                     ConsolidatedTopChrome(
-                        hostLabel = "hetzner",
                         sessionName = "claude-main",
                         tabLabels = listOf("Terminal", "Conversation"),
                         selectedTabIndex = 1,
@@ -197,7 +195,6 @@ class TmuxConsolidatedChromeScreenshotTest {
                         .testTag(SCREENSHOT_ROOT_TAG),
                 ) {
                     ConsolidatedTopChrome(
-                        hostLabel = "hetzner",
                         sessionName = "claude-main",
                         onBack = {},
                         onMore = { expanded.value = true },

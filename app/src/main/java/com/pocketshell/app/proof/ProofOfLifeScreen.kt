@@ -164,35 +164,6 @@ internal fun readKeyFromRawResource(context: Context): String {
 }
 
 /**
- * Terminfo entry advertised on PTY allocation. xterm-256color is the AOSP /
- * Termux baseline and the one that real interactive agent CLIs (opencode,
- * Codex, Claude Code) target. Anything more conservative — notably the
- * `vt100` that sshj's `allocateDefaultPTY` defaults to — pushes those CLIs
- * into a degraded line-mode where the prompt input drops to the bottom of
- * the scrolling shell instead of rendering inside their alternate-screen
- * input box. Kept as a top-level constant so it is visible in code review
- * and easy to grep when bumping sshj or refactoring the SSH layer.
- */
-internal const val INTERACTIVE_PTY_TERM: String = "xterm-256color"
-
-/**
- * Initial PTY column count advertised on shell allocation. Matches sshj's
- * historical `allocateDefaultPTY` default (80) so well-behaved login shells
- * that read the SSH-time TIOCGWINSZ see the same starting geometry as
- * before; the on-device [com.termux.view.TerminalView] resizes the remote
- * PTY to the real on-screen grid via `changeWindowDimensions` once it lays
- * out, so this value is only ever seen by the brief pre-layout window.
- */
-internal const val INTERACTIVE_PTY_INITIAL_COLUMNS: Int = 80
-
-/**
- * Initial PTY row count. See [INTERACTIVE_PTY_INITIAL_COLUMNS] for the
- * rationale on keeping the 80x24 default; the real grid replaces this on
- * first layout.
- */
-internal const val INTERACTIVE_PTY_INITIAL_ROWS: Int = 24
-
-/**
  * Wrap the blocking [Session.Shell.getInputStream] into a coroutine-friendly
  * [Flow] that emits a `ByteArray` for every chunk read from the SSH
  * channel. The flow terminates when the stream returns -1 (remote closed).

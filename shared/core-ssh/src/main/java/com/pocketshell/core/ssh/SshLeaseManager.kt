@@ -115,58 +115,6 @@ public class SshLeaseManager(
         }
     }
 
-    /**
-     * Transfer ownership of an already-connected session into the lease pool.
-     *
-     * This is the compatibility bridge for callers that still prewarm outside
-     * [SshLeaseManager]. The returned lease behaves like a normal acquired
-     * lease; releasing it lets the manager retain or close the session using
-     * the same idle policy as sessions opened through [acquire].
-     */
-    public suspend fun adopt(target: SshLeaseTarget, session: SshSession): Result<SshLease> {
-        val key = target.leaseKey
-        if (!session.isConnected) {
-            runCatching { session.close() }
-            return Result.failure(SshLeaseAdoptDisconnectedException())
-        }
-        return mutex.withLock {
-            if (closed) {
-                runCatching { session.close() }
-                return@withLock Result.failure(SshLeaseManagerClosedException())
-            }
-            entries[key]?.takeIf { it.session.isConnected }?.let { existing ->
-                runCatching { session.close() }
-                existing.closeJob?.cancel()
-                existing.closeJob = null
-                existing.idleSinceMillis = null
-                existing.refCount += 1
-                emitStateLocked(key, SshLeaseConnectionState.Connected)
-                return@withLock Result.success(
-                    SshLease(
-                        key = key,
-                        session = existing.session,
-                        isNewConnection = false,
-                        entryId = existing.id,
-                        releaseAction = ::release,
-                    ),
-                )
-            }
-            entries.remove(key)?.close()
-            val entry = Entry(id = nextEntryId++, key = key, session = session, refCount = 1)
-            entries[key] = entry
-            emitStateLocked(key, SshLeaseConnectionState.Connected)
-            Result.success(
-                SshLease(
-                    key = key,
-                    session = session,
-                    isNewConnection = false,
-                    entryId = entry.id,
-                    releaseAction = ::release,
-                ),
-            )
-        }
-    }
-
     public suspend fun closeIdle() {
         val idleEntries = mutex.withLock {
             entries.values
@@ -430,6 +378,3 @@ public class SshLease internal constructor(
 }
 
 public class SshLeaseManagerClosedException : IllegalStateException("SSH lease manager is closed")
-
-public class SshLeaseAdoptDisconnectedException :
-    IllegalStateException("Cannot adopt a disconnected SSH session")

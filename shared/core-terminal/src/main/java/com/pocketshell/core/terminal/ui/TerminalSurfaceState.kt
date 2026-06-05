@@ -395,15 +395,6 @@ class TerminalSurfaceState internal constructor(
     }
 
     /**
-     * Test-only seam: emit a synthetic buffer tick so collectors of
-     * [flowOfMatches] re-run the matcher without needing to push bytes
-     * through the bridge.
-     */
-    internal fun emitBufferTickForTesting() {
-        bufferTick.value = bufferTick.value + 1
-    }
-
-    /**
      * Test-only seam: read the text the bridge's emulator has actually
      * rendered onto its cell grid. Used by the issue #248 regression test to
      * prove a query-response leak never reaches the visible transcript.

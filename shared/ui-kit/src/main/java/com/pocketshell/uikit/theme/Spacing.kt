@@ -26,12 +26,6 @@ object PocketShellSpacing {
 
     /** 16 dp — large padding (app bar, sheet header, host-card internal), dialog padding. */
     val lg = 16.dp
-
-    /** 20 dp — extra-large spacing (section label top margin, breadcrumb padding). */
-    val xl = 20.dp
-
-    /** 24 dp — screen-level padding, largest list-item spacing. */
-    val xxl = 24.dp
 }
 
 /**

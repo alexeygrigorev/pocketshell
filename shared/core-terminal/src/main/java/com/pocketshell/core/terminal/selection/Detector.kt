@@ -83,9 +83,9 @@ package com.pocketshell.core.terminal.selection
  *    on its behaviour). Compose it with `DefaultTerminalMatcher` by calling
  *    both and merging the results, claiming earlier matches' byte ranges if
  *    you need to avoid overlaps.
- * 3. Teach [MatchActions] (or your downstream replacement) what to do on tap.
- *    Add a `when` branch for the new kind — the sealed hierarchy makes the
- *    compiler enforce exhaustiveness so you cannot forget.
+ * 3. Teach your downstream tap-action handler what to do on tap. Add a `when`
+ *    branch for the new kind — the sealed hierarchy makes the compiler enforce
+ *    exhaustiveness so you cannot forget.
  * 4. Add unit tests in
  *    `shared/core-terminal/src/test/java/com/pocketshell/core/terminal/selection/`
  *    covering at least one positive case and one false-positive case the new

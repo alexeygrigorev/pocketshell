@@ -16,7 +16,6 @@ import org.json.JSONObject
  *
  * Entry points:
  *
- * - Batch-convert legacy/simple [OpenCodeRow]s ([parseRows]).
  * - Batch-convert SQLite join rows ([parseSqliteRows]).
  * - Parse remote `sqlite3` JSON output ([parseSqliteJsonRows]).
  * - Convert a single JSONL line as it streams in
@@ -25,7 +24,7 @@ import org.json.JSONObject
  *   pipeline that Claude + Codex already use for real-time updates
  *   (issue #160, OpenCode parity piece).
  *
- * The JSONL row shape mirrors [OpenCodeRow]:
+ * The JSONL row shape is:
  *
  * ```
  * {"id":"u1","role":"user","content":"check the app","createdAtMillis":12345}
@@ -36,25 +35,6 @@ import org.json.JSONObject
  * partial or schema-drifty without dropping the rest of the conversation.
  */
 public class OpenCodeReader : ConversationParser {
-    public fun parseRows(rows: List<OpenCodeRow>): List<ConversationEvent> =
-        rows.flatMapIndexed { index, row ->
-            val id = row.id.ifBlank { "opencode:$index" }
-            val role = parseRole(row.role) ?: return@flatMapIndexed emptyList()
-            if (row.content.isBlank()) {
-                emptyList()
-            } else {
-                listOf(
-                    ConversationEvent.Message(
-                        id = id,
-                        agent = AgentKind.OpenCode,
-                        atMillis = row.createdAtMillis,
-                        role = role,
-                        text = row.content,
-                    ),
-                )
-            }
-        }
-
     public fun parseSqliteJsonRows(output: String): List<ConversationEvent> {
         val trimmed = output.trim()
         if (trimmed.isEmpty()) return emptyList()
@@ -130,24 +110,23 @@ public class OpenCodeReader : ConversationParser {
         val trimmed = line.trim()
         if (trimmed.isEmpty()) return emptyList()
         val json = trimmed.asJsonObjectOrNull() ?: return emptyList()
-        val row = rowFromJson(json) ?: return emptyList()
-        return parseRows(listOf(row))
-    }
-
-    private fun rowFromJson(json: JSONObject): OpenCodeRow? {
-        val role = json.stringOrNull("role") ?: return null
+        val role = parseRole(json.stringOrNull("role") ?: return emptyList())
+            ?: return emptyList()
         val content = json.stringOrNull("content") ?: json.stringOrNull("text") ?: ""
+        if (content.isBlank()) return emptyList()
         val id = json.stringOrNull("id")
             ?: json.stringOrNull("messageId")
             ?: json.stringOrNull("uuid")
-            ?: ""
-        return OpenCodeRow(
-            id = id,
-            role = role,
-            content = content,
-            createdAtMillis = json.longOrNull("createdAtMillis")
-                ?: json.longOrNull("created_at_ms")
-                ?: json.timestampMillis(),
+        return listOf(
+            ConversationEvent.Message(
+                id = id?.takeIf { it.isNotBlank() } ?: "opencode:0",
+                agent = AgentKind.OpenCode,
+                atMillis = json.longOrNull("createdAtMillis")
+                    ?: json.longOrNull("created_at_ms")
+                    ?: json.timestampMillis(),
+                role = role,
+                text = content,
+            ),
         )
     }
 
@@ -169,10 +148,6 @@ public class OpenCodeReader : ConversationParser {
                 ?: json.longOrNull("time_created")
                 ?: json.longOrNull("createdAtMillis")
                 ?: json.timestampMillis(),
-            messageUpdatedAtMillis = json.longOrNull("message_time_updated")
-                ?: json.longOrNull("messageUpdatedAtMillis")
-                ?: json.longOrNull("time_updated")
-                ?: json.longOrNull("updatedAtMillis"),
             messageRole = json.stringOrNull("message_role")
                 ?: json.stringOrNull("messageRole")
                 ?: json.stringOrNull("role"),
@@ -288,18 +263,10 @@ public class OpenCodeReader : ConversationParser {
     }
 }
 
-public data class OpenCodeRow(
-    val id: String,
-    val role: String,
-    val content: String,
-    val createdAtMillis: Long? = null,
-)
-
 public data class OpenCodeSqliteRow(
     val messageId: String,
     val messageData: String? = null,
     val messageCreatedAtMillis: Long? = null,
-    val messageUpdatedAtMillis: Long? = null,
     val messageRole: String? = null,
     val messageContent: String? = null,
     val partId: String? = null,

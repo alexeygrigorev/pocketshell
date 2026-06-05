@@ -135,78 +135,11 @@ fun SmartSelectionAffordanceOverlay(
 }
 
 /**
- * Compatibility wrapper for callers that still want the old URL-only visual
- * overlay. New terminal surfaces should use [SmartSelectionAffordanceOverlay]
- * so paths and errors receive the same lightweight visual treatment.
- */
-@Composable
-public fun UrlOverlay(
-    view: TerminalView?,
-    renderRequests: Flow<Unit>,
-    viewportChangeKey: Any? = Unit,
-    onUrlsChanged: (List<UrlRegion>) -> Unit,
-    modifier: Modifier = Modifier,
-    accentColor: Color = Color(0xFF22D3EE),
-) {
-    var urls by remember { mutableStateOf<List<UrlRegion>>(emptyList()) }
-    val latestOnUrlsChanged by rememberUpdatedState(onUrlsChanged)
-
-    LaunchedEffect(view, renderRequests, viewportChangeKey) {
-        if (view == null) {
-            latestOnUrlsChanged(emptyList())
-            return@LaunchedEffect
-        }
-        val initial = findVisibleUrls(view)
-        urls = initial
-        latestOnUrlsChanged(initial)
-        renderRequests.collect {
-            val fresh = findVisibleUrls(view)
-            if (fresh != urls) {
-                urls = fresh
-                latestOnUrlsChanged(fresh)
-            }
-        }
-    }
-
-    val regions = remember(urls) {
-        urls.map { url ->
-            TerminalMatchRegion(
-                match = TerminalMatch.Url(url.url),
-                row = url.row,
-                startCol = url.startCol,
-                endColExclusive = url.endColExclusive,
-            )
-        }
-    }
-
-    Layout(
-        content = {},
-        modifier = modifier.drawBehind {
-            for (segment in smartSelectionAffordanceSegments(view, regions, size.width, size.height)) {
-                drawRect(
-                    color = accentColor,
-                    topLeft = Offset(segment.left, segment.top),
-                    size = Size(
-                        width = segment.right - segment.left,
-                        height = segment.thicknessPx,
-                    ),
-                )
-            }
-        },
-    ) { _, constraints ->
-        layout(
-            constraints.maxWidth.coerceAtLeast(0),
-            constraints.maxHeight.coerceAtLeast(0),
-        ) {}
-    }
-}
-
-/**
  * Issue #500: paints a quiet path hairline under every tappable file path the
  * [findVisibleFilePaths] scanner reports on the visible viewport, and keeps the
- * host's [FilePathRegion] snapshot in sync for hit-testing. Mirrors
- * [UrlOverlay]; the actual tap routing happens in the View's gesture pipeline
- * via [com.pocketshell.core.terminal.ui.PocketShellTerminalViewClient.onTapMaybeUrl].
+ * host's [FilePathRegion] snapshot in sync for hit-testing. The actual tap
+ * routing happens in the View's gesture pipeline via
+ * [com.pocketshell.core.terminal.ui.PocketShellTerminalViewClient.onTapMaybeUrl].
  */
 @Composable
 public fun FilePathOverlay(
@@ -368,14 +301,3 @@ public fun hitTestUrl(
         startColOf = { it.startCol },
         endColExclusiveOf = { it.endColExclusive },
     )
-
-/**
- * Compose-friendly overload of [hitTestUrl] that takes an [Offset] instead
- * of separate `(x, y)` floats. Convenient for tests and Compose pointer
- * handlers that already have an [Offset] in hand.
- */
-internal fun hitTestUrl(
-    view: TerminalView,
-    urls: List<UrlRegion>,
-    pos: Offset,
-): UrlRegion? = hitTestUrl(view, urls, pos.x, pos.y)

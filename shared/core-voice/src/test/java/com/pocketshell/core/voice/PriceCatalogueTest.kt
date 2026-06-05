@@ -14,8 +14,6 @@ import org.junit.Test
  *  - Unknown `(provider, feature)` pairs fall back to `0` so the call
  *    site logs a zero-cost row instead of crashing.
  *  - Malformed JSON degrades to an [PriceCatalogue.empty] catalogue.
- *  - Output-unit price is exposed for forward-compat with chat models
- *    where input + output prices differ.
  */
 class PriceCatalogueTest {
 
@@ -26,8 +24,6 @@ class PriceCatalogueTest {
         // OpenAI's published Whisper rate is $0.006 / minute = 10
         // millicents / audio_second. The bundled JSON must match.
         assertEquals(10L, catalogue.unitCost("openai", "whisper"))
-        // Whisper bills only on audio length — no per-character output price.
-        assertEquals(0L, catalogue.outputUnitCost("openai", "whisper"))
         assertNotEquals("unknown", catalogue.version())
     }
 
@@ -37,7 +33,6 @@ class PriceCatalogueTest {
 
         assertEquals(0L, catalogue.unitCost("openai", "gpt4o"))
         assertEquals(0L, catalogue.unitCost("anthropic", "claude-3-opus"))
-        assertEquals(0L, catalogue.outputUnitCost("openai", "gpt4o"))
     }
 
     @Test
@@ -56,9 +51,7 @@ class PriceCatalogueTest {
     }
 
     @Test
-    fun customJsonSupportsOutputUnitPricing() {
-        // Future chat-model row — verifies the schema is forward-compatible
-        // without code changes in PriceCatalogue.
+    fun customJsonParsesUnitPricing() {
         val json = """
             {
               "version": "test",
@@ -66,9 +59,7 @@ class PriceCatalogueTest {
                 "openai": {
                   "gpt4o-mini": {
                     "unit": "input_token",
-                    "unitCostUsdMillicents": 15,
-                    "outputUnit": "output_token",
-                    "outputUnitCostUsdMillicents": 60
+                    "unitCostUsdMillicents": 15
                   }
                 }
               }
@@ -78,7 +69,6 @@ class PriceCatalogueTest {
         val catalogue = PriceCatalogue.fromJsonString(json)
 
         assertEquals(15L, catalogue.unitCost("openai", "gpt4o-mini"))
-        assertEquals(60L, catalogue.outputUnitCost("openai", "gpt4o-mini"))
     }
 
     @Test

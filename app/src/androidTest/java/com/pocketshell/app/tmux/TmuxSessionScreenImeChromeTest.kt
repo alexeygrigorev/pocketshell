@@ -279,7 +279,6 @@ class TmuxSessionScreenImeChromeTest {
             PocketShellTheme {
                 Column {
                     ConsolidatedTopChrome(
-                        hostLabel = "host.example",
                         sessionName = "claude-main",
                         onBack = {},
                         onMore = {},
@@ -339,7 +338,6 @@ class TmuxSessionScreenImeChromeTest {
         Column(modifier = Modifier.fillMaxWidth()) {
             AnimatedVisibility(visible = !chromeCompressed, enter = animEnter, exit = animExit) {
                 ConsolidatedTopChrome(
-                    hostLabel = "host.example",
                     sessionName = "claude-main",
                     tabLabels = tabLabels,
                     selectedTabIndex = selectedTabIndex,
@@ -391,7 +389,6 @@ class TmuxSessionScreenImeChromeTest {
             )
         } else {
             ConsolidatedTopChrome(
-                hostLabel = "host.example",
                 sessionName = "claude-main",
                 onBack = {},
                 onMore = { expanded.value = true },

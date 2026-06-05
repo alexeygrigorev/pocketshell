@@ -677,7 +677,6 @@ public fun TmuxSessionScreen(
                     ) {
                         Column(modifier = Modifier.fillMaxWidth()) {
                             ConsolidatedTopChrome(
-                                hostLabel = host,
                                 sessionName = sessionName,
                                 // Issue #481: surface the detected agent/model
                                 // name as the header title when the visible
@@ -3822,7 +3821,6 @@ private fun DropdownMenuSectionHeader(text: String) {
  */
 @Composable
 internal fun ConsolidatedTopChrome(
-    hostLabel: String,
     sessionName: String,
     onBack: () -> Unit,
     onMore: () -> Unit,
@@ -3926,11 +3924,6 @@ internal fun ConsolidatedTopChrome(
             }
             moreMenu()
         }
-        // Reference [hostLabel] so the parameter does not show as
-        // unused — kept on the API for forward compatibility (and so
-        // the screen can revive a host crumb segment cheaply if the
-        // user feedback ever asks for it back).
-        @Suppress("UNUSED_EXPRESSION") hostLabel
     }
 }
 

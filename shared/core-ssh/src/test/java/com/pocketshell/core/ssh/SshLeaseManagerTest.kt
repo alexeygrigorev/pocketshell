@@ -277,42 +277,6 @@ class SshLeaseManagerTest {
     }
 
     @Test
-    fun `adopted session is released through normal idle policy`() = runTest {
-        val adopted = FakeSshSession()
-        val manager = leaseManager(
-            connector = QueueLeaseConnector(FakeSshSession()),
-            idleTtlMillis = 0,
-        )
-
-        val lease = manager.adopt(TARGET, adopted).getOrThrow()
-
-        assertSame(adopted, lease.session)
-        assertFalse(lease.isNewConnection)
-        assertFalse(adopted.closed)
-
-        lease.release()
-
-        assertTrue(adopted.closed)
-    }
-
-    @Test
-    fun `adopt closes supplied session when matching lease already exists`() = runTest {
-        val existing = FakeSshSession()
-        val adopted = FakeSshSession()
-        val manager = leaseManager(QueueLeaseConnector(existing), idleTtlMillis = 1_000)
-        val existingLease = manager.acquire(TARGET).getOrThrow()
-
-        val adoptedLease = manager.adopt(TARGET, adopted).getOrThrow()
-
-        assertSame(existing, adoptedLease.session)
-        assertTrue("redundant adopted session must not leak", adopted.closed)
-        assertFalse(existing.closed)
-
-        existingLease.release()
-        adoptedLease.release()
-    }
-
-    @Test
     fun `release from replaced disconnected lease does not mutate active replacement`() = runTest {
         val first = FakeSshSession()
         val second = FakeSshSession()

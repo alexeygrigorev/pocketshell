@@ -246,8 +246,9 @@ uv sync --group dev
 uv run pytest
 ```
 
-The tests stub `quse.usage.collect_usage` so they run in seconds without
-hitting any provider API.
+The tests stub `pocketshell.usage.subprocess.run` (and the `quse`/`tmuxctl`
+binary resolvers) so they run in seconds without invoking any real binary or
+hitting a provider API.
 
 ## Release flow
 

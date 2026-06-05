@@ -72,32 +72,6 @@ def _tmuxctl_missing_message() -> str:
     )
 
 
-def _run_tmuxctl(args: Sequence[str]) -> int:
-    """Invoke `tmuxctl` with [args]; proxy stdout/stderr and exit code.
-
-    Identical contract to `pocketshell.jobs._run_tmuxctl` /
-    `pocketshell.usage._run_quse` so a consumer that already parses
-    `tmuxctl` output sees a byte-identical payload when routed through
-    `pocketshell sessions ...`.
-    """
-    tmuxctl_path = _resolve_tmuxctl_binary()
-    if tmuxctl_path is None:
-        click.echo(_tmuxctl_missing_message(), err=True)
-        return 127
-
-    completed = subprocess.run(
-        [tmuxctl_path, *args],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if completed.stdout:
-        sys.stdout.write(completed.stdout)
-    if completed.stderr:
-        sys.stderr.write(completed.stderr)
-    return completed.returncode
-
-
 def _run_tmuxctl_capture(args: Sequence[str]) -> dict[str, Any]:
     """Invoke ``tmuxctl`` and return a daemon-friendly raw envelope."""
     tmuxctl_path = _resolve_tmuxctl_binary()

@@ -6,8 +6,6 @@
       "whisper": {
         "unit": "audio_second",
         "unitCostUsdMillicents": 10,
-        "outputUnit": "transcript_character",
-        "outputUnitCostUsdMillicents": 0,
         "source": "https://openai.com/api/pricing/ — $0.006 per audio minute = 10 millicents per second as of 2026-01"
       }
     }

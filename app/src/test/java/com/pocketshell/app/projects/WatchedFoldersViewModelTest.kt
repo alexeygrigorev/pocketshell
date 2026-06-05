@@ -1,8 +1,6 @@
 package com.pocketshell.app.projects
 
-import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.dao.ProjectRootDao
-import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.ProjectRootEntity
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
@@ -34,7 +32,6 @@ class WatchedFoldersViewModelTest {
     private fun newVm(dao: ProjectRootDao = FakeProjectRootDao()): WatchedFoldersViewModel =
         WatchedFoldersViewModel(
             projectRootDao = dao,
-            hostDao = FakeHostDao(),
         )
 
     @Test
@@ -329,14 +326,4 @@ private class FakeProjectRootDao : ProjectRootDao {
 
     private fun sorted(rows: List<ProjectRootEntity>): List<ProjectRootEntity> =
         rows.sortedWith(compareBy<ProjectRootEntity> { it.label }.thenBy { it.path })
-}
-
-private class FakeHostDao : HostDao {
-    override fun getAll(): Flow<List<HostEntity>> = MutableStateFlow(emptyList())
-    override suspend fun getById(id: Long): HostEntity? = null
-    override fun getEnabled(): Flow<List<HostEntity>> = MutableStateFlow(emptyList())
-    override suspend fun insert(host: HostEntity): Long = 0L
-    override suspend fun update(host: HostEntity) = Unit
-    override suspend fun delete(host: HostEntity) = Unit
-    override suspend fun deleteById(id: Long) = Unit
 }

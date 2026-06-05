@@ -1,9 +1,9 @@
 """Unified server-side Python utility for the PocketShell Android client.
 
-This package is intended to replace the separately-installed `quse` and
-`tmuxctl` utilities the PocketShell app currently probes for. The first PR
-ships the skeleton plus the `pocketshell usage` subcommand only; later PRs
-will add `jobs`, `agent-log`, `sessions`, `repos`, and daemon mode.
+This package replaces the separately-installed `quse` and `tmuxctl`
+utilities the PocketShell app used to probe for. The app now probes a
+single `pocketshell` binary, which exposes the `usage`, `jobs`,
+`agent-log`, `sessions`, `repos`, and daemon subcommands.
 
 See https://github.com/alexeygrigorev/pocketshell/issues/170.
 """

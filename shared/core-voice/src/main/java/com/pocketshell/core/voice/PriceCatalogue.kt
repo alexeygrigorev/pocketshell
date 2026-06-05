@@ -2,7 +2,6 @@ package com.pocketshell.core.voice
 
 import org.json.JSONException
 import org.json.JSONObject
-import java.io.InputStream
 
 /**
  * Price look-up for client-side AI API calls (issue #181).
@@ -29,12 +28,11 @@ import java.io.InputStream
  * know the price yet" and the costs screen will surface it under the
  * feature with a `0.00 USD` total until the catalogue is updated.
  *
- * ## Reading from a different location
+ * ## Reading
  *
- * The default constructor reads `/ai-pricing.json` from the classpath via
- * `ClassLoader.getResourceAsStream`. The secondary constructor accepts a
- * pre-opened [InputStream] so tests can inject a fixed snapshot without
- * touching the bundled file.
+ * [fromBundledResource] reads `/ai-pricing.json` from the classpath via
+ * `ClassLoader.getResourceAsStream`. Tests drive the parser directly with
+ * [fromJsonString].
  */
 public class PriceCatalogue private constructor(
     private val version: String,
@@ -54,15 +52,6 @@ public class PriceCatalogue private constructor(
     public fun unitCost(provider: String, feature: String): Long =
         feature(provider, feature)?.unitCostUsdMillicents ?: 0L
 
-    /**
-     * Per-output-unit price snapshot in USD millicents. Whisper bills
-     * purely on audio length, so this returns `0` for `("openai",
-     * "whisper")` — but the surface exists for chat models, whose total
-     * cost is `input_tokens * inputPrice + output_tokens * outputPrice`.
-     */
-    public fun outputUnitCost(provider: String, feature: String): Long =
-        feature(provider, feature)?.outputUnitCostUsdMillicents ?: 0L
-
     private fun feature(provider: String, feature: String): FeaturePricing? =
         table[provider]?.get(feature)
 
@@ -70,18 +59,9 @@ public class PriceCatalogue private constructor(
     public data class FeaturePricing(
         val unit: String,
         val unitCostUsdMillicents: Long,
-        val outputUnit: String? = null,
-        val outputUnitCostUsdMillicents: Long = 0L,
     )
 
     public companion object {
-        /**
-         * Resource path inside `core-voice/src/main/resources/`. Public
-         * so consumers that want to ship their own pricing file (e.g.
-         * for a forked corporate build) can read it the same way.
-         */
-        public const val DEFAULT_RESOURCE_PATH: String = "/ai-pricing.json"
-
         /**
          * Build a [PriceCatalogue] from the bundled `ai-pricing.json`.
          * Returns a catalogue with an empty table when the resource is
@@ -89,17 +69,9 @@ public class PriceCatalogue private constructor(
          * rows rather than crashing on a malformed checkin.
          */
         public fun fromBundledResource(): PriceCatalogue {
-            val stream = PriceCatalogue::class.java.getResourceAsStream(DEFAULT_RESOURCE_PATH)
+            val stream = PriceCatalogue::class.java.getResourceAsStream("/ai-pricing.json")
                 ?: return empty()
-            return stream.use { fromStream(it) }
-        }
-
-        /**
-         * Build a [PriceCatalogue] from an arbitrary JSON stream. The
-         * caller closes the stream. Used by tests and corporate forks.
-         */
-        public fun fromStream(input: InputStream): PriceCatalogue {
-            val raw = input.readBytes().toString(Charsets.UTF_8)
+            val raw = stream.use { it.readBytes().toString(Charsets.UTF_8) }
             return fromJsonString(raw)
         }
 
@@ -127,11 +99,6 @@ public class PriceCatalogue private constructor(
                             unit = featureJson.optString("unit", "unknown"),
                             unitCostUsdMillicents = featureJson.optLong(
                                 "unitCostUsdMillicents",
-                                0L,
-                            ),
-                            outputUnit = featureJson.optString("outputUnit").takeIf { it.isNotBlank() },
-                            outputUnitCostUsdMillicents = featureJson.optLong(
-                                "outputUnitCostUsdMillicents",
                                 0L,
                             ),
                         )

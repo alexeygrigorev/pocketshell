@@ -93,6 +93,80 @@ public final class TerminalRenderer {
 
     private final float[] asciiMeasures = new float[127];
 
+    /** Reused scratch for {@link Canvas#getClipBounds(android.graphics.Rect)} (#469). */
+    private final android.graphics.Rect mClipScratch = new android.graphics.Rect();
+
+    // --- Dirty-region rendering state (PocketShell #469) ------------------------
+    //
+    // The renderer caches, per logical visible row, the content-generation stamp it
+    // last painted (see TerminalRow#mGeneration). On the next frame it skips the
+    // per-row style-run segmentation + glyph draw for rows whose stamp is unchanged
+    // AND which are not affected by a cursor/selection/global-effect change. The
+    // skipped row keeps the pixels the previous onDraw left on the View's surface,
+    // which is exactly how partial repaint behaves on a hardware-accelerated View.
+    //
+    // Correctness is gated by TerminalRendererDirtyOracleTest: every supported
+    // scenario must produce a byte-identical viewport whether rendered through the
+    // dirty path or a forced full repaint. Any context that affects unchanged cells
+    // (reverse-video, alt-screen swap, resize, colors-changed, cursor move,
+    // selection change, top-row scrollback move) forces a full repaint here.
+    //
+    // The cache is keyed by LOGICAL visible row position, not by physical ring slot,
+    // because render() always paints logical row i into the same fixed y-band
+    // (y depends only on i = row - topRow). So the only question per band is: "did
+    // the content shown at logical row i change since I last painted that band?".
+    // That is captured by (generation, internalRow) of whatever TerminalRow now
+    // occupies logical row i: when the screen scrolls, a different physical row (and
+    // thus a different internalRow / generation) moves into band i and is correctly
+    // marked dirty. No scroll-delta pixel shift is needed or correct here, because
+    // we do not move pixels between bands -- we repaint the bands whose content
+    // changed. The internalRow guard defends against two distinct ring rows that
+    // happen to share a generation counter value.
+
+    /** Last-painted content stamp per logical visible row; -1 = unknown/force-dirty. */
+    private long[] mLastRenderedGeneration = new long[0];
+    /** Physical ring-slot that produced each {@link #mLastRenderedGeneration} entry. */
+    private int[] mLastRenderedInternalRow = new int[0];
+    /** Whether {@link #mLastRenderedGeneration} holds a usable previous frame. */
+    private boolean mHasRenderedFrame = false;
+    /** Fingerprint of the global render context from the previous frame. */
+    private int mLastRows = -1;
+    private int mLastColumns = -1;
+    private int mLastTopRow = Integer.MIN_VALUE;
+    private int mLastTotalRows = -1;
+    private boolean mLastReverseVideo = false;
+    private boolean mLastAlternateBuffer = false;
+    private int mLastCursorRow = -1;
+    private int mLastCursorCol = -1;
+    private boolean mLastCursorVisible = false;
+    private int mLastCursorShape = -1;
+    private int mLastSelY1 = -2, mLastSelY2 = -2, mLastSelX1 = -2, mLastSelX2 = -2;
+    private int mLastPaletteHash = 0;
+    /** Set to false (via {@link #invalidateDirtyCache()}) to force the next frame full. */
+    private boolean mDirtyCacheValid = false;
+    /** Count of rows actually painted by the most recent {@link #render} (test hook). */
+    private int mLastRenderedRowCount = 0;
+
+    /**
+     * Number of grid rows actually painted by the most recent {@link #render} call —
+     * i.e. rows whose pixel band intersected the canvas clip. A deterministic, timing-
+     * free proxy for the dirty-region win (#469): a clipped append-flood frame paints
+     * only the few rows the platform invalidated, an unclipped full repaint paints all.
+     */
+    public int getLastRenderedRowCountForTesting() {
+        return mLastRenderedRowCount;
+    }
+
+    /**
+     * Force the next {@link #render} call to repaint every row regardless of the
+     * generation cache. Safe to call at any time; used as the conservative fallback
+     * for any state the fingerprint does not explicitly model.
+     */
+    public void invalidateDirtyCache() {
+        mDirtyCacheValid = false;
+        mHasRenderedFrame = false;
+    }
+
     public TerminalRenderer(int textSize, Typeface typeface) {
         mTextSize = textSize;
         mTypeface = typeface;
@@ -144,6 +218,99 @@ public final class TerminalRenderer {
         }
     }
 
+    /**
+     * Result code for {@link #peekDirtyRows}: every visible row must repaint. */
+    public static final int PEEK_FULL = -1;
+    /** Result code for {@link #peekDirtyRows}: nothing changed; no repaint needed. */
+    public static final int PEEK_NONE = 0;
+
+    /**
+     * Peek which logical visible rows {@link #render} will repaint for the current
+     * emulator state, WITHOUT advancing the dirty cache, filling {@code outDirty}
+     * (indexed by {@code row - topRow}). The hosting {@link TerminalView} uses this to
+     * invalidate exactly the changed rows so the platform clips {@code onDraw} to them
+     * and preserves the clean ones — which are exactly the rows {@code render()} skips.
+     * Runs on the same (main) thread as {@code render()} with no intervening emulator
+     * mutation, so the result matches what {@code render()} computes (#469).
+     *
+     * @param outDirty caller-owned array of length {@code >= emulator.mRows}; entries
+     *                 {@code [0, mRows)} are set to each row's dirty flag.
+     * @return {@link #PEEK_FULL} if a full repaint is required (e.g. global-effect
+     *         change or first frame), {@link #PEEK_NONE} if nothing is dirty, otherwise
+     *         the count of dirty rows.
+     */
+    public final int peekDirtyRows(TerminalEmulator emulator, int topRow,
+                                   int selectionY1, int selectionY2, int selectionX1, int selectionX2,
+                                   boolean[] outDirty) {
+        final int rows = emulator.mRows;
+        final boolean reverseVideo = emulator.isReverseVideo();
+        final int columns = emulator.mColumns;
+        final int cursorCol = emulator.getCursorCol();
+        final int cursorRow = emulator.getCursorRow();
+        final boolean cursorVisible = emulator.shouldCursorBeVisible();
+        final TerminalBuffer screen = emulator.getScreen();
+        final int cursorShape = emulator.getCursorStyle();
+        final boolean alternateBuffer = emulator.isAlternateBufferActive();
+        final int paletteHash = java.util.Arrays.hashCode(emulator.mColors.mCurrentColors);
+
+        final boolean cacheUsable = mDirtyCacheValid && mHasRenderedFrame
+            && mLastRenderedGeneration.length == rows;
+        final boolean forceFull = !cacheUsable
+            || rows != mLastRows || columns != mLastColumns || topRow != mLastTopRow
+            || reverseVideo || reverseVideo != mLastReverseVideo
+            || alternateBuffer != mLastAlternateBuffer || cursorShape != mLastCursorShape
+            || paletteHash != mLastPaletteHash
+            || selectionY1 != mLastSelY1 || selectionY2 != mLastSelY2
+            || selectionX1 != mLastSelX1 || selectionX2 != mLastSelX2;
+
+        if (forceFull) {
+            for (int i = 0; i < rows; i++) outDirty[i] = true;
+            return PEEK_FULL;
+        }
+
+        int dirtyCount = 0;
+        for (int i = 0; i < rows; i++) {
+            final int row = topRow + i;
+            final int internalRow = screen.externalToInternalRow(row);
+            final TerminalRow lineObject = screen.allocateFullLineIfNecessary(internalRow);
+            boolean rowIsDirty = lineObject.mGeneration != mLastRenderedGeneration[i]
+                || internalRow != mLastRenderedInternalRow[i];
+            if (!rowIsDirty) {
+                if (cursorVisible && row == cursorRow) {
+                    rowIsDirty = true;
+                } else if (mLastCursorVisible && row == mLastCursorRow
+                        && (cursorRow != mLastCursorRow || cursorCol != mLastCursorCol || !cursorVisible)) {
+                    rowIsDirty = true;
+                }
+            }
+            outDirty[i] = rowIsDirty;
+            if (rowIsDirty) dirtyCount++;
+        }
+        return dirtyCount;
+    }
+
+    /**
+     * Pixel top of logical visible row {@code i}'s invalidation band (#469).
+     *
+     * <p>The band is the EXACT pixel rows {@link #render} paints for this row, with no
+     * slack into neighbouring (possibly clean) rows: any slack would let the platform
+     * clip the following {@code onDraw} over a clean band that {@code render()} then
+     * skips, blanking it. The first band starts at 0 so the top row's ascender region
+     * is covered.
+     */
+    public int rowTopPx(int i) {
+        return (i == 0) ? 0 : (i * mFontLineSpacing + mFontAscent);
+    }
+
+    /**
+     * Pixel bottom of logical visible row {@code i}'s invalidation band (#469). Equals
+     * the baseline of row {@code i} ({@code render}'s {@code heightOffset}), which is
+     * where the next row's band starts. See {@link #rowTopPx} for why no slack is added.
+     */
+    public int rowBottomPx(int i) {
+        return mFontLineSpacingAndAscent + (i + 1) * mFontLineSpacing;
+    }
+
     /** Render the terminal to a canvas with at a specified row scroll, and an optional rectangular selection. */
     public final void render(TerminalEmulator mEmulator, Canvas canvas, int topRow,
                              int selectionY1, int selectionY2, int selectionX1, int selectionX2) {
@@ -157,12 +324,55 @@ public final class TerminalRenderer {
         final int[] palette = mEmulator.mColors.mCurrentColors;
         final int cursorShape = mEmulator.getCursorStyle();
 
+        final int rows = mEmulator.mRows;
+        final boolean alternateBuffer = mEmulator.isAlternateBufferActive();
+        final int paletteHash = java.util.Arrays.hashCode(palette);
+
+        // Advance the per-row generation cache (drives TerminalView's next-frame
+        // dirty-rect invalidate via peekDirtyRows). render() itself does NOT use the
+        // dirty flags to decide what to paint — see the clip-gated skip below (#469).
+        computeDirtyRows(
+            screen, topRow, rows, columns,
+            reverseVideo, alternateBuffer, cursorRow, cursorCol, cursorVisible,
+            cursorShape, selectionY1, selectionY2, selectionX1, selectionX2, paletteHash);
+
+        // The dirty-region win comes from the platform CLIP: TerminalView issues
+        // invalidate(rect) for only the changed rows, so onDraw's canvas is clipped to
+        // those rows and the rest of the View surface is preserved by the platform.
+        // render() skips a row only when its pixel band is entirely OUTSIDE the current
+        // clip. This is the ONLY safe skip: when the platform asks for a FULL redraw
+        // (first draw, config change, screenshot/draw-to-bitmap, occlusion), the clip
+        // is the whole view and every row repaints, producing a complete frame with no
+        // reliance on retained pixels. Reverse-video repaints the whole grid anyway.
+        // Skipping requires a positive row pitch to compute per-row pixel bands. If the
+        // platform/paint reports a degenerate (<= 0) line spacing — e.g. Robolectric's
+        // shadow Paint returns zero font metrics — disable skipping and paint every row,
+        // which is always correct (just not optimised).
+        final boolean haveClip = mFontLineSpacing > 0
+            && canvas.getClipBounds(mClipScratch) && !mClipScratch.isEmpty();
+        final int clipTop = haveClip ? mClipScratch.top : Integer.MIN_VALUE;
+        final int clipBottom = haveClip ? mClipScratch.bottom : Integer.MAX_VALUE;
+
+        // A reverse-video frame repaints the whole background.
         if (reverseVideo)
             canvas.drawColor(palette[TextStyle.COLOR_INDEX_FOREGROUND], PorterDuff.Mode.SRC);
 
+        int paintedRowCount = 0;
         float heightOffset = mFontLineSpacingAndAscent;
         for (int row = topRow; row < endRow; row++) {
             heightOffset += mFontLineSpacing;
+
+            if (haveClip) {
+                // Row i's pixel band is [bandTop, bandTop + mFontLineSpacing). Skip it
+                // only if it does not intersect the clip; clipped-out rows keep the
+                // pixels the platform preserved for the unclipped region.
+                final float bandTop = heightOffset - mFontLineSpacingAndAscent;
+                final float bandBottom = bandTop + mFontLineSpacing;
+                if (bandBottom <= clipTop || bandTop >= clipBottom) {
+                    continue;
+                }
+            }
+            paintedRowCount++;
 
             final int cursorX = (row == cursorRow && cursorVisible) ? cursorCol : -1;
             int selx1 = -1, selx2 = -1;
@@ -245,6 +455,112 @@ public final class TerminalRenderer {
             drawTextRun(canvas, line, palette, heightOffset, lastRunStartColumn, columnWidthSinceLastRun, lastRunStartIndex, charsSinceLastRun,
                 measuredWidthForRun, cursorColor, cursorShape, lastRunStyle, reverseVideo || invertCursorTextColor || lastRunInsideSelection);
         }
+        mLastRenderedRowCount = paintedRowCount;
+    }
+
+    /**
+     * Decide which logical visible rows must be repainted this frame, and update the
+     * generation cache to reflect what is about to be painted. Returns a {@code rows}
+     * length boolean array indexed by {@code row - topRow}.
+     *
+     * <p>The cache is keyed by logical visible row position. render() paints logical
+     * row {@code i} into a fixed y-band, so a row is "clean" exactly when the content
+     * now occupying band {@code i} is byte-identical to what was painted there last
+     * frame. That is detected by comparing the {@code (generation, internalRow)} pair
+     * of the {@link TerminalRow} currently at logical row {@code i} against the cached
+     * pair: a scroll moves a different physical row (different internalRow and/or
+     * generation) into band {@code i}, which is correctly marked dirty. No pixel shift
+     * is performed because pixels are not moved between bands.
+     *
+     * <p>Returns all-true (full repaint) whenever any global-context fingerprint
+     * field changed since the previous frame, or the cache is invalid. The cursor row
+     * (current and previous) is always repainted because the cursor is an overlay
+     * whose presence is invisible to the row's content generation.
+     */
+    private boolean[] computeDirtyRows(
+            TerminalBuffer screen, int topRow, int rows, int columns,
+            boolean reverseVideo, boolean alternateBuffer, int cursorRow, int cursorCol, boolean cursorVisible,
+            int cursorShape, int selY1, int selY2, int selX1, int selX2, int paletteHash) {
+
+        final boolean[] dirty = new boolean[rows];
+
+        if (mLastRenderedGeneration.length != rows) {
+            mLastRenderedGeneration = new long[rows];
+            mLastRenderedInternalRow = new int[rows];
+            mDirtyCacheValid = false;
+            mHasRenderedFrame = false;
+        }
+
+        // Any structural / global-effect change forces a full repaint: a changed
+        // cell stamp is not enough to capture these because they affect cells whose
+        // own generation did not change (reverse video, alt-screen swap, resize,
+        // colors-changed, scrollback top-row move, selection-rect move, cursor-shape
+        // / palette change).
+        final boolean forceFull =
+            !mDirtyCacheValid
+            || !mHasRenderedFrame
+            || rows != mLastRows
+            || columns != mLastColumns
+            || topRow != mLastTopRow
+            // While reverse-video is active the whole canvas is wiped to the
+            // foreground colour at the top of every render(), so every band must be
+            // repainted each frame, not only on the on/off transition.
+            || reverseVideo
+            || reverseVideo != mLastReverseVideo
+            || alternateBuffer != mLastAlternateBuffer
+            || cursorShape != mLastCursorShape
+            || paletteHash != mLastPaletteHash
+            || selY1 != mLastSelY1 || selY2 != mLastSelY2 || selX1 != mLastSelX1 || selX2 != mLastSelX2;
+
+        // The cursor cell is drawn as an overlay on top of its row's glyph, so the
+        // row carrying the cursor (and the row it just left) must always repaint even
+        // though the underlying text generation did not change.
+        final int prevCursorRow = mLastCursorRow;
+        final int prevCursorCol = mLastCursorCol;
+        final boolean prevCursorVisible = mLastCursorVisible;
+
+        for (int i = 0; i < rows; i++) {
+            final int row = topRow + i;
+            final int internalRow = screen.externalToInternalRow(row);
+            final TerminalRow lineObject = screen.allocateFullLineIfNecessary(internalRow);
+            final long generation = lineObject.mGeneration;
+
+            boolean rowIsDirty = forceFull
+                || generation != mLastRenderedGeneration[i]
+                || internalRow != mLastRenderedInternalRow[i];
+
+            if (!rowIsDirty) {
+                // Force-repaint the row gaining the cursor and the row that lost it.
+                if (cursorVisible && row == cursorRow) {
+                    rowIsDirty = true;
+                } else if (prevCursorVisible && row == prevCursorRow
+                        && (cursorRow != prevCursorRow || cursorCol != prevCursorCol || !cursorVisible)) {
+                    rowIsDirty = true;
+                }
+            }
+
+            dirty[i] = rowIsDirty;
+            // Record what we are about to paint into this band for the next frame.
+            mLastRenderedGeneration[i] = generation;
+            mLastRenderedInternalRow[i] = internalRow;
+        }
+
+        // Persist the fingerprint for next frame's comparison.
+        mLastRows = rows;
+        mLastColumns = columns;
+        mLastTopRow = topRow;
+        mLastReverseVideo = reverseVideo;
+        mLastAlternateBuffer = alternateBuffer;
+        mLastCursorRow = cursorRow;
+        mLastCursorCol = cursorCol;
+        mLastCursorVisible = cursorVisible;
+        mLastCursorShape = cursorShape;
+        mLastSelY1 = selY1; mLastSelY2 = selY2; mLastSelX1 = selX1; mLastSelX2 = selX2;
+        mLastPaletteHash = paletteHash;
+        mDirtyCacheValid = true;
+        mHasRenderedFrame = true;
+
+        return dirty;
     }
 
     private void drawTextRun(Canvas canvas, char[] text, int[] palette, float y, int startColumn, int runWidthColumns,

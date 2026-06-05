@@ -62,6 +62,143 @@ class TerminalParserRenderBenchmarkTest {
         }
     }
 
+    /**
+     * Dirty-region win (PocketShell #469). Mirrors the live per-frame cadence: a small
+     * chunk is appended then rendered, repeatedly. Compares the production dirty path
+     * ({@link TerminalRenderer#peekDirtyRows} — the rows TerminalView invalidates and
+     * repaints) against a forced full-repaint baseline.
+     *
+     * <p>The gate is the DETERMINISTIC repainted-row work summed over all frames — a
+     * timing-free, metric-independent proxy for the redraw cost the issue targets
+     * (Robolectric's shadow Canvas does not model rasterization, so wall-clock is only
+     * recorded, not gated).
+     *
+     * <p>Two regimes, both asserted:
+     *  - **in-place rewrite** (agent spinner / status line — the realistic heavy
+     *    interactive-output hot path of #172/#259/#457): only the rewritten row changes,
+     *    so the dirty path repaints ~1 row/frame vs the full grid — an order-of-magnitude
+     *    reduction. Gated hard (>= 8x).
+     *  - **pure append scroll** (`yes`/`cat biglog`): every visible row's CONTENT shifts
+     *    up one row each frame, so by logical-row identity every row legitimately changed.
+     *    This renderer does not blit the canvas, so a scroll correctly repaints all rows;
+     *    we assert NO REGRESSION (dirty work <= full) and rely on the oracle + device
+     *    workbench to prove no row is blanked.
+     */
+    @Test
+    fun dirtyRegionRenderingBeatsFullRepaintOnHeavyOutput() {
+        val scenarios = listOf(
+            "append_flood" to renderCadenceLines(2000) { i ->
+                "build log line $i: compiling module-$i ... ok in ${i % 97}ms\r\n"
+            },
+            "spinner_rewrite" to renderCadenceLines(2000) { i ->
+                val g = spinnerGlyph(i)
+                "\r[K$g task progress ${i % 100}% token-${i * 13}"
+            },
+        )
+
+        val report = StringBuilder("dirty-region render micro-benchmark (#469)\n")
+        val results = HashMap<String, Pair<RenderCadenceResult, RenderCadenceResult>>()
+        scenarios.forEach { (name, frames) ->
+            val full = measureRenderCadence(name, frames, forceFull = true)
+            val dirty = measureRenderCadence(name, frames, forceFull = false)
+            results[name] = full to dirty
+            val rowReduction = full.paintedRows.toDouble() / dirty.paintedRows.coerceAtLeast(1)
+            report.appendLine(
+                "$name: full repainted-rows=${full.paintedRows} dirty repainted-rows=${dirty.paintedRows} " +
+                    "reduction=${format(rowReduction)}x | " +
+                    "full p95=${format(full.p95RenderMs)}ms dirty p95=${format(dirty.p95RenderMs)}ms",
+            )
+        }
+
+        // In-place rewrite (the realistic heavy interactive agent-output hot path): the
+        // dirty path must repaint at least ~8x fewer rows than the full grid repaint.
+        // Deterministic, so stable on Robolectric's zero-metric shadow Canvas.
+        val (spinFull, spinDirty) = results.getValue("spinner_rewrite")
+        val spinReduction = spinFull.paintedRows.toDouble() / spinDirty.paintedRows.coerceAtLeast(1)
+        assertTrue(
+            "spinner_rewrite repainted-row reduction ${format(spinReduction)}x must be >= 8x: $report",
+            spinReduction >= 8.0,
+        )
+        // Append scroll legitimately changes every row, so assert no regression only.
+        val (appFull, appDirty) = results.getValue("append_flood")
+        assertTrue(
+            "append_flood dirty repainted-rows ${appDirty.paintedRows} must not exceed full ${appFull.paintedRows}: $report",
+            appDirty.paintedRows <= appFull.paintedRows,
+        )
+
+        val outputDir = if (File("shared/core-terminal").isDirectory) {
+            File("shared/core-terminal/build/reports/terminal-benchmarks")
+        } else {
+            File("build/reports/terminal-benchmarks")
+        }
+        outputDir.mkdirs()
+        File(outputDir, "dirty-region-render.txt").writeText(report.toString())
+    }
+
+    private data class RenderCadenceResult(
+        val p95RenderMs: Double,
+        val maxRenderMs: Double,
+        val paintedRows: Long,
+    )
+
+    private fun renderCadenceLines(count: Int, line: (Int) -> String): List<ByteArray> =
+        (0 until count).map { line(it).toByteArray(Charsets.UTF_8) }
+
+    private fun measureRenderCadence(
+        name: String,
+        frames: List<ByteArray>,
+        forceFull: Boolean,
+    ): RenderCadenceResult {
+        val terminal = TerminalEmulator(
+            SinkOutput, 80, 24, CELL_WIDTH_PX, CELL_HEIGHT_PX,
+            TerminalEmulator.TERMINAL_TRANSCRIPT_ROWS_MAX, null,
+        )
+        val renderer = TerminalRenderer(TEXT_SIZE_PX, Typeface.MONOSPACE)
+        val bitmap = Bitmap.createBitmap(1600, 900, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        val rows = 24
+        val dirtyScratch = BooleanArray(rows)
+
+        // Warm up.
+        renderer.render(terminal, canvas, 0, -1, -1, -1, -1)
+
+        var invalidatedRows = 0L
+        val timingsNs = ArrayList<Long>(frames.size)
+        frames.forEach { chunk ->
+            terminal.append(chunk, chunk.size)
+            val started = System.nanoTime()
+            if (forceFull) {
+                // Baseline: a full (unclipped) repaint of the whole grid each frame —
+                // the platform redraws all rows, so the per-frame redraw cost is `rows`.
+                renderer.invalidateDirtyCache()
+                renderer.render(terminal, canvas, 0, -1, -1, -1, -1)
+                invalidatedRows += rows
+            } else {
+                // Dirty path: mirror TerminalView — only the rows peekDirtyRows reports
+                // are invalidated and repainted (PEEK_FULL = all rows). This row count
+                // is the timing-free measure of redraw work and is metric-independent,
+                // so it is stable on Robolectric's zero-metric shadow Canvas.
+                val result = renderer.peekDirtyRows(terminal, 0, -1, -1, -1, -1, dirtyScratch)
+                val dirtyCount = when (result) {
+                    TerminalRenderer.PEEK_FULL -> rows
+                    TerminalRenderer.PEEK_NONE -> 0
+                    else -> result
+                }
+                invalidatedRows += dirtyCount
+                // Still render so the renderer's cache advances exactly like production.
+                renderer.render(terminal, canvas, 0, -1, -1, -1, -1)
+            }
+            timingsNs += System.nanoTime() - started
+        }
+        val sorted = timingsNs.sorted()
+        val p95Index = ceil(sorted.size * 0.95).toInt().coerceAtLeast(1) - 1
+        return RenderCadenceResult(
+            p95RenderMs = sorted[p95Index].toDouble() / NANOS_PER_MILLI,
+            maxRenderMs = sorted.last().toDouble() / NANOS_PER_MILLI,
+            paintedRows = invalidatedRows,
+        )
+    }
+
     private fun runFixture(fixture: Fixture): BenchmarkResult {
         val terminal = TerminalEmulator(
             SinkOutput,

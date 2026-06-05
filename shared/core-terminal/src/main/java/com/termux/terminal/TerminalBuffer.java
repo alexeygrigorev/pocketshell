@@ -173,6 +173,20 @@ public final class TerminalBuffer {
      * @param externalRow a row in the external coordinate system.
      * @return The row corresponding to the input argument in the private coordinate system.
      */
+    /**
+     * The index in the circular buffer where the visible screen starts. Exposed so
+     * the renderer's dirty-region cache (#469) can detect ring-buffer scroll and
+     * shift its per-logical-row generation stamps by the scroll delta.
+     */
+    public int getScreenFirstRow() {
+        return mScreenFirstRow;
+    }
+
+    /** The length of the circular line buffer. See {@link #getScreenFirstRow()}. */
+    public int getTotalRows() {
+        return mTotalRows;
+    }
+
     public int externalToInternalRow(int externalRow) {
         if (externalRow < -mActiveTranscriptRows || externalRow > mScreenRows)
             throw new IllegalArgumentException("extRow=" + externalRow + ", mScreenRows=" + mScreenRows + ", mActiveTranscriptRows=" + mActiveTranscriptRows);
@@ -481,6 +495,9 @@ public final class TerminalBuffer {
                 }
                 line.mStyle[x] = TextStyle.encode(foreColor, backColor, effect);
             }
+            // Style was written directly (bypassing TerminalRow.setChar), so the
+            // renderer's dirty-region cache must see this row as changed (#469).
+            line.bumpGeneration();
         }
     }
 

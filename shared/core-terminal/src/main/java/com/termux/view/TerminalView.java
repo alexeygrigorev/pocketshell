@@ -74,14 +74,66 @@ public final class TerminalView extends View {
     private int mPendingRenderInvalidationRequests;
     private int mCoalescedRenderInvalidationFrames;
     private int mDefaultBackgroundColor = 0XFF000000;
+    /** Scratch dirty-row buffer for dirty-region invalidation (#469); main-thread only. */
+    private boolean[] mDirtyRowsScratch = new boolean[0];
     private final Runnable mRenderInvalidationRunnable = new Runnable() {
         @Override
         public void run() {
             mRenderInvalidationPending = false;
             mCoalescedRenderInvalidationFrames++;
-            invalidate();
+            invalidateDirtyRegion();
         }
     };
+
+    /**
+     * Invalidate exactly the rows the renderer reports as dirty (PocketShell #469),
+     * one rect per maximal contiguous dirty run, so the platform clips the following
+     * {@code onDraw} to the changed rows and preserves the unchanged ones — which are
+     * exactly the rows {@link TerminalRenderer#render} skips. Falls back to a full
+     * {@code invalidate()} for a full repaint or whenever the renderer/emulator is
+     * unavailable (keeping behaviour identical to the pre-#469 path).
+     */
+    private void invalidateDirtyRegion() {
+        final TerminalEmulator emulator = mEmulator;
+        if (emulator == null || mRenderer == null) {
+            invalidate();
+            return;
+        }
+        final int rows = emulator.mRows;
+        if (mDirtyRowsScratch.length < rows) {
+            mDirtyRowsScratch = new boolean[rows];
+        }
+        int[] sel = mDefaultSelectors;
+        if (mTextSelectionCursorController != null) {
+            mTextSelectionCursorController.getSelectors(sel);
+        }
+        int result = mRenderer.peekDirtyRows(
+            emulator, mTopRow, sel[0], sel[1], sel[2], sel[3], mDirtyRowsScratch);
+
+        if (result == TerminalRenderer.PEEK_FULL) {
+            invalidate();
+            return;
+        }
+        if (result == TerminalRenderer.PEEK_NONE) {
+            // Nothing visible changed; skip the invalidate entirely. (Cursor blink is
+            // driven independently by the blink handler.)
+            return;
+        }
+
+        final int width = getWidth();
+        int runStart = -1;
+        for (int i = 0; i < rows; i++) {
+            if (mDirtyRowsScratch[i]) {
+                if (runStart == -1) runStart = i;
+            } else if (runStart != -1) {
+                invalidate(0, Math.max(0, mRenderer.rowTopPx(runStart)), width, mRenderer.rowBottomPx(i - 1));
+                runStart = -1;
+            }
+        }
+        if (runStart != -1) {
+            invalidate(0, Math.max(0, mRenderer.rowTopPx(runStart)), width, mRenderer.rowBottomPx(rows - 1));
+        }
+    }
 
     float mScaleFactor = 1.f;
     final GestureAndScaleRecognizer mGestureRecognizer;
@@ -1073,6 +1125,10 @@ public final class TerminalView extends View {
         } catch (RuntimeException e) {
             reportTerminalViewFailure("terminal draw failed", e);
             canvas.drawColor(mDefaultBackgroundColor);
+            // The canvas was wiped to the background colour; the renderer's
+            // dirty-region cache (#469) no longer reflects what is on screen, so
+            // force the next frame to repaint every row.
+            if (mRenderer != null) mRenderer.invalidateDirtyCache();
         }
     }
 

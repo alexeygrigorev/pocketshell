@@ -50,12 +50,41 @@ public final class TerminalRow {
     /** If this row might contain chars with width != 1, used for deactivating fast path */
     boolean mHasNonOneWidthOrSurrogateChars;
 
+    /**
+     * Monotonically increasing content-version stamp for dirty-region rendering
+     * (PocketShell #469). Bumped at every content-mutating chokepoint of this row
+     * ({@link #setChar}, {@link #clear}, {@link #copyInterval}, and the direct
+     * style writes routed through {@link #bumpGeneration()} from the buffer). The
+     * renderer caches the last-rendered stamp per logical screen row and skips the
+     * (expensive) per-row style-run segmentation + glyph draw for rows whose stamp
+     * is unchanged since the previous frame.
+     *
+     * <p>Starts at {@code 1} so a freshly constructed/cleared row is never
+     * mistaken for the renderer's initial {@code 0} cache entry (which would let a
+     * never-rendered row be skipped on the first frame).
+     *
+     * <p>Correctness contract: any code path that mutates a cell's char or style
+     * MUST go through one of the chokepoints above, or the renderer must be forced
+     * to a full repaint (see {@code TerminalRenderer}). A missed bump leaves a
+     * stale glyph on screen.
+     */
+    public long mGeneration = 1;
+
     /** Construct a blank row (containing only whitespace, ' ') with a specified style. */
     public TerminalRow(int columns, long style) {
         mColumns = columns;
         mText = new char[(int) (SPARE_CAPACITY_FACTOR * columns)];
         mStyle = new long[columns];
         clear(style);
+    }
+
+    /**
+     * Bump the content-version stamp. Called by {@link TerminalBuffer} for the few
+     * style writes that bypass {@link #setChar}/{@link #clear} (DECCARA via
+     * {@code setOrClearEffect}). See {@link #mGeneration}.
+     */
+    public void bumpGeneration() {
+        mGeneration++;
     }
 
     /** NOTE: The sourceX2 is exclusive. */
@@ -146,12 +175,17 @@ public final class TerminalRow {
         Arrays.fill(mStyle, style);
         mSpaceUsed = (short) mColumns;
         mHasNonOneWidthOrSurrogateChars = false;
+        mGeneration++;
     }
 
     // https://github.com/steven676/Android-Terminal-Emulator/commit/9a47042620bec87617f0b4f5d50568535668fe26
     public void setChar(int columnToSet, int codePoint, long style) {
         if (columnToSet  < 0 || columnToSet >= mStyle.length)
             throw new IllegalArgumentException("TerminalRow.setChar(): columnToSet=" + columnToSet + ", codePoint=" + codePoint + ", style=" + style);
+
+        // Bump first so every return path (combining-char limit, fast path, wide-char
+        // fixups, recursive self-calls) marks the row dirty for the renderer (#469).
+        mGeneration++;
 
         mStyle[columnToSet] = style;
 

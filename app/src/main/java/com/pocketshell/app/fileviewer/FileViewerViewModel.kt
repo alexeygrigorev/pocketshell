@@ -45,6 +45,17 @@ sealed interface FileViewerUiState {
     ) : FileViewerUiState
 
     /**
+     * A PDF was fetched and cached to [cacheFile]. The paged PDF view opens it
+     * with [android.graphics.pdf.PdfRenderer] and renders one page at a time
+     * to a bitmap on a background dispatcher.
+     */
+    data class Pdf(
+        val displayPath: String,
+        val cacheFile: File,
+        val sizeBytes: Long,
+    ) : FileViewerUiState
+
+    /**
      * The file can't be previewed — too large, binary-non-image, missing, or
      * the host was unreachable. [message] is user-facing.
      */
@@ -66,7 +77,7 @@ sealed interface FileViewerUiState {
  *  - Decide image-vs-text-vs-binary ([FileTypeDetector]); cache image bytes
  *    to the app cache dir so the Compose image loader reads them off disk.
  *
- * Read-only. No editing, no PDF, no audio (those are #498 / #499).
+ * Read-only. PDFs render page-by-page (#498). No editing, no audio (#499).
  */
 @HiltViewModel
 class FileViewerViewModel @Inject constructor(
@@ -127,6 +138,15 @@ class FileViewerViewModel @Inject constructor(
                     content = bytes.toString(Charsets.UTF_8),
                     sizeBytes = bytes.size.toLong(),
                 )
+                FileViewerType.PDF -> if (pdfExceedsCap(bytes.size.toLong())) {
+                    pdfTooLarge(resolved, bytes.size.toLong())
+                } else {
+                    FileViewerUiState.Pdf(
+                        displayPath = resolved,
+                        cacheFile = writeToCache(resolved, bytes),
+                        sizeBytes = bytes.size.toLong(),
+                    )
+                }
                 FileViewerType.BINARY -> FileViewerUiState.CannotPreview(
                     displayPath = resolved,
                     message = "Can't preview this file — it looks like a binary file " +
@@ -155,6 +175,13 @@ class FileViewerViewModel @Inject constructor(
             runCatching { session.close() }
         }
     }
+
+    private fun pdfTooLarge(resolved: String, sizeBytes: Long): FileViewerUiState =
+        FileViewerUiState.CannotPreview(
+            displayPath = resolved,
+            message = "PDF is too large to preview (${sizeBytes / (1024 * 1024)} MB; " +
+                "limit ${MAX_PDF_BYTES / (1024 * 1024)} MB).",
+        )
 
     private fun writeToCache(resolved: String, bytes: ByteArray): File {
         val dir = File(appContext.cacheDir, CACHE_SUBDIR).apply { mkdirs() }
@@ -228,6 +255,24 @@ class FileViewerViewModel @Inject constructor(
          * keeping a single decoded copy off the OOM cliff on a phone.
          */
         const val MAX_PREVIEW_BYTES: Long = 20L * 1024 * 1024
+
+        /**
+         * Tighter ceiling for PDFs. A PDF is rendered page-by-page to a
+         * full-resolution bitmap (PdfRenderer), so a large document with many
+         * heavy pages costs far more memory than an equivalent-sized image.
+         * Cap at 10 MB so a single phone can render any normal document
+         * (reports, manuals, slide exports) without the OOM cliff, while a
+         * pathological PDF gets a clear "too large" message instead of a crash.
+         */
+        const val MAX_PDF_BYTES: Long = 10L * 1024 * 1024
+
+        /**
+         * Size guard for PDFs. True when [sizeBytes] exceeds [MAX_PDF_BYTES],
+         * in which case the viewer shows a clear "too large" message instead
+         * of feeding a huge document to PdfRenderer and risking an OOM.
+         * Pure — unit-tested.
+         */
+        internal fun pdfExceedsCap(sizeBytes: Long): Boolean = sizeBytes > MAX_PDF_BYTES
 
         internal const val CACHE_SUBDIR = "file-viewer"
 

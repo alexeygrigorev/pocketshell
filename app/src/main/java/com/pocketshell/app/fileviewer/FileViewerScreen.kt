@@ -17,21 +17,25 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -44,6 +48,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.theme.PocketShellColors
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 
 const val FILE_VIEWER_SCREEN_TAG = "fileViewerScreen"
@@ -52,6 +58,11 @@ const val FILE_VIEWER_TITLE_TAG = "fileViewerTitle"
 const val FILE_VIEWER_LOADING_TAG = "fileViewerLoading"
 const val FILE_VIEWER_IMAGE_TAG = "fileViewerImage"
 const val FILE_VIEWER_TEXT_TAG = "fileViewerText"
+const val FILE_VIEWER_PDF_TAG = "fileViewerPdf"
+const val FILE_VIEWER_PDF_PAGE_TAG = "fileViewerPdfPage"
+const val FILE_VIEWER_PDF_PREV_TAG = "fileViewerPdfPrev"
+const val FILE_VIEWER_PDF_NEXT_TAG = "fileViewerPdfNext"
+const val FILE_VIEWER_PDF_PAGE_LABEL_TAG = "fileViewerPdfPageLabel"
 const val FILE_VIEWER_CANNOT_PREVIEW_TAG = "fileViewerCannotPreview"
 const val FILE_VIEWER_RETRY_TAG = "fileViewerRetry"
 
@@ -131,6 +142,7 @@ internal fun FileViewerScaffold(
                 is FileViewerUiState.Loading -> LoadingPanel()
                 is FileViewerUiState.Image -> ImagePanel(state.cacheFile)
                 is FileViewerUiState.TextContent -> TextPanel(state.content)
+                is FileViewerUiState.Pdf -> PdfPanel(state.cacheFile)
                 is FileViewerUiState.CannotPreview -> CannotPreviewPanel(
                     message = state.message,
                     onRetry = onRetry,
@@ -144,6 +156,7 @@ private fun FileViewerUiState.displayPath(): String = when (this) {
     is FileViewerUiState.Loading -> displayPath
     is FileViewerUiState.Image -> displayPath
     is FileViewerUiState.TextContent -> displayPath
+    is FileViewerUiState.Pdf -> displayPath
     is FileViewerUiState.CannotPreview -> displayPath
 }
 
@@ -280,6 +293,177 @@ private fun TextPanel(content: String) {
             modifier = Modifier
                 .horizontalScroll(hScroll)
                 .padding(12.dp),
+        )
+    }
+}
+
+/**
+ * Paged, zoomable PDF view. Opens the cached file with [PdfPageRenderer]
+ * (platform [android.graphics.pdf.PdfRenderer] — no third-party dep) and
+ * renders the current page to a bitmap on [Dispatchers.Default]. Prev/Next
+ * page through the document; pinch (scale) + drag (translate) zoom the current
+ * page, mirroring the image view's gesture pattern.
+ */
+@Composable
+private fun PdfPanel(cacheFile: File) {
+    val renderer = remember(cacheFile.path) {
+        runCatching { PdfPageRenderer.open(cacheFile) }.getOrNull()
+    }
+    DisposableEffect(renderer) {
+        onDispose { renderer?.close() }
+    }
+    if (renderer == null) {
+        CannotPreviewPanel(
+            message = "Couldn't open the PDF — the file may be corrupt or password-protected.",
+            onRetry = {},
+            showRetry = false,
+        )
+        return
+    }
+
+    val pageCount = renderer.pageCount
+    var pageIndex by remember(cacheFile.path) { mutableIntStateOf(0) }
+    var bitmap by remember(cacheFile.path) { mutableStateOf<ImageBitmap?>(null) }
+    var rendering by remember(cacheFile.path) { mutableStateOf(true) }
+    var renderError by remember(cacheFile.path) { mutableStateOf(false) }
+
+    // Render the current page off the main thread whenever the page changes.
+    LaunchedEffect(renderer, pageIndex) {
+        rendering = true
+        renderError = false
+        bitmap = null
+        val rendered = withContext(Dispatchers.Default) {
+            runCatching { renderer.renderPage(pageIndex) }.getOrNull()
+        }
+        if (rendered != null) {
+            bitmap = rendered.asImageBitmap()
+        } else {
+            renderError = true
+        }
+        rendering = false
+    }
+
+    // Reset zoom/pan when paging to a new page.
+    var scale by remember(pageIndex, cacheFile.path) { mutableFloatStateOf(1f) }
+    var offsetX by remember(pageIndex, cacheFile.path) { mutableFloatStateOf(0f) }
+    var offsetY by remember(pageIndex, cacheFile.path) { mutableFloatStateOf(0f) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(PocketShellColors.TermBg)
+            .testTag(FILE_VIEWER_PDF_TAG),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .pointerInput(pageIndex) {
+                    detectTransformGestures { _, pan, zoom, _ ->
+                        scale = (scale * zoom).coerceIn(1f, 8f)
+                        if (scale > 1f) {
+                            offsetX += pan.x
+                            offsetY += pan.y
+                        } else {
+                            offsetX = 0f
+                            offsetY = 0f
+                        }
+                    }
+                },
+            contentAlignment = Alignment.Center,
+        ) {
+            val current = bitmap
+            when {
+                current != null -> Image(
+                    bitmap = current,
+                    contentDescription = "PDF page ${pageIndex + 1}",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer(
+                            scaleX = scale,
+                            scaleY = scale,
+                            translationX = offsetX,
+                            translationY = offsetY,
+                        )
+                        .testTag(FILE_VIEWER_PDF_PAGE_TAG),
+                )
+                renderError -> Text(
+                    text = "Couldn't render this page.",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 14.sp,
+                )
+                rendering -> CircularProgressIndicator(color = PocketShellColors.Accent)
+            }
+        }
+        PdfPagerBar(
+            pageIndex = pageIndex,
+            pageCount = pageCount,
+            onPrev = { if (pageIndex > 0) pageIndex-- },
+            onNext = { if (pageIndex < pageCount - 1) pageIndex++ },
+        )
+    }
+}
+
+@Composable
+private fun PdfPagerBar(
+    pageIndex: Int,
+    pageCount: Int,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(52.dp)
+            .background(PocketShellColors.Background)
+            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        PdfPagerButton(
+            label = "‹ Prev",
+            enabled = pageIndex > 0,
+            onClick = onPrev,
+            testTag = FILE_VIEWER_PDF_PREV_TAG,
+        )
+        Text(
+            text = "Page ${pageIndex + 1} / $pageCount",
+            color = PocketShellColors.Text,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            modifier = Modifier.testTag(FILE_VIEWER_PDF_PAGE_LABEL_TAG),
+        )
+        PdfPagerButton(
+            label = "Next ›",
+            enabled = pageIndex < pageCount - 1,
+            onClick = onNext,
+            testTag = FILE_VIEWER_PDF_NEXT_TAG,
+        )
+    }
+}
+
+@Composable
+private fun PdfPagerButton(
+    label: String,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    testTag: String,
+) {
+    Box(
+        modifier = Modifier
+            .width(72.dp)
+            .height(40.dp)
+            .then(if (enabled) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
+            .testTag(testTag),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = if (enabled) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
         )
     }
 }

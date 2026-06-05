@@ -3,8 +3,8 @@ package com.pocketshell.app.fileviewer
 /**
  * How the in-app file viewer (issue #497) should render a fetched file.
  *
- * The viewer supports two preview modes NOW — images and text. Anything
- * else (binary-non-image, or a file that exceeded the size cap) renders a
+ * The viewer supports images, text, and PDFs. Anything else
+ * (binary-non-image, or a file that exceeded the size cap) renders a
  * friendly "can't preview" message instead of crashing.
  */
 enum class FileViewerType {
@@ -13,6 +13,9 @@ enum class FileViewerType {
 
     /** Renders in the scrollable monospace read-only text view. */
     TEXT,
+
+    /** Renders page-by-page (PdfRenderer) in the paged/zoomable PDF view. */
+    PDF,
 
     /** Not previewable (binary, unknown, or undecodable). */
     BINARY,
@@ -28,12 +31,15 @@ enum class FileViewerType {
  *     [FileViewerType.IMAGE] regardless of extension (the agent often
  *     references a path whose extension lies, and a content sniff is more
  *     reliable than the suffix).
- *  2. Else if the extension is a known image extension AND the bytes look
+ *  2. Else if the bytes carry the **PDF** magic header (`%PDF`), it's a
+ *     [FileViewerType.PDF]. The header is ASCII, so this must run before
+ *     the UTF-8 text sniff or a PDF would be misread as a text file.
+ *  3. Else if the extension is a known image extension AND the bytes look
  *     image-ish enough not to be UTF-8 text, treat as image. (Covers exotic
  *     image formats we don't sniff but the OS decoder may still handle.)
- *  3. Else if the bytes are UTF-8-decodable text (no NUL bytes, valid
+ *  4. Else if the bytes are UTF-8-decodable text (no NUL bytes, valid
  *     UTF-8), it's [FileViewerType.TEXT].
- *  4. Else [FileViewerType.BINARY].
+ *  5. Else [FileViewerType.BINARY].
  */
 object FileTypeDetector {
 
@@ -43,6 +49,7 @@ object FileTypeDetector {
 
     fun detect(remotePath: String, bytes: ByteArray): FileViewerType {
         if (looksLikeImageMagic(bytes)) return FileViewerType.IMAGE
+        if (looksLikePdf(remotePath, bytes)) return FileViewerType.PDF
 
         val ext = extensionOf(remotePath)
         val isUtf8Text = looksLikeUtf8Text(bytes)
@@ -50,6 +57,38 @@ object FileTypeDetector {
         if (ext in IMAGE_EXTENSIONS && !isUtf8Text) return FileViewerType.IMAGE
 
         return if (isUtf8Text) FileViewerType.TEXT else FileViewerType.BINARY
+    }
+
+    /**
+     * True when [bytes] is a PDF. The reliable signal is the `%PDF` magic at
+     * the start of the file. As a fallback we also honour a `.pdf` extension
+     * when the bytes are clearly non-text binary (a truncated/odd PDF whose
+     * header sniff slipped) so auto-detect routing stays consistent with the
+     * extension the agent referenced (#500).
+     */
+    internal fun looksLikePdf(remotePath: String, bytes: ByteArray): Boolean {
+        // "%PDF" = 0x25 0x50 0x44 0x46. A conforming PDF starts with it; the
+        // spec allows it within the first 1024 bytes, so scan a small window.
+        if (containsPdfMagic(bytes)) return true
+        return extensionOf(remotePath) == "pdf" && !looksLikeUtf8Text(bytes)
+    }
+
+    private fun containsPdfMagic(bytes: ByteArray): Boolean {
+        val magic = byteArrayOf('%'.code.toByte(), 'P'.code.toByte(), 'D'.code.toByte(), 'F'.code.toByte())
+        val limit = minOf(bytes.size - magic.size, 1024)
+        var i = 0
+        while (i <= limit) {
+            var matched = true
+            for (j in magic.indices) {
+                if (bytes[i + j] != magic[j]) {
+                    matched = false
+                    break
+                }
+            }
+            if (matched) return true
+            i++
+        }
+        return false
     }
 
     /** Lower-cased extension after the last `.` of the final path segment, or "" . */

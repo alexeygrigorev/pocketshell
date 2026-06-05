@@ -2,11 +2,16 @@ package com.pocketshell.app.fileviewer
 
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.pdf.PdfDocument
 import android.util.Base64
 import androidx.compose.ui.test.junit4.ComposeContentTestRule
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.DEFAULT_HOST
@@ -160,6 +165,69 @@ class FileViewerDockerTest {
         WalkthroughScreenshotArtifacts.capture("issue497-file-viewer-text")
     }
 
+    @Test
+    fun viewsRemotePdfPagesFromFixture(): Unit = runBlocking {
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val pdfPath = "/tmp/issue498-doc-$suffix.pdf"
+
+        // Seed a real 3-page PDF (base64-decoded server-side).
+        val pdfBase64 = Base64.encodeToString(makePdfBytes(pages = 3), Base64.NO_WRAP)
+        withTimeout(20_000) {
+            connect()?.use { session ->
+                val exit = session.exec(
+                    "printf '%s' '$pdfBase64' | base64 -d > '$pdfPath'",
+                )
+                assertEquals("seed pdf exit", 0, exit.exitCode)
+                seededPaths += pdfPath
+            } ?: error("could not connect to seed fixture pdf")
+        }
+
+        composeRule.setContent {
+            FileViewerScreen(
+                hostName = "agents",
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+                remotePath = pdfPath,
+                cwd = null,
+                onBack = {},
+                viewModel = FileViewerViewModel(
+                    InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,
+                ),
+            )
+        }
+
+        // Page 1 renders.
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(FILE_VIEWER_PDF_PAGE_TAG)
+        }
+        composeRule.onNodeWithTag(FILE_VIEWER_PDF_PAGE_TAG).assertExists()
+        composeRule.onNodeWithText("Page 1 / 3").assertExists()
+        WalkthroughScreenshotArtifacts.capture("issue498-pdf-page1")
+
+        // Page through to page 2 then page 3.
+        composeRule.onNodeWithTag(FILE_VIEWER_PDF_NEXT_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithText("Page 2 / 3").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithTag(FILE_VIEWER_PDF_PAGE_TAG).assertExists()
+        WalkthroughScreenshotArtifacts.capture("issue498-pdf-page2")
+
+        composeRule.onNodeWithTag(FILE_VIEWER_PDF_NEXT_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithText("Page 3 / 3").fetchSemanticsNodes().isNotEmpty()
+        }
+        WalkthroughScreenshotArtifacts.capture("issue498-pdf-page3")
+
+        // Back to page 1 via Prev.
+        composeRule.onNodeWithTag(FILE_VIEWER_PDF_PREV_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithText("Page 2 / 3").fetchSemanticsNodes().isNotEmpty()
+        }
+    }
+
     private suspend fun connect() = SshConnection.connect(
         host = DEFAULT_HOST,
         port = DEFAULT_PORT,
@@ -176,6 +244,31 @@ class FileViewerDockerTest {
         val out = ByteArrayOutputStream()
         assertTrue(bmp.compress(Bitmap.CompressFormat.PNG, 100, out))
         bmp.recycle()
+        return out.toByteArray()
+    }
+
+    /**
+     * Build a real multi-page PDF with [android.graphics.pdf.PdfDocument] so the
+     * connected test exercises the exact PdfRenderer decode path with a genuine
+     * PDF byte stream (no third-party PDF library involved).
+     */
+    private fun makePdfBytes(pages: Int): ByteArray {
+        val doc = PdfDocument()
+        val paint = Paint().apply {
+            color = Color.BLACK
+            textSize = 48f
+            isAntiAlias = true
+        }
+        for (p in 1..pages) {
+            val pageInfo = PdfDocument.PageInfo.Builder(612, 792, p).create()
+            val page = doc.startPage(pageInfo)
+            page.canvas.drawColor(Color.WHITE)
+            page.canvas.drawText("PocketShell PDF page $p of $pages", 60f, 120f, paint)
+            doc.finishPage(page)
+        }
+        val out = ByteArrayOutputStream()
+        doc.writeTo(out)
+        doc.close()
         return out.toByteArray()
     }
 }

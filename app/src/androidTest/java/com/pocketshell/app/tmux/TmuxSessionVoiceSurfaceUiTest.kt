@@ -58,7 +58,7 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.setContent {
             PocketShellTheme {
                 KeyBarWithMic(
-                    keys = TmuxKeyBarLayout,
+                    keys = tmuxKeyBarLayout(expanded = false),
                     onKey = {},
                     micState = InlineDictationViewModel.RecordingState.Idle,
                     micAmplitude = 0f,
@@ -69,7 +69,7 @@ class TmuxSessionVoiceSurfaceUiTest {
             }
         }
 
-        compose.onNodeWithText("Ctrl-C").assertIsDisplayed()
+        compose.onNodeWithText("^C").assertIsDisplayed()
         compose.onNodeWithTag(INLINE_DICTATION_MIC_SLOT_TAG).assertIsDisplayed().performClick()
         assertEquals(1, micTaps)
     }
@@ -80,7 +80,7 @@ class TmuxSessionVoiceSurfaceUiTest {
         compose.setContent {
             PocketShellTheme {
                 KeyBarWithMic(
-                    keys = TmuxKeyBarLayout,
+                    keys = tmuxKeyBarLayout(expanded = false),
                     onKey = { taps += it.label },
                     micState = InlineDictationViewModel.RecordingState.Idle,
                     micAmplitude = 0f,
@@ -91,10 +91,10 @@ class TmuxSessionVoiceSurfaceUiTest {
             }
         }
 
-        compose.onNodeWithText("Ctrl-C").assertIsDisplayed().assertHasClickAction().performClick()
-        compose.onNodeWithText("Ctrl-D").assertIsDisplayed().assertHasClickAction().performClick()
+        compose.onNodeWithText("^C").assertIsDisplayed().assertHasClickAction().performClick()
+        compose.onNodeWithText("^D").assertIsDisplayed().assertHasClickAction().performClick()
 
-        assertEquals(listOf("Ctrl-C", "Ctrl-D"), taps)
+        assertEquals(listOf("^C", "^D"), taps)
     }
 
     @Test

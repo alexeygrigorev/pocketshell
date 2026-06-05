@@ -20,6 +20,7 @@ import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.tmux.CommandResponse
+import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.protocol.ControlEvent
@@ -1752,13 +1753,20 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
-    fun onKeyBarKeySendsCtrlCAndCtrlDAsRawControlBytes() = runTest {
+    fun onKeyBarKeySendsCuratedCtrlCombosAsRawControlBytes() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()
         vm.attachClientForTest(client)
 
-        vm.onKeyBarKey("%0", "Ctrl-C")
-        vm.onKeyBarKey("%0", "Ctrl-D")
+        // Issue #458: the curated one-tap combos use the `^X` short labels
+        // and each maps to its control byte via the `send-keys -H` overlay
+        // path (no resize/redraw). The legacy `Ctrl-C` / `Ctrl-D` aliases
+        // remain accepted for back-compat with the byte mapping.
+        vm.onKeyBarKey("%0", "^C")
+        vm.onKeyBarKey("%0", "^D")
+        vm.onKeyBarKey("%0", "^Z")
+        vm.onKeyBarKey("%0", "^O")
+        vm.onKeyBarKey("%0", "^X")
         advanceUntilIdle()
 
         val sent = client.sentCommands.filter { it.startsWith("send-keys") }
@@ -1766,6 +1774,100 @@ class TmuxSessionViewModelTest {
             listOf(
                 "send-keys -H -t %0 03",
                 "send-keys -H -t %0 04",
+                "send-keys -H -t %0 1a",
+                "send-keys -H -t %0 0f",
+                "send-keys -H -t %0 18",
+            ),
+            sent,
+        )
+    }
+
+    @Test
+    fun ctrlModifierChordsTheNextKeyAsAControlByte() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        // Issue #458: arm Ctrl (one-shot), then tap a letter in the bar.
+        // The letter is sent as its Ctrl-chord control byte (`g` -> 0x07),
+        // and the one-shot Ctrl auto-clears so the following plain tap is
+        // NOT chorded.
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
+        assertEquals(KeyModifierState.OneShot, vm.ctrlModifierState.value)
+        vm.onKeyBarKey("%0", "g")
+        advanceUntilIdle()
+        assertEquals(KeyModifierState.Off, vm.ctrlModifierState.value)
+
+        vm.onKeyBarKey("%0", "Tab")
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals(
+            listOf(
+                "send-keys -H -t %0 07",
+                "send-keys -t %0 Tab",
+            ),
+            sent,
+        )
+    }
+
+    @Test
+    fun lockedCtrlModifierChordsRepeatedlyUntilDisarmed() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        // Locked Ctrl survives a chord so several land in a row.
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.Locked)
+        vm.onKeyBarKey("%0", "a")
+        advanceUntilIdle()
+        assertEquals(KeyModifierState.Locked, vm.ctrlModifierState.value)
+        vm.onKeyBarKey("%0", "B")
+        advanceUntilIdle()
+        assertEquals(KeyModifierState.Locked, vm.ctrlModifierState.value)
+        // Disarm via an explicit Ctrl tap mirrored from the bar FSM.
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.Off)
+        // A bar key after disarm chords nothing — `^C` is its own raw byte.
+        vm.onKeyBarKey("%0", "^C")
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals(
+            listOf(
+                "send-keys -H -t %0 01",
+                // Uppercase B chords to the same byte as lowercase b.
+                "send-keys -H -t %0 02",
+                // Disarmed: the curated `^C` key sends its own raw byte.
+                "send-keys -H -t %0 03",
+            ),
+            sent,
+        )
+    }
+
+    @Test
+    fun ctrlModifierChordsArrowsAndNamedKeysViaTmuxChordSyntax() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        // Issue #458: Ctrl + arrow / Tab / Esc route through tmux's own
+        // `C-<key>` chord named keys so tmux emits the correct terminfo
+        // encoding (e.g. Ctrl+Right word-jump). Each is one-shot so it
+        // re-arms per chord here.
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
+        vm.onKeyBarKey("%0", "›")
+        advanceUntilIdle()
+        assertEquals(KeyModifierState.Off, vm.ctrlModifierState.value)
+
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
+        vm.onKeyBarKey("%0", "Esc")
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals(
+            listOf(
+                "send-keys -t %0 C-Right",
+                "send-keys -t %0 C-Escape",
             ),
             sent,
         )

@@ -367,6 +367,15 @@ public fun TmuxSessionScreen(
     // dark for voice input).
     var showMicSheet by remember { mutableStateOf(false) }
     var showSnippetPicker by remember { mutableStateOf(false) }
+    // Issue #458: whether the terminal key bar shows its full row (the long
+    // tail of Ctrl combos + arrows) or the compact curated default. Local UI
+    // state toggled by the `⋯` / `×` slot; survives recomposition only (a
+    // fresh attach starts compact, which is the right default).
+    var keyBarExpanded by remember { mutableStateOf(false) }
+    // Issue #458: the armed state of the key bar's `Ctrl` modifier, mirrored
+    // from the ui-kit KeyBar FSM into the view model. Drives the accent
+    // treatment on the `Ctrl` slot so the user can see Ctrl is armed.
+    val ctrlModifierState by viewModel.ctrlModifierState.collectAsState()
     // Issue #436 (Slice A): agent slash-command quick-send palette state.
     var showAgentCommands by remember { mutableStateOf(false) }
     // Issue #462: a "sticky" last-known agent for the visible pane, so the
@@ -1038,11 +1047,29 @@ public fun TmuxSessionScreen(
             // Conversation with just the unified composer band below.
             if (isImeVisible && currentPane != null && !showConversation) {
                 KeyBarWithMic(
-                    keys = TmuxKeyBarLayout,
+                    keys = tmuxKeyBarLayout(keyBarExpanded),
                     onKey = if (sessionLive) {
-                        { binding -> viewModel.onKeyBarKey(currentPane.paneId, binding.label) }
+                        { binding ->
+                            // Issue #458: the `⋯` / `×` slot toggles the
+                            // expander locally; it is never a keystroke. All
+                            // other taps route to the pane (control bytes via
+                            // the `send-keys -H` overlay path — no redraw).
+                            when (binding.label) {
+                                TmuxKeyBarExpandLabel -> keyBarExpanded = true
+                                TmuxKeyBarCollapseLabel -> keyBarExpanded = false
+                                else -> viewModel.onKeyBarKey(currentPane.paneId, binding.label)
+                            }
+                        }
                     } else {
                         { _ -> }
+                    },
+                    // Issue #458: feed the `Ctrl` slot's armed state from the
+                    // view model so the bar renders the accent and the
+                    // sticky FSM stays in sync with the chord decision in
+                    // [onKeyBarKey]. The map is keyed by the binding label.
+                    modifierStates = mapOf(TmuxCtrlModifierLabel to ctrlModifierState),
+                    onModifierStateChange = { binding, state ->
+                        viewModel.onKeyBarModifierState(binding.label, state)
                     },
                     micState = dictationState.recording,
                     micAmplitude = dictationState.amplitude,
@@ -4576,21 +4603,67 @@ private fun PageIndicator(pageCount: Int, currentPage: Int) {
 }
 
 /**
- * Tmux-specific 8-slot key bar. Ctrl/Alt modifier slots are intentionally
- * not mirrored from [com.pocketshell.app.session.SessionScreen]'s layout:
- * the tmux route sends pane input through `send-keys`, and these one-shot
- * Ctrl-C / Ctrl-D keys map directly to the control bytes agents expect.
+ * Issue #458: the expander toggle label. Tapping `⋯` flips the bar between
+ * its compact default row and the full row (the long tail of Ctrl combos +
+ * arrows). The screen intercepts this label in its `onKey` lambda and
+ * toggles local UI state instead of sending it to the pane — it is never a
+ * keystroke.
  */
-internal val TmuxKeyBarLayout: List<KeyBinding> = listOf(
+internal const val TmuxKeyBarExpandLabel: String = "⋯"
+internal const val TmuxKeyBarCollapseLabel: String = "×"
+
+/**
+ * Issue #458: the `Ctrl` modifier slot. A [KeyKind.Modifier] so the ui-kit
+ * [com.pocketshell.uikit.components.KeyBar] owns the sticky tap FSM (tap =
+ * arm for one chord, double-tap = lock, tap-while-armed = disarm). When
+ * armed, the next regular key tapped in the bar is sent as a Ctrl-chord
+ * control byte (see [TmuxSessionViewModel.onKeyBarKey]). The armed state is
+ * mirrored to [TmuxSessionViewModel.ctrlModifierState] and rendered with the
+ * accent treatment by the bar itself.
+ */
+internal const val TmuxCtrlModifierLabel: String = "Ctrl"
+
+/**
+ * Tmux key bar — curated default + an expandable long tail (issue #458).
+ *
+ * The default row stays compact and one-handed: `Esc`, the `Ctrl` modifier,
+ * the three most-reached Ctrl combos (`^C` interrupt, `^D` EOF, `^Z`
+ * suspend), `Tab`, and the `⋯` expander. Every control key maps directly to
+ * its control byte through the `send-keys -H` overlay path
+ * ([TmuxSessionViewModel.sendControlInputToPane]) — no terminal resize or
+ * redraw. The `Ctrl` modifier covers any other chord the curated set omits:
+ * tap `Ctrl`, then any letter key, and it is sent as `0x01`..`0x1A`.
+ *
+ * Tapping `⋯` expands the bar ([tmuxKeyBarLayout] with `expanded = true`) to
+ * surface the long tail — `^O` / `^X` and the four arrow keys, plus the
+ * `Ctrl` modifier — with `×` to collapse back. Both rows stay within a
+ * single non-scrolling row width on a phone so nothing clips.
+ */
+internal val TmuxKeyBarLayoutCompact: List<KeyBinding> = listOf(
     KeyBinding(label = "Esc", kind = KeyKind.Regular),
+    KeyBinding(label = TmuxCtrlModifierLabel, kind = KeyKind.Modifier),
+    KeyBinding(label = "^C", kind = KeyKind.Regular),
+    KeyBinding(label = "^D", kind = KeyKind.Regular),
+    KeyBinding(label = "^Z", kind = KeyKind.Regular),
     KeyBinding(label = "Tab", kind = KeyKind.Regular),
-    KeyBinding(label = "Ctrl-C", kind = KeyKind.Regular),
-    KeyBinding(label = "Ctrl-D", kind = KeyKind.Regular),
+    KeyBinding(label = TmuxKeyBarExpandLabel, kind = KeyKind.Arrow),
+)
+
+internal val TmuxKeyBarLayoutExpanded: List<KeyBinding> = listOf(
+    KeyBinding(label = "Esc", kind = KeyKind.Regular),
+    KeyBinding(label = TmuxCtrlModifierLabel, kind = KeyKind.Modifier),
+    KeyBinding(label = "^O", kind = KeyKind.Regular),
+    KeyBinding(label = "^X", kind = KeyKind.Regular),
     KeyBinding(label = "‹", kind = KeyKind.Arrow),
     KeyBinding(label = "⌃", kind = KeyKind.Arrow),
     KeyBinding(label = "⌄", kind = KeyKind.Arrow),
     KeyBinding(label = "›", kind = KeyKind.Arrow),
+    KeyBinding(label = TmuxKeyBarCollapseLabel, kind = KeyKind.Arrow),
 )
+
+/** Pick the curated or full key-bar layout based on the expander state. */
+internal fun tmuxKeyBarLayout(expanded: Boolean): List<KeyBinding> =
+    if (expanded) TmuxKeyBarLayoutExpanded else TmuxKeyBarLayoutCompact
 
 internal const val CtrlC2Chip: String = "Ctrl-C x2"
 internal const val CtrlD2Chip: String = "Ctrl-D x2"

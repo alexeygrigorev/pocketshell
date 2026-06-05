@@ -4856,24 +4856,30 @@ internal const val TmuxCtrlModifierLabel: String = "Ctrl"
  * Tmux key bar — curated default + an expandable long tail (issue #458).
  *
  * The default row stays compact and one-handed: `Esc`, the `Ctrl` modifier,
- * the three most-reached Ctrl combos (`^C` interrupt, `^D` EOF, `^Z`
- * suspend), `Tab`, and the `⋯` expander. Every control key maps directly to
- * its control byte through the `send-keys -H` overlay path
- * ([TmuxSessionViewModel.sendControlInputToPane]) — no terminal resize or
- * redraw. The `Ctrl` modifier covers any other chord the curated set omits:
- * tap `Ctrl`, then any letter key, and it is sent as `0x01`..`0x1A`.
+ * the two most-reached one-tap actions (`^C` interrupt, `⏎` Enter/submit),
+ * `^D` EOF, `Tab`, and the `⋯` expander. Enter is the highest-frequency key
+ * (issue #527): one obvious tap submits the typed/pending line to the pane
+ * without opening the soft keyboard. Every control key maps directly to its
+ * control byte through the `send-keys -H` overlay path
+ * ([TmuxSessionViewModel.sendControlInputToPane]); `⏎` maps to the tmux
+ * named `Enter` key via `send-keys -t <pane> Enter`
+ * ([TmuxSessionViewModel.sendNamedKey]) — no terminal resize or redraw. The
+ * `Ctrl` modifier covers any other chord the curated set omits: tap `Ctrl`,
+ * then any letter key, and it is sent as `0x01`..`0x1A`.
  *
  * Tapping `⋯` expands the bar ([tmuxKeyBarLayout] with `expanded = true`) to
- * surface the long tail — `^O` / `^X` and the four arrow keys, plus the
- * `Ctrl` modifier — with `×` to collapse back. Both rows stay within a
- * single non-scrolling row width on a phone so nothing clips.
+ * surface the long tail — `^Z` suspend, `^O` / `^X` and the four arrow keys,
+ * plus the `Ctrl` modifier — with `×` to collapse back. Both rows stay within
+ * a single non-scrolling row width on a phone so nothing clips.
  */
+internal const val TmuxKeyBarEnterLabel: String = "⏎"
+
 internal val TmuxKeyBarLayoutCompact: List<KeyBinding> = listOf(
     KeyBinding(label = "Esc", kind = KeyKind.Regular),
     KeyBinding(label = TmuxCtrlModifierLabel, kind = KeyKind.Modifier),
     KeyBinding(label = "^C", kind = KeyKind.Regular),
+    KeyBinding(label = TmuxKeyBarEnterLabel, kind = KeyKind.Regular),
     KeyBinding(label = "^D", kind = KeyKind.Regular),
-    KeyBinding(label = "^Z", kind = KeyKind.Regular),
     KeyBinding(label = "Tab", kind = KeyKind.Regular),
     KeyBinding(label = TmuxKeyBarExpandLabel, kind = KeyKind.Arrow),
 )
@@ -4881,6 +4887,8 @@ internal val TmuxKeyBarLayoutCompact: List<KeyBinding> = listOf(
 internal val TmuxKeyBarLayoutExpanded: List<KeyBinding> = listOf(
     KeyBinding(label = "Esc", kind = KeyKind.Regular),
     KeyBinding(label = TmuxCtrlModifierLabel, kind = KeyKind.Modifier),
+    KeyBinding(label = TmuxKeyBarEnterLabel, kind = KeyKind.Regular),
+    KeyBinding(label = "^Z", kind = KeyKind.Regular),
     KeyBinding(label = "^O", kind = KeyKind.Regular),
     KeyBinding(label = "^X", kind = KeyKind.Regular),
     KeyBinding(label = "‹", kind = KeyKind.Arrow),

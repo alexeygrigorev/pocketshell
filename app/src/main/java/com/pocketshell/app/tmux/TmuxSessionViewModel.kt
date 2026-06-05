@@ -5059,6 +5059,11 @@ public class TmuxSessionViewModel @Inject constructor(
         val named = when (label) {
             "Esc" -> "Escape"
             "Tab" -> "Tab"
+            // Issue #527: the dedicated Enter/Return key. Submits a
+            // newline/CR to the pane (runs the typed or pending line) via
+            // the tmux named `Enter` key on the `send-keys` control channel
+            // — no terminal resize or redraw, like Esc/Tab.
+            "⏎", "Enter" -> "Enter"
             // Curated one-tap control combos (issue #458). Each maps
             // directly to its control byte via the `send-keys -H` overlay
             // path — no resize, no redraw.

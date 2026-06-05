@@ -1753,6 +1753,37 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun onKeyBarKeyEnterSendsTmuxEnterNamedKeyWithoutReflow() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+
+        // Issue #527: the dedicated Enter/Return key submits a newline/CR to
+        // the pane via the tmux named `Enter` key on the `send-keys` control
+        // channel. Both the glyph label and the legacy "Enter" alias map to
+        // the same sequence.
+        vm.onKeyBarKey("%0", "⏎")
+        vm.onKeyBarKey("%0", "Enter")
+        advanceUntilIdle()
+
+        val sent = client.sentCommands.filter { it.startsWith("send-keys") }
+        assertEquals(
+            listOf(
+                "send-keys -t %0 Enter",
+                "send-keys -t %0 Enter",
+            ),
+            sent,
+        )
+        // No resize/redraw path: the named-key route never uses
+        // `refresh-client` and never the literal `send-keys -l`/`-H` byte
+        // paths that would imply a paste/reflow.
+        assertTrue(
+            "Enter must not trigger a resize/refresh-client",
+            client.sentCommands.none { it.startsWith("refresh-client") },
+        )
+    }
+
+    @Test
     fun onKeyBarKeySendsCuratedCtrlCombosAsRawControlBytes() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()

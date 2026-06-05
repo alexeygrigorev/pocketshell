@@ -146,7 +146,7 @@ class TmuxKeyBarCtrlComboE2eTest {
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        listOf("Esc", "Ctrl", "^C", "^D", "^Z", "Tab").forEach { label ->
+        listOf("Esc", "Ctrl", "^C", "⏎", "^D", "Tab").forEach { label ->
             assertTrue(
                 "expected the compact key bar to show '$label'",
                 compose.onAllNodesWithText(label, useUnmergedTree = true)
@@ -209,6 +209,40 @@ class TmuxKeyBarCtrlComboE2eTest {
         }
         captureViewport("issue458-05-prompt-resumed")
 
+        // ===== Enter key (issue #527): submit a pending line via the bar ====
+        // Type a command WITHOUT a trailing newline so it sits as a pending,
+        // unsubmitted line in the pane — the exact situation the maintainer
+        // hits when the composer fails to submit. Then tap the dedicated `⏎`
+        // key in the compact key bar and confirm the line executes (the
+        // sentinel echoes), all without opening anything beyond the key bar.
+        SystemClock.sleep(750)
+        val enterGridBefore = terminalGridSize()
+        typePendingLine("echo $ENTER_MARKER", "enter-pending-line")
+        // The pending text must be visible in the pane but NOT yet executed
+        // (the marker echo has not run, so it appears only once — as input).
+        waitForVisibleTerminal("enter-pending-visible", timeoutMillis = 20_000) { transcript ->
+            transcript.contains("echo $ENTER_MARKER")
+        }
+        captureViewport("issue458-05b-enter-pending")
+        // Tap the dedicated Enter/Return key in the compact row.
+        val enterAt = SystemClock.elapsedRealtime()
+        compose.onNodeWithText("⏎", useUnmergedTree = true).performClick()
+        waitForVisibleTerminal("enter-executed", timeoutMillis = 20_000) { transcript ->
+            // Echo output: the marker now appears as a standalone echoed line
+            // (twice overall — once as the typed command, once as output).
+            transcript.split(ENTER_MARKER).size >= 3
+        }
+        recordTiming("enter_key_submit_to_echo_ms", SystemClock.elapsedRealtime() - enterAt)
+        val enterGridAfter = terminalGridSize()
+        captureViewport("issue458-05c-enter-executed")
+        // No reflow: tapping Enter is a `send-keys` control-channel command,
+        // never a resize. The on-screen grid is unchanged across the submit.
+        assertTrue(
+            "expected no terminal reflow across the Enter key: grid before=$enterGridBefore " +
+                "after=$enterGridAfter",
+            enterGridBefore == enterGridAfter,
+        )
+
         // ===== Ctrl modifier: arm it and capture the armed state =====
         // Re-focus is unnecessary here — the key bar is a Compose overlay,
         // not part of the terminal. Tapping `Ctrl` arms the one-shot
@@ -237,7 +271,7 @@ class TmuxKeyBarCtrlComboE2eTest {
                 .fetchSemanticsNodes()
                 .isNotEmpty()
         }
-        listOf("^O", "^X", "‹", "›").forEach { label ->
+        listOf("^Z", "^O", "^X", "‹", "›").forEach { label ->
             assertTrue(
                 "expected the expanded key bar to show '$label'",
                 compose.onAllNodesWithText(label, useUnmergedTree = true)
@@ -258,6 +292,14 @@ class TmuxKeyBarCtrlComboE2eTest {
                 "'$RESUME_MARKER', proving Ctrl+C returned an interactive prompt; got:\n$transcript",
             transcript.contains(RESUME_MARKER),
         )
+        // Issue #527: the Enter key submitted the pending line, so the echo
+        // marker appears as both the typed command and its executed output.
+        assertTrue(
+            "expected visible terminal transcript to show the Enter-key sentinel " +
+                "'$ENTER_MARKER' executed at least twice (typed + echoed), proving the " +
+                "key-bar Enter submitted the pending line; got:\n$transcript",
+            transcript.split(ENTER_MARKER).size >= 3,
+        )
     }
 
     private fun buildSummary(
@@ -273,6 +315,7 @@ class TmuxKeyBarCtrlComboE2eTest {
         appendLine("no_reflow=${gridBefore == gridAfter}")
         appendLine("flood_marker=$FLOOD_MARKER")
         appendLine("resume_marker=$RESUME_MARKER")
+        appendLine("enter_marker=$ENTER_MARKER")
         appendLine("artifacts:")
         listOf(
             "issue458-01-attached",
@@ -280,6 +323,8 @@ class TmuxKeyBarCtrlComboE2eTest {
             "issue458-03-process-running",
             "issue458-04-after-ctrl-c",
             "issue458-05-prompt-resumed",
+            "issue458-05b-enter-pending",
+            "issue458-05c-enter-executed",
             "issue458-06-ctrl-armed",
             "issue458-07-ctrl-after-chord",
             "issue458-08-keybar-expanded",
@@ -320,6 +365,19 @@ class TmuxKeyBarCtrlComboE2eTest {
         }
         val enterCommitted = terminalInputConnection().commitText("\n", 1)
         assertTrue("expected terminal input to submit $label", enterCommitted)
+    }
+
+    /**
+     * Type [text] into the terminal input WITHOUT a trailing newline, leaving
+     * it as a pending, unsubmitted line in the pane (issue #527). Submission
+     * is then exercised separately via the key-bar `⏎` key.
+     */
+    private fun typePendingLine(text: String, label: String) {
+        text.chunked(4).forEach { chunk ->
+            val committed = terminalInputConnection().commitText(chunk, 1)
+            assertTrue("expected terminal input to commit `$chunk` for $label", committed)
+            SystemClock.sleep(35)
+        }
     }
 
     private fun terminalInputConnection(): InputConnection {
@@ -582,5 +640,6 @@ class TmuxKeyBarCtrlComboE2eTest {
         const val READY_MARKER: String = "KEYBAR-READY"
         val FLOOD_MARKER: String = "FLOOD-${System.currentTimeMillis().toString().takeLast(6)}"
         val RESUME_MARKER: String = "RESUMED-${System.currentTimeMillis().toString().takeLast(6)}"
+        val ENTER_MARKER: String = "ENTERKEY-${System.currentTimeMillis().toString().takeLast(6)}"
     }
 }

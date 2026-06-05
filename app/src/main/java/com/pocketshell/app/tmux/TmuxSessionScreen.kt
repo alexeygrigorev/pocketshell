@@ -64,6 +64,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -134,6 +135,7 @@ import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
+import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlinx.coroutines.launch
 import kotlin.math.abs
@@ -366,6 +368,39 @@ public fun TmuxSessionScreen(
     var showSnippetPicker by remember { mutableStateOf(false) }
     // Issue #436 (Slice A): agent slash-command quick-send palette state.
     var showAgentCommands by remember { mutableStateOf(false) }
+    // Issue #462: a "sticky" last-known agent for the visible pane, so the
+    // always-visible "/ commands" header affordance does not flicker out on a
+    // transient detection miss. Live agent detection round-trips can briefly
+    // report `detection == null` mid-session (a list-panes refresh, a pane-tty
+    // reassignment, a re-attach before re-detection completes). If the palette
+    // button were gated purely on the live `currentAgentConversation`, it would
+    // blink away during those gaps — exactly the "buried / sometimes absent"
+    // complaint this issue is about. We therefore remember the last non-null
+    // detected agent keyed by the visible `paneId`: the button stays reachable
+    // across flicker, and the sticky resets when the user moves to a different
+    // pane (a genuinely different shell/window). See the issue notes for the
+    // deliberate trade-off (a benign over-show after a real agent exit beats a
+    // vanishing affordance, and sending a slash command into a plain shell is
+    // harmless).
+    val stickyAgentForPane = remember { mutableStateMapOf<String, AgentKind>() }
+    // Whenever live detection lands a non-null agent for the visible pane,
+    // record it as the sticky value for that pane id. A subsequent transient
+    // `detection == null` leaves the recorded value intact, so the header
+    // affordance and the palette keep working through the gap.
+    val liveAgentForPane = currentAgentConversation?.detection?.agent
+    val currentPaneId = currentPane?.paneId
+    LaunchedEffect(currentPaneId, liveAgentForPane) {
+        val paneId = currentPaneId
+        if (paneId != null && liveAgentForPane != null) {
+            stickyAgentForPane[paneId] = liveAgentForPane
+        }
+    }
+    // The agent used for the "/ commands" palette: the live detection if
+    // present, else the sticky last-known agent for this pane (issue #462
+    // detection-flicker resilience). Null only when this pane has never been an
+    // agent pane in the current attach.
+    val paletteAgent: AgentKind? = liveAgentForPane
+        ?: currentPaneId?.let { stickyAgentForPane[it] }
 
     // Issue #167: intercept system-back so the user returns to the host
     // list instead of exiting the activity. Without this `BackHandler`
@@ -691,6 +726,14 @@ public fun TmuxSessionScreen(
                                 onBack = onBack,
                                 onMore = { moreExpanded = true },
                                 moreMenu = { AnchoredTmuxMoreMenu() },
+                                // Issue #462: a dedicated, always-visible "/"
+                                // command-palette button in the session header.
+                                // Shown whenever the visible pane is (or was
+                                // just) an agent pane — resilient to transient
+                                // detection misses via `paletteAgent`. One tap
+                                // opens the existing #436 [AgentCommandSheet].
+                                showCommandPalette = paletteAgent != null,
+                                onCommandPalette = { showAgentCommands = true },
                                 connectionStatus = status.toUiStatus(),
                                 modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
                             )
@@ -733,6 +776,10 @@ public fun TmuxSessionScreen(
                             onBack = onBack,
                             onMore = { moreExpanded = true },
                             moreMenu = { AnchoredTmuxMoreMenu() },
+                            // Issue #462: keep the "/ commands" palette reachable
+                            // while the keyboard is up too.
+                            showCommandPalette = paletteAgent != null,
+                            onCommandPalette = { showAgentCommands = true },
                             connectionStatus = status.toUiStatus(),
                             modifier = Modifier.testTag(TMUX_COMPACT_BREADCRUMB_TAG),
                         )
@@ -1458,7 +1505,11 @@ public fun TmuxSessionScreen(
     // the Codex submit delay already handled there). When detection is null
     // (plain shell pane) the "/ commands" chip is not offered, so the sheet
     // only ever opens with a non-null agent.
-    val agentForCommands = currentAgentConversation?.detection?.agent
+    // Issue #462: use the flicker-resilient `paletteAgent` (live detection, or
+    // the sticky last-known agent for this pane) so the sheet still opens with
+    // the right catalog if a transient detection miss nulled the live row at
+    // the moment of the tap.
+    val agentForCommands = paletteAgent
     if (showAgentCommands && agentForCommands != null) {
         AgentCommandSheet(
             agent = agentForCommands,
@@ -2331,6 +2382,10 @@ internal const val TMUX_FULL_CHROME_MORE_BUTTON_TAG = "tmux:chrome:full:more"
 internal const val TMUX_COMPACT_CHROME_BACK_BUTTON_TAG = "tmux:chrome:compact:back"
 internal const val TMUX_COMPACT_CHROME_MORE_BUTTON_TAG =
     "tmux:chrome:compact:more"
+
+// Issue #462: the dedicated "/" agent command-palette button rendered in the
+// session header chrome (and the IME-up compact breadcrumb) for agent panes.
+internal const val TMUX_COMMAND_PALETTE_BUTTON_TAG = "tmux:chrome:command-palette"
 
 /**
  * Issues #177 / #249: the "Reconnecting" / "Disconnected" breadcrumb pill
@@ -3835,6 +3890,13 @@ internal fun ConsolidatedTopChrome(
     selectedTabIndex: Int = 0,
     onTabSelected: (Int) -> Unit = {},
     pulseConversationTab: Boolean = false,
+    // Issue #462: when true, a dedicated "/" command-palette button renders
+    // in the header (between the tabs and the kebab). It is the obvious,
+    // always-reachable entry point to the agent slash-command palette
+    // ([AgentCommandSheet]) for agent sessions — one tap, not buried in the
+    // bottom chip row. [onCommandPalette] fires on tap.
+    showCommandPalette: Boolean = false,
+    onCommandPalette: () -> Unit = {},
     // Issues #177 / #249: the live connection state, surfaced through the
     // breadcrumb's status dot (amber pulse while reconnecting, red while
     // disconnected) plus a compact "Reconnecting" / "Disconnected" pill.
@@ -3908,6 +3970,11 @@ internal fun ConsolidatedTopChrome(
             Spacer(modifier = Modifier.width(4.dp))
         }
 
+        // Issue #462: the dedicated "/ commands" palette entry point.
+        if (showCommandPalette) {
+            CommandPaletteButton(onClick = onCommandPalette)
+        }
+
         Box(modifier = Modifier.size(48.dp)) {
             Box(
                 modifier = Modifier
@@ -3924,6 +3991,50 @@ internal fun ConsolidatedTopChrome(
             }
             moreMenu()
         }
+    }
+}
+
+/**
+ * Issue #462: the dedicated "/" command-palette button shown in the session
+ * header for agent panes. This is the obvious, always-reachable entry point
+ * the maintainer asked for — a clear glyph in the session chrome, not a chip
+ * buried in the bottom Esc/Tab/Ctrl band. One tap opens the existing #436
+ * [AgentCommandSheet] (`/goal`, `/compact`, `/clear`, …).
+ *
+ * Rendered as an accent-tinted 48dp touch target with a monospace `/` glyph
+ * and a `contentDescription` so it is discoverable by sighted users and
+ * accessibility tooling alike. Tagged [TMUX_COMMAND_PALETTE_BUTTON_TAG] so the
+ * affordance can be asserted/clicked from instrumentation.
+ */
+@Composable
+private fun CommandPaletteButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .size(40.dp)
+            .background(
+                color = PocketShellColors.Accent.copy(alpha = 0.16f),
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.Accent.copy(alpha = 0.55f),
+                shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+            )
+            .clickable(role = androidx.compose.ui.semantics.Role.Button, onClick = onClick)
+            .testTag(TMUX_COMMAND_PALETTE_BUTTON_TAG)
+            .semantics { contentDescription = "Agent commands" },
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "/",
+            color = PocketShellColors.Accent,
+            fontFamily = JetBrainsMonoFamily,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+        )
     }
 }
 
@@ -4050,6 +4161,11 @@ internal fun CompactBreadcrumb(
     onMore: () -> Unit,
     modifier: Modifier = Modifier,
     moreMenu: @Composable () -> Unit = {},
+    // Issue #462: the "/" command-palette button stays reachable even in the
+    // IME-up compact chrome so the user never has to drop the keyboard to find
+    // it. Same resilient gating as the full chrome.
+    showCommandPalette: Boolean = false,
+    onCommandPalette: () -> Unit = {},
     // Issues #177 / #249: even in the IME-up compact chrome the user must
     // be able to tell the session is not live before they dictate into it.
     connectionStatus: com.pocketshell.uikit.model.ConnectionStatus =
@@ -4091,6 +4207,12 @@ internal fun CompactBreadcrumb(
         )
         ConnectionStatusPill(connectionStatus)
         Spacer(modifier = Modifier.width(4.dp))
+        // Issue #462: the dedicated "/ commands" palette entry point, kept
+        // reachable in the IME-up compact chrome too.
+        if (showCommandPalette) {
+            CommandPaletteButton(onClick = onCommandPalette)
+            Spacer(modifier = Modifier.width(4.dp))
+        }
         Box(
             modifier = Modifier
                 .width(48.dp)

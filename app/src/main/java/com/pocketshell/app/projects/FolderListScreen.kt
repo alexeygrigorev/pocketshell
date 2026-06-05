@@ -33,6 +33,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
@@ -204,6 +207,9 @@ fun FolderListScreen(
     var emptyProjectFolder by remember { mutableStateOf<PickerTarget?>(null) }
     var importFolder by remember { mutableStateOf<PickerTarget?>(null) }
     var rootAddSheet by remember { mutableStateOf<FolderTreeRoot?>(null) }
+    // Issue #518: the session pending a "Stop session" confirmation. Non-null
+    // means the confirm dialog is up; confirming kills it, Cancel clears it.
+    var stopSessionTarget by remember { mutableStateOf<String?>(null) }
     var showAssistant by remember { mutableStateOf(false) }
     var dictationTarget by remember { mutableStateOf(AssistantDictationTarget.Prompt) }
     var dictationEventId by remember { mutableStateOf(0L) }
@@ -303,6 +309,7 @@ fun FolderListScreen(
                             folderPath.takeUnless { it == FolderListViewModel.UNTRACKED_PATH },
                         )
                     },
+                    onStopSession = { sessionName -> stopSessionTarget = sessionName },
                     onFolderActions = { row ->
                         // Copy-source set = every real (non-untracked)
                         // discovered folder the user can see, so the env
@@ -478,6 +485,17 @@ fun FolderListScreen(
             onCloneGitProject = {
                 rootAddSheet = null
                 onBrowseRepos(root.path)
+            },
+        )
+    }
+
+    stopSessionTarget?.let { sessionName ->
+        StopSessionDialog(
+            sessionName = sessionName,
+            onDismiss = { stopSessionTarget = null },
+            onConfirm = {
+                stopSessionTarget = null
+                viewModel.killSession(sessionName)
             },
         )
     }
@@ -948,6 +966,7 @@ private fun FolderListContent(
     onDismissActionStatus: () -> Unit,
     onOpenPortForwarding: () -> Unit,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
+    onStopSession: (sessionName: String) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onCreateInRoot: (FolderTreeRoot) -> Unit,
     onRootActions: (FolderTreeRoot) -> Unit,
@@ -1037,6 +1056,7 @@ private fun FolderListContent(
                                     session.sessionName,
                                 )
                             },
+                            onStop = { onStopSession(session.sessionName) },
                         )
                     }
                 }
@@ -1063,6 +1083,7 @@ private fun FolderListContent(
                                     session.sessionName,
                                 )
                             },
+                            onStop = { onStopSession(session.sessionName) },
                         )
                     }
                 }
@@ -1077,6 +1098,7 @@ private fun FolderListContent(
                     root = root,
                     expandedProjectPaths = expandedProjectPaths,
                     onSessionClick = onSessionClick,
+                    onStopSession = onStopSession,
                     onFolderActions = onFolderActions,
                     onCreateInRoot = onCreateInRoot,
                     onRootActions = onRootActions,
@@ -1316,6 +1338,7 @@ private fun FlatSessionRow(
     session: FolderSessionEntry,
     folderLabel: String,
     onClick: () -> Unit,
+    onStop: () -> Unit,
 ) {
     val isAgent = session.agentKind.isAgent()
     ListRow(
@@ -1330,11 +1353,22 @@ private fun FlatSessionRow(
             )
         },
         trailing = {
-            Badge(
-                label = sessionBadgeLabel(session),
-                role = if (isAgent) BadgeRole.Agent else BadgeRole.Shell,
-                modifier = Modifier.testTag(folderListFlatRowBadgeTestTag(session.sessionName)),
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Badge(
+                    label = sessionBadgeLabel(session),
+                    role = if (isAgent) BadgeRole.Agent else BadgeRole.Shell,
+                    modifier = Modifier.testTag(folderListFlatRowBadgeTestTag(session.sessionName)),
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                // "Stop session" kebab on the flat host-detail row too, so the
+                // affordance is discoverable in both host-detail views (#518).
+                CompactTreeIconButton(
+                    label = "⋮",
+                    contentDescription = "Stop session ${session.sessionName}",
+                    onClick = onStop,
+                    testTag = folderListFlatRowStopTestTag(session.sessionName),
+                )
+            }
         },
     )
 }
@@ -1374,6 +1408,7 @@ private fun FolderTreeRootGroup(
     root: FolderTreeRoot,
     expandedProjectPaths: Set<String>,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
+    onStopSession: (sessionName: String) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onCreateInRoot: (FolderTreeRoot) -> Unit,
     onRootActions: (FolderTreeRoot) -> Unit,
@@ -1402,6 +1437,7 @@ private fun FolderTreeRootGroup(
                         folder = folder,
                         expanded = folder.path in expandedProjectPaths,
                         onSessionClick = onSessionClick,
+                        onStopSession = onStopSession,
                         onFolderActions = onFolderActions,
                         onToggleExpanded = { onToggleProjectExpanded(folder) },
                     )
@@ -1556,6 +1592,7 @@ private fun FolderGroup(
     folder: FolderRow,
     expanded: Boolean,
     onSessionClick: (folderPath: String, sessionName: String) -> Unit,
+    onStopSession: (sessionName: String) -> Unit,
     onFolderActions: (FolderRow) -> Unit,
     onToggleExpanded: () -> Unit,
 ) {
@@ -1598,6 +1635,7 @@ private fun FolderGroup(
                             folderPath = folder.path,
                             session = session,
                             onClick = { onSessionClick(folder.path, session.sessionName) },
+                            onStop = { onStopSession(session.sessionName) },
                             modifier = Modifier.weight(1f),
                         )
                     }
@@ -1713,11 +1751,13 @@ private fun FolderHeader(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WorkspaceSessionRow(
     folderPath: String,
     session: FolderSessionEntry,
     onClick: () -> Unit,
+    onStop: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -1726,7 +1766,14 @@ private fun WorkspaceSessionRow(
             // Compact paint via the density rung, but the interactive row keeps
             // the 48 dp a11y touch floor (#461 §6.1).
             .heightIn(min = PocketShellDensity.tapTargetMin)
-            .clickable(role = Role.Button, onClick = onClick)
+            // Tap opens the session; long-press reaches the same "Stop session"
+            // confirmation as the trailing kebab — discoverable without
+            // entering the session (#518).
+            .combinedClickable(
+                role = Role.Button,
+                onClick = onClick,
+                onLongClick = onStop,
+            )
             .padding(horizontal = 6.dp, vertical = PocketShellDensity.rowPadV)
             .testTag(folderDetailRowTestTag(folderPath, session.sessionName)),
         verticalAlignment = Alignment.CenterVertically,
@@ -1759,6 +1806,16 @@ private fun WorkspaceSessionRow(
         AgentTypeBadge(
             session = session,
             modifier = Modifier.testTag(folderSessionBadgeTestTag(folderPath, session.sessionName)),
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        // Per-session "Stop session" kebab — discoverable without entering the
+        // session (#518). Opens the confirmation dialog; the actual kill runs
+        // only after the user confirms.
+        CompactTreeIconButton(
+            label = "⋮",
+            contentDescription = "Stop session ${session.sessionName}",
+            onClick = onStop,
+            testTag = folderSessionStopTestTag(folderPath, session.sessionName),
         )
     }
 }
@@ -2098,6 +2155,57 @@ private fun SessionAgentKind.isAgent(): Boolean = when (this) {
     SessionAgentKind.Shell -> false
 }
 
+/**
+ * Confirmation dialog for the host-detail "Stop session" action (#518).
+ *
+ * Stopping a session ends its tmux session on the host — a destructive,
+ * non-undoable action — so it is gated behind an explicit confirm. Cancel /
+ * tapping outside does nothing; only the Stop button kills the session.
+ */
+@Composable
+private fun StopSessionDialog(
+    sessionName: String,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = PocketShellColors.Surface,
+        title = {
+            Text(
+                text = "Stop this session?",
+                color = PocketShellColors.Text,
+                fontWeight = FontWeight.SemiBold,
+            )
+        },
+        text = {
+            Text(
+                text = "This ends the tmux session “$sessionName” on the host.",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 13.sp,
+            )
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = PocketShellColors.Red,
+                    contentColor = PocketShellColors.OnAccent,
+                ),
+                modifier = Modifier.testTag(STOP_SESSION_CONFIRM_TAG),
+            ) {
+                Text("Stop")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss, modifier = Modifier.testTag(STOP_SESSION_CANCEL_TAG)) {
+                Text("Cancel", color = PocketShellColors.TextSecondary)
+            }
+        },
+        modifier = Modifier.testTag(STOP_SESSION_DIALOG_TAG),
+    )
+}
+
 private val FolderListFabContentClearance = 112.dp
 
 // Test tags exposed for the unit / connected E2E suite.
@@ -2137,6 +2245,11 @@ const val FOLDER_LIST_ASSISTANT_CLOSE_TAG: String = "folder-list:assistant:close
 const val FOLDER_LIST_ACTION_STATUS_TAG: String = "folder-list:action-status"
 const val FOLDER_LIST_ACTION_STATUS_DISMISS_TAG: String = "folder-list:action-status:dismiss"
 
+// Issue #518 — "Stop session" confirmation dialog.
+const val STOP_SESSION_DIALOG_TAG: String = "folder-list:stop-session:dialog"
+const val STOP_SESSION_CONFIRM_TAG: String = "folder-list:stop-session:confirm"
+const val STOP_SESSION_CANCEL_TAG: String = "folder-list:stop-session:cancel"
+
 fun folderRowTestTag(path: String): String = "folder-list:row:$path"
 fun folderHeaderClickTestTag(path: String): String = "folder-list:header-click:$path"
 fun folderHeaderLabelTag(path: String): String = "folder-list:header:$path"
@@ -2146,6 +2259,9 @@ fun folderListFlatRowStatusDotTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:status"
 fun folderListFlatRowBadgeTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:badge"
+/** Tags the per-session "Stop session" kebab on a flat host-detail row (#518). */
+fun folderListFlatRowStopTestTag(sessionName: String): String =
+    "folder-list:flat-row:$sessionName:stop"
 fun folderDetailRowTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName"
 fun folderDetailCreateTestTag(folderPath: String): String =
@@ -2160,6 +2276,9 @@ fun folderSessionStatusDotTestTag(folderPath: String, sessionName: String): Stri
     "folder-list:detail:$folderPath:$sessionName:status"
 fun folderSessionBadgeTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:badge"
+/** Tags the per-session "Stop session" kebab on a tree session child row (#518). */
+fun folderSessionStopTestTag(folderPath: String, sessionName: String): String =
+    "folder-list:detail:$folderPath:$sessionName:stop"
 /** Tags the `├─/└─` tree connector cell on an expanded session child row (#503). */
 fun folderSessionConnectorTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:connector"

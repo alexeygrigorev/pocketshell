@@ -21,6 +21,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.setMain
@@ -160,6 +161,96 @@ class FolderListViewModelKillSessionTest {
         }
     }
 
+    @Test
+    fun killSessionFromTreeRemovesRowAndBroadcasts() = runTest {
+        // Issue #518: stopping a session from the host-detail tree row must
+        // run the gateway kill, drop the row, AND broadcast via the shared
+        // lifecycle signals so other view models converge too.
+        val signals = SessionLifecycleSignals()
+        val killed = mutableListOf<KilledSession>()
+        val collector = launchKilledCollector(signals, killed)
+        val gateway = StubGateway(listOf(sessionRow("alpha"), sessionRow("beta")))
+        val vm = newViewModel(gateway = gateway, signals = signals)
+        try {
+            bind(vm)
+            runCurrent()
+            vm.stopPolling()
+            runCurrent()
+            assertEquals(setOf("alpha", "beta"), readySessionNames(vm))
+
+            // User confirmed "Stop session" on the beta row.
+            vm.killSession("beta")
+            runCurrent()
+
+            assertEquals(
+                "gateway must have been asked to kill the targeted session",
+                listOf("beta"),
+                gateway.killedSessionNames,
+            )
+            assertEquals(
+                "killed row drops from the tree",
+                setOf("alpha"),
+                readySessionNames(vm),
+            )
+            assertTrue(
+                "kill must broadcast via SessionLifecycleSignals so siblings converge",
+                killed.any { it.hostId == HOST.id && it.sessionName == "beta" },
+            )
+        } finally {
+            collector.cancel()
+            vm.stopPolling()
+        }
+    }
+
+    @Test
+    fun failedKillKeepsRowOnTree() = runTest {
+        // A failed kill (tmux still reports the session) must NOT drop the row
+        // and must NOT broadcast — the tree keeps the still-live session so the
+        // user is not misled into thinking it stopped.
+        val signals = SessionLifecycleSignals()
+        val killed = mutableListOf<KilledSession>()
+        val collector = launchKilledCollector(signals, killed)
+        val gateway = StubGateway(
+            rows = listOf(sessionRow("alpha"), sessionRow("beta")),
+            killSucceeds = false,
+        )
+        val vm = newViewModel(gateway = gateway, signals = signals)
+        try {
+            bind(vm)
+            runCurrent()
+            vm.stopPolling()
+            runCurrent()
+            assertEquals(setOf("alpha", "beta"), readySessionNames(vm))
+
+            vm.killSession("beta")
+            runCurrent()
+
+            assertEquals(
+                "a failed kill must leave the still-live row on the tree",
+                setOf("alpha", "beta"),
+                readySessionNames(vm),
+            )
+            assertTrue(
+                "a failed kill must not broadcast a lifecycle signal",
+                killed.none { it.sessionName == "beta" },
+            )
+            assertTrue(
+                "a failed kill surfaces an error action status",
+                vm.actionStatus.value is FolderActionStatus.Failed,
+            )
+        } finally {
+            collector.cancel()
+            vm.stopPolling()
+        }
+    }
+
+    private fun TestScope.launchKilledCollector(
+        signals: SessionLifecycleSignals,
+        sink: MutableList<KilledSession>,
+    ) = backgroundScope.launch {
+        signals.killedSessions.collect { sink.add(it) }
+    }
+
     private fun bind(vm: FolderListViewModel) {
         vm.bind(
             hostId = HOST.id,
@@ -214,7 +305,14 @@ class FolderListViewModelKillSessionTest {
 
     private class StubGateway(
         @Volatile var rows: List<FolderSessionRow>,
+        // Issue #518: when true, killSession succeeds and removes the row from
+        // the gateway's reported set (the next probe agrees the kill landed);
+        // when false it fails so the failure path can be asserted.
+        @Volatile var killSucceeds: Boolean = true,
     ) : FolderListGateway {
+        @Volatile
+        var killedSessionNames: MutableList<String> = mutableListOf()
+
         override suspend fun listSessionsWithFolder(
             host: HostEntity,
             keyPath: String,
@@ -246,6 +344,20 @@ class FolderListViewModelKillSessionTest {
             folderPath: String,
             payload: FolderImportPayload,
         ): Result<String> = error("not used")
+
+        override suspend fun killSession(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            sessionName: String,
+        ): Result<Unit> {
+            if (!killSucceeds) {
+                return Result.failure(RuntimeException("tmux session '$sessionName' is still running."))
+            }
+            killedSessionNames.add(sessionName)
+            rows = rows.filterNot { it.sessionName == sessionName }
+            return Result.success(Unit)
+        }
     }
 
     private class FakeHostDao(private val host: HostEntity) : HostDao {

@@ -217,6 +217,30 @@ interface FolderListGateway {
         folderPath: String,
         payload: FolderImportPayload,
     ): Result<String>
+
+    /**
+     * Kill the tmux session named [sessionName] on the remote via an
+     * SSH-exec `tmux kill-session` — issue #518.
+     *
+     * This is the host-detail-tree kill path. Unlike the in-session kill
+     * ([com.pocketshell.app.tmux.TmuxSessionViewModel.killCurrentSession])
+     * and the sessions-dashboard kill, the folder/session tree never holds
+     * an attached `tmux -CC` control client, so the kill runs as a one-shot
+     * exec over the same SSH-lease path the gateway already uses for
+     * `tmux new-session` / `list-sessions`.
+     *
+     * Returns success only when the session is no longer present after the
+     * kill (verified with `tmux has-session`), so a failed kill never
+     * reports success and the caller keeps the still-live row. Killing an
+     * already-absent session is treated as success (idempotent — the user's
+     * intent is satisfied).
+     */
+    suspend fun killSession(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        sessionName: String,
+    ): Result<Unit>
 }
 
 data class FolderImportPayload(
@@ -719,6 +743,34 @@ class SshFolderListGateway internal constructor(
                 )
             }
             sessionName
+        }
+    }
+
+    override suspend fun killSession(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        sessionName: String,
+    ): Result<Unit> {
+        val target = sessionName.trim()
+        if (target.isEmpty()) {
+            return Result.failure(IllegalArgumentException("No session to stop."))
+        }
+        return withLeaseSession(host, keyPath, passphrase) { session ->
+            val quotedName = shellQuote(target)
+            session.exec(pathAware("tmux kill-session -t $quotedName"))
+            // Authoritative check: a kill "succeeded" only when the session
+            // is genuinely gone. `tmux has-session` exits non-zero when the
+            // session is absent, so exitCode != 0 == killed (or never
+            // existed — idempotent success). A zero exit means the session
+            // is still alive, so the kill did not land and we must surface a
+            // failure so the tree keeps the still-live row.
+            val hasSession = session.exec(
+                pathAware("tmux has-session -t $quotedName"),
+            )
+            if (hasSession.exitCode == 0) {
+                throw RuntimeException("tmux session '$target' is still running.")
+            }
         }
     }
 

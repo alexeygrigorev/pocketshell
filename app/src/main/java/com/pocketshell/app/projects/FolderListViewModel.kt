@@ -600,6 +600,62 @@ class FolderListViewModel internal constructor(
         }
     }
 
+    /**
+     * Stop (kill) the tmux session named [sessionName] directly from the
+     * host-detail tree — issue #518.
+     *
+     * The folder/session tree never holds an attached `tmux -CC` control
+     * client, so the kill runs over the gateway's SSH-exec path
+     * ([FolderListGateway.killSession]) rather than the in-session control
+     * channel that [com.pocketshell.app.tmux.TmuxSessionViewModel.killCurrentSession]
+     * uses. On a CONFIRMED kill (the gateway verified the session is gone)
+     * we reuse the EXACT same reconcile path as the in-session kill: the
+     * optimistic [onSessionKilled] row-drop plus the [SessionLifecycleSignals]
+     * broadcast, so any other view model (a flat sessions dashboard, a
+     * re-bound tree) drops the dead row too. A failed kill never drops the
+     * row and surfaces an error banner so the user knows nothing happened.
+     */
+    fun killSession(sessionName: String) {
+        val params = bound ?: return
+        val target = sessionName.trim()
+        if (target.isEmpty()) return
+        viewModelScope.launch {
+            _actionStatus.value = FolderActionStatus.Running("Stopping $target")
+            val host = withContext(ioDispatcher) { hostDao.getById(params.hostId) } ?: run {
+                _actionStatus.value = FolderActionStatus.Failed("Host not found.")
+                return@launch
+            }
+            val result = gateway.killSession(
+                host = host,
+                keyPath = params.keyPath,
+                passphrase = params.passphrase,
+                sessionName = target,
+            )
+            result.fold(
+                onSuccess = {
+                    _actionStatus.value = FolderActionStatus.Succeeded("Stopped $target")
+                    // Reuse the existing kill reconcile path (issue #464):
+                    // optimistic local drop + the shared lifecycle broadcast
+                    // so every view model converges on the dead session being
+                    // gone. onSessionKilled also kicks an authoritative
+                    // re-probe when the tree poll is still live.
+                    onSessionKilled(
+                        com.pocketshell.app.tmux.KilledSession(
+                            hostId = params.hostId,
+                            sessionName = target,
+                        ),
+                    )
+                    sessionLifecycleSignals?.emitKilled(params.hostId, target)
+                },
+                onFailure = { error ->
+                    _actionStatus.value = FolderActionStatus.Failed(
+                        "Couldn't stop $target: ${error.message ?: error.javaClass.simpleName}",
+                    )
+                },
+            )
+        }
+    }
+
     fun createEmptyProject(parentPath: String, folderName: String) {
         val params = bound ?: return
         viewModelScope.launch {

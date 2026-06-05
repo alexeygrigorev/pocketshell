@@ -1045,6 +1045,13 @@ class FolderListGroupingTest {
             folderPath: String,
             payload: FolderImportPayload,
         ): Result<String> = error("not used")
+
+        override suspend fun killSession(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+            sessionName: String,
+        ): Result<Unit> = error("not used")
     }
 
     private class MapHostDao(vararg hosts: HostEntity) : HostDao {

@@ -371,4 +371,11 @@ private class OverflowFolderListGateway(
         folderPath: String,
         payload: FolderImportPayload,
     ): Result<String> = Result.success("$folderPath/${payload.remoteName}")
+
+    override suspend fun killSession(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        sessionName: String,
+    ): Result<Unit> = Result.success(Unit)
 }

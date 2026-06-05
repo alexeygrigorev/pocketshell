@@ -958,6 +958,91 @@ class FolderListScreenE2eTest {
         )
     }
 
+    /**
+     * Issue #465: reopening a stale session and going back landed the
+     * host-detail screen on an unrecoverable `open failed` state — only the
+     * error message + a Retry that never recovered, forcing a force-close.
+     *
+     * This reproduces that journey at the screen level: the first probe fails
+     * with an "open failed" [FolderListResult.ConnectFailed], so the screen
+     * shows the error panel + Retry (captured BEFORE). Tapping Retry must
+     * re-run the probe and reload the folder tree (captured AFTER) — never a
+     * blank dead-end. The app-bar Back stays present throughout so the screen
+     * is always navigable.
+     */
+    @Test
+    fun openFailedErrorRecoversOnRetry() {
+        val recoveredRows = listOf(
+            FolderSessionRow(
+                sessionName = "claude-main",
+                lastActivity = 1_700_004_000L,
+                attached = true,
+                cwd = "/home/u/git/pocketshell",
+                agentKind = SessionAgentKind.Claude,
+            ),
+        )
+        val fakeGateway = OpenFailedThenRecoveringGateway(
+            recoveredRows = recoveredRows,
+            projectFoldersByRoot = mapOf("~/git" to listOf("/home/u/git/pocketshell")),
+            resolvedWatchedRootPaths = mapOf("~/git" to "/home/u/git"),
+        )
+        val viewModel = constructFolderListViewModel(fakeGateway)
+        val dictationViewModel = noopAssistantDictationViewModel()
+
+        compose.setContent {
+            PocketShellTheme {
+                FolderListScreen(
+                    hostId = hostId,
+                    hostName = "issue171-host",
+                    hostname = "h.example",
+                    port = 22,
+                    username = "u",
+                    keyPath = "/tmp/issue171",
+                    passphrase = null,
+                    onBack = {},
+                    onOpenSession = { _, _ -> },
+                    onSessionCreated = { _, _ -> },
+                    onBrowseRepos = { _ -> },
+                    onOpenWorkspaceSettings = {},
+                    onEditEnv = { _, _, _ -> },
+                    modifier = Modifier.fillMaxSize(),
+                    viewModel = viewModel,
+                    assistantDictationViewModel = dictationViewModel,
+                )
+            }
+        }
+
+        // BEFORE: the open-failed probe drives the error panel + Retry.
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(FOLDER_LIST_ERROR_TAG)
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(FOLDER_LIST_ERROR_TAG).assertExists()
+        compose.onNodeWithTag(FOLDER_LIST_RETRY_TAG).assertExists().assertHasClickAction()
+        // The screen must remain navigable in the error state: Back is present.
+        compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG).assertExists()
+        captureFullDevice("issue465-open-failed-before.png")
+        captureViewport("issue465-open-failed-before-viewport.png")
+
+        // RETRY: re-run the probe; the host is reachable now.
+        compose.onNodeWithTag(FOLDER_LIST_RETRY_TAG).performClick()
+
+        // AFTER: the folder tree reloads — no blank dead-end.
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(folderTreeRootTestTag("~/git"))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithTag(FOLDER_LIST_ERROR_TAG).assertDoesNotExist()
+        compose.onNodeWithTag(folderTreeRootTestTag("~/git")).assertExists()
+        captureFullDevice("issue465-open-failed-after-retry.png")
+        captureViewport("issue465-open-failed-after-retry-viewport.png")
+
+        assertTrue(
+            "Retry must have re-run the probe at least twice (fail then recover)",
+            fakeGateway.callCount.get() >= 2,
+        )
+    }
+
     private fun constructFolderListViewModel(
         gateway: FolderListGateway,
     ): FolderListViewModel {
@@ -1025,6 +1110,71 @@ class FolderListScreenE2eTest {
             bitmap.compress(Bitmap.CompressFormat.PNG, 100, stream)
         }
     }
+}
+
+/**
+ * Issue #465: gateway whose FIRST probe fails with an "open failed"
+ * [FolderListResult.ConnectFailed] (the dead-end the maintainer hit) and whose
+ * subsequent probes succeed — so the screen-level Retry recovery can be
+ * exercised deterministically.
+ */
+private class OpenFailedThenRecoveringGateway(
+    private val recoveredRows: List<FolderSessionRow>,
+    private val projectFoldersByRoot: Map<String, List<String>> = emptyMap(),
+    private val resolvedWatchedRootPaths: Map<String, String> = emptyMap(),
+) : FolderListGateway {
+
+    val callCount: AtomicInteger = AtomicInteger(0)
+
+    override suspend fun listSessionsWithFolder(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        watchedRoots: List<ProjectRootEntity>,
+    ): FolderListResult {
+        val call = callCount.incrementAndGet()
+        return if (call == 1) {
+            FolderListResult.ConnectFailed(java.io.IOException("open failed"))
+        } else {
+            FolderListResult.Sessions(
+                rows = recoveredRows,
+                projectFoldersByRoot = projectFoldersByRoot,
+                resolvedWatchedRootPaths = resolvedWatchedRootPaths,
+            )
+        }
+    }
+
+    override suspend fun createSession(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        sessionName: String,
+        cwd: String,
+        startCommand: String?,
+    ): Result<String> = Result.success(sessionName)
+
+    override suspend fun createEmptyProject(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        parentPath: String,
+        folderName: String,
+    ): Result<String> = Result.success("$parentPath/$folderName")
+
+    override suspend fun importFile(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        folderPath: String,
+        payload: FolderImportPayload,
+    ): Result<String> = Result.success("$folderPath/${payload.remoteName}")
+
+    override suspend fun killSession(
+        host: HostEntity,
+        keyPath: String,
+        passphrase: CharArray?,
+        sessionName: String,
+    ): Result<Unit> = Result.success(Unit)
 }
 
 private fun noopAssistantDictationViewModel(): InlineDictationViewModel =

@@ -93,8 +93,19 @@ internal class FakeTmuxClient : TmuxClient {
     @Volatile
     var connectCalled: Boolean = false
 
+    /**
+     * Issue #465: when non-null, [connect] throws this instead of
+     * succeeding. Models the production `tmux -CC` spawn failing because the
+     * underlying SSH transport refused to open a new channel/shell — sshj
+     * surfaces that as an `open failed` [TmuxClientException]. Used to drive
+     * the poisoned-transport reconnect dead-end regression.
+     */
+    @Volatile
+    var connectThrows: Throwable? = null
+
     override suspend fun connect() {
         connectCalled = true
+        connectThrows?.let { throw it }
     }
 
     override suspend fun sendCommand(cmd: String): CommandResponse {

@@ -426,25 +426,63 @@ class SshFolderListGateway internal constructor(
         passphrase: CharArray?,
         block: suspend (SshSession) -> T,
     ): Result<T> {
+        val leaseTarget = host.toSshLeaseTarget(keyPath, passphrase)
         val lease = try {
-            sshLeaseManager.acquire(host.toSshLeaseTarget(keyPath, passphrase))
+            sshLeaseManager.acquire(leaseTarget)
                 .getOrElse { return Result.failure(it) }
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
             return Result.failure(t)
         }
+        var poisonedTransport = false
         return try {
             Result.success(block(lease.session))
         } catch (e: CancellationException) {
             throw e
         } catch (t: Throwable) {
+            // Issue #465: an "open failed" — the pooled SSH transport is alive
+            // but refuses to open the probe's exec channel — must EVICT the
+            // pooled lease, not just release it back. A transport stuck
+            // refusing channels still reports `isConnected`, so the pool would
+            // keep handing it back and every folder-tree poll would re-surface
+            // the same ConnectError dead-end (the host-detail "open failed"
+            // screen the maintainer hit). Evicting it makes the NEXT poll /
+            // Retry open a fresh transport that recovers the tree.
+            poisonedTransport = isChannelOpenFailure(t)
             Result.failure(t)
         } finally {
             withContext(NonCancellable) {
                 lease.release()
+                if (poisonedTransport) {
+                    runCatching { sshLeaseManager.disconnect(leaseTarget.leaseKey) }
+                }
             }
         }
+    }
+
+    /**
+     * Issue #465: true when [cause] is a channel/shell "open failed" against an
+     * otherwise-live SSH transport — the case where the pooled connection must
+     * be evicted so the next probe opens a fresh transport instead of reusing
+     * the half-dead one forever.
+     */
+    private fun isChannelOpenFailure(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (current != null && seen.add(current)) {
+            val message = current.message
+            if (message != null &&
+                (
+                    message.contains("open failed", ignoreCase = true) ||
+                        message.contains("failed to open SSH shell", ignoreCase = true)
+                    )
+            ) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
     }
 
     private fun HostEntity.toSshLeaseTarget(

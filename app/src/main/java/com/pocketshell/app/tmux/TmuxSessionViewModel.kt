@@ -1968,6 +1968,26 @@ public class TmuxSessionViewModel @Inject constructor(
         // unknown host, missing key) that should fall straight back to the
         // manual Reconnect affordance.
         lastConnectFailureCause = cause
+        // Issue #465: an "open failed" — the pooled SSH transport is alive but
+        // refuses to open the new `tmux -CC` channel/shell — is the dead-end
+        // the maintainer hit: every Reconnect reused the SAME poisoned
+        // transport (the lease pool reuses any session that still reports
+        // `isConnected`), so `client.connect()` threw "open failed" forever and
+        // the only escape was a force-close. Evict the pooled lease here so the
+        // NEXT acquire opens a fresh transport that can open the channel, and
+        // force-preserve the reconnect target so the Reconnect affordance has
+        // something to retry even when this was the very first connect.
+        val openFailed = isChannelOpenFailure(cause)
+        if (openFailed) {
+            withContext(NonCancellable) {
+                runCatching { sshLeaseManager.disconnect(target.toSshLeaseTarget().leaseKey) }
+            }
+            Log.w(
+                ISSUE_145_RECONNECT_TAG,
+                "tmux-connect-open-failed evicted poisoned lease so Reconnect opens fresh; " +
+                    "${targetLogFields(target)} attempt=$attempt",
+            )
+        }
         Log.w(
             ISSUE_145_RECONNECT_TAG,
             attachMilestoneMessage(
@@ -1987,9 +2007,41 @@ public class TmuxSessionViewModel @Inject constructor(
         }
         activeAttachMilestone = null
         activeTarget = null
-        connectingTarget = if (preserveReconnectTarget) target else null
+        connectingTarget = if (preserveReconnectTarget || openFailed) target else null
         refreshReconnectAvailability()
         _connectionStatus.value = ConnectionStatus.Failed(message)
+    }
+
+    /**
+     * Issue #465: true when [cause] is a channel/shell "open failed" against an
+     * otherwise-live SSH transport. This is the case where the pooled
+     * connection must be EVICTED (not merely released back to the pool) so the
+     * next [reconnect] opens a fresh transport — a transport stuck refusing new
+     * channels never self-heals on its own because it still reports
+     * `isConnected`, so the lease pool would keep handing it back.
+     *
+     * Matched on the message text rather than an exception type because the
+     * failure surfaces as a [com.pocketshell.core.tmux.TmuxClientException]
+     * wrapping the sshj `ConnectionException` whose message is the bare
+     * "open failed" string. We walk the cause chain so a deeper wrap still
+     * matches.
+     */
+    private fun isChannelOpenFailure(cause: Throwable?): Boolean {
+        var current: Throwable? = cause
+        val seen = HashSet<Throwable>()
+        while (current != null && seen.add(current)) {
+            val message = current.message
+            if (message != null &&
+                (
+                    message.contains("open failed", ignoreCase = true) ||
+                        message.contains("failed to open SSH shell", ignoreCase = true)
+                    )
+            ) {
+                return true
+            }
+            current = current.cause
+        }
+        return false
     }
 
     /**

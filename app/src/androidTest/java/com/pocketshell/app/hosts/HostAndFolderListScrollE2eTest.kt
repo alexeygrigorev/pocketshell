@@ -210,12 +210,18 @@ class FolderListScrollE2eTest {
             rows = rows,
             projectFoldersByRoot = mapOf("/home/u/work" to folders),
         )
-        val viewModel = FolderListViewModel(
-            gateway = fakeGateway,
-            hostDao = database.hostDao(),
-            projectRootDao = database.projectRootDao(),
-            forwardingController = ForwardingController(InstrumentationRegistry.getInstrumentation().targetContext),
-        )
+        // The FolderListViewModel `init` attaches a ProcessLifecycleOwner
+        // observer, which must run on the main thread.
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        lateinit var viewModel: FolderListViewModel
+        instrumentation.runOnMainSync {
+            viewModel = FolderListViewModel(
+                gateway = fakeGateway,
+                hostDao = database.hostDao(),
+                projectRootDao = database.projectRootDao(),
+                forwardingController = ForwardingController(instrumentation.targetContext),
+            )
+        }
         val lastRowTag = folderDetailRowTestTag(folders.first(), rows.first().sessionName)
         var hostDetailViewMode by mutableStateOf(HostDetailViewMode.Tree)
 

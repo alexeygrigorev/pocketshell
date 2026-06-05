@@ -95,12 +95,7 @@ class FolderListSessionClickTest {
                 ),
             ),
         )
-        val viewModel = FolderListViewModel(
-            gateway = fakeGateway,
-            hostDao = db.hostDao(),
-            projectRootDao = db.projectRootDao(),
-            forwardingController = ForwardingController(InstrumentationRegistry.getInstrumentation().targetContext),
-        )
+        val viewModel = constructViewModelOnMainThread(fakeGateway)
 
         compose.setContent {
             PocketShellTheme {
@@ -152,12 +147,7 @@ class FolderListSessionClickTest {
                 ),
             ),
         )
-        val viewModel = FolderListViewModel(
-            gateway = fakeGateway,
-            hostDao = db.hostDao(),
-            projectRootDao = db.projectRootDao(),
-            forwardingController = ForwardingController(InstrumentationRegistry.getInstrumentation().targetContext),
-        )
+        val viewModel = constructViewModelOnMainThread(fakeGateway)
         compose.setContent {
             PocketShellTheme {
                 FolderListScreen(

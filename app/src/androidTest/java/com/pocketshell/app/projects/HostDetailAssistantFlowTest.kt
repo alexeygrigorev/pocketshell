@@ -163,7 +163,14 @@ class HostDetailAssistantFlowTest {
             ),
             reposRemoteSource = ReposRemoteSource(ReposJsonParser()),
             forwardingController = ForwardingController(context),
+            // Off-main-thread test: drive the foreground gate via the test
+            // seam instead of touching the main-thread-affine
+            // ProcessLifecycleOwner registry (which would otherwise throw
+            // "addObserver must be called on the main thread"). Mirrors
+            // HostDetailAssistantFolderDisambiguationTest.
+            attachLifecycle = false,
         ).apply {
+            setProcessStartedForTest(true)
             setAssistantSshExecutor(NoOpAssistantSshExecutor)
         }
 
@@ -375,11 +382,20 @@ private fun assistantDictationViewModel(vararg transcripts: String): InlineDicta
 }
 
 private class HostDetailAssistantGateway(
-    private val rows: List<FolderSessionRow>,
-    private val projectFoldersByRoot: Map<String, List<String>>,
+    rows: List<FolderSessionRow>,
+    projectFoldersByRoot: Map<String, List<String>>,
 ) : FolderListGateway {
     val listCallCount = AtomicInteger(0)
     val createdProjects = mutableListOf<String>()
+
+    // Mutable so a confirmed `create_project` is reflected by the next
+    // refresh probe — mirroring a real server where the folder (and a
+    // session inside it) shows up on the post-create `tmux list-sessions`
+    // sweep and surfaces as a visible folder row in the tree.
+    private val rows = rows.toMutableList()
+    private val projectFoldersByRoot = projectFoldersByRoot
+        .mapValues { (_, paths) -> paths.toMutableList() }
+        .toMutableMap()
 
     override suspend fun listSessionsWithFolder(
         host: HostEntity,
@@ -389,8 +405,8 @@ private class HostDetailAssistantGateway(
     ): FolderListResult {
         listCallCount.incrementAndGet()
         return FolderListResult.Sessions(
-            rows = rows,
-            projectFoldersByRoot = projectFoldersByRoot,
+            rows = rows.toList(),
+            projectFoldersByRoot = projectFoldersByRoot.mapValues { it.value.toList() },
         )
     }
 
@@ -412,6 +428,17 @@ private class HostDetailAssistantGateway(
     ): Result<String> {
         val path = "$parentPath/$folderName"
         createdProjects += path
+        // Reflect the new project in subsequent probes so the post-create
+        // refresh surfaces it as a visible folder row (a folder only renders
+        // as a tree row when it carries at least one session).
+        projectFoldersByRoot.getOrPut(parentPath) { mutableListOf() }.add(path)
+        rows += FolderSessionRow(
+            sessionName = "$folderName-main",
+            lastActivity = 1_700_000_100L,
+            attached = false,
+            cwd = path,
+            agentKind = SessionAgentKind.Shell,
+        )
         return Result.success(path)
     }
 

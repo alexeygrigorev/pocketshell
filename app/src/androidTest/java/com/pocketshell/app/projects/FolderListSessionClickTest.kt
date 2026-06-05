@@ -205,7 +205,7 @@ class FolderListSessionClickTest {
 
         compose.onNodeWithTag(folderDetailActionsTestTag("/root/projects")).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
-            compose.onAllNodesWithText("Empty project").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithText("New empty project").fetchSemanticsNodes().isNotEmpty()
         }
         compose.onNodeWithTag(FOLDER_CONTEXT_EMPTY_PROJECT_TAG).performClick()
         compose.onNodeWithTag(EMPTY_PROJECT_NAME_TAG).performTextInput("scratch")

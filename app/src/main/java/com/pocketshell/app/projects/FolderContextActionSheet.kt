@@ -100,14 +100,45 @@ internal fun FolderContextActionContent(
         if (onEnv != null) {
             FolderContextRow("Env files", FOLDER_CONTEXT_ENV_TAG, onEnv)
         }
-        FolderContextRow("Import into this folder", FOLDER_CONTEXT_IMPORT_TAG, onImport)
-        FolderContextRow("Clone git project", FOLDER_CONTEXT_CLONE_TAG, onCloneGitProject)
-        FolderContextRow("Empty project", FOLDER_CONTEXT_EMPTY_PROJECT_TAG, onEmptyProject)
+        // The three "add a project to this folder" actions, grouped under a
+        // section header so it reads as one decision: which way to add a
+        // project — reuse an existing folder, clone a repo, or start empty
+        // (#517).
+        Spacer(modifier = Modifier.height(2.dp))
+        Text(
+            text = "Add a project",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+        FolderContextRow(
+            label = "Import into this folder",
+            description = "Use an existing folder already on the host",
+            testTag = FOLDER_CONTEXT_IMPORT_TAG,
+            onClick = onImport,
+        )
+        FolderContextRow(
+            label = "Clone git project",
+            description = "Clone a git repository into this folder",
+            testTag = FOLDER_CONTEXT_CLONE_TAG,
+            onClick = onCloneGitProject,
+        )
+        FolderContextRow(
+            label = "New empty project",
+            description = "Create a new empty folder to start from scratch",
+            testTag = FOLDER_CONTEXT_EMPTY_PROJECT_TAG,
+            onClick = onEmptyProject,
+        )
     }
 }
 
 @Composable
-private fun FolderContextRow(label: String, testTag: String, onClick: () -> Unit) {
+private fun FolderContextRow(
+    label: String,
+    testTag: String,
+    onClick: () -> Unit,
+    description: String? = null,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -118,13 +149,22 @@ private fun FolderContextRow(label: String, testTag: String, onClick: () -> Unit
             .testTag(testTag),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = label,
-            color = PocketShellColors.Text,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.weight(1f),
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = label,
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Medium,
+            )
+            if (description != null) {
+                Spacer(modifier = Modifier.height(3.dp))
+                Text(
+                    text = description,
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 12.sp,
+                )
+            }
+        }
         Text(text = "›", color = PocketShellColors.TextSecondary, fontSize = 18.sp)
     }
 }

@@ -56,6 +56,17 @@ sealed interface FileViewerUiState {
     ) : FileViewerUiState
 
     /**
+     * An audio file was fetched and cached to [cacheFile]. The audio panel
+     * plays it with [android.media.MediaPlayer] (platform decoder — no
+     * third-party dep) directly off the cached file, with play/pause and seek.
+     */
+    data class Audio(
+        val displayPath: String,
+        val cacheFile: File,
+        val sizeBytes: Long,
+    ) : FileViewerUiState
+
+    /**
      * The file can't be previewed — too large, binary-non-image, missing, or
      * the host was unreachable. [message] is user-facing.
      */
@@ -77,7 +88,8 @@ sealed interface FileViewerUiState {
  *  - Decide image-vs-text-vs-binary ([FileTypeDetector]); cache image bytes
  *    to the app cache dir so the Compose image loader reads them off disk.
  *
- * Read-only. PDFs render page-by-page (#498). No editing, no audio (#499).
+ * Read-only. PDFs render page-by-page (#498); audio plays in an in-app
+ * MediaPlayer panel with play/pause + seek (#499). No editing.
  */
 @HiltViewModel
 class FileViewerViewModel @Inject constructor(
@@ -147,6 +159,15 @@ class FileViewerViewModel @Inject constructor(
                         sizeBytes = bytes.size.toLong(),
                     )
                 }
+                FileViewerType.AUDIO -> if (audioExceedsCap(bytes.size.toLong())) {
+                    audioTooLarge(resolved, bytes.size.toLong())
+                } else {
+                    FileViewerUiState.Audio(
+                        displayPath = resolved,
+                        cacheFile = writeToCache(resolved, bytes),
+                        sizeBytes = bytes.size.toLong(),
+                    )
+                }
                 FileViewerType.BINARY -> FileViewerUiState.CannotPreview(
                     displayPath = resolved,
                     message = "Can't preview this file — it looks like a binary file " +
@@ -181,6 +202,13 @@ class FileViewerViewModel @Inject constructor(
             displayPath = resolved,
             message = "PDF is too large to preview (${sizeBytes / (1024 * 1024)} MB; " +
                 "limit ${MAX_PDF_BYTES / (1024 * 1024)} MB).",
+        )
+
+    private fun audioTooLarge(resolved: String, sizeBytes: Long): FileViewerUiState =
+        FileViewerUiState.CannotPreview(
+            displayPath = resolved,
+            message = "Audio file is too large to play (${sizeBytes / (1024 * 1024)} MB; " +
+                "limit ${MAX_AUDIO_BYTES / (1024 * 1024)} MB).",
         )
 
     private fun writeToCache(resolved: String, bytes: ByteArray): File {
@@ -273,6 +301,24 @@ class FileViewerViewModel @Inject constructor(
          * Pure — unit-tested.
          */
         internal fun pdfExceedsCap(sizeBytes: Long): Boolean = sizeBytes > MAX_PDF_BYTES
+
+        /**
+         * Ceiling for an audio file the in-app player will load. Audio is
+         * streamed from a cached file by [android.media.MediaPlayer] (it does
+         * not decode the whole file into memory up front), so the cap is only
+         * bounded by the overall fetch cap [MAX_PREVIEW_BYTES] and the cache
+         * write — 20 MB comfortably covers a typical voice note / short clip
+         * while keeping the SFTP fetch and cache write quick on a phone. A
+         * larger file gets a clear "too large" message instead of a long fetch.
+         */
+        const val MAX_AUDIO_BYTES: Long = MAX_PREVIEW_BYTES
+
+        /**
+         * Size guard for audio. True when [sizeBytes] exceeds [MAX_AUDIO_BYTES],
+         * in which case the viewer shows a clear "too large" message instead of
+         * caching and playing an oversized file. Pure — unit-tested.
+         */
+        internal fun audioExceedsCap(sizeBytes: Long): Boolean = sizeBytes > MAX_AUDIO_BYTES
 
         internal const val CACHE_SUBDIR = "file-viewer"
 

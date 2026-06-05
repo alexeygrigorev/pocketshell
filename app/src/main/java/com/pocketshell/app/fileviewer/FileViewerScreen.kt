@@ -21,6 +21,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderColors
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -49,8 +52,10 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Locale
 
 const val FILE_VIEWER_SCREEN_TAG = "fileViewerScreen"
 const val FILE_VIEWER_BACK_TAG = "fileViewerBack"
@@ -63,6 +68,11 @@ const val FILE_VIEWER_PDF_PAGE_TAG = "fileViewerPdfPage"
 const val FILE_VIEWER_PDF_PREV_TAG = "fileViewerPdfPrev"
 const val FILE_VIEWER_PDF_NEXT_TAG = "fileViewerPdfNext"
 const val FILE_VIEWER_PDF_PAGE_LABEL_TAG = "fileViewerPdfPageLabel"
+const val FILE_VIEWER_AUDIO_TAG = "fileViewerAudio"
+const val FILE_VIEWER_AUDIO_PLAY_PAUSE_TAG = "fileViewerAudioPlayPause"
+const val FILE_VIEWER_AUDIO_SEEKBAR_TAG = "fileViewerAudioSeekbar"
+const val FILE_VIEWER_AUDIO_CURRENT_TIME_TAG = "fileViewerAudioCurrentTime"
+const val FILE_VIEWER_AUDIO_TOTAL_TIME_TAG = "fileViewerAudioTotalTime"
 const val FILE_VIEWER_CANNOT_PREVIEW_TAG = "fileViewerCannotPreview"
 const val FILE_VIEWER_RETRY_TAG = "fileViewerRetry"
 
@@ -143,6 +153,7 @@ internal fun FileViewerScaffold(
                 is FileViewerUiState.Image -> ImagePanel(state.cacheFile)
                 is FileViewerUiState.TextContent -> TextPanel(state.content)
                 is FileViewerUiState.Pdf -> PdfPanel(state.cacheFile)
+                is FileViewerUiState.Audio -> AudioPanel(state.cacheFile)
                 is FileViewerUiState.CannotPreview -> CannotPreviewPanel(
                     message = state.message,
                     onRetry = onRetry,
@@ -157,6 +168,7 @@ private fun FileViewerUiState.displayPath(): String = when (this) {
     is FileViewerUiState.Image -> displayPath
     is FileViewerUiState.TextContent -> displayPath
     is FileViewerUiState.Pdf -> displayPath
+    is FileViewerUiState.Audio -> displayPath
     is FileViewerUiState.CannotPreview -> displayPath
 }
 
@@ -465,6 +477,177 @@ private fun PdfPagerButton(
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
         )
+    }
+}
+
+/**
+ * In-app audio player — issue #499.
+ *
+ * Plays the cached audio file with [AudioPlayerController] (platform
+ * [android.media.MediaPlayer] — no third-party dep). The controller prepares
+ * asynchronously and is released in [DisposableEffect.onDispose] so the native
+ * player is never leaked. A play/pause button drives playback; a [Slider]
+ * shows current/total position and scrubs to seek. While playing, a polling
+ * loop advances the slider; dragging the slider seeks the track.
+ */
+@Composable
+private fun AudioPanel(cacheFile: File) {
+    var phase by remember(cacheFile.path) {
+        mutableStateOf(AudioPlayerController.Phase.PREPARING)
+    }
+    var durationMs by remember(cacheFile.path) { mutableIntStateOf(0) }
+    var positionMs by remember(cacheFile.path) { mutableIntStateOf(0) }
+    var errorMessage by remember(cacheFile.path) { mutableStateOf<String?>(null) }
+    // While the user drags the thumb we show their drag position and suppress
+    // the polling update so the thumb doesn't jump back under their finger.
+    var scrubbing by remember(cacheFile.path) { mutableStateOf(false) }
+    var scrubMs by remember(cacheFile.path) { mutableFloatStateOf(0f) }
+
+    val controller = remember(cacheFile.path) {
+        AudioPlayerController(
+            file = cacheFile,
+            listener = object : AudioPlayerController.Listener {
+                override fun onPhase(p: AudioPlayerController.Phase) {
+                    phase = p
+                }
+
+                override fun onDuration(d: Int) {
+                    durationMs = d.coerceAtLeast(0)
+                }
+
+                override fun onError(message: String) {
+                    errorMessage = message
+                }
+            },
+        )
+    }
+
+    DisposableEffect(controller) {
+        controller.prepare()
+        onDispose { controller.release() }
+    }
+
+    // Poll the playback position while playing so the slider tracks the audio.
+    LaunchedEffect(controller, phase) {
+        if (phase == AudioPlayerController.Phase.PLAYING) {
+            while (true) {
+                if (!scrubbing) positionMs = controller.currentPositionMs()
+                delay(200)
+            }
+        }
+    }
+
+    val message = errorMessage
+    if (phase == AudioPlayerController.Phase.ERROR && message != null) {
+        CannotPreviewPanel(message = message, onRetry = {}, showRetry = false)
+        return
+    }
+
+    val isPlaying = phase == AudioPlayerController.Phase.PLAYING
+    val ready = phase != AudioPlayerController.Phase.PREPARING
+    val sliderMax = durationMs.coerceAtLeast(1).toFloat()
+    val sliderValue = if (scrubbing) scrubMs else positionMs.toFloat().coerceIn(0f, sliderMax)
+    val displayedPositionMs = if (scrubbing) scrubMs.toInt() else positionMs
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(PocketShellColors.TermBg)
+            .padding(horizontal = 24.dp)
+            .testTag(FILE_VIEWER_AUDIO_TAG),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(96.dp)
+                .then(
+                    if (ready) {
+                        Modifier.clickable(role = Role.Button) {
+                            if (isPlaying) controller.pause() else controller.play()
+                        }
+                    } else {
+                        Modifier
+                    },
+                )
+                .testTag(FILE_VIEWER_AUDIO_PLAY_PAUSE_TAG),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (!ready) {
+                CircularProgressIndicator(color = PocketShellColors.Accent)
+            } else {
+                Text(
+                    text = if (isPlaying) "❚❚" else "▶",
+                    color = PocketShellColors.Accent,
+                    fontSize = 44.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+
+        Spacer(Modifier.height(24.dp))
+
+        Slider(
+            value = sliderValue,
+            valueRange = 0f..sliderMax,
+            enabled = ready,
+            onValueChange = {
+                scrubbing = true
+                scrubMs = it
+            },
+            onValueChangeFinished = {
+                controller.seekTo(scrubMs.toInt())
+                positionMs = scrubMs.toInt()
+                scrubbing = false
+            },
+            colors = audioSliderColors(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag(FILE_VIEWER_AUDIO_SEEKBAR_TAG),
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                text = formatAudioTime(displayedPositionMs),
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.testTag(FILE_VIEWER_AUDIO_CURRENT_TIME_TAG),
+            )
+            Text(
+                text = formatAudioTime(durationMs),
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+                fontFamily = FontFamily.Monospace,
+                modifier = Modifier.testTag(FILE_VIEWER_AUDIO_TOTAL_TIME_TAG),
+            )
+        }
+    }
+}
+
+@Composable
+private fun audioSliderColors(): SliderColors = SliderDefaults.colors(
+    thumbColor = PocketShellColors.Accent,
+    activeTrackColor = PocketShellColors.Accent,
+    inactiveTrackColor = PocketShellColors.BorderSoft,
+)
+
+/**
+ * Format a millisecond position as `m:ss` (or `h:mm:ss` past an hour). Pure —
+ * unit-tested. A negative/unknown value renders as `0:00`.
+ */
+internal fun formatAudioTime(positionMs: Int): String {
+    val totalSeconds = (positionMs.coerceAtLeast(0)) / 1000
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+    return if (hours > 0) {
+        String.format(Locale.US, "%d:%02d:%02d", hours, minutes, seconds)
+    } else {
+        String.format(Locale.US, "%d:%02d", minutes, seconds)
     }
 }
 

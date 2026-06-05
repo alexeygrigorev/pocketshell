@@ -12,6 +12,7 @@ import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.proof.DEFAULT_HOST
@@ -228,6 +229,69 @@ class FileViewerDockerTest {
         }
     }
 
+    @Test
+    fun playsRemoteAudioFromFixture(): Unit = runBlocking {
+        val suffix = System.currentTimeMillis().toString().takeLast(6)
+        val wavPath = "/tmp/issue499-clip-$suffix.wav"
+
+        // Seed a real, valid PCM WAV (silent) so MediaPlayer prepares it with a
+        // platform codec — no third-party audio lib involved.
+        val wavBase64 = Base64.encodeToString(makeWavBytes(millis = 800), Base64.NO_WRAP)
+        withTimeout(20_000) {
+            connect()?.use { session ->
+                val exit = session.exec(
+                    "printf '%s' '$wavBase64' | base64 -d > '$wavPath'",
+                )
+                assertEquals("seed wav exit", 0, exit.exitCode)
+                seededPaths += wavPath
+            } ?: error("could not connect to seed fixture audio")
+        }
+
+        composeRule.setContent {
+            FileViewerScreen(
+                hostName = "agents",
+                hostname = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                username = DEFAULT_USER,
+                keyPath = keyFile.absolutePath,
+                passphrase = null,
+                remotePath = wavPath,
+                cwd = null,
+                onBack = {},
+                viewModel = FileViewerViewModel(
+                    InstrumentationRegistry.getInstrumentation().targetContext.applicationContext,
+                ),
+            )
+        }
+
+        // The audio panel renders with its play/pause control and seekbar.
+        composeRule.waitUntil(timeoutMillis = 30_000) {
+            composeRule.onAllNodesWithTagExists(FILE_VIEWER_AUDIO_TAG)
+        }
+        composeRule.onNodeWithTag(FILE_VIEWER_AUDIO_TAG).assertExists()
+        composeRule.onNodeWithTag(FILE_VIEWER_AUDIO_SEEKBAR_TAG).assertExists()
+        WalkthroughScreenshotArtifacts.capture("issue499-audio-ready")
+
+        // Tap play, then verify it reaches a started/playing state (the
+        // pause glyph "❚❚" appears once playback starts).
+        composeRule.onNodeWithTag(FILE_VIEWER_AUDIO_PLAY_PAUSE_TAG).performClick()
+        composeRule.waitUntil(timeoutMillis = 15_000) {
+            composeRule.onAllNodesWithText("❚❚").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithText("❚❚").assertExists()
+        WalkthroughScreenshotArtifacts.capture("issue499-audio-playing")
+
+        // Scrub the seekbar to seek; the player accepts the seek without error
+        // (the audio panel is still shown, not the can't-preview state).
+        composeRule.onNodeWithTag(FILE_VIEWER_AUDIO_SEEKBAR_TAG)
+            .performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.SetProgress) {
+                it(400f)
+            }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag(FILE_VIEWER_AUDIO_TAG).assertExists()
+        WalkthroughScreenshotArtifacts.capture("issue499-audio-after-seek")
+    }
+
     private suspend fun connect() = SshConnection.connect(
         host = DEFAULT_HOST,
         port = DEFAULT_PORT,
@@ -269,6 +333,43 @@ class FileViewerDockerTest {
         val out = ByteArrayOutputStream()
         doc.writeTo(out)
         doc.close()
+        return out.toByteArray()
+    }
+
+    /**
+     * Build a minimal valid PCM WAV of [millis] of silence (16-bit mono, 8 kHz)
+     * so MediaPlayer can prepare it with a platform codec — no third-party
+     * audio library involved.
+     */
+    private fun makeWavBytes(millis: Int): ByteArray {
+        val sampleRate = 8000
+        val numSamples = sampleRate * millis / 1000
+        val dataSize = numSamples * 2
+        val out = ByteArrayOutputStream()
+        fun writeIntLE(v: Int) {
+            out.write(v and 0xFF)
+            out.write((v shr 8) and 0xFF)
+            out.write((v shr 16) and 0xFF)
+            out.write((v shr 24) and 0xFF)
+        }
+        fun writeShortLE(v: Int) {
+            out.write(v and 0xFF)
+            out.write((v shr 8) and 0xFF)
+        }
+        out.write("RIFF".toByteArray())
+        writeIntLE(36 + dataSize)
+        out.write("WAVE".toByteArray())
+        out.write("fmt ".toByteArray())
+        writeIntLE(16)
+        writeShortLE(1)
+        writeShortLE(1)
+        writeIntLE(sampleRate)
+        writeIntLE(sampleRate * 2)
+        writeShortLE(2)
+        writeShortLE(16)
+        out.write("data".toByteArray())
+        writeIntLE(dataSize)
+        repeat(dataSize) { out.write(0) }
         return out.toByteArray()
     }
 }

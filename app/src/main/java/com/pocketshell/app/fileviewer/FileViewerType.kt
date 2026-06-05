@@ -3,7 +3,7 @@ package com.pocketshell.app.fileviewer
 /**
  * How the in-app file viewer (issue #497) should render a fetched file.
  *
- * The viewer supports images, text, and PDFs. Anything else
+ * The viewer supports images, text, PDFs, and audio. Anything else
  * (binary-non-image, or a file that exceeded the size cap) renders a
  * friendly "can't preview" message instead of crashing.
  */
@@ -16,6 +16,9 @@ enum class FileViewerType {
 
     /** Renders page-by-page (PdfRenderer) in the paged/zoomable PDF view. */
     PDF,
+
+    /** Plays in the in-app audio player (MediaPlayer) — mp3/wav/m4a/ogg/flac/aac. */
+    AUDIO,
 
     /** Not previewable (binary, unknown, or undecodable). */
     BINARY,
@@ -34,12 +37,18 @@ enum class FileViewerType {
  *  2. Else if the bytes carry the **PDF** magic header (`%PDF`), it's a
  *     [FileViewerType.PDF]. The header is ASCII, so this must run before
  *     the UTF-8 text sniff or a PDF would be misread as a text file.
- *  3. Else if the extension is a known image extension AND the bytes look
+ *  3. Else if the bytes carry a known **audio** magic header (ID3/MPEG,
+ *     `RIFF…WAVE`, `OggS`, `fLaC`, ftyp), or the extension is a known audio
+ *     extension AND the bytes aren't UTF-8 text, it's [FileViewerType.AUDIO].
+ *     The OS [android.media.MediaPlayer] parses the container; extension is a
+ *     reliable signal here (consistent with #500 routing) and magic-byte
+ *     confirmation catches a mislabelled suffix.
+ *  4. Else if the extension is a known image extension AND the bytes look
  *     image-ish enough not to be UTF-8 text, treat as image. (Covers exotic
  *     image formats we don't sniff but the OS decoder may still handle.)
- *  4. Else if the bytes are UTF-8-decodable text (no NUL bytes, valid
+ *  5. Else if the bytes are UTF-8-decodable text (no NUL bytes, valid
  *     UTF-8), it's [FileViewerType.TEXT].
- *  5. Else [FileViewerType.BINARY].
+ *  6. Else [FileViewerType.BINARY].
  */
 object FileTypeDetector {
 
@@ -47,9 +56,14 @@ object FileTypeDetector {
         "png", "jpg", "jpeg", "webp", "gif", "bmp",
     )
 
+    private val AUDIO_EXTENSIONS = setOf(
+        "mp3", "wav", "m4a", "ogg", "oga", "flac", "aac",
+    )
+
     fun detect(remotePath: String, bytes: ByteArray): FileViewerType {
         if (looksLikeImageMagic(bytes)) return FileViewerType.IMAGE
         if (looksLikePdf(remotePath, bytes)) return FileViewerType.PDF
+        if (looksLikeAudio(remotePath, bytes)) return FileViewerType.AUDIO
 
         val ext = extensionOf(remotePath)
         val isUtf8Text = looksLikeUtf8Text(bytes)
@@ -57,6 +71,57 @@ object FileTypeDetector {
         if (ext in IMAGE_EXTENSIONS && !isUtf8Text) return FileViewerType.IMAGE
 
         return if (isUtf8Text) FileViewerType.TEXT else FileViewerType.BINARY
+    }
+
+    /**
+     * True when [bytes] / the path name an audio file the OS
+     * [android.media.MediaPlayer] can play. A known audio magic header wins
+     * outright (a mislabelled suffix still routes correctly), and a known
+     * audio extension routes to audio when the bytes are clearly non-text
+     * binary — so #500 auto-detect stays consistent with the extension the
+     * agent referenced without misrouting a `.mp3`-named text note.
+     */
+    internal fun looksLikeAudio(remotePath: String, bytes: ByteArray): Boolean {
+        if (looksLikeAudioMagic(bytes)) return true
+        return extensionOf(remotePath) in AUDIO_EXTENSIONS && !looksLikeUtf8Text(bytes)
+    }
+
+    /**
+     * Magic-number sniff for the common audio containers. These signatures are
+     * stable file-start markers; the actual decode is delegated to
+     * [android.media.MediaPlayer], so this only has to be reliable enough to
+     * route the file to the audio player.
+     */
+    internal fun looksLikeAudioMagic(bytes: ByteArray): Boolean {
+        if (bytes.size < 4) return false
+        // MP3 with ID3v2 tag: "ID3"
+        if (bytes.startsWith('I'.code, 'D'.code, '3'.code)) return true
+        // MP3 frame sync: 0xFF 0xEx/0xFx (MPEG audio frame header).
+        if (bytes.size >= 2 &&
+            bytes[0] == 0xFF.toByte() && (bytes[1].toInt() and 0xE0) == 0xE0
+        ) {
+            return true
+        }
+        // WAV: "RIFF"...."WAVE"
+        if (bytes.size >= 12 &&
+            bytes.startsWith('R'.code, 'I'.code, 'F'.code, 'F'.code) &&
+            bytes[8] == 'W'.code.toByte() && bytes[9] == 'A'.code.toByte() &&
+            bytes[10] == 'V'.code.toByte() && bytes[11] == 'E'.code.toByte()
+        ) {
+            return true
+        }
+        // OGG: "OggS"
+        if (bytes.startsWith('O'.code, 'g'.code, 'g'.code, 'S'.code)) return true
+        // FLAC: "fLaC"
+        if (bytes.startsWith('f'.code, 'L'.code, 'a'.code, 'C'.code)) return true
+        // MP4/M4A/AAC (ISO-BMFF): box header at offset 4 = "ftyp"
+        if (bytes.size >= 8 &&
+            bytes[4] == 'f'.code.toByte() && bytes[5] == 't'.code.toByte() &&
+            bytes[6] == 'y'.code.toByte() && bytes[7] == 'p'.code.toByte()
+        ) {
+            return true
+        }
+        return false
     }
 
     /**

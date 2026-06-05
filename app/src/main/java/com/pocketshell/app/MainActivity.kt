@@ -984,6 +984,7 @@ private fun AppNavigator(
         // clones it (if needed) and opens a tmux session in the clone
         // folder. Reached from the FolderList "Repos" action.
         is AppDestination.RepoBrowser -> RepoBrowserScreen(
+            hostId = dest.hostId,
             hostName = dest.hostName,
             hostname = dest.hostname,
             port = dest.port,
@@ -992,7 +993,15 @@ private fun AppNavigator(
             passphrase = dest.passphrase,
             cloneRoot = dest.cloneRoot,
             onBack = ::back,
-            onOpenRepo = { path ->
+            // Issue #516: tapping a repo now opens the SAME Shell/Agent
+            // SessionTypePickerSheet the folder flow uses, pre-filled with
+            // the resolved clone path. The picker create path
+            // (FolderListViewModel.createSession) has already built the
+            // tmux session — and, for an Agent pick, send-keys'd the agent
+            // CLI into the new pane — so the only remaining step here is to
+            // attach. The old direct onOpenRepo → TmuxSession bypass is
+            // removed (D22 hard-cut, no fallback open path).
+            onSessionCreated = { sessionName, cwd ->
                 navigate(
                     AppDestination.TmuxSession(
                         hostId = dest.hostId,
@@ -1002,9 +1011,21 @@ private fun AppNavigator(
                         username = dest.username,
                         keyPath = dest.keyPath,
                         passphrase = dest.passphrase,
-                        sessionName = RepoSessionName(path),
-                        startDirectory = path,
+                        sessionName = sessionName,
+                        startDirectory = cwd,
                     ),
+                )
+            },
+            suggestStartDirectories = { prefix ->
+                startDirectoryAutocomplete.suggestions(
+                    target = StartDirectoryAutocompleteTarget(
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                    ),
+                    typedPrefix = prefix,
                 )
             },
         )
@@ -1339,16 +1360,3 @@ internal fun AppDestination.timingName(): String = when (this) {
 
 private const val DefaultTmuxSessionName = "pocketshell"
 private const val LAST_SESSION_ACTIVITY_LOG_TAG = "PsLastSession"
-
-/**
- * Issue #230: derive a tmux session name for a repo opened from the
- * GitHub repos browser. tmux session names must not contain colons (the
- * folder-list field separator) and stay short, so we take the trailing
- * path segment, sanitise it to `[A-Za-z0-9_-]`, and fall back to the
- * default when nothing usable remains.
- */
-internal fun RepoSessionName(path: String): String {
-    val tail = path.trim().trimEnd('/').substringAfterLast('/')
-    val safe = tail.replace(Regex("[^A-Za-z0-9_-]"), "-").trim('-').take(24)
-    return safe.ifBlank { DefaultTmuxSessionName }
-}

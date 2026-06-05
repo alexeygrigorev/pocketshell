@@ -24,6 +24,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -46,14 +49,21 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * ## Interaction
  *
  *  - Tap a "Clone" row → runs `pocketshell repos clone`, shows a per-row
- *    progress spinner, then fires [onOpenRepo] with the clone path.
+ *    progress spinner, then opens the Shell/Agent [SessionTypePickerSheet]
+ *    pre-filled with the clone path.
  *  - Tap an "Open" (already-cloned) row → resolves the path via
- *    `pocketshell repos open` and fires [onOpenRepo].
+ *    `pocketshell repos open` and opens the same picker pre-filled with
+ *    that path.
+ *  - Confirming the picker creates + attaches the session via the SAME
+ *    picker→create→attach path the folder "+ New session" flow uses
+ *    ([FolderListViewModel.createSession] → [onSessionCreated]); there is
+ *    no direct `navigate(TmuxSession)` bypass (issue #516, D22).
  *  - A clone/open failure surfaces an inline dismissible banner; the
  *    list stays usable.
  */
 @Composable
 fun RepoBrowserScreen(
+    hostId: Long,
     hostName: String,
     hostname: String,
     port: Int,
@@ -63,13 +73,20 @@ fun RepoBrowserScreen(
     cloneRoot: String = "~/git",
     onBack: () -> Unit,
     /**
-     * Fired when a repo is ready to open — the path is the local clone
-     * directory (freshly cloned or already on disk). The caller routes
-     * to a tmux session with this path as the start directory.
+     * Fired after the [SessionTypePickerSheet] successfully created a
+     * session on the remote in the resolved repo clone directory — the
+     * SAME contract the folder new-session flow uses
+     * ([FolderListScreen]'s `onSessionCreated`). By the time this fires
+     * the tmux session exists (and, for an Agent pick, the agent CLI has
+     * already been `send-keys`'d into the new pane by the gateway), so
+     * the caller (MainActivity) only needs to attach by routing to
+     * `AppDestination.TmuxSession` with the resolved name + cwd.
      */
-    onOpenRepo: (path: String) -> Unit,
+    onSessionCreated: (sessionName: String, cwd: String) -> Unit,
     modifier: Modifier = Modifier,
     viewModel: RepoBrowserViewModel = hiltViewModel(),
+    sessionViewModel: FolderListViewModel = hiltViewModel(),
+    suggestStartDirectories: (suspend (String) -> List<String>)? = null,
 ) {
     LaunchedEffect(hostname, port, username, keyPath) {
         viewModel.bind(
@@ -83,7 +100,28 @@ fun RepoBrowserScreen(
             ),
         )
     }
+    // Reuse the folder flow's create path: the picker confirm calls
+    // FolderListViewModel.createSession, which runs the same
+    // FolderListGateway.createSession used by the folder new-session
+    // sheet. Bind it to this host so the create RPC has credentials.
+    LaunchedEffect(hostId, hostname, port, username, keyPath) {
+        sessionViewModel.bind(
+            hostId = hostId,
+            hostName = hostName,
+            hostname = hostname,
+            port = port,
+            username = username,
+            keyPath = keyPath,
+            passphrase = passphrase,
+        )
+    }
     val state by viewModel.state.collectAsState()
+    val sessionState by sessionViewModel.state.collectAsState()
+
+    // Pre-filled repo path the picker should open on. Set once a repo tap
+    // resolves (clone-then-open or already-cloned), cleared on dismiss /
+    // confirm. Replaces the old direct onOpenRepo → TmuxSession bypass.
+    var pickerRepoPath by remember { mutableStateOf<String?>(null) }
 
     RepoBrowserScaffold(
         hostName = hostName,
@@ -91,11 +129,46 @@ fun RepoBrowserScreen(
         state = state,
         onBack = onBack,
         onRetry = viewModel::refresh,
-        onRepoClick = { row -> viewModel.onRepoTapped(row, onResolved = onOpenRepo) },
+        onRepoClick = { row ->
+            viewModel.onRepoTapped(row, onResolved = { path -> pickerRepoPath = path })
+        },
         onDismissError = viewModel::clearActionError,
         modifier = modifier,
     )
+
+    pickerRepoPath?.let { repoPath ->
+        SessionTypePickerSheet(
+            folderPath = repoPath,
+            folderLabel = repoFolderLabel(repoPath),
+            onDismiss = { pickerRepoPath = null },
+            suggestStartDirectories = suggestStartDirectories,
+            onCreate = { choice ->
+                pickerRepoPath = null
+                val newName = derivedSessionName(
+                    choice = choice,
+                    homeDirectory = conventionalRemoteHome(username),
+                    existingNames = knownSessionNames(sessionState),
+                )
+                sessionViewModel.createSession(
+                    sessionName = newName,
+                    cwd = choice.startDirectory,
+                    startCommand = choice.startCommand(),
+                    onResolved = { resolved ->
+                        onSessionCreated(resolved, choice.startDirectory)
+                    },
+                )
+            },
+        )
+    }
 }
+
+/**
+ * Short label for the picker header — the repo clone's trailing folder
+ * segment (e.g. `/home/alexey/git/pocketshell` → `pocketshell`), falling
+ * back to the full path when there's no usable segment.
+ */
+internal fun repoFolderLabel(path: String): String =
+    path.trim().trimEnd('/').substringAfterLast('/').ifBlank { path }
 
 /**
  * Stateless body of [RepoBrowserScreen] — split out from the view-model

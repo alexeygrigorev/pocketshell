@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Log
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
@@ -607,6 +608,29 @@ private fun AppNavigator(
         } else {
             Modifier.fillMaxSize().imePadding()
         }
+    // Issue #520: the hand-rolled navigator owns the system/gesture Back
+    // button for every non-root destination. Without this, screens that do
+    // not register their own `BackHandler` (host-detail FolderList, the
+    // plain-SSH Session, RepoBrowser, FileViewer, EnvFiles, Usage, AiCosts,
+    // CrashReports, WatchedFolders, RecurringJobs, QR scanner) fall through
+    // to the Activity default, which finishes the app — so system Back exits
+    // to the launcher instead of returning to the previous screen, the
+    // pre-release blocker the #513 audit reproduced. Routing through the same
+    // `back()` the in-app `‹` chevron uses keeps the two identical.
+    //
+    // This is registered BEFORE the destination `when` block, so a screen
+    // that DOES register its own `BackHandler` (TmuxSession overlay routing,
+    // the AddEditHost unsaved-changes confirm, Settings, PortForward panel,
+    // ForwardingChooser, Snippets) composes later and therefore wins on
+    // Compose's LIFO back dispatcher — those screens keep their richer
+    // back behaviour untouched.
+    //
+    // The root HostList is deliberately excluded: leaving default Back there
+    // means Back from the landing screen still exits the app, which is the
+    // expected behaviour (and what ColdInstall/EmulatorWorkflow assert).
+    BackHandler(enabled = shouldTrapSystemBack(activeDestination)) {
+        back()
+    }
     androidx.compose.foundation.layout.Box(modifier = keyboardAvoidanceModifier) {
     when (val dest = activeDestination) {
         AppDestination.HostList -> HostListScreen(
@@ -1184,6 +1208,19 @@ private fun AppNavigator(
     }
     }
 }
+
+/**
+ * Issue #520: whether the navigator-level [BackHandler] should intercept the
+ * system/gesture Back button for [destination].
+ *
+ * Returns `true` for every non-root destination so system Back routes through
+ * the hand-rolled `back()` (returning to the previous screen, identical to the
+ * in-app `‹` chevron). Returns `false` for the root [AppDestination.HostList]
+ * so Back on the landing screen keeps the Activity default and exits the app —
+ * the intended behaviour the cold-launch / workflow e2e tests assert against.
+ */
+internal fun shouldTrapSystemBack(destination: AppDestination): Boolean =
+    destination != AppDestination.HostList
 
 internal fun resolveLastSessionForStop(
     currentDestination: AppDestination,

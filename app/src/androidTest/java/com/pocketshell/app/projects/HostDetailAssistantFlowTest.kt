@@ -196,6 +196,8 @@ class HostDetailAssistantFlowTest {
                     .fetchSemanticsNodes().isNotEmpty()
         }
 
+        // #522: the host-assistant action lives behind the header kebab now.
+        compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_TAG).performClick()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_PROMPT_TAG)
             .performTextInput("create notes")

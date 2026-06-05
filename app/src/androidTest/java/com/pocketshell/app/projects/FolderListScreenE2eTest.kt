@@ -247,7 +247,11 @@ class FolderListScreenE2eTest {
         compose.onNodeWithText("Workspace roots").assertDoesNotExist()
         compose.onNodeWithText("Flat projects").assertDoesNotExist()
         compose.onNodeWithText("Repos").assertDoesNotExist()
-        compose.onNodeWithContentDescription("Browse repos").assertExists()
+        // #522 item 2: the former Browse repos / Host assistant / Workspace
+        // settings buttons collapsed into a single header `⋮` kebab. The actions
+        // are reachable as menu items once the kebab is open, not as standalone
+        // top-bar buttons.
+        compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).assertExists()
         compose.onNodeWithTag(folderTreeRootLabelTag("~/git"), useUnmergedTree = true).assertExists()
         // The action-bearing root header Rows (~/git, ~/tmp) wrap their label
         // in a semantics-merging `combinedClickable` (#455), so the label
@@ -284,15 +288,27 @@ class FolderListScreenE2eTest {
         compose.onAllNodesWithTag(FOLDER_LIST_VIEW_TOGGLE_TAG)
             .fetchSemanticsNodes()
             .also { assertTrue("Tree/Flat toggle should not render on host detail", it.isEmpty()) }
+        // Open the header kebab, then tap the "Workspace settings" menu item
+        // (#522 item 2). Tapping a menu item dismisses the menu.
+        compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
+        // #522 item 2 evidence: the single header kebab opens a menu with the
+        // three consolidated actions (Host assistant / Browse repos / Workspace
+        // settings) instead of three cramped circular buttons.
+        compose.onNodeWithTag(FOLDER_LIST_BROWSE_REPOS_TAG).assertExists()
+        compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_TAG).assertExists()
+        android.os.SystemClock.sleep(200)
+        WalkthroughScreenshotArtifacts.capture("issue522-header-kebab-open")
         compose.onNodeWithTag(FOLDER_LIST_WORKSPACE_SETTINGS_TAG)
             .assertExists()
             .performClick()
         compose.waitUntil(timeoutMillis = 5_000) { openedWorkspaceSettings }
+        // Re-open the kebab and tap "Host assistant" to surface the assistant
+        // panel.
+        compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
         compose.onNodeWithContentDescription("Host assistant").assertExists()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_TAG)
             .assertExists()
             .performClick()
-        compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_ICON_TAG, useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_PANEL_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_PROMPT_MIC_TAG).assertExists()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_PROMPT_TAG)
@@ -413,6 +429,12 @@ class FolderListScreenE2eTest {
         compose.onNodeWithText("claude-main", useUnmergedTree = true).assertExists()
         compose.onNodeWithTag(
             folderSessionStatusDotTestTag("/home/u/git/pocketshell", "claude-main"),
+            useUnmergedTree = true,
+        ).assertExists()
+        // #522 item 3: tree session rows lead with the terminal tile glyph too,
+        // alongside the status dot, for consistency with the flat rows.
+        compose.onNodeWithTag(
+            folderSessionTileTestTag("/home/u/git/pocketshell", "claude-main"),
             useUnmergedTree = true,
         ).assertExists()
         compose.onNodeWithText("build-shell", useUnmergedTree = true).assertExists()
@@ -771,6 +793,20 @@ class FolderListScreenE2eTest {
         // Section labels render uppercased (shared SectionHeader contract).
         compose.onNodeWithText("ACTIVE").assertIsDisplayed()
         compose.onNodeWithText("IDLE").assertIsDisplayed()
+        // #522 item 3: each flat session row leads with a terminal tile glyph
+        // alongside the status dot.
+        compose.onNodeWithTag(
+            folderListFlatRowTileTestTag("claude-main"),
+            useUnmergedTree = true,
+        ).assertExists()
+        compose.onNodeWithTag(
+            folderListFlatRowStatusDotTestTag("claude-main"),
+            useUnmergedTree = true,
+        ).assertExists()
+        // #522 evidence: header (single name + count subtitle + kebab) and the
+        // flat rows (status dot + terminal tile glyph) captured before the tap.
+        WalkthroughScreenshotArtifacts.capture("issue522-flat-header-and-rows")
+        captureViewport("issue522-flat-header-and-rows-viewport.png")
         // The folder context now lives in the row subtitle (the directory label
         // the tree grouping otherwise carries).
         compose.onAllNodesWithText("pocketshell")

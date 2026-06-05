@@ -209,7 +209,9 @@ class HostDetailAssistantFolderDisambiguationTest {
                     .fetchSemanticsNodes().isNotEmpty()
         }
 
-        // Open the assistant panel and submit an ambiguous request.
+        // Open the assistant panel (now behind the header kebab, #522) and
+        // submit an ambiguous request.
+        compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_TAG).performClick()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_PROMPT_TAG)
             .performTextInput("open a claude session in the workshop")
@@ -330,6 +332,7 @@ class HostDetailAssistantFolderDisambiguationTest {
                     .fetchSemanticsNodes().isNotEmpty()
         }
 
+        compose.onNodeWithTag(FOLDER_LIST_OVERFLOW_TAG).performClick()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_TAG).performClick()
         compose.onNodeWithTag(FOLDER_LIST_ASSISTANT_PROMPT_TAG)
             .performTextInput("open a claude session in the workshop")

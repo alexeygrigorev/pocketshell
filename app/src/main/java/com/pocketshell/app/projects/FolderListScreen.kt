@@ -37,8 +37,9 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
-import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -61,7 +62,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -79,7 +79,6 @@ import com.pocketshell.app.share.ShareUploader
 import com.pocketshell.app.voice.AssistantCorrectionDictation
 import com.pocketshell.app.voice.AssistantDictationTextEvent
 import com.pocketshell.app.voice.AssistantStrip
-import com.pocketshell.app.voice.DictateDotIcon
 import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.appendDictationText
 import com.pocketshell.app.voice.toMicButtonState
@@ -94,10 +93,6 @@ import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellDensity
 import com.pocketshell.uikit.theme.PocketShellSpacing
 import com.pocketshell.uikit.theme.PocketShellType
-import kotlin.math.PI
-import kotlin.math.cos
-import kotlin.math.min
-import kotlin.math.sin
 import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
@@ -274,8 +269,17 @@ fun FolderListScreen(
             .testTag(FOLDER_LIST_SCREEN_TAG),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
+            // Host-level Active/Idle/total summary shown as the single header
+            // subtitle directly under the host name (#522 item 1), mirroring the
+            // maintainer's mockup #489. Derived from the Ready state's full
+            // session set so the same `N active · M idle · K sessions` line reads
+            // identically in both tree and flat views — the per-view list no
+            // longer repeats the host name in a second band.
+            val headerGroups = (state as? FolderListUiState.Ready)
+                ?.let { FlatSessionGroups.from(it.flatSessions) }
             FolderListAppBar(
                 hostName = hostName,
+                headerGroups = headerGroups,
                 onBack = onBack,
                 onBrowseRepos = { onBrowseRepos(null) },
                 onOpenWorkspaceSettings = onOpenWorkspaceSettings,
@@ -605,9 +609,19 @@ internal fun knownSessionNames(state: FolderListUiState): Set<String> =
         else -> emptySet()
     }
 
+/**
+ * Host-detail header (#522 items 1 + 2). Mockup #489 shows the host name ONCE,
+ * with the `N active · M idle · K sessions` count line directly beneath it and a
+ * single `⋮` kebab on the right — not the old three cramped circular action
+ * buttons and not a second host-name band in the list. The former Browse repos /
+ * Host assistant / Workspace settings buttons are now items in the kebab overflow
+ * menu (same affordance pattern as the host-list card kebab), and the count
+ * subtitle ([headerGroups]) is the single host-level summary the screen carries.
+ */
 @Composable
 private fun FolderListAppBar(
     hostName: String,
+    headerGroups: FlatSessionGroups?,
     onBack: () -> Unit,
     onBrowseRepos: () -> Unit,
     onOpenWorkspaceSettings: () -> Unit,
@@ -616,9 +630,9 @@ private fun FolderListAppBar(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .height(56.dp)
+            .heightIn(min = 56.dp)
             .background(PocketShellColors.Background)
-            .padding(horizontal = 8.dp),
+            .padding(horizontal = 8.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -635,74 +649,135 @@ private fun FolderListAppBar(
                 fontWeight = FontWeight.Bold,
             )
         }
-        Text(
-            text = hostName,
-            color = PocketShellColors.Text,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+        // Single host title with the count subtitle directly beneath it (#522
+        // item 1). A leading green dot marks an active host, harmonised with the
+        // session rows. No second host-name band is rendered in the list.
+        Column(
             modifier = Modifier
                 .padding(start = 4.dp)
                 .weight(1f)
-                .testTag(FOLDER_LIST_TITLE_TAG),
+                .then(
+                    if (headerGroups != null) {
+                        Modifier.testTag(FOLDER_LIST_FLAT_HEADER_TAG)
+                    } else {
+                        Modifier
+                    },
+                ),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (headerGroups != null) {
+                    StatusDot(
+                        active = headerGroups.activeCount > 0,
+                        modifier = Modifier.testTag(FOLDER_LIST_FLAT_HEADER_DOT_TAG),
+                    )
+                    Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
+                }
+                Text(
+                    text = hostName,
+                    color = PocketShellColors.Text,
+                    fontSize = 18.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .weight(1f, fill = false)
+                        .testTag(FOLDER_LIST_TITLE_TAG),
+                )
+            }
+            if (headerGroups != null) {
+                Text(
+                    text = flatHostCountText(headerGroups),
+                    color = PocketShellColors.TextMuted,
+                    style = PocketShellType.labelMono,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.testTag(FOLDER_LIST_FLAT_HEADER_COUNTS_TAG),
+                )
+            }
+        }
+        FolderListOverflowMenu(
+            onBrowseRepos = onBrowseRepos,
+            onOpenAssistant = onOpenAssistant,
+            onOpenWorkspaceSettings = onOpenWorkspaceSettings,
         )
+    }
+}
+
+/**
+ * Single `⋮` kebab overflow for the host-detail header (#522 item 2). Consolidates
+ * the former Browse repos / Host assistant / Workspace settings circular buttons
+ * into one menu, matching the host-list card kebab pattern. Each former button's
+ * `contentDescription` + test tag move onto its [DropdownMenuItem] so existing
+ * instrumentation (which located the action by tag / description) keeps working
+ * once the menu is open.
+ */
+@Composable
+private fun FolderListOverflowMenu(
+    onBrowseRepos: () -> Unit,
+    onOpenAssistant: () -> Unit,
+    onOpenWorkspaceSettings: () -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
         TopBarIconButton(
-            contentDescription = "Browse repos",
-            testTag = FOLDER_LIST_BROWSE_REPOS_TAG,
-            onClick = onBrowseRepos,
+            contentDescription = "More actions",
+            testTag = FOLDER_LIST_OVERFLOW_TAG,
+            onClick = { expanded = true },
         ) {
-            ReposIcon()
+            HostDetailKebabIcon()
         }
-        Spacer(modifier = Modifier.size(4.dp))
-        TopBarIconButton(
-            contentDescription = "Host assistant",
-            testTag = FOLDER_LIST_ASSISTANT_TAG,
-            onClick = onOpenAssistant,
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
         ) {
-            AssistantMicSparkIcon()
-        }
-        Spacer(modifier = Modifier.size(4.dp))
-        TopBarIconButton(
-            contentDescription = "Workspace settings",
-            testTag = FOLDER_LIST_WORKSPACE_SETTINGS_TAG,
-            onClick = onOpenWorkspaceSettings,
-        ) {
-            SettingsGearIcon()
+            DropdownMenuItem(
+                text = { Text("Host assistant") },
+                onClick = {
+                    expanded = false
+                    onOpenAssistant()
+                },
+                modifier = Modifier
+                    .semantics { contentDescription = "Host assistant" }
+                    .testTag(FOLDER_LIST_ASSISTANT_TAG),
+            )
+            DropdownMenuItem(
+                text = { Text("Browse repos") },
+                onClick = {
+                    expanded = false
+                    onBrowseRepos()
+                },
+                modifier = Modifier
+                    .semantics { contentDescription = "Browse repos" }
+                    .testTag(FOLDER_LIST_BROWSE_REPOS_TAG),
+            )
+            DropdownMenuItem(
+                text = { Text("Workspace settings") },
+                onClick = {
+                    expanded = false
+                    onOpenWorkspaceSettings()
+                },
+                modifier = Modifier
+                    .semantics { contentDescription = "Workspace settings" }
+                    .testTag(FOLDER_LIST_WORKSPACE_SETTINGS_TAG),
+            )
         }
     }
 }
 
+/**
+ * Vertical three-dot kebab glyph for the host-detail header overflow (#522).
+ * Drawn with [Canvas] (no `material-icons-extended` dependency), matching the
+ * host-list card kebab visual.
+ */
 @Composable
-private fun ReposIcon() {
-    Canvas(modifier = Modifier.size(20.dp)) {
-        val color = PocketShellColors.TextSecondary
-        val stroke = 1.7.dp.toPx()
-        val x = size.width * 0.34f
-        drawLine(
-            color = color,
-            start = Offset(x, size.height * 0.18f),
-            end = Offset(x, size.height * 0.76f),
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
-        drawLine(
-            color = color,
-            start = Offset(x, size.height * 0.46f),
-            end = Offset(size.width * 0.68f, size.height * 0.32f),
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
-        drawLine(
-            color = color,
-            start = Offset(size.width * 0.68f, size.height * 0.32f),
-            end = Offset(size.width * 0.68f, size.height * 0.74f),
-            strokeWidth = stroke,
-            cap = StrokeCap.Round,
-        )
-        drawCircle(color = color, radius = 2.4.dp.toPx(), center = Offset(x, size.height * 0.18f))
-        drawCircle(color = color, radius = 2.4.dp.toPx(), center = Offset(x, size.height * 0.78f))
-        drawCircle(color = color, radius = 2.4.dp.toPx(), center = Offset(size.width * 0.68f, size.height * 0.32f))
+private fun HostDetailKebabIcon() {
+    val color = PocketShellColors.TextSecondary
+    Canvas(modifier = Modifier.size(width = 4.dp, height = 18.dp)) {
+        val r = size.width / 2f
+        val gap = (size.height - 6f * r) / 2f
+        drawCircle(color = color, radius = r, center = Offset(r, r))
+        drawCircle(color = color, radius = r, center = Offset(r, 3f * r + gap))
+        drawCircle(color = color, radius = r, center = Offset(r, 5f * r + 2f * gap))
     }
 }
 
@@ -823,43 +898,6 @@ private fun HostDetailAssistantPanel(
 }
 
 @Composable
-private fun AssistantMicSparkIcon() {
-    Box(
-        modifier = Modifier
-            .size(22.dp)
-            .testTag(FOLDER_LIST_ASSISTANT_ICON_TAG),
-    ) {
-        Icon(
-            imageVector = DictateDotIcon,
-            contentDescription = null,
-            tint = PocketShellColors.TextSecondary,
-            modifier = Modifier
-                .size(18.dp)
-                .align(Alignment.CenterStart),
-        )
-        Canvas(
-            modifier = Modifier
-                .size(9.dp)
-                .align(Alignment.TopEnd),
-        ) {
-            val diamond = Path().apply {
-                moveTo(size.width * 0.5f, 0f)
-                lineTo(size.width, size.height * 0.5f)
-                lineTo(size.width * 0.5f, size.height)
-                lineTo(0f, size.height * 0.5f)
-                close()
-            }
-            drawPath(path = diamond, color = PocketShellColors.Accent)
-            drawCircle(
-                color = PocketShellColors.Accent,
-                radius = size.minDimension * 0.12f,
-                center = Offset(size.width * 0.08f, size.height * 0.12f),
-            )
-        }
-    }
-}
-
-@Composable
 private fun TopBarIconButton(
     contentDescription: String,
     testTag: String,
@@ -877,39 +915,6 @@ private fun TopBarIconButton(
         contentAlignment = Alignment.Center,
     ) {
         content()
-    }
-}
-
-@Composable
-private fun SettingsGearIcon() {
-    val color = PocketShellColors.TextSecondary
-    Canvas(modifier = Modifier.size(20.dp)) {
-        val center = androidx.compose.ui.geometry.Offset(size.width / 2f, size.height / 2f)
-        val minSide = min(size.width, size.height)
-        val toothRadius = minSide * 0.055f
-        val toothDistance = minSide * 0.37f
-        repeat(8) { index ->
-            val angle = index * PI.toFloat() / 4f
-            drawCircle(
-                color = color,
-                radius = toothRadius,
-                center = androidx.compose.ui.geometry.Offset(
-                    x = center.x + cos(angle) * toothDistance,
-                    y = center.y + sin(angle) * toothDistance,
-                ),
-            )
-        }
-        drawCircle(
-            color = color,
-            radius = minSide * 0.28f,
-            center = center,
-            style = Stroke(width = minSide * 0.12f),
-        )
-        drawCircle(
-            color = color,
-            radius = minSide * 0.075f,
-            center = center,
-        )
     }
 }
 
@@ -1030,9 +1035,10 @@ private fun FolderListContent(
                     FlatEmptyState()
                 }
             } else {
-                item(key = FLAT_HEADER_KEY) {
-                    FlatHostHeader(hostName = hostName, groups = flatGroups)
-                }
+                // #522 item 1: the host name + count summary no longer repeats in
+                // a second in-list band — it lives once in the header app bar
+                // (single title + count subtitle). The list goes straight to the
+                // Active / Idle sections.
                 if (flatGroups.active.isNotEmpty()) {
                     item(key = FLAT_ACTIVE_SECTION_KEY) {
                         SectionHeader(
@@ -1248,52 +1254,6 @@ private fun EmptyState() {
 }
 
 /**
- * Header band above the flat session list (#489). Mirrors the maintainer's
- * mockup's top strip, harmonised with the design language: the host name (bright
- * [PocketShellType.bodyDense]) preceded by a green [StatusDot] when any session
- * is active, with a muted `N active · M idle · K sessions` count line beneath.
- * It is the flat-view analogue of the tree's per-root count line, so the screen
- * always tells the user the active/idle/total split at a glance.
- */
-@Composable
-private fun FlatHostHeader(
-    hostName: String,
-    groups: FlatSessionGroups,
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = PocketShellDensity.rowPadH, vertical = 2.dp)
-            .testTag(FOLDER_LIST_FLAT_HEADER_TAG),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            StatusDot(
-                active = groups.activeCount > 0,
-                modifier = Modifier.testTag(FOLDER_LIST_FLAT_HEADER_DOT_TAG),
-            )
-            Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
-            Text(
-                text = hostName,
-                color = PocketShellColors.Text,
-                style = PocketShellType.bodyDense,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Text(
-            text = flatHostCountText(groups),
-            color = PocketShellColors.TextMuted,
-            style = PocketShellType.labelMono,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.testTag(FOLDER_LIST_FLAT_HEADER_COUNTS_TAG),
-        )
-    }
-}
-
-/**
  * `N active · M idle · K sessions` count summary for the flat-view header (#489).
  * Always shows all three facets so the active/idle/total split is legible even
  * when one section is empty (e.g. `0 active · 4 idle · 4 sessions`).
@@ -1347,10 +1307,18 @@ private fun FlatSessionRow(
         onClick = onClick,
         modifier = Modifier.testTag(folderListFlatRowTestTag(session.sessionName)),
         leading = {
-            StatusDot(
-                active = session.attached || isAgent,
-                modifier = Modifier.testTag(folderListFlatRowStatusDotTestTag(session.sessionName)),
-            )
+            // Mockup #489 leads each row with the status dot AND a terminal tile
+            // glyph (#522 item 3); the dot keeps its active/idle signal.
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                StatusDot(
+                    active = session.attached || isAgent,
+                    modifier = Modifier.testTag(folderListFlatRowStatusDotTestTag(session.sessionName)),
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                SessionTileGlyph(
+                    modifier = Modifier.testTag(folderListFlatRowTileTestTag(session.sessionName)),
+                )
+            }
         },
         trailing = {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1782,6 +1750,12 @@ private fun WorkspaceSessionRow(
             active = session.attached || session.agentKind.isAgent(),
             modifier = Modifier.testTag(folderSessionStatusDotTestTag(folderPath, session.sessionName)),
         )
+        Spacer(modifier = Modifier.width(6.dp))
+        // Terminal tile glyph leads the name alongside the status dot, matching
+        // the flat-view rows and mockup #489 (#522 item 3).
+        SessionTileGlyph(
+            modifier = Modifier.testTag(folderSessionTileTestTag(folderPath, session.sessionName)),
+        )
         Spacer(modifier = Modifier.width(8.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -2027,6 +2001,39 @@ private fun StatusDot(active: Boolean, modifier: Modifier = Modifier) {
 }
 
 /**
+ * Leading terminal tile glyph on a session row (#522 item 3). Mockup #489 leads
+ * every session row with a rounded `>_` terminal tile before the project name —
+ * the rows previously led with only the [StatusDot]. The tile sits alongside (and
+ * after) the status dot, so the row reads as `● >_ <name>`, keeping the dot's
+ * active/idle signal while adding the terminal affordance the mockup shows.
+ */
+@Composable
+private fun SessionTileGlyph(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(18.dp)
+            .background(
+                color = PocketShellColors.SurfaceElev.copy(alpha = 0.72f),
+                shape = RoundedCornerShape(4.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = RoundedCornerShape(4.dp),
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = ">_",
+            color = PocketShellColors.TextSecondary,
+            style = PocketShellType.labelMono,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
+    }
+}
+
+/**
  * A project folder is "active" when it has at least one attached session or a
  * live agent (Claude/Codex/OpenCode/probing/exited shell that just ran one) —
  * the green-dot condition in the mockup. Otherwise it reads idle (amber).
@@ -2227,8 +2234,9 @@ const val FOLDER_LIST_FLAT_HEADER_COUNTS_TAG: String = "folder-list:flat:header:
 const val FOLDER_LIST_FLAT_ACTIVE_SECTION_TAG: String = "folder-list:flat:section:active"
 const val FOLDER_LIST_FLAT_IDLE_SECTION_TAG: String = "folder-list:flat:section:idle"
 
-// Stable LazyColumn item keys for the flat-view header / section rows (#489).
-private const val FLAT_HEADER_KEY: String = "flat-header"
+// Stable LazyColumn item keys for the flat-view section rows (#489). The host
+// header band moved into the app bar (#522 item 1), so there is no in-list
+// header item key any more.
 private const val FLAT_ACTIVE_SECTION_KEY: String = "flat-section-active"
 private const val FLAT_IDLE_SECTION_KEY: String = "flat-section-idle"
 const val FOLDER_LIST_NEW_SESSION_FAB_TAG: String = "folder-list:new-session-fab"
@@ -2236,7 +2244,8 @@ const val FOLDER_LIST_BROWSE_REPOS_TAG: String = "folder-list:browse-repos"
 const val FOLDER_LIST_VIEW_TOGGLE_TAG: String = "folder-list:view-toggle"
 const val FOLDER_LIST_WORKSPACE_SETTINGS_TAG: String = "folder-list:workspace-settings"
 const val FOLDER_LIST_ASSISTANT_TAG: String = "folder-list:assistant"
-const val FOLDER_LIST_ASSISTANT_ICON_TAG: String = "folder-list:assistant:icon"
+/** Host-detail header `⋮` kebab overflow button (#522 item 2). */
+const val FOLDER_LIST_OVERFLOW_TAG: String = "folder-list:overflow"
 const val FOLDER_LIST_ASSISTANT_PANEL_TAG: String = "folder-list:assistant:panel"
 const val FOLDER_LIST_ASSISTANT_PROMPT_TAG: String = "folder-list:assistant:prompt"
 const val FOLDER_LIST_ASSISTANT_PROMPT_MIC_TAG: String = "folder-list:assistant:prompt-mic"
@@ -2257,6 +2266,9 @@ fun folderCountPillTestTag(path: String): String = "folder-list:count:$path"
 fun folderListFlatRowTestTag(sessionName: String): String = "folder-list:flat-row:$sessionName"
 fun folderListFlatRowStatusDotTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:status"
+/** Tags the leading terminal tile glyph on a flat host-detail row (#522 item 3). */
+fun folderListFlatRowTileTestTag(sessionName: String): String =
+    "folder-list:flat-row:$sessionName:tile"
 fun folderListFlatRowBadgeTestTag(sessionName: String): String =
     "folder-list:flat-row:$sessionName:badge"
 /** Tags the per-session "Stop session" kebab on a flat host-detail row (#518). */
@@ -2274,6 +2286,9 @@ fun folderStatusDotTestTag(folderPath: String): String =
     "folder-list:detail:$folderPath:status"
 fun folderSessionStatusDotTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:status"
+/** Tags the leading terminal tile glyph on a tree session child row (#522 item 3). */
+fun folderSessionTileTestTag(folderPath: String, sessionName: String): String =
+    "folder-list:detail:$folderPath:$sessionName:tile"
 fun folderSessionBadgeTestTag(folderPath: String, sessionName: String): String =
     "folder-list:detail:$folderPath:$sessionName:badge"
 /** Tags the per-session "Stop session" kebab on a tree session child row (#518). */

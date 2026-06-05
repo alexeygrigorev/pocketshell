@@ -614,7 +614,15 @@ private fun windowLabel(name: String): String = when (name.lowercase()) {
     "5h" -> "5h window"
     "7d" -> "7d window"
     "weekly" -> "Weekly limit"
-    else -> name.replaceFirstChar { it.uppercase() }
+    // #522 item 4: humanize raw snake_case keys (e.g. `short_term` /
+    // `long_term`) so the usage panel reads "Short term" / "Long term" rather
+    // than carrying the underscore. Splits on `_`, sentence-cases the first
+    // word, lowercases the rest so "Short term" reads as prose, not Title Case.
+    else -> name
+        .split('_')
+        .filter { it.isNotBlank() }
+        .joinToString(" ") { it.lowercase() }
+        .replaceFirstChar { it.uppercase() }
 }
 
 /**

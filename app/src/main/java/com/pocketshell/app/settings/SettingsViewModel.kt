@@ -186,6 +186,16 @@ class SettingsViewModel @Inject constructor(
         repository.setUsageWarnThresholdPercent(percent)
 
     /**
+     * Persist [delayMs] as the composer's agent-submit Enter delay (issue
+     * #526). The repository clamps + snaps to the slider grid, so a slider
+     * drag that lands on a fractional or out-of-band value snaps to a
+     * supported stop. The terminal send path reads this value to wait
+     * between typing the message text and pressing the submit Enter.
+     */
+    fun setAgentSubmitEnterDelayMs(delayMs: Int) =
+        repository.setAgentSubmitEnterDelayMs(delayMs)
+
+    /**
      * Persist [key] through the keystore-backed vault. The caller still
      * owns the [CharArray] and is responsible for zeroing it after this
      * call returns (matches the contract in

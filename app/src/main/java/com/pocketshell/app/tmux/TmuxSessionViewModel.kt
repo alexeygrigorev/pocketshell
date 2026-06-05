@@ -165,7 +165,30 @@ public class TmuxSessionViewModel @Inject constructor(
     // Nullable default keeps the existing unit-test constructors working
     // without supplying the singleton.
     private val sessionLifecycleSignals: SessionLifecycleSignals? = null,
+    // Issue #526: source of the user-configurable agent-submit Enter delay.
+    // The composer/agent send path types the message text, waits this delay,
+    // then sends the submit Enter as a separate `send-keys` so a fast Enter
+    // doesn't race ahead of the agent TUI's paste ingestion. Nullable default
+    // keeps the existing unit-test constructors working without the singleton;
+    // when absent the send path falls back to the built-in defaults.
+    private val settingsRepository: com.pocketshell.app.settings.SettingsRepository? = null,
 ) : ViewModel() {
+
+    /**
+     * Issue #526: test override for the configured agent-submit Enter delay
+     * (ms). Unit tests build the view model without the
+     * [com.pocketshell.app.settings.SettingsRepository] singleton, so this
+     * seam lets a test pin the delay the send path waits before pressing the
+     * submit Enter and assert the text → delay → Enter ordering with virtual
+     * time. Null means "fall back to the repository / built-in default".
+     */
+    @Volatile
+    private var agentSubmitEnterDelayMsOverrideForTest: Int? = null
+
+    @androidx.annotation.VisibleForTesting
+    internal fun setAgentSubmitEnterDelayForTest(delayMs: Int?) {
+        agentSubmitEnterDelayMsOverrideForTest = delayMs
+    }
 
     /** SSH executor seam for assistant tools; tests substitute it. */
     private var assistantSshExecutor: AssistantSshExecutor = RealAssistantSshExecutor()
@@ -3873,15 +3896,39 @@ public class TmuxSessionViewModel @Inject constructor(
                 client.sendCommand("send-keys -l -t $paneId -- '${escapeSingleQuoted(payload)}'")
                     .throwIfTmuxError("type agent input into pane $paneId")
             }
-            delayBeforeAgentSubmitIfNeeded(agent)
+            delayBeforeAgentSubmit(agent)
             client.sendCommand("send-keys -t $paneId Enter")
                 .throwIfTmuxError("submit pasted agent input")
         }
     }
 
-    private suspend fun delayBeforeAgentSubmitIfNeeded(agent: AgentKind) {
-        if (agent == AgentKind.Codex) {
-            delay(CODEX_AGENT_SUBMIT_DELAY_MS)
+    /**
+     * Issue #526: wait between typing the composer's message text into the
+     * agent pane and pressing the submit Enter, so the Enter never races
+     * ahead of the agent TUI finishing its paste ingestion (which left the
+     * message sitting unsent until the user pressed Enter manually).
+     *
+     * The wait is the user-configurable
+     * [com.pocketshell.app.settings.AppSettings.agentSubmitEnterDelayMs]
+     * (Settings → Terminal, default 150ms). Codex keeps a known-needed floor
+     * of [CODEX_AGENT_SUBMIT_DELAY_MS] so lowering the global delay can't
+     * regress the Codex TUI that motivated the original delay; the effective
+     * Codex wait is `max(configured, Codex floor)`.
+     *
+     * A zero effective delay sends the Enter back-to-back (the pre-#526
+     * behaviour) without a spurious `delay(0)` suspension.
+     */
+    private suspend fun delayBeforeAgentSubmit(agent: AgentKind) {
+        val configured = agentSubmitEnterDelayMsOverrideForTest
+            ?: settingsRepository?.settings?.value?.agentSubmitEnterDelayMs
+            ?: com.pocketshell.app.settings.AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS
+        val effective = if (agent == AgentKind.Codex) {
+            maxOf(configured.toLong(), CODEX_AGENT_SUBMIT_DELAY_MS)
+        } else {
+            configured.toLong()
+        }
+        if (effective > 0L) {
+            delay(effective)
         }
     }
 

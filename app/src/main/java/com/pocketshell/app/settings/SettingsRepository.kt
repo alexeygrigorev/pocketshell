@@ -161,6 +161,22 @@ class SettingsRepository @Inject constructor(
         _settings.value = _settings.value.copy(usageWarnThresholdPercent = snapped)
     }
 
+    /**
+     * Persist the composer's agent-submit Enter delay (ms). Issue #526.
+     * Clamped to [AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS] /
+     * [AppSettings.MAX_AGENT_SUBMIT_ENTER_DELAY_MS] and snapped to the
+     * slider grid so a hand-edited prefs file or slider rounding can't push
+     * the delay outside the useful band. The send path reads this value to
+     * decide how long to wait after typing the message text before pressing
+     * the submit Enter (closing the agent-TUI paste-ingest race).
+     */
+    fun setAgentSubmitEnterDelayMs(delayMs: Int) {
+        val snapped = snapAgentSubmitEnterDelay(delayMs)
+        if (_settings.value.agentSubmitEnterDelayMs == snapped) return
+        prefs.edit().putInt(KEY_AGENT_SUBMIT_ENTER_DELAY_MS, snapped).apply()
+        _settings.value = _settings.value.copy(agentSubmitEnterDelayMs = snapped)
+    }
+
     private fun readSnapshot(): AppSettings {
         val font = prefs.safeFloat(KEY_TERMINAL_FONT_SP, AppSettings.DEFAULT_TERMINAL_FONT_SP)
             .coerceIn(AppSettings.MIN_TERMINAL_FONT_SP, AppSettings.MAX_TERMINAL_FONT_SP)
@@ -202,6 +218,12 @@ class SettingsRepository @Inject constructor(
                 AppSettings.DEFAULT_USAGE_WARN_PERCENT,
             ),
         )
+        val agentSubmitEnterDelayMs = snapAgentSubmitEnterDelay(
+            prefs.safeInt(
+                KEY_AGENT_SUBMIT_ENTER_DELAY_MS,
+                AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS,
+            ),
+        )
         return AppSettings(
             terminalFontSizeSp = font,
             conversationFontSizeSp = conversationFont,
@@ -212,6 +234,28 @@ class SettingsRepository @Inject constructor(
             showSystemNotes = showSystemNotes,
             hostDetailViewMode = hostDetailViewMode,
             usageWarnThresholdPercent = usageWarnPercent,
+            agentSubmitEnterDelayMs = agentSubmitEnterDelayMs,
+        )
+    }
+
+    /**
+     * Snap [delayMs] to the nearest
+     * [AppSettings.AGENT_SUBMIT_ENTER_DELAY_STEP_MS] grid point within
+     * [AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS] /
+     * [AppSettings.MAX_AGENT_SUBMIT_ENTER_DELAY_MS]. Issue #526. Persistence
+     * and read both route through this helper so a legacy or hand-edited
+     * prefs value lands on a slider stop and stays inside the useful band.
+     */
+    private fun snapAgentSubmitEnterDelay(delayMs: Int): Int {
+        val clamped = delayMs.coerceIn(
+            AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS,
+            AppSettings.MAX_AGENT_SUBMIT_ENTER_DELAY_MS,
+        )
+        val step = AppSettings.AGENT_SUBMIT_ENTER_DELAY_STEP_MS
+        val snapped = ((clamped + step / 2) / step) * step
+        return snapped.coerceIn(
+            AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS,
+            AppSettings.MAX_AGENT_SUBMIT_ENTER_DELAY_MS,
         )
     }
 
@@ -282,5 +326,6 @@ class SettingsRepository @Inject constructor(
         const val KEY_SHOW_SYSTEM_NOTES = "show_system_notes"
         const val KEY_HOST_DETAIL_VIEW_MODE = "host_detail_view_mode"
         const val KEY_USAGE_WARN_THRESHOLD = "usage_warn_threshold_percent"
+        const val KEY_AGENT_SUBMIT_ENTER_DELAY_MS = "agent_submit_enter_delay_ms"
     }
 }

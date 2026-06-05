@@ -157,6 +157,8 @@ fun SettingsScreen(
                     onConversationFontSizeChange = viewModel::setConversationFontSizeSp,
                     tmuxOnAttach = settings.tmuxOnAttachByDefault,
                     onTmuxOnAttachChange = viewModel::setTmuxOnAttachByDefault,
+                    agentSubmitEnterDelayMs = settings.agentSubmitEnterDelayMs,
+                    onAgentSubmitEnterDelayChange = viewModel::setAgentSubmitEnterDelayMs,
                     hosts = hosts,
                     selectedHostId = settings.defaultHostId,
                     onSelectDefaultHost = viewModel::setDefaultHostId,
@@ -445,6 +447,8 @@ private fun TerminalSection(
     onConversationFontSizeChange: (Float) -> Unit,
     tmuxOnAttach: Boolean,
     onTmuxOnAttachChange: (Boolean) -> Unit,
+    agentSubmitEnterDelayMs: Int,
+    onAgentSubmitEnterDelayChange: (Int) -> Unit,
     hosts: List<com.pocketshell.core.storage.entity.HostEntity>,
     selectedHostId: Long?,
     onSelectDefaultHost: (Long?) -> Unit,
@@ -560,6 +564,55 @@ private fun TerminalSection(
                         uncheckedBorderColor = PocketShellColors.Border,
                     ),
                     modifier = Modifier.testTag(TMUX_SWITCH_TAG),
+                )
+            }
+
+            // Issue #526: agent-submit Enter delay. The composer types the
+            // message text into the agent pane, waits this long, then presses
+            // the submit Enter as a separate key so a fast Enter doesn't race
+            // ahead of the agent TUI's paste ingestion (which left the message
+            // sitting unsent). Lives next to the other terminal/session knobs.
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "Agent submit delay",
+                color = PocketShellColors.Text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = "Pause after typing a message before pressing Enter, so the " +
+                    "agent submits it instead of leaving it in the input. Raise this " +
+                    "if Send sometimes leaves text unsent.",
+                color = PocketShellColors.TextSecondary,
+                fontSize = 12.sp,
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Slider(
+                    value = agentSubmitEnterDelayMs.toFloat(),
+                    onValueChange = { onAgentSubmitEnterDelayChange(it.roundToInt()) },
+                    valueRange = AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS.toFloat()..
+                        AppSettings.MAX_AGENT_SUBMIT_ENTER_DELAY_MS.toFloat(),
+                    steps = ((AppSettings.MAX_AGENT_SUBMIT_ENTER_DELAY_MS -
+                        AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS) /
+                        AppSettings.AGENT_SUBMIT_ENTER_DELAY_STEP_MS) - 1,
+                    colors = SliderDefaults.colors(
+                        thumbColor = PocketShellColors.Accent,
+                        activeTrackColor = PocketShellColors.Accent,
+                        inactiveTrackColor = PocketShellColors.Border,
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .testTag(AGENT_SUBMIT_DELAY_SLIDER_TAG),
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+                Text(
+                    text = "${agentSubmitEnterDelayMs}ms",
+                    color = PocketShellColors.TextSecondary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    modifier = Modifier.testTag(AGENT_SUBMIT_DELAY_VALUE_TAG),
                 )
             }
 
@@ -1587,6 +1640,10 @@ internal const val TERMINAL_FONT_SLIDER_TAG = "settings:terminal:font-slider"
 internal const val CONVERSATION_FONT_SLIDER_TAG = "settings:terminal:conversation-font-slider"
 internal const val CONVERSATION_FONT_VALUE_TAG = "settings:terminal:conversation-font-value"
 internal const val TMUX_SWITCH_TAG = "settings:terminal:tmux-switch"
+// Issue #526: agent-submit Enter delay slider + its right-aligned "Xms"
+// value label, placed under Settings → Terminal.
+internal const val AGENT_SUBMIT_DELAY_SLIDER_TAG = "settings:terminal:agent-submit-delay-slider"
+internal const val AGENT_SUBMIT_DELAY_VALUE_TAG = "settings:terminal:agent-submit-delay-value"
 internal const val DEFAULT_HOST_NONE_TAG = "settings:startup:default-host:none"
 internal const val DEFAULT_HOST_EMPTY_TAG = "settings:startup:default-host:empty"
 internal const val DIAGNOSTICS_CRASHES_TAG = "settings:diagnostics:crashes"

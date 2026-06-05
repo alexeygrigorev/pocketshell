@@ -2723,6 +2723,74 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun agentSubmitDelaysFinalEnterByConfiguredDelayForClaudeCode() = runTest {
+        // Issue #526: the composer/agent send path types the message text,
+        // waits the user-configurable delay, then presses the submit Enter as
+        // a SEPARATE send-keys so the Enter can't race ahead of the agent
+        // TUI's paste ingestion (which left the message sitting unsent). This
+        // applies to every agent now, not just Codex.
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.setAgentSubmitEnterDelayForTest(200)
+
+        val send = async { vm.sendToAgentPaneResult("%0", "  run tests  ") }
+        runCurrent()
+
+        // Text is typed immediately; the submit Enter must NOT have been sent
+        // yet — it waits out the configured delay first.
+        assertEquals(
+            "Send should type the prompt before waiting to press Enter",
+            listOf("send-keys -l -t %0 -- 'run tests'"),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+
+        advanceTimeBy(199L)
+        runCurrent()
+        assertEquals(
+            "Submit Enter must not fire before the configured delay elapses",
+            listOf("send-keys -l -t %0 -- 'run tests'"),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+
+        advanceTimeBy(1L)
+        assertTrue(send.await().isSuccess)
+        assertEquals(
+            "After the configured delay the submit Enter fires as a separate key",
+            listOf(
+                "send-keys -l -t %0 -- 'run tests'",
+                "send-keys -t %0 Enter",
+            ),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+    }
+
+    @Test
+    fun agentSubmitWithZeroConfiguredDelaySendsEnterBackToBack() = runTest {
+        // Issue #526: a 0ms delay restores the pre-#526 back-to-back behaviour
+        // for users whose agent never races — no spurious suspension between
+        // the text and the submit Enter.
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.setAgentSubmitEnterDelayForTest(0)
+
+        val result = vm.sendToAgentPaneResult("%0", "ship it")
+        runCurrent()
+
+        assertTrue(result.isSuccess)
+        assertEquals(
+            listOf(
+                "send-keys -l -t %0 -- 'ship it'",
+                "send-keys -t %0 Enter",
+            ),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+    }
+
+    @Test
     fun rawPaneInputDoesNotUseCodexAgentSubmitDelay() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()

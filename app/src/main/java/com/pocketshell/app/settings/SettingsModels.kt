@@ -76,6 +76,19 @@ data class AppSettings(
      * as red regardless of where the slider sits.
      */
     val usageWarnThresholdPercent: Int = DEFAULT_USAGE_WARN_PERCENT,
+    /**
+     * Issue #526: how long PocketShell waits after typing the composer's
+     * message text into the agent pane before pressing the submit Enter, in
+     * milliseconds. The composer's Send writes the text and the submit Enter
+     * as two separate `send-keys` calls; on a busy TUI (Claude Code, Codex)
+     * an Enter that lands before the agent has finished ingesting the pasted
+     * text is not treated as submit, so the message sits unsent in the input
+     * line. This configurable delay closes that race. Default
+     * [DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS]; tunable between
+     * [MIN_AGENT_SUBMIT_ENTER_DELAY_MS] and [MAX_AGENT_SUBMIT_ENTER_DELAY_MS]
+     * via the Settings → Terminal slider.
+     */
+    val agentSubmitEnterDelayMs: Int = DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS,
 ) {
     companion object {
         const val MIN_TERMINAL_FONT_SP: Float = 10f
@@ -194,6 +207,28 @@ data class AppSettings(
          * any meaningful interpretation difference.
          */
         const val USAGE_WARN_PERCENT_STEP: Int = 5
+
+        /**
+         * Issue #526: bounds + default for the composer agent-submit Enter
+         * delay (ms). After typing the message text into the agent pane the
+         * composer waits this long, then sends the submit Enter as a separate
+         * `send-keys` so a fast Enter doesn't race ahead of the agent TUI's
+         * paste ingestion (which leaves the message sitting unsent).
+         *
+         * - Default 150ms sits in the maintainer-suggested 100–300ms band:
+         *   long enough for Claude Code / Codex to finish ingesting a typical
+         *   composer message before the submit Enter, short enough that Send
+         *   still feels instant.
+         * - The floor is 0ms (back-to-back, the pre-#526 behaviour) for users
+         *   whose agent never races; the ceiling 1000ms covers a sluggish TUI
+         *   without letting a hand-edited prefs value make Send feel broken.
+         * - The slider grain is 50ms, giving a fine set of stops across the
+         *   useful range.
+         */
+        const val MIN_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 0
+        const val MAX_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 1000
+        const val DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS: Int = 150
+        const val AGENT_SUBMIT_ENTER_DELAY_STEP_MS: Int = 50
     }
 }
 

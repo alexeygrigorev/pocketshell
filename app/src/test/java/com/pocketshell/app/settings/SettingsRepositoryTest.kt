@@ -409,4 +409,61 @@ class SettingsRepositoryTest {
         repo.setUsageWarnThresholdPercent(73)
         assertEquals(75, repo.settings.value.usageWarnThresholdPercent)
     }
+
+    @Test
+    fun `agentSubmitEnterDelay defaults to 150ms`() {
+        // Issue #526: fresh install gets the maintainer-suggested ~150ms
+        // delay so the composer's submit Enter never races ahead of the
+        // agent TUI's paste ingestion.
+        val repo = SettingsRepository(context)
+        assertEquals(
+            AppSettings.DEFAULT_AGENT_SUBMIT_ENTER_DELAY_MS,
+            repo.settings.value.agentSubmitEnterDelayMs,
+        )
+        assertEquals(150, repo.settings.value.agentSubmitEnterDelayMs)
+    }
+
+    @Test
+    fun `setAgentSubmitEnterDelayMs persists and round-trips`() {
+        val repo = SettingsRepository(context)
+        repo.setAgentSubmitEnterDelayMs(300)
+        assertEquals(300, repo.settings.value.agentSubmitEnterDelayMs)
+        // Reload from disk to prove persistence.
+        assertEquals(
+            300,
+            SettingsRepository(context).settings.value.agentSubmitEnterDelayMs,
+        )
+    }
+
+    @Test
+    fun `setAgentSubmitEnterDelayMs clamps below minimum`() {
+        val repo = SettingsRepository(context)
+        repo.setAgentSubmitEnterDelayMs(-50)
+        assertEquals(
+            AppSettings.MIN_AGENT_SUBMIT_ENTER_DELAY_MS,
+            repo.settings.value.agentSubmitEnterDelayMs,
+        )
+    }
+
+    @Test
+    fun `setAgentSubmitEnterDelayMs clamps above maximum`() {
+        val repo = SettingsRepository(context)
+        repo.setAgentSubmitEnterDelayMs(5000)
+        assertEquals(
+            AppSettings.MAX_AGENT_SUBMIT_ENTER_DELAY_MS,
+            repo.settings.value.agentSubmitEnterDelayMs,
+        )
+    }
+
+    @Test
+    fun `setAgentSubmitEnterDelayMs snaps to slider step`() {
+        // The slider grain is 50ms per
+        // [AppSettings.AGENT_SUBMIT_ENTER_DELAY_STEP_MS], so an arbitrary 170
+        // value should snap to the nearest stop (150).
+        val repo = SettingsRepository(context)
+        repo.setAgentSubmitEnterDelayMs(170)
+        assertEquals(150, repo.settings.value.agentSubmitEnterDelayMs)
+        repo.setAgentSubmitEnterDelayMs(180)
+        assertEquals(200, repo.settings.value.agentSubmitEnterDelayMs)
+    }
 }

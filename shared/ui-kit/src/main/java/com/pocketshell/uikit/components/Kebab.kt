@@ -33,6 +33,17 @@ import com.pocketshell.uikit.theme.PocketShellType
  * icon renders a label-only row (e.g. a destructive or rarely-used action that
  * doesn't have a glyph in `material-icons-core`, the only ramp on the
  * classpath).
+ *
+ * Most rows are a plain label (+ optional [icon]). A row that needs richer
+ * content — e.g. a non-clickable status header that renders a badge instead of
+ * a text label — can supply [content], which fully replaces the label/icon
+ * rendering. Pair [content] with `enabled = false` + a no-op [onClick] for a
+ * read-only header row.
+ *
+ * [contentDescription] sets a semantics content description on the row so
+ * instrumentation can locate it by description (some call sites historically
+ * located the action by `contentDescription` rather than [testTag]); both can
+ * be set independently.
  */
 data class KebabItem(
     val label: String,
@@ -40,7 +51,15 @@ data class KebabItem(
     val icon: ImageVector? = null,
     /** Optional stable test tag for the menu item, for instrumentation. */
     val testTag: String? = null,
+    /** Optional semantics content description for the menu item. */
+    val contentDescription: String? = null,
     val enabled: Boolean = true,
+    /**
+     * Optional custom content that replaces the default label/icon row. Used
+     * for read-only header rows that render a badge or other composable
+     * instead of a plain label.
+     */
+    val content: (@Composable () -> Unit)? = null,
 )
 
 /**
@@ -64,12 +83,17 @@ data class KebabItem(
  * one-liner: `Kebab(items = listOf(KebabItem("Ports", onPorts), …))`. A caller
  * that needs to drive expansion externally can wire [expanded] + [onExpandedChange];
  * pass both to control it.
+ *
+ * [triggerTestTag] overrides the default [KEBAB_BUTTON_TAG] on the trigger so a
+ * screen that already has stable instrumentation for its overflow button can
+ * adopt this component without breaking existing tests.
  */
 @Composable
 fun Kebab(
     items: List<KebabItem>,
     modifier: Modifier = Modifier,
     contentDescription: String = "More actions",
+    triggerTestTag: String = KEBAB_BUTTON_TAG,
     expanded: Boolean? = null,
     onExpandedChange: ((Boolean) -> Unit)? = null,
 ) {
@@ -87,7 +111,7 @@ fun Kebab(
                 .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = CircleShape)
                 .clickable(role = Role.Button, onClick = { setExpanded(true) })
                 .semantics { this.contentDescription = contentDescription }
-                .testTag(KEBAB_BUTTON_TAG),
+                .testTag(triggerTestTag),
             contentAlignment = Alignment.Center,
         ) {
             KebabIcon()
@@ -98,9 +122,16 @@ fun Kebab(
             modifier = Modifier.background(PocketShellColors.SurfaceElev),
         ) {
             items.forEach { item ->
+                var itemModifier: Modifier = Modifier
+                item.contentDescription?.let { description ->
+                    itemModifier = itemModifier.semantics { this.contentDescription = description }
+                }
+                item.testTag?.let { tag ->
+                    itemModifier = itemModifier.testTag(tag)
+                }
                 DropdownMenuItem(
                     enabled = item.enabled,
-                    text = {
+                    text = item.content ?: {
                         Text(
                             text = item.label,
                             color = PocketShellColors.Text,
@@ -121,7 +152,7 @@ fun Kebab(
                         setExpanded(false)
                         item.onClick()
                     },
-                    modifier = item.testTag?.let { Modifier.testTag(it) } ?: Modifier,
+                    modifier = itemModifier,
                 )
             }
         }

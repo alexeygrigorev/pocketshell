@@ -37,8 +37,6 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -84,6 +82,8 @@ import com.pocketshell.app.voice.appendDictationText
 import com.pocketshell.app.voice.toMicButtonState
 import com.pocketshell.uikit.components.Badge
 import com.pocketshell.uikit.components.BadgeRole
+import com.pocketshell.uikit.components.Kebab
+import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.MicButton
 import com.pocketshell.uikit.components.SectionHeader
@@ -706,10 +706,11 @@ private fun FolderListAppBar(
 /**
  * Single `⋮` kebab overflow for the host-detail header (#522 item 2). Consolidates
  * the former Browse repos / Host assistant / Workspace settings circular buttons
- * into one menu, matching the host-list card kebab pattern. Each former button's
- * `contentDescription` + test tag move onto its [DropdownMenuItem] so existing
- * instrumentation (which located the action by tag / description) keeps working
- * once the menu is open.
+ * into one menu. Renders the shared [Kebab] component (#461 design-system
+ * consolidation) so the trigger glyph + menu chrome match every other overflow
+ * across the app. Each former button's `contentDescription` + test tag move onto
+ * its [KebabItem] so existing instrumentation (which located the action by tag /
+ * description) keeps working once the menu is open.
  */
 @Composable
 private fun FolderListOverflowMenu(
@@ -717,68 +718,29 @@ private fun FolderListOverflowMenu(
     onOpenAssistant: () -> Unit,
     onOpenWorkspaceSettings: () -> Unit,
 ) {
-    var expanded by remember { mutableStateOf(false) }
-    Box {
-        TopBarIconButton(
-            contentDescription = "More actions",
-            testTag = FOLDER_LIST_OVERFLOW_TAG,
-            onClick = { expanded = true },
-        ) {
-            HostDetailKebabIcon()
-        }
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-        ) {
-            DropdownMenuItem(
-                text = { Text("Host assistant") },
-                onClick = {
-                    expanded = false
-                    onOpenAssistant()
-                },
-                modifier = Modifier
-                    .semantics { contentDescription = "Host assistant" }
-                    .testTag(FOLDER_LIST_ASSISTANT_TAG),
-            )
-            DropdownMenuItem(
-                text = { Text("Browse repos") },
-                onClick = {
-                    expanded = false
-                    onBrowseRepos()
-                },
-                modifier = Modifier
-                    .semantics { contentDescription = "Browse repos" }
-                    .testTag(FOLDER_LIST_BROWSE_REPOS_TAG),
-            )
-            DropdownMenuItem(
-                text = { Text("Workspace settings") },
-                onClick = {
-                    expanded = false
-                    onOpenWorkspaceSettings()
-                },
-                modifier = Modifier
-                    .semantics { contentDescription = "Workspace settings" }
-                    .testTag(FOLDER_LIST_WORKSPACE_SETTINGS_TAG),
-            )
-        }
-    }
-}
-
-/**
- * Vertical three-dot kebab glyph for the host-detail header overflow (#522).
- * Drawn with [Canvas] (no `material-icons-extended` dependency), matching the
- * host-list card kebab visual.
- */
-@Composable
-private fun HostDetailKebabIcon() {
-    val color = PocketShellColors.TextSecondary
-    Canvas(modifier = Modifier.size(width = 4.dp, height = 18.dp)) {
-        val r = size.width / 2f
-        val gap = (size.height - 6f * r) / 2f
-        drawCircle(color = color, radius = r, center = Offset(r, r))
-        drawCircle(color = color, radius = r, center = Offset(r, 3f * r + gap))
-        drawCircle(color = color, radius = r, center = Offset(r, 5f * r + 2f * gap))
-    }
+    Kebab(
+        triggerTestTag = FOLDER_LIST_OVERFLOW_TAG,
+        items = listOf(
+            KebabItem(
+                label = "Host assistant",
+                onClick = onOpenAssistant,
+                contentDescription = "Host assistant",
+                testTag = FOLDER_LIST_ASSISTANT_TAG,
+            ),
+            KebabItem(
+                label = "Browse repos",
+                onClick = onBrowseRepos,
+                contentDescription = "Browse repos",
+                testTag = FOLDER_LIST_BROWSE_REPOS_TAG,
+            ),
+            KebabItem(
+                label = "Workspace settings",
+                onClick = onOpenWorkspaceSettings,
+                contentDescription = "Workspace settings",
+                testTag = FOLDER_LIST_WORKSPACE_SETTINGS_TAG,
+            ),
+        ),
+    )
 }
 
 @Composable
@@ -894,27 +856,6 @@ private fun HostDetailAssistantPanel(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun TopBarIconButton(
-    contentDescription: String,
-    testTag: String,
-    onClick: () -> Unit,
-    content: @Composable () -> Unit,
-) {
-    Box(
-        modifier = Modifier
-            .size(40.dp)
-            .background(color = PocketShellColors.SurfaceElev, shape = CircleShape)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = CircleShape)
-            .semantics { this.contentDescription = contentDescription }
-            .clickable(role = Role.Button, onClick = onClick)
-            .testTag(testTag),
-        contentAlignment = Alignment.Center,
-    ) {
-        content()
     }
 }
 

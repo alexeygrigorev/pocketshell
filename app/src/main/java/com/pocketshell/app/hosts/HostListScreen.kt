@@ -28,8 +28,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -64,6 +62,8 @@ import com.pocketshell.app.sessions.SessionsDashboardViewModel
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.components.HostCard
+import com.pocketshell.uikit.components.Kebab
+import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.model.HostSetupState
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlinx.coroutines.channels.Channel
@@ -1231,24 +1231,20 @@ private fun SettingsGearIcon() {
 }
 
 /**
- * Trailing kebab (vertical three-dot) button + the [DropdownMenu] it
- * anchors. Lives in the [HostCard]'s `trailingContent` slot. Tapping
- * the icon flips [expanded] via the caller; long-press on the card
- * also calls back to flip the same state so the menu is reachable both
- * ways. The icon is drawn directly with [Canvas] to avoid pulling in
- * `material-icons-extended` for a single glyph (`Icons.Filled.MoreVert`
- * is not part of `material-icons-core`, the only ramp on our
- * classpath).
+ * Trailing kebab (vertical three-dot) overflow for the host card. Renders the
+ * shared [com.pocketshell.uikit.components.Kebab] component (#461 design-system
+ * consolidation), which draws the trigger glyph + the menu it anchors. Lives in
+ * the [HostCard]'s `trailingContent` slot. Tapping the trigger flips [expanded]
+ * via the caller; long-press on the card also calls back to flip the same state
+ * so the menu is reachable both ways.
  *
- * Issue #155: the 40 dp tap target now carries a permanent visible
- * affordance — a circular [PocketShellColors.SurfaceElev] background
- * with a 1 dp [PocketShellColors.BorderSoft] hairline border —
- * matching the design-system §8 requirement that the kebab read as
- * "always visible affordance". Previously the icon was drawn directly
- * on the card surface, which made it easy to miss against the host's
- * setup-state badge and avatar colour. The same issue also moves the
- * usage record into this menu so it no longer competes with the
- * setup-state badge in the row.
+ * Issue #155: the 40 dp tap target carries a permanent visible affordance — a
+ * circular [PocketShellColors.SurfaceElev] background with a 1 dp
+ * [PocketShellColors.BorderSoft] hairline border — matching the design-system §8
+ * requirement that the kebab read as "always visible affordance". The shared
+ * Kebab draws exactly this chrome. The usage record is rendered as the first,
+ * non-clickable menu row so it no longer competes with the setup-state badge in
+ * the row.
  */
 @Composable
 internal fun HostOverflowMenuAnchor(
@@ -1265,102 +1261,88 @@ internal fun HostOverflowMenuAnchor(
     onShare: () -> Unit,
     onRecheckSetup: () -> Unit,
 ) {
-    Box {
-        // Issue #155: render the kebab inside a 40 dp circular
-        // SurfaceElev container with a 1 dp BorderSoft hairline border
-        // so the affordance is visually obvious. The design-system §8
-        // re-spec explicitly calls for a "circular (20 dp radius)"
-        // kebab; the hairline border keeps it on the same chrome
-        // language as the host card (Δ3 — borders, not shadows).
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .background(color = PocketShellColors.SurfaceElev, shape = CircleShape)
-                .border(width = 1.dp, color = PocketShellColors.BorderSoft, shape = CircleShape)
-                .clickable(role = Role.Button, onClick = onExpand)
-                .testTag(HOST_OVERFLOW_BUTTON_TAG),
-            contentAlignment = Alignment.Center,
-        ) {
-            KebabIcon()
-        }
-        DropdownMenu(
-            expanded = expanded,
-            onDismissRequest = onDismiss,
-        ) {
-            // Issue #155: per-host usage status surfaced as the first
-            // menu entry when the scheduler has a blocked / near-limit
-            // record for the host. Rendered as a non-clickable header
-            // row (no `onClick`) so it reads as state rather than an
-            // action — the user can already drill into the cross-host
-            // Usage dashboard from the strip above the host list. The
-            // pill is wrapped in a Box carrying the existing
-            // `host:usage-badge:<id>` test tag so instrumentation that
-            // previously located the inline chip keeps working.
-            if (usageRecord != null) {
-                DropdownMenuItem(
+    // Issue #461: render the shared Kebab component instead of a hand-rolled
+    // trigger + DropdownMenu. Expansion is driven externally (the host card's
+    // long-press also opens this menu), so [expanded] / [onExpandedChange] are
+    // wired through. The trigger keeps its stable HOST_OVERFLOW_BUTTON_TAG; the
+    // 40 dp circular SurfaceElev + 1 dp BorderSoft hairline chrome the shared
+    // Kebab draws is the same affordance #155 specced here.
+    val items = buildList {
+        // Issue #155: per-host usage status surfaced as the first menu entry
+        // when the scheduler has a blocked / near-limit record for the host.
+        // Rendered as a non-clickable header row (disabled, no-op onClick) so it
+        // reads as state rather than an action. The pill is wrapped in a Box
+        // carrying the existing `host:usage-badge:<id>` test tag so
+        // instrumentation that previously located the inline chip keeps working.
+        if (usageRecord != null) {
+            add(
+                KebabItem(
+                    label = "",
+                    onClick = {},
                     enabled = false,
-                    text = {
+                    content = {
                         Box(modifier = Modifier.testTag(usageBadgeTestTag)) {
                             com.pocketshell.app.usage.UsageSessionBlockedBadge(
                                 provider = usageRecord,
                             )
                         }
                     },
-                    onClick = {},
-                )
-            }
-            // Issue #519: restore the host-edit entry point. The
-            // long-press → Edit affordance was dropped in #38 when
-            // long-press became "open kebab" (#113), which silently
-            // orphaned the `onEditHost` route — delete-and-re-add was
-            // the only way to change a host's name / address / key.
-            // Edit is the primary per-host config action, so it sits at
-            // the top of the action list, above the read/glance items
-            // (Usage/Ports) and well clear of destructive Share/re-check.
-            DropdownMenuItem(
-                text = { Text("Edit") },
-                onClick = onEdit,
-                modifier = Modifier.testTag(HOST_EDIT_ITEM_TAG),
-            )
-            // Issue #483: discoverable, labelled per-host entry to the
-            // Usage detail. Sits at the top of the action list (above
-            // Ports) so the quota glance is one obvious tap from the
-            // host it belongs to. Only rendered when the nav graph
-            // supplied a route.
-            if (onOpenUsage != null) {
-                DropdownMenuItem(
-                    text = { Text("Usage") },
-                    onClick = onOpenUsage,
-                    modifier = Modifier.testTag(usageMenuItemTestTag),
-                )
-            }
-            DropdownMenuItem(
-                text = { Text("Ports") },
-                onClick = onOpenPorts,
-            )
-            // Issue #206: per-host watched-folders configuration.
-            // Placed above Share so the quick-access config row sits
-            // next to Ports (other per-host config) rather than mixed
-            // with sharing / diagnostics affordances.
-            DropdownMenuItem(
-                text = { Text("Watched folders") },
-                onClick = onOpenWatchedFolders,
-                modifier = Modifier.testTag(HOST_WATCHED_FOLDERS_ITEM_TAG),
-            )
-            DropdownMenuItem(
-                text = { Text("Share") },
-                onClick = onShare,
-            )
-            // Issue #120: manual re-probe entry point. Sits below the
-            // existing items so the placement is visually stable when
-            // long-press users learn the menu layout.
-            DropdownMenuItem(
-                text = { Text(RECHECK_SETUP_LABEL) },
-                onClick = onRecheckSetup,
-                modifier = Modifier.testTag(HOST_RECHECK_SETUP_ITEM_TAG),
+                ),
             )
         }
+        // Issue #519: restore the host-edit entry point. The long-press → Edit
+        // affordance was dropped in #38 when long-press became "open kebab"
+        // (#113), which silently orphaned the `onEditHost` route. Edit is the
+        // primary per-host config action, so it sits at the top of the action
+        // list, above the read/glance items (Usage/Ports) and well clear of
+        // destructive Share/re-check.
+        add(
+            KebabItem(
+                label = "Edit",
+                onClick = onEdit,
+                testTag = HOST_EDIT_ITEM_TAG,
+            ),
+        )
+        // Issue #483: discoverable, labelled per-host entry to the Usage detail.
+        // Only rendered when the nav graph supplied a route.
+        if (onOpenUsage != null) {
+            add(
+                KebabItem(
+                    label = "Usage",
+                    onClick = onOpenUsage,
+                    testTag = usageMenuItemTestTag,
+                ),
+            )
+        }
+        add(KebabItem(label = "Ports", onClick = onOpenPorts))
+        // Issue #206: per-host watched-folders configuration. Placed above Share
+        // so the quick-access config row sits next to Ports (other per-host
+        // config) rather than mixed with sharing / diagnostics affordances.
+        add(
+            KebabItem(
+                label = "Watched folders",
+                onClick = onOpenWatchedFolders,
+                testTag = HOST_WATCHED_FOLDERS_ITEM_TAG,
+            ),
+        )
+        add(KebabItem(label = "Share", onClick = onShare))
+        // Issue #120: manual re-probe entry point. Sits below the existing items
+        // so the placement is visually stable when long-press users learn the
+        // menu layout.
+        add(
+            KebabItem(
+                label = RECHECK_SETUP_LABEL,
+                onClick = onRecheckSetup,
+                testTag = HOST_RECHECK_SETUP_ITEM_TAG,
+            ),
+        )
     }
+    Kebab(
+        items = items,
+        triggerTestTag = HOST_OVERFLOW_BUTTON_TAG,
+        expanded = expanded,
+        onExpandedChange = { next -> if (next) onExpand() else onDismiss() },
+    )
 }
 
 internal const val HOST_OVERFLOW_BUTTON_TAG: String = "host:overflow:button"
@@ -1373,34 +1355,6 @@ internal const val HOST_RECHECK_SETUP_ITEM_TAG: String = "host:overflow:recheck-
 // config screen without depending on free-form text.
 const val HOST_WATCHED_FOLDERS_ITEM_TAG: String = "host:overflow:watched-folders"
 internal const val RECHECK_SETUP_LABEL: String = "Re-check setup"
-
-/**
- * Three small dots stacked vertically — the classic Android "more"
- * affordance. Drawn with [Canvas] (3 filled circles) because
- * `material-icons-core` (the only icon ramp on the classpath; see the
- * comment on `DictateDotIcon` in `SessionScreen.kt`) does not ship
- * `MoreVert`. Coloured `TextSecondary` so it reads as chrome, not a
- * primary affordance.
- */
-@Composable
-private fun KebabIcon() {
-    val color = PocketShellColors.TextSecondary
-    Canvas(modifier = Modifier.size(width = 4.dp, height = 18.dp)) {
-        val r = size.width / 2f
-        val gap = (size.height - 6f * r) / 2f
-        drawCircle(color = color, radius = r, center = androidx.compose.ui.geometry.Offset(r, r))
-        drawCircle(
-            color = color,
-            radius = r,
-            center = androidx.compose.ui.geometry.Offset(r, 3f * r + gap),
-        )
-        drawCircle(
-            color = color,
-            radius = r,
-            center = androidx.compose.ui.geometry.Offset(r, 5f * r + 2f * gap),
-        )
-    }
-}
 
 @Composable
 internal fun ShareMessageBanner(message: String, onDismiss: () -> Unit) {

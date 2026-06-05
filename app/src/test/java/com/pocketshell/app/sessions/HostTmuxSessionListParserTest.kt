@@ -129,6 +129,47 @@ class HostTmuxSessionListParserTest {
     }
 
     @Test
+    fun parseTmuxListSessionsReadsSessionPathFromFiveFieldShape() {
+        // Issue #463: the warm live-client query appends `#{session_path}`.
+        val rows = parser.parseTmuxListSessions(
+            "codex::1779520800::1779521400::1::/home/alexey/git/pocketshell\n" +
+                "idle::1779510000::1779510500::0::/home/alexey/git/other\n",
+        )
+
+        assertEquals(listOf("codex", "idle"), rows.map { it.name })
+        assertEquals(
+            listOf("/home/alexey/git/pocketshell", "/home/alexey/git/other"),
+            rows.map { it.path },
+        )
+        assertEquals(1779520800L, rows[0].createdAt)
+        assertTrue(rows[0].attached)
+        assertFalse(rows[1].attached)
+    }
+
+    @Test
+    fun parseTmuxListSessionsFiveFieldKeepsNameWithDoubleColons() {
+        // Issue #463: a name containing `::` must not be eaten by the new
+        // 5-field path; created/activity/attached are numeric so the name
+        // absorbs the leading double-colon segment.
+        val rows = parser.parseTmuxListSessions(
+            "codex::feature::1779520800::1779521400::1::/srv/app\n",
+        )
+
+        assertEquals(listOf("codex::feature"), rows.map { it.name })
+        assertEquals(listOf("/srv/app"), rows.map { it.path })
+    }
+
+    @Test
+    fun parseTmuxListSessionsFourFieldShapeHasNullPath() {
+        // The host-wide tmux/pocketshell fallbacks still emit 4 fields; path
+        // must be null there so the project switcher treats it as unknown.
+        val rows = parser.parseTmuxListSessions("codex::1779520800::1779521400::1\n")
+
+        assertEquals(listOf("codex"), rows.map { it.name })
+        assertNull(rows[0].path)
+    }
+
+    @Test
     fun parseTmuxListSessionsAcceptsTabDelimitedRows() {
         val rows = parser.parseTmuxListSessions("codex\t1779520800\t1779521400\t1\n")
 

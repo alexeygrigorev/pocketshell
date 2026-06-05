@@ -38,8 +38,8 @@ class HostTmuxSessionsGatewayTest {
         client.responses += CommandResponse(
             number = 1L,
             output = listOf(
-                "beta::101::301::1",
-                "alpha::100::300::0",
+                "beta::101::301::1::/home/alexey/git/pocketshell",
+                "alpha::100::300::0::/home/alexey/git/other",
             ),
             isError = false,
         )
@@ -59,9 +59,17 @@ class HostTmuxSessionsGatewayTest {
         assertTrue(result is HostTmuxSessionListResult.Sessions)
         val rows = (result as HostTmuxSessionListResult.Sessions).rows
         assertEquals(listOf("beta", "alpha"), rows.map { it.name })
+        assertEquals(
+            listOf("/home/alexey/git/pocketshell", "/home/alexey/git/other"),
+            rows.map { it.path },
+        )
         assertEquals(0, SshOpenTelemetry.count(SSH_SOURCE_SESSION_PICKER_LIST))
         assertEquals(
-            listOf("list-sessions -F '#{session_name}::#{session_created}::#{session_activity}::#{session_attached}'"),
+            listOf(
+                "list-sessions -F " +
+                    "'#{session_name}::#{session_created}::#{session_activity}::" +
+                    "#{session_attached}::#{session_path}'",
+            ),
             client.sentCommands,
         )
     }

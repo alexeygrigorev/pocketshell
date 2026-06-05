@@ -7,6 +7,14 @@ data class HostTmuxSessionRow(
     val createdAt: Long? = null,
     val lastActivity: Long? = null,
     val attached: Boolean = false,
+    /**
+     * Issue #463: the session's working directory (`#{session_path}`),
+     * populated by the warm live-client `list-sessions` query so the
+     * in-session project switcher can group sessions by project/folder.
+     * Null when the source list shape did not carry a path (e.g. the
+     * `pocketshell sessions list` proxy or the fallback regex parse).
+     */
+    val path: String? = null,
 )
 
 data class HostTmuxSessionPickerRequest(

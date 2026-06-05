@@ -154,6 +154,16 @@ class TmuxSessionScreenTest {
     }
 
     @Test
+    fun projectCrumbLabelReturnsLeafFolderName() {
+        assertEquals("pocketshell", projectCrumbLabel("/home/alexey/git/pocketshell"))
+        assertEquals("pocketshell", projectCrumbLabel("/home/alexey/git/pocketshell/"))
+        assertEquals("work", projectCrumbLabel("~/work"))
+        assertEquals("~", projectCrumbLabel("~"))
+        assertEquals("/", projectCrumbLabel("/"))
+        assertEquals("/", projectCrumbLabel("   "))
+    }
+
+    @Test
     fun tmuxSessionTabStateShowsOnlyTerminalForNonAgentPane() {
         val state = tmuxSessionTabState(null)
 

@@ -60,6 +60,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
@@ -304,6 +305,10 @@ public fun TmuxSessionScreen(
         rememberStartDirectoryAutocompleteController(suggestStartDirectories)
     val agentConversations by viewModel.agentConversations.collectAsState()
     val sessionPickerState by sessionPickerViewModel.state.collectAsState()
+    // Issue #463: the in-session project switcher's sibling list, sourced
+    // from the warm live `-CC` client only (no SSH handshake) so tapping the
+    // header project crumb and switching stays instant.
+    val projectSwitcherState by sessionPickerViewModel.projectSwitcher.collectAsState()
     val assistantState by viewModel.assistantState.collectAsState()
     val dictationState by inlineDictationViewModel.uiState.collectAsState()
     // Issue #176: collected once at the screen root so the conversation
@@ -347,6 +352,12 @@ public fun TmuxSessionScreen(
     val currentWindowId = currentPane?.windowId
     val windows = remember(panes) { panes.toWindowSummaries() }
     val scope = rememberCoroutineScope()
+
+    // Issue #463: the current session's project path (the active pane's
+    // working directory) and the short leaf label shown on the header crumb.
+    // Null cwd → no crumb (we don't know the project to scope siblings to).
+    val projectPath = currentPane?.cwd?.takeIf { it.isNotBlank() }
+    val projectLabel = remember(projectPath) { projectPath?.let(::projectCrumbLabel) }
     val haptics = LocalHapticFeedback.current
     val verticalSwipeThresholdPx = with(LocalDensity.current) { VerticalSwipeThreshold.toPx() }
     var moreExpanded by remember { mutableStateOf(false) }
@@ -556,6 +567,26 @@ public fun TmuxSessionScreen(
         )
     }
 
+    // Issue #463: keep the project switcher's sibling list fresh from the
+    // warm live `-CC` client while the session is connected. Re-runs when the
+    // active pane's project path changes (window/pane switch) or the session
+    // becomes live, so the dropdown reflects the live session list without an
+    // SSH handshake. Cleared on dispose so a destroyed screen doesn't leak a
+    // stale list into the singleton-scoped picker VM.
+    LaunchedEffect(sessionPickerRequest, projectPath, sessionName, sessionLive) {
+        if (sessionLive) {
+            sessionPickerViewModel.refreshProjectSiblings(
+                host = sessionPickerRequest.host,
+                keyPath = sessionPickerRequest.keyPath,
+                currentSessionName = sessionName,
+                projectPath = projectPath,
+            )
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose { sessionPickerViewModel.clearProjectSiblings() }
+    }
+
     fun openTextDialog(
         mode: TmuxDialogMode,
         initialText: String = "",
@@ -744,6 +775,29 @@ public fun TmuxSessionScreen(
                                 // opens the existing #436 [AgentCommandSheet].
                                 showCommandPalette = paletteAgent != null,
                                 onCommandPalette = { showAgentCommands = true },
+                                // Issue #463: the tappable project crumb +
+                                // sibling-session dropdown. Refresh the warm
+                                // sibling list on open, and route a selection
+                                // through the same warm same-host switch the
+                                // session-switcher overlay uses.
+                                projectLabel = projectLabel,
+                                projectSwitcher = projectSwitcherState,
+                                onProjectSwitcherOpen = {
+                                    sessionPickerViewModel.refreshProjectSiblings(
+                                        host = sessionPickerRequest.host,
+                                        keyPath = sessionPickerRequest.keyPath,
+                                        currentSessionName = sessionName,
+                                        projectPath = projectPath,
+                                    )
+                                },
+                                onSwitchToSibling = { selected ->
+                                    handleTmuxSessionSelection(
+                                        currentSessionName = sessionName,
+                                        selectedSessionName = selected,
+                                        onDismiss = {},
+                                        onReplace = onReplaceTmuxSession,
+                                    )
+                                },
                                 connectionStatus = status.toUiStatus(),
                                 modifier = Modifier.testTag(TMUX_FULL_BREADCRUMB_TAG),
                             )
@@ -2146,6 +2200,22 @@ internal fun handleTmuxSessionSelection(
     onReplace(selectedSessionName)
 }
 
+/**
+ * Issue #463: the short leaf label for the header project crumb, derived
+ * from the active pane's working directory (the project path). Returns the
+ * last path segment (e.g. `/home/alexey/git/pocketshell` → `pocketshell`,
+ * `~/work` → `work`). The home directory and root collapse to `~` and `/`
+ * respectively so the crumb still reads as a place, and a blank/odd path
+ * falls back to the raw trimmed value.
+ */
+internal fun projectCrumbLabel(path: String): String {
+    val trimmed = path.trim().trimEnd('/')
+    if (trimmed.isEmpty()) return "/"
+    if (trimmed == "~") return "~"
+    val leaf = trimmed.substringAfterLast('/')
+    return leaf.ifBlank { trimmed }
+}
+
 internal fun sessionSwitcherPages(
     state: HostTmuxSessionPickerState,
     currentSessionName: String,
@@ -2408,6 +2478,13 @@ internal const val TMUX_COMPACT_CHROME_MORE_BUTTON_TAG =
 // Issue #462: the dedicated "/" agent command-palette button rendered in the
 // session header chrome (and the IME-up compact breadcrumb) for agent panes.
 internal const val TMUX_COMMAND_PALETTE_BUTTON_TAG = "tmux:chrome:command-palette"
+
+// Issue #463: the tappable project/folder crumb in the session header that
+// opens the in-session project-scoped session switcher dropdown, and the
+// dropdown's per-session rows.
+internal const val TMUX_PROJECT_SWITCHER_TAG = "tmux:chrome:project-switcher"
+internal const val TMUX_PROJECT_SWITCHER_MENU_TAG = "tmux:chrome:project-switcher:menu"
+internal const val TMUX_PROJECT_SWITCHER_ROW_TAG_PREFIX = "tmux:chrome:project-switcher:row:"
 
 /**
  * Issues #177 / #249: the "Reconnecting" / "Disconnected" breadcrumb pill
@@ -3919,6 +3996,17 @@ internal fun ConsolidatedTopChrome(
     // bottom chip row. [onCommandPalette] fires on tap.
     showCommandPalette: Boolean = false,
     onCommandPalette: () -> Unit = {},
+    // Issue #463: the in-session project switcher. When [projectLabel] is
+    // non-null a tappable project/folder crumb renders at the leading edge
+    // of the title slot. It shows a ▾ chevron and opens [projectSwitcher]'s
+    // sibling-session dropdown only when there is at least one OTHER session
+    // in the same project to switch to. Selecting a sibling fires
+    // [onSwitchToSibling], which routes through the warm same-host switch.
+    projectLabel: String? = null,
+    projectSwitcher: HostTmuxSessionPickerViewModel.ProjectSwitcherState =
+        HostTmuxSessionPickerViewModel.ProjectSwitcherState(),
+    onProjectSwitcherOpen: () -> Unit = {},
+    onSwitchToSibling: (String) -> Unit = {},
     // Issues #177 / #249: the live connection state, surfaced through the
     // breadcrumb's status dot (amber pulse while reconnecting, red while
     // disconnected) plus a compact "Reconnecting" / "Disconnected" pill.
@@ -3957,6 +4045,20 @@ internal fun ConsolidatedTopChrome(
             status = connectionStatus,
         )
         Spacer(modifier = Modifier.width(8.dp))
+
+        // Issue #463: the tappable project/folder crumb. Opens a dropdown of
+        // this project's sibling sessions; selecting one warm-switches to it.
+        // Hidden entirely when we don't know the project; the chevron is
+        // hidden when there's nothing to switch to (single-session project).
+        if (projectLabel != null) {
+            ProjectSwitcherCrumb(
+                projectLabel = projectLabel,
+                switcher = projectSwitcher,
+                onOpen = onProjectSwitcherOpen,
+                onSwitchToSibling = onSwitchToSibling,
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+        }
 
         // Issue #481: the title — the agent/model name when a conversation
         // is detected (`claude-3-5-sonnet` in the mockup), otherwise the
@@ -4012,6 +4114,133 @@ internal fun ConsolidatedTopChrome(
                 )
             }
             moreMenu()
+        }
+    }
+}
+
+/**
+ * Issue #463: the tappable project/folder crumb in the session header that
+ * opens an in-session, project-scoped session switcher.
+ *
+ * The crumb shows the current project's leaf folder label and a ▾ chevron.
+ * Tapping it anchors a [DropdownMenu] listing the sibling sessions in the
+ * same project (sourced from the warm live `-CC` client — never a fresh SSH
+ * connect), each row showing the session name, a state chip, and a
+ * [com.pocketshell.uikit.components.StatusDot] consistent with the folder
+ * tree rows. Selecting a sibling fires [onSwitchToSibling], which routes
+ * through the existing `onReplaceTmuxSession` → warm same-host switch (no
+ * reconnect; status flips to `Switching`, not `Connecting`).
+ *
+ * The chevron — and the whole tap affordance — is only shown when the
+ * project has at least one OTHER session to switch to
+ * ([HostTmuxSessionPickerViewModel.ProjectSwitcherState.hasSiblingsToSwitch]).
+ * A single-session project renders a plain, non-interactive label so there
+ * is zero Fitts/Hick cost when there is nothing to switch to.
+ */
+@Composable
+private fun ProjectSwitcherCrumb(
+    projectLabel: String,
+    switcher: HostTmuxSessionPickerViewModel.ProjectSwitcherState,
+    onOpen: () -> Unit,
+    onSwitchToSibling: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val canSwitch = switcher.hasSiblingsToSwitch
+    Box(modifier = modifier) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .then(
+                    if (canSwitch) {
+                        Modifier.clickable(
+                            role = androidx.compose.ui.semantics.Role.Button,
+                        ) {
+                            onOpen()
+                            expanded = true
+                        }
+                    } else {
+                        Modifier
+                    },
+                )
+                .background(
+                    color = if (canSwitch) {
+                        PocketShellColors.Accent.copy(alpha = 0.14f)
+                    } else {
+                        androidx.compose.ui.graphics.Color.Transparent
+                    },
+                    shape = RoundedCornerShape(8.dp),
+                )
+                .padding(horizontal = if (canSwitch) 8.dp else 0.dp, vertical = 4.dp)
+                .testTag(TMUX_PROJECT_SWITCHER_TAG),
+        ) {
+            Text(
+                text = projectLabel,
+                color = if (canSwitch) PocketShellColors.Accent else PocketShellColors.TextSecondary,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 120.dp),
+            )
+            if (canSwitch) {
+                Spacer(modifier = Modifier.width(2.dp))
+                Text(
+                    text = "▾",
+                    color = PocketShellColors.Accent,
+                    fontSize = 11.sp,
+                )
+            }
+        }
+
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.testTag(TMUX_PROJECT_SWITCHER_MENU_TAG),
+        ) {
+            val rows = switcher.siblings
+            rows.forEach { row ->
+                val isCurrent = row.name == switcher.currentSessionName
+                DropdownMenuItem(
+                    enabled = !isCurrent,
+                    onClick = {
+                        expanded = false
+                        if (!isCurrent) onSwitchToSibling(row.name)
+                    },
+                    modifier = Modifier.testTag(TMUX_PROJECT_SWITCHER_ROW_TAG_PREFIX + row.name),
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            com.pocketshell.uikit.components.StatusDot(
+                                status = if (isCurrent || row.attached) {
+                                    com.pocketshell.uikit.model.ConnectionStatus.Connected
+                                } else {
+                                    com.pocketshell.uikit.model.ConnectionStatus.Idle
+                                },
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column {
+                                Text(
+                                    text = row.name,
+                                    color = PocketShellColors.Text,
+                                    fontSize = 14.sp,
+                                    fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                                    maxLines = 1,
+                                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                )
+                                Text(
+                                    text = when {
+                                        isCurrent -> "Current"
+                                        row.attached -> "Attached"
+                                        else -> "Available"
+                                    },
+                                    color = PocketShellColors.TextSecondary,
+                                    fontSize = 11.sp,
+                                )
+                            }
+                        }
+                    },
+                )
+            }
         }
     }
 }

@@ -8,6 +8,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -153,6 +154,127 @@ class HostTmuxSessionPickerViewModelTest {
         assertEquals(HostTmuxSessionPickerState.Idle, vm.state.value)
     }
 
+    @Test
+    fun projectSwitcherFiltersWarmSiblingsToSameProjectPath() = runTest {
+        // Issue #463: the project switcher must scope to the current
+        // session's project path and sort by recent activity.
+        val vm = HostTmuxSessionPickerViewModel(
+            FakeGateway(
+                result = HostTmuxSessionListResult.Sessions(emptyList()),
+                liveResult = HostTmuxSessionListResult.Sessions(
+                    listOf(
+                        HostTmuxSessionRow(name = "a", lastActivity = 10L, path = "/proj"),
+                        HostTmuxSessionRow(name = "b", lastActivity = 30L, path = "/proj"),
+                        HostTmuxSessionRow(name = "other", lastActivity = 99L, path = "/elsewhere"),
+                        HostTmuxSessionRow(name = "c", lastActivity = 20L, path = "/proj/"),
+                    ),
+                ),
+            ),
+        )
+        val req = request()
+
+        vm.refreshProjectSiblings(req.host, req.keyPath, currentSessionName = "a", projectPath = "/proj")
+        runCurrent()
+
+        val switcher = vm.projectSwitcher.value
+        // Sorted by activity desc: b(30), c(20), a(10). 'other' excluded.
+        assertEquals(listOf("b", "c", "a"), switcher.siblings.map { it.name })
+        assertEquals("a", switcher.currentSessionName)
+        assertTrue(switcher.hasSiblingsToSwitch)
+    }
+
+    @Test
+    fun projectSwitcherSingleSessionHasNothingToSwitchTo() = runTest {
+        val vm = HostTmuxSessionPickerViewModel(
+            FakeGateway(
+                result = HostTmuxSessionListResult.Sessions(emptyList()),
+                liveResult = HostTmuxSessionListResult.Sessions(
+                    listOf(
+                        HostTmuxSessionRow(name = "solo", lastActivity = 10L, path = "/proj"),
+                        HostTmuxSessionRow(name = "elsewhere", lastActivity = 30L, path = "/other"),
+                    ),
+                ),
+            ),
+        )
+        val req = request()
+
+        vm.refreshProjectSiblings(req.host, req.keyPath, currentSessionName = "solo", projectPath = "/proj")
+        runCurrent()
+
+        val switcher = vm.projectSwitcher.value
+        assertEquals(listOf("solo"), switcher.siblings.map { it.name })
+        assertFalse(switcher.hasSiblingsToSwitch)
+    }
+
+    @Test
+    fun projectSwitcherWithoutLiveClientKeepsLastKnownSiblings() = runTest {
+        // No live client (null) → keep the last known list so the dropdown
+        // still opens instantly instead of collapsing.
+        val swapping = LiveSwappingGateway(
+            first = HostTmuxSessionListResult.Sessions(
+                listOf(
+                    HostTmuxSessionRow(name = "a", lastActivity = 10L, path = "/proj"),
+                    HostTmuxSessionRow(name = "b", lastActivity = 20L, path = "/proj"),
+                ),
+            ),
+            second = null,
+        )
+        val vm = HostTmuxSessionPickerViewModel(swapping)
+        val req = request()
+
+        vm.refreshProjectSiblings(req.host, req.keyPath, "a", "/proj")
+        runCurrent()
+        assertEquals(listOf("b", "a"), vm.projectSwitcher.value.siblings.map { it.name })
+
+        vm.refreshProjectSiblings(req.host, req.keyPath, "a", "/proj")
+        runCurrent()
+        // Siblings retained despite the null (no live client) result.
+        assertEquals(listOf("b", "a"), vm.projectSwitcher.value.siblings.map { it.name })
+    }
+
+    @Test
+    fun projectSwitcherFallsBackToCurrentSessionPathWhenProjectPathUnknown() = runTest {
+        val vm = HostTmuxSessionPickerViewModel(
+            FakeGateway(
+                result = HostTmuxSessionListResult.Sessions(emptyList()),
+                liveResult = HostTmuxSessionListResult.Sessions(
+                    listOf(
+                        HostTmuxSessionRow(name = "a", lastActivity = 10L, path = "/proj"),
+                        HostTmuxSessionRow(name = "b", lastActivity = 20L, path = "/proj"),
+                        HostTmuxSessionRow(name = "other", lastActivity = 99L, path = "/x"),
+                    ),
+                ),
+            ),
+        )
+        val req = request()
+
+        vm.refreshProjectSiblings(req.host, req.keyPath, currentSessionName = "a", projectPath = null)
+        runCurrent()
+
+        // projectPath null → uses the current session's reported path (/proj).
+        assertEquals(listOf("b", "a"), vm.projectSwitcher.value.siblings.map { it.name })
+    }
+
+    private class LiveSwappingGateway(
+        private val first: HostTmuxSessionListResult,
+        private val second: HostTmuxSessionListResult?,
+    ) : HostTmuxSessionsGateway {
+        private var calls = 0
+        override suspend fun listSessions(
+            host: HostEntity,
+            keyPath: String,
+            passphrase: CharArray?,
+        ): HostTmuxSessionListResult = HostTmuxSessionListResult.Sessions(emptyList())
+
+        override suspend fun listSessionsFromLiveClient(
+            host: HostEntity,
+            keyPath: String,
+        ): HostTmuxSessionListResult? {
+            calls += 1
+            return if (calls == 1) first else second
+        }
+    }
+
     private fun request(): HostTmuxSessionPickerRequest =
         HostTmuxSessionPickerRequest(
             host = HostEntity(
@@ -169,12 +291,18 @@ class HostTmuxSessionPickerViewModelTest {
 
     private class FakeGateway(
         private val result: HostTmuxSessionListResult,
+        private val liveResult: HostTmuxSessionListResult? = null,
     ) : HostTmuxSessionsGateway {
         override suspend fun listSessions(
             host: HostEntity,
             keyPath: String,
             passphrase: CharArray?,
         ): HostTmuxSessionListResult = result
+
+        override suspend fun listSessionsFromLiveClient(
+            host: HostEntity,
+            keyPath: String,
+        ): HostTmuxSessionListResult? = liveResult
     }
 
     private class SwappingGateway(
@@ -190,6 +318,11 @@ class HostTmuxSessionPickerViewModelTest {
             calls += 1
             return if (calls == 1) initial else next
         }
+
+        override suspend fun listSessionsFromLiveClient(
+            host: HostEntity,
+            keyPath: String,
+        ): HostTmuxSessionListResult? = null
     }
 
     private class SuspendingGateway(
@@ -200,5 +333,10 @@ class HostTmuxSessionPickerViewModelTest {
             keyPath: String,
             passphrase: CharArray?,
         ): HostTmuxSessionListResult = gate.await()
+
+        override suspend fun listSessionsFromLiveClient(
+            host: HostEntity,
+            keyPath: String,
+        ): HostTmuxSessionListResult? = null
     }
 }

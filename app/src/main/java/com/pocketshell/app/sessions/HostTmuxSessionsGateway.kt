@@ -21,6 +21,19 @@ interface HostTmuxSessionsGateway {
         keyPath: String,
         passphrase: CharArray?,
     ): HostTmuxSessionListResult
+
+    /**
+     * Issue #463: list sessions using ONLY the warm live `-CC` control
+     * client for [host]. Never opens a fresh SSH connection. Returns
+     * `null` when there is no live client for the host (so the caller can
+     * keep the previously-known list rather than blocking on a handshake).
+     * This is the data source for the in-session project switcher — using
+     * it instead of [listSessions] is what keeps the switch "instant".
+     */
+    suspend fun listSessionsFromLiveClient(
+        host: HostEntity,
+        keyPath: String,
+    ): HostTmuxSessionListResult?
 }
 
 class SshHostTmuxSessionsGateway @Inject constructor(
@@ -121,7 +134,7 @@ class SshHostTmuxSessionsGateway @Inject constructor(
     private fun pathAware(command: String): String =
         ReposRemoteSource.pathAwareCommand(command)
 
-    private suspend fun listSessionsFromLiveClient(
+    override suspend fun listSessionsFromLiveClient(
         host: HostEntity,
         keyPath: String,
     ): HostTmuxSessionListResult? {
@@ -157,7 +170,13 @@ class SshHostTmuxSessionsGateway @Inject constructor(
             this.keyPath == keyPath
 
     private companion object {
+        // Issue #463: append `#{session_path}` so the warm live-client list
+        // carries each session's working directory and the in-session
+        // project switcher can group sessions by project/folder without a
+        // second SSH connect.
         const val LIVE_LIST_SESSIONS_COMMAND: String =
-            "list-sessions -F '#{session_name}::#{session_created}::#{session_activity}::#{session_attached}'"
+            "list-sessions -F " +
+                "'#{session_name}::#{session_created}::#{session_activity}::" +
+                "#{session_attached}::#{session_path}'"
     }
 }

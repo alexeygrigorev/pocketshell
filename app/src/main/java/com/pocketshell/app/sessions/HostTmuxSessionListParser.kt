@@ -70,11 +70,21 @@ class HostTmuxSessionListParser @Inject constructor() {
             createdAt = fields.createdAt?.trim()?.toLongOrNull(),
             lastActivity = fields.lastActivity?.trim()?.toLongOrNull(),
             attached = (fields.attached?.trim()?.toLongOrNull() ?: fields.fallbackAttachedCount) > 0L,
+            // Issue #463: only the warm live-client query carries
+            // `#{session_path}`; treat a blank path as "unknown" (null) so
+            // the project switcher does not group every path-less session
+            // under an empty-string bucket.
+            path = fields.path?.trim()?.takeIf { it.isNotEmpty() },
         )
     }
 
     private fun parseStructuredTmuxListSessionsFields(line: String): TmuxListSessionsFields? {
         for (separator in STRUCTURED_SEPARATORS) {
+            // Issue #463: the warm live-client query appends
+            // `#{session_path}` as a 5th column. Try the 5-field shape
+            // first (so the session path is captured), then fall back to
+            // the original 4-field shape that other producers still emit.
+            parseStructuredFiveFields(line, separator)?.let { return it }
             val fields = line.splitFromRight(separator, expectedTailFields = 3) ?: continue
             if (fields[1].trim().toLongOrNull() == null || fields[2].trim().toLongOrNull() == null) {
                 continue
@@ -87,6 +97,27 @@ class HostTmuxSessionListParser @Inject constructor() {
             )
         }
         return null
+    }
+
+    private fun parseStructuredFiveFields(line: String, separator: String): TmuxListSessionsFields? {
+        val fields = line.splitFromRight(separator, expectedTailFields = 4) ?: return null
+        // created + activity must be numeric epoch seconds; attached is a
+        // 0/1 count. The trailing field is the (possibly empty) session
+        // path. If created/activity aren't numeric this isn't the 5-field
+        // shape — let the 4-field path handle it.
+        if (fields[1].trim().toLongOrNull() == null || fields[2].trim().toLongOrNull() == null) {
+            return null
+        }
+        if (fields[3].trim().toLongOrNull() == null) {
+            return null
+        }
+        return TmuxListSessionsFields(
+            name = fields[0],
+            createdAt = fields[1],
+            lastActivity = fields[2],
+            attached = fields[3],
+            path = fields[4],
+        )
     }
 
     private fun parseFallbackTmuxListSessionsFields(line: String): TmuxListSessionsFields? {
@@ -128,6 +159,9 @@ class HostTmuxSessionListParser @Inject constructor() {
         val lastActivity: String?,
         val attached: String?,
         val fallbackAttachedCount: Long = 0L,
+        // Issue #463: session working directory from `#{session_path}`,
+        // only present in the warm live-client 5-field shape.
+        val path: String? = null,
     )
 
     private companion object {

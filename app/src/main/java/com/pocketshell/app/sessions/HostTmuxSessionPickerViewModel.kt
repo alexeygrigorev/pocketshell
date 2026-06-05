@@ -2,6 +2,7 @@ package com.pocketshell.app.sessions
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pocketshell.core.storage.entity.HostEntity
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,7 +19,18 @@ class HostTmuxSessionPickerViewModel @Inject constructor(
         MutableStateFlow(HostTmuxSessionPickerState.Idle)
     val state: StateFlow<HostTmuxSessionPickerState> = _state.asStateFlow()
 
+    /**
+     * Issue #463: the in-session project switcher's sibling list. Sourced
+     * ONLY from the warm live `-CC` client (never a fresh SSH connect) and
+     * filtered to the current session's project path, so tapping the
+     * header crumb and switching stays instant.
+     */
+    private val _projectSwitcher: MutableStateFlow<ProjectSwitcherState> =
+        MutableStateFlow(ProjectSwitcherState())
+    val projectSwitcher: StateFlow<ProjectSwitcherState> = _projectSwitcher.asStateFlow()
+
     private var loadJob: Job? = null
+    private var projectSwitcherJob: Job? = null
 
     fun load(request: HostTmuxSessionPickerRequest) {
         loadJob?.cancel()
@@ -83,5 +95,94 @@ class HostTmuxSessionPickerViewModel @Inject constructor(
         loadJob?.cancel()
         loadJob = null
         _state.value = HostTmuxSessionPickerState.Idle
+    }
+
+    /**
+     * Issue #463: refresh the project-switcher sibling list for the
+     * session screen's header crumb. Reads ONLY the warm live `-CC` client
+     * for [host] (no SSH fallback) and keeps the sessions whose working
+     * directory matches [projectPath] (the current pane's cwd). When the
+     * host has no live client yet, the previously-known sibling list is
+     * retained so the dropdown still opens instantly.
+     */
+    fun refreshProjectSiblings(
+        host: HostEntity,
+        keyPath: String,
+        currentSessionName: String,
+        projectPath: String?,
+    ) {
+        projectSwitcherJob?.cancel()
+        projectSwitcherJob = viewModelScope.launch {
+            val result = gateway.listSessionsFromLiveClient(host, keyPath)
+            val rows = (result as? HostTmuxSessionListResult.Sessions)?.rows
+            if (rows == null) {
+                // No live client (or a transient warm-query error): keep the
+                // last known siblings rather than collapsing the dropdown.
+                _projectSwitcher.value = _projectSwitcher.value.copy(
+                    currentSessionName = currentSessionName,
+                )
+                return@launch
+            }
+            _projectSwitcher.value = ProjectSwitcherState(
+                currentSessionName = currentSessionName,
+                projectPath = projectPath,
+                siblings = projectSiblings(rows, projectPath, currentSessionName),
+            )
+        }
+    }
+
+    /**
+     * Reset the switcher (e.g. when the screen leaves). Cancels any
+     * in-flight warm query.
+     */
+    fun clearProjectSiblings() {
+        projectSwitcherJob?.cancel()
+        projectSwitcherJob = null
+        _projectSwitcher.value = ProjectSwitcherState()
+    }
+
+    private fun projectSiblings(
+        rows: List<HostTmuxSessionRow>,
+        projectPath: String?,
+        currentSessionName: String,
+    ): List<HostTmuxSessionRow> {
+        val normalisedProject = projectPath?.trimEnd('/')?.takeIf { it.isNotEmpty() }
+        val inProject = if (normalisedProject == null) {
+            // We don't know this session's project path — fall back to the
+            // path the current session reports in the live list so the
+            // switcher still scopes to siblings sharing that directory.
+            val currentRowPath = rows
+                .firstOrNull { it.name == currentSessionName }
+                ?.path
+                ?.trimEnd('/')
+                ?.takeIf { it.isNotEmpty() }
+            if (currentRowPath == null) {
+                rows
+            } else {
+                rows.filter { it.path?.trimEnd('/') == currentRowPath }
+            }
+        } else {
+            rows.filter { it.path?.trimEnd('/') == normalisedProject }
+        }
+        return inProject.sortedWith(
+            compareByDescending<HostTmuxSessionRow> { it.lastActivity ?: it.createdAt ?: 0L }
+                .thenBy { it.name },
+        )
+    }
+
+    /**
+     * Issue #463: state backing the in-session project switcher dropdown.
+     * [siblings] are the sessions in the current project (including the
+     * current one, marked by [currentSessionName]). [hasSiblingsToSwitch]
+     * is true only when there is at least one OTHER session to switch to —
+     * the header crumb hides its chevron otherwise.
+     */
+    data class ProjectSwitcherState(
+        val currentSessionName: String = "",
+        val projectPath: String? = null,
+        val siblings: List<HostTmuxSessionRow> = emptyList(),
+    ) {
+        val hasSiblingsToSwitch: Boolean
+            get() = siblings.any { it.name != currentSessionName }
     }
 }

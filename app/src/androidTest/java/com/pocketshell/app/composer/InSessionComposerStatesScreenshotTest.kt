@@ -239,7 +239,11 @@ class InSessionComposerStatesScreenshotTest {
                 )
             }
             compose.onNodeWithTag(COMPOSER_TIMER_TAG).assertIsDisplayed()
-            compose.onNodeWithText("Stop").assertExists()
+            // The recording row now offers the two explicit stop actions (To
+            // field / Send) instead of the removed in-surface "Stop" label.
+            compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed()
+            compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
+            compose.onNodeWithText("Stop").assertDoesNotExist()
             compose.waitForIdle()
             captureRoot("issue453-insession-02-recording")
 

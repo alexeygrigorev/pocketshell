@@ -67,7 +67,8 @@ class PromptComposerVisualScreenshotTest {
         // composer screenshot.
         WalkthroughScreenshotArtifacts.capture("05b-composer-idle-draft")
 
-        // State 2: Recording — waveform + timer + Stop. No status text.
+        // State 2: Recording — waveform + timer + the two explicit stop
+        // actions ("To field" / "Send"). No status text, no Auto-send toggle.
         compose.runOnIdle {
             state = state.copy(
                 recording = PromptComposerViewModel.RecordingState.Recording,
@@ -78,8 +79,11 @@ class PromptComposerVisualScreenshotTest {
         }
         compose.onNodeWithTag(COMPOSER_TIMER_TAG).assertIsDisplayed()
         compose.onNodeWithText("00:17").assertExists()
-        compose.onNodeWithText("Stop").assertExists()
-        compose.onNodeWithTag(COMPOSER_AUTO_SEND_TAG).assertExists()
+        // Issue #508: two explicit stop buttons replace the old Stop FAB +
+        // Auto-send toggle.
+        compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
+        compose.onNodeWithText("To field").assertExists()
         // Declutter: no LISTENING/CAPTURING text.
         compose.onNodeWithText("CAPTURING").assertDoesNotExist()
         compose.waitForIdle()

@@ -79,8 +79,10 @@ class PromptComposerSmokeTest {
         // No redundant status text any more (declutter).
         compose.onNodeWithText("CAPTURING").assertDoesNotExist()
         compose.onNodeWithText("LISTENING").assertDoesNotExist()
-        // The Auto-send toggle is present in the Recording state.
-        compose.onNodeWithTag(COMPOSER_AUTO_SEND_TAG).assertIsDisplayed()
+        // Issue #508: the two explicit stop actions replace the old Auto-send
+        // toggle in the Recording state.
+        compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
 
         compose.runOnIdle {
             // Active-speech sub-state: the sampler loop has seen at least
@@ -106,9 +108,10 @@ class PromptComposerSmokeTest {
             .assert(hasContentDescription("Prompt composer transcribing"))
         compose.onNodeWithText("Transcribing…").assertExists()
         compose.onNodeWithText("TRANSCRIBING").assertDoesNotExist()
-        // Cancel + Auto-send are available during transcription.
+        // Issue #508: Cancel + Send are available during transcription (no
+        // persistent Auto-send toggle).
         compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
-        compose.onNodeWithTag(COMPOSER_AUTO_SEND_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
     }
 
     @Test

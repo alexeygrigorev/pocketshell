@@ -22,13 +22,13 @@ import org.junit.runner.RunWith
  * Issue #453: emulator acceptance for the redesigned composer's Cancel
  * affordance.
  *
- * The recording UI was redesigned (issue #453): the Recording state is
- * stopped via the red Stop button (which always transcribes), and the only
- * Cancel affordance lives in the **Transcribing** state — it cancels the
- * in-flight transcription and restores the composer to Idle with the typed
- * draft preserved. This test renders [SheetContent] in the Transcribing
- * state and exercises that Cancel affordance via its
- * [COMPOSER_CANCEL_RECORDING_TAG] tag and its `contentDescription`.
+ * The recording UI was redesigned (issue #453 / #508): the Recording state
+ * is stopped via two explicit actions ("To field" / "Send"), and the Cancel
+ * affordance lives in the **Transcribing** state — it cancels the in-flight
+ * transcription and restores the composer to Idle with the typed draft
+ * preserved. This test renders [SheetContent] in the Transcribing state and
+ * exercises that Cancel affordance via its [COMPOSER_CANCEL_RECORDING_TAG]
+ * tag and its `contentDescription`.
  */
 @RunWith(AndroidJUnit4::class)
 class PromptComposerCancelRecordingTest {
@@ -44,7 +44,6 @@ class PromptComposerCancelRecordingTest {
                 draft = "draft the user wants to keep",
                 recording = PromptComposerViewModel.RecordingState.Transcribing,
                 amplitude = 0f,
-                autoSend = false,
             ),
         )
 
@@ -64,7 +63,6 @@ class PromptComposerCancelRecordingTest {
                             recording = PromptComposerViewModel.RecordingState.Idle,
                         )
                     },
-                    onAutoSendChange = {},
                 )
             }
         }
@@ -111,7 +109,6 @@ class PromptComposerCancelRecordingTest {
                     onMicTap = {},
                     onSend = { _ -> },
                     onCancelRecording = {},
-                    onAutoSendChange = {},
                 )
             }
         }
@@ -120,8 +117,8 @@ class PromptComposerCancelRecordingTest {
         compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertDoesNotExist()
         compose.onNodeWithContentDescription("Start dictation").assertIsDisplayed()
 
-        // Recording: still no Cancel — the red Stop button drives the
-        // stop->transcribe transition instead.
+        // Recording: still no Cancel — the two explicit stop actions
+        // ("To field" / "Send") drive the stop->transcribe transition instead.
         compose.runOnIdle {
             state = state.copy(
                 recording = PromptComposerViewModel.RecordingState.Recording,
@@ -130,7 +127,8 @@ class PromptComposerCancelRecordingTest {
             )
         }
         compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertDoesNotExist()
-        compose.onNodeWithContentDescription("Stop recording").assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_TIMER_TAG).assertIsDisplayed()
     }
 }

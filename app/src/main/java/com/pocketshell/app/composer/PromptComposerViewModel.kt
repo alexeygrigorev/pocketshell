@@ -119,15 +119,6 @@ public class PromptComposerViewModel @Inject constructor(
             } else {
                 null
             },
-            // Issue #453: restore the user's Auto-send choice across a
-            // ViewModel recreate. The toggle is a sticky session preference,
-            // so a screen-lock / low-memory recreate (common while a
-            // dictation is in flight) must NOT silently flip it back off —
-            // the maintainer reported "автосенд снялся автоматически" (it
-            // auto-unchecked itself). Persisting it through [SavedStateHandle]
-            // makes the on-state survive the recreate the same way the draft
-            // text does.
-            autoSend = savedStateHandle.get<Boolean>(KEY_AUTO_SEND) == true,
         ),
     )
 
@@ -382,40 +373,6 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
-     * Issue #453: flip the Auto-send toggle shown in the Recording /
-     * Transcribing states. When Auto-send is ON, a completed dictation is
-     * sent immediately (Whisper transcript → draft → SendRequest) instead
-     * of merely being inserted into the editable input for the user to
-     * review before tapping Send. When OFF, the transcript lands in the
-     * input and the user edits/sends it manually (the mockup's "Text
-     * inserted" state).
-     *
-     * The toggle is sticky for the rest of the session — flipping it while
-     * recording also arms / disarms the queued auto-send for the in-flight
-     * dictation so the choice the user makes mid-recording is honoured when
-     * Whisper returns.
-     */
-    public fun setAutoSend(enabled: Boolean) {
-        // Issue #453: persist the choice so it survives a ViewModel recreate
-        // (process death / config change). Without this the toggle reset to
-        // its `false` default on the next recreate — the "auto-unchecked
-        // itself" bug the maintainer hit. Written the same way as KEY_DRAFT.
-        savedStateHandle[KEY_AUTO_SEND] = enabled
-        _uiState.update { it.copy(autoSend = enabled) }
-        // Keep the in-flight queued-send flag in sync with the toggle while
-        // a dictation is active so flipping the switch mid-recording is
-        // honoured when the transcript lands. `withEnter = true` mirrors the
-        // primary Send affordance (auto-send always submits with Enter).
-        when (_uiState.value.recording) {
-            RecordingState.Recording, RecordingState.Transcribing -> {
-                pendingSendOnTranscribeSuccess = enabled
-                pendingSendWithEnter = true
-            }
-            RecordingState.Idle -> Unit
-        }
-    }
-
-    /**
      * Issue #211: emit a [SendRequest] for the current draft and clear
      * the draft so the next composer open is a fresh slate. No-op when
      * the draft is empty — the FSM-Idle case where the user has nothing
@@ -511,15 +468,6 @@ public class PromptComposerViewModel @Inject constructor(
         // loop can publish a deterministic mm:ss elapsed timer onto
         // [UiState.recordingElapsedMs]. The clock seam keeps this testable.
         recordingStartedAtMs = clock()
-
-        // Issue #453: if Auto-send is already toggled on when the user taps
-        // the mic, arm the queued send up front so the completed dictation
-        // dispatches without a second tap. `withEnter = true` mirrors the
-        // primary Send affordance (auto-send always submits).
-        if (_uiState.value.autoSend) {
-            pendingSendOnTranscribeSuccess = true
-            pendingSendWithEnter = true
-        }
 
         _uiState.update {
             it.copy(
@@ -1246,14 +1194,6 @@ public class PromptComposerViewModel @Inject constructor(
          * [RecordingState.Recording]. Render with [formatElapsed].
          */
         val recordingElapsedMs: Long = 0L,
-        /**
-         * Issue #453: the "Auto-send" toggle shown in the Recording /
-         * Transcribing states. When `true`, a completed dictation is sent
-         * immediately; when `false`, the transcript is inserted into the
-         * editable input for the user to review before tapping Send. Sticky
-         * across recordings within the session.
-         */
-        val autoSend: Boolean = false,
     )
 
     /**
@@ -1454,15 +1394,6 @@ public class PromptComposerViewModel @Inject constructor(
          * [RECORDING_INTERRUPTED_MESSAGE] banner once, and resets it.
          */
         internal const val KEY_WAS_RECORDING: String = "prompt-composer-was-recording"
-
-        /**
-         * Issue #453: [SavedStateHandle] key for the sticky Auto-send
-         * toggle. Persisting it makes the user's on-choice survive a
-         * ViewModel recreate (process death / config change) instead of
-         * silently resetting to the `false` default — the maintainer's
-         * "auto-unchecked itself" bug.
-         */
-        internal const val KEY_AUTO_SEND: String = "prompt-composer-auto-send"
 
         /**
          * Issue #169 Part 2: user-facing message surfaced via

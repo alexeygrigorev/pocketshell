@@ -39,8 +39,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SheetState
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -327,7 +325,6 @@ public fun PromptComposerSheet(
             // in-flight Whisper round-trip. (Recording is stopped via the
             // red Stop button, which always transcribes.)
             onCancelRecording = viewModel::cancelTranscription,
-            onAutoSendChange = viewModel::setAutoSend,
             onSend = { withEnter ->
                 // Issue #211: route through the ViewModel so the FSM
                 // decides whether to dispatch now (Idle) or queue for
@@ -429,10 +426,6 @@ internal fun SheetContent(
     // no-op so existing previews and the legacy connected tests that
     // bypass the ViewModel keep compiling.
     onCancelRecording: () -> Unit = {},
-    // Issue #453: flip the Auto-send toggle. Defaults to a no-op so
-    // previews / legacy tests that don't exercise the toggle keep
-    // compiling.
-    onAutoSendChange: (Boolean) -> Unit = {},
     // Issue #180: queued failed / offline transcriptions. Defaults to
     // an empty list so older previews + tests that pre-date the queue
     // render the same composer shape they always did.
@@ -569,7 +562,6 @@ internal fun SheetContent(
                     amplitude = state.amplitude,
                     capturing = state.hasDetectedSpeech,
                     elapsedLabel = formatElapsed(state.recordingElapsedMs),
-                    onStop = onMicTap,
                 )
             }
 
@@ -697,13 +689,17 @@ internal fun SheetContent(
             Spacer(modifier = Modifier.height(8.dp))
         }
 
-        // Issue #453: the single decluttered controls row at the bottom of
-        // the composer, matching all four mockup states:
+        // Issue #453 / #508: the single decluttered controls row at the
+        // bottom of the composer, matching all four mockup states:
         //  - Left: 📎 attach (paperclip) + `{}` snippets — always present.
         //  - Right, Idle / Text-inserted: a single primary Send button with
         //    a send-arrow glyph (the old Insert/Send pair collapses to one).
-        //  - Right, Recording: an Auto-send toggle + a red record/stop FAB.
-        //  - Right, Transcribing: an Auto-send toggle + a Cancel button.
+        //  - Right, Recording: two explicit stop actions — "To field"
+        //    (stop + transcribe into the editable field, nothing sent) and
+        //    "Send" (stop + transcribe + send). The old persistent Auto-send
+        //    toggle is gone (#508): the choice is made per-recording.
+        //  - Right, Transcribing: Cancel + "Send" (arms the queued send for
+        //    the in-flight round-trip).
         val isRecording = state.recording == PromptComposerViewModel.RecordingState.Recording
         val attachmentBusy = attachmentUploading != null
         Row(
@@ -768,31 +764,46 @@ internal fun SheetContent(
                 }
 
                 PromptComposerViewModel.RecordingState.Recording -> {
-                    AutoSendToggle(
-                        checked = state.autoSend,
-                        onCheckedChange = onAutoSendChange,
+                    // Issue #508: two explicit stop actions replace the old
+                    // persistent Auto-send toggle. The choice is made
+                    // per-recording, at the moment of stopping:
+                    //  - "To field": stop + transcribe, drop the text into the
+                    //    editable composer field (nothing sent). The user can
+                    //    then attach a screenshot / edit before sending. This
+                    //    is the historic [onMicTap] stop path — the transcript
+                    //    appends to the draft and the FSM lands back in Idle.
+                    //  - "Send": stop + transcribe + send immediately. Routes
+                    //    through [onSend(true)] which (while Recording) queues
+                    //    the send and stops the recorder; the queued send fires
+                    //    once Whisper returns with the combined transcript.
+                    ToFieldButton(
+                        onClick = onMicTap,
+                        modifier = Modifier.testTag(COMPOSER_TO_FIELD_TAG),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
-                    // Red record/stop FAB: tapping it stops the recording
-                    // and starts transcription (same path as the mockup's
-                    // big red button at the bottom-right of the Recording
-                    // state).
-                    RecordStopButton(
-                        onClick = onMicTap,
-                        modifier = Modifier.testTag(COMPOSER_MIC_TAG),
+                    StopSendButton(
+                        onClick = { onSend(true) },
+                        modifier = Modifier.testTag(COMPOSER_STOP_SEND_TAG),
                     )
                 }
 
                 PromptComposerViewModel.RecordingState.Transcribing -> {
-                    AutoSendToggle(
-                        checked = state.autoSend,
-                        onCheckedChange = onAutoSendChange,
-                    )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    // Issue #508: the audio is already captured and the Whisper
+                    // round-trip is in flight, but the user can still pick where
+                    // the transcript lands once it returns. "To field" is a
+                    // no-op on the in-flight request — the transcript appends to
+                    // the draft by default — so the only extra action surfaced
+                    // here is "Send" (arms the queued send) plus Cancel (aborts
+                    // the round-trip). No persistent Auto-send toggle.
                     GhostButton(
                         label = "Cancel",
                         onClick = onCancelRecording,
                         modifier = Modifier.testTag(COMPOSER_CANCEL_RECORDING_TAG),
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    StopSendButton(
+                        onClick = { onSend(true) },
+                        modifier = Modifier.testTag(COMPOSER_STOP_SEND_TAG),
                     )
                 }
             }
@@ -801,19 +812,19 @@ internal fun SheetContent(
 }
 
 /**
- * Issue #453: the Recording-state surface that replaces the editable input
- * — an amplitude-driven [Waveform] flanked by the elapsed mm:ss timer and a
- * "Stop" affordance. Matches the mockup's recording card. The animated
- * waveform alone (plus the live ticking timer) conveys "we are capturing"
- * — there is no redundant "CAPTURING" text label any more (the maintainer's
- * declutter request).
+ * Issue #453 / #508: the Recording-state surface that replaces the editable
+ * input — an amplitude-driven [Waveform] flanked by the elapsed mm:ss timer.
+ * The animated waveform alone (plus the live ticking timer) conveys "we are
+ * capturing"; there is no redundant "CAPTURING" text. The single in-surface
+ * "Stop" label was removed in #508 — stopping is now done via the two
+ * explicit bottom-row actions ("To field" / "Send"), so a lone "Stop" here
+ * would be ambiguous about where the transcript lands.
  */
 @Composable
 private fun RecordingSurface(
     amplitude: Float,
     capturing: Boolean,
     elapsedLabel: String,
-    onStop: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -855,16 +866,6 @@ private fun RecordingSurface(
                         "Prompt composer waiting for speech"
                     }
                 },
-        )
-        Text(
-            text = "Stop",
-            color = PocketShellColors.Accent,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier
-                .clickable(role = Role.Button, onClick = onStop)
-                .padding(horizontal = 6.dp, vertical = 6.dp)
-                .testTag(COMPOSER_STOP_TAG),
         )
     }
 }
@@ -983,67 +984,76 @@ private fun SendButton(
 }
 
 /**
- * Issue #453: the "Auto-send" toggle shown in the Recording / Transcribing
- * states. When ON, the completed dictation is sent immediately; when OFF,
- * the transcript lands in the editable input for review before Send.
+ * Issue #508: "To field" stop action shown while Recording. Tapping it stops
+ * the recording and transcribes, dropping the resulting text into the
+ * editable composer field — nothing is sent. The user can then attach a
+ * screenshot / edit before tapping Send manually. Rendered as a clear
+ * outlined pill (secondary affordance) so it reads as a deliberate,
+ * non-sending choice next to the accent-filled Send pill.
  */
 @Composable
-private fun AutoSendToggle(
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit,
+private fun ToFieldButton(
+    onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(
         modifier = modifier
-            .clickable(role = Role.Switch) { onCheckedChange(!checked) }
-            .testTag(COMPOSER_AUTO_SEND_TAG),
+            .height(44.dp)
+            .background(
+                color = PocketShellColors.SurfaceElev,
+                shape = RoundedCornerShape(22.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.Border,
+                shape = RoundedCornerShape(22.dp),
+            )
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Stop and put transcript in the field" }
+            .padding(horizontal = 16.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Text(
-            text = "Auto-send",
-            color = if (checked) PocketShellColors.Accent else PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
-            fontWeight = FontWeight.Medium,
-        )
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = PocketShellColors.OnAccent,
-                checkedTrackColor = PocketShellColors.Accent,
-                uncheckedThumbColor = PocketShellColors.TextSecondary,
-                uncheckedTrackColor = PocketShellColors.SurfaceElev,
-                uncheckedBorderColor = PocketShellColors.Border,
-            ),
+            text = "To field",
+            color = PocketShellColors.Text,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
         )
     }
 }
 
 /**
- * Issue #453: the red record/stop FAB shown at the bottom-right of the
- * Recording state (the big red button in the mockup). Tapping it stops the
- * recording and starts transcription.
+ * Issue #508: "Send" stop action shown while Recording / Transcribing.
+ * Tapping it stops the recording (or arms the in-flight transcription) and
+ * sends the dictation immediately once Whisper returns. Rendered as the
+ * accent-filled primary pill with a send arrow so it reads as the
+ * commit/submit action next to the secondary "To field" choice.
  */
 @Composable
-private fun RecordStopButton(
+private fun StopSendButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Box(
+    Row(
         modifier = modifier
-            .size(48.dp)
-            .background(color = PocketShellColors.Red, shape = androidx.compose.foundation.shape.CircleShape)
+            .height(44.dp)
+            .background(
+                color = PocketShellColors.Accent,
+                shape = RoundedCornerShape(22.dp),
+            )
             .clickable(role = Role.Button, onClick = onClick)
-            .semantics { contentDescription = "Stop recording" },
-        contentAlignment = Alignment.Center,
+            .semantics { contentDescription = "Stop and send the transcript" }
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        // White rounded square = the universal "stop" glyph.
-        Box(
-            modifier = Modifier
-                .size(16.dp)
-                .background(color = Color.White, shape = RoundedCornerShape(3.dp)),
+        Text(
+            text = "Send",
+            color = PocketShellColors.OnAccent,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
         )
+        SendArrowGlyph(color = PocketShellColors.OnAccent)
     }
 }
 
@@ -1709,11 +1719,16 @@ internal const val COMPOSER_PLACEHOLDER = "Compose prompt…"
 /** Issue #453: elapsed mm:ss recording timer rendered next to the waveform. */
 internal const val COMPOSER_TIMER_TAG = "prompt-composer-timer"
 
-/** Issue #453: the "Stop" affordance inside the recording surface. */
-internal const val COMPOSER_STOP_TAG = "prompt-composer-stop"
-
-/** Issue #453: the Auto-send toggle shown in Recording / Transcribing. */
-internal const val COMPOSER_AUTO_SEND_TAG = "prompt-composer-auto-send"
+/**
+ * Issue #508: the two explicit stop actions shown in the Recording row,
+ * replacing the old persistent Auto-send toggle.
+ *  - [COMPOSER_TO_FIELD_TAG]: stop + transcribe into the editable field
+ *    (nothing sent).
+ *  - [COMPOSER_STOP_SEND_TAG]: stop + transcribe + send immediately. Also
+ *    shown in Transcribing to arm the queued send for the in-flight clip.
+ */
+internal const val COMPOSER_TO_FIELD_TAG = "prompt-composer-to-field"
+internal const val COMPOSER_STOP_SEND_TAG = "prompt-composer-stop-send"
 
 /**
  * Issue #153 fix 2: test tag for the in-flight transcribing spinner
@@ -1805,9 +1820,9 @@ private fun PromptComposerIdlePreview() {
 }
 
 /**
- * Issue #453: Recording state — amplitude-driven waveform + the `00:17`
- * elapsed timer + Stop; below, the Auto-send toggle and the red record/stop
- * button. No redundant "CAPTURING" text — the animated indicator conveys it.
+ * Issue #453 / #508: Recording state — amplitude-driven waveform + the
+ * `00:17` elapsed timer; below, the two explicit stop actions ("To field" +
+ * "Send"). No persistent Auto-send toggle, no redundant "CAPTURING" text.
  */
 @Preview(name = "Composer · recording", widthDp = 412, heightDp = 360)
 @Composable
@@ -1821,7 +1836,6 @@ private fun PromptComposerRecordingPreview() {
                     amplitude = 0.7f,
                     hasDetectedSpeech = true,
                     recordingElapsedMs = 17_000L,
-                    autoSend = false,
                     error = null,
                 ),
                 onClose = {},
@@ -1834,8 +1848,9 @@ private fun PromptComposerRecordingPreview() {
 }
 
 /**
- * Issue #453: Transcribing state — "Transcribing…" + spinner + Cancel; the
- * Auto-send toggle is still shown.
+ * Issue #453 / #508: Transcribing state — "Transcribing…" + spinner; below,
+ * Cancel + "Send" (arms the queued send for the in-flight round-trip). No
+ * persistent Auto-send toggle.
  */
 @Preview(name = "Composer · transcribing", widthDp = 412, heightDp = 360)
 @Composable
@@ -1847,7 +1862,6 @@ private fun PromptComposerTranscribingPreview() {
                     draft = "",
                     recording = PromptComposerViewModel.RecordingState.Transcribing,
                     amplitude = 0f,
-                    autoSend = true,
                     error = null,
                 ),
                 onClose = {},

@@ -28,14 +28,16 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * Issue #453 (supersedes the #211/#210 UI flow): emulator coverage of the
- * redesigned "dictate then send" path.
+ * Issue #508 (supersedes #453's Auto-send toggle, and the #211/#210 UI flow):
+ * emulator coverage of the redesigned "dictate then choose" path.
  *
- * The recording UI was redesigned (issue #453): there is no Send button
- * during Recording/Transcribing any more. Instead an **Auto-send** toggle
- * controls whether the completed dictation is sent immediately (ON) or
- * merely inserted into the editable input for review (OFF). The red Stop
- * button stops recording and starts transcription.
+ * The Recording row now offers two explicit stop actions instead of a
+ * persistent Auto-send toggle:
+ *  - **"To field"** ([COMPOSER_TO_FIELD_TAG]) — stop + transcribe, drop the
+ *    text into the editable composer field; nothing is sent.
+ *  - **"Send"** ([COMPOSER_STOP_SEND_TAG]) — stop + transcribe + send
+ *    immediately. Also shown in Transcribing to arm the queued send for the
+ *    in-flight clip.
  *
  * Renders [SheetContent] backed by a real [PromptComposerViewModel] with
  * in-memory fakes for the microphone and Whisper client. The `sendRequests`
@@ -98,7 +100,6 @@ class PromptComposerSendWhileRecordingTest {
                     onMicTap = { vm.onMicTap() },
                     onSend = { withEnter -> vm.requestSend(withEnter) },
                     onCancelRecording = vm::cancelTranscription,
-                    onAutoSendChange = vm::setAutoSend,
                 )
             }
         }
@@ -109,10 +110,10 @@ class PromptComposerSendWhileRecordingTest {
     }
 
     @Test
-    fun autoSendOnStopThenTranscribeFiresSendWithCombinedTranscript() {
-        // Issue #453: with Auto-send ON, tapping the red Stop button stops
-        // recording, transcription runs, the transcript is appended to the
-        // existing draft, and the send fires with the combined text.
+    fun sendButtonStopsTranscribesAndSendsCombinedTranscript() {
+        // Issue #508: tapping the "Send" stop button stops recording,
+        // transcription runs, the transcript is appended to the existing
+        // draft, and the send fires with the combined text.
         val mic = TestMicCapture()
         val whisper = object : WhisperClient {
             override suspend fun transcribe(
@@ -136,15 +137,12 @@ class PromptComposerSendWhileRecordingTest {
         compose.waitUntil(timeoutMillis = 5_000) {
             vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Recording
         }
-        // 3. Turn Auto-send ON while recording.
-        compose.onNodeWithTag(COMPOSER_AUTO_SEND_TAG).assertIsDisplayed().performClick()
-        compose.waitForIdle()
-        // 4. Tap the red Stop button → stop -> transcribe -> auto-send.
-        compose.onNodeWithTag(COMPOSER_MIC_TAG).performClick()
+        // 3. Tap the "Send" stop button → stop -> transcribe -> send.
+        compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed().performClick()
         compose.waitForIdle()
         compose.waitUntil(timeoutMillis = 10_000) { sent.isNotEmpty() }
 
-        // The send carries the combined draft. Auto-send always submits.
+        // The send carries the combined draft and submits with Enter.
         assertEquals(1, sent.size)
         assertEquals("Tell me from dictation", sent[0].text)
         assertEquals(true, sent[0].withEnter)
@@ -153,9 +151,9 @@ class PromptComposerSendWhileRecordingTest {
     }
 
     @Test
-    fun autoSendWhileTranscribingFiresOnlyAfterWhisperSuccess() {
-        // Issue #453: with Auto-send ON, the queued send must NOT fire
-        // until Whisper completes.
+    fun sendWhileTranscribingFiresOnlyAfterWhisperSuccess() {
+        // Issue #508: tapping "Send" while Transcribing arms the queued send;
+        // it must NOT fire until Whisper completes.
         val release = CompletableDeferred<Unit>()
         val whisperCalls = AtomicInteger(0)
         val whisper = object : WhisperClient {
@@ -176,16 +174,13 @@ class PromptComposerSendWhileRecordingTest {
         )
         val sent = setupContent(vm)
 
-        // Auto-send ON before recording.
         compose.onNodeWithTag(COMPOSER_MIC_TAG).performClick()
         compose.waitForIdle()
         compose.waitUntil(timeoutMillis = 5_000) {
             vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Recording
         }
-        compose.onNodeWithTag(COMPOSER_AUTO_SEND_TAG).performClick()
-        compose.waitForIdle()
-        // Stop -> Transcribing (parked on the latch).
-        compose.onNodeWithTag(COMPOSER_MIC_TAG).performClick()
+        // "To field" stop -> Transcribing (parked on the latch).
+        compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).performClick()
         compose.waitForIdle()
         compose.waitUntil(timeoutMillis = 5_000) {
             vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Transcribing
@@ -193,8 +188,11 @@ class PromptComposerSendWhileRecordingTest {
 
         // Nothing dispatched yet — the latch is still held.
         assertEquals(0, sent.size)
-        // The Auto-send toggle is still shown during transcription.
-        compose.onNodeWithTag(COMPOSER_AUTO_SEND_TAG).assertIsDisplayed()
+        // The "Send" action is still shown during transcription.
+        compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed().performClick()
+        compose.waitForIdle()
+        // Still nothing — Whisper hasn't returned.
+        assertEquals(0, sent.size)
 
         // Release Whisper.
         release.complete(Unit)
@@ -207,9 +205,9 @@ class PromptComposerSendWhileRecordingTest {
     }
 
     @Test
-    fun autoSendOffInsertsTranscriptIntoEditableDraftWithoutSending() {
-        // Issue #453: with Auto-send OFF (the default), the completed
-        // dictation lands in the editable input for review — no send fires.
+    fun toFieldStopInsertsTranscriptIntoEditableDraftWithoutSending() {
+        // Issue #508: tapping "To field" drops the completed dictation into
+        // the editable input for review — no send fires.
         val mic = TestMicCapture()
         val whisper = object : WhisperClient {
             override suspend fun transcribe(
@@ -231,8 +229,8 @@ class PromptComposerSendWhileRecordingTest {
         compose.waitUntil(timeoutMillis = 5_000) {
             vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Recording
         }
-        // Stop with Auto-send OFF.
-        compose.onNodeWithTag(COMPOSER_MIC_TAG).performClick()
+        // Stop via "To field".
+        compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed().performClick()
         compose.waitForIdle()
         compose.waitUntil(timeoutMillis = 10_000) {
             vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Idle &&
@@ -248,9 +246,9 @@ class PromptComposerSendWhileRecordingTest {
     }
 
     @Test
-    fun autoSendWhisperFailureDropsSendAndSurfacesError() {
-        // Issue #453: if Whisper fails with Auto-send ON, the queued send is
-        // cancelled, an error banner appears, and the typed draft survives.
+    fun sendButtonWhisperFailureDropsSendAndSurfacesError() {
+        // Issue #508: if Whisper fails after the "Send" stop, the queued send
+        // is cancelled, an error banner appears, and the typed draft survives.
         val mic = TestMicCapture()
         val whisper = object : WhisperClient {
             override suspend fun transcribe(
@@ -275,9 +273,7 @@ class PromptComposerSendWhileRecordingTest {
         compose.waitUntil(timeoutMillis = 5_000) {
             vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Recording
         }
-        compose.onNodeWithTag(COMPOSER_AUTO_SEND_TAG).performClick()
-        compose.waitForIdle()
-        compose.onNodeWithTag(COMPOSER_MIC_TAG).performClick()
+        compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).performClick()
         compose.waitForIdle()
         compose.waitUntil(timeoutMillis = 10_000) {
             vm.uiState.value.recording == PromptComposerViewModel.RecordingState.Idle &&

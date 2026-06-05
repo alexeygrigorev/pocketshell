@@ -1920,27 +1920,52 @@ class PromptComposerViewModelTest {
         advanceUntilIdle()
     }
 
-    // -- Issue #453: Auto-send toggle -------------------------------------
+    // -- Issue #508: two explicit stop buttons (To field / Send) ----------
 
     @Test
-    fun autoSendOnSendsTheTranscriptWithoutASecondTap() = runTest {
+    fun toFieldStopLandsTranscriptInDraftWithoutSending() = runTest {
+        // The "To field" button is the historic stop-and-transcribe path
+        // ([onMicTap] while Recording): the transcript appends to the editable
+        // draft and NOTHING is sent. The user can then attach a screenshot /
+        // edit before tapping Send manually.
         val vm = newVm(
             mic = FakeMicCapture(),
             whisper = fakeWhisperClient { Result.success("deploy the app") },
             samplerDispatcher = StandardTestDispatcher(testScheduler),
         )
         val sent = collectSendRequests(vm)
-        // Turn Auto-send ON before recording.
-        vm.setAutoSend(true)
-        assertTrue(vm.uiState.value.autoSend)
 
-        vm.onMicTap()
+        vm.onMicTap() // start recording
         runCurrent()
-        vm.onMicTap() // stop -> transcribe
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        vm.onMicTap() // "To field": stop -> transcribe -> draft
         advanceUntilIdle()
 
-        // With Auto-send ON the completed dictation is dispatched without a
-        // separate Send tap, and the draft is cleared.
+        assertEquals(0, sent.size)
+        assertEquals("deploy the app", vm.uiState.value.draft)
+        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
+    }
+
+    @Test
+    fun sendStopTranscribesAndSendsImmediately() = runTest {
+        // The "Send" button routes through [requestSend(true)] while Recording:
+        // it queues the send and stops the recorder; once Whisper returns, the
+        // queued send fires with the combined transcript and the draft clears.
+        val vm = newVm(
+            mic = FakeMicCapture(),
+            whisper = fakeWhisperClient { Result.success("deploy the app") },
+            samplerDispatcher = StandardTestDispatcher(testScheduler),
+        )
+        val sent = collectSendRequests(vm)
+
+        vm.onMicTap() // start recording
+        runCurrent()
+        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
+
+        vm.requestSend(withEnter = true) // "Send": stop -> transcribe -> send
+        advanceUntilIdle()
+
         assertEquals(1, sent.size)
         assertEquals("deploy the app", sent[0].text)
         assertEquals(true, sent[0].withEnter)
@@ -1948,116 +1973,67 @@ class PromptComposerViewModelTest {
     }
 
     @Test
-    fun autoSendOffInsertsTheTranscriptIntoTheEditableDraft() = runTest {
+    fun sendStopCombinesExistingDraftWithTranscript() = runTest {
+        // "Send" while a typed draft already exists sends the combined text
+        // (existing draft + just-transcribed words), not just the transcript.
         val vm = newVm(
             mic = FakeMicCapture(),
-            whisper = fakeWhisperClient { Result.success("deploy the app") },
+            whisper = fakeWhisperClient { Result.success("the app") },
             samplerDispatcher = StandardTestDispatcher(testScheduler),
         )
         val sent = collectSendRequests(vm)
-        // Auto-send defaults OFF.
-        assertEquals(false, vm.uiState.value.autoSend)
+        vm.onDraftChange("deploy")
 
         vm.onMicTap()
         runCurrent()
-        vm.onMicTap() // stop -> transcribe
+        vm.requestSend(withEnter = true)
         advanceUntilIdle()
 
-        // With Auto-send OFF nothing is sent — the transcript lands in the
-        // editable draft for the user to review before tapping Send.
-        assertEquals(0, sent.size)
-        assertEquals("deploy the app", vm.uiState.value.draft)
-        assertEquals(RecordingState.Idle, vm.uiState.value.recording)
-    }
-
-    @Test
-    fun togglingAutoSendOnMidRecordingArmsTheQueuedSend() = runTest {
-        val vm = newVm(
-            mic = FakeMicCapture(),
-            whisper = fakeWhisperClient { Result.success("mid-record toggle") },
-            samplerDispatcher = StandardTestDispatcher(testScheduler),
-        )
-        val sent = collectSendRequests(vm)
-
-        vm.onMicTap()
-        runCurrent()
-        assertEquals(RecordingState.Recording, vm.uiState.value.recording)
-        // Flip Auto-send ON while the mic is still open.
-        vm.setAutoSend(true)
-        runCurrent()
-
-        vm.onMicTap() // stop -> transcribe
-        advanceUntilIdle()
-
-        // The mid-recording toggle is honoured: the transcript is sent.
         assertEquals(1, sent.size)
-        assertEquals("mid-record toggle", sent[0].text)
+        assertEquals("deploy the app", sent[0].text)
         assertEquals("", vm.uiState.value.draft)
     }
 
     @Test
-    fun togglingAutoSendOffMidRecordingDisarmsTheQueuedSend() = runTest {
+    fun sendWhileTranscribingFiresOnceWhisperReturns() = runTest {
+        // The "Send" button is also offered in Transcribing (the audio is
+        // already captured). Tapping it there arms the queued send so the
+        // in-flight round-trip dispatches the transcript when it lands.
+        //
+        // Gate the Whisper response on an explicit latch so the FSM stays
+        // parked on Transcribing while we tap Send; without it the suspend
+        // function returns immediately and the FSM is already back on Idle.
+        val release = kotlinx.coroutines.CompletableDeferred<Unit>()
+        val whisper = object : WhisperClient {
+            override suspend fun transcribe(audio: ByteArray, language: String?): Result<String> {
+                release.await()
+                return Result.success("send from transcribing")
+            }
+        }
         val vm = newVm(
             mic = FakeMicCapture(),
-            whisper = fakeWhisperClient { Result.success("changed my mind") },
+            whisper = whisper,
             samplerDispatcher = StandardTestDispatcher(testScheduler),
         )
         val sent = collectSendRequests(vm)
-        // Start with Auto-send ON, then turn it OFF mid-recording.
-        vm.setAutoSend(true)
-        vm.onMicTap()
-        runCurrent()
-        vm.setAutoSend(false)
-        runCurrent()
 
-        vm.onMicTap() // stop -> transcribe
-        advanceUntilIdle()
+        vm.onMicTap() // start recording
+        runCurrent()
+        vm.onMicTap() // stop -> Transcribing (whisper coroutine parked on latch)
+        runCurrent()
+        assertEquals(RecordingState.Transcribing, vm.uiState.value.recording)
 
-        // Turning Auto-send OFF mid-recording disarms the queued send; the
-        // transcript merely inserts into the editable draft.
+        // Tap Send while still Transcribing — only the queued flag is armed,
+        // nothing dispatched yet.
+        vm.requestSend(withEnter = true)
+        runCurrent()
         assertEquals(0, sent.size)
-        assertEquals("changed my mind", vm.uiState.value.draft)
-    }
 
-    // -- Issue #453: Auto-send persistence (the "auto-unchecked itself" bug) --
-
-    @Test
-    fun setAutoSendPersistsTheChoiceToSavedStateHandle() {
-        val handle = SavedStateHandle()
-        val vm = newVm(savedStateHandle = handle)
-
-        vm.setAutoSend(true)
-        assertTrue(vm.uiState.value.autoSend)
-        // The choice is written to SavedStateHandle so it survives recreate.
-        assertEquals(true, handle.get<Boolean>(PromptComposerViewModel.KEY_AUTO_SEND))
-
-        vm.setAutoSend(false)
-        assertFalse(vm.uiState.value.autoSend)
-        assertEquals(false, handle.get<Boolean>(PromptComposerViewModel.KEY_AUTO_SEND))
-    }
-
-    @Test
-    fun autoSendOnSurvivesAViewModelRecreate() {
-        // Simulate the maintainer's report ("автосенд снялся автоматически"):
-        // the user turns Auto-send ON, then a process-death / config-change
-        // recreate rebuilds the ViewModel from the same SavedStateHandle. The
-        // toggle must STILL be ON — not silently reset to its false default.
-        val handle = SavedStateHandle()
-        val first = newVm(savedStateHandle = handle)
-        first.setAutoSend(true)
-        assertTrue(first.uiState.value.autoSend)
-
-        // Recreate from the same handle (what AndroidX does on recreate).
-        val recreated = newVm(savedStateHandle = handle)
-        assertTrue(
-            "Auto-send must persist its ON state across a ViewModel recreate",
-            recreated.uiState.value.autoSend,
-        )
-    }
-
-    @Test
-    fun autoSendDefaultsToOffWhenSavedStateHandleIsEmpty() {
-        val vm = newVm(savedStateHandle = SavedStateHandle())
-        assertFalse(vm.uiState.value.autoSend)
+        // Whisper round-trip completes: the queued send fires.
+        release.complete(Unit)
+        advanceUntilIdle()
+        assertEquals(1, sent.size)
+        assertEquals("send from transcribing", sent[0].text)
+        assertEquals("", vm.uiState.value.draft)
     }
 }

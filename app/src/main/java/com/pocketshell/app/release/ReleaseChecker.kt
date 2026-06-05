@@ -1,5 +1,6 @@
 package com.pocketshell.app.release
 
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -26,6 +27,32 @@ data class ReleaseInfo(
     val htmlUrl: String,
     val apkUrl: String,
 )
+
+/**
+ * Outcome of a single GitHub-Releases poll. Issue #515: the old API
+ * collapsed "no newer release" and "the check itself failed" into the
+ * same `null`, so a cold-launch network blip / GitHub rate-limit produced
+ * exactly the same silent no-banner as a genuinely up-to-date install.
+ * Splitting them lets the caller log + surface a failure (with a retry)
+ * while staying silent when the app really is current.
+ *
+ * - [UpdateAvailable] — a strictly-newer release with a downloadable APK
+ *   asset was found.
+ * - [UpToDate] — the check succeeded and the installed build is current
+ *   (or the newer tag had no matching dotted-APK asset). No banner.
+ * - [Failed] — the check could not complete (non-200, rate-limit,
+ *   network error, unparseable body). Carries a human-readable [reason]
+ *   for logging and an optional "tap to retry" affordance. NOT a silent
+ *   null.
+ */
+sealed interface ReleaseCheckResult {
+    data class UpdateAvailable(val info: ReleaseInfo) : ReleaseCheckResult
+    data object UpToDate : ReleaseCheckResult
+    data class Failed(val reason: String) : ReleaseCheckResult
+
+    /** The [ReleaseInfo] when an update is available, else `null`. */
+    fun infoOrNull(): ReleaseInfo? = (this as? UpdateAvailable)?.info
+}
 
 /**
  * Hits the GitHub Releases API for the public PocketShell repo and
@@ -59,32 +86,72 @@ open class ReleaseChecker(
         private const val API_URL = "https://api.github.com/repos/$REPO/releases/latest"
         private const val USER_AGENT = "pocketshell"
         private const val TIMEOUT_MS = 10_000
+        private const val TAG = "PsReleaseCheck"
     }
 
     /**
-     * Query the GitHub Releases API. Returns the asset metadata only
-     * when the remote tag is strictly newer than [currentVersion]; if
-     * the remote tag is equal or older, returns `null`.
+     * Query the GitHub Releases API and classify the outcome (issue
+     * #515). Unlike the legacy [check], this distinguishes three states:
+     *
+     *  - [ReleaseCheckResult.UpdateAvailable] when the remote tag is
+     *    strictly newer than [currentVersion] and ships the dotted-APK
+     *    asset;
+     *  - [ReleaseCheckResult.UpToDate] when the install is current (or
+     *    the newer tag has no matching APK);
+     *  - [ReleaseCheckResult.Failed] when the request itself failed
+     *    (non-200 / rate-limit / network error / unparseable body).
+     *
+     * Every failure is logged with its concrete reason via [Log] so the
+     * "no banner appeared" case is diagnosable in logcat instead of
+     * vanishing into a silent `null`.
      *
      * Marked `open` so unit tests can subclass and short-circuit the
      * network call — see `HostListViewModelTest.FakeReleaseChecker`.
      */
-    open suspend fun check(currentVersion: String): ReleaseInfo? = withContext(Dispatchers.IO) {
-        try {
-            val conn = (URL(latestReleaseUrl).openConnection() as HttpURLConnection).apply {
-                connectTimeout = TIMEOUT_MS
-                readTimeout = TIMEOUT_MS
-                setRequestProperty("Accept", "application/vnd.github+json")
-                setRequestProperty("User-Agent", USER_AGENT)
+    open suspend fun checkForUpdate(currentVersion: String): ReleaseCheckResult =
+        withContext(Dispatchers.IO) {
+            try {
+                val conn = (URL(latestReleaseUrl).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = TIMEOUT_MS
+                    readTimeout = TIMEOUT_MS
+                    setRequestProperty("Accept", "application/vnd.github+json")
+                    setRequestProperty("User-Agent", USER_AGENT)
+                }
+
+                val code = conn.responseCode
+                if (code != 200) {
+                    // GitHub returns 403 with a rate-limit body for
+                    // unauthenticated bursts — the single most likely cause
+                    // of "the banner never showed at cold launch". Naming the
+                    // code makes that diagnosable.
+                    val reason = "GitHub returned HTTP $code"
+                    Log.w(TAG, "release check failed: $reason (current=$currentVersion)")
+                    return@withContext ReleaseCheckResult.Failed(reason)
+                }
+
+                val body = conn.inputStream.bufferedReader().readText()
+                val info = parseRelease(body, currentVersion)
+                if (info != null) {
+                    ReleaseCheckResult.UpdateAvailable(info)
+                } else {
+                    ReleaseCheckResult.UpToDate
+                }
+            } catch (e: Exception) {
+                val reason = "${e.javaClass.simpleName}: ${e.message ?: "no message"}"
+                Log.w(TAG, "release check failed: $reason (current=$currentVersion)", e)
+                ReleaseCheckResult.Failed(reason)
             }
-
-            if (conn.responseCode != 200) return@withContext null
-
-            parseRelease(conn.inputStream.bufferedReader().readText(), currentVersion)
-        } catch (_: Exception) {
-            null
         }
-    }
+
+    /**
+     * Legacy convenience wrapper that collapses the [checkForUpdate]
+     * outcome back to "the [ReleaseInfo] or `null`". Kept for callers
+     * (e.g. the update notifier's version labeler) that only care about
+     * the available-release case. New callers that need to surface a
+     * failed check should use [checkForUpdate] directly.
+     */
+    suspend fun check(currentVersion: String): ReleaseInfo? =
+        checkForUpdate(currentVersion).infoOrNull()
 
     internal fun parseRelease(body: String, currentVersion: String): ReleaseInfo? {
         val json = JSONObject(body)

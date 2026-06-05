@@ -162,6 +162,11 @@ fun HostListScreen(
     // Issue #476: one-shot feedback for the update-banner tap so a working
     // download no longer looks like a silent no-op.
     val updateMessage by viewModel.updateMessage.collectAsState()
+    // Issue #515: surfaces a "couldn't check for updates — Retry" note when
+    // the GitHub-Releases poll genuinely failed (vs simply finding no newer
+    // release), so a cold-launch rate-limit / network blip no longer vanishes
+    // silently.
+    val updateCheckFailed by viewModel.updateCheckFailed.collectAsState()
     val bootstrapState by viewModel.bootstrapState.collectAsState()
     val bootstrapHostName by viewModel.bootstrapHostName.collectAsState()
     val pendingNavigation by viewModel.pendingNavigation.collectAsState()
@@ -386,6 +391,9 @@ fun HostListScreen(
                     .sortedBy { it.key }
                 val hasUpdateBanner = updateInfo != null
                 val hasUpdateMessageBanner = updateMessage != null
+                // Issue #515: the check failed (vs found no update) — show a
+                // visible retry instead of a silent no-op.
+                val hasUpdateCheckFailedBanner = updateCheckFailed != null
                 val hasShareBanner = shareMessage != null
                 val hasRecheckBanner = recheckMessage != null
                 val hasUsageWarningBanners = activeUsageBanners.isNotEmpty() && onOpenUsage != null
@@ -395,6 +403,7 @@ fun HostListScreen(
                 // difference (dismissible, non-blocking, no setup framing).
                 val hasAppUpdateWarning = appUpdateWarning != null
                 val hasAnyNotice = hasUpdateBanner || hasUpdateMessageBanner ||
+                    hasUpdateCheckFailedBanner ||
                     hasShareBanner || hasRecheckBanner ||
                     hasUsageWarningBanners || hasAppUpdateWarning
                 if (hasAnyNotice) {
@@ -410,41 +419,12 @@ fun HostListScreen(
                             updateInfo?.let { info ->
                                 UpdateBanner(
                                     info = info,
-                                    onUpdate = {
-                                        // Issue #476: the tap used to fire a
-                                        // bare ACTION_VIEW with no feedback and
-                                        // no error handling, so a working
-                                        // download looked like a silent no-op
-                                        // and a failed one threw. Now we always
-                                        // show what happened: on success a
-                                        // "download started" confirmation, on
-                                        // failure a concrete reason plus a
-                                        // fallback to the release page (which a
-                                        // browser always handles).
-                                        try {
-                                            context.startActivity(
-                                                Intent(
-                                                    Intent.ACTION_VIEW,
-                                                    Uri.parse(info.apkUrl),
-                                                ),
-                                            )
-                                            viewModel.onUpdateDownloadStarted(info.tagName)
-                                        } catch (e: ActivityNotFoundException) {
-                                            launchReleasePageFallback(
-                                                context,
-                                                info,
-                                                viewModel,
-                                                e.message ?: "no app can open the download link",
-                                            )
-                                        } catch (e: SecurityException) {
-                                            launchReleasePageFallback(
-                                                context,
-                                                info,
-                                                viewModel,
-                                                e.message ?: "the download was blocked",
-                                            )
-                                        }
-                                    },
+                                    // Issue #515: the ACTION_VIEW → APK launch
+                                    // (with download-started / failure feedback
+                                    // and the release-page fallback) is shared
+                                    // with the #514 "app is behind" banner so
+                                    // both offer the exact same sideload path.
+                                    onUpdate = { launchApkDownload(context, info, viewModel) },
                                 )
                             }
 
@@ -457,6 +437,22 @@ fun HostListScreen(
                                     message = msg,
                                     onDismiss = viewModel::clearUpdateMessage,
                                 )
+                            }
+
+                            // Issue #515: the GitHub-Releases poll genuinely
+                            // failed (non-200 / rate-limit / network blip /
+                            // unparseable body) rather than finding no newer
+                            // release. Surface a visible, dismissible note with
+                            // a Retry that re-runs the check, so a single bad
+                            // cold-launch moment is no longer a silent no-op.
+                            updateCheckFailed?.let { failure ->
+                                Box(modifier = Modifier.testTag(HOST_LIST_UPDATE_CHECK_FAILED_TAG)) {
+                                    UpdateCheckFailedBanner(
+                                        reason = failure.reason,
+                                        onRetry = viewModel::checkForUpdates,
+                                        onDismiss = viewModel::dismissUpdateCheckFailure,
+                                    )
+                                }
                             }
 
                             shareMessage?.let { msg ->
@@ -485,8 +481,22 @@ fun HostListScreen(
                             // difference. No installer, no setup framing.
                             appUpdateWarning?.let { warning ->
                                 Box(modifier = Modifier.testTag(HOST_LIST_APP_UPDATE_WARNING_TAG)) {
-                                    ShareMessageBanner(
-                                        message = warning.message,
+                                    // Issue #515: the host probe proved this
+                                    // app is behind the remote CLI — the
+                                    // strongest "you should update" signal. If
+                                    // a real downloadable GitHub release was
+                                    // resolved, offer an actionable OPTIONAL
+                                    // "Update" (same ACTION_VIEW → APK path as
+                                    // the standalone UpdateBanner). The host is
+                                    // already fully usable, so this never
+                                    // blocks; when no release is resolved the
+                                    // banner degrades to a passive dismissible
+                                    // note exactly as #514 shipped it.
+                                    AppUpdateWarningBanner(
+                                        warning = warning,
+                                        onUpdate = warning.releaseInfo?.let { info ->
+                                            { launchApkDownload(context, info, viewModel) }
+                                        },
                                         onDismiss = viewModel::dismissAppUpdateWarning,
                                     )
                                 }
@@ -810,6 +820,28 @@ internal const val HOST_LIST_NOTICES_TAG = "host-list:notices"
 internal const val HOST_LIST_APP_UPDATE_WARNING_TAG = "host-list:app-update-warning"
 
 /**
+ * Issue #515: stable test tag for the "couldn't check for updates — Retry"
+ * banner shown when the GitHub-Releases poll genuinely failed (vs found no
+ * newer release). The connected scenario asserts this surfaces a visible
+ * retry rather than a silent no-op.
+ */
+internal const val HOST_LIST_UPDATE_CHECK_FAILED_TAG = "host-list:update-check-failed"
+
+/**
+ * Issue #515: stable test tag riding the actionable "Update" button on the
+ * #514 "app is behind" banner once a downloadable GitHub release has been
+ * resolved. Connected/instrumented tests target this to fire the APK open
+ * path.
+ */
+internal const val HOST_LIST_APP_UPDATE_ACTION_TAG = "host-list:app-update-warning:update"
+
+/**
+ * Issue #515: stable test tag riding the "Retry" button on the
+ * update-check-failed banner.
+ */
+internal const val HOST_LIST_UPDATE_CHECK_RETRY_TAG = "host-list:update-check-failed:retry"
+
+/**
  * Issue #144: stable test tag for the bottom-right "+" FloatingActionButton
  * that opens the Add Host form. The FAB carries the only primary tap target
  * for "add a host" — the empty-state copy intentionally has no button — so
@@ -855,6 +887,42 @@ internal const val IMPORT_CONFLICT_ADD_AS_NEW_TAG = "host-list:import-conflict:a
  * instrumentation that targets it stays valid.
  */
 internal const val HOST_USAGE_BADGE_TAG_PREFIX = "host:usage-badge:"
+
+/**
+ * Issue #515: the single shared "download the update APK" path. Fires
+ * `Intent.ACTION_VIEW` against [ReleaseInfo.apkUrl] so the system browser /
+ * download manager handles the sideload — we never silently install — then
+ * records a download-started confirmation. On failure it falls back to the
+ * release page and records a concrete reason. Used by BOTH the standalone
+ * [UpdateBanner] (#40/#476) and the #514 "app is behind" banner so the two
+ * offer exactly the same user-driven sideload UX.
+ */
+internal fun launchApkDownload(
+    context: Context,
+    info: ReleaseInfo,
+    viewModel: HostListViewModel,
+) {
+    try {
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW, Uri.parse(info.apkUrl)),
+        )
+        viewModel.onUpdateDownloadStarted(info.tagName)
+    } catch (e: ActivityNotFoundException) {
+        launchReleasePageFallback(
+            context,
+            info,
+            viewModel,
+            e.message ?: "no app can open the download link",
+        )
+    } catch (e: SecurityException) {
+        launchReleasePageFallback(
+            context,
+            info,
+            viewModel,
+            e.message ?: "the download was blocked",
+        )
+    }
+}
 
 /**
  * Issue #476: shared fallback path for the update tap. When the primary
@@ -1327,6 +1395,87 @@ internal fun ShareMessageBanner(message: String, onDismiss: () -> Unit) {
         )
         TextButton(onClick = onDismiss) {
             Text("Dismiss", color = PocketShellColors.Accent, fontSize = 12.sp)
+        }
+    }
+}
+
+/**
+ * Issue #515: quiet inline note shown when the GitHub-Releases poll failed
+ * (vs simply found no newer release). The failure used to vanish into a
+ * silent `null`; this surfaces a concrete cause plus a Retry that re-runs
+ * the check, and a Dismiss to clear it. Styled like [ShareMessageBanner]
+ * (not the alarming accent banner) so a transient network blip reads as a
+ * gentle "tap to retry", not an error takeover.
+ */
+@Composable
+internal fun UpdateCheckFailedBanner(
+    reason: String,
+    onRetry: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "Couldn't check for updates ($reason)",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(
+            onClick = onRetry,
+            modifier = Modifier.testTag(HOST_LIST_UPDATE_CHECK_RETRY_TAG),
+        ) {
+            Text("Retry", color = PocketShellColors.Accent, fontSize = 12.sp)
+        }
+        TextButton(onClick = onDismiss) {
+            Text("Dismiss", color = PocketShellColors.TextSecondary, fontSize = 12.sp)
+        }
+    }
+}
+
+/**
+ * Issue #514 + #515: the soft "remote pocketshell CLI is newer than this
+ * app" note. The host stays fully usable, so this is a quiet dismissible
+ * banner — never a sheet. #515 adds an OPTIONAL "Update" action when the
+ * host probe has been backed by a resolved downloadable GitHub release
+ * ([onUpdate] non-null): tapping it fires the same ACTION_VIEW → APK path
+ * as the standalone [UpdateBanner]. When no release was resolved ([onUpdate]
+ * null) the banner degrades to the passive #514 form with just Dismiss.
+ */
+@Composable
+internal fun AppUpdateWarningBanner(
+    warning: HostListViewModel.AppUpdateWarning,
+    onUpdate: (() -> Unit)?,
+    onDismiss: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(PocketShellColors.Surface)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = warning.message,
+            color = PocketShellColors.TextSecondary,
+            fontSize = 12.sp,
+            modifier = Modifier.weight(1f),
+        )
+        if (onUpdate != null) {
+            TextButton(
+                onClick = onUpdate,
+                modifier = Modifier.testTag(HOST_LIST_APP_UPDATE_ACTION_TAG),
+            ) {
+                Text("Update", color = PocketShellColors.Accent, fontSize = 12.sp)
+            }
+        }
+        TextButton(onClick = onDismiss) {
+            Text("Dismiss", color = PocketShellColors.TextSecondary, fontSize = 12.sp)
         }
     }
 }

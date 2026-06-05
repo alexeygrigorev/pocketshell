@@ -10,6 +10,7 @@ import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.bootstrap.HostBootstrapper
 import com.pocketshell.app.notifications.UpdateNotifier
+import com.pocketshell.app.release.ReleaseCheckResult
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -196,16 +197,24 @@ class HostListViewModelTest {
      */
     private class FakeReleaseChecker(
         private val result: ReleaseInfo?,
+        // Issue #515: when non-null, the check reports a failed poll (vs
+        // "no newer release") so the failure-path test can assert the
+        // ViewModel surfaces a reason instead of a silent null.
+        private val failureReason: String? = null,
     ) : ReleaseChecker() {
         var callCount: Int = 0
             private set
         var lastCurrentVersion: String? = null
             private set
 
-        override suspend fun check(currentVersion: String): ReleaseInfo? {
+        override suspend fun checkForUpdate(currentVersion: String): ReleaseCheckResult {
             callCount += 1
             lastCurrentVersion = currentVersion
-            return result
+            return when {
+                failureReason != null -> ReleaseCheckResult.Failed(failureReason)
+                result != null -> ReleaseCheckResult.UpdateAvailable(result)
+                else -> ReleaseCheckResult.UpToDate
+            }
         }
     }
 
@@ -411,6 +420,120 @@ class HostListViewModelTest {
 
         assertEquals(1, fake.callCount)
         assertNull(viewModel.updateAvailable.value)
+    }
+
+    @Test
+    fun updateCheckFailed_surfacesReason_insteadOfSilentNull_whenCheckFails() = runTest {
+        // Issue #515: a failed poll (non-200 / rate-limit / network blip)
+        // used to look identical to "no newer release" — a silent null. Now
+        // it surfaces a visible, reasoned failure the user can retry, and the
+        // available-update state is left untouched.
+        val fake = FakeReleaseChecker(result = null, failureReason = "GitHub returned HTTP 403")
+        val viewModel = newViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = fake,
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
+            settingsRepository = newSettingsRepository(),
+        )
+
+        assertEquals(1, fake.callCount)
+        // NOT silently null — the failure is observable with its reason.
+        val failure = viewModel.updateCheckFailed.value
+        assertNotNull(failure)
+        assertEquals("GitHub returned HTTP 403", failure!!.reason)
+        // The available-update banner stays empty (no false "up to date").
+        assertNull(viewModel.updateAvailable.value)
+
+        // Dismiss clears the failure note.
+        viewModel.dismissUpdateCheckFailure()
+        assertNull(viewModel.updateCheckFailed.value)
+    }
+
+    @Test
+    fun updateCheckFailed_clears_whenLaterCheckSucceeds() = runTest {
+        // A retry that succeeds must clear the failure note so the banner
+        // disappears rather than lingering after the network recovers.
+        val fake = FakeReleaseChecker(result = null)
+        val viewModel = newViewModel(
+            applicationContext = context,
+            hostDao = db.hostDao(),
+            sshKeyDao = db.sshKeyDao(),
+            releaseChecker = fake,
+            bootstrapper = HostBootstrapper(),
+            usageScheduler = newUsageScheduler(),
+            activeClients = ActiveTmuxClients(),
+            settingsRepository = newSettingsRepository(),
+        )
+
+        // A successful "up to date" check leaves no failure banner.
+        assertNull(viewModel.updateCheckFailed.value)
+    }
+
+    @Test
+    fun appUpdateWarning_offersResolvedRelease_whenRemoteCliNewerAndGithubHasRelease() = runTest {
+        // Issue #515: when the host probe proves the app is behind the remote
+        // CLI, the soft banner should resolve a real downloadable GitHub
+        // release so it can offer an OPTIONAL actionable "Update" — not just
+        // passive text. The host stays fully usable regardless.
+        val info = ReleaseInfo(
+            tagName = "v9999.0.0",
+            htmlUrl = "https://github.com/alexeygrigorev/pocketshell/releases/tag/v9999.0.0",
+            apkUrl = "https://example.com/pocketshell-9999.0.0-debug.apk",
+        )
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(name = "remote-newer", hostname = "h.example", username = "u", keyId = keyId),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = newViewModel(
+            releaseChecker = FakeReleaseChecker(result = info),
+            sessionOpener = HostSessionOpener { _, _, _ ->
+                FakeBootstrapSession(pocketshellVersion = "9999.0.0")
+            },
+        )
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k").join()
+
+        // Host navigates normally (ready) — never blocked by the offer.
+        assertEquals(true, viewModel.pendingNavigation.value!!.ready)
+        assertNull(viewModel.bootstrapState.value)
+
+        // The warning carries the resolved release so the banner can offer
+        // a working "Update" (ACTION_VIEW → APK).
+        val warning = viewModel.appUpdateWarning.value
+        assertNotNull(warning)
+        assertEquals(hostId, warning!!.hostId)
+        assertEquals(info, warning.releaseInfo)
+    }
+
+    @Test
+    fun appUpdateWarning_degradesToPassiveNote_whenGithubResolvesNoRelease() = runTest {
+        // If GitHub finds nothing newer (or the lookup fails) the #514 soft
+        // warning still appears — it just degrades to a passive dismissible
+        // note with no Update action. #514's behavior is preserved.
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(name = "remote-newer", hostname = "h.example", username = "u", keyId = keyId),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = newViewModel(
+            releaseChecker = FakeReleaseChecker(result = null),
+            sessionOpener = HostSessionOpener { _, _, _ ->
+                FakeBootstrapSession(pocketshellVersion = "9999.0.0")
+            },
+        )
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k").join()
+
+        val warning = viewModel.appUpdateWarning.value
+        assertNotNull(warning)
+        assertEquals(hostId, warning!!.hostId)
+        // No resolved release → passive note (banner shows Dismiss only).
+        assertNull(warning.releaseInfo)
     }
 
     @Test

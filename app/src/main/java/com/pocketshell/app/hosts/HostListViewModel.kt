@@ -15,6 +15,7 @@ import com.pocketshell.app.bootstrap.ToolStatus
 import com.pocketshell.app.bootstrap.cliUpdateFailureMessage
 import com.pocketshell.app.notifications.DefaultUpdateNotifier
 import com.pocketshell.app.notifications.UpdateNotifier
+import com.pocketshell.app.release.ReleaseCheckResult
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -327,6 +328,26 @@ class HostListViewModel internal constructor(
     val updateAvailable: StateFlow<ReleaseInfo?> = _updateAvailable.asStateFlow()
 
     /**
+     * Issue #515: non-null when the most recent GitHub-Releases poll did
+     * not complete (non-200 / rate-limit / network error / unparseable
+     * body), carrying the concrete failure reason. The old check
+     * collapsed "no newer release" and "the check itself failed" into the
+     * same silent `null`, so a single bad cold-launch moment produced no
+     * banner and no trace until the next cold start. Surfacing the failure
+     * gives the user a visible, dismissible "couldn't check for updates —
+     * Retry" affordance instead of a silent no-op, and the reason is also
+     * logged in [ReleaseChecker.checkForUpdate]. Cleared on the next
+     * successful check (or a dismiss). `null` hides the banner.
+     */
+    private val _updateCheckFailed = MutableStateFlow<UpdateCheckFailure?>(null)
+    val updateCheckFailed: StateFlow<UpdateCheckFailure?> = _updateCheckFailed.asStateFlow()
+
+    /** Dismiss the "couldn't check for updates" banner for now. */
+    fun dismissUpdateCheckFailure() {
+        _updateCheckFailed.value = null
+    }
+
+    /**
      * Issue #476: transient feedback for the update-banner tap. The
      * download itself is launched from the screen (it needs an Android
      * `Context` to fire `ACTION_VIEW`), but the user-visible "what
@@ -402,6 +423,34 @@ class HostListViewModel internal constructor(
             remoteVersion = appUpdate.currentVersion,
             appVersion = appUpdate.expectedVersion,
         )
+        // Issue #515: the host probe just *proved* this app build is behind
+        // the remote pocketshell CLI — the strongest possible "you should
+        // update" signal. Try to resolve a real downloadable GitHub release
+        // so the banner can offer an actionable, OPTIONAL "Update" (the same
+        // ACTION_VIEW → APK path the standalone UpdateBanner uses) instead of
+        // a dead passive line. This is best-effort and non-blocking: the host
+        // is already fully usable, and if the GitHub lookup finds nothing
+        // newer (or fails) the banner stays a passive note that still
+        // dismisses cleanly.
+        resolveAppUpdateRelease(host.id)
+    }
+
+    /**
+     * Best-effort GitHub-release lookup that populates the [AppUpdateWarning]
+     * banner's actionable [AppUpdateWarning.releaseInfo] so the user can tap
+     * "Update" and get the APK. Runs in [viewModelScope]; on any failure or
+     * "no newer release" the banner simply keeps its passive form. Guards
+     * against a stale write by re-checking the live warning still targets the
+     * same host before applying the resolved release.
+     */
+    private fun resolveAppUpdateRelease(hostId: Long) {
+        viewModelScope.launch {
+            val currentVersion = currentVersionName() ?: return@launch
+            val info = releaseChecker.check(currentVersion) ?: return@launch
+            val current = _appUpdateWarning.value ?: return@launch
+            if (current.hostId != hostId || current.releaseInfo != null) return@launch
+            _appUpdateWarning.value = current.copy(releaseInfo = info)
+        }
     }
 
     /**
@@ -781,18 +830,43 @@ class HostListViewModel internal constructor(
             val currentVersion = currentVersionName()
             if (currentVersion == null) {
                 _updateAvailable.value = null
+                _updateCheckFailed.value = null
                 return@launch
             }
-            val release = releaseChecker.check(currentVersion)
-            _updateAvailable.value = release
-            // Issue #502: surface the newer release as a local notification
-            // so the user notices it even when they've skipped the host
-            // list (the [UpdateBanner] home) and gone straight into a
-            // session. The notifier de-dupes per version, so re-running the
-            // check (cold launch / pull-to-refresh) never re-spams the same
-            // release.
-            if (release != null) {
-                updateNotifier.notifyUpdateAvailable(release)
+            // Issue #515: the check now classifies its outcome instead of
+            // collapsing "no newer release" and "the check failed" into the
+            // same silent null. A genuine failure (non-200 / rate-limit /
+            // network blip / unparseable body) raises a visible, dismissible
+            // "couldn't check — Retry" banner and is logged with its reason;
+            // a successful "up to date" check clears any prior failure
+            // without surfacing anything.
+            when (val result = releaseChecker.checkForUpdate(currentVersion)) {
+                is ReleaseCheckResult.UpdateAvailable -> {
+                    _updateAvailable.value = result.info
+                    _updateCheckFailed.value = null
+                    StartupTiming.mark("hostlist-update-check-available", "tag" to result.info.tagName)
+                    // Issue #502: surface the newer release as a local
+                    // notification so the user notices it even when they've
+                    // skipped the host list (the [UpdateBanner] home) and gone
+                    // straight into a session. The notifier de-dupes per
+                    // version, so re-running the check (cold launch /
+                    // pull-to-refresh) never re-spams the same release.
+                    updateNotifier.notifyUpdateAvailable(result.info)
+                }
+
+                ReleaseCheckResult.UpToDate -> {
+                    _updateAvailable.value = null
+                    _updateCheckFailed.value = null
+                    StartupTiming.mark("hostlist-update-check-uptodate")
+                }
+
+                is ReleaseCheckResult.Failed -> {
+                    // Keep any previously-found update visible; only surface
+                    // the failure so the user can retry. The reason is also
+                    // logged inside the checker.
+                    _updateCheckFailed.value = UpdateCheckFailure(result.reason)
+                    StartupTiming.mark("hostlist-update-check-failed", "reason" to result.reason)
+                }
             }
         }
     }
@@ -1471,11 +1545,29 @@ class HostListViewModel internal constructor(
         val hostId: Long,
         val remoteVersion: String,
         val appVersion: String,
+        // Issue #515: when a real downloadable GitHub release has been
+        // resolved (best-effort, after the probe proved the app is behind),
+        // the banner offers an actionable "Update" that opens this APK via
+        // ACTION_VIEW. `null` until/unless the lookup succeeds — the banner
+        // then stays a passive, dismissible note.
+        val releaseInfo: ReleaseInfo? = null,
     ) {
         val message: String
             get() = "Remote pocketshell CLI $remoteVersion is newer than this app " +
                 "($appVersion) — consider updating the app."
     }
+
+    /**
+     * Issue #515: payload for the "couldn't check for updates" banner. The
+     * GitHub-Releases poll failed (non-200 / rate-limit / network blip /
+     * unparseable body) rather than finding no newer release. [reason] is a
+     * short human-readable cause for the inline note; the same reason is
+     * logged in [ReleaseChecker.checkForUpdate]. The banner offers a Retry
+     * that re-runs [checkForUpdates].
+     */
+    data class UpdateCheckFailure(
+        val reason: String,
+    )
 
     /**
      * Decoded but not-yet-persisted host import. Captured at the point

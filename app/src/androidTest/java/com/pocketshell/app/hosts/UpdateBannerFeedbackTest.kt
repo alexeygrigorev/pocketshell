@@ -21,6 +21,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.bootstrap.HostBootstrapper
+import com.pocketshell.app.release.ReleaseCheckResult
 import com.pocketshell.app.release.ReleaseChecker
 import com.pocketshell.app.release.ReleaseInfo
 import com.pocketshell.app.sessions.ActiveTmuxClients
@@ -195,28 +196,10 @@ class UpdateBannerFeedbackTest {
         Column(modifier = Modifier.fillMaxWidth().testTag("update-notices-under-test")) {
             UpdateBanner(
                 info = releaseInfo,
-                onUpdate = {
-                    try {
-                        context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse(releaseInfo.apkUrl)),
-                        )
-                        viewModel.onUpdateDownloadStarted(releaseInfo.tagName)
-                    } catch (e: ActivityNotFoundException) {
-                        launchReleasePageFallback(
-                            context,
-                            releaseInfo,
-                            viewModel,
-                            e.message ?: "no app can open the download link",
-                        )
-                    } catch (e: SecurityException) {
-                        launchReleasePageFallback(
-                            context,
-                            releaseInfo,
-                            viewModel,
-                            e.message ?: "the download was blocked",
-                        )
-                    }
-                },
+                // Issue #515: drive the same shared APK-launch helper the
+                // production screen uses, so the test stays honest about the
+                // shipped behavior.
+                onUpdate = { launchApkDownload(context, releaseInfo, viewModel) },
             )
             updateMessage?.let { msg ->
                 ShareMessageBanner(message = msg, onDismiss = viewModel::clearUpdateMessage)
@@ -236,6 +219,7 @@ class UpdateBannerFeedbackTest {
     }
 
     private class NoOpReleaseChecker : ReleaseChecker() {
-        override suspend fun check(currentVersion: String): ReleaseInfo? = null
+        override suspend fun checkForUpdate(currentVersion: String): ReleaseCheckResult =
+            ReleaseCheckResult.UpToDate
     }
 }

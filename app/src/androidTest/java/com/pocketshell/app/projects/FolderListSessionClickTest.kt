@@ -388,7 +388,16 @@ class FolderListSessionClickTest {
                 useUnmergedTree = true,
             ).fetchSemanticsNodes().isEmpty(),
         )
-        assertTrue(compose.onAllNodesWithText("codex-app").fetchSemanticsNodes().isEmpty())
+        // In TREE view the `/root/work/app` folder owns the live `codex-app`
+        // session, so it AUTO-EXPANDS by default (#471) and the session row
+        // renders under it. The session name is therefore visible in tree mode.
+        // (This used to assert the name was hidden inside a collapsed folder;
+        // that pre-dated auto-expand, so the assertion now matches the shipped
+        // behaviour.)
+        compose.onNodeWithTag(
+            folderDetailRowTestTag("/root/work/app", "codex-app"),
+        ).assertIsDisplayed()
+        compose.onNodeWithText("codex-app").assertIsDisplayed()
 
         // Flat view (#485): the tree roots and folder headers disappear; the
         // single session renders as a plain flat row keyed by its name.

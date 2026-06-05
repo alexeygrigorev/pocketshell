@@ -160,6 +160,56 @@ public interface SshSession : AutoCloseable {
         remotePath: String,
     ): String
 
+    /**
+     * List the entries of remote directory [remotePath] (issue #528 — file
+     * explorer).
+     *
+     * Implemented over a structured `exec` (`find -maxdepth 1` + `stat`) rather
+     * than SFTP: the Alpine fixtures and many minimal OpenSSH servers ship
+     * `openssh-server` without the separate `openssh-sftp-server` package, so
+     * the SFTP subsystem isn't available. The exec route only needs a POSIX
+     * shell plus `find`/`stat`, the same baseline [downloadFile] relies on.
+     *
+     * Returns a [RemoteListing]: the directory's [RemoteEntry] rows (name +
+     * type + size + optional mtime) and a `truncated` flag set when the listing
+     * exceeded [maxEntries] and was capped. The directory's own entry and any
+     * `.`/`..` are filtered out — the explorer renders its own parent ("..")
+     * affordance from the path.
+     *
+     * The path is resolved by the remote login shell, so `~`-relative and
+     * `$VAR`-relative paths are expanded server-side and a relative path lands
+     * under `$HOME`.
+     *
+     * Throws:
+     *  - [SshFileNotFoundException] when the path does not exist.
+     *  - [SshNotADirectoryException] when the path exists but is a regular file.
+     *  - [SshPermissionDeniedException] when the directory is not readable.
+     *  - [SshException] on any other shell / transport error.
+     *
+     * This is a blocking call wrapped to play well with coroutines via
+     * `kotlinx.coroutines.Dispatchers.IO`.
+     *
+     * Has a default body that throws [NotImplementedError] so the many bespoke
+     * per-test [SshSession] fakes don't all have to override it; the production
+     * [RealSshSession] provides the real listing.
+     */
+    public suspend fun listDirectory(
+        remotePath: String,
+        maxEntries: Int = DEFAULT_MAX_LIST_ENTRIES,
+    ): RemoteListing =
+        throw NotImplementedError("listDirectory is only implemented by RealSshSession")
+
     /** Disconnect and free all resources. Idempotent. */
     override fun close()
+
+    public companion object {
+        /**
+         * Default cap on a single [listDirectory] call. A few thousand rows is
+         * already more than a human will scroll; capping here keeps a
+         * pathological directory (a build cache with 100k files) from stalling
+         * the fetch and the lazy list. The UI surfaces a "truncated" note when
+         * the cap is hit so the listing is never silently incomplete.
+         */
+        public const val DEFAULT_MAX_LIST_ENTRIES: Int = 5_000
+    }
 }

@@ -288,6 +288,26 @@ internal class RealSshSession(
         remotePath
     }
 
+    override suspend fun listDirectory(
+        remotePath: String,
+        maxEntries: Int,
+    ): RemoteListing = withContext(Dispatchers.IO) {
+        ensureConnected()
+        // Listing route: a structured `exec` over `find -maxdepth 1` + `stat`,
+        // NOT SFTP. The Alpine fixtures (`tests/docker/Dockerfile.ssh`) and many
+        // minimal OpenSSH servers ship `openssh-server` *without* the separate
+        // `openssh-sftp-server` package, so `Subsystem sftp` points at a missing
+        // binary and `newSFTPClient()` dies with "EOF while reading packet".
+        // The same reasoning is why `downloadFile`/`uploadStream` use a `cat`
+        // exec channel rather than SCP/SFTP — we only require a POSIX shell plus
+        // `find`/`stat`, which are present on busybox and coreutils alike.
+        val probe = exec(buildListDirCommand(remotePath))
+        if (probe.exitCode != PROBE_EXIT_OK) {
+            throw classifyListFailure(remotePath, probe)
+        }
+        parseListing(probe.stdout, remotePath, maxEntries)
+    }
+
     override suspend fun downloadFile(remotePath: String, maxBytes: Long): ByteArray =
         withContext(Dispatchers.IO) {
             ensureConnected()
@@ -571,6 +591,139 @@ internal class RealSshSession(
     private fun ensureConnected() {
         if (!isConnected) throw SshException("SSH session is not connected")
     }
+}
+
+/**
+ * Exit code [buildListDirCommand] emits on a successful listing. Distinct from
+ * the not-a-dir / permission / not-found sentinels so [classifyListFailure] can
+ * map each shell-side outcome onto a typed exception.
+ */
+internal const val PROBE_EXIT_OK: Int = 0
+
+/** [buildListDirCommand] exit code: the path exists but is not a directory. */
+internal const val PROBE_EXIT_NOT_A_DIR: Int = 20
+
+/** [buildListDirCommand] exit code: the path does not exist. */
+internal const val PROBE_EXIT_NO_SUCH: Int = 21
+
+/** [buildListDirCommand] exit code: the directory could not be read (perms). */
+internal const val PROBE_EXIT_DENIED: Int = 22
+
+/**
+ * Field separator between `type|size|mtime|path` in [buildListDirCommand]
+ * output. A vertical bar is shell-safe in `stat -c` and rare in real
+ * filenames; the path is the *last* field so any bars inside a filename are
+ * preserved by [parseListing] splitting on only the first three separators.
+ */
+internal const val LIST_FIELD_SEP: Char = '|'
+
+/**
+ * Build the remote directory-listing command for [remotePath] (issue #528).
+ *
+ * Strategy (POSIX shell, busybox- and coreutils-safe — same baseline as
+ * `downloadFile`'s `cat`):
+ *  1. Guard the path: `! -e` -> exit [PROBE_EXIT_NO_SUCH]; not a directory ->
+ *     [PROBE_EXIT_NOT_A_DIR]; not readable/executable -> [PROBE_EXIT_DENIED].
+ *  2. List with `find <dir> -maxdepth 1` and `stat -c "%F|%s|%Y|%n"` each entry.
+ *     `find` includes the directory itself as the first hit; [parseListing]
+ *     drops the row whose path equals the listed directory. `stat` does not
+ *     follow symlinks, so a link is reported as `symbolic link`.
+ *  3. On success the guard already returned 0 via the `find` pipeline's own
+ *     exit; we force a clean 0 so [classifyListFailure] only fires on the
+ *     guard sentinels.
+ *
+ * The path is single-quoted with the standard `'\''` escape so arbitrary
+ * filenames (spaces, quotes, `$`) don't break parsing. Filenames containing a
+ * literal newline are a known limitation of the line-based parse (busybox
+ * `stat` cannot NUL-terminate); such names are extremely rare and degrade to a
+ * skipped/garbled row rather than a crash.
+ */
+internal fun buildListDirCommand(remotePath: String): String {
+    val quoted = remotePath.replace("'", "'\\''")
+    return buildString {
+        append("d='").append(quoted).append("'; ")
+        append("if [ ! -e \"\$d\" ]; then exit ").append(PROBE_EXIT_NO_SUCH).append("; fi; ")
+        append("if [ ! -d \"\$d\" ]; then exit ").append(PROBE_EXIT_NOT_A_DIR).append("; fi; ")
+        // Need read (to list names) and execute (to stat children).
+        append("if [ ! -r \"\$d\" ] || [ ! -x \"\$d\" ]; then exit ")
+            .append(PROBE_EXIT_DENIED).append("; fi; ")
+        append("find \"\$d\" -maxdepth 1 -exec stat -c '%F")
+            .append(LIST_FIELD_SEP).append("%s")
+            .append(LIST_FIELD_SEP).append("%Y")
+            .append(LIST_FIELD_SEP).append("%n' {} ").append("\\;").append(" 2>/dev/null; ")
+        append("exit ").append(PROBE_EXIT_OK)
+    }
+}
+
+/**
+ * Map a non-zero [buildListDirCommand] exit onto a typed [SshException].
+ * Visible-for-test so the sentinel mapping is pinned without a live server.
+ */
+internal fun classifyListFailure(remotePath: String, probe: ExecResult): SshException =
+    when (probe.exitCode) {
+        PROBE_EXIT_NOT_A_DIR -> SshNotADirectoryException(remotePath)
+        PROBE_EXIT_NO_SUCH -> SshFileNotFoundException(remotePath)
+        PROBE_EXIT_DENIED -> SshPermissionDeniedException(remotePath)
+        else -> SshException(
+            "Listing $remotePath failed (exit ${probe.exitCode}): ${probe.stderr.trim()}",
+        )
+    }
+
+/**
+ * Parse [buildListDirCommand] stdout (one `type|size|mtime|path` line per
+ * entry) into a [RemoteListing] relative to [listedDir]. Drops the listed
+ * directory's own row and any `.`/`..`, caps at [maxEntries] (setting
+ * `truncated`), and folds the busybox/coreutils `stat -c %F` human type string
+ * onto [RemoteEntry.Type]. Pure — unit-tested without SSH.
+ */
+internal fun parseListing(
+    stdout: String,
+    listedDir: String,
+    maxEntries: Int,
+): RemoteListing {
+    val normalizedDir = listedDir.trimEnd('/')
+    val entries = ArrayList<RemoteEntry>()
+    var truncated = false
+    for (raw in stdout.lineSequence()) {
+        val line = raw.trimEnd('\r')
+        if (line.isEmpty()) continue
+        // Split on only the first three separators so a `|` inside a filename
+        // is preserved in the path field.
+        val parts = line.split(LIST_FIELD_SEP, limit = 4)
+        if (parts.size < 4) continue
+        val typeStr = parts[0].trim()
+        val size = parts[1].trim().toLongOrNull() ?: 0L
+        val mtime = parts[2].trim().toLongOrNull()?.takeIf { it > 0L }
+        val fullPath = parts[3]
+        // The listed directory itself is the first `find` hit — skip it.
+        if (fullPath.trimEnd('/') == normalizedDir) continue
+        val name = fullPath.substringAfterLast('/')
+        if (name.isEmpty() || name == "." || name == "..") continue
+        if (entries.size >= maxEntries) {
+            truncated = true
+            break
+        }
+        val type = parseStatType(typeStr)
+        entries += RemoteEntry(
+            name = name,
+            type = type,
+            sizeBytes = if (type == RemoteEntry.Type.FILE) size else 0L,
+            modifiedEpochSec = mtime,
+        )
+    }
+    return RemoteListing(entries = entries, truncated = truncated)
+}
+
+/**
+ * Fold a `stat -c %F` human-readable file-type string (busybox and coreutils
+ * use the same words) onto [RemoteEntry.Type]. Unknown / device / socket /
+ * fifo types map to [RemoteEntry.Type.OTHER]. Visible-for-test.
+ */
+internal fun parseStatType(statType: String): RemoteEntry.Type = when (statType.lowercase()) {
+    "directory" -> RemoteEntry.Type.DIRECTORY
+    "regular file", "regular empty file" -> RemoteEntry.Type.FILE
+    "symbolic link" -> RemoteEntry.Type.SYMLINK
+    else -> RemoteEntry.Type.OTHER
 }
 
 /**

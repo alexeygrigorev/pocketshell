@@ -283,6 +283,28 @@ sealed interface AppDestination {
         val cwd: String?,
     ) : AppDestination
 
+    /**
+     * Browsable remote file explorer — issue #528.
+     *
+     * Lists the remote filesystem over SSH (folders-first), navigates into
+     * folders and back up, and hands a tapped file to [FileViewer]. Reachable
+     * from the in-session kebab's "Browse files…" action; [startDir] seeds the
+     * listing at the active pane's working directory (or `~` when unknown).
+     *
+     * SSH connection parameters are required because the screen opens a
+     * persistent [com.pocketshell.core.ssh.SshSession] to list directories.
+     */
+    data class FileExplorer(
+        val hostId: Long,
+        val hostName: String,
+        val hostname: String,
+        val port: Int,
+        val username: String,
+        val keyPath: String,
+        val passphrase: CharArray?,
+        val startDir: String,
+    ) : AppDestination
+
     /** Per-session recurring jobs backed by the host's `pocketshell jobs` CLI. */
     data class RecurringJobs(
         val hostName: String,

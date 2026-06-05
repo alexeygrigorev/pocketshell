@@ -224,6 +224,14 @@ public fun TmuxSessionScreen(
      */
     onOpenFile: (path: String, cwd: String?) -> Unit = { _, _ -> },
     /**
+     * Issue #528: open the browsable file explorer. [startDir] is the active
+     * pane's working directory so browsing starts where the agent is working
+     * (or `~` when unknown). MainActivity wires this to
+     * navigate(AppDestination.FileExplorer(...)); back returns to this exact
+     * session/window via the hand-rolled back-stack.
+     */
+    onBrowseFiles: (startDir: String) -> Unit = {},
+    /**
      * Issue #116 (usage-panel Fix B): same per-host worst-case
      * [com.pocketshell.core.usage.UsageProviderRecord] surface as
      * [com.pocketshell.app.session.SessionScreen], but for the
@@ -645,6 +653,13 @@ public fun TmuxSessionScreen(
                 moreExpanded = false
                 openFilePath = ""
                 showOpenFileDialog = true
+            },
+            onBrowseFiles = {
+                moreExpanded = false
+                // Seed the explorer at the active pane's cwd; `~` when unknown
+                // so the remote shell expands it to the login home.
+                val paneCwd = currentPane?.cwd?.takeIf { it.isNotBlank() }
+                onBrowseFiles(paneCwd ?: "~")
             },
             onNewWindow = {
                 moreExpanded = false
@@ -2526,6 +2541,11 @@ internal const val TMUX_OPEN_FILE_BUTTON_TAG = "tmux:session:open-file-button"
 internal const val TMUX_OPEN_FILE_DIALOG_FIELD_TAG = "tmux:session:open-file-field"
 internal const val TMUX_OPEN_FILE_DIALOG_CONFIRM_TAG = "tmux:session:open-file-confirm"
 /**
+ * Issue #528: stable test tag for the kebab's "Browse files…" item, used by
+ * instrumentation to drive kebab -> file explorer.
+ */
+internal const val TMUX_BROWSE_FILES_BUTTON_TAG = "tmux:session:browse-files-button"
+/**
  * Issue #448 (epic #432 slice C): stable test tags for the new-port
  * detection overlay and its actions, so instrumentation can assert the
  * overlay appears and drive Forward / Dismiss.
@@ -3846,6 +3866,10 @@ internal fun TmuxMoreMenu(
     // path-entry dialog. Defaulted so existing direct callers / tests of
     // TmuxMoreMenu stay source-compatible.
     onOpenFile: () -> Unit = {},
+    // Issue #528: "Browse files…" kebab item — opens the browsable file
+    // explorer. Defaulted so existing direct callers / tests stay
+    // source-compatible.
+    onBrowseFiles: () -> Unit = {},
     // Issue #445: "Port forwarding" kebab item — opens the per-host
     // port-forward panel. Defaulted so existing direct callers / tests
     // of TmuxMoreMenu stay source-compatible.
@@ -3911,6 +3935,14 @@ internal fun TmuxMoreMenu(
             text = { Text("Port forwarding") },
             onClick = onOpenPortForwarding,
             modifier = Modifier.testTag(TMUX_PORT_FORWARDING_BUTTON_TAG),
+        )
+        // Issue #528: browse the remote filesystem and tap a file to open it in
+        // the viewer. Host-scoped, so it sits in the "On this host" group next
+        // to the type-a-path "Open file…" fast option.
+        DropdownMenuItem(
+            text = { Text("Browse files…") },
+            onClick = onBrowseFiles,
+            modifier = Modifier.testTag(TMUX_BROWSE_FILES_BUTTON_TAG),
         )
         // Issue #497: open a server file (image / text) in the in-app viewer.
         // Host-scoped affordance, so it lives in the "On this host" group.

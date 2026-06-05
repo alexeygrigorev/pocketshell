@@ -288,6 +288,115 @@ class SshIntegrationTest {
     }
 
     @Test
+    fun listDirectoryReturnsEntriesFoldersFirst() = runTest {
+        // Issue #528: SFTP file explorer listing. Build a known tree under the
+        // login home, list it, and assert the {name,type,size} mapping plus the
+        // folders-first sort the explorer renders.
+        val session = SshConnection.connect(
+            host = container!!.host,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Path(privateKeyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrThrow()
+
+        session.use {
+            // Deterministic fixture: a subdir, a file with known bytes, and a
+            // dotfile (SFTP readdir includes dotfiles; the explorer shows them).
+            val setup = it.exec(
+                "rm -rf ~/ps528 && mkdir -p ~/ps528/sub && " +
+                    "printf 'hello' > ~/ps528/file.txt && " +
+                    "printf 'xx' > ~/ps528/.hidden && echo ok",
+            )
+            assertEquals("fixture setup should succeed: ${setup.stderr}", 0, setup.exitCode)
+
+            val listing = it.listDirectory("ps528")
+            assertTrue("listing should not be truncated", !listing.truncated)
+            // `.` and `..` are filtered; the three real entries remain.
+            val names = listing.entries.map { e -> e.name }.sorted()
+            assertEquals(listOf(".hidden", "file.txt", "sub"), names)
+
+            val sorted = listing.entries.sortedWith(RemoteEntry.FOLDERS_FIRST)
+            assertEquals("sub", sorted.first().name)
+            assertEquals(RemoteEntry.Type.DIRECTORY, sorted.first().type)
+
+            val file = listing.entries.first { e -> e.name == "file.txt" }
+            assertEquals(RemoteEntry.Type.FILE, file.type)
+            assertEquals(5L, file.sizeBytes)
+
+            it.exec("rm -rf ~/ps528")
+        }
+    }
+
+    @Test
+    fun listDirectoryOnARegularFileThrowsNotADirectory() = runTest {
+        val session = SshConnection.connect(
+            host = container!!.host,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Path(privateKeyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrThrow()
+
+        session.use {
+            it.exec("printf 'x' > ~/ps528-file.txt")
+            val ex = runCatching { it.listDirectory("ps528-file.txt") }.exceptionOrNull()
+            assertTrue(
+                "expected SshNotADirectoryException, got $ex",
+                ex is SshNotADirectoryException,
+            )
+            it.exec("rm -f ~/ps528-file.txt")
+        }
+    }
+
+    @Test
+    fun listDirectoryOnMissingPathThrowsFileNotFound() = runTest {
+        val session = SshConnection.connect(
+            host = container!!.host,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Path(privateKeyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrThrow()
+
+        session.use {
+            val ex = runCatching {
+                it.listDirectory("ps528-definitely-not-here")
+            }.exceptionOrNull()
+            assertTrue(
+                "expected SshFileNotFoundException, got $ex",
+                ex is SshFileNotFoundException,
+            )
+        }
+    }
+
+    @Test
+    fun listDirectoryCapsAtMaxEntriesAndFlagsTruncated() = runTest {
+        val session = SshConnection.connect(
+            host = container!!.host,
+            port = sshPort,
+            user = "testuser",
+            key = SshKey.Path(privateKeyFile),
+            passphrase = null,
+            knownHosts = KnownHostsPolicy.AcceptAll,
+        ).getOrThrow()
+
+        session.use {
+            it.exec(
+                "rm -rf ~/ps528-big && mkdir -p ~/ps528-big && cd ~/ps528-big && " +
+                    "touch f1 f2 f3 f4 f5",
+            )
+            val listing = it.listDirectory("ps528-big", maxEntries = 3)
+            assertEquals(3, listing.entries.size)
+            assertTrue("expected truncated flag", listing.truncated)
+            it.exec("rm -rf ~/ps528-big")
+        }
+    }
+
+    @Test
     fun closeDisconnectsTheSession() = runTest {
         val session = SshConnection.connect(
             host = container!!.host,

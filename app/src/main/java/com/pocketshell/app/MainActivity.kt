@@ -47,6 +47,7 @@ import com.pocketshell.app.hosts.HostListViewModel
 import com.pocketshell.app.hosts.QrScannerScreen
 import com.pocketshell.app.env.EnvCopySourceFolder
 import com.pocketshell.app.env.EnvScreen
+import com.pocketshell.app.fileexplorer.FileExplorerScreen
 import com.pocketshell.app.fileviewer.FileViewerScreen
 import com.pocketshell.app.jobs.RecurringJobsScreen
 import com.pocketshell.app.jobs.RecurringJobsViewModel
@@ -1066,6 +1067,35 @@ private fun AppNavigator(
             onBack = ::back,
         )
 
+        // Issue #528: browsable remote file explorer. A tapped file pushes the
+        // FileViewer destination with the already-absolute path (cwd = null,
+        // it's resolved). Back returns to the explorer at the same directory.
+        is AppDestination.FileExplorer -> FileExplorerScreen(
+            hostName = dest.hostName,
+            hostname = dest.hostname,
+            port = dest.port,
+            username = dest.username,
+            keyPath = dest.keyPath,
+            passphrase = dest.passphrase,
+            startDir = dest.startDir,
+            onBack = ::back,
+            onOpenFile = { absolutePath ->
+                navigate(
+                    AppDestination.FileViewer(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        remotePath = absolutePath,
+                        cwd = null,
+                    ),
+                )
+            },
+        )
+
         is AppDestination.RecurringJobs -> {
             val jobsViewModel = hiltViewModel<RecurringJobsViewModel>()
             androidx.compose.runtime.LaunchedEffect(dest) {
@@ -1175,6 +1205,22 @@ private fun AppNavigator(
                         passphrase = dest.passphrase,
                         remotePath = path,
                         cwd = cwd,
+                    ),
+                )
+            },
+            // Issue #528: kebab -> browsable file explorer. Seeds at the active
+            // pane's cwd (or `~` when unknown). Back returns to this session.
+            onBrowseFiles = { startDir ->
+                navigate(
+                    AppDestination.FileExplorer(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        startDir = startDir,
                     ),
                 )
             },
@@ -1392,6 +1438,7 @@ internal fun AppDestination.timingName(): String = when (this) {
     is AppDestination.RepoBrowser -> "RepoBrowser(hostId=$hostId)"
     is AppDestination.EnvFiles -> "EnvFiles(hostId=$hostId)"
     is AppDestination.FileViewer -> "FileViewer(hostId=$hostId)"
+    is AppDestination.FileExplorer -> "FileExplorer(hostId=$hostId)"
     is AppDestination.RecurringJobs -> "RecurringJobs(session=$sessionName)"
 }
 

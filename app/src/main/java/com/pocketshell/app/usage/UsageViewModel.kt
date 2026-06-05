@@ -197,9 +197,19 @@ open class UsageViewModel @Inject constructor(
         inFlight?.cancel()
         inFlight = viewModelScope.launch {
             _state.value = _state.value.copy(isRefreshing = true)
-            val hosts = hostDao.getAll()
-                .first()
-                .filter { it.pocketshellVersionCompatible != false }
+            // Issue #525: do NOT filter hosts by `pocketshellVersionCompatible`.
+            // That flag is unreliable — a host whose remote CLI is NEWER than
+            // the app (which #514 considers fully usable) can carry a STALE
+            // `false` written before #514 replaced exact-`==` with semver
+            // semantics, and that stale value silently dropped the host to
+            // "0 hosts" → a blank panel. The fetcher already classifies every
+            // host into Records / ToolMissing / Skipped from the SAME single
+            // usage command the host-list summary runs, so attempting the fetch
+            // for every saved host is both correct and consistent across
+            // surfaces. A host that genuinely cannot serve usage lands in
+            // ToolMissing (explicit empty-reason) or Skipped — never silently
+            // hidden behind a stale compat flag.
+            val hosts = hostDao.getAll().first()
             val snapshots = mutableListOf<UsageHostSnapshot>()
             val missing = mutableListOf<UsageMissingToolHost>()
             val schedulerUpdates = mutableMapOf<Long, UsageSnapshot>()

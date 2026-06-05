@@ -169,6 +169,74 @@ class UsageScreenE2eTest {
     }
 
     @Test
+    fun usagePanel_staleIncompatFlag_remoteNewerHost_stillShowsUsage() = runBlocking {
+        // Issue #525 regression on-device: a reachable host that carries a
+        // STALE `pocketshellVersionCompatible = false` (written before #514
+        // replaced exact-`==` with semver, when the remote CLI 0.3.23 was
+        // NEWER than the app-expected 0.3.22) must NOT be filtered out of the
+        // Usage panel. Before the fix it dropped to "0 providers · 0 hosts"
+        // (blank). After the fix the fetcher still runs against agents:2222
+        // and the panel renders the provider cards.
+        val key = readFixtureKey()
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        seedHost(
+            key = key,
+            name = "Usage Stale Incompat",
+            hostname = DEFAULT_HOST,
+            port = DEFAULT_PORT,
+            // The stale flag #514 considers usable (remote-newer).
+            pocketshellInstalled = true,
+            pocketshellCliVersion = "0.3.23",
+            pocketshellExpectedCliVersion = "0.3.22",
+            pocketshellVersionCompatible = false,
+        )
+
+        val artifactsDir = ensureArtifactDir()
+        launchedActivity = ActivityScenario.launch(MainActivity::class.java)
+
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
+            compose.onAllNodesWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true).performClick()
+
+        compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG)
+            .performScrollToNode(hasTestTag(USAGE_OPEN_TAG))
+        compose.onNodeWithTag(USAGE_OPEN_TAG, useUnmergedTree = true).performClick()
+
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
+            compose.onAllNodesWithText("Usage", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithText("Usage", useUnmergedTree = true).assertExists()
+
+        // The stale-flagged but reachable host must still produce provider
+        // cards — proving it was NOT filtered out to "0 hosts".
+        compose.waitUntil(timeoutMillis = TerminalTestTimeouts.terminalVisibilityTimeoutMs()) {
+            val codex = compose.onAllNodesWithText("Codex", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+            val claude = compose.onAllNodesWithText("Claude", useUnmergedTree = true)
+                .fetchSemanticsNodes()
+            codex.isNotEmpty() || claude.isNotEmpty()
+        }
+
+        captureFullDevice(File(artifactsDir, "03-usage-stale-incompat-viewport.png"))
+        File(artifactsDir, "03-usage-stale-incompat-summary.txt").writeText(
+            buildString {
+                appendLine("scenario=usage-stale-incompat-remote-newer")
+                appendLine("docker_target=agents")
+                appendLine("docker_port=$DEFAULT_PORT")
+                appendLine("host_flag=pocketshellVersionCompatible=false (stale, remote-newer)")
+                appendLine("expected=provider cards render, NOT '0 hosts' (issue #525)")
+                appendLine("route=HostList → Settings gear → Usage row → UsageScreen")
+            },
+        )
+    }
+
+    @Test
     fun usagePanel_emptyCell_rendersBreadcrumbAndEmptyState() = runBlocking {
         val key = readFixtureKey()
         // Best-effort probe; an unreachable agents target still lets the
@@ -246,6 +314,10 @@ class UsageScreenE2eTest {
         name: String,
         hostname: String,
         port: Int,
+        pocketshellInstalled: Boolean? = null,
+        pocketshellCliVersion: String? = null,
+        pocketshellExpectedCliVersion: String? = null,
+        pocketshellVersionCompatible: Boolean? = null,
     ) {
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
         val db = Room.databaseBuilder(appContext, AppDatabase::class.java, DATABASE_NAME)
@@ -268,6 +340,10 @@ class UsageScreenE2eTest {
                     keyId = storedKey.id,
                     tmuxInstalled = true,
                     lastBootstrapAt = System.currentTimeMillis(),
+                    pocketshellInstalled = pocketshellInstalled,
+                    pocketshellCliVersion = pocketshellCliVersion,
+                    pocketshellExpectedCliVersion = pocketshellExpectedCliVersion,
+                    pocketshellVersionCompatible = pocketshellVersionCompatible,
                 ),
             )
         } finally {

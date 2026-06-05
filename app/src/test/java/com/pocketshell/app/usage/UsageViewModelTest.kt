@@ -159,29 +159,28 @@ class UsageViewModelTest {
     }
 
     @Test
-    fun refresh_skipsHostsWithIncompatiblePocketshellCli() = runTest {
+    fun refresh_doesNotHideHostFlaggedRemoteNewerCompatibleFalse() = runTest {
+        // Issue #525 regression: a host that #514 considers usable (remote
+        // pocketshell CLI NEWER than the app's expected version) can still
+        // carry a STALE `pocketshellVersionCompatible = false` written before
+        // #514 replaced exact-`==` with semver semantics. The Usage panel must
+        // NOT drop such a host to "0 hosts" — it must attempt a usage fetch and
+        // render its records. The flag is unreliable, so it is not a valid sole
+        // exclusion criterion for the panel.
         val keyId = db.sshKeyDao().insert(
             SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
         )
-        val compatibleId = db.hostDao().insert(
+        val staleHostId = db.hostDao().insert(
             HostEntity(
-                name = "compatible",
-                hostname = "ok.example",
+                name = "hetzner",
+                hostname = "stale.example",
                 username = "u",
                 keyId = keyId,
                 pocketshellInstalled = true,
-                pocketshellVersionCompatible = true,
-            ),
-        )
-        db.hostDao().insert(
-            HostEntity(
-                name = "mismatch",
-                hostname = "mismatch.example",
-                username = "u",
-                keyId = keyId,
-                pocketshellInstalled = true,
-                pocketshellCliVersion = "0.3.6",
-                pocketshellExpectedCliVersion = "0.3.7",
+                // Remote CLI is NEWER than the app expected (0.3.23 > 0.3.22),
+                // which #514 treats as usable, but a stale `false` lingers.
+                pocketshellCliVersion = "0.3.23",
+                pocketshellExpectedCliVersion = "0.3.22",
                 pocketshellVersionCompatible = false,
             ),
         )
@@ -191,19 +190,23 @@ class UsageViewModelTest {
         )
         val fetcher = FakeFetcher(
             scripts = mapOf(
-                "ok.example" to HostUsageFetch.Records(records, Instant.now()),
-                "mismatch.example" to HostUsageFetch.ToolMissing,
+                "stale.example" to HostUsageFetch.Records(records, Instant.now()),
             ),
         )
 
         val viewModel = UsageViewModel(db.hostDao(), fetcher)
         advanceUntilIdle()
 
-        assertEquals(listOf("ok.example"), fetcher.fetchedHostnames)
+        // The stale-flagged host must have been fetched, not silently filtered.
+        assertEquals(listOf("stale.example"), fetcher.fetchedHostnames)
         val state = viewModel.state.value
-        assertEquals(1, state.hosts.size)
-        assertEquals(compatibleId, state.hosts.single().hostId)
-        assertTrue(state.missingToolHosts.isEmpty())
+        assertEquals(
+            "remote-newer host with stale incompat flag must appear in Usage",
+            1,
+            state.hosts.size,
+        )
+        assertEquals(staleHostId, state.hosts.single().hostId)
+        assertEquals("codex", state.hosts.single().records.single().provider)
         assertFalse(state.isRefreshing)
     }
 

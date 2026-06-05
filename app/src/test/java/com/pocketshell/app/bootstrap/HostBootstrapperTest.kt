@@ -388,6 +388,136 @@ class HostBootstrapperTest {
     }
 
     @Test
+    fun checkServerSetup_reportsAppUpdateRequired_whenRemotePocketshellIsNewerThanApp() = runTest {
+        // Issue #514: remote CLI 0.3.23 is NEWER than the app's expected
+        // 0.3.22. The host is fine; the APP is behind. This must NOT be a
+        // VersionMismatch (which would loop the host installer forever).
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'pocketshell'") to ExecResult("/home/u/.local/bin/pocketshell\n", "", 0),
+                pathAware("'/home/u/.local/bin/pocketshell' --version") to ExecResult("pocketshell, version 0.3.23\n", "", 0),
+                pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
+                pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
+                systemdAware("systemctl --user is-active pocketshell-jobs.service") to ExecResult("active\n", "", 0),
+                systemdAware("systemctl --user is-enabled pocketshell-jobs.service") to ExecResult("enabled\n", "", 0),
+            ),
+        )
+
+        val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion = "0.3.22")
+
+        val status = report.tools[BootstrapTool.Pocketshell]
+        assertTrue(
+            "remote-newer must NOT be VersionMismatch (avoids host installer loop)",
+            status !is ToolStatus.VersionMismatch,
+        )
+        assertEquals(
+            ToolStatus.AppUpdateRequired(
+                path = "/home/u/.local/bin/pocketshell",
+                currentVersion = "0.3.23",
+                expectedVersion = "0.3.22",
+            ),
+            status,
+        )
+        // Host is fine: app-update-required does not block readiness and
+        // must not appear in the host-installer mismatch set.
+        assertTrue(report.versionMismatchedTools.isEmpty())
+        assertTrue(report.isRequiredReady)
+        assertEquals(
+            ToolStatus.AppUpdateRequired(
+                path = "/home/u/.local/bin/pocketshell",
+                currentVersion = "0.3.23",
+                expectedVersion = "0.3.22",
+            ),
+            report.pocketshellAppUpdateRequired,
+        )
+        // Issue #514 (DESIGN REFINEMENT): the remote-newer state must NOT
+        // produce an actionable setup sheet — there is nothing to
+        // install/upgrade on the host, and the presentation is a soft
+        // dismissible banner, not a takeover sheet. So the report yields no
+        // bootstrap-sheet rows and the host is ready (navigates normally).
+        assertTrue(
+            "remote-newer must not generate any actionable bootstrap-sheet rows",
+            !report.hasBootstrapSheetRows(),
+        )
+        assertTrue("remote-newer host must be fully ready", report.isReady)
+    }
+
+    @Test
+    fun checkServerSetup_reportsMismatch_whenRemotePocketshellIsOlderThanApp() = runTest {
+        // Issue #514: remote CLI older than app expected → host genuinely
+        // behind → keep VersionMismatch host-upgrade flow.
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'pocketshell'") to ExecResult("/home/u/.local/bin/pocketshell\n", "", 0),
+                pathAware("'/home/u/.local/bin/pocketshell' --version") to ExecResult("pocketshell, version 0.3.21\n", "", 0),
+                pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
+                pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
+                systemdAware("systemctl --user is-active pocketshell-jobs.service") to ExecResult("active\n", "", 0),
+                systemdAware("systemctl --user is-enabled pocketshell-jobs.service") to ExecResult("enabled\n", "", 0),
+            ),
+        )
+
+        val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion = "0.3.22")
+
+        assertEquals(listOf(BootstrapTool.Pocketshell), report.versionMismatchedTools)
+        assertEquals(
+            ToolStatus.VersionMismatch(
+                path = "/home/u/.local/bin/pocketshell",
+                currentVersion = "0.3.21",
+                expectedVersion = "0.3.22",
+            ),
+            report.tools[BootstrapTool.Pocketshell],
+        )
+        assertNull(report.pocketshellAppUpdateRequired)
+        assertTrue(!report.isRequiredReady)
+    }
+
+    @Test
+    fun checkServerSetup_treatsMultiDigitPatchAsNewer_notStringEqual() = runTest {
+        // Issue #514: 0.3.10 > 0.3.9 numerically; string compare would put
+        // "0.3.10" < "0.3.9". Expected 0.3.9, remote 0.3.10 → app behind.
+        val session = FakeSshSession(
+            mapOf(
+                pathAware("command -v 'pocketshell'") to ExecResult("/home/u/.local/bin/pocketshell\n", "", 0),
+                pathAware("'/home/u/.local/bin/pocketshell' --version") to ExecResult("pocketshell, version 0.3.10\n", "", 0),
+                pathAware("command -v 'uv'") to ExecResult("/home/u/.local/bin/uv\n", "", 0),
+                pathAware("command -v 'systemctl'") to ExecResult("/usr/bin/systemctl\n", "", 0),
+                systemdAware("systemctl --user is-active pocketshell-jobs.service") to ExecResult("active\n", "", 0),
+                systemdAware("systemctl --user is-enabled pocketshell-jobs.service") to ExecResult("enabled\n", "", 0),
+            ),
+        )
+
+        val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion = "0.3.9")
+
+        assertEquals(
+            ToolStatus.AppUpdateRequired(
+                path = "/home/u/.local/bin/pocketshell",
+                currentVersion = "0.3.10",
+                expectedVersion = "0.3.9",
+            ),
+            report.tools[BootstrapTool.Pocketshell],
+        )
+        assertTrue(report.versionMismatchedTools.isEmpty())
+    }
+
+    @Test
+    fun compareSemver_ordersNumericallyAndHandlesOddShapes() {
+        assertEquals(0, compareSemver("0.3.22", "0.3.22"))
+        assertTrue((compareSemver("0.3.21", "0.3.22") ?: 0) < 0)
+        assertTrue((compareSemver("0.3.23", "0.3.22") ?: 0) > 0)
+        assertTrue((compareSemver("0.3.10", "0.3.9") ?: 0) > 0)
+        assertTrue((compareSemver("0.3.9", "0.3.10") ?: 0) < 0)
+        assertTrue((compareSemver("1.0.0", "0.99.99") ?: 0) > 0)
+        // Differing component counts: shorter is padded with zeros.
+        assertEquals(0, compareSemver("0.3", "0.3.0"))
+        assertTrue((compareSemver("0.3.1", "0.3") ?: 0) > 0)
+        // Unparseable shapes → null (caller falls back to mismatch path).
+        assertNull(compareSemver("dev", "0.3.22"))
+        assertNull(compareSemver("0.3.22", ""))
+        assertNull(compareSemver("0.3.x", "0.3.22"))
+    }
+
+    @Test
     fun checkServerSetup_wrapsBootstrapCommandsInPosixShell() = runTest {
         val session = FakeSshSession(
             mapOf(

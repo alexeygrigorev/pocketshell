@@ -15,7 +15,9 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.MainActivity
 import com.pocketshell.app.proof.PreGrantPermissionsRule
+import com.pocketshell.app.hosts.HOST_LIST_APP_UPDATE_WARNING_TAG
 import com.pocketshell.app.hosts.SshKeyStorage
+import com.pocketshell.app.projects.FOLDER_LIST_BACK_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_NEW_SESSION_FAB_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_SCREEN_TAG
 import com.pocketshell.core.ssh.KnownHostsPolicy
@@ -146,6 +148,74 @@ class HostBootstrapScenarioSuiteTest {
         capture("03-upgrade-failed")
         assertRemote("failed uv upgrade should leave the old pocketshell CLI in place") {
             installedToolsAndEnabledDaemonCommand("0.1.0")
+        }
+    }
+
+    @Test
+    fun appUpdateRequired() = scenario("app-update-required") {
+        // Issue #514 (DESIGN REFINEMENT 2026-06-05): remote pocketshell CLI
+        // is NEWER than this app build. A minor delta rarely breaks
+        // compatibility, so the host must stay fully usable — usage panel,
+        // sessions, and folders all render and work exactly as for a
+        // version-matched host. The host installer must NOT run, there must
+        // be NO takeover setup sheet / modal / "Continue" gate, and NO loop.
+        // The ONLY surfaced difference is a small, dismissible, non-blocking
+        // warning banner on the host list.
+        launchSeededHost()
+        tapSeededHost()
+
+        // The host is treated as ready: it navigates straight to the folder
+        // list (proving usage/sessions/folders are reachable and functional)
+        // without ever popping the bootstrap setup sheet.
+        waitForReadyNavigation()
+        // No takeover sheet and no "Host setup needed" framing was shown.
+        compose.onNodeWithTag(HOST_BOOTSTRAP_SHEET_TAG).assertDoesNotExist()
+        assertTrue(
+            "remote-newer must never show 'Host setup needed'",
+            compose.onAllNodesWithText("Host setup needed").fetchSemanticsNodes().isEmpty(),
+        )
+        capture("02-host-fully-usable")
+
+        // Go back to the host list: the soft, dismissible "consider updating
+        // the app" warning banner must be visible (and is the only surfaced
+        // difference) — NOT a sheet, NOT a setup-needed badge.
+        compose.onNodeWithTag(FOLDER_LIST_BACK_TAG).performClick()
+        compose.waitUntil(timeoutMillis = 20_000) {
+            compose.onAllNodesWithTag(HOST_LIST_APP_UPDATE_WARNING_TAG)
+                .fetchSemanticsNodes()
+                .isNotEmpty()
+        }
+        compose.onNodeWithTag(HOST_LIST_APP_UPDATE_WARNING_TAG).assertExists()
+        assertTrue(
+            "expected a 'consider updating the app' warning",
+            compose.onAllNodesWithText("consider updating the app", substring = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty(),
+        )
+        assertTrue(
+            "expected the warning to name the remote pocketshell CLI being newer",
+            compose.onAllNodesWithText("is newer than this app", substring = true)
+                .fetchSemanticsNodes()
+                .isNotEmpty(),
+        )
+        // The bootstrap sheet must still be absent — the warning is inline,
+        // not a takeover.
+        compose.onNodeWithTag(HOST_BOOTSTRAP_SHEET_TAG).assertDoesNotExist()
+        capture("03-soft-warning-banner")
+
+        // Dismissible and non-blocking: tapping Dismiss removes the banner
+        // and the host list stays usable (no loop, no re-prompt).
+        compose.onNodeWithText("Dismiss").performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithTag(HOST_LIST_APP_UPDATE_WARNING_TAG)
+                .fetchSemanticsNodes()
+                .isEmpty()
+        }
+        compose.onNodeWithTag(HOST_LIST_APP_UPDATE_WARNING_TAG).assertDoesNotExist()
+        capture("04-warning-dismissed")
+
+        assertRemote("app-update-required profile should still expose the newer host CLI") {
+            installedToolsAndEnabledDaemonCommand()
         }
     }
 
@@ -475,6 +545,24 @@ class HostBootstrapScenarioSuiteTest {
         fun latestVersionReset(targetAppVersion: String): String =
             "printf ${shellQuote("$targetAppVersion\n")} > $LATEST_VERSION_FILE; "
 
+        /**
+         * Issue #514: produce a dotted-numeric version strictly newer than
+         * [targetAppVersion] by bumping its last numeric component, so the
+         * remote CLI is guaranteed to outrank whatever the running app
+         * build reports. Falls back to a high fixed version if the app
+         * version is not dotted-numeric.
+         */
+        fun newerThanAppVersion(targetAppVersion: String): String {
+            val parts = targetAppVersion.trim().split('.')
+            val numeric = parts.map { it.toIntOrNull() }
+            if (numeric.isEmpty() || numeric.any { it == null }) {
+                return "9999.0.0"
+            }
+            val bumped = numeric.toMutableList()
+            bumped[bumped.lastIndex] = (bumped.last() ?: 0) + 1
+            return bumped.joinToString(".")
+        }
+
         fun shellQuote(value: String): String =
             "'" + value.replace("'", "'\"'\"'") + "'"
 
@@ -516,6 +604,19 @@ class HostBootstrapScenarioSuiteTest {
                         "printf '0.1.0\\n' > $VERSION_FILE; " +
                         latestVersionReset(targetAppVersion) +
                         "printf 'fixture refused upgrade\\n' > $UPGRADE_FAILURE_FILE; " +
+                        "printf 'active enabled\\n' > $STATE_FILE"
+                },
+            ),
+            "app-update-required" to ScenarioDefinition(
+                // Issue #514: reuse the uv-upgrade container (pocketshell +
+                // uv + systemctl installed) but report a remote CLI version
+                // strictly NEWER than the running app build.
+                label = "app update required",
+                port = 2236,
+                resetCommand = { targetAppVersion ->
+                    "rm -f ~/.local/bin/pocketshell $UPGRADE_FAILURE_FILE; " +
+                        "printf ${shellQuote("${newerThanAppVersion(targetAppVersion)}\n")} > $VERSION_FILE; " +
+                        latestVersionReset(targetAppVersion) +
                         "printf 'active enabled\\n' > $STATE_FILE"
                 },
             ),

@@ -91,8 +91,66 @@ public sealed interface ToolStatus {
         val currentVersion: String,
         val expectedVersion: String,
     ) : ToolStatus
+
+    /**
+     * Issue #514: the remote pocketshell CLI is *newer* than the version
+     * this app build expects. The host is fine — there is nothing to
+     * install or upgrade on the server. The APP is behind. Surfacing this
+     * as [VersionMismatch] (the old exact-`==` behaviour) drove an
+     * unsatisfiable host-installer loop: the upgrade command can only land
+     * on the newest published version, never the older one the app wants.
+     *
+     * This status is deliberately NOT counted by
+     * [HostBootstrapReport.versionMismatchedTools] or [missingTools], so it
+     * never triggers the host installer and never blocks readiness. The
+     * bootstrap sheet renders a distinct, honest "update the app" message
+     * with a Continue action.
+     */
+    public data class AppUpdateRequired(
+        val path: String,
+        val currentVersion: String,
+        val expectedVersion: String,
+    ) : ToolStatus
+
     public data object Missing : ToolStatus
     public data class Unknown(val reason: String) : ToolStatus
+}
+
+/**
+ * Compare two dotted-numeric versions (`MAJOR.MINOR.PATCH`, any number of
+ * components) numerically. Returns a negative number when [a] < [b], zero
+ * when equal, a positive number when [a] > [b], or `null` when either side
+ * is not a clean dotted-numeric version (so callers can fall back to the
+ * conservative mismatch path instead of guessing).
+ *
+ * Issue #514: a plain string `==` / `compareTo` mis-orders multi-digit
+ * components ("0.3.10" < "0.3.9" as strings) and cannot tell "remote is
+ * newer" from "remote is older". This pure numeric compare fixes both.
+ */
+internal fun compareSemver(a: String, b: String): Int? {
+    val left = parseSemverComponents(a) ?: return null
+    val right = parseSemverComponents(b) ?: return null
+    val size = maxOf(left.size, right.size)
+    for (i in 0 until size) {
+        val l = left.getOrElse(i) { 0 }
+        val r = right.getOrElse(i) { 0 }
+        if (l != r) return l.compareTo(r)
+    }
+    return 0
+}
+
+private fun parseSemverComponents(version: String): List<Int>? {
+    val trimmed = version.trim()
+    if (trimmed.isEmpty()) return null
+    val parts = trimmed.split('.')
+    val components = ArrayList<Int>(parts.size)
+    for (part in parts) {
+        if (part.isEmpty()) return null
+        val value = part.toIntOrNull() ?: return null
+        if (value < 0) return null
+        components += value
+    }
+    return components
 }
 
 public sealed interface PocketshellDaemonStatus {
@@ -142,6 +200,15 @@ public data class HostBootstrapReport(
 
     public val pocketshellVersionMismatch: ToolStatus.VersionMismatch?
         get() = tools[BootstrapTool.Pocketshell] as? ToolStatus.VersionMismatch
+
+    /**
+     * Issue #514: the remote pocketshell CLI is newer than the app build.
+     * Non-null means "update the app", not "set up the host". Deliberately
+     * excluded from [versionMismatchedTools] / [isRequiredReady] so it
+     * never runs the host installer and never blocks navigation.
+     */
+    public val pocketshellAppUpdateRequired: ToolStatus.AppUpdateRequired?
+        get() = tools[BootstrapTool.Pocketshell] as? ToolStatus.AppUpdateRequired
 
     public val isRequiredReady: Boolean
         get() = missingTools.isEmpty() &&
@@ -350,14 +417,31 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         } else {
             val current = parsePocketshellVersion(result.stdout.ifBlank { result.stderr })
                 ?: return ToolStatus.Unknown("pocketshell --version did not report a parseable version")
-            if (current == expectedVersion) {
-                ToolStatus.Installed(path = path, version = current, expectedVersion = expectedVersion)
-            } else {
-                ToolStatus.VersionMismatch(
+            // Issue #514: compare numerically so the three cases are
+            // distinct. remote > expected means the APP is behind (host is
+            // fine) — surface AppUpdateRequired so the host installer does
+            // NOT run and we don't loop. remote < expected keeps the
+            // host-upgrade VersionMismatch flow. Unparseable shapes fall
+            // back to the conservative VersionMismatch path (unless equal),
+            // never crash.
+            when (compareSemver(current, expectedVersion)) {
+                0 -> ToolStatus.Installed(path = path, version = current, expectedVersion = expectedVersion)
+                in 1..Int.MAX_VALUE -> ToolStatus.AppUpdateRequired(
                     path = path,
                     currentVersion = current,
                     expectedVersion = expectedVersion,
                 )
+                else -> if (current == expectedVersion) {
+                    // Defensive: equal-but-unparseable (null compare) is
+                    // still "installed".
+                    ToolStatus.Installed(path = path, version = current, expectedVersion = expectedVersion)
+                } else {
+                    ToolStatus.VersionMismatch(
+                        path = path,
+                        currentVersion = current,
+                        expectedVersion = expectedVersion,
+                    )
+                }
             }
         }
         } catch (e: SshException) {
@@ -427,6 +511,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         when (val systemctl = checkToolWithPath(session, "systemctl", bootstrapPath)) {
             is ToolStatus.Installed -> Unit
             is ToolStatus.VersionMismatch -> Unit
+            is ToolStatus.AppUpdateRequired -> Unit
             ToolStatus.Missing -> return PocketshellDaemonStatus.Unavailable("systemctl is not installed on this host")
             is ToolStatus.Unknown -> return PocketshellDaemonStatus.Unknown("could not locate systemctl: ${systemctl.reason}")
         }
@@ -638,6 +723,7 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
         val pocketshell = when (val status = checkToolWithPath(session, BINARY_POCKETSHELL, bootstrapPath)) {
             is ToolStatus.Installed -> status.path
             is ToolStatus.VersionMismatch -> status.path
+            is ToolStatus.AppUpdateRequired -> status.path
             ToolStatus.Missing -> return InstallResult.Error("pocketshell is not installed; install it before enabling the jobs daemon.")
             is ToolStatus.Unknown -> return InstallResult.Error("could not locate pocketshell: ${status.reason}")
         }
@@ -844,7 +930,9 @@ public class HostBootstrapper @javax.inject.Inject constructor() {
     }
 
     private fun ToolStatus?.isPresentOnRemote(): Boolean =
-        this is ToolStatus.Installed || this is ToolStatus.VersionMismatch
+        this is ToolStatus.Installed ||
+            this is ToolStatus.VersionMismatch ||
+            this is ToolStatus.AppUpdateRequired
 
     public companion object {
         /**

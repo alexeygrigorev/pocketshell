@@ -174,6 +174,7 @@ fun HostListScreen(
     // write until the user picks Overwrite / Skip / Add as new.
     val importConflict by viewModel.importConflict.collectAsState()
     val recheckMessage by viewModel.recheckMessage.collectAsState()
+    val appUpdateWarning by viewModel.appUpdateWarning.collectAsState()
     val setupStates by viewModel.setupStates.collectAsState()
     // Issue #116 (usage-panel Fix B): per-card warning record in the kebab.
     val usageBadges by viewModel.usageBadges.collectAsState()
@@ -388,9 +389,14 @@ fun HostListScreen(
                 val hasShareBanner = shareMessage != null
                 val hasRecheckBanner = recheckMessage != null
                 val hasUsageWarningBanners = activeUsageBanners.isNotEmpty() && onOpenUsage != null
+                // Issue #514: remote pocketshell CLI is newer than this app
+                // build. A minor delta rarely breaks anything, so the host
+                // stays fully usable — this banner is the only surfaced
+                // difference (dismissible, non-blocking, no setup framing).
+                val hasAppUpdateWarning = appUpdateWarning != null
                 val hasAnyNotice = hasUpdateBanner || hasUpdateMessageBanner ||
                     hasShareBanner || hasRecheckBanner ||
-                    hasUsageWarningBanners
+                    hasUsageWarningBanners || hasAppUpdateWarning
                 if (hasAnyNotice) {
                     item(key = "notices") {
                         Column(
@@ -469,6 +475,21 @@ fun HostListScreen(
                                     message = msg,
                                     onDismiss = viewModel::clearRecheckMessage,
                                 )
+                            }
+
+                            // Issue #514: soft, dismissible "remote
+                            // pocketshell CLI newer than this app" note.
+                            // Reuses [ShareMessageBanner] so it reads as a
+                            // quiet inline notice, not a sheet. The host
+                            // stays fully usable; this is the only surfaced
+                            // difference. No installer, no setup framing.
+                            appUpdateWarning?.let { warning ->
+                                Box(modifier = Modifier.testTag(HOST_LIST_APP_UPDATE_WARNING_TAG)) {
+                                    ShareMessageBanner(
+                                        message = warning.message,
+                                        onDismiss = viewModel::dismissAppUpdateWarning,
+                                    )
+                                }
                             }
 
                             // Issue #214: dismissible in-app usage
@@ -779,6 +800,14 @@ internal const val HOST_ROW_TAG_PREFIX = "host:row:"
  * this block — usage is now surfaced per-host on each host card.
  */
 internal const val HOST_LIST_NOTICES_TAG = "host-list:notices"
+
+/**
+ * Issue #514: stable test tag for the soft "remote pocketshell CLI is
+ * newer than this app — consider updating the app" banner. The connected
+ * scenario asserts this banner appears (NOT a takeover sheet) while the
+ * host stays fully usable.
+ */
+internal const val HOST_LIST_APP_UPDATE_WARNING_TAG = "host-list:app-update-warning"
 
 /**
  * Issue #144: stable test tag for the bottom-right "+" FloatingActionButton

@@ -575,6 +575,62 @@ class HostListViewModelTest {
     }
 
     @Test
+    fun bootstrapHost_navigatesAndRaisesSoftWarning_whenRemoteCliIsNewerThanApp() = runTest {
+        // Issue #514 (DESIGN REFINEMENT): the remote pocketshell CLI is far
+        // newer than this app build (9999.0.0 > app versionName). The host
+        // must be treated as fully ready: navigate normally, NO takeover
+        // bootstrap sheet, NO installer, NO loop. The only surfaced
+        // difference is the small dismissible "consider updating the app"
+        // warning banner.
+        val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "remote-newer",
+                hostname = "h.example",
+                username = "u",
+                keyId = keyId,
+            ),
+        )
+        val host = db.hostDao().getById(hostId)!!
+        val viewModel = newViewModel(
+            sessionOpener = HostSessionOpener { _, _, _ ->
+                FakeBootstrapSession(pocketshellVersion = "9999.0.0")
+            },
+        )
+
+        viewModel.bootstrapHost(host, keyPath = "/tmp/k").join()
+
+        // Host navigates normally (ready) and NO bootstrap sheet is shown.
+        val pending = viewModel.pendingNavigation.value
+        assertNotNull(pending)
+        assertEquals(hostId, pending!!.host.id)
+        assertEquals(true, pending.ready)
+        assertNull(viewModel.bootstrapState.value)
+
+        // The soft, dismissible warning is raised and names both versions.
+        val warning = viewModel.appUpdateWarning.value
+        assertNotNull(warning)
+        assertEquals(hostId, warning!!.hostId)
+        assertEquals("9999.0.0", warning.remoteVersion)
+        assertTrue(warning.message.contains("consider updating the app"))
+
+        // Dismiss clears the banner; re-probing the same host does not
+        // re-raise it (no nag loop).
+        viewModel.dismissAppUpdateWarning()
+        assertNull(viewModel.appUpdateWarning.value)
+
+        // Persisted host stays "installed + version-compatible" so usage /
+        // sessions / folders treat it as ready, never CliUpdateNeeded.
+        val persisted = db.hostDao().getById(hostId)!!
+        assertEquals(true, persisted.pocketshellInstalled)
+        assertEquals(true, persisted.pocketshellVersionCompatible)
+        assertEquals(
+            com.pocketshell.uikit.model.HostSetupState.Ready,
+            deriveSetupState(persisted),
+        )
+    }
+
+    @Test
     fun bootstrapHost_skipsProbe_whenCacheIsFresh() = runTest {
         val keyId = db.sshKeyDao().insert(SshKeyEntity(name = "k", privateKeyPath = "/tmp/k"))
         val now = System.currentTimeMillis()
@@ -1968,6 +2024,9 @@ class HostListViewModelTest {
         private val releaseTmuxProbe: CompletableDeferred<Unit>? = null,
         private val daemonEnabled: Boolean = true,
         private val tmuxInstalled: Boolean = true,
+        // Issue #514: drive the reported remote pocketshell CLI version so a
+        // test can stand up a "remote newer than this app build" host.
+        private val pocketshellVersion: String = "0.2.0",
     ) : SshSession {
         val recorded = mutableListOf<String>()
         var closeCount: Int = 0
@@ -1996,7 +2055,7 @@ class HostListViewModelTest {
                 command.contains("command -v") && command.contains("pocketshell") ->
                     ExecResult("/home/u/.local/bin/pocketshell\n", "", 0)
                 command.contains("pocketshell") && command.contains("--version") ->
-                    ExecResult("pocketshell, version 0.2.0\n", "", 0)
+                    ExecResult("pocketshell, version $pocketshellVersion\n", "", 0)
                 command.contains("command -v") && command.contains("uv") ->
                     ExecResult("/home/u/.local/bin/uv\n", "", 0)
                 command.contains("command -v") && command.contains("systemctl") ->

@@ -366,6 +366,56 @@ class HostListViewModel internal constructor(
     }
 
     /**
+     * Issue #514: small, non-blocking, dismissible note shown when the
+     * remote pocketshell CLI is *newer* than this app build. A minor
+     * version delta almost never breaks compatibility, so the host stays
+     * fully set up and usable (usage panel, sessions, folders all work) —
+     * this is the ONLY surfaced difference. NOT a takeover sheet, NOT a
+     * modal, NOT a "setup needed" framing, and it never runs the host
+     * installer. `null` hides the banner.
+     *
+     * In-memory only (resets on cold launch) like the usage / share /
+     * re-check banners. Re-raised the next time we probe a remote-newer
+     * host; dismissal lasts the app session via [dismissAppUpdateWarning].
+     */
+    private val _appUpdateWarning = MutableStateFlow<AppUpdateWarning?>(null)
+    val appUpdateWarning: StateFlow<AppUpdateWarning?> = _appUpdateWarning.asStateFlow()
+
+    /**
+     * Set of "remote newer" host ids the user has dismissed this session,
+     * so re-probing a dismissed host does not re-raise the same banner.
+     */
+    private val _dismissedAppUpdateWarnings = MutableStateFlow<Set<Long>>(emptySet())
+
+    /**
+     * Raise the soft "consider updating the app" banner when [report]
+     * reports the remote pocketshell CLI is newer than this app build
+     * (`pocketshellAppUpdateRequired != null`). No-op otherwise, and a
+     * no-op when the user already dismissed it for this host this session.
+     * The host itself is left fully functional — this only adds a banner.
+     */
+    private fun maybeRaiseAppUpdateWarning(host: HostEntity, report: HostBootstrapReport) {
+        val appUpdate = report.pocketshellAppUpdateRequired ?: return
+        if (_dismissedAppUpdateWarnings.value.contains(host.id)) return
+        _appUpdateWarning.value = AppUpdateWarning(
+            hostId = host.id,
+            remoteVersion = appUpdate.currentVersion,
+            appVersion = appUpdate.expectedVersion,
+        )
+    }
+
+    /**
+     * Dismiss the app-update warning for this app session. Records the
+     * host id so a later re-probe of the same remote-newer host does not
+     * pop the banner again until the next cold launch.
+     */
+    fun dismissAppUpdateWarning() {
+        val current = _appUpdateWarning.value ?: return
+        _dismissedAppUpdateWarnings.value = _dismissedAppUpdateWarnings.value + current.hostId
+        _appUpdateWarning.value = null
+    }
+
+    /**
      * Bootstrap sheet state. `null` means the sheet is hidden. The
      * sheet's lifecycle is bound to a `pendingNavigation`: when the user
      * skips or completes install, the screen calls
@@ -828,7 +878,14 @@ class HostListViewModel internal constructor(
                 persistResult(host, installed = true)
                 val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
                 persistPocketshellResult(host, report)
+                // Issue #514: when the remote pocketshell CLI is newer than
+                // this app build the host is fully set up — isReady is true,
+                // we navigate normally, and the "consider updating the app"
+                // note is surfaced as a small dismissible banner on the host
+                // list (see [pocketshellAppUpdateWarning]), NOT a takeover
+                // sheet. No installer, no "setup needed" framing, no loop.
                 if (report.isReady) {
+                    maybeRaiseAppUpdateWarning(host, report)
                     closeBootstrapSession()
                     setHostOpenPhase(host.id, HostOpenPhase.OpeningFolders)
                     _pendingNavigation.value = PendingNavigation(host, keyPath, passphrase, ready = true)
@@ -998,6 +1055,10 @@ class HostListViewModel internal constructor(
                     // surfaced where those features are invoked.
                     val finalReport = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
                     persistPocketshellResult(host, finalReport)
+                    // Issue #514: "remote newer than app" is a ready host —
+                    // surface the soft update note via the banner, not the
+                    // sheet.
+                    maybeRaiseAppUpdateWarning(host, finalReport)
                     _bootstrapState.value = if (finalReport.isReady) {
                         HostBootstrapSheetState.Success
                     } else {
@@ -1160,7 +1221,12 @@ class HostListViewModel internal constructor(
         needsTmux: Boolean,
     ) {
         val report = bootstrapper.checkServerSetup(session, expectedPocketshellVersion())
-        bootstrapTargetHost?.let { persistPocketshellResult(it, report) }
+        bootstrapTargetHost?.let {
+            persistPocketshellResult(it, report)
+            // Issue #514: remote-newer is a ready host; show the soft note
+            // via the banner, never the sheet.
+            maybeRaiseAppUpdateWarning(it, report)
+        }
         _bootstrapState.value = if (!needsTmux && report.isRequiredReady) {
             HostBootstrapSheetState.Success
         } else {
@@ -1255,20 +1321,30 @@ class HostListViewModel internal constructor(
      */
     private suspend fun persistPocketshellResult(host: HostEntity, report: HostBootstrapReport) {
         val status = report.tools[BootstrapTool.Pocketshell]
-        val pocketshellInstalled = status is ToolStatus.Installed || status is ToolStatus.VersionMismatch
+        // Issue #514: AppUpdateRequired (remote CLI newer than this app
+        // build) is still "installed and present" on the host — the host is
+        // fine, only the app is behind.
+        val pocketshellInstalled = status is ToolStatus.Installed ||
+            status is ToolStatus.VersionMismatch ||
+            status is ToolStatus.AppUpdateRequired
         val currentVersion = when (status) {
             is ToolStatus.Installed -> status.version
             is ToolStatus.VersionMismatch -> status.currentVersion
+            is ToolStatus.AppUpdateRequired -> status.currentVersion
             else -> null
         }
         val expectedVersion = when (status) {
             is ToolStatus.Installed -> status.expectedVersion
             is ToolStatus.VersionMismatch -> status.expectedVersion
+            is ToolStatus.AppUpdateRequired -> status.expectedVersion
             else -> expectedPocketshellVersion()
         }
         val compatible = when (status) {
             is ToolStatus.Installed -> if (status.expectedVersion != null) true else null
             is ToolStatus.VersionMismatch -> false
+            // Host CLI works fine; the app needs updating, not the host. We
+            // do not mark the host CLI itself as incompatible.
+            is ToolStatus.AppUpdateRequired -> true
             else -> null
         }
         val daemonRunning = when (val daemon = report.daemon) {
@@ -1384,6 +1460,22 @@ class HostListViewModel internal constructor(
         val hostName: String,
         val payload: String,
     )
+
+    /**
+     * Issue #514: payload for the soft "remote pocketshell CLI is newer
+     * than this app" banner. Carries the host id (so dismissal is scoped)
+     * and the two versions for the user-facing copy. Surfacing this never
+     * blocks the host — usage, sessions, and folders all keep working.
+     */
+    data class AppUpdateWarning(
+        val hostId: Long,
+        val remoteVersion: String,
+        val appVersion: String,
+    ) {
+        val message: String
+            get() = "Remote pocketshell CLI $remoteVersion is newer than this app " +
+                "($appVersion) — consider updating the app."
+    }
 
     /**
      * Decoded but not-yet-persisted host import. Captured at the point

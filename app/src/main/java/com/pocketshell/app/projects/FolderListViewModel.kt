@@ -356,6 +356,19 @@ class FolderListViewModel internal constructor(
     private var lastResolvedWatchedRootPaths: Map<String, String> = emptyMap()
     private var lastCreatedFolders: Map<String, String> = emptyMap()
     private var expandedProjectPaths: Set<String> = emptySet()
+
+    /**
+     * Issue #471: folder paths the user has *explicitly collapsed*. This is
+     * the memory that makes auto-expand respect manual collapse.
+     *
+     * Auto-expand ([emitReady]) opens any folder with ≥1 active session on
+     * first ready and whenever a freshly-active folder appears — but it must
+     * NOT fight the user. Once the user collapses a session-bearing folder it
+     * lands here, and every subsequent 5 s discovery poll / re-emission skips
+     * re-expanding it. The path leaves this set only when the user expands the
+     * folder again ([toggleProjectExpanded]), restoring auto-expand for it.
+     */
+    private var userCollapsedProjectPaths: Set<String> = emptySet()
     private var lastDiscoveredPorts: List<HostDiscoveredPort> = emptyList()
     private var forwardingSnapshots: Map<Long, ForwardingHostSnapshot> = emptyMap()
 
@@ -519,6 +532,10 @@ class FolderListViewModel internal constructor(
         lastScannedProjectFoldersByRoot = emptyMap()
         lastHistoryProjectFoldersByRoot = emptyMap()
         lastResolvedWatchedRootPaths = emptyMap()
+        // Issue #471: a new host starts with no expansion memory so auto-expand
+        // applies fresh and a prior host's collapse choices don't leak across.
+        expandedProjectPaths = emptySet()
+        userCollapsedProjectPaths = emptySet()
         _state.value = FolderListUiState.Loading
 
         warmJob?.cancel()
@@ -723,7 +740,17 @@ class FolderListViewModel internal constructor(
     }
 
     fun toggleProjectExpanded(projectPath: String) {
-        expandedProjectPaths = toggleProjectExpansion(expandedProjectPaths, canonicalisePath(projectPath))
+        val canonical = canonicalisePath(projectPath)
+        val wasExpanded = canonical in expandedProjectPaths
+        expandedProjectPaths = toggleProjectExpansion(expandedProjectPaths, canonical)
+        // Issue #471: record/clear the explicit manual-collapse so auto-expand
+        // respects the user's choice. Collapsing a folder pins it collapsed
+        // across polls; expanding it again restores auto-expand for it.
+        userCollapsedProjectPaths = if (wasExpanded) {
+            userCollapsedProjectPaths + canonical
+        } else {
+            userCollapsedProjectPaths - canonical
+        }
         emitReady()
     }
 
@@ -965,11 +992,29 @@ class FolderListViewModel internal constructor(
             resolvedWatchedRootPaths = lastResolvedWatchedRootPaths,
             extraFolders = lastCreatedFolders,
         )
-        val visibleProjectPaths = treeRoots
-            .flatMap { root -> root.folders }
+        val visibleFolders = treeRoots.flatMap { root -> root.folders }
+        val visibleProjectPaths = visibleFolders
             .map { folder -> folder.path }
             .toSet()
-        expandedProjectPaths = expandedProjectPaths.intersect(visibleProjectPaths)
+        // Issue #471: auto-expand folders with ≥1 active session by default so
+        // running sessions are visible at a glance, while RESPECTING manual
+        // collapse. A folder the user collapsed stays in
+        // [userCollapsedProjectPaths] and is skipped here, so a 5 s discovery
+        // poll / re-emission never springs it back open. Empty folders are
+        // never auto-expanded (keeps the #455 compact-tree direction).
+        val activeProjectPaths = visibleFolders
+            .filter { it.sessions.isNotEmpty() }
+            .map { it.path }
+            .toSet()
+        expandedProjectPaths = resolveExpandedProjectPaths(
+            previousExpanded = expandedProjectPaths,
+            visibleProjectPaths = visibleProjectPaths,
+            activeProjectPaths = activeProjectPaths,
+            userCollapsedProjectPaths = userCollapsedProjectPaths,
+        )
+        // Drop collapse memory for folders that no longer exist so it can't
+        // leak across rebinds or accumulate stale paths.
+        userCollapsedProjectPaths = userCollapsedProjectPaths.intersect(visibleProjectPaths)
         _state.value = FolderListUiState.Ready(
             folders = folders,
             treeRoots = treeRoots,
@@ -1488,6 +1533,35 @@ class FolderListViewModel internal constructor(
         fun toggleProjectExpansion(expandedPaths: Set<String>, projectPath: String): Set<String> {
             val canonical = canonicalisePath(projectPath)
             return if (canonical in expandedPaths) expandedPaths - canonical else expandedPaths + canonical
+        }
+
+        /**
+         * Issue #471: compute the next set of expanded folder paths for a
+         * fresh emission, auto-expanding folders with active sessions while
+         * respecting manual collapse. Pure + visible-for-test so the
+         * collapse-stickiness invariant can be exercised without a view model.
+         *
+         * Rules:
+         *  - Start from [previousExpanded] (so a folder the user manually
+         *    expanded stays open), pruned to [visibleProjectPaths] so paths
+         *    for folders that disappeared don't linger.
+         *  - Auto-expand every path in [activeProjectPaths] (folders with ≥1
+         *    active session) EXCEPT those the user explicitly collapsed
+         *    ([userCollapsedProjectPaths]). This is what keeps a poll / re-emit
+         *    from re-opening a folder the user collapsed.
+         *  - Empty folders are never in [activeProjectPaths], so they are never
+         *    auto-expanded (they only open via an explicit user tap, which
+         *    lands in [previousExpanded]).
+         */
+        fun resolveExpandedProjectPaths(
+            previousExpanded: Set<String>,
+            visibleProjectPaths: Set<String>,
+            activeProjectPaths: Set<String>,
+            userCollapsedProjectPaths: Set<String>,
+        ): Set<String> {
+            val carriedOver = previousExpanded.intersect(visibleProjectPaths)
+            val autoExpand = activeProjectPaths - userCollapsedProjectPaths
+            return carriedOver + autoExpand
         }
 
         internal fun mergeForwardingPortRows(

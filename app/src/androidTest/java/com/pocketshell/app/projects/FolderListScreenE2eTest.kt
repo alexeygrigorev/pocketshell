@@ -399,14 +399,12 @@ class FolderListScreenE2eTest {
         }
         assertEquals("/home/u/git/pocketshell", editedEnvPath)
 
-        // --- Assertion 3: projects are collapsed by default; expanding
-        //    pocketshell reveals agent sessions before idle shell
-        //    sessions and keeps the raw tmux name as fallback text.
-        compose.onNodeWithText("claude-main", useUnmergedTree = true).assertDoesNotExist()
-        compose.onNodeWithTag(
-            folderDetailDisclosureTestTag("/home/u/git/pocketshell"),
-            useUnmergedTree = true,
-        ).performClick()
+        // --- Assertion 3: issue #471 — folders with ≥1 active session
+        //    auto-expand on first ready, so the running sessions are visible
+        //    at a glance WITHOUT a tap. The pocketshell project (active
+        //    Claude + idle shell) starts expanded, revealing agent sessions
+        //    before idle shell sessions and keeping the raw tmux name as
+        //    fallback text.
         compose.waitUntil(timeoutMillis = 5_000) {
             (viewModel.state.value as? FolderListUiState.Ready)
                 ?.expandedProjectPaths
@@ -433,7 +431,15 @@ class FolderListScreenE2eTest {
         // replaced the inline "Claude · Idle" rollup with a compact right-
         // aligned badge pill carrying just the agent/shell identity (the mockup
         // shows no activity word on the row), so match the short badge label.
-        compose.onNodeWithText("Claude", substring = true).assertExists()
+        // #471: with active folders auto-expanded, more than one "Claude" badge
+        // can render (pocketshell + the outside-lab demo), so assert presence
+        // rather than a single node; the precise per-session badge tags below
+        // pin the pocketshell claude badge specifically.
+        assertTrue(
+            "a Claude agent badge should render",
+            compose.onAllNodesWithText("Claude", substring = true)
+                .fetchSemanticsNodes().isNotEmpty(),
+        )
 
         // #478: each expanded session row carries a right-aligned agent-type
         // badge pill. The pocketshell project has a Claude agent + a Shell
@@ -448,8 +454,18 @@ class FolderListScreenE2eTest {
             useUnmergedTree = true,
         ).assertExists()
         // The agent badge renders "Claude" and the shell badge renders "Shell".
-        compose.onNodeWithText("Claude", useUnmergedTree = true).assertExists()
-        compose.onNodeWithText("Shell", useUnmergedTree = true).assertExists()
+        // #471: auto-expand can surface more than one Claude badge, so assert
+        // presence on the unmerged tree rather than a single node.
+        assertTrue(
+            "a Claude badge should render on the unmerged tree",
+            compose.onAllNodesWithText("Claude", useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty(),
+        )
+        assertTrue(
+            "a Shell badge should render on the unmerged tree",
+            compose.onAllNodesWithText("Shell", useUnmergedTree = true)
+                .fetchSemanticsNodes().isNotEmpty(),
+        )
 
         // #503: every expanded session child hangs off a `├─/└─` tree connector
         // cell. Both children of the expanded pocketshell project carry a
@@ -462,15 +478,40 @@ class FolderListScreenE2eTest {
             folderSessionConnectorTestTag("/home/u/git/pocketshell", "build-shell"),
             useUnmergedTree = true,
         ).assertExists()
-        // #503: the connector renders only under EXPANDED projects, never on a
-        // collapsed project or as a stray spine on the project rows themselves.
-        // llm-zoomcamp is still collapsed, so its session carries no connector
-        // and neither does the project row.
+        // #471: llm-zoomcamp also has an active session (codex-llm), so it
+        // auto-expands on first ready too and renders its connector.
+        compose.onNodeWithTag(
+            folderSessionConnectorTestTag("/home/u/git/llm-zoomcamp", "codex-llm"),
+            useUnmergedTree = true,
+        ).assertExists()
+        // #471 collapse stickiness at the screen level: the user collapses
+        // llm-zoomcamp; it must stay collapsed (no connector) — auto-expand
+        // does not spring it back open.
+        compose.onNodeWithTag(
+            folderDetailDisclosureTestTag("/home/u/git/llm-zoomcamp"),
+            useUnmergedTree = true,
+        ).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            (viewModel.state.value as? FolderListUiState.Ready)
+                ?.expandedProjectPaths
+                ?.contains("/home/u/git/llm-zoomcamp") == false
+        }
         compose.onAllNodesWithTag(
             folderSessionConnectorTestTag("/home/u/git/llm-zoomcamp", "codex-llm"),
             useUnmergedTree = true,
         ).fetchSemanticsNodes().also {
-            assertTrue("collapsed project must not render a tree connector (#503)", it.isEmpty())
+            assertTrue("user-collapsed project must not render a tree connector (#503/#471)", it.isEmpty())
+        }
+        // Re-expand so the remaining assertions/captures see the original
+        // auto-expanded tree state.
+        compose.onNodeWithTag(
+            folderDetailDisclosureTestTag("/home/u/git/llm-zoomcamp"),
+            useUnmergedTree = true,
+        ).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            (viewModel.state.value as? FolderListUiState.Ready)
+                ?.expandedProjectPaths
+                ?.contains("/home/u/git/llm-zoomcamp") == true
         }
         // The spine geometry is anchored to the child block: the first child's
         // connector top aligns with the row block start and the connector cell's

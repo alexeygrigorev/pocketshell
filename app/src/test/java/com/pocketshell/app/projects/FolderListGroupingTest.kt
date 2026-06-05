@@ -1,5 +1,6 @@
 package com.pocketshell.app.projects
 
+import androidx.lifecycle.ViewModelStore
 import androidx.test.core.app.ApplicationProvider
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.portfwd.ForwardingController
@@ -25,6 +26,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -48,6 +50,21 @@ import org.robolectric.annotation.Config
 class FolderListGroupingTest {
     @get:Rule
     val mainDispatcherRule = MainDispatcherRule()
+
+    // Clearing the store calls `onCleared()` on every ViewModel registered
+    // during a test, which cancels its `viewModelScope`. Tests that build a
+    // real [FolderListViewModel] (e.g. `rebindingToSecondHostStartsSecondHostProbe`)
+    // launch polling/warm coroutines on `Dispatchers.Main`; without this
+    // teardown those coroutines outlive `runTest`, leak onto the shared Main
+    // dispatcher, and surface as `Dispatchers.Main` failures in whichever
+    // unrelated test class runs next in the same JVM fork (issue #505).
+    private val viewModelStore = ViewModelStore()
+    private var nextViewModelKey: Int = 0
+
+    @After
+    fun tearDown() {
+        viewModelStore.clear()
+    }
 
     @Test
     fun canonicalisePathStripsTrailingSlash() {
@@ -876,6 +893,10 @@ class FolderListGroupingTest {
             // ProcessLifecycleOwner is not STARTED under runTest, so open
             // the gate explicitly to exercise the probe.
             it.setProcessStartedForTest(true)
+            // Issue #505: register the VM so `tearDown()`'s
+            // `viewModelStore.clear()` cancels its `viewModelScope`, stopping
+            // the polling/warm coroutines from leaking onto Main past runTest.
+            viewModelStore.put("FolderListViewModel-${nextViewModelKey++}", it)
         }
 
         try {

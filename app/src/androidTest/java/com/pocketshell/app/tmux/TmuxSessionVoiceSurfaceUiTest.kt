@@ -31,6 +31,7 @@ import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
+import com.pocketshell.app.voice.SnippetsChipIcon
 import com.pocketshell.uikit.theme.PocketShellTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -111,13 +112,16 @@ class TmuxSessionVoiceSurfaceUiTest {
                     onShowKeyboardTap = { keyboardTaps += 1 },
                     onAddSnippetTap = { snippetTaps += 1 },
                     addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
-                    addSnippetIcon = null,
+                    // Issue #454: production (TmuxSessionScreen) renders the
+                    // saved-snippet picker chip with the list glyph; capture
+                    // the same icon so the artifact matches what the user sees.
+                    addSnippetIcon = SnippetsChipIcon,
                     onProjectNavigationTap = null,
                 )
             }
         }
 
-        captureViewportArtifact("shell-command-bottom-strip.png")
+        captureViewportArtifact("shell-snippets-bottom-strip.png")
 
         compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed().performClick()
         assertEquals(1, dictateTaps)
@@ -147,12 +151,15 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     @Test
-    fun agentBottomChipBandIsDeclutteredToSlashCommandsAndMic() {
-        // Issue #453: the agent-pane band is decluttered to "/ commands" + the
-        // mic FAB. The former `Ctrl-C x2` / `Ctrl-D x2` chips moved into the
-        // "/ commands" palette (session-control rows), and `+ prompt` is gone
-        // (the composer sheet's `{}` already inserts prompts). On TmuxScreen
-        // the agent band passes `onAddSnippetTap = null` for agent panes.
+    fun agentBottomChipBandIsJustTheMicFab() {
+        // Issue #454: the agent-pane band is decluttered to JUST the mic FAB.
+        // The former "/ commands" bottom chip is gone — the dedicated "/"
+        // command-palette button in the session header (issue #462) is the
+        // single, obvious entry to that palette, so the bottom chip was a
+        // redundant duplicate. The former `Ctrl-C x2` / `Ctrl-D x2` chips
+        // already moved into the palette (session-control rows), and there is
+        // no snippet chip on agent panes (the composer's `{}` inserts prompts).
+        // `AgentExitChips` is now empty.
         var dictateTaps = 0
         val chipTaps = mutableListOf<String>()
         compose.setContent {
@@ -172,18 +179,19 @@ class TmuxSessionVoiceSurfaceUiTest {
 
         compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed().performClick()
         assertEquals(1, dictateTaps)
-        // "/ commands" is the only chip in the agent band now.
-        compose.onNodeWithText(AgentCommandsChip).assertIsDisplayed().assertHasClickAction().performClick()
+        // The "/ commands" bottom chip is gone (it lives in the header now).
+        compose.onNodeWithText(AgentCommandsChip).assertDoesNotExist()
         // The interrupt/EOF chips are no longer in the band (they live in the palette).
         compose.onNodeWithText(CtrlC2Chip).assertDoesNotExist()
         compose.onNodeWithText(CtrlD2Chip).assertDoesNotExist()
-        // No `+ prompt` / `+ command` / shell-command chips in the agent band.
+        // No snippet / shell-command chips in the agent band.
         compose.onNodeWithText(ADD_PROMPT_CHIP_LABEL).assertDoesNotExist()
         compose.onNodeWithText(ADD_COMMAND_CHIP_LABEL).assertDoesNotExist()
         compose.onNodeWithText("git status").assertDoesNotExist()
-        captureViewportArtifact("agent-prompt-bottom-strip.png")
+        captureViewportArtifact("agent-mic-only-bottom-strip.png")
 
-        assertEquals(listOf(AgentCommandsChip), chipTaps)
+        // No band chips at all — only the mic FAB is interactive.
+        assertEquals(emptyList<String>(), chipTaps)
     }
 
     // ─── Issue #459: Conversation shares the unified composer bottom with

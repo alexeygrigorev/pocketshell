@@ -357,7 +357,7 @@ private fun PrimaryChipCluster(
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
     addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
-    addSnippetIcon: ImageVector? = DictateDotIcon,
+    addSnippetIcon: ImageVector? = SnippetsChipIcon,
     modifier: Modifier = Modifier,
 ) {
     if (onShowKeyboardTap == null && onAddSnippetTap == null) return
@@ -424,7 +424,7 @@ internal fun BottomChipControls(
     onShowKeyboardTap: (() -> Unit)? = null,
     onAddSnippetTap: (() -> Unit)? = null,
     addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
-    addSnippetIcon: ImageVector? = DictateDotIcon,
+    addSnippetIcon: ImageVector? = SnippetsChipIcon,
     onProjectNavigationTap: (() -> Unit)? = null,
     // Issue #249: gate the command chips and optional dictate mic on whether
     // the SSH/tmux session is live. While disconnected or reconnecting a
@@ -484,9 +484,19 @@ internal val DefaultSessionChips: List<String> = listOf(
 )
 
 internal const val SHOW_KEYBOARD_CHIP_LABEL: String = "show keyboard"
-internal const val ADD_SNIPPET_CHIP_LABEL: String = "+ snippet"
-internal const val ADD_PROMPT_CHIP_LABEL: String = "+ prompt"
-internal const val ADD_COMMAND_CHIP_LABEL: String = "+ command"
+
+// Issue #454: the saved-snippet picker chip. The old `+ snippet` / `+ prompt`
+// / `+ command` labels were unclear — the leading `+` read as "add a NEW
+// command/prompt" when the chip actually OPENS the saved-snippet picker to
+// insert an existing one, and the command-vs-prompt split duplicated the
+// confusion the maintainer flagged on the bottom bar. All three now render the
+// single, legible `snippets` label with a list glyph so the affordance reads as
+// "open my saved snippets". The three constants are kept as distinct identifiers
+// only so callers/tests can still name the raw-SSH, agent-prompt, and
+// shell-command picker entry points; their visible text is identical.
+internal const val ADD_SNIPPET_CHIP_LABEL: String = "snippets"
+internal const val ADD_PROMPT_CHIP_LABEL: String = "snippets"
+internal const val ADD_COMMAND_CHIP_LABEL: String = "snippets"
 
 /**
  * A 24x24 microphone glyph used by accent chips and as the
@@ -504,6 +514,49 @@ internal const val ADD_COMMAND_CHIP_LABEL: String = "+ command"
  * adjacent "dictate" caption.
  */
 internal val DictateDotIcon: ImageVector = MicGlyphIcon
+
+/**
+ * Issue #454: a 24x24 "list" glyph used as the leading icon on the saved-snippet
+ * picker chip (`snippets`). The old snippet chip leaned on the mic
+ * [DictateDotIcon], which read as "dictate" and reinforced the maintainer's
+ * "what does this chip do?" confusion. A short stack of horizontal lines reads
+ * as "a saved list", so the chip clearly means "open my saved snippets" rather
+ * than "add a new command". Hand-traced for the same reason as
+ * [KeyboardChipIcon] — one glyph, no `material-icons-extended` dependency.
+ *
+ * Geometry: three rounded horizontal bars at y ≈ 7, 11.5, 16, each 12 wide and
+ * 2 tall, left-aligned at x = 6, with a small leading dot at x = 3 on each row
+ * (the classic bulleted-list silhouette).
+ */
+internal val SnippetsChipIcon: ImageVector = ImageVector.Builder(
+    name = "Snippets",
+    defaultWidth = 24.dp,
+    defaultHeight = 24.dp,
+    viewportWidth = 24f,
+    viewportHeight = 24f,
+).addSnippetsPath(
+    fill = SolidColor(Color.White),
+).build()
+
+private fun ImageVector.Builder.addSnippetsPath(fill: SolidColor): ImageVector.Builder {
+    val builder = PathBuilder()
+    for (y in listOf(6f, 10.5f, 15f)) {
+        // Leading bullet dot.
+        builder.moveTo(3f, y)
+        builder.lineToRelative(2f, 0f)
+        builder.lineToRelative(0f, 2f)
+        builder.lineToRelative(-2f, 0f)
+        builder.close()
+        // Row bar.
+        builder.moveTo(7f, y)
+        builder.lineToRelative(14f, 0f)
+        builder.lineToRelative(0f, 2f)
+        builder.lineToRelative(-14f, 0f)
+        builder.close()
+    }
+    addPath(pathData = builder.nodes, fill = fill)
+    return this
+}
 
 /**
  * Issue #131: stable test tag for the show-keyboard chip. Lives next to

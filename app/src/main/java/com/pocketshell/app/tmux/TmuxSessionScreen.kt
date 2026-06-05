@@ -122,6 +122,7 @@ import com.pocketshell.app.tmux.TmuxSessionViewModel.ConnectionStatus
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
+import com.pocketshell.app.voice.SnippetsChipIcon
 import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.core.agents.AgentKind
 import com.pocketshell.core.agents.ConversationEvent
@@ -1057,26 +1058,19 @@ public fun TmuxSessionScreen(
                     chips = if (isAgentPane) AgentExitChips else DefaultSessionChips,
                     onChipTap = { chip ->
                         currentPane?.let { pane ->
-                            when (chip) {
-                                // Issue #436 (Slice A): open the agent
-                                // slash-command palette rather than typing the
-                                // chip label into the pane. Issue #453: the
-                                // interrupt/EOF controls moved INTO that
-                                // palette, so the band only carries this chip.
-                                AgentCommandsChip -> showAgentCommands = true
-                                else -> {
-                                    // Chip taps run literal commands in the
-                                    // focused pane. Mirrors
-                                    // `SessionViewModel.onChipTap` which
-                                    // appends a CR; the tmux input bridge
-                                    // translates the trailing CR into a named
-                                    // `Enter` key.
-                                    viewModel.writeInputToPane(
-                                        pane.paneId,
-                                        (chip + "\r").toByteArray(Charsets.UTF_8),
-                                    )
-                                }
-                            }
+                            // Issue #454: the agent band no longer carries the
+                            // "/ commands" chip (the dedicated "/" header button
+                            // from issue #462 is the single palette entry now),
+                            // so the only chips reaching this handler are the
+                            // shell-pane quick-run commands ([DefaultSessionChips]).
+                            // Each runs literally in the focused pane — mirrors
+                            // `SessionViewModel.onChipTap`, appending a CR that
+                            // the tmux input bridge translates into a named
+                            // `Enter` key.
+                            viewModel.writeInputToPane(
+                                pane.paneId,
+                                (chip + "\r").toByteArray(Charsets.UTF_8),
+                            )
                         }
                     },
                     onDictateTap = { showMicSheet = true },
@@ -1107,18 +1101,19 @@ public fun TmuxSessionScreen(
                             )
                         }
                     },
-                    // Issue #453: drop the `+ prompt` chip on agent panes —
-                    // the composer sheet's `{}` snippets affordance already
-                    // covers inserting a prompt/snippet, so the band chip was
-                    // a redundant third way to do the same thing and cluttered
-                    // the "/ commands + mic" idle the maintainer asked for.
-                    // Terminal panes keep `+ command` (no in-band composer
-                    // snippet entry there).
+                    // Issue #453: no snippet chip on agent panes — the composer
+                    // sheet's `{}` affordance already inserts saved prompts, so
+                    // the band chip was a redundant third way to do the same
+                    // thing. Issue #454: shell panes keep the saved-snippet
+                    // picker, now rendered as a clear `snippets` chip with a
+                    // list glyph (the old `+ command` / `+ prompt` labels read
+                    // as "add a new command" and were the affordance the
+                    // maintainer found unclear).
                     onAddSnippetTap = if (hostId != 0L && !isAgentPane) {
                         { showSnippetPicker = true }
                     } else null,
                     addSnippetLabel = ADD_COMMAND_CHIP_LABEL,
-                    addSnippetIcon = null,
+                    addSnippetIcon = SnippetsChipIcon,
                     // Project navigation on tmux panes is a separate
                     // follow-up — see #123 notes on per-pane cwd /
                     // project-root wiring.
@@ -4600,17 +4595,19 @@ internal val TmuxKeyBarLayout: List<KeyBinding> = listOf(
 internal const val CtrlC2Chip: String = "Ctrl-C x2"
 internal const val CtrlD2Chip: String = "Ctrl-D x2"
 
-// Issue #436 (Slice A): "/ commands" chip on agent panes opens the
-// agent-aware slash-command quick-send palette ([AgentCommandSheet]). It is
-// a chip rather than a literal-input command, so the [onChipTap] handler
-// special-cases it (like the Ctrl-C/Ctrl-D chips) instead of writing it into
-// the pane.
+// Issue #436 (Slice A): the agent slash-command quick-send palette
+// ([AgentCommandSheet]). Opened from the dedicated "/" command-palette button
+// in the session header (issue #462) — the single, discoverable entry point.
+// The label is kept as a stable identifier for that palette button + tests.
 internal const val AgentCommandsChip: String = "/ commands"
 
-// Issue #453: the agent-pane band is decluttered to a single "/ commands"
-// chip + the mic FAB (matching the maintainer's "clean / command + mic"
-// ask). The former `Ctrl-C x2` / `Ctrl-D x2` interrupt/EOF chips moved into
-// the "/ commands" palette as session-control rows (see [AgentCommandSheet]
-// `onControlSend`). `CtrlC2Chip` / `CtrlD2Chip` are kept as the literal
-// labels the palette controls map to, but no longer appear in the band.
-internal val AgentExitChips: List<String> = listOf(AgentCommandsChip)
+// Issue #454: the agent-pane bottom band is decluttered to just the mic FAB
+// (plus the Terminal-only "show keyboard" chip). The former "/ commands"
+// bottom chip was redundant once issue #462 added the dedicated "/" palette
+// button to the session header — same target ([AgentCommandSheet]), one obvious
+// place. `AgentExitChips` is now empty so the agent band carries no scrollable
+// chips. The former `Ctrl-C x2` / `Ctrl-D x2` interrupt/EOF chips already moved
+// into the "/ commands" palette as session-control rows (see [AgentCommandSheet]
+// `onControlSend`). `CtrlC2Chip` / `CtrlD2Chip` are kept as the literal labels
+// the palette controls map to, but no longer appear in the band.
+internal val AgentExitChips: List<String> = emptyList()

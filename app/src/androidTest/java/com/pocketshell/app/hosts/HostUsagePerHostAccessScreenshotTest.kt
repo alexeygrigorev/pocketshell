@@ -62,6 +62,7 @@ class HostUsagePerHostAccessScreenshotTest {
                         onDismiss = {},
                         usageRecord = null,
                         usageBadgeTestTag = HOST_USAGE_BADGE_TAG_PREFIX + "kebab",
+                        onEdit = {},
                         onOpenUsage = {},
                         usageMenuItemTestTag = HOST_USAGE_MENU_ITEM_TAG_PREFIX + "kebab",
                         onOpenPorts = {},

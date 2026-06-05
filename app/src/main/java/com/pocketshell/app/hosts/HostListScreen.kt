@@ -95,18 +95,18 @@ import kotlin.math.sin
  * [SessionViewModel][com.pocketshell.app.session.SessionViewModel]
  * runs the connect under its own Hilt scope.
  *
- * `onEditHost` is retained on the public signature because the nav
- * graph (`MainActivity`) still routes to the edit screen by host id —
- * see issue #38 for the removal of the long-press affordance that used
- * to invoke it. Once a non-clobbering long-press hook lands on
- * `HostCard` (`ui-kit`) the wire-up returns; until then the parameter
- * is intentionally unused at this call site.
+ * `onEditHost` routes to the edit-host screen by host id. The
+ * long-press → Edit affordance was dropped in #38 when long-press
+ * became "open the kebab overflow menu" (#113), which silently
+ * orphaned this route. Issue #519 restores a discoverable entry point
+ * via the kebab → "Edit" item; the callback fires when that item is
+ * tapped.
  */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun HostListScreen(
     onAddHost: () -> Unit,
-    @Suppress("UNUSED_PARAMETER") onEditHost: (Long) -> Unit,
+    onEditHost: (Long) -> Unit,
     // Issue #112: Crashes affordance was moved off the top bar and now
     // lives under Settings → Diagnostics. The activity-level wiring still
     // passes this callback so the navigator can re-introduce a direct
@@ -624,6 +624,13 @@ fun HostListScreen(
                                         onDismiss = { menuOpen = false },
                                         usageRecord = usageRecord,
                                         usageBadgeTestTag = HOST_USAGE_BADGE_TAG_PREFIX + host.id,
+                                        // Issue #519: restore the host-edit
+                                        // entry point — routes to the
+                                        // (already wired) EditHost destination.
+                                        onEdit = {
+                                            menuOpen = false
+                                            onEditHost(host.id)
+                                        },
                                         // Issue #483: discoverable, labelled
                                         // per-host entry to the Usage detail.
                                         // Issue #506: this kebab item is now
@@ -1250,6 +1257,7 @@ internal fun HostOverflowMenuAnchor(
     onDismiss: () -> Unit,
     usageRecord: com.pocketshell.core.usage.UsageProviderRecord?,
     usageBadgeTestTag: String,
+    onEdit: () -> Unit,
     onOpenUsage: (() -> Unit)?,
     usageMenuItemTestTag: String,
     onOpenPorts: () -> Unit,
@@ -1301,6 +1309,19 @@ internal fun HostOverflowMenuAnchor(
                     onClick = {},
                 )
             }
+            // Issue #519: restore the host-edit entry point. The
+            // long-press → Edit affordance was dropped in #38 when
+            // long-press became "open kebab" (#113), which silently
+            // orphaned the `onEditHost` route — delete-and-re-add was
+            // the only way to change a host's name / address / key.
+            // Edit is the primary per-host config action, so it sits at
+            // the top of the action list, above the read/glance items
+            // (Usage/Ports) and well clear of destructive Share/re-check.
+            DropdownMenuItem(
+                text = { Text("Edit") },
+                onClick = onEdit,
+                modifier = Modifier.testTag(HOST_EDIT_ITEM_TAG),
+            )
             // Issue #483: discoverable, labelled per-host entry to the
             // Usage detail. Sits at the top of the action list (above
             // Ports) so the quota glance is one obvious tap from the
@@ -1343,6 +1364,9 @@ internal fun HostOverflowMenuAnchor(
 }
 
 internal const val HOST_OVERFLOW_BUTTON_TAG: String = "host:overflow:button"
+// Issue #519: stable tag for the kebab → "Edit" entry so instrumentation
+// can reach the edit-host route without depending on free-form text.
+const val HOST_EDIT_ITEM_TAG: String = "host:overflow:edit"
 internal const val HOST_RECHECK_SETUP_ITEM_TAG: String = "host:overflow:recheck-setup"
 // Issue #206: stable tag for the kebab → "Watched folders" entry so
 // the connected E2E test can navigate from the host list to the

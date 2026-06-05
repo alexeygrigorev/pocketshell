@@ -16,6 +16,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import com.pocketshell.app.MainActivity
+import com.pocketshell.app.R
 import com.pocketshell.app.portfwd.ForwardingController
 import com.pocketshell.app.systemsurfaces.ForwardingTileService
 import dagger.hilt.android.AndroidEntryPoint
@@ -328,7 +329,17 @@ class ForwardingService : Service() {
         contentTextOverride = "Connecting…",
     )
 
-    private fun buildNotification(
+    /**
+     * Build the foreground-service notification.
+     *
+     * Only depends on the service's [Context] (`this`) — never on the
+     * Hilt-injected [controller] — so a JVM Robolectric test can construct the
+     * service and call this directly to assert the title / body / icon / ongoing
+     * wording (issue #521) without standing up Hilt. Marked
+     * [androidx.annotation.VisibleForTesting] for that reason.
+     */
+    @androidx.annotation.VisibleForTesting
+    internal fun buildNotification(
         hostName: String,
         hostCount: Int,
         tunnelCount: Int,
@@ -360,12 +371,15 @@ class ForwardingService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
 
-        // Issue #487: the maintainer wants an always-on "port forwarding is
-        // active" status with the Spotify / Google-Recorder ongoing feel.
-        // Title carries the steady "Port forwarding active" headline (the part
-        // that reads as the persistent status), the body carries the live
-        // host + tunnel detail.
-        val contentText = contentTextOverride ?: buildString {
+        // Issue #487 / #521: the maintainer wants an always-on "port
+        // forwarding is running in the background" status with the Google
+        // Recorder ongoing feel — a recognizable status-bar icon plus wording
+        // that explicitly says it's running in the background right now.
+        //
+        // `detail` is the live host + tunnel topology (changes as tunnels come
+        // and go). It's reused both in the collapsed body and in the expanded
+        // BigText so the user always sees what's forwarded.
+        val detail = contentTextOverride ?: buildString {
             if (hostName.isNotEmpty()) {
                 append(hostName)
                 if (hostCount > 1) append(" + ${hostCount - 1} more")
@@ -383,14 +397,26 @@ class ForwardingService : Service() {
             }
         }
 
+        // Issue #521: the collapsed body leads with the explicit "Running in
+        // the background" phrasing (Recorder's "Recording now") and then the
+        // live detail, so even the one-line collapsed shade row reads as an
+        // active background process the user controls.
+        val contentText = "Running in the background · $detail"
+
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Port forwarding active")
+            // Issue #521: title explicitly says it's running (not just
+            // "active"), matching Recorder's persistent-status headline.
+            .setContentTitle("Port forwarding running")
             .setContentText(contentText)
             // A larger body so the host + tunnel detail is fully readable when
             // the user expands the notification shade, like Recorder's
             // "Recording in progress · 00:42" expanded row.
             .setStyle(NotificationCompat.BigTextStyle().bigText(contentText))
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            // Issue #521: dedicated monochrome status-bar glyph (the same
+            // bidirectional forward-arrow as the QS tile) so the status bar
+            // shows an unmistakable PocketShell port-forward mark instead of
+            // the old generic ic_dialog_info.
+            .setSmallIcon(R.drawable.ic_stat_forwarding)
             .setContentIntent(contentIntent)
             // Ongoing + the no-clear flag make the notification persistent and
             // non-dismissable while ≥1 tunnel is active (the user stops it via

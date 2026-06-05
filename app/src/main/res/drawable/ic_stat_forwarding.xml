@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Status-bar icon for the D21 port-forwarding foreground service
+    (issue #521). The maintainer wants the ongoing notification to read
+    like Google Recorder's persistent mic glyph: an unmistakable,
+    branded status-bar icon — not the old generic ic_dialog_info.
+
+    The glyph is the same bidirectional forward-arrow PocketShell already
+    uses for the quick-settings tile (ic_qs_forwarding): two opposing
+    arrows that read as "port forwarding / tunnelling" at a glance, so the
+    QS tile and the status bar share one recognizable mark.
+
+    Status-bar icons MUST be white-on-transparent (alpha only). Android
+    re-tints them per system theme, so the fillColor is opaque white and
+    the rest of the canvas is transparent. Authored at 24dp like other
+    notification small icons.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M4,6h10.2l-2.6,-2.6L13,2l5,5 -5,5 -1.4,-1.4L14.2,8H4V6zM20,18H9.8l2.6,2.6L11,22l-5,-5 5,-5 1.4,1.4L9.8,16H20v2z" />
+</vector>

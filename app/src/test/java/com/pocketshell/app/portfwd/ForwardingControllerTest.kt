@@ -14,6 +14,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows
 import org.robolectric.annotation.Config
@@ -286,6 +287,139 @@ class ForwardingControllerTest {
 
         assertEquals(1, controller.flowOfRestoringHostCount().value)
         assertTrue(controller.flowOfHostSnapshots().value.getValue(1L).restoring)
+    }
+
+    // --- Issue #521: the D21 foreground-service notification copy + icon ----
+    //
+    // The maintainer wants the ongoing notification to read like Google
+    // Recorder's persistent "running now" status: a recognizable status-bar
+    // icon and explicit "running in the background" wording. The notification
+    // is built by ForwardingService.buildNotification, which only needs the
+    // service Context (not the Hilt-injected controller), so we can build the
+    // service via Robolectric and assert the notification directly here on the
+    // JVM. These are the authoritative CI assertions (the connected
+    // ForwardingNotificationE2eTest is Assume-gated off CI for swiftshader
+    // status-bar flakiness).
+
+    private fun buildServiceNotification(
+        hostName: String,
+        hostCount: Int,
+        tunnelCount: Int,
+        restoringHostCount: Int = 0,
+    ): android.app.Notification {
+        // .get() (not .create()) so onCreate/Hilt-injection never runs;
+        // buildNotification only touches the Context.
+        val service = Robolectric.buildService(ForwardingService::class.java).get()
+        return service.buildNotification(
+            hostName = hostName,
+            hostCount = hostCount,
+            tunnelCount = tunnelCount,
+            restoringHostCount = restoringHostCount,
+        )
+    }
+
+    @Test
+    fun `notification title says forwarding is running, not just active`() {
+        val notification = buildServiceNotification(
+            hostName = "alpha",
+            hostCount = 1,
+            tunnelCount = 2,
+        )
+
+        assertEquals(
+            "Port forwarding running",
+            notification.extras.getCharSequence("android.title")?.toString(),
+        )
+    }
+
+    @Test
+    fun `notification body says running in background and lists host plus tunnels`() {
+        val notification = buildServiceNotification(
+            hostName = "alpha",
+            hostCount = 1,
+            tunnelCount = 2,
+        )
+
+        val body = notification.extras.getCharSequence("android.text")?.toString().orEmpty()
+        assertTrue(
+            "body must explicitly say it's running in the background: '$body'",
+            body.contains("Running in the background"),
+        )
+        assertTrue(
+            "body must list the host + tunnel count: '$body'",
+            body.contains("alpha") && body.contains("2 tunnels"),
+        )
+        // BigText carries the same detail for the expanded shade.
+        val bigText = notification.extras.getCharSequence("android.bigText")?.toString().orEmpty()
+        assertTrue(
+            "expanded BigText must keep the live detail: '$bigText'",
+            bigText.contains("Running in the background") &&
+                bigText.contains("alpha") && bigText.contains("2 tunnels"),
+        )
+    }
+
+    @Test
+    fun `notification body collapses multiple hosts and pluralises tunnels`() {
+        val single = buildServiceNotification(
+            hostName = "alpha",
+            hostCount = 1,
+            tunnelCount = 1,
+        ).extras.getCharSequence("android.text")?.toString().orEmpty()
+        assertTrue(
+            "single tunnel must not be pluralised: '$single'",
+            single.contains("1 tunnel") && !single.contains("1 tunnels"),
+        )
+
+        val multi = buildServiceNotification(
+            hostName = "alpha",
+            hostCount = 3,
+            tunnelCount = 5,
+        ).extras.getCharSequence("android.text")?.toString().orEmpty()
+        assertTrue(
+            "multiple hosts must collapse to '+ N more': '$multi'",
+            multi.contains("alpha + 2 more") && multi.contains("5 tunnels"),
+        )
+    }
+
+    @Test
+    fun `notification body shows restoring while transport is down`() {
+        val body = buildServiceNotification(
+            hostName = "alpha",
+            hostCount = 1,
+            tunnelCount = 0,
+            restoringHostCount = 1,
+        ).extras.getCharSequence("android.text")?.toString().orEmpty()
+        assertTrue(
+            "a restoring host must read 'Restoring…', not '0 tunnels': '$body'",
+            body.contains("Restoring…") && !body.contains("0 tunnel"),
+        )
+    }
+
+    @Test
+    fun `notification uses the dedicated status-bar icon and stays ongoing`() {
+        val notification = buildServiceNotification(
+            hostName = "alpha",
+            hostCount = 1,
+            tunnelCount = 2,
+        )
+
+        assertEquals(
+            "must use the dedicated ic_stat_forwarding glyph, not generic ic_dialog_info",
+            com.pocketshell.app.R.drawable.ic_stat_forwarding,
+            notification.smallIcon?.resId,
+        )
+        assertTrue(
+            "notification must be ongoing (non-swipeable while forwarding)",
+            notification.flags and android.app.Notification.FLAG_ONGOING_EVENT != 0,
+        )
+        assertNotNull(
+            "notification must be tappable to open the panel",
+            notification.contentIntent,
+        )
+        assertTrue(
+            "notification must keep a Stop action",
+            notification.actions?.any { it.title?.toString() == "Stop" } == true,
+        )
     }
 
     private fun drainStartedServices() {

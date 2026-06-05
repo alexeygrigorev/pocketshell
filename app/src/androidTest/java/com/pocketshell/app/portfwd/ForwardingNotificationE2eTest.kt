@@ -26,9 +26,11 @@ import java.io.FileOutputStream
 import java.io.InputStreamReader
 
 /**
- * Emulator evidence for issue #487, part 1: the D21 port-forward foreground
- * service posts the always-on "Port forwarding active" ongoing notification
- * the moment a forward goes active, and it clears when no tunnels remain.
+ * Emulator evidence for issue #487, part 1 (polished in #521): the D21
+ * port-forward foreground service posts the always-on "Port forwarding running"
+ * ongoing notification the moment a forward goes active — with a dedicated
+ * recognizable status-bar icon and "Running in the background" wording — and it
+ * clears when no tunnels remain.
  *
  * The maintainer reported never seeing this notification. The root cause was
  * that POST_NOTIFICATIONS (Android 13+) was only requested once at first
@@ -133,7 +135,7 @@ class ForwardingNotificationE2eTest {
             posted = forwardingNotification()
         }
         assertNotNull(
-            "ongoing 'Port forwarding active' notification did not appear within " +
+            "ongoing 'Port forwarding running' notification did not appear within " +
                 "${POST_APPEARS_TIMEOUT_MS}ms; active titles=" +
                 notificationManager.activeNotifications.map {
                     it.notification.extras.getCharSequence("android.title")
@@ -141,15 +143,36 @@ class ForwardingNotificationE2eTest {
             posted,
         )
 
+        // Issue #521: title explicitly says it's running (Recorder feel).
+        val title = posted!!.notification.extras
+            .getCharSequence("android.title")?.toString().orEmpty()
+        assertEquals(
+            "notification title must read 'Port forwarding running'",
+            "Port forwarding running",
+            title,
+        )
         // It is ongoing (non-dismissable while active).
-        val flags = posted!!.notification.flags
+        val flags = posted.notification.flags
         assertTrue(
             "forwarding notification must be ongoing (FLAG_ONGOING_EVENT)",
             flags and android.app.Notification.FLAG_ONGOING_EVENT != 0,
         )
-        // Body reflects the host + tunnel count (Spotify/Recorder feel).
+        // Issue #521: dedicated status-bar icon (not the old generic
+        // ic_dialog_info), so the status bar shows a recognizable mark.
+        assertEquals(
+            "forwarding notification must use the dedicated ic_stat_forwarding " +
+                "status-bar icon (Recorder-style recognizable glyph)",
+            com.pocketshell.app.R.drawable.ic_stat_forwarding,
+            posted.notification.smallIcon?.resId,
+        )
+        // Issue #521: body says it's running in the background + the host +
+        // tunnel count (Recorder "Recording now" feel).
         val body = posted.notification.extras
             .getCharSequence("android.text")?.toString().orEmpty()
+        assertTrue(
+            "notification body should say it's running in the background: '$body'",
+            body.contains("Running in the background"),
+        )
         assertTrue(
             "notification body should show the host + tunnel count: '$body'",
             body.contains("Forward Host") && body.contains("2 tunnels"),
@@ -184,7 +207,7 @@ class ForwardingNotificationE2eTest {
             it.notification.extras
                 .getCharSequence("android.title")
                 ?.toString()
-                ?.contains("Port forwarding active") == true
+                ?.contains("Port forwarding running") == true
         }
 
     private fun captureShade(name: String) {

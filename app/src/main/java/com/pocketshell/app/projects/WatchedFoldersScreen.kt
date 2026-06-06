@@ -15,11 +15,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -36,11 +35,16 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.app.settings.HostDetailViewMode
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.uikit.components.Kebab
+import com.pocketshell.uikit.components.KebabItem
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SegmentedToggle
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Per-host "Watched folders" config screen — issue #206.
@@ -53,9 +57,10 @@ import com.pocketshell.uikit.theme.PocketShellColors
  *  - Settings → Per-host folders (which has no decrypted passphrase, so
  *    discovery is hidden when arriving from there).
  *
- * The screen draws its own chrome — same hand-rolled `SettingsAppBar`
- * pattern as Settings / Crash reports — to stay consistent with the
- * rest of the app.
+ * Chrome rides the shared #479 design language: the header is [ScreenHeader]
+ * (no bespoke 60dp bar), folder rows are dense [ListRow]s with a single
+ * per-row [Kebab] (Edit / Move up / Move down / Delete), and the host-detail
+ * mode picker is a [SegmentedToggle] instead of a radio group.
  */
 @Composable
 fun WatchedFoldersScreen(
@@ -81,7 +86,27 @@ fun WatchedFoldersScreen(
             .fillMaxSize()
             .background(PocketShellColors.Background),
     ) {
-        WatchedFoldersAppBar(hostName = state.hostName, onBack = onBack)
+        ScreenHeader(
+            title = "Workspace settings",
+            subtitle = state.hostName.ifBlank { null },
+            titleTestTag = WATCHED_FOLDERS_TITLE_TAG,
+            modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
+            leading = {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clickable(role = Role.Button, onClick = onBack)
+                        .testTag(WATCHED_FOLDERS_BACK_TAG),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "‹",
+                        color = PocketShellColors.TextSecondary,
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                }
+            },
+        )
 
         LazyColumn(
             modifier = Modifier
@@ -95,29 +120,19 @@ fun WatchedFoldersScreen(
                     Text(
                         text = "Host detail",
                         color = PocketShellColors.Text,
-                        fontSize = 14.sp,
+                        style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "Choose the default layout when opening this host.",
                         color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
+                        style = PocketShellType.bodyDense,
                     )
                     Spacer(modifier = Modifier.height(8.dp))
-                    HostDetailModeRow(
-                        label = "Workspace tree",
-                        detail = "Group active projects under configured roots.",
-                        selected = hostDetailViewMode == HostDetailViewMode.Tree,
-                        onClick = { onHostDetailViewModeSelected(HostDetailViewMode.Tree) },
-                        testTag = WORKSPACE_VIEW_MODE_TREE_TAG,
-                    )
-                    HostDetailModeRow(
-                        label = "Flat folder list",
-                        detail = "Show folders in one recency-sorted list.",
-                        selected = hostDetailViewMode == HostDetailViewMode.Flat,
-                        onClick = { onHostDetailViewModeSelected(HostDetailViewMode.Flat) },
-                        testTag = WORKSPACE_VIEW_MODE_FLAT_TAG,
+                    HostDetailModeToggle(
+                        selected = hostDetailViewMode,
+                        onSelected = onHostDetailViewModeSelected,
                     )
                 }
             }
@@ -126,14 +141,14 @@ fun WatchedFoldersScreen(
                     Text(
                         text = "Workspace roots for ${state.hostName.ifBlank { "this host" }}",
                         color = PocketShellColors.Text,
-                        fontSize = 14.sp,
+                        style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "Top-level roots shown on host detail, in the order below.",
                         color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
+                        style = PocketShellType.bodyDense,
                     )
                     Spacer(modifier = Modifier.height(12.dp))
 
@@ -184,7 +199,7 @@ fun WatchedFoldersScreen(
                         Text(
                             text = "Open this host to enable the remote discovery probe.",
                             color = PocketShellColors.TextMuted,
-                            fontSize = 11.sp,
+                            style = MaterialTheme.typography.labelSmall,
                         )
                     }
                 }
@@ -239,104 +254,23 @@ fun WatchedFoldersScreen(
 }
 
 @Composable
-private fun WatchedFoldersAppBar(hostName: String, onBack: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(60.dp)
-            .background(PocketShellColors.Background)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clickable(role = Role.Button, onClick = onBack)
-                .testTag(WATCHED_FOLDERS_BACK_TAG),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "‹",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        Column(modifier = Modifier.padding(start = 4.dp)) {
-            Text(
-                text = "Workspace settings",
-                color = PocketShellColors.Text,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.testTag(WATCHED_FOLDERS_TITLE_TAG),
-            )
-            if (hostName.isNotBlank()) {
-                Text(
-                    text = hostName,
-                    color = PocketShellColors.TextSecondary,
-                    fontSize = 12.sp,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun HostDetailModeRow(
-    label: String,
-    detail: String,
-    selected: Boolean,
-    onClick: () -> Unit,
-    testTag: String,
+private fun HostDetailModeToggle(
+    selected: HostDetailViewMode,
+    onSelected: (HostDetailViewMode) -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(role = Role.RadioButton, onClick = onClick)
-            .padding(vertical = 8.dp)
-            .testTag(testTag),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        RadioMark(selected = selected)
-        Spacer(modifier = Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = label,
-                color = PocketShellColors.Text,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = detail,
-                color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
-            )
-        }
-    }
-}
-
-@Composable
-private fun RadioMark(selected: Boolean) {
-    Box(
-        modifier = Modifier
-            .size(20.dp)
-            .border(
-                width = 2.dp,
-                color = if (selected) PocketShellColors.Accent else PocketShellColors.Border,
-                shape = CircleShape,
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (selected) {
-            Box(
-                modifier = Modifier
-                    .size(10.dp)
-                    .background(color = PocketShellColors.Accent, shape = CircleShape),
-            )
-        }
-    }
+    // Order matches the radio group it replaces: Tree first, Flat second.
+    val modes = listOf(HostDetailViewMode.Tree, HostDetailViewMode.Flat)
+    SegmentedToggle(
+        labels = listOf("Workspace tree", "Flat folder list"),
+        selectedIndex = modes.indexOf(selected).coerceAtLeast(0),
+        onSelected = { index -> onSelected(modes[index]) },
+        segmentTag = { index ->
+            when (modes[index]) {
+                HostDetailViewMode.Tree -> WORKSPACE_VIEW_MODE_TREE_TAG
+                HostDetailViewMode.Flat -> WORKSPACE_VIEW_MODE_FLAT_TAG
+            }
+        },
+    )
 }
 
 @Composable
@@ -379,14 +313,14 @@ private fun EmptyWatchedFoldersHint() {
         Text(
             text = "No workspace roots yet",
             color = PocketShellColors.Text,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(modifier = Modifier.height(2.dp))
         Text(
             text = "Add roots such as ~/git or ~/tmp to control host-detail tree order.",
             color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
+            style = PocketShellType.bodyDense,
         )
     }
 }
@@ -402,77 +336,53 @@ private fun WatchedFolderRow(
     onMoveDown: () -> Unit,
 ) {
     val visibleLabel = WatchedFoldersViewModel.stripOrderPrefix(row.label)
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp)
-            .testTag(watchedFolderRowTestTag(row.id)),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = visibleLabel.ifBlank { row.path },
-                color = PocketShellColors.Text,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
+    // One dense row, one overflow affordance: Edit / Move up / Move down /
+    // Delete all live in the per-row kebab (#479 §4 decision 4). The path
+    // rides the mono subtitle.
+    ListRow(
+        modifier = Modifier.testTag(watchedFolderRowTestTag(row.id)),
+        title = visibleLabel.ifBlank { row.path },
+        subtitle = row.path,
+        trailing = {
+            Kebab(
+                triggerTestTag = watchedFolderMenuTestTag(row.id),
+                items = buildList {
+                    add(
+                        KebabItem(
+                            label = "Edit",
+                            onClick = onEdit,
+                            testTag = watchedFolderEditTestTag(row.id),
+                        ),
+                    )
+                    if (!isFirst) {
+                        add(
+                            KebabItem(
+                                label = "Move up",
+                                onClick = onMoveUp,
+                                testTag = watchedFolderUpTestTag(row.id),
+                            ),
+                        )
+                    }
+                    if (!isLast) {
+                        add(
+                            KebabItem(
+                                label = "Move down",
+                                onClick = onMoveDown,
+                                testTag = watchedFolderDownTestTag(row.id),
+                            ),
+                        )
+                    }
+                    add(
+                        KebabItem(
+                            label = "Delete",
+                            onClick = onDelete,
+                            testTag = watchedFolderDeleteTestTag(row.id),
+                        ),
+                    )
+                },
             )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = row.path,
-                color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
-            )
-        }
-        ReorderChevron(
-            label = "↑",
-            enabled = !isFirst,
-            onClick = onMoveUp,
-            testTag = watchedFolderUpTestTag(row.id),
-        )
-        Spacer(modifier = Modifier.width(2.dp))
-        ReorderChevron(
-            label = "↓",
-            enabled = !isLast,
-            onClick = onMoveDown,
-            testTag = watchedFolderDownTestTag(row.id),
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        TextButton(
-            onClick = onEdit,
-            modifier = Modifier.testTag(watchedFolderEditTestTag(row.id)),
-        ) {
-            Text("Edit", color = PocketShellColors.Accent, fontSize = 13.sp)
-        }
-        TextButton(
-            onClick = onDelete,
-            modifier = Modifier.testTag(watchedFolderDeleteTestTag(row.id)),
-        ) {
-            Text("Delete", color = PocketShellColors.TextSecondary, fontSize = 13.sp)
-        }
-    }
-}
-
-@Composable
-private fun ReorderChevron(
-    label: String,
-    enabled: Boolean,
-    onClick: () -> Unit,
-    testTag: String,
-) {
-    Box(
-        modifier = Modifier
-            .size(32.dp)
-            .clickable(role = Role.Button, enabled = enabled, onClick = onClick)
-            .testTag(testTag),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            text = label,
-            color = if (enabled) PocketShellColors.TextSecondary else PocketShellColors.TextMuted,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Bold,
-        )
-    }
+        },
+    )
 }
 
 @Composable
@@ -545,7 +455,7 @@ private fun DiscoveryPanel(
             Text(
                 text = "Discovered folders",
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
             )
@@ -553,7 +463,7 @@ private fun DiscoveryPanel(
                 onClick = onDismiss,
                 modifier = Modifier.testTag(WATCHED_FOLDERS_DISCOVER_DISMISS_TAG),
             ) {
-                Text("Hide", color = PocketShellColors.TextSecondary, fontSize = 13.sp)
+                Text("Hide", color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
             }
         }
         Spacer(modifier = Modifier.height(8.dp))
@@ -561,7 +471,7 @@ private fun DiscoveryPanel(
             Text(
                 text = it,
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = PocketShellType.bodyDense,
                 modifier = Modifier.testTag(WATCHED_FOLDERS_DISCOVER_ERROR_TAG),
             )
             Spacer(modifier = Modifier.height(8.dp))
@@ -570,7 +480,7 @@ private fun DiscoveryPanel(
             Text(
                 text = "No matching folders.",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = PocketShellType.bodyDense,
             )
         }
         candidates.forEach { candidate ->
@@ -584,20 +494,20 @@ private fun DiscoveryPanel(
                     Text(
                         text = candidate.label,
                         color = PocketShellColors.Text,
-                        fontSize = 13.sp,
+                        style = PocketShellType.bodyDense,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Text(
                         text = candidate.path,
                         color = PocketShellColors.TextSecondary,
-                        fontSize = 12.sp,
+                        style = PocketShellType.bodyMono,
                     )
                 }
                 TextButton(
                     onClick = { onAccept(candidate) },
                     modifier = Modifier.testTag(watchedFolderAcceptTestTag(candidate.path)),
                 ) {
-                    Text("Add", color = PocketShellColors.Accent, fontSize = 13.sp)
+                    Text("Add", color = PocketShellColors.Accent, style = PocketShellType.bodyDense)
                 }
             }
         }
@@ -626,11 +536,11 @@ private fun FeedbackBanner(message: String, onDismiss: () -> Unit) {
         Text(
             text = message,
             color = PocketShellColors.Text,
-            fontSize = 12.sp,
+            style = PocketShellType.bodyDense,
             modifier = Modifier.weight(1f),
         )
         TextButton(onClick = onDismiss) {
-            Text("Dismiss", color = PocketShellColors.TextSecondary, fontSize = 12.sp)
+            Text("Dismiss", color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
         }
     }
 }
@@ -652,6 +562,7 @@ const val WORKSPACE_VIEW_MODE_TREE_TAG: String = "workspace-settings:view-mode:t
 const val WORKSPACE_VIEW_MODE_FLAT_TAG: String = "workspace-settings:view-mode:flat"
 
 fun watchedFolderRowTestTag(id: Long): String = "watched-folders:row:$id"
+fun watchedFolderMenuTestTag(id: Long): String = "watched-folders:row:$id:menu"
 fun watchedFolderUpTestTag(id: Long): String = "watched-folders:row:$id:up"
 fun watchedFolderDownTestTag(id: Long): String = "watched-folders:row:$id:down"
 fun watchedFolderEditTestTag(id: Long): String = "watched-folders:row:$id:edit"

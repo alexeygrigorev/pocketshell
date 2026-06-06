@@ -1,6 +1,7 @@
 package com.pocketshell.app.projects
 
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
@@ -221,6 +222,13 @@ class WatchedFoldersE2eTest {
             vm.state.value.roots.any { it.id == insertedId }
         }
 
+        // Delete now lives in the per-row kebab (#479 §4): open the overflow
+        // menu, then tap Delete.
+        compose.onNodeWithTag(watchedFolderMenuTestTag(insertedId)).performClick()
+        compose.waitUntil(timeoutMillis = 5_000L) {
+            compose.onAllNodesWithTag(watchedFolderDeleteTestTag(insertedId))
+                .fetchSemanticsNodes().isNotEmpty()
+        }
         compose.onNodeWithTag(watchedFolderDeleteTestTag(insertedId)).performClick()
 
         compose.waitUntil(timeoutMillis = 5_000L) {

@@ -144,6 +144,12 @@ class EnvScreenE2eTest {
         captureViewport("issue264-env-list-masked-viewport.png")
 
         // --- Assertion 2: Reveal shows the plain value.
+        // Reveal now lives in the per-row kebab (#479 §4): open the overflow
+        // menu, then tap Reveal.
+        compose.onNodeWithTag(envKeyMenuTestTag("API_KEY")).performClick()
+        compose.waitUntil(timeoutMillis = 5_000) {
+            compose.onAllNodesWithTag(envKeyRevealTestTag("API_KEY")).fetchSemanticsNodes().isNotEmpty()
+        }
         compose.onNodeWithTag(envKeyRevealTestTag("API_KEY")).performClick()
         compose.waitUntil(timeoutMillis = 5_000) {
             compose.onAllNodesWithText(secret).fetchSemanticsNodes().isNotEmpty()

@@ -25,6 +25,7 @@ import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -42,13 +43,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.uikit.components.Kebab
+import com.pocketshell.uikit.components.KebabItem
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Per-folder env-file management screen — issue #264.
@@ -57,6 +62,10 @@ import com.pocketshell.uikit.theme.PocketShellColors
  * default, D24), and lets the user add/update a key (value via stdin,
  * never argv), reveal a value on demand (plain, no biometric), and copy
  * keys from another already-discovered folder.
+ *
+ * Chrome rides the shared #479 design language: the header is [ScreenHeader]
+ * (no bespoke 60dp bar) and each key renders as a dense [ListRow] whose single
+ * per-row [Kebab] carries Reveal / Hide.
  */
 @Composable
 fun EnvScreen(
@@ -159,35 +168,27 @@ fun EnvScreen(
 
 @Composable
 private fun EnvAppBar(folderLabel: String, hostName: String, onBack: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(60.dp)
-            .background(PocketShellColors.Background)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clickable(role = Role.Button, onClick = onBack)
-                .testTag(ENV_BACK_TAG),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(text = "‹", color = PocketShellColors.TextSecondary, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-        }
-        Column(modifier = Modifier.padding(start = 4.dp).weight(1f)) {
-            Text(
-                text = "Env · $folderLabel",
-                color = PocketShellColors.Text,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.testTag(ENV_TITLE_TAG),
-            )
-            Text(text = hostName, color = PocketShellColors.TextSecondary, fontSize = 12.sp)
-        }
-    }
+    ScreenHeader(
+        title = "Env · $folderLabel",
+        subtitle = hostName.ifBlank { null },
+        titleTestTag = ENV_TITLE_TAG,
+        modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
+        leading = {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clickable(role = Role.Button, onClick = onBack)
+                    .testTag(ENV_BACK_TAG),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "‹",
+                    color = PocketShellColors.TextSecondary,
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+            }
+        },
+    )
 }
 
 @Composable
@@ -203,11 +204,11 @@ private fun EnvBanner(message: String, onDismiss: () -> Unit) {
         Text(
             text = message,
             color = PocketShellColors.Text,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
             modifier = Modifier.weight(1f),
         )
         TextButton(onClick = onDismiss) {
-            Text("Dismiss", color = PocketShellColors.Accent, fontSize = 12.sp)
+            Text("Dismiss", color = PocketShellColors.Accent, style = PocketShellType.bodyDense)
         }
     }
 }
@@ -231,7 +232,7 @@ private fun EnvErrorPanel(message: String, onRetry: () -> Unit) {
             .testTag(ENV_ERROR_TAG),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(text = message, color = PocketShellColors.Text, fontSize = 14.sp)
+        Text(text = message, color = PocketShellColors.Text, style = MaterialTheme.typography.bodyMedium)
         TextButton(onClick = onRetry, modifier = Modifier.testTag(ENV_RETRY_TAG)) {
             Text("Retry", color = PocketShellColors.Accent)
         }
@@ -256,15 +257,14 @@ private fun EnvKeyList(
             Text(
                 text = directory,
                 color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
-                fontFamily = FontFamily.Monospace,
+                style = PocketShellType.labelMono,
                 modifier = Modifier.padding(horizontal = 4.dp),
             )
         }
         if (canCopy) {
             item {
                 TextButton(onClick = onCopyFrom, modifier = Modifier.testTag(ENV_COPY_FROM_TAG)) {
-                    Text("Copy keys from another folder", color = PocketShellColors.Accent, fontSize = 13.sp)
+                    Text("Copy keys from another folder", color = PocketShellColors.Accent, style = PocketShellType.bodyDense)
                 }
             }
         }
@@ -289,75 +289,73 @@ private fun EnvEmptyState() {
             .padding(horizontal = 16.dp, vertical = 14.dp)
             .testTag(ENV_EMPTY_TAG),
     ) {
-        Text(text = "No env keys yet", color = PocketShellColors.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text(text = "No env keys yet", color = PocketShellColors.Text, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = "Tap + to add a key, or copy keys from another folder.",
             color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
+            style = PocketShellType.bodyDense,
         )
     }
 }
 
 @Composable
 private fun EnvKeyCard(row: EnvKeyUiRow, onReveal: (String) -> Unit, onHide: (String) -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(12.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
-            .padding(horizontal = 14.dp, vertical = 12.dp)
-            .testTag(envKeyRowTestTag(row.key)),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = row.key,
-                color = PocketShellColors.Text,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier.weight(1f),
-            )
+    // One dense row per key: the key name rides the mono-adjacent title, the
+    // masked / revealed value rides the mono subtitle, and Reveal / Hide
+    // consolidate into the single per-row kebab (#479 §4 decision 4). The file
+    // pill stays as a right-aligned chip before the kebab.
+    val display = when {
+        row.revealedValue != null -> row.revealedValue
+        !row.hasValue -> "(empty)"
+        else -> "••••••••"
+    }
+    ListRow(
+        modifier = Modifier.testTag(envKeyRowTestTag(row.key)),
+        title = row.key,
+        subtitle = display,
+        trailing = {
             FileTag(file = row.file)
-        }
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            val display = when {
-                row.revealedValue != null -> row.revealedValue
-                !row.hasValue -> "(empty)"
-                else -> "••••••••"
-            }
-            Text(
-                text = display,
-                color = if (row.revealedValue != null) PocketShellColors.Green else PocketShellColors.TextSecondary,
-                fontSize = 13.sp,
-                fontFamily = FontFamily.Monospace,
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag(envKeyValueTestTag(row.key)),
-            )
             if (row.revealing) {
                 CircularProgressIndicator(
                     color = PocketShellColors.Accent,
                     strokeWidth = 2.dp,
                     modifier = Modifier.size(16.dp),
                 )
-            } else if (row.revealedValue != null) {
-                TextButton(
-                    onClick = { onHide(row.key) },
-                    modifier = Modifier.testTag(envKeyHideTestTag(row.key)),
-                ) {
-                    Text("Hide", color = PocketShellColors.Accent, fontSize = 12.sp)
-                }
-            } else if (row.hasValue) {
-                TextButton(
-                    onClick = { onReveal(row.key) },
-                    modifier = Modifier.testTag(envKeyRevealTestTag(row.key)),
-                ) {
-                    Text("Reveal", color = PocketShellColors.Accent, fontSize = 12.sp)
-                }
+            } else {
+                EnvKeyMenu(row = row, onReveal = onReveal, onHide = onHide)
             }
+        },
+    )
+}
+
+@Composable
+private fun EnvKeyMenu(row: EnvKeyUiRow, onReveal: (String) -> Unit, onHide: (String) -> Unit) {
+    val items = buildList {
+        when {
+            row.revealedValue != null -> add(
+                KebabItem(
+                    label = "Hide",
+                    onClick = { onHide(row.key) },
+                    testTag = envKeyHideTestTag(row.key),
+                ),
+            )
+            row.hasValue -> add(
+                KebabItem(
+                    label = "Reveal",
+                    onClick = { onReveal(row.key) },
+                    testTag = envKeyRevealTestTag(row.key),
+                ),
+            )
         }
+    }
+    // No actions for an empty key (nothing to reveal/hide): suppress the kebab
+    // so the row carries no dead affordance.
+    if (items.isNotEmpty()) {
+        Kebab(
+            triggerTestTag = envKeyMenuTestTag(row.key),
+            items = items,
+        )
     }
 }
 
@@ -368,7 +366,7 @@ private fun FileTag(file: String) {
             .background(PocketShellColors.Purple.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
             .padding(horizontal = 6.dp, vertical = 2.dp),
     ) {
-        Text(text = file, color = PocketShellColors.Purple, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
+        Text(text = file, color = PocketShellColors.Purple, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -448,8 +446,7 @@ private fun FileTargetSelector(selected: EnvFileTarget, onSelect: (EnvFileTarget
                 Text(
                     text = target.fileName,
                     color = if (isSelected) PocketShellColors.Accent else PocketShellColors.TextSecondary,
-                    fontSize = 13.sp,
-                    fontFamily = FontFamily.Monospace,
+                    style = PocketShellType.bodyMono,
                 )
             }
         }
@@ -486,13 +483,12 @@ private fun CopyFromFolderSheet(
             Text(
                 text = "Copy keys from another folder",
                 color = PocketShellColors.Text,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.titleMedium,
             )
 
             val source = selectedSource
             if (source == null) {
-                Text("Pick a source folder:", color = PocketShellColors.TextSecondary, fontSize = 12.sp)
+                Text("Pick a source folder:", color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
                 LazyColumn(
                     modifier = Modifier.heightIn(max = 280.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -513,7 +509,7 @@ private fun CopyFromFolderSheet(
                 Text(
                     text = "From: ${source.label}",
                     color = PocketShellColors.Text,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                     fontWeight = FontWeight.SemiBold,
                 )
                 when (val ks = sourceKeys) {
@@ -526,7 +522,7 @@ private fun CopyFromFolderSheet(
                     is EnvCopySourceKeys.Failed -> Text(
                         text = ks.message,
                         color = PocketShellColors.Red,
-                        fontSize = 13.sp,
+                        style = PocketShellType.bodyDense,
                         modifier = Modifier.testTag(ENV_COPY_SOURCE_ERROR_TAG),
                     )
                     is EnvCopySourceKeys.Ready -> {
@@ -534,7 +530,7 @@ private fun CopyFromFolderSheet(
                             Text(
                                 text = "That folder has no env keys.",
                                 color = PocketShellColors.TextSecondary,
-                                fontSize = 13.sp,
+                                style = PocketShellType.bodyDense,
                                 modifier = Modifier.testTag(ENV_COPY_SOURCE_EMPTY_TAG),
                             )
                         } else {
@@ -556,7 +552,7 @@ private fun CopyFromFolderSheet(
                                     )
                                 }
                             }
-                            Text("Into:", color = PocketShellColors.TextSecondary, fontSize = 12.sp)
+                            Text("Into:", color = PocketShellColors.TextSecondary, style = PocketShellType.bodyDense)
                             FileTargetSelector(selected = target, onSelect = { target = it })
                         }
                     }
@@ -592,12 +588,11 @@ private fun SourceFolderRow(folder: EnvCopySourceFolder, onClick: () -> Unit) {
             .padding(horizontal = 14.dp, vertical = 10.dp)
             .testTag(envCopySourceTestTag(folder.path)),
     ) {
-        Text(text = folder.label, color = PocketShellColors.Text, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text(text = folder.label, color = PocketShellColors.Text, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
         Text(
             text = folder.path,
             color = PocketShellColors.TextSecondary,
-            fontSize = 11.sp,
-            fontFamily = FontFamily.Monospace,
+            style = PocketShellType.labelMono,
         )
     }
 }
@@ -622,8 +617,7 @@ private fun CopyKeyCheckboxRow(keyName: String, checked: Boolean, onToggle: () -
         Text(
             text = keyName,
             color = PocketShellColors.Text,
-            fontSize = 13.sp,
-            fontFamily = FontFamily.Monospace,
+            style = PocketShellType.bodyMono,
         )
     }
 }
@@ -662,6 +656,7 @@ const val ENV_COPY_SOURCE_ERROR_TAG: String = "env:copy-source-error"
 const val ENV_COPY_SOURCE_EMPTY_TAG: String = "env:copy-source-empty"
 
 fun envKeyRowTestTag(key: String): String = "env:key:$key"
+fun envKeyMenuTestTag(key: String): String = "env:menu:$key"
 fun envKeyValueTestTag(key: String): String = "env:value:$key"
 fun envKeyRevealTestTag(key: String): String = "env:reveal:$key"
 fun envKeyHideTestTag(key: String): String = "env:hide:$key"

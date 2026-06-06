@@ -1,8 +1,10 @@
 package com.pocketshell.app.composer
 
 import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.style.TextDecoration
 import com.pocketshell.core.terminal.selection.ConversationLink
 import com.pocketshell.core.terminal.selection.ConversationLinkKind
+import com.pocketshell.uikit.theme.PocketShellColors
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -33,6 +35,14 @@ class MarkdownTextLinkTest {
 
         val links = clickableLinks(rendered)
         assertEquals(1, links.size)
+        assertEquals(
+            TextDecoration.Underline,
+            links[0].styles?.style?.textDecoration,
+        )
+        assertEquals(
+            PocketShellColors.Accent,
+            links[0].styles?.style?.color,
+        )
 
         // Firing the link's listener routes the detected FILE link.
         links[0].linkInteractionListener?.onClick(links[0])

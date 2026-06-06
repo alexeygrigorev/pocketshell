@@ -55,6 +55,18 @@ class ConversationLinkDetectionTest {
         assertEquals(ConversationLinkKind.FILE, out[0].kind)
     }
 
+    @Test
+    fun detectsIssue583PocketShellAttachmentPathAsFileLink() {
+        val attachment =
+            "~/.pocketshell/attachments/host-1-git-pocketshell-c/" +
+                "20260606-155901-01-Screenshot_20260606-155849.png"
+        val out = links("Screenshot context: `$attachment`.")
+
+        assertEquals(1, out.size)
+        assertEquals(attachment, out[0].text)
+        assertEquals(ConversationLinkKind.FILE, out[0].kind)
+    }
+
     // --- Directories --------------------------------------------------------
 
     @Test

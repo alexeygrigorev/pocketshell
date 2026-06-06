@@ -100,11 +100,13 @@ import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
 import com.pocketshell.app.session.AgentConversationSyncStatus
 import com.pocketshell.app.session.AgentConversationUiState
+import com.pocketshell.app.session.ConversationLinkAction
 import com.pocketshell.app.session.ConversationSyncStatusRow
 import com.pocketshell.app.session.InlineDictationViewModel
 import com.pocketshell.app.session.KeyBarWithMic
 import com.pocketshell.app.settings.SettingsViewModel
 import com.pocketshell.app.session.SessionTab
+import com.pocketshell.app.session.conversationLinkAction
 import com.pocketshell.app.session.conversationSyncStatusLabel
 import com.pocketshell.app.sessions.DEFAULT_TMUX_START_DIRECTORY
 import com.pocketshell.app.sessions.HostTmuxSessionPickerRequest
@@ -1064,19 +1066,13 @@ public fun TmuxSessionScreen(
                         // pane's cwd resolves project-relative file/dir targets.
                         onConversationLinkTap = { link ->
                             val cwd = currentPane!!.cwd.takeIf { it.isNotBlank() }
-                            when (link.kind) {
-                                com.pocketshell.core.terminal.selection
-                                    .ConversationLinkKind.FILE ->
-                                    onOpenFile(link.text, cwd)
-                                com.pocketshell.core.terminal.selection
-                                    .ConversationLinkKind.DIRECTORY ->
-                                    onBrowseFiles(
-                                        com.pocketshell.app.fileviewer.RemotePathResolver
-                                            .resolve(link.text, cwd),
-                                    )
-                                com.pocketshell.core.terminal.selection
-                                    .ConversationLinkKind.URL ->
-                                    handleUrlTap(link.text)
+                            when (val action = conversationLinkAction(link, cwd)) {
+                                is ConversationLinkAction.OpenFile ->
+                                    onOpenFile(action.path, action.cwd)
+                                is ConversationLinkAction.BrowseDirectory ->
+                                    onBrowseFiles(action.startDir)
+                                is ConversationLinkAction.OpenUrl ->
+                                    handleUrlTap(action.url)
                             }
                         },
                     )

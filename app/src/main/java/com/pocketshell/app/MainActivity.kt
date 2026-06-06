@@ -865,6 +865,35 @@ private fun AppNavigator(
             },
             onOpenUsage = { navigate(AppDestination.Usage) },
             onAssistantNavigate = ::navigate,
+            onOpenFile = { path, cwd ->
+                navigate(
+                    AppDestination.FileViewer(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        remotePath = path,
+                        cwd = cwd,
+                    ),
+                )
+            },
+            onBrowseFiles = { startDir ->
+                navigate(
+                    AppDestination.FileExplorer(
+                        hostId = dest.hostId,
+                        hostName = dest.hostName,
+                        hostname = dest.hostname,
+                        port = dest.port,
+                        username = dest.username,
+                        keyPath = dest.keyPath,
+                        passphrase = dest.passphrase,
+                        startDir = startDir,
+                    ),
+                )
+            },
             // Issue #116: in-session blocked / near-limit chip for the
             // active host. Look up by [HostEntity.id]; absence means the
             // scheduler has no recent record warranting a chip.

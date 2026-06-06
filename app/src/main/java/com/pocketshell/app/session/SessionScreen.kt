@@ -71,6 +71,7 @@ import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.AssistantStrip
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ToolCallSummary
+import com.pocketshell.core.terminal.selection.ConversationLink
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -78,6 +79,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.text.font.FontFamily
 import com.pocketshell.core.terminal.ui.TerminalSurface
+import com.pocketshell.core.terminal.ui.openUrlWithFallback
 import com.pocketshell.core.terminal.ui.showTerminalSoftKeyboard
 import com.pocketshell.uikit.components.Breadcrumb
 import com.pocketshell.uikit.components.KeyBar
@@ -160,6 +162,15 @@ public fun SessionScreen(
     /** Route an assistant-requested navigation (issue #266). */
     onAssistantNavigate: (com.pocketshell.app.nav.AppDestination) -> Unit = {},
     /**
+     * Issue #583: open a remote file path tapped in Conversation text. Raw SSH
+     * sessions have no reliable pane cwd, so callers usually receive null.
+     */
+    onOpenFile: (path: String, cwd: String?) -> Unit = { _, _ -> },
+    /**
+     * Issue #583: open a remote directory path tapped in Conversation text.
+     */
+    onBrowseFiles: (startDir: String) -> Unit = {},
+    /**
      * Issue #116 (usage-panel Fix B): the most-concerning
      * [com.pocketshell.core.usage.UsageProviderRecord] for this
      * session's host as reported by [com.pocketshell.app.usage.UsageScheduler].
@@ -222,6 +233,13 @@ public fun SessionScreen(
     var showSnippetPicker by remember { mutableStateOf(false) }
 
     val context = LocalContext.current
+    val handleConversationLinkTap: (ConversationLink) -> Unit = { link ->
+        when (val action = conversationLinkAction(link, cwd = null)) {
+            is ConversationLinkAction.OpenFile -> onOpenFile(action.path, action.cwd)
+            is ConversationLinkAction.BrowseDirectory -> onBrowseFiles(action.startDir)
+            is ConversationLinkAction.OpenUrl -> openUrlWithFallback(context, action.url)
+        }
+    }
     // Issue #131: the show-keyboard chip needs the Compose root view so it
     // can locate the embedded `TerminalView` under it. `LocalView.current`
     // is the `AndroidComposeView` host attached to this window; descending
@@ -367,6 +385,7 @@ public fun SessionScreen(
                         onRetryAgentStream = viewModel::retryAgentConversationStream,
                         // Issue #494: retry a failed optimistic send.
                         onRetryFailedSend = { id -> viewModel.retryFailedAgentSend(id) },
+                        onConversationLinkTap = handleConversationLinkTap,
                     )
                 } else {
                     TerminalSurface(
@@ -607,6 +626,9 @@ internal fun ConversationPane(
     // Issue #494: retry a failed optimistic user send (passes its optimistic
     // id). Default no-op for screenshot/legacy callers.
     onRetryFailedSend: (String) -> Unit = {},
+    // Issue #583: file paths / directories / URLs in message bodies are
+    // rendered as actionable links when the screen supplies a tap sink.
+    onConversationLinkTap: ((ConversationLink) -> Unit)? = null,
 ) {
     val (effectiveQuery, onEffectiveQueryChange) = rememberHoistedQuery(query, onQueryChange)
     var composerText by remember { mutableStateOf("") }
@@ -691,6 +713,7 @@ internal fun ConversationPane(
                             expandedSystemNotes.value = if (current.contains(id)) current - id else current + id
                         },
                         onRetryFailedSend = onRetryFailedSend,
+                        onLinkTap = onConversationLinkTap,
                     )
                 }
             }
@@ -858,9 +881,10 @@ private fun ConversationEventRow(
     isSystemNoteExpanded: Boolean,
     onToggleSystemNoteExpand: (String) -> Unit,
     onRetryFailedSend: (String) -> Unit = {},
+    onLinkTap: ((ConversationLink) -> Unit)? = null,
 ) {
     when (event) {
-        is ConversationEvent.Message -> ConversationMessageRow(event, onRetryFailedSend)
+        is ConversationEvent.Message -> ConversationMessageRow(event, onRetryFailedSend, onLinkTap)
         is ConversationEvent.ToolCall -> ConversationToolCallRow(
             toolCall = event,
             result = eventsById.findToolResultFor(event.id),
@@ -881,8 +905,13 @@ private fun ConversationEventRow(
 private fun ConversationMessageRow(
     event: ConversationEvent.Message,
     onRetryFailedSend: (String) -> Unit = {},
+    onLinkTap: ((ConversationLink) -> Unit)? = null,
 ) {
-    ConversationMessageTurn(event = event, onRetrySend = onRetryFailedSend)
+    ConversationMessageTurn(
+        event = event,
+        onRetrySend = onRetryFailedSend,
+        onLinkTap = onLinkTap,
+    )
 }
 
 @Composable

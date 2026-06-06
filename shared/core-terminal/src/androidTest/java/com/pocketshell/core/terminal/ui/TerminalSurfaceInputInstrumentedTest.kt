@@ -22,13 +22,13 @@ import java.io.OutputStream
 
 /**
  * Emulator/device coverage for the path users exercise manually:
- * tap terminal -> focus terminal -> IME input connection -> remote stdin.
+ * explicit keyboard control -> focus terminal -> IME input connection -> remote stdin.
  */
 @RunWith(AndroidJUnit4::class)
 class TerminalSurfaceInputInstrumentedTest {
 
     @Test
-    fun terminalTapAndImeCommitRouteTextAndEnterToRemoteStdin() = runBlocking {
+    fun focusedTerminalImeCommitRoutesTextAndEnterToRemoteStdin() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -52,8 +52,7 @@ class TerminalSurfaceInputInstrumentedTest {
                 view.measure(widthSpec, heightSpec)
                 view.layout(0, 0, view.measuredWidth, view.measuredHeight)
 
-                client.onSingleTapUp(null)
-                assertTrue("terminal tap should focus the TerminalView", view.isFocused)
+                assertTrue("explicit keyboard path should focus the TerminalView", view.requestFocus())
 
                 val editorInfo = EditorInfo()
                 val inputConnection = requireNotNull(view.onCreateInputConnection(editorInfo))

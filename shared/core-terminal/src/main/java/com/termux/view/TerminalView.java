@@ -226,7 +226,6 @@ public final class TerminalView extends View {
                     stopTextSelectionMode();
                     return true;
                 }
-                requestFocus();
                 mClient.onSingleTapUp(event);
                 return true;
             }

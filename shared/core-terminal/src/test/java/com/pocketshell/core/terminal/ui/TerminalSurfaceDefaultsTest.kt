@@ -14,6 +14,7 @@ import androidx.compose.ui.graphics.toArgb
 import com.termux.view.TerminalView
 import com.termux.view.TerminalViewClient
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -55,7 +56,7 @@ class TerminalSurfaceDefaultsTest {
     }
 
     @Test
-    fun pocketShellClientRequestsSoftKeyboardOnTerminalTap() {
+    fun pocketShellClientDoesNotRequestSoftKeyboardOnTerminalTap() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val view = TerminalView(context, null)
         val client = PocketShellTerminalViewClient()
@@ -64,9 +65,9 @@ class TerminalSurfaceDefaultsTest {
         view.applyPocketShellDefaults(client)
         client.onSingleTapUp(null)
 
-        assertTrue("terminal tap should focus the embedded TerminalView", view.isFocused)
-        assertTrue(
-            "terminal tap should ask Android to show the soft keyboard",
+        assertFalse("terminal tap client must not request TerminalView focus", view.isFocused)
+        assertFalse(
+            "terminal tap client must not ask Android to show the soft keyboard",
             shadowOf(inputMethodManager).isSoftInputVisible,
         )
     }

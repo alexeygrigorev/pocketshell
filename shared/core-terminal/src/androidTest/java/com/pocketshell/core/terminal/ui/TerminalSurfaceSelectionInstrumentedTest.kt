@@ -284,9 +284,9 @@ class TerminalSurfaceSelectionInstrumentedTest {
 
             // End-to-end: install the same tap-hook the TerminalSurface
             // composable would install and synthesise a single-tap-up gesture
-            // on the URL's bounding box. The hook must (a) report the URL
-            // string to the host, (b) return true so the keyboard summon is
-            // suppressed.
+            // on the URL's bounding box. The hook must report the URL string
+            // to the host and return true so plain terminal-tap fall-through
+            // is suppressed.
             val tapUrls = mutableListOf<String>()
             client.onTapMaybeUrl = { x, y ->
                 val hit = hitTestUrl(view, found, x, y)
@@ -320,11 +320,10 @@ class TerminalSurfaceSelectionInstrumentedTest {
                     tapUrls,
                 )
 
-                // A tap on column 0 of the same row must fall through to the
-                // keyboard summon path — proves we didn't break the existing
-                // "tap empty area → keyboard" behaviour. We swap in a
-                // counting hook so the synthetic taps don't pollute the
-                // first assertion's recording.
+                // A tap on column 0 of the same row must return false from
+                // the hook while a URL tap returns true. We swap in a
+                // counting hook so the synthetic taps don't pollute the first
+                // assertion's recording.
                 val handledCalls = arrayOf(0, 0)
                 client.onTapMaybeUrl = { x, y ->
                     val hit = hitTestUrl(view, found, x, y)
@@ -339,15 +338,15 @@ class TerminalSurfaceSelectionInstrumentedTest {
                 instrumentation.runOnMainSync {
                     val emptyHit = hitTestUrl(view, found, 0.5f * fontWidth, midY)
                     assertNull(
-                        "empty-area tap must fall through to the View's keyboard summon",
+                        "empty-area tap must not resolve to a URL",
                         emptyHit,
                     )
                     assertFalse(
-                        "tap-on-empty hook must return false so onSingleTapUp continues to the IME path",
+                        "tap-on-empty hook must return false so onSingleTapUp has no URL action",
                         client.onTapMaybeUrl?.invoke(0.5f * fontWidth, midY) ?: true,
                     )
                     assertTrue(
-                        "tap-on-URL hook must return true so onSingleTapUp suppresses the IME summon",
+                        "tap-on-URL hook must return true so onSingleTapUp routes the URL action",
                         client.onTapMaybeUrl?.invoke(midX, midY) ?: false,
                     )
                 }

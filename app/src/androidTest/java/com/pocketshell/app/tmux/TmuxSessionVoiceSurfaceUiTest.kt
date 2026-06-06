@@ -15,9 +15,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.pocketshell.app.assistant.AssistantAgentLoop
 import com.pocketshell.app.assistant.AssistantUiState
-import com.pocketshell.app.session.INLINE_DICTATION_MIC_SLOT_TAG
 import com.pocketshell.app.session.InlineDictationViewModel
-import com.pocketshell.app.session.KeyBarWithMic
 import com.pocketshell.app.voice.ADD_COMMAND_CHIP_LABEL
 import com.pocketshell.app.voice.ADD_PROMPT_CHIP_LABEL
 import com.pocketshell.app.voice.ASSISTANT_CORRECTION_MIC_TAG
@@ -43,9 +41,8 @@ import org.junit.runner.RunWith
 /**
  * Emulator validation for the tmux terminal bottom controls. The full
  * `TmuxSessionScreen` requires Hilt + a live tmux connect, so this test
- * isolates the input strips the screen renders and verifies #311's
- * session-open controls: terminal chrome keeps dictation on the right
- * while agent-vs-shell sessions expose different prompt/command affordances.
+ * isolates the input strips the screen renders and verifies the terminal
+ * accessory and agent-vs-shell prompt/command affordances.
  */
 @RunWith(AndroidJUnit4::class)
 class TmuxSessionVoiceSurfaceUiTest {
@@ -54,25 +51,24 @@ class TmuxSessionVoiceSurfaceUiTest {
     val compose = createComposeRule()
 
     @Test
-    fun tmuxKeyBarExposesInlineMicSlot() {
-        var micTaps = 0
+    fun tmuxKeyboardOpenAccessoryShowsHotkeysOnly() {
         compose.setContent {
             PocketShellTheme {
-                KeyBarWithMic(
+                KeyBar(
                     keys = tmuxKeyBarLayout(expanded = false),
                     onKey = {},
-                    micState = InlineDictationViewModel.RecordingState.Idle,
-                    micAmplitude = 0f,
-                    dictationMode = InlineDictationViewModel.DictationMode.Prompt,
-                    onDictationModeSelected = {},
-                    onMicTap = { micTaps++ },
                 )
             }
         }
 
+        compose.onNodeWithText("Esc").assertIsDisplayed().assertHasClickAction()
         compose.onNodeWithText("^C").assertIsDisplayed()
-        compose.onNodeWithTag(INLINE_DICTATION_MIC_SLOT_TAG).assertIsDisplayed().performClick()
-        assertEquals(1, micTaps)
+        compose.onNodeWithText("^D").assertIsDisplayed()
+        compose.onNodeWithText("Tab").assertIsDisplayed()
+        compose.onNodeWithText("Prompt").assertDoesNotExist()
+        compose.onNodeWithText("Command").assertDoesNotExist()
+        compose.onNodeWithText("Ready").assertDoesNotExist()
+        compose.onNodeWithText("Speech capture ready").assertDoesNotExist()
     }
 
     @Test
@@ -80,14 +76,9 @@ class TmuxSessionVoiceSurfaceUiTest {
         val taps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme {
-                KeyBarWithMic(
+                KeyBar(
                     keys = tmuxKeyBarLayout(expanded = false),
                     onKey = { taps += it.label },
-                    micState = InlineDictationViewModel.RecordingState.Idle,
-                    micAmplitude = 0f,
-                    dictationMode = InlineDictationViewModel.DictationMode.Prompt,
-                    onDictationModeSelected = {},
-                    onMicTap = {},
                 )
             }
         }

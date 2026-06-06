@@ -47,11 +47,9 @@ fun showTerminalSoftKeyboard(
         val imm = terminalView.context
             .getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
             ?: return@runCatching false
-        // `SHOW_IMPLICIT` matches the upstream Termux tap-on-viewport path
-        // (see `PocketShellTerminalViewClient.onSingleTapUp`). Using the same
-        // flag means the system keyboard policy treats the chip-tap the same
-        // way it treats a tap on the terminal viewport — important because the
-        // user already expects that tap interaction to "feel" like the chip.
+        // `SHOW_IMPLICIT` is appropriate here because the user explicitly
+        // tapped PocketShell's "show keyboard" control. Terminal viewport
+        // taps intentionally do not call IMM.
         imm.showSoftInput(terminalView, InputMethodManager.SHOW_IMPLICIT) && focused
     }.getOrElse { cause ->
         onLocalTerminalError?.invoke(cause)

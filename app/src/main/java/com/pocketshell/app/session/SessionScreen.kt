@@ -1,9 +1,5 @@
 package com.pocketshell.app.session
 
-import android.Manifest
-import android.content.pm.PackageManager
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -56,7 +52,6 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -260,23 +255,6 @@ public fun SessionScreen(
         }
     }
 
-    // Runtime RECORD_AUDIO permission flow for the inline-dictation path.
-    // The composer (#15) owns its own launcher because the composer can be
-    // opened without the IME being up; the inline path mirrors the same
-    // gate so the user gets the system prompt on first tap of the key-bar
-    // mic too. Both launchers reuse the manifest-level `RECORD_AUDIO`
-    // declaration; only one prompt will ever fire because the OS
-    // remembers the user's grant per package.
-    val inlinePermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) {
-            inlineDictationViewModel.onMicTap()
-        } else {
-            inlineDictationViewModel.surfacePermissionDenied()
-        }
-    }
-
     val isImeVisible = WindowInsets.ime.getBottom(androidx.compose.ui.platform.LocalDensity.current) > 0
 
     Box(
@@ -425,34 +403,6 @@ public fun SessionScreen(
                 modifierStates = keyBarModifierStates,
                 onModifierStateChange = { binding, state ->
                     viewModel.onKeyBarModifierState(binding.label, state)
-                },
-                micState = dictationState.recording,
-                micAmplitude = dictationState.amplitude,
-                dictationError = dictationState.error,
-                dictationMode = dictationState.mode,
-                onDictationModeSelected = inlineDictationViewModel::selectMode,
-                onInlineMicTap = inlineMicTap@{
-                    // Same three-step gate as the prompt composer
-                    // (#15): permission → API-key → recorder.
-                    val granted = ContextCompat.checkSelfPermission(
-                        context,
-                        Manifest.permission.RECORD_AUDIO,
-                    ) == PackageManager.PERMISSION_GRANTED
-                    if (!granted) {
-                        inlinePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                        return@inlineMicTap
-                    }
-                    if (!inlineDictationViewModel.hasApiKey()) {
-                        // Inline dictation does not own a key-entry
-                        // dialog (the issue is explicit about "no
-                        // sheet"). We route the user to the prompt
-                        // composer, which already hosts the one-field
-                        // dialog. Surfacing this as a banner avoids
-                        // the dead-end "tap mic, nothing happens".
-                        showMicSheet = true
-                        return@inlineMicTap
-                    }
-                    inlineDictationViewModel.onMicTap()
                 },
                 onChipTap = viewModel::onChipTap,
                 onDictateTap = { showMicSheet = true },
@@ -1499,12 +1449,6 @@ internal fun RawSessionBottomControls(
     onKey: (KeyBinding) -> Unit,
     modifierStates: Map<String, KeyModifierState> = emptyMap(),
     onModifierStateChange: (KeyBinding, KeyModifierState) -> Unit = { _, _ -> },
-    micState: InlineDictationViewModel.RecordingState,
-    micAmplitude: Float,
-    dictationError: String? = null,
-    dictationMode: InlineDictationViewModel.DictationMode,
-    onDictationModeSelected: (InlineDictationViewModel.DictationMode) -> Unit,
-    onInlineMicTap: () -> Unit,
     onChipTap: (String) -> Unit,
     onDictateTap: () -> Unit,
     onShowKeyboardTap: () -> Unit,
@@ -1515,19 +1459,11 @@ internal fun RawSessionBottomControls(
     // Conversation always sends through the unified composer surface, even if
     // the IME is visible from an earlier terminal interaction.
     if (isImeVisible && !showConversation) {
-        KeyBarWithMic(
+        KeyBar(
             keys = SessionTerminalKeyBarLayout,
-            onKey = onKey,
+            onKey = if (sessionLive) onKey else { _ -> },
             modifierStates = modifierStates,
             onModifierStateChange = onModifierStateChange,
-            micState = micState,
-            micAmplitude = micAmplitude,
-            dictationError = dictationError,
-            dictationMode = dictationMode,
-            onDictationModeSelected = onDictationModeSelected,
-            onMicTap = onInlineMicTap,
-            // Issue #249: gate key bar + mic on liveness.
-            inputEnabled = sessionLive,
         )
     } else {
         Column {

@@ -65,11 +65,6 @@ class InlineDictationUiTest {
                     showConversation = true,
                     sessionLive = true,
                     onKey = { keyTaps += it.label },
-                    micState = InlineDictationViewModel.RecordingState.Idle,
-                    micAmplitude = 0f,
-                    dictationMode = InlineDictationViewModel.DictationMode.Prompt,
-                    onDictationModeSelected = {},
-                    onInlineMicTap = {},
                     onChipTap = {},
                     onDictateTap = { dictateTaps++ },
                     onShowKeyboardTap = {},
@@ -86,6 +81,38 @@ class InlineDictationUiTest {
 
         assertEquals(emptyList<String>(), keyTaps)
         assertEquals(1, dictateTaps)
+    }
+
+    @Test
+    fun rawSshKeyboardOpenAccessoryShowsHotkeysOnly() {
+        val keyTaps = mutableListOf<String>()
+        compose.setContent {
+            PocketShellTheme {
+                RawSessionBottomControls(
+                    isImeVisible = true,
+                    showConversation = false,
+                    sessionLive = true,
+                    onKey = { keyTaps += it.label },
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onShowKeyboardTap = {},
+                    onAddSnippetTap = null,
+                    onProjectNavigationTap = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("Esc").assertIsDisplayed().assertHasClickAction().performClick()
+        compose.onNodeWithText("Ctrl-C").assertIsDisplayed()
+        compose.onNodeWithText("Ctrl-D").assertIsDisplayed()
+        compose.onNodeWithText("Tab").assertIsDisplayed()
+        compose.onNodeWithText("Prompt").assertDoesNotExist()
+        compose.onNodeWithText("Command").assertDoesNotExist()
+        compose.onNodeWithText("Ready").assertDoesNotExist()
+        compose.onNodeWithText("Speech capture ready").assertDoesNotExist()
+        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertDoesNotExist()
+
+        assertEquals(listOf("Esc"), keyTaps)
     }
 
     @Test

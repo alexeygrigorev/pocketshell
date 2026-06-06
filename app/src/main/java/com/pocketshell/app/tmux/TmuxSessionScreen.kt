@@ -1,10 +1,6 @@
 package com.pocketshell.app.tmux
 
-import android.Manifest
-import android.content.pm.PackageManager
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.tween
@@ -94,7 +90,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.hilt.navigation.compose.hiltViewModel
-import androidx.core.content.ContextCompat
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
@@ -103,7 +98,6 @@ import com.pocketshell.app.session.AgentConversationUiState
 import com.pocketshell.app.session.ConversationLinkAction
 import com.pocketshell.app.session.ConversationSyncStatusRow
 import com.pocketshell.app.session.InlineDictationViewModel
-import com.pocketshell.app.session.KeyBarWithMic
 import com.pocketshell.app.settings.SettingsViewModel
 import com.pocketshell.app.session.SessionTab
 import com.pocketshell.app.session.conversationLinkAction
@@ -512,35 +506,6 @@ public fun TmuxSessionScreen(
     // the tunnel so the user can open the working local URL.
     var pendingLocalhostForward by remember {
         mutableStateOf<com.pocketshell.core.terminal.selection.LocalhostUrl?>(null)
-    }
-
-    // Runtime RECORD_AUDIO permission flow for the inline-dictation path.
-    // Mirrors SessionScreen so the tmux route uses the same right-side mic
-    // affordance instead of falling back to a separate terminal-only path.
-    val inlinePermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-    ) { granted ->
-        if (granted) {
-            inlineDictationViewModel.onMicTap()
-        } else {
-            inlineDictationViewModel.surfacePermissionDenied()
-        }
-    }
-
-    fun onInlineMicTap() {
-        val granted = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.RECORD_AUDIO,
-        ) == PackageManager.PERMISSION_GRANTED
-        if (!granted) {
-            inlinePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-            return
-        }
-        if (!inlineDictationViewModel.hasApiKey()) {
-            showMicSheet = true
-            return
-        }
-        inlineDictationViewModel.onMicTap()
     }
 
     // Issue #184 Layer 1: when the IME comes up, snap the active
@@ -1135,9 +1100,7 @@ public fun TmuxSessionScreen(
                 }
             }
 
-            // Assistant review sits above the input band; dictation
-            // recording/transcribing/failure state is rendered inline by
-            // KeyBarWithMic in the speech capture area.
+            // Assistant review sits above the input band.
             AssistantStrip(
                 state = assistantState,
                 onConfirm = viewModel::confirmAssistantAction,
@@ -1152,15 +1115,15 @@ public fun TmuxSessionScreen(
             // Issue #459: the Conversation tab and the Terminal tab now
             // share an identical bottom — the unified composer band
             // ([BottomChipControls], which opens the #453
-            // [PromptComposerSheet] via the mic). The terminal key bar
-            // ([KeyBarWithMic]) is a Terminal-only, keyboard-up affordance
-            // for sending raw keys into the focused pane; in Conversation
-            // you only ever send via the composer, so the key bar must NOT
-            // appear there even if the IME happens to be up. Gating it on
-            // `!showConversation` keeps it Terminal-only and leaves
-            // Conversation with just the unified composer band below.
+            // [PromptComposerSheet] via the mic). The terminal key bar is a
+            // Terminal-only, keyboard-up affordance for sending raw keys into
+            // the focused pane; in Conversation you only ever send via the
+            // composer, so the key bar must NOT appear there even if the IME
+            // happens to be up. Gating it on `!showConversation` keeps it
+            // Terminal-only and leaves Conversation with just the unified
+            // composer band below.
             if (isImeVisible && currentPane != null && !showConversation) {
-                KeyBarWithMic(
+                KeyBar(
                     keys = tmuxKeyBarLayout(keyBarExpanded),
                     onKey = if (sessionLive) {
                         { binding ->
@@ -1185,13 +1148,6 @@ public fun TmuxSessionScreen(
                     onModifierStateChange = { binding, state ->
                         viewModel.onKeyBarModifierState(binding.label, state)
                     },
-                    micState = dictationState.recording,
-                    micAmplitude = dictationState.amplitude,
-                    dictationError = dictationState.error,
-                    dictationMode = dictationState.mode,
-                    onDictationModeSelected = inlineDictationViewModel::selectMode,
-                    onMicTap = ::onInlineMicTap,
-                    inputEnabled = sessionLive,
                 )
             } else if (currentPane != null && (showConversation || !isImeVisible)) {
                 val isAgentPane = currentAgentConversation?.detection != null

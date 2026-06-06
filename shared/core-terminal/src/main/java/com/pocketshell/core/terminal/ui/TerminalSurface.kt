@@ -8,7 +8,6 @@ import android.graphics.Typeface
 import android.net.Uri
 import android.view.KeyEvent
 import android.view.MotionEvent
-import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -349,9 +348,8 @@ fun TerminalSurface(
     // Install the tap-hook on the view client every time `visibleUrls`,
     // `terminalView`, or `effectiveUrlTap` changes. The hook receives a tap
     // in view-local pixels and returns true if the tap landed on a URL —
-    // PocketShellTerminalViewClient.onSingleTapUp then suppresses the
-    // keyboard summon for that gesture and the host's onUrlTap callback
-    // fires.
+    // PocketShellTerminalViewClient.onSingleTapUp then lets the host handle
+    // that gesture and suppresses the plain terminal tap fall-through.
     DisposableEffect(viewClient, terminalView, visibleUrls, visibleFilePaths, effectiveUrlTap, onFilePathTap) {
         val view = terminalView
         val tap = effectiveUrlTap
@@ -538,10 +536,9 @@ private fun TerminalView.applyPocketShellDefaultColors() {
  * [TerminalViewClient] used by PocketShell's embedded terminal.
  *
  * The vendored [TerminalView] owns text and hardware-key routing once the IME
- * is open, but it delegates the "single tap" action to its client. Upstream
- * Termux's app client uses that callback to summon the soft keyboard; without
- * the same bridge here PocketShell could render a connected terminal while
- * leaving phone users with no way to type into it.
+ * is open, but it delegates the "single tap" action to its client. PocketShell
+ * keeps that tap available for URL/file handling and terminal focus/selection,
+ * while the explicit "show keyboard" chip is the only path that summons IME.
  */
 internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessionClient {
     private var terminalView: TerminalView? = null
@@ -591,18 +588,12 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
     override fun getTerminalCursorStyle(): Int? = null
     override fun onScale(scale: Float): Float = 1f
     override fun onSingleTapUp(e: MotionEvent?) {
-        val view = terminalView ?: return
-        // Issue #175 — give the URL-tap host first crack at the gesture. If
-        // the host says "yes, this hit a URL", suppress the keyboard summon
-        // entirely; the host is responsible for the follow-up (typically
-        // firing Intent.ACTION_VIEW).
+        if (terminalView == null) return
+        // Issue #175/#500 — give URL/file hosts first crack at the gesture.
+        // The vendored TerminalView has already handled selection state and
+        // focus before calling us; do not summon IME from a terminal tap.
         runCatching {
-            val handledUrl = e != null && onTapMaybeUrl?.invoke(e.x, e.y) == true
-            if (!handledUrl) {
-                view.requestFocus()
-                val inputMethodManager = view.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
-                inputMethodManager?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
-            }
+            if (e != null) onTapMaybeUrl?.invoke(e.x, e.y)
         }.onFailure { onTerminalSurfaceError?.invoke(it) }
     }
     override fun onScrollChanged() {

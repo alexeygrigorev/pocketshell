@@ -190,15 +190,15 @@ class FilePathTapInstrumentedTest {
                     tappedPaths,
                 )
 
-                // The prose tap must return false so onSingleTapUp keeps its
-                // keyboard-summon fall-through behaviour.
+                // The prose tap must return false while a file-path tap
+                // returns true and routes to the host.
                 instrumentation.runOnMainSync {
                     assertFalse(
-                        "prose tap hook must return false so the IME summon path runs",
+                        "prose tap hook must return false so no file-path action runs",
                         client.onTapMaybeUrl?.invoke(0.5f * fontWidth, centreY(pngRegion)) ?: true,
                     )
                     assertTrue(
-                        "file-path tap hook must return true so the IME summon is suppressed",
+                        "file-path tap hook must return true so the file viewer action runs",
                         client.onTapMaybeUrl?.invoke(centreX(pngRegion), centreY(pngRegion)) ?: false,
                     )
                 }

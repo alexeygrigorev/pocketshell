@@ -1,6 +1,11 @@
 package com.pocketshell.app.fileviewer
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import android.graphics.BitmapFactory
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -19,6 +24,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -44,12 +50,14 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -78,6 +86,11 @@ const val FILE_VIEWER_AUDIO_CURRENT_TIME_TAG = "fileViewerAudioCurrentTime"
 const val FILE_VIEWER_AUDIO_TOTAL_TIME_TAG = "fileViewerAudioTotalTime"
 const val FILE_VIEWER_CANNOT_PREVIEW_TAG = "fileViewerCannotPreview"
 const val FILE_VIEWER_RETRY_TAG = "fileViewerRetry"
+
+// Issue #559 — "act on the opened file" header actions.
+const val FILE_VIEWER_SHARE_TAG = "fileViewerShare"
+const val FILE_VIEWER_COPY_TAG = "fileViewerCopy"
+const val FILE_VIEWER_COPY_ALL_TAG = "fileViewerCopyAll"
 
 /**
  * In-app file viewer — issue #497.
@@ -149,6 +162,7 @@ internal fun FileViewerScaffold(
             FileViewerAppBar(
                 hostName = hostName,
                 displayPath = state.displayPath(),
+                shareable = state.shareable(),
                 onBack = onBack,
             )
             when (state) {
@@ -175,16 +189,136 @@ private fun FileViewerUiState.displayPath(): String = when (this) {
     is FileViewerUiState.CannotPreview -> displayPath
 }
 
+/**
+ * Issue #559 — what the viewer can hand to the share sheet / clipboard for the
+ * currently-opened file. Every previewable state maps to a [Shareable]; the
+ * [FileViewerUiState.Loading] and [FileViewerUiState.CannotPreview] states have
+ * nothing to act on yet, so the Share/Copy actions are hidden for them.
+ *
+ * Image/PDF/Audio already cached the bytes to a local [File] for their preview,
+ * so the URI is built straight from that cache file. Text is held in memory
+ * ([FileViewerUiState.TextContent.content]); for a file URI we materialise it to
+ * the same `file-viewer` cache dir on demand (see [Shareable.Text.materialize]),
+ * and we also keep the raw text so "Copy all" can put it on the clipboard
+ * directly.
+ */
+internal sealed interface Shareable {
+    /** Remote path of the opened file — drives the share name + MIME type. */
+    val displayPath: String
+
+    /** MIME type so a receiving app (Telegram/Gmail) accepts the file. */
+    val mimeType: String
+
+    data class FileBacked(
+        override val displayPath: String,
+        val cacheFile: File,
+        override val mimeType: String,
+    ) : Shareable
+
+    data class Text(
+        override val displayPath: String,
+        val content: String,
+    ) : Shareable {
+        override val mimeType: String get() = "text/plain"
+
+        /**
+         * Write the in-memory text to the shared `file-viewer` cache dir so the
+         * FileProvider can serve it as a content URI (for Share / Copy-as-file).
+         * The "Copy all" action does not need this — it copies [content]
+         * directly to the clipboard.
+         */
+        fun materialize(context: Context): File {
+            val dir = File(context.cacheDir, FileViewerViewModel.CACHE_SUBDIR).apply { mkdirs() }
+            val name = shareFileName(displayPath, fallbackExtension = "txt")
+            return File(dir, name).apply { writeText(content) }
+        }
+    }
+}
+
+private fun FileViewerUiState.shareable(): Shareable? = when (this) {
+    is FileViewerUiState.Loading -> null
+    is FileViewerUiState.CannotPreview -> null
+    is FileViewerUiState.Image -> Shareable.FileBacked(
+        displayPath = displayPath,
+        cacheFile = cacheFile,
+        mimeType = imageMimeFor(displayPath),
+    )
+    is FileViewerUiState.Pdf -> Shareable.FileBacked(
+        displayPath = displayPath,
+        cacheFile = cacheFile,
+        mimeType = "application/pdf",
+    )
+    is FileViewerUiState.Audio -> Shareable.FileBacked(
+        displayPath = displayPath,
+        cacheFile = cacheFile,
+        mimeType = audioMimeFor(displayPath),
+    )
+    is FileViewerUiState.TextContent -> Shareable.Text(
+        displayPath = displayPath,
+        content = content,
+    )
+}
+
+/**
+ * MIME type for an image preview, derived from the path extension so a
+ * receiving app gets the right type (a JPEG isn't `image/png`). Falls back to
+ * the `image` wildcard type when the extension is missing/unknown (content was
+ * image-sniffed).
+ */
+internal fun imageMimeFor(displayPath: String): String =
+    when (FileTypeDetector.extensionOf(displayPath)) {
+        "png" -> "image/png"
+        "jpg", "jpeg" -> "image/jpeg"
+        "webp" -> "image/webp"
+        "gif" -> "image/gif"
+        "bmp" -> "image/bmp"
+        else -> "image/*"
+    }
+
+/**
+ * MIME type for an audio preview, derived from the path extension. Falls back
+ * to the `audio` wildcard type for an unknown/missing extension (content was
+ * magic-sniffed).
+ */
+internal fun audioMimeFor(displayPath: String): String =
+    when (FileTypeDetector.extensionOf(displayPath)) {
+        "mp3" -> "audio/mpeg"
+        "wav" -> "audio/wav"
+        "m4a", "aac" -> "audio/mp4"
+        "ogg", "oga" -> "audio/ogg"
+        "flac" -> "audio/flac"
+        else -> "audio/*"
+    }
+
+/**
+ * A filesystem-safe share file name from the remote path's basename, keeping
+ * the original extension so receiving apps see the right type. Falls back to
+ * [fallbackExtension] when the basename has no extension.
+ */
+internal fun shareFileName(displayPath: String, fallbackExtension: String): String {
+    val base = displayPath.substringAfterLast('/').substringAfterLast('\\')
+        .ifBlank { "file" }
+    val safe = base.replace(Regex("[^A-Za-z0-9._-]"), "_")
+    return if (safe.contains('.')) safe else "$safe.$fallbackExtension"
+}
+
 @Composable
 private fun FileViewerAppBar(
     hostName: String,
     displayPath: String,
+    shareable: Shareable?,
     onBack: () -> Unit,
 ) {
     // Slice E1b (#539): the bespoke 60dp bar + raw `sp` title/breadcrumb adopt
     // the shared `ScreenHeader`. The file name is the title; the full remote
     // path is the breadcrumb subtitle (mono, since it is path data). The mono
     // file-reading surface below is left untouched.
+    //
+    // Issue #559: the trailing slot carries the "act on the opened file"
+    // actions — Share (system share sheet) and Copy (file URI to the
+    // clipboard). They appear only once there is something to act on (a
+    // previewable state with a cached file or text content).
+    val context = LocalContext.current
     ScreenHeader(
         title = displayPath.substringAfterLast('/').ifEmpty { "File" },
         subtitle = displayPath.ifEmpty { hostName },
@@ -205,7 +339,131 @@ private fun FileViewerAppBar(
                 )
             }
         },
+        trailing = if (shareable == null) {
+            null
+        } else {
+            {
+                HeaderAction(
+                    label = "Share",
+                    testTag = FILE_VIEWER_SHARE_TAG,
+                    onClick = { shareFile(context, shareable) },
+                )
+                HeaderAction(
+                    label = "Copy",
+                    testTag = FILE_VIEWER_COPY_TAG,
+                    onClick = { copyFileToClipboard(context, shareable) },
+                )
+            }
+        },
     )
+}
+
+/** A compact text action button for the header trailing slot (#559). */
+@Composable
+private fun HeaderAction(
+    label: String,
+    testTag: String,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .height(40.dp)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 8.dp)
+            .testTag(testTag),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = PocketShellColors.Accent,
+            fontSize = 14.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+    }
+}
+
+/**
+ * Build a `.fileprovider` content URI for the opened file and fire an
+ * `ACTION_SEND` chooser. Mirrors the proven `CostsScreen` pattern: the same
+ * authority (`${applicationId}.fileprovider`), `FLAG_GRANT_READ_URI_PERMISSION`
+ * so the receiving app can read the file, and a `createChooser` so the system
+ * lists Telegram / Gmail / Drive / etc. The MIME type is derived from the file
+ * type/extension so the receiving app accepts it.
+ */
+private fun shareFile(context: Context, shareable: Shareable) {
+    val file = shareable.resolveFile(context)
+    if (file == null) {
+        Toast.makeText(context, "Nothing to share", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val uri = runCatching {
+        FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+    }.getOrNull()
+    if (uri == null) {
+        Toast.makeText(context, "Couldn't prepare the file to share", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = shareable.mimeType
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_SUBJECT, file.name)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(
+        Intent.createChooser(intent, "Share ${file.name}").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        },
+    )
+}
+
+/**
+ * Put the opened file on the clipboard as a content URI so it can be pasted
+ * into apps that accept files (`ClipData.newUri`). The `ClipData` is built
+ * through the `ContentResolver` so the receiving app inherits read access to
+ * the `.fileprovider` URI.
+ */
+private fun copyFileToClipboard(context: Context, shareable: Shareable) {
+    val file = shareable.resolveFile(context)
+    if (file == null) {
+        Toast.makeText(context, "Nothing to copy", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val uri = runCatching {
+        FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+    }.getOrNull()
+    if (uri == null) {
+        Toast.makeText(context, "Couldn't prepare the file to copy", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+    if (clipboard == null) {
+        Toast.makeText(context, "Clipboard unavailable", Toast.LENGTH_SHORT).show()
+        return
+    }
+    val clip = ClipData.newUri(context.contentResolver, file.name, uri)
+    clipboard.setPrimaryClip(clip)
+    Toast.makeText(context, "Copied ${file.name} to clipboard", Toast.LENGTH_SHORT).show()
+}
+
+/** Copy raw text to the clipboard as plain text (text viewer "Copy all"). */
+private fun copyTextToClipboard(context: Context, content: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+    if (clipboard == null) {
+        Toast.makeText(context, "Clipboard unavailable", Toast.LENGTH_SHORT).show()
+        return
+    }
+    clipboard.setPrimaryClip(ClipData.newPlainText("file text", content))
+    Toast.makeText(context, "Copied text to clipboard", Toast.LENGTH_SHORT).show()
+}
+
+/**
+ * The local [File] backing a [Shareable]: the already-cached preview file for
+ * image/PDF/audio, or a freshly-materialised cache file for text. Returns null
+ * only if a text file fails to write (rare; surfaced as a toast by the caller).
+ */
+private fun Shareable.resolveFile(context: Context): File? = when (this) {
+    is Shareable.FileBacked -> cacheFile.takeIf { it.exists() }
+    is Shareable.Text -> runCatching { materialize(context) }.getOrNull()
 }
 
 @Composable
@@ -275,27 +533,61 @@ private fun ImagePanel(cacheFile: File) {
     }
 }
 
-/** Scrollable read-only monospace text view (vertical + horizontal scroll). */
+/**
+ * Scrollable read-only monospace text view (vertical + horizontal scroll).
+ *
+ * Issue #559: the reading surface is wrapped in a [SelectionContainer] so the
+ * user can long-press to select an arbitrary range (and use the system
+ * copy/share handles), and a one-tap "Copy all" action above it puts the whole
+ * body on the clipboard as plain text.
+ */
 @Composable
 private fun TextPanel(content: String) {
+    val context = LocalContext.current
     val vScroll = rememberScrollState()
     val hScroll = rememberScrollState()
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(PocketShellColors.TermBg)
-            .verticalScroll(vScroll)
-            .testTag(FILE_VIEWER_TEXT_TAG),
+            .background(PocketShellColors.TermBg),
     ) {
-        Text(
-            text = content,
-            color = PocketShellColors.TermText,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 12.sp,
+        Row(
             modifier = Modifier
-                .horizontalScroll(hScroll)
-                .padding(12.dp),
-        )
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.End,
+        ) {
+            Box(
+                modifier = Modifier
+                    .clickable(role = Role.Button) { copyTextToClipboard(context, content) }
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+                    .testTag(FILE_VIEWER_COPY_ALL_TAG),
+            ) {
+                Text(
+                    text = "Copy all",
+                    color = PocketShellColors.Accent,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+        SelectionContainer(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .verticalScroll(vScroll)
+                .testTag(FILE_VIEWER_TEXT_TAG),
+        ) {
+            Text(
+                text = content,
+                color = PocketShellColors.TermText,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                modifier = Modifier
+                    .horizontalScroll(hScroll)
+                    .padding(12.dp),
+            )
+        }
     }
 }
 

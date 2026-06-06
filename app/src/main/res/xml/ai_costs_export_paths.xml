@@ -1,16 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-    Issue #181: AI cost log export.
+    Paths exposed by the `.fileprovider` authority for `ACTION_SEND` /
+    clipboard content URIs. Scoped to the specific cache subdirectories
+    that produce shareable files so the authority can't accidentally
+    expose anything else from the app's cache:
 
-    The "Export as CSV" affordance on the AI Costs screen writes a
-    timestamped file under `cacheDir/ai-costs-export/` and hands its
-    content URI to `ACTION_SEND` so the user can drop it into email /
-    GDrive / a finance app. This paths file scopes the FileProvider to
-    just that subdirectory so we can't accidentally expose anything
-    else from the app's cache through the new authority.
+    - `ai-costs-export/` (issue #181): the "Export as CSV" affordance on
+      the AI Costs screen writes a timestamped file there and hands its
+      content URI to `ACTION_SEND`.
+    - `file-viewer/` (issue #559): the in-app file viewer caches the
+      downloaded preview file there. Share / Copy on the viewer hand that
+      cached file's content URI to `ACTION_SEND` / the clipboard so the
+      opened image / PDF / audio / text can be sent on to another app.
+      Must match `FileViewerViewModel.CACHE_SUBDIR`.
 -->
 <paths>
     <cache-path
         name="ai-costs-export"
         path="ai-costs-export/" />
+    <cache-path
+        name="file-viewer"
+        path="file-viewer/" />
 </paths>

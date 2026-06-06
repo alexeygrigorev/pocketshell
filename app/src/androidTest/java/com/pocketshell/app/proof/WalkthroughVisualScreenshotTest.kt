@@ -8,12 +8,14 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.click
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.printToString
 import androidx.room.Room
@@ -30,6 +32,7 @@ import com.pocketshell.app.settings.HOST_IMPORT_DIALOG_COPY_TAG
 import com.pocketshell.app.settings.HOST_IMPORT_ROW_TAG
 import com.pocketshell.app.settings.HOST_IMPORT_SCAN_QR_TAG
 import com.pocketshell.app.settings.SETTINGS_BACK_TAG
+import com.pocketshell.app.settings.SETTINGS_LAZY_COLUMN_TAG
 import com.pocketshell.app.hosts.SshKeyStorage
 import com.pocketshell.app.projects.FOLDER_LIST_EMPTY_TAG
 import com.pocketshell.app.projects.FOLDER_LIST_ERROR_TAG
@@ -133,11 +136,25 @@ class WalkthroughVisualScreenshotTest {
                 )
             }
             compose.onNodeWithTag(SETTINGS_BUTTON_TAG, useUnmergedTree = true).performClick()
-            compose.waitUntil(timeoutMillis = 5_000) {
-                compose.onAllNodesWithTag(HOST_IMPORT_ROW_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+            // Issue #531: wait for the Settings screen to be open (its
+            // scroll container is the deterministic signal the NavHost route
+            // swapped and the screen composed), then scroll the host-import
+            // row into view. The row lives near the bottom of the Settings
+            // LazyColumn (Terminal/Voice/Assistant/Usage/Workspace come
+            // first after the #486 reorder), so it is below the fold on a
+            // Pixel 7 and never composes until scrolled. The old flat 5 s
+            // `waitUntil(hasTag(HOST_IMPORT_ROW_TAG))` was racing on a node
+            // the LazyColumn had not laid out yet, throwing
+            // ComposeTimeoutException.
+            waitUntilWithDiagnostics(
+                label = "settings screen scroll container present",
+                timeoutMillis = uiNavigationTimeoutMs(),
+                tagProbes = listOf(SETTINGS_LAZY_COLUMN_TAG, SETTINGS_BACK_TAG, SETTINGS_BUTTON_TAG),
+            ) {
+                hasTag(SETTINGS_LAZY_COLUMN_TAG)
             }
+            compose.onNodeWithTag(SETTINGS_LAZY_COLUMN_TAG)
+                .performScrollToNode(hasTestTag(HOST_IMPORT_ROW_TAG))
             compose.onNodeWithTag(HOST_IMPORT_ROW_TAG, useUnmergedTree = true).performClick()
             compose.onNodeWithTag(HOST_IMPORT_DIALOG_COPY_TAG, useUnmergedTree = true).assertExists()
             compose.onNodeWithText("Scan QR", useUnmergedTree = true).assertExists()
@@ -145,16 +162,20 @@ class WalkthroughVisualScreenshotTest {
             compose.onNodeWithTag(HOST_IMPORT_SCAN_QR_TAG, useUnmergedTree = true).assertExists()
             compose.onNodeWithTag(HOST_IMPORT_CHOOSE_FILE_TAG, useUnmergedTree = true).assertExists()
             compose.onNodeWithText("Cancel", useUnmergedTree = true).performClick()
-            compose.waitUntil(timeoutMillis = 5_000) {
-                compose.onAllNodesWithTag(HOST_IMPORT_DIALOG_COPY_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isEmpty()
+            waitUntilWithDiagnostics(
+                label = "host-import dialog dismissed",
+                timeoutMillis = uiNavigationTimeoutMs(),
+                tagProbes = listOf(HOST_IMPORT_DIALOG_COPY_TAG, HOST_IMPORT_ROW_TAG),
+            ) {
+                !hasTag(HOST_IMPORT_DIALOG_COPY_TAG)
             }
             compose.onNodeWithTag(SETTINGS_BACK_TAG, useUnmergedTree = true).performClick()
-            compose.waitUntil(timeoutMillis = 5_000) {
-                compose.onAllNodesWithTag(HOST_LIST_ADD_FAB_TAG, useUnmergedTree = true)
-                    .fetchSemanticsNodes()
-                    .isNotEmpty()
+            waitUntilWithDiagnostics(
+                label = "host list visible after settings back",
+                timeoutMillis = uiNavigationTimeoutMs(),
+                tagProbes = listOf(HOST_LIST_ADD_FAB_TAG, SETTINGS_BACK_TAG),
+            ) {
+                hasTag(HOST_LIST_ADD_FAB_TAG)
             }
             assertTextsClearOfStatusBar(
                 texts = listOf("Hosts"),
@@ -210,10 +231,20 @@ class WalkthroughVisualScreenshotTest {
             compose.onNodeWithTag(FOLDER_LIST_SCREEN_TAG, useUnmergedTree = true).assertExists()
             compose.onNodeWithTag(FOLDER_LIST_TITLE_TAG, useUnmergedTree = true).assertExists()
             compose.onNodeWithTag(FOLDER_LIST_NEW_SESSION_FAB_TAG, useUnmergedTree = true).assertExists()
-            compose.onNodeWithTag(folderHeaderClickTestTag(sessionProjectPath), useUnmergedTree = true).performClick()
+            // Issue #531: the seeded sessions are idle (no live SSH), but #471
+            // auto-expands any folder with ≥1 session, so the seeded folder
+            // may already be open. An unconditional header click then *toggles
+            // it closed*, hiding the session row and timing out the wait below.
+            // Toggle the header only while the seeded session is still hidden
+            // so we end on an expanded folder regardless of the auto-expand
+            // starting state.
+            expandFolderUntilSessionVisible(
+                projectPath = sessionProjectPath,
+                sessionName = tmuxSessionName,
+            )
             waitUntilWithDiagnostics(
                 label = "seeded tmux session $tmuxSessionName visible",
-                timeoutMillis = 10_000,
+                timeoutMillis = uiNavigationTimeoutMs(),
                 textProbes = listOf(WALKTHROUGH_HOST_NAME, sessionProjectPath.substringAfterLast('/'), tmuxSessionName),
                 tagProbes = hostDetailDiagnosticTags(sessionProjectPath),
             ) {
@@ -347,6 +378,44 @@ class WalkthroughVisualScreenshotTest {
     private fun waitForTmuxPaneReady() {
         compose.waitUntil(timeoutMillis = 10_000) {
             terminalTranscriptSnapshot().contains("tmux visual pass ready")
+        }
+    }
+
+    // Issue #531: several in-process UI-navigation settles in this
+    // walkthrough used flat short `waitUntil` windows that raced on a loaded
+    // emulator. The Settings gear -> host-import navigation (NavHost route
+    // swap + Settings LazyColumn recomposition) overshot its 5 s wait, and
+    // the folder-tree expand that reveals the already-loaded session rows
+    // overshot its 10 s wait. Both are plain Compose recomposition settles
+    // (no SSH/terminal round-trip — the session data is already loaded), so
+    // a local deadline well above the observed slow case stays tight enough
+    // to surface a real regression, while CI gets the generous ceiling the
+    // sibling E2Es already adopted for the swiftshader runner under load.
+    private fun uiNavigationTimeoutMs(): Long =
+        if (TerminalTestTimeouts.isRunningOnCi()) 60_000L else 20_000L
+
+    // Issue #531: ensure the seeded folder ends up EXPANDED with its session
+    // row visible, independent of #471's auto-expand starting state. The old
+    // code clicked the folder header exactly once, which collapsed an
+    // already-auto-expanded folder and hid the session. This toggles the
+    // header only while the session is still hidden, settling on idle each
+    // iteration, until the row appears or the CI-aware deadline elapses.
+    private fun expandFolderUntilSessionVisible(projectPath: String, sessionName: String) {
+        val deadline = System.currentTimeMillis() + uiNavigationTimeoutMs()
+        compose.waitForIdle()
+        while (!hasText(sessionName) && System.currentTimeMillis() < deadline) {
+            compose.onNodeWithTag(folderHeaderClickTestTag(projectPath), useUnmergedTree = true)
+                .performClick()
+            compose.waitForIdle()
+            if (hasText(sessionName)) {
+                return
+            }
+            // Give a collapsed->expanded recomposition a poll window before
+            // deciding to toggle again, so we do not bounce the folder
+            // open/closed faster than it can render its session rows.
+            runCatching {
+                compose.waitUntil(timeoutMillis = 2_000) { hasText(sessionName) }
+            }
         }
     }
 
@@ -526,14 +595,27 @@ class WalkthroughVisualScreenshotTest {
     ) {
         val insets = systemBarInsets()
         texts.forEach { text ->
-            val bounds = compose.onNodeWithText(text, useUnmergedTree = true)
-                .fetchSemanticsNode()
-                .boundsInRoot
+            // Issue #531: the host-list screen legitimately renders "Hosts"
+            // twice — once as the ScreenHeader title and once as the host
+            // group SectionHeader label — so the old single-node lookup threw
+            // "Expected exactly 1 node but found 2". The status-bar-clearance
+            // contract applies to every instance of the text, so assert each
+            // matching node clears the status bar and require at least one.
+            val nodes = compose.onAllNodesWithText(text, useUnmergedTree = true)
+                .fetchSemanticsNodes()
             assertTrue(
-                "$screenshotName overlaps status bar: text=\"$text\" top=${bounds.top}, " +
-                    "statusBarBottom=${insets.statusTop}, artifact=${artifact.absolutePath}",
-                bounds.top >= insets.statusTop,
+                "$screenshotName expected at least one \"$text\" node, found none, " +
+                    "artifact=${artifact.absolutePath}",
+                nodes.isNotEmpty(),
             )
+            nodes.forEach { node ->
+                val bounds = node.boundsInRoot
+                assertTrue(
+                    "$screenshotName overlaps status bar: text=\"$text\" top=${bounds.top}, " +
+                        "statusBarBottom=${insets.statusTop}, artifact=${artifact.absolutePath}",
+                    bounds.top >= insets.statusTop,
+                )
+            }
         }
     }
 

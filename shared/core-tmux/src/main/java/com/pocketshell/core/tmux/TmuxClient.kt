@@ -11,6 +11,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -30,6 +31,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedDeque
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * High-level client wrapping a `tmux -CC` control channel running inside an
@@ -128,6 +130,17 @@ public interface TmuxClient : AutoCloseable {
     public val disconnected: StateFlow<Boolean>
 
     /**
+     * Emits when a pane's lossless terminal-output backlog is exhausted.
+     *
+     * This is a local rendering/ingestion failure signal, not an SSH
+     * transport disconnect. Callers should recover the terminal surface
+     * (for tmux panes, usually by recreating/reseeding from `capture-pane`)
+     * or show a local terminal error state; they must not route this through
+     * reconnect.
+     */
+    public val outputBacklogOverflows: Flow<TmuxOutputBacklogOverflow>
+
+    /**
      * Tear down the tmux control channel and the underlying SSH shell.
      * Idempotent. After [close] the [events] flow completes and any
      * pending [sendCommand] calls fail with [TmuxClientException].
@@ -201,6 +214,11 @@ public interface TmuxClient : AutoCloseable {
 public class TmuxClientException(message: String, cause: Throwable? = null) :
     RuntimeException(message, cause)
 
+public data class TmuxOutputBacklogOverflow(
+    val paneId: String,
+    val droppedEvents: Int,
+)
+
 /**
  * Real implementation of [TmuxClient] backed by an [SshSession]'s shell
  * channel.
@@ -246,9 +264,10 @@ internal class RealTmuxClient(
     )
 
     // Shared flow of all events. extraBufferCapacity absorbs short bursts
-    // without blocking the reader. If consumers fall behind for longer than
-    // that, readerLoop suspends instead of dropping terminal bytes; losing a
-    // `%output` chunk corrupts the pane emulator state.
+    // without blocking the reader. Pane `%output` is emitted to this bus on a
+    // best-effort basis from [emitOutput]; the per-pane terminal stream is the
+    // authoritative output path, and it must never let diagnostic/global event
+    // collectors starve the control reader.
     //
     // replay = 0 because subscribers only care about events that arrive
     // after they start collecting; tmux's structural state (sessions /
@@ -260,8 +279,8 @@ internal class RealTmuxClient(
 
     override val events: Flow<ControlEvent> = eventBus.asSharedFlow()
 
-    private val paneOutputFlows =
-        ConcurrentHashMap<String, MutableSharedFlow<ControlEvent.Output>>()
+    private val paneOutputPipes =
+        ConcurrentHashMap<String, PaneOutputPipe>()
 
     // Issue #173: latched signal that the reader loop has exited (or
     // [close] was called). The reader sets this from its `finally` block
@@ -271,6 +290,14 @@ internal class RealTmuxClient(
     private val _disconnected: MutableStateFlow<Boolean> = MutableStateFlow(false)
 
     override val disconnected: StateFlow<Boolean> = _disconnected.asStateFlow()
+
+    private val _outputBacklogOverflows = MutableSharedFlow<TmuxOutputBacklogOverflow>(
+        replay = 0,
+        extraBufferCapacity = 64,
+    )
+
+    override val outputBacklogOverflows: Flow<TmuxOutputBacklogOverflow> =
+        _outputBacklogOverflows.asSharedFlow()
 
     // Outstanding sendCommand waiters, FIFO. tmux's control mode is
     // strict one-at-a-time, and we serialise on the Kotlin side via
@@ -400,7 +427,6 @@ internal class RealTmuxClient(
             }
             if (response != null) return@withLock response
 
-            pendingQueue.remove(pendingCmd)
             writeJob.cancel()
             val kind = commandKind(cmd)
             val exception = TmuxClientException(
@@ -411,15 +437,21 @@ internal class RealTmuxClient(
                 ISSUE_244_DIAG_TAG,
                 "tmux-command-timeout kind=$kind timeoutMs=$commandTimeoutMs",
             )
+            pendingQueue.remove(pendingCmd)
             close()
             throw exception
         }
     }
 
     override fun outputFor(paneId: String): Flow<ControlEvent.Output> {
-        return paneOutputFlows.getOrPut(paneId) {
-            MutableSharedFlow(replay = 0, extraBufferCapacity = EVENT_BUFFER)
-        }.asSharedFlow()
+        return paneOutputPipes.getOrPut(paneId) {
+            PaneOutputPipe.create(
+                scope = clientScope,
+                onOverflow = { overflow ->
+                    _outputBacklogOverflows.tryEmit(overflow)
+                },
+            )
+        }.flow.asSharedFlow()
     }
 
     override suspend fun setWindowSizeLatest(sessionId: String): CommandResponse =
@@ -495,6 +527,7 @@ internal class RealTmuxClient(
         if (closed) return
         closed = true
         connected = false
+        paneOutputPipes.values.forEach { it.close() }
         // Issue #173: signal disconnection BEFORE we tear the rest down
         // so observers like [TmuxSessionViewModel] can flip their
         // connection-status state without racing the scope cancel.
@@ -629,11 +662,12 @@ internal class RealTmuxClient(
                     }
                     else -> Unit
                 }
-                // Always forward the event to the bus so external
+                // Always forward non-output events to the bus so external
                 // observers (UI, session-list updater, etc.) see the same
-                // events the response-correlator just consumed. Use
-                // suspending emit: tmux pane output is terminal state, not
-                // disposable telemetry.
+                // structural events the response-correlator just consumed.
+                // Pane output fanout is deliberately non-blocking: terminal
+                // rendering and diagnostic collectors must not starve this
+                // reader loop and delay command-response parsing.
                 if (event is ControlEvent.Output) {
                     // Issue #105 diagnostics. We log BEFORE and AFTER the
                     // emit so a reviewer reading logcat can tell apart:
@@ -687,9 +721,14 @@ internal class RealTmuxClient(
         }
     }
 
-    private suspend fun emitOutput(event: ControlEvent.Output) {
-        paneOutputFlows[event.paneId]?.emit(event)
-        eventBus.emit(event)
+    private fun emitOutput(event: ControlEvent.Output) {
+        paneOutputPipes[event.paneId]?.send(event)
+        if (!eventBus.tryEmit(event)) {
+            Log.w(
+                ISSUE_105_DIAG_TAG,
+                "tmux-output-eventbus-drop pane=${event.paneId} bytes=${event.data.size}",
+            )
+        }
     }
 
     /**
@@ -721,6 +760,7 @@ internal class RealTmuxClient(
          * heap.
          */
         private const val EVENT_BUFFER = 256
+        private const val OUTPUT_BACKLOG_EVENTS = 4096
 
         /**
          * Logcat tag for issue #105 live-update diagnostics. Kept short
@@ -773,6 +813,58 @@ internal class RealTmuxClient(
                 bytes.copyOf(bytes.size - 1)
             } else {
                 bytes
+            }
+        }
+    }
+
+    private class PaneOutputPipe private constructor(
+        val flow: MutableSharedFlow<ControlEvent.Output>,
+        private val channel: Channel<ControlEvent.Output>,
+        private val job: Job,
+        private val onOverflow: (TmuxOutputBacklogOverflow) -> Unit,
+        private val droppedEvents: AtomicInteger = AtomicInteger(0),
+    ) {
+        fun send(event: ControlEvent.Output) {
+            val result = channel.trySend(event)
+            if (result.isFailure) {
+                val dropped = droppedEvents.incrementAndGet()
+                onOverflow(TmuxOutputBacklogOverflow(event.paneId, dropped))
+                Log.w(
+                    ISSUE_105_DIAG_TAG,
+                    "tmux-output-backlog-overflow pane=${event.paneId} " +
+                        "bytes=${event.data.size} droppedEvents=$dropped " +
+                        "capacity=$OUTPUT_BACKLOG_EVENTS",
+                    result.exceptionOrNull(),
+                )
+            }
+        }
+
+        fun close() {
+            channel.close()
+            job.cancel()
+        }
+
+        companion object {
+            fun create(
+                scope: CoroutineScope,
+                onOverflow: (TmuxOutputBacklogOverflow) -> Unit,
+            ): PaneOutputPipe {
+                val flow = MutableSharedFlow<ControlEvent.Output>(
+                    replay = 0,
+                    extraBufferCapacity = EVENT_BUFFER,
+                )
+                val channel = Channel<ControlEvent.Output>(OUTPUT_BACKLOG_EVENTS)
+                val job = scope.launch {
+                    for (event in channel) {
+                        flow.emit(event)
+                    }
+                }
+                return PaneOutputPipe(
+                    flow = flow,
+                    channel = channel,
+                    job = job,
+                    onOverflow = onOverflow,
+                )
             }
         }
     }

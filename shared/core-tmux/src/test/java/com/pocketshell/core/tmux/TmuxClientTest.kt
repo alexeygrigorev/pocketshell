@@ -33,6 +33,7 @@ import java.io.PipedOutputStream
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Unit tests for [RealTmuxClient] driven against a fake [SshSession] / fake
@@ -498,6 +499,143 @@ class TmuxClientTest {
     }
 
     @Test
+    fun `codex scale output flood cannot starve command response parsing`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 1_000L)
+        val outputCount = 900
+        val firstOutputBlocked = CompletableDeferred<Unit>()
+        val releasePaneCollector = CompletableDeferred<Unit>()
+        val allOutputDelivered = CompletableDeferred<Unit>()
+        val delivered = AtomicInteger(0)
+        val firstPayload = arrayOfNulls<String>(1)
+        val lastPayload = arrayOfNulls<String>(1)
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val slowPaneCollector = scope.async {
+                client.outputFor("%0").collect {
+                    firstOutputBlocked.complete(Unit)
+                    releasePaneCollector.await()
+                    val text = String(it.data, StandardCharsets.UTF_8)
+                    val index = delivered.incrementAndGet()
+                    if (index == 1) firstPayload[0] = text
+                    if (index == outputCount) {
+                        lastPayload[0] = text
+                        allOutputDelivered.complete(Unit)
+                    }
+                }
+            }
+            delay(100)
+
+            val response = scope.async {
+                client.sendCommand("display-message -p ok")
+            }
+            withTimeout(2_000) {
+                while (!shell.stdinAsString().endsWith("display-message -p ok\n")) {
+                    yield(); delay(10)
+                }
+            }
+
+            val feedJob = scope.async {
+                shell.feed(codexScaleControlModeFlood(commandNumber = 1L, outputCount = outputCount))
+            }
+
+            withTimeout(3_000) { firstOutputBlocked.await() }
+            val result = withTimeout(3_000) { response.await() }
+            assertFalse(result.isError)
+            assertEquals(listOf("ok"), result.output)
+            assertFalse(
+                "slow terminal output fanout must not be classified as a tmux disconnect",
+                client.disconnected.value,
+            )
+            withTimeout(3_000) { feedJob.await() }
+
+            releasePaneCollector.complete(Unit)
+            withTimeout(3_000) { allOutputDelivered.await() }
+            assertEquals(
+                "pane output backlog must remain lossless; do not silently drop terminal bytes",
+                outputCount,
+                delivered.get(),
+            )
+            assertTrue(
+                "first output should be preserved",
+                firstPayload[0]?.contains("codex-flood-0000") == true,
+            )
+            assertTrue(
+                "last output should be preserved",
+                lastPayload[0]?.contains("codex-flood-0899") == true,
+            )
+            slowPaneCollector.cancel()
+        } finally {
+            releasePaneCollector.complete(Unit)
+            client.close()
+        }
+    }
+
+    @Test
+    fun `unbounded pane output flood emits overflow without disconnecting reader`() = runBlocking {
+        val shell = FakeShell()
+        val session = FakeSession(shell)
+        val client = RealTmuxClient(session, scope, commandTimeoutMs = 1_000L)
+        val firstOutputBlocked = CompletableDeferred<Unit>()
+        val releasePaneCollector = CompletableDeferred<Unit>()
+        try {
+            client.connect()
+            withTimeout(2_000) {
+                while (shell.stdinBytes().isEmpty()) { yield(); delay(10) }
+            }
+            shell.resetStdin()
+
+            val blockedPaneCollector = scope.async {
+                client.outputFor("%0").collect {
+                    firstOutputBlocked.complete(Unit)
+                    releasePaneCollector.await()
+                }
+            }
+            val overflow = scope.async {
+                client.outputBacklogOverflows.first()
+            }
+            delay(100)
+
+            val response = scope.async {
+                client.sendCommand("display-message -p ok")
+            }
+            withTimeout(2_000) {
+                while (!shell.stdinAsString().endsWith("display-message -p ok\n")) {
+                    yield(); delay(10)
+                }
+            }
+
+            val feedJob = scope.async {
+                shell.feed(codexScaleControlModeFlood(commandNumber = 1L, outputCount = 5_000))
+            }
+
+            withTimeout(3_000) { firstOutputBlocked.await() }
+            val overflowEvent = withTimeout(3_000) { overflow.await() }
+            assertEquals("%0", overflowEvent.paneId)
+            assertTrue("overflow must report dropped events", overflowEvent.droppedEvents > 0)
+
+            val result = withTimeout(3_000) { response.await() }
+            assertFalse(result.isError)
+            assertEquals(listOf("ok"), result.output)
+            assertFalse(
+                "output backlog overflow is a local terminal condition, not a transport disconnect",
+                client.disconnected.value,
+            )
+            withTimeout(3_000) { feedJob.await() }
+            blockedPaneCollector.cancel()
+        } finally {
+            releasePaneCollector.complete(Unit)
+            client.close()
+        }
+    }
+
+    @Test
     fun `close fails an in-flight sendCommand with TmuxClientException`() = runBlocking {
         val shell = FakeShell()
         val session = FakeSession(shell)
@@ -853,6 +991,31 @@ class TmuxClientTest {
         } finally {
             client.close()
         }
+    }
+
+    private fun codexScaleControlModeFlood(commandNumber: Long, outputCount: Int): String = buildString {
+        repeat(outputCount) { index ->
+            append("%output %0 ")
+            append("\\033[38;5;")
+            append(index % 256)
+            append('m')
+            append("codex-flood-")
+            append(index.toString().padStart(4, '0'))
+            append(' ')
+            append("x".repeat(220))
+            if (index % 5 == 0) append("\\033[2K")
+            if (index % 11 == 0) append("\\rspinner-frame-")
+            append(index)
+            append("\\033[0m")
+            append('\n')
+        }
+        append("%begin 1 ")
+        append(commandNumber)
+        append(" 0\n")
+        append("ok\n")
+        append("%end 1 ")
+        append(commandNumber)
+        append(" 0\n")
     }
 
     // --- fakes --------------------------------------------------------------

@@ -169,6 +169,46 @@ class BackgroundGraceControllerTest {
     }
 
     @Test
+    fun `real app fanout drops deferred network reconnect on within-grace resume`() = runTest {
+        val events = mutableListOf<String>()
+        var pendingNetworkChange = true
+        val controller = BackgroundGraceController(
+            scope = backgroundScope,
+            graceMillis = graceMillis,
+            onGraceElapsed = {
+                events += "tmux:background"
+                events += "ssh:stop"
+            },
+            onForeground = { resumedWithinGrace ->
+                events += "ssh:start"
+                if (!resumedWithinGrace) {
+                    events += "tmux:foreground"
+                    if (pendingNetworkChange) {
+                        events += "network:dispatch"
+                        pendingNetworkChange = false
+                    }
+                } else {
+                    pendingNetworkChange = false
+                }
+            },
+        )
+
+        controller.onBackground()
+        runCurrent()
+        advanceTimeBy(graceMillis / 2)
+        runCurrent()
+        controller.onForeground()
+        runCurrent()
+
+        assertEquals(
+            "a short background must not replay deferred network changes as reconnects",
+            listOf("ssh:start"),
+            events,
+        )
+        assertFalse("pending network change should be consumed", pendingNetworkChange)
+    }
+
+    @Test
     fun `real app fanout detaches tmux and stops leases only after grace elapses`() = runTest {
         val events = mutableListOf<String>()
         val activeTmuxClients = ActiveTmuxClients()

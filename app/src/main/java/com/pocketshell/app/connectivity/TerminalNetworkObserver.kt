@@ -121,6 +121,7 @@ class TerminalNetworkObserver @Inject constructor(
 data class TerminalNetworkChange(
     val previous: TerminalNetworkSnapshot,
     val current: TerminalNetworkSnapshot,
+    val previousValidated: TerminalNetworkSnapshot.Validated?,
     val reason: String,
     val sequence: Long,
 )
@@ -141,6 +142,8 @@ internal class TerminalNetworkChangeDetector(
     initial: TerminalNetworkSnapshot,
 ) {
     private var current: TerminalNetworkSnapshot = initial
+    private var lastValidated: TerminalNetworkSnapshot.Validated? =
+        initial as? TerminalNetworkSnapshot.Validated
     private var sequence: Long = 0L
 
     fun update(
@@ -148,13 +151,17 @@ internal class TerminalNetworkChangeDetector(
         reason: String,
     ): TerminalNetworkChange? {
         val previous = current
+        val previousValidated = lastValidated
         if (previous == snapshot) return null
         current = snapshot
         if (snapshot !is TerminalNetworkSnapshot.Validated) return null
+        if (snapshot == previousValidated) return null
+        lastValidated = snapshot
         sequence += 1L
         return TerminalNetworkChange(
             previous = previous,
             current = snapshot,
+            previousValidated = previousValidated,
             reason = reason,
             sequence = sequence,
         )

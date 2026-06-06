@@ -3,6 +3,7 @@ package com.pocketshell.app.tmux
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientException
+import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
@@ -55,6 +56,12 @@ internal class FakeTmuxClient : TmuxClient {
     val disconnectedSignal: MutableStateFlow<Boolean> = MutableStateFlow(false)
 
     override val disconnected: StateFlow<Boolean> = disconnectedSignal.asStateFlow()
+
+    val outputBacklogOverflowEvents: MutableSharedFlow<TmuxOutputBacklogOverflow> =
+        MutableSharedFlow(replay = 0, extraBufferCapacity = 16)
+
+    override val outputBacklogOverflows: Flow<TmuxOutputBacklogOverflow> =
+        outputBacklogOverflowEvents
 
     val sentCommands: MutableList<String> = mutableListOf()
 

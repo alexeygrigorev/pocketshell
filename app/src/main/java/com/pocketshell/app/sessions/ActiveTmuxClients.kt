@@ -1,5 +1,6 @@
 package com.pocketshell.app.sessions
 
+import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.core.tmux.TmuxClient
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -231,6 +232,6 @@ class ActiveTmuxClients @Inject constructor() {
     class LifecycleHooks(
         val onBackground: suspend () -> Unit,
         val onForeground: suspend () -> Unit,
-        val onNetworkChanged: suspend (reason: String) -> Unit = {},
+        val onNetworkChanged: suspend (TerminalNetworkChange) -> Unit = {},
     )
 }

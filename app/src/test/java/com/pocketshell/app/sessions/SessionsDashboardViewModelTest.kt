@@ -985,6 +985,7 @@ class SessionsDashboardViewModelTest {
         // satisfying the interface contract. Tracked separately from
         // #145 — this fake is unrelated to the disconnect monitor work.
         override val disconnected = delegate.disconnected
+        override val outputBacklogOverflows = delegate.outputBacklogOverflows
         val sentCommands: MutableList<String> get() = delegate.sentCommands
         override suspend fun connect() = delegate.connect()
         override suspend fun sendCommand(cmd: String): CommandResponse {

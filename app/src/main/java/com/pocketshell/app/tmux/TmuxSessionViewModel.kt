@@ -21,6 +21,7 @@ import com.pocketshell.app.assistant.RealAssistantSshExecutor
 import com.pocketshell.app.assistant.SessionActionBridge
 import com.pocketshell.app.assistant.SessionAssistantController
 import com.pocketshell.app.composer.PromptAttachmentStager
+import com.pocketshell.app.connectivity.TerminalNetworkChange
 import com.pocketshell.app.nav.AppDestination
 import com.pocketshell.app.projects.FolderListGateway
 import com.pocketshell.app.repos.ReposRemoteSource
@@ -61,6 +62,7 @@ import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
 import com.pocketshell.core.tmux.TmuxClientFactory
+import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
@@ -332,7 +334,9 @@ public class TmuxSessionViewModel @Inject constructor(
     private var autoReconnectJob: Job? = null
     private var appActive: Boolean = true
     private var eventsJob: Job? = null
+    private var outputOverflowJob: Job? = null
     private var disconnectedJob: Job? = null
+    private var lastPaneOutputAtElapsedMs: Long? = null
 
     // Issue #440: the cause of the most recent failed connect attempt, set
     // by [failConnectAttempt] and consulted by [scheduleAutoReconnect]. The
@@ -1371,7 +1375,7 @@ public class TmuxSessionViewModel @Inject constructor(
             hooks = ActiveTmuxClients.LifecycleHooks(
                 onBackground = { onAppBackgrounded() },
                 onForeground = { onAppForegrounded() },
-                onNetworkChanged = { reason -> onNetworkChanged(reason) },
+                onNetworkChanged = { change -> onNetworkChanged(change) },
             ),
         )
         lifecycleHookHostId = hostId
@@ -1382,13 +1386,31 @@ public class TmuxSessionViewModel @Inject constructor(
      * while the terminal is foregrounded, reconnect immediately instead of
      * waiting for sshj's reader to discover that the old TCP path died.
      */
-    public fun onNetworkChanged(reason: String) {
+    public fun onNetworkChanged(change: TerminalNetworkChange) {
         if (!appActive) return
         if (autoReconnectJob?.isActive == true) return
         val current = _connectionStatus.value
         if (current !is ConnectionStatus.Connected) return
         val target = activeTarget ?: connectingTarget ?: return
         if (clientRef == null && sessionRef == null) return
+        val reason = change.reason
+        val lastOutputAt = lastPaneOutputAtElapsedMs
+        val outputAgeMs = lastOutputAt?.let { SystemClock.elapsedRealtime() - it }
+        val realValidatedIdentityChange = change.previousValidated != null &&
+            change.previousValidated != change.current
+        if (
+            outputAgeMs != null &&
+            outputAgeMs <= NETWORK_RECONNECT_OUTPUT_QUIET_MS &&
+            !realValidatedIdentityChange
+        ) {
+            Log.i(
+                ISSUE_548_NETWORK_TAG,
+                "tmux-network-proactive-reconnect-skip reason=$reason " +
+                    "cause=recent-output outputAgeMs=$outputAgeMs " +
+                    targetLogFields(target),
+            )
+            return
+        }
         val reconnectReason = "Network changed; reconnecting ${current.user}@${current.host}:${current.port}."
         Log.i(
             ISSUE_548_NETWORK_TAG,
@@ -1524,6 +1546,8 @@ public class TmuxSessionViewModel @Inject constructor(
         val client = clientRef ?: return emptyList()
         eventsJob?.cancel()
         eventsJob = null
+        outputOverflowJob?.cancel()
+        outputOverflowJob = null
         disconnectedJob?.cancel()
         disconnectedJob = null
         projectRootsJob?.cancel()
@@ -2440,6 +2464,13 @@ public class TmuxSessionViewModel @Inject constructor(
             }
         }
         eventsJob = job
+        outputOverflowJob?.cancel()
+        outputOverflowJob = bridgeScope.launch {
+            client.outputBacklogOverflows.collect { overflow ->
+                if (clientRef !== client) return@collect
+                handleTerminalOutputBacklogOverflow(overflow)
+            }
+        }
         // Issue #173: observe the client's latched `disconnected`
         // StateFlow so we flip [_connectionStatus] to Failed when the
         // underlying [TmuxClient.readerLoop] exits (clean EOF, sshj
@@ -3019,7 +3050,10 @@ public class TmuxSessionViewModel @Inject constructor(
             is ControlEvent.WindowClose,
             is ControlEvent.LayoutChange,
             -> reconcilePanes()
-            is ControlEvent.Output -> logFirstPaneOutput(event)
+            is ControlEvent.Output -> {
+                lastPaneOutputAtElapsedMs = SystemClock.elapsedRealtime()
+                logFirstPaneOutput(event)
+            }
             else -> Unit
         }
     }
@@ -3348,6 +3382,26 @@ public class TmuxSessionViewModel @Inject constructor(
         portDetector.forwarded(port)
         _detectedPort.value = null
         return port
+    }
+
+    private fun handleTerminalOutputBacklogOverflow(overflow: TmuxOutputBacklogOverflow) {
+        val existing = paneRows[overflow.paneId] ?: return
+        if (existing.surfaceError) return
+        Log.w(
+            ISSUE_145_RECONNECT_TAG,
+            "tmux-terminal-output-backlog-overflow pane=${overflow.paneId} " +
+                "droppedEvents=${overflow.droppedEvents} status=${_connectionStatus.value}",
+        )
+
+        paneProducerJobs.remove(overflow.paneId)?.cancel()
+        panePortDetectorJobs.remove(overflow.paneId)?.cancel()
+        runCatching { existing.terminalState.detachExternalProducer() }
+
+        val errored = existing.copy(surfaceError = true)
+        paneRows[overflow.paneId] = errored
+        _panes.update { rows ->
+            rows.map { row -> if (row.paneId == overflow.paneId) errored else row }
+        }
     }
 
     /**
@@ -5669,6 +5723,8 @@ public class TmuxSessionViewModel @Inject constructor(
         sessionPrewarmJob = null
         eventsJob?.cancelAndJoin()
         eventsJob = null
+        outputOverflowJob?.cancelAndJoin()
+        outputOverflowJob = null
         disconnectedJob?.cancelAndJoin()
         disconnectedJob = null
         projectRootsJob?.cancelAndJoin()
@@ -5759,6 +5815,8 @@ public class TmuxSessionViewModel @Inject constructor(
     private suspend fun closeCurrentClientKeepSession() {
         eventsJob?.cancelAndJoin()
         eventsJob = null
+        outputOverflowJob?.cancelAndJoin()
+        outputOverflowJob = null
         disconnectedJob?.cancelAndJoin()
         disconnectedJob = null
         projectRootsJob?.cancelAndJoin()
@@ -5878,6 +5936,8 @@ public class TmuxSessionViewModel @Inject constructor(
         orphanDetachJob = null
         eventsJob?.cancel()
         eventsJob = null
+        outputOverflowJob?.cancel()
+        outputOverflowJob = null
         disconnectedJob?.cancel()
         disconnectedJob = null
         projectRootsJob?.cancel()
@@ -6666,6 +6726,14 @@ internal const val SYNC_DETACH_TIMEOUT_MS: Long = 600L
 internal const val CODEX_AGENT_SUBMIT_DELAY_MS: Long = 250L
 internal const val ATTACH_PANES_READY_TIMEOUT_MS: Long = 30_000L
 internal const val ATTACH_PANES_READY_RETRY_MS: Long = 100L
+
+/**
+ * Issue #548: a validated-network callback is only a proactive hint. If
+ * tmux pane bytes arrived recently, the control stream is demonstrably
+ * alive, so do not present the session as SSH reconnecting unless the
+ * transport later reports EOF/failure via [TmuxClient.disconnected].
+ */
+internal const val NETWORK_RECONNECT_OUTPUT_QUIET_MS: Long = 5_000L
 
 /**
  * Issue #451: how long [TmuxSessionViewModel.stagePromptAttachments] waits

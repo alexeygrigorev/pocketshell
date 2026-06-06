@@ -3,6 +3,8 @@ package com.pocketshell.app.tmux
 import android.os.Looper
 import android.os.SystemClock
 import com.pocketshell.app.session.AgentConversationSyncStatus
+import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.TerminalNetworkSnapshot
 import com.pocketshell.app.hosts.MainDispatcherRule
 import com.pocketshell.app.session.OPTIMISTIC_USER_MESSAGE_ID_PREFIX
 import com.pocketshell.app.session.SessionTab
@@ -24,6 +26,7 @@ import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxClientFactory
+import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
 import com.pocketshell.core.tmux.protocol.ControlEvent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -1042,7 +1045,9 @@ class TmuxSessionViewModelTest {
         )
         runCurrent()
 
-        registry.lifecycleHooksSnapshot().single().onNetworkChanged("validated-default-network-changed")
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(reason = "validated-default-network-changed"),
+        )
         runCurrent()
 
         assertEquals(
@@ -1065,6 +1070,132 @@ class TmuxSessionViewModelTest {
             "proactive reconnect should remove the stale active client from the registry",
             registry.clients.value.isEmpty(),
         )
+    }
+
+    @Test
+    fun restoredSameNetworkHintDuringActiveTerminalOutputDoesNotShowReconnect() = runTest {
+        TMUX_CONNECT_ATTEMPTS.set(0)
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(0L, 0L, 0L, 0L))
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        vm.applyParsedPanesForTest(
+            listOf(
+                TmuxSessionViewModel.ParsedPane(
+                    "%0",
+                    "@0",
+                    "\$0",
+                    "work",
+                    paneIndex = 0,
+                    sessionName = "work",
+                ),
+            ),
+        )
+        advanceUntilIdle()
+
+        val state = vm.panes.value.single().terminalState
+        val slowSideChannelCollector = launch {
+            state.output.collect {
+                delay(60_000)
+            }
+        }
+        runCurrent()
+
+        try {
+            client.emittedEvents.emit(ControlEvent.Output("%0", issue576BackpressureOutputChunks().first()))
+            runCurrent()
+
+            val hook = registry.lifecycleHooksSnapshot().single()
+            repeat(4) { index ->
+                hook.onNetworkChanged(
+                    networkChange(
+                        previous = TerminalNetworkSnapshot.NoValidatedNetwork,
+                        current = TerminalNetworkSnapshot.Validated("wifi"),
+                        previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                        reason = "validated-network-during-output-$index",
+                    ),
+                )
+                runCurrent()
+            }
+
+            assertTrue(
+                "active terminal output proves the tmux stream is alive; network hints must not show reconnect",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+            assertEquals(
+                "network hints during active output must not enqueue reconnect attempts",
+                0,
+                connector.connectCount,
+            )
+            assertEquals(
+                "network hints during active output must not increment the reconnect counter",
+                0,
+                TMUX_CONNECT_ATTEMPTS.get(),
+            )
+            assertFalse(
+                "terminal-side backpressure must not flip the tmux disconnected signal",
+                client.disconnectedSignal.value,
+            )
+        } finally {
+            slowSideChannelCollector.cancel()
+        }
+    }
+
+    @Test
+    fun realNetworkIdentityChangeDuringActiveTerminalOutputStillReconnects() = runTest {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        runCurrent()
+        client.emittedEvents.emit(ControlEvent.Output("%0", "still streaming".toByteArray()))
+        runCurrent()
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(
+                previous = TerminalNetworkSnapshot.Validated("wifi"),
+                current = TerminalNetworkSnapshot.Validated("cell"),
+                previousValidated = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "wifi-cellular-handoff",
+            ),
+        )
+        runCurrent()
+
+        assertEquals(
+            "real validated identity change should still use proactive reconnect despite recent output",
+            TmuxConnectTrigger.NetworkReconnect,
+            vm.latestRestoreIntentSnapshot()?.trigger,
+        )
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting)
+        assertEquals(0, connector.connectCount)
     }
 
     @Test
@@ -1093,7 +1224,9 @@ class TmuxSessionViewModelTest {
             client = oldClient,
         )
 
-        registry.lifecycleHooksSnapshot().single().onNetworkChanged("validated-default-network-changed")
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged(
+            networkChange(reason = "validated-default-network-changed"),
+        )
         advanceUntilIdle()
 
         assertEquals(1, connector.connectCount)
@@ -1548,6 +1681,35 @@ class TmuxSessionViewModelTest {
         } finally {
             slowSideChannelCollector.cancel()
         }
+    }
+
+    @Test
+    fun terminalOutputBacklogOverflowIsLocalPaneErrorNotReconnect() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "codex", paneIndex = 0)),
+        )
+        advanceUntilIdle()
+
+        client.outputBacklogOverflowEvents.emit(
+            TmuxOutputBacklogOverflow(paneId = "%0", droppedEvents = 1),
+        )
+        advanceUntilIdle()
+
+        assertTrue(
+            "terminal backlog overflow is a local pane error, not reconnect",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertFalse(
+            "terminal backlog overflow must not flip tmux disconnected",
+            client.disconnectedSignal.value,
+        )
+        assertTrue(
+            "overflowed pane should enter explicit terminal recovery state",
+            vm.panes.value.single().surfaceError,
+        )
     }
 
     @Test
@@ -4402,6 +4564,7 @@ class TmuxSessionViewModelTest {
         private val delegate = FakeTmuxClient()
         override val events = delegate.events
         override val disconnected = delegate.disconnected
+        override val outputBacklogOverflows = delegate.outputBacklogOverflows
         val sentCommands: MutableList<String> get() = delegate.sentCommands
         override suspend fun connect() = delegate.connect()
         override suspend fun sendCommand(cmd: String): CommandResponse {
@@ -6887,6 +7050,22 @@ class TmuxSessionViewModelTest {
         chunks += "\u001b[?25h\u001b[0m\r\nISSUE576-VM-DONE\r\n".toByteArray(Charsets.UTF_8)
         return chunks
     }
+
+    private fun networkChange(
+        previous: TerminalNetworkSnapshot = TerminalNetworkSnapshot.Validated("wifi"),
+        current: TerminalNetworkSnapshot.Validated = TerminalNetworkSnapshot.Validated("cell"),
+        previousValidated: TerminalNetworkSnapshot.Validated? =
+            previous as? TerminalNetworkSnapshot.Validated,
+        reason: String = "validated-default-network-changed",
+        sequence: Long = 1L,
+    ): TerminalNetworkChange =
+        TerminalNetworkChange(
+            previous = previous,
+            current = current,
+            previousValidated = previousValidated,
+            reason = reason,
+            sequence = sequence,
+        )
 
     private class QueueLeaseConnector(
         private vararg val sessions: FakeSshSession,

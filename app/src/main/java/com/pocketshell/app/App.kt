@@ -154,6 +154,10 @@ class App : Application() {
             sshLeaseLifecycleDispatcher.dispatch(Lifecycle.Event.ON_START)
             if (!resumedWithinGrace) {
                 dispatchTmuxForeground()
+                drainPendingTerminalNetworkChange()
+                terminalNetworkObserver.refresh("process-foreground")
+            } else {
+                pendingTerminalNetworkChange = null
             }
         },
     )
@@ -167,8 +171,6 @@ class App : Application() {
             Lifecycle.Event.ON_START -> {
                 processForeground = true
                 backgroundGraceController.onForeground()
-                drainPendingTerminalNetworkChange()
-                terminalNetworkObserver.refresh("process-foreground")
             }
             else -> Unit
         }
@@ -233,7 +235,7 @@ class App : Application() {
         )
         for (hook in hooks) {
             terminalNetworkScope.launch {
-                runCatching { hook.onNetworkChanged(change.reason) }
+                runCatching { hook.onNetworkChanged(change) }
                     .onFailure { Log.w(TERMINAL_NETWORK_TAG, "terminal network hook failed", it) }
             }
         }

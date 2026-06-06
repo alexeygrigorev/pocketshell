@@ -61,4 +61,35 @@ class TerminalNetworkChangeDetectorTest {
         assertEquals(TerminalNetworkSnapshot.NoValidatedNetwork, change!!.previous)
         assertEquals(TerminalNetworkSnapshot.Validated("cell"), change.current)
     }
+
+    @Test
+    fun `transient offline bounce back to same validated network does not emit reconnect`() {
+        val detector = TerminalNetworkChangeDetector(
+            initial = TerminalNetworkSnapshot.Validated("wifi"),
+        )
+
+        assertNull(
+            detector.update(
+                snapshot = TerminalNetworkSnapshot.NoValidatedNetwork,
+                reason = "default-network-lost",
+            ),
+        )
+
+        assertNull(
+            detector.update(
+                snapshot = TerminalNetworkSnapshot.Validated("wifi"),
+                reason = "default-network-capabilities",
+            ),
+        )
+
+        val handoff = detector.update(
+            snapshot = TerminalNetworkSnapshot.Validated("cell"),
+            reason = "real-handoff",
+        )
+
+        assertTrue(handoff != null)
+        assertEquals(TerminalNetworkSnapshot.Validated("wifi"), handoff!!.previous)
+        assertEquals(TerminalNetworkSnapshot.Validated("cell"), handoff.current)
+        assertEquals(1L, handoff.sequence)
+    }
 }

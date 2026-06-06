@@ -13,6 +13,9 @@
       cached file's content URI to `ACTION_SEND` / the clipboard so the
       opened image / PDF / audio / text can be sent on to another app.
       Must match `FileViewerViewModel.CACHE_SUBDIR`.
+    - `report-archives/` (issue #575): the crash reports screen zips
+      local reports there before handing the bundle to Android's share
+      sheet.
 -->
 <paths>
     <cache-path
@@ -21,4 +24,7 @@
     <cache-path
         name="file-viewer"
         path="file-viewer/" />
+    <cache-path
+        name="report-archives"
+        path="report-archives/" />
 </paths>

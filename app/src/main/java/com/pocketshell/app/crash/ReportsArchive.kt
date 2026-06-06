@@ -15,8 +15,8 @@ import java.util.zip.ZipOutputStream
  *
  * Pure file-system logic so it is unit-testable without an emulator: it
  * enumerates the report files, writes them into one zip, and returns the
- * archive [File]. The transport (SCP/SFTP to `~/inbox/pocketshell/`) is
- * the existing share path's job — this object only produces the bundle.
+ * archive [File]. The screen exposes that file through FileProvider and
+ * Android's share sheet.
  *
  * The archive filename is `pocketshell-reports-<deviceLabel>-<timestamp>.zip`.
  * The timestamp is sourced from an injected [Clock] so callers (and tests)
@@ -49,8 +49,7 @@ object ReportsArchive {
      * a numeric suffix so a collision cannot drop a report silently.
      *
      * Returns [destination] for call-site chaining. The caller owns the
-     * lifecycle of [destination] (e.g. deleting it from the cache dir after
-     * the upload completes).
+     * lifecycle of [destination].
      */
     fun packInto(reportFiles: List<File>, destination: File): File {
         destination.parentFile?.mkdirs()

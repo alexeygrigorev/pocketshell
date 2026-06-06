@@ -39,9 +39,9 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
@@ -73,6 +73,21 @@ fun CrashReportsScreen(
     // Re-list whenever the screen is (re)composed onto the back stack so a
     // crash that happened mid-session shows up without a manual refresh.
     LaunchedEffect(Unit) { viewModel.reload() }
+
+    LaunchedEffect(shareAllState) {
+        val state = shareAllState as? ShareAllState.Prepared ?: return@LaunchedEffect
+        val result = runCatching {
+            shareReportsArchive(context, state.archive)
+        }
+        result.fold(
+            onSuccess = { viewModel.markShareAllLaunched() },
+            onFailure = { error ->
+                viewModel.shareAllLaunchFailed(
+                    error.message ?: "Could not open the Android share sheet.",
+                )
+            },
+        )
+    }
 
     fun shareSelected() {
         val body = selectedBody.takeIf { it.isNotBlank() } ?: return
@@ -109,8 +124,8 @@ fun CrashReportsScreen(
                 item {
                     Text(
                         text = "Reports are stored only on this device. " +
-                            "\"Share all\" zips every report and uploads it to " +
-                            "~/inbox/pocketshell/ on a host.",
+                            "\"Share all\" zips every report and opens " +
+                            "Android's share sheet.",
                         color = PocketShellColors.TextSecondary,
                         fontSize = 12.sp,
                     )
@@ -139,17 +154,6 @@ fun CrashReportsScreen(
     }
 
     when (val state = shareAllState) {
-        is ShareAllState.PickingHost -> HostPickerDialog(
-            hosts = state.hosts,
-            onPick = { viewModel.shareAllTo(it) },
-            onDismiss = { viewModel.clearShareAllState() },
-        )
-        is ShareAllState.Success -> ShareAllResultDialog(
-            title = "Reports shared",
-            message = "${state.reportCount} report(s) uploaded to ${state.hostName}:\n" +
-                state.remotePath,
-            onDismiss = { viewModel.clearShareAllState() },
-        )
         is ShareAllState.Failed -> ShareAllResultDialog(
             title = "Share failed",
             message = "${state.message}\n\nReports were kept on this device.",
@@ -177,7 +181,7 @@ private fun BulkActionsBar(
     onShareAll: () -> Unit,
     onDeleteAll: () -> Unit,
 ) {
-    val uploading = shareAllState is ShareAllState.Uploading
+    val preparing = shareAllState is ShareAllState.Preparing
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -186,20 +190,20 @@ private fun BulkActionsBar(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         val label = when {
-            uploading -> "Sharing…"
+            preparing -> "Preparing..."
             else -> "Share all ($reportCount)"
         }
         ActionButton(
             label = label,
             onClick = onShareAll,
-            enabled = reportCount > 0 && !uploading,
+            enabled = reportCount > 0 && !preparing,
             modifier = Modifier.testTag(CRASH_REPORTS_SHARE_ALL_TAG),
         )
         Spacer(modifier = Modifier.width(8.dp))
         ActionButton(
             label = "Delete all",
             onClick = onDeleteAll,
-            enabled = reportCount > 0 && !uploading,
+            enabled = reportCount > 0 && !preparing,
             modifier = Modifier.testTag(CRASH_REPORTS_DELETE_ALL_TAG),
         )
         Spacer(modifier = Modifier.weight(1f))
@@ -208,45 +212,6 @@ private fun BulkActionsBar(
             color = PocketShellColors.TextMuted,
             fontSize = 12.sp,
         )
-    }
-}
-
-@Composable
-private fun HostPickerDialog(
-    hosts: List<HostEntity>,
-    onPick: (HostEntity) -> Unit,
-    onDismiss: () -> Unit,
-) {
-    DialogScrim(onDismiss = onDismiss) {
-        Text(
-            text = "Share reports to which host?",
-            color = PocketShellColors.Text,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Bold,
-        )
-        Spacer(modifier = Modifier.height(12.dp))
-        hosts.forEach { host ->
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp)
-                    .background(PocketShellColors.Surface, RoundedCornerShape(8.dp))
-                    .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(8.dp))
-                    .clickable(role = Role.Button) { onPick(host) }
-                    .padding(horizontal = 12.dp, vertical = 12.dp),
-            ) {
-                Text(
-                    text = host.name,
-                    color = PocketShellColors.Text,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-        }
-        Spacer(modifier = Modifier.height(12.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            AppBarTextButton(label = "Cancel", onClick = onDismiss)
-        }
     }
 }
 
@@ -516,3 +481,22 @@ private fun ActionButton(
 
 private val ReportTimeFormatter: DateTimeFormatter =
     DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss z")
+
+private fun shareReportsArchive(context: android.content.Context, archive: java.io.File) {
+    val uri = FileProvider.getUriForFile(
+        context,
+        context.packageName + ".fileprovider",
+        archive,
+    )
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "application/zip"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        putExtra(Intent.EXTRA_SUBJECT, archive.name)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(
+        Intent.createChooser(intent, "Share crash reports").apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        },
+    )
+}

@@ -199,7 +199,7 @@ internal const val DEFAULT_MAX_AGENT_EVENTS: Int = 500
 
 /**
  * Issue #460: multiplier applied to the requested event budget when
- * tailing a raw JSONL transcript (Claude Code; legacy OpenCode JSONL).
+ * tailing a raw JSONL transcript (Claude Code; Codex).
  * One conversation turn there is not one line — an active agent turn
  * emits many `tool_use` / `tool_result` lines per user prompt — so a
  * `tail -n <events>` over the raw file captures only the most recent
@@ -563,8 +563,8 @@ internal class AgentConversationRepository(
         }
         val parser = parserFor(detection.agent) ?: return emptyList()
         // Issue #460: [maxLines] is a *message/event* budget, but a
-        // line-tailed JSONL transcript (Claude Code; legacy OpenCode
-        // JSONL) interleaves one user turn with potentially hundreds of
+        // line-tailed JSONL transcript (Claude Code; Codex)
+        // interleaves one user turn with potentially hundreds of
         // tool_use / tool_result lines. A `tail -n <maxLines>` over the
         // raw file therefore routinely captures only the final agent
         // turn — all tool activity, zero of the user's own prompts — so
@@ -738,7 +738,9 @@ internal class AgentConversationRepository(
     private fun parserFor(agent: AgentKind): ConversationParser? = when (agent) {
         AgentKind.ClaudeCode -> ClaudeCodeParser()
         AgentKind.Codex -> CodexParser()
-        AgentKind.OpenCode -> OpenCodeReader()
+        // OpenCode is read exclusively from its SQLite database via the
+        // [isOpenCodeSqlite] branches; it has no JSONL-tailing parser.
+        AgentKind.OpenCode -> null
     }
 
     internal fun detectionCommand(cwd: String): String {

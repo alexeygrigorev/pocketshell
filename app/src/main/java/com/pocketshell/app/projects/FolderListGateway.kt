@@ -1221,15 +1221,12 @@ class SshFolderListGateway internal constructor(
 
         /**
          * Parse `list-panes -a` output into compact per-window rows. The
-         * current command emits one row per pane with window identity;
-         * only the active pane in each window is kept. The legacy 5-field
-         * shape remains accepted for parser tests and live-client drift.
+         * command emits one 8-field row per pane with window identity;
+         * only the active pane in each window is kept.
          */
         internal fun parseSessionWindowRows(stdout: String): List<FolderSessionWindowRow> {
             val lines = stdout.lineSequence().filter { it.isNotBlank() }.toList()
             if (lines.isEmpty()) return emptyList()
-            val firstParts = lines.first().split(FIELD_SEP, limit = 8)
-            if (firstParts.size < 8) return parseLegacySessionWindowRows(lines)
 
             val rows = mutableListOf<FolderSessionWindowRow>()
             for (line in lines) {
@@ -1247,28 +1244,6 @@ class SshFolderListGateway internal constructor(
                     cwd = parts[5].trim().takeIf { it.isNotEmpty() },
                     tty = parts[6].trim().takeIf { it.isNotEmpty() },
                     command = parts[7].trim().takeIf { it.isNotEmpty() },
-                )
-            }
-            return rows
-        }
-
-        private fun parseLegacySessionWindowRows(lines: List<String>): List<FolderSessionWindowRow> {
-            val rows = mutableListOf<FolderSessionWindowRow>()
-            for (line in lines) {
-                val parts = line.split(FIELD_SEP, limit = 5)
-                if (parts.size < 3) continue
-                val sessionName = parts[0].trim()
-                if (sessionName.isEmpty()) continue
-                val active = (parts[1].trim().toLongOrNull() ?: 0L) > 0L
-                if (!active) continue
-                rows += FolderSessionWindowRow(
-                    sessionName = sessionName,
-                    index = null,
-                    name = null,
-                    active = true,
-                    cwd = parts.getOrNull(2)?.trim()?.takeIf { it.isNotEmpty() },
-                    tty = parts.getOrNull(3)?.trim()?.takeIf { it.isNotEmpty() },
-                    command = parts.getOrNull(4)?.trim()?.takeIf { it.isNotEmpty() },
                 )
             }
             return rows

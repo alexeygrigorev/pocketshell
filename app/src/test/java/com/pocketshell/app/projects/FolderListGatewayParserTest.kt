@@ -112,10 +112,12 @@ class FolderListGatewayParserTest {
     fun parseActivePaneRowsReturnsOnlyActivePaneForEachSession() {
         // Two panes for `claude-main`, only the active one (pane_active=1)
         // wins. A second session `solo` has a single active pane.
+        // 8-field shape: session::window_index::window_name::window_active::
+        // pane_active::pane_current_path::pane_tty::pane_current_command
         val stdout = """
-            claude-main::0::/home/alexey/git/pocketshell/.subdir::/dev/pts/2::bash
-            claude-main::1::/home/alexey/git/pocketshell::/dev/pts/3::node
-            solo::1::/tmp::/dev/pts/4::sh
+            claude-main::0::bash::1::0::/home/alexey/git/pocketshell/.subdir::/dev/pts/2::bash
+            claude-main::0::bash::1::1::/home/alexey/git/pocketshell::/dev/pts/3::node
+            solo::0::sh::1::1::/tmp::/dev/pts/4::sh
 
         """.trimIndent()
         val map = SshFolderListGateway.parseActivePaneRows(stdout)
@@ -151,11 +153,12 @@ class FolderListGatewayParserTest {
     }
 
     @Test
-    fun parseActivePaneRowsToleratesMissingOptionalFields() {
-        // pane_tty + pane_current_command may be absent on older tmux —
-        // the parser must still surface the active row with the cwd.
+    fun parseActivePaneRowsToleratesEmptyOptionalFields() {
+        // pane_tty + pane_current_command may render empty — the parser
+        // must still surface the active row with the cwd and null the
+        // empty optional columns.
         val stdout = """
-            sessA::1::/something
+            sessA::0::win::1::1::/something::::
         """.trimIndent()
         val map = SshFolderListGateway.parseActivePaneRows(stdout)
         assertEquals(1, map.size)
@@ -167,12 +170,12 @@ class FolderListGatewayParserTest {
     @Test
     fun parseActivePaneRowsIgnoresInactivePanes() {
         val stdout = """
-            sessA::0::/something::/dev/pts/0::bash
+            sessA::0::win::1::0::/something::/dev/pts/0::bash
             sessB::1
         """.trimIndent()
         val map = SshFolderListGateway.parseActivePaneRows(stdout)
-        // sessA is inactive (pane_active=0) → skipped.
-        // sessB has only 2 fields → fails the size check → skipped.
+        // sessA's only pane is inactive (pane_active=0) → skipped.
+        // sessB has only 2 fields → fails the 8-field size check → skipped.
         assertEquals(0, map.size)
     }
 }

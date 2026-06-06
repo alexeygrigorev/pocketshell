@@ -143,16 +143,6 @@ open class ReleaseChecker(
             }
         }
 
-    /**
-     * Legacy convenience wrapper that collapses the [checkForUpdate]
-     * outcome back to "the [ReleaseInfo] or `null`". Kept for callers
-     * (e.g. the update notifier's version labeler) that only care about
-     * the available-release case. New callers that need to surface a
-     * failed check should use [checkForUpdate] directly.
-     */
-    suspend fun check(currentVersion: String): ReleaseInfo? =
-        checkForUpdate(currentVersion).infoOrNull()
-
     internal fun parseRelease(body: String, currentVersion: String): ReleaseInfo? {
         val json = JSONObject(body)
         val tagName = json.getString("tag_name")

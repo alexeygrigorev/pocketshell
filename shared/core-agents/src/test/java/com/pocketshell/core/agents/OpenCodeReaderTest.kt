@@ -1,34 +1,10 @@
 package com.pocketshell.core.agents
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.json.JSONObject
 
 class OpenCodeReaderTest {
-    @Test
-    fun parsesSingleJsonlLineForTailing() {
-        val events = OpenCodeReader().parseLine(
-            """{"id":"u1","role":"user","content":"check","createdAtMillis":12}""",
-        )
-
-        val msg = events.single() as ConversationEvent.Message
-        assertEquals("u1", msg.id)
-        assertEquals(ConversationRole.User, msg.role)
-        assertEquals("check", msg.text)
-        assertEquals(12L, msg.atMillis)
-    }
-
-    @Test
-    fun parseLineTolerantOfBlankAndMalformedRows() {
-        val reader = OpenCodeReader()
-        assertTrue(reader.parseLine("").isEmpty())
-        assertTrue(reader.parseLine("  ").isEmpty())
-        assertTrue(reader.parseLine("{not json").isEmpty())
-        assertTrue(reader.parseLine("""{"role":"system","content":"x"}""").isEmpty())
-        assertTrue(reader.parseLine("""{"id":"x","role":"user","content":""}""").isEmpty())
-    }
-
     @Test
     fun parsesSqliteMessageAndPartRowsIntoMessages() {
         val events = OpenCodeReader().parseSqliteRows(

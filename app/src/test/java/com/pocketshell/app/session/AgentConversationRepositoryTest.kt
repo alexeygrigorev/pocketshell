@@ -328,37 +328,6 @@ class AgentConversationRepositoryTest {
     }
 
     @Test
-    fun legacyOpenCodeJsonlDetectionUsesJsonlTailAndLineCount() = runTest {
-        val session = FakeSshSession(
-            wcOutput = "7\n",
-            tailLines = listOf(
-                """{"id":"real-user","role":"user","content":"type-back-e2e-opencode","createdAtMillis":12}""",
-            ),
-        )
-        val detection = AgentDetection(
-            agent = AgentKind.OpenCode,
-            sourcePath = "/home/testuser/.local/share/opencode/pocketshell-rows.jsonl",
-            sessionId = "pocketshell-rows",
-            confidence = AgentDetection.Confidence.RecentFile,
-        )
-        val events = mutableListOf<ConversationEvent>()
-
-        val count = AgentConversationRepository().lineCount(session, detection)
-        val job = AgentConversationRepository().tailEventsFromLine(session, detection, fromLineExclusive = count) {
-            events += it
-        }
-        job?.cancel()
-
-        assertEquals(7L, count)
-        assertEquals(listOf("type-back-e2e-opencode"), events.map { (it as ConversationEvent.Message).text })
-        assertEquals(listOf("real-user"), events.map { it.id })
-        assertEquals(1, session.tailCalls)
-        assertEquals(listOf("/home/testuser/.local/share/opencode/pocketshell-rows.jsonl" to 7L), session.tailFromLineCalls)
-        assertTrue(session.execCommands.single().contains("wc -l < "))
-        assertFalse(session.execCommands.any { it.contains("sqlite3 -readonly") })
-    }
-
-    @Test
     fun openCodeTailExportsSnapshotAndEmitsNewRowsWithoutStartupSeed() = runTest {
         val initialOutput = """
             {"message_id":"m1","message_data":"{\"role\":\"user\"}","message_time_created":100,"part_id":"p1","part_data":"{\"type\":\"text\",\"text\":\"old\"}","part_time_created":101}

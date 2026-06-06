@@ -39,7 +39,7 @@ class ReleaseCheckerInstrumentedTest {
         try {
             val checker = ReleaseChecker(server.url("/repos/latest").toString())
 
-            val result = checker.check("0.2.0")
+            val result = checker.checkForUpdate("0.2.0").infoOrNull()
 
             assertEquals(
                 ReleaseInfo(
@@ -81,7 +81,7 @@ class ReleaseCheckerInstrumentedTest {
         try {
             val checker = ReleaseChecker(server.url("/repos/latest").toString())
 
-            assertNull(checker.check("0.2.1"))
+            assertNull(checker.checkForUpdate("0.2.1").infoOrNull())
         } finally {
             server.shutdown()
         }

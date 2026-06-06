@@ -446,7 +446,7 @@ class HostListViewModel internal constructor(
     private fun resolveAppUpdateRelease(hostId: Long) {
         viewModelScope.launch {
             val currentVersion = currentVersionName() ?: return@launch
-            val info = releaseChecker.check(currentVersion) ?: return@launch
+            val info = releaseChecker.checkForUpdate(currentVersion).infoOrNull() ?: return@launch
             val current = _appUpdateWarning.value ?: return@launch
             if (current.hostId != hostId || current.releaseInfo != null) return@launch
             _appUpdateWarning.value = current.copy(releaseInfo = info)

@@ -18,23 +18,15 @@ import org.json.JSONObject
  *
  * - Batch-convert SQLite join rows ([parseSqliteRows]).
  * - Parse remote `sqlite3` JSON output ([parseSqliteJsonRows]).
- * - Convert a single JSONL line as it streams in
- *   ([parseLine] / [ConversationParser]), so the
- *   `AgentConversationRepository` can use the same `session.tail(...)`
- *   pipeline that Claude + Codex already use for real-time updates
- *   (issue #160, OpenCode parity piece).
  *
- * The JSONL row shape is:
+ * OpenCode is read exclusively from its SQLite database; it has no raw
+ * JSONL-tailing path, so this reader is not a [ConversationParser].
  *
- * ```
- * {"id":"u1","role":"user","content":"check the app","createdAtMillis":12345}
- * ```
- *
- * Anything else (blank lines, comments, malformed JSON, unknown roles/parts)
- * is silently skipped. Agent logs and remote command output are allowed to be
+ * Anything malformed (blank rows, malformed JSON, unknown roles/parts) is
+ * silently skipped. Agent logs and remote command output are allowed to be
  * partial or schema-drifty without dropping the rest of the conversation.
  */
-public class OpenCodeReader : ConversationParser {
+public class OpenCodeReader {
     public fun parseSqliteJsonRows(output: String): List<ConversationEvent> {
         val trimmed = output.trim()
         if (trimmed.isEmpty()) return emptyList()
@@ -104,30 +96,6 @@ public class OpenCodeReader : ConversationParser {
                 } ?: emptyList()
             }
         }
-    }
-
-    override fun parseLine(line: String): List<ConversationEvent> {
-        val trimmed = line.trim()
-        if (trimmed.isEmpty()) return emptyList()
-        val json = trimmed.asJsonObjectOrNull() ?: return emptyList()
-        val role = parseRole(json.stringOrNull("role") ?: return emptyList())
-            ?: return emptyList()
-        val content = json.stringOrNull("content") ?: json.stringOrNull("text") ?: ""
-        if (content.isBlank()) return emptyList()
-        val id = json.stringOrNull("id")
-            ?: json.stringOrNull("messageId")
-            ?: json.stringOrNull("uuid")
-        return listOf(
-            ConversationEvent.Message(
-                id = id?.takeIf { it.isNotBlank() } ?: "opencode:0",
-                agent = AgentKind.OpenCode,
-                atMillis = json.longOrNull("createdAtMillis")
-                    ?: json.longOrNull("created_at_ms")
-                    ?: json.timestampMillis(),
-                role = role,
-                text = content,
-            ),
-        )
     }
 
     private fun sqliteRowFromJson(json: JSONObject): OpenCodeSqliteRow? {

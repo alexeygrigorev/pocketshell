@@ -68,3 +68,6 @@ keystore.properties
 # repo so they survive `cd` between worktree and main, but gitignored so
 # they never accidentally get committed.
 .pickup/
+
+# Scratch dir for fast-render PNGs (scripts/render.sh output, viewed via PocketShell)
+.tmp/

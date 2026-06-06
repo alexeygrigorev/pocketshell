@@ -2,6 +2,7 @@ package com.pocketshell.uikit.render
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Surface
@@ -132,10 +133,13 @@ class DesignRenders {
     private fun render(name: String, content: @Composable () -> Unit) {
         captureRoboImage("build/renders/$name.png") {
             PocketShellTheme {
-                Surface(color = PocketShellColors.Background) {
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = PocketShellColors.Background,
+                ) {
                     Column(
                         modifier = Modifier
-                            .fillMaxWidth()
+                            .fillMaxSize()
                             .padding(vertical = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp),
                     ) {

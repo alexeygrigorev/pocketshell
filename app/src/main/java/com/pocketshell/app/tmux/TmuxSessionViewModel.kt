@@ -461,6 +461,7 @@ public class TmuxSessionViewModel @Inject constructor(
         startDirectory: String? = null,
         trigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
     ) {
+        pausedAutoReconnect = null
         autoReconnectJob?.cancel()
         autoReconnectJob = null
         val target = ConnectionTarget(
@@ -764,6 +765,7 @@ public class TmuxSessionViewModel @Inject constructor(
      * for direct programmatic callers.
      */
     public fun reconnect(): Boolean {
+        pausedAutoReconnect = null
         autoReconnectJob?.cancel()
         autoReconnectJob = null
         val target = activeTarget ?: connectingTarget ?: return false
@@ -819,6 +821,7 @@ public class TmuxSessionViewModel @Inject constructor(
     public fun cancelConnect(): Boolean {
         val current = _connectionStatus.value
         if (current !is ConnectionStatus.Connecting && current !is ConnectionStatus.Reconnecting) return false
+        pausedAutoReconnect = null
         autoReconnectJob?.cancel()
         autoReconnectJob = null
         connectJob?.cancel()
@@ -836,6 +839,7 @@ public class TmuxSessionViewModel @Inject constructor(
     // re-attach to. Going through [activeTarget] for the reconnect path
     // would not work because [closeCurrentConnectionAndJoin] clears it.
     private var pendingReattach: PendingReattach? = null
+    private var pausedAutoReconnect: PausedAutoReconnect? = null
     private var backgroundDetachJob: Job? = null
     private var sessionPrewarmJob: Job? = null
     private var foregroundReattachForTest: (() -> Unit)? = null
@@ -883,8 +887,15 @@ public class TmuxSessionViewModel @Inject constructor(
             autoReconnectJob?.cancel()
             autoReconnectJob = null
             val target = activeTarget ?: connectingTarget
-            connectingTarget = target
-            refreshReconnectAvailability()
+            if (target != null) {
+                pausedAutoReconnect = PausedAutoReconnect(
+                    target = target,
+                    reason = reconnecting.reason,
+                )
+                activeTarget = target
+                connectingTarget = target
+                refreshReconnectAvailability()
+            }
             _connectionStatus.value = ConnectionStatus.Failed(
                 "${reconnecting.reason} Auto reconnect paused while PocketShell is in the background.",
             )
@@ -953,6 +964,11 @@ public class TmuxSessionViewModel @Inject constructor(
     public fun onAppForegrounded() {
         appActive = true
         if (pendingReattach == null) {
+            val paused = pausedAutoReconnect
+            if (paused != null) {
+                resumePausedAutoReconnect(paused)
+                return
+            }
             latestConnectIntent?.let { intent ->
                 Log.i(
                     ISSUE_235_LIFECYCLE_TAG,
@@ -1014,6 +1030,30 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
+    private fun resumePausedAutoReconnect(paused: PausedAutoReconnect) {
+        pausedAutoReconnect = null
+        val target = paused.target
+        if (_connectionStatus.value is ConnectionStatus.Connected && activeTarget == target) return
+        Log.i(
+            ISSUE_235_LIFECYCLE_TAG,
+            "tmux-auto-reconnect-resume-on-foreground " +
+                targetLogFields(target) +
+                " reason=${paused.reason}",
+        )
+        connect(
+            hostId = target.hostId,
+            hostName = target.hostName,
+            host = target.host,
+            port = target.port,
+            user = target.user,
+            keyPath = target.keyPath,
+            passphrase = target.passphrase,
+            sessionName = target.sessionName,
+            startDirectory = target.startDirectory,
+            trigger = TmuxConnectTrigger.AutoReconnect,
+        )
+    }
+
     /**
      * Issue #235: user-driven detach.
      *
@@ -1036,6 +1076,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // QA when the user backgrounds the app during the detach
         // animation) does not re-seed the reattach.
         pendingReattach = null
+        pausedAutoReconnect = null
         Log.i(
             ISSUE_235_LIFECYCLE_TAG,
             "tmux-detach-manual host=${activeTarget?.host} session=${activeTarget?.sessionName}",
@@ -5883,6 +5924,11 @@ public class TmuxSessionViewModel @Inject constructor(
         val generation: Long,
         val intendedTarget: ConnectionTarget?,
         val intendedTrigger: TmuxConnectTrigger?,
+    )
+
+    private data class PausedAutoReconnect(
+        val target: ConnectionTarget,
+        val reason: String,
     )
 
     private data class RuntimeRefreshGuard(

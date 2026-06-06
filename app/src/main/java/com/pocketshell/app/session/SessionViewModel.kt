@@ -255,6 +255,7 @@ public class SessionViewModel @Inject constructor(
     private var projectRootsJob: Job? = null
     private var activeTarget: RawSshTarget? = null
     private var connectingTarget: RawSshTarget? = null
+    private var pausedAutoReconnect: PausedAutoReconnect? = null
     private var appActive: Boolean = true
 
     private val _canReconnect: MutableStateFlow<Boolean> = MutableStateFlow(false)
@@ -281,6 +282,7 @@ public class SessionViewModel @Inject constructor(
         passphrase: CharArray? = null,
         hostId: Long? = null,
     ) {
+        pausedAutoReconnect = null
         autoReconnectJob?.cancel()
         autoReconnectJob = null
         val target = RawSshTarget(host, port, user, keyPath, passphrase?.copyOf(), hostId)
@@ -296,6 +298,7 @@ public class SessionViewModel @Inject constructor(
     }
 
     public fun reconnect(): Boolean {
+        pausedAutoReconnect = null
         autoReconnectJob?.cancel()
         autoReconnectJob = null
         val target = activeTarget ?: connectingTarget ?: return false
@@ -321,6 +324,8 @@ public class SessionViewModel @Inject constructor(
 
     public fun onAppForegrounded() {
         appActive = true
+        val paused = pausedAutoReconnect ?: return
+        resumePausedAutoReconnect(paused)
     }
 
     public fun onAppBackgrounded() {
@@ -329,10 +334,30 @@ public class SessionViewModel @Inject constructor(
         autoReconnectJob = null
         val reconnecting = _connectionStatus.value as? ConnectionStatus.Reconnecting ?: return
         val target = activeTarget ?: connectingTarget
-        connectingTarget = target
-        refreshReconnectAvailability()
+        if (target != null) {
+            pausedAutoReconnect = PausedAutoReconnect(
+                target = target,
+            )
+            activeTarget = target
+            connectingTarget = target
+            refreshReconnectAvailability()
+        }
         _connectionStatus.value = ConnectionStatus.Failed(
             "${reconnecting.reason} Auto reconnect paused while PocketShell is in the background.",
+        )
+    }
+
+    private fun resumePausedAutoReconnect(paused: PausedAutoReconnect) {
+        pausedAutoReconnect = null
+        val target = paused.target
+        if (_connectionStatus.value is ConnectionStatus.Connected && activeTarget == target) return
+        connect(
+            host = target.host,
+            port = target.port,
+            user = target.user,
+            keyPath = target.keyPath,
+            passphrase = target.passphrase,
+            hostId = target.hostId,
         )
     }
 
@@ -358,6 +383,7 @@ public class SessionViewModel @Inject constructor(
     public fun cancelConnect(): Boolean {
         val current = _connectionStatus.value
         if (current !is ConnectionStatus.Connecting && current !is ConnectionStatus.Reconnecting) return false
+        pausedAutoReconnect = null
         autoReconnectJob?.cancel()
         autoReconnectJob = null
         connectJob?.cancel()
@@ -1495,6 +1521,10 @@ private data class RawSshTarget(
         return result
     }
 }
+
+private data class PausedAutoReconnect(
+    val target: RawSshTarget,
+)
 
 private fun passphrasesEqual(left: CharArray?, right: CharArray?): Boolean = when {
     left == null && right == null -> true

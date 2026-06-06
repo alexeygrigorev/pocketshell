@@ -1206,6 +1206,76 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun foregroundReturnResumesBackgroundPausedAutoReconnect() = runTest {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            reconnectClient
+        }
+        val deadClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = deadClient,
+        )
+
+        deadClient.disconnectedSignal.value = true
+        runCurrent()
+        assertTrue(
+            "disconnect must be waiting in auto-reconnect delay before background",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+        )
+
+        vm.onAppBackgrounded()
+        advanceUntilIdle()
+        val backgroundStatus = vm.connectionStatus.value
+        assertTrue(
+            "background pause should be represented as Failed while app is not visible",
+            backgroundStatus is TmuxSessionViewModel.ConnectionStatus.Failed,
+        )
+        assertTrue(
+            (backgroundStatus as TmuxSessionViewModel.ConnectionStatus.Failed).message,
+            backgroundStatus.message.contains("Auto reconnect paused while PocketShell is in the background."),
+        )
+        assertEquals(
+            "backgrounding during retry delay must not connect",
+            0,
+            connector.connectCount,
+        )
+
+        vm.onAppForegrounded()
+        advanceUntilIdle()
+
+        assertEquals(
+            "foreground return must resume the paused reconnect automatically",
+            1,
+            connector.connectCount,
+        )
+        assertSame(reconnectClient, registry.clients.value[7L]?.client)
+        assertTrue(
+            "foreground resume should reconnect, got ${vm.connectionStatus.value}",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        val foregroundStatus = vm.connectionStatus.value
+        assertFalse(
+            "stale background-paused copy must not remain visible in foreground",
+            foregroundStatus.toString().contains("Auto reconnect paused while PocketShell is in the background."),
+        )
+    }
+
+    @Test
     fun writeInputToPaneSeparatesLeadingDashLiteralFromTmuxOptions() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()

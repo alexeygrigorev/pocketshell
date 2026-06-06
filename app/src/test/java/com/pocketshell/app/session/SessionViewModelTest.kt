@@ -36,6 +36,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import java.io.ByteArrayInputStream
@@ -1398,6 +1399,64 @@ class SessionViewModelTest {
 
         assertEquals("background disconnect must not start reconnect attempts", 0, connects)
         assertTrue("manual reconnect target remains available", vm.canReconnect.value)
+    }
+
+    @Test
+    fun rawSshForegroundReturnResumesBackgroundPausedAutoReconnect() = runTest {
+        val reconnectSession = FakeRawSshSession("reconnect")
+        val connector = QueueRawLeaseConnector(reconnectSession)
+        val vm = newVm(
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+
+        try {
+            vm.markRawShellDisconnectedForTest(
+                host = "alpha.example",
+                port = 2222,
+                user = "alex",
+                keyPath = "/tmp/test-key",
+            )
+            runCurrent()
+            assertTrue(
+                "disconnect must be waiting in auto-reconnect delay before background",
+                vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Reconnecting,
+            )
+
+            vm.onAppBackgrounded()
+            runCurrent()
+            val backgroundStatus = vm.connectionStatus.value
+            assertTrue(
+                "background pause should be represented as Failed while app is not visible",
+                backgroundStatus is SessionViewModel.ConnectionStatus.Failed,
+            )
+            assertTrue(
+                (backgroundStatus as SessionViewModel.ConnectionStatus.Failed).message,
+                backgroundStatus.message.contains("Auto reconnect paused while PocketShell is in the background."),
+            )
+            assertEquals(
+                "backgrounding during retry delay must not connect",
+                0,
+                connector.connectCount,
+            )
+
+            vm.onAppForegrounded()
+            waitUntil {
+                connector.connectCount == 1 &&
+                    vm.connectionStatus.value is SessionViewModel.ConnectionStatus.Connected
+            }
+
+            val foregroundStatus = vm.connectionStatus.value
+            assertFalse(
+                "stale background-paused copy must not remain visible in foreground",
+                foregroundStatus.toString().contains("Auto reconnect paused while PocketShell is in the background."),
+            )
+            assertTrue("manual reconnect remains available after foreground resume", vm.canReconnect.value)
+        } finally {
+            reconnectSession.startedShells.forEach { it.close() }
+            reconnectSession.close()
+            vm.terminalState.detachExternalProducer()
+        }
     }
 
     @Test

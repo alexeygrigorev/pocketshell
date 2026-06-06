@@ -55,6 +55,8 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import com.pocketshell.app.conversation.CONVERSATION_TOOL_COPY_TAG_PREFIX
+import com.pocketshell.app.conversation.ConversationCopyAction
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.UnsentPromptBanner
@@ -920,11 +922,16 @@ private fun ConversationToolCallRow(
                     .padding(top = 4.dp, start = 8.dp, end = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                ToolCallSection(label = "input", body = toolCall.input)
+                ToolCallSection(
+                    label = "input",
+                    body = toolCall.input,
+                    copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + toolCall.id + ":input",
+                )
                 if (result != null) {
                     ToolCallSection(
                         label = if (result.isError) "output (error)" else "output",
                         body = result.output,
+                        copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + toolCall.id + ":output",
                     )
                 }
             }
@@ -983,7 +990,11 @@ private fun ConversationSystemNoteRow(
                     .fillMaxWidth()
                     .padding(top = 4.dp, start = 8.dp, end = 4.dp),
             ) {
-                ToolCallSection(label = "content", body = note.content)
+                ToolCallSection(
+                    label = "content",
+                    body = note.content,
+                    copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + note.id + ":content",
+                )
             }
         }
     }
@@ -1003,23 +1014,43 @@ private fun ConversationToolResultRow(result: ConversationEvent.ToolResult) {
             fontWeight = FontWeight.Medium,
         )
         if (result.output.isNotEmpty()) {
-            ToolCallSection(label = "output", body = result.output)
+            ToolCallSection(
+                label = "output",
+                body = result.output,
+                copyTestTag = CONVERSATION_TOOL_COPY_TAG_PREFIX + result.id + ":output",
+            )
         }
     }
 }
 
 @Composable
-private fun ToolCallSection(label: String, body: String) {
+private fun ToolCallSection(
+    label: String,
+    body: String,
+    copyTestTag: String,
+) {
     if (body.isEmpty()) return
     val lineCount = body.count { it == '\n' } + 1
     val tooLong = lineCount > 200 || body.length > 5000
     Column(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = label,
-            color = PocketShellColors.TextMuted,
-            fontSize = 10.sp,
-            modifier = Modifier.padding(bottom = 2.dp),
-        )
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = label,
+                color = PocketShellColors.TextMuted,
+                fontSize = 10.sp,
+                modifier = Modifier.weight(1f),
+            )
+            ConversationCopyAction(
+                text = body,
+                testTag = copyTestTag,
+                clipboardLabel = "conversation tool $label",
+            )
+        }
         val base = Modifier
             .fillMaxWidth()
             .background(color = PocketShellColors.TermBg, shape = RoundedCornerShape(4.dp))

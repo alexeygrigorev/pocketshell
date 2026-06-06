@@ -1,9 +1,11 @@
 package com.pocketshell.app.conversation
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -24,7 +26,6 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.clickable
 import com.pocketshell.app.composer.MarkdownText
 import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.agents.ConversationRole
@@ -105,7 +106,7 @@ internal fun ConversationMessageTurn(
         ) {
             val isPending = event.sendState == MessageSendState.Pending
             val isFailed = event.sendState == MessageSendState.Failed
-            if (event.streaming || timestamp != null || isPending || isFailed) {
+            if (event.streaming || timestamp != null || isPending || isFailed || event.text.isNotBlank()) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically,
@@ -146,6 +147,11 @@ internal fun ConversationMessageTurn(
                             modifier = Modifier.testTag(CONVERSATION_TIMESTAMP_TAG_PREFIX + event.id),
                         )
                     }
+                    Spacer(modifier = Modifier.weight(1f))
+                    ConversationCopyAction(
+                        text = event.text,
+                        testTag = CONVERSATION_COPY_TAG_PREFIX + event.id,
+                    )
                 }
             }
             // Issue #493: render the message body at the Slice 0

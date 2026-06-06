@@ -2,6 +2,7 @@ package com.pocketshell.app.composer
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -13,6 +14,7 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -22,6 +24,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -49,6 +52,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
@@ -56,16 +60,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalView
@@ -77,6 +85,7 @@ import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.TextFieldValue
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -93,7 +102,10 @@ import com.pocketshell.core.storage.entity.PendingTranscriptionEntity
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
 import com.pocketshell.uikit.theme.PocketShellTheme
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.util.Locale
 
 /**
  * The Phase 1 prompt composer (issue #15). Visual target:
@@ -222,7 +234,13 @@ public fun PromptComposerSheet(
     ) { uris ->
         val stageAttachments = onStageAttachments ?: return@rememberLauncherForActivityResult
         if (uris.isNotEmpty()) {
-            viewModel.attachFiles(uris.size) {
+            val previews = uris.map { uri ->
+                PromptComposerViewModel.AttachmentPreview(
+                    uri = uri,
+                    mimeType = runCatching { context.contentResolver.getType(uri) }.getOrNull(),
+                )
+            }
+            viewModel.attachFiles(count = uris.size, previews = previews) {
                 stageAttachments(uris)
             }
         }
@@ -423,7 +441,7 @@ internal fun SheetContent(
     modifier: Modifier = Modifier,
     onSnippets: (() -> Unit)? = null,
     onAttachFiles: (() -> Unit)? = null,
-    // Issue #544: remove a single staged attachment chip by remote path.
+    // Issue #544/#566: remove a single staged attachment tile by remote path.
     // Defaults to a no-op so previews / legacy tests that don't stage
     // attachments keep compiling.
     onRemoveAttachment: (String) -> Unit = {},
@@ -701,12 +719,12 @@ internal fun SheetContent(
             Spacer(modifier = Modifier.height(8.dp))
         }
 
-        // Issue #544: staged attachments render as compact removable chips
-        // at the bottom of the composer (above the controls row), VS Code /
-        // Cursor style. The draft text stays clean while composing; the
-        // remote paths are folded into the outgoing prompt only at SEND.
+        // Issue #566: staged attachments render as compact square tiles at
+        // the bottom of the composer (above the controls row), ChatGPT /
+        // Claude style. The draft text stays clean while composing; remote
+        // paths are folded into the outgoing prompt only at SEND.
         if (state.attachments.isNotEmpty()) {
-            AttachmentChipRow(
+            AttachmentTileGrid(
                 attachments = state.attachments,
                 onRemove = onRemoveAttachment,
             )
@@ -1150,21 +1168,15 @@ private fun MicTriggerButton(
 }
 
 /**
- * Issue #544: the compact removable-chip row for staged attachments,
- * rendered at the bottom of the composer (VS Code / Cursor reference-file
- * style). Each chip shows the file name only — never the full remote path —
- * plus an `×` that removes just that attachment. Chips wrap onto multiple
- * lines via [FlowRow] so several attachments stay compact instead of
- * pushing the controls row off-screen.
- *
- * The visual recipe reuses the #461/#479 chip vocabulary (`AccentSoft`
- * fill + `BorderSoft` outline + small rounded corners), matching the dense
- * dev-tool language of the other chip rows (`WatchedFoldersChipRow`,
- * `CommandChip`).
+ * Issue #566: compact ChatGPT/Claude-style staged attachment tiles. Each
+ * attachment is a fixed square: image selections get a thumbnail when the
+ * local preview Uri is still readable; all other files get a typed file tile.
+ * The full file name stays in accessibility text while the visible label is
+ * constrained to the tile width, so long names cannot stretch the composer.
  */
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun AttachmentChipRow(
+private fun AttachmentTileGrid(
     attachments: List<PromptComposerViewModel.StagedAttachment>,
     onRemove: (String) -> Unit,
     modifier: Modifier = Modifier,
@@ -1177,47 +1189,210 @@ private fun AttachmentChipRow(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         attachments.forEach { attachment ->
-            Row(
+            AttachmentTile(
+                attachment = attachment,
+                onRemove = onRemove,
+            )
+        }
+    }
+}
+
+@Composable
+private fun AttachmentTile(
+    attachment: PromptComposerViewModel.StagedAttachment,
+    onRemove: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val shape = RoundedCornerShape(8.dp)
+    val isImage = attachment.isImageAttachment()
+    val context = LocalContext.current
+    val thumbnail by produceState<ImageBitmap?>(
+        initialValue = null,
+        key1 = attachment.previewUri,
+        key2 = attachment.mimeType,
+    ) {
+        val uri = attachment.previewUri
+        value = if (isImage && uri != null) {
+            withContext(Dispatchers.IO) {
+                decodeAttachmentThumbnail(context.contentResolver, uri)
+            }
+        } else {
+            null
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .size(ATTACHMENT_TILE_SIZE)
+            .clip(shape)
+            .background(
+                color = PocketShellColors.SurfaceElev,
+                shape = shape,
+            )
+            .border(
+                width = 1.dp,
+                color = PocketShellColors.BorderSoft,
+                shape = shape,
+            )
+            .semantics {
+                contentDescription = "Attachment ${attachment.displayName}"
+            }
+            .testTag(composerAttachmentChipTestTag(attachment.remotePath)),
+    ) {
+        if (thumbnail != null) {
+            Image(
+                bitmap = thumbnail!!,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            AttachmentTypeTile(
+                attachment = attachment,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
+        AttachmentTileLabel(
+            label = attachment.displayName,
+            imageBacked = thumbnail != null,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth(),
+        )
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.TopEnd)
+                .size(ATTACHMENT_TILE_REMOVE_TOUCH_SIZE)
+                .clickable(role = Role.Button) { onRemove(attachment.remotePath) }
+                .semantics { contentDescription = "Remove ${attachment.displayName}" }
+                .testTag(composerAttachmentRemoveTestTag(attachment.remotePath)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Box(
                 modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(2.dp)
+                    .size(ATTACHMENT_TILE_REMOVE_SIZE)
                     .background(
-                        color = PocketShellColors.SurfaceElev,
-                        shape = RoundedCornerShape(8.dp),
+                        color = PocketShellColors.Surface,
+                        shape = RoundedCornerShape(11.dp),
                     )
                     .border(
                         width = 1.dp,
                         color = PocketShellColors.BorderSoft,
-                        shape = RoundedCornerShape(8.dp),
-                    )
-                    .padding(start = 10.dp, end = 4.dp, top = 5.dp, bottom = 5.dp)
-                    .testTag(composerAttachmentChipTestTag(attachment.remotePath)),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        shape = RoundedCornerShape(11.dp),
+                    ),
+                contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = attachment.displayName,
+                    text = "×",
                     color = PocketShellColors.Text,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
                 )
-                Box(
-                    modifier = Modifier
-                        .size(20.dp)
-                        .clickable(role = Role.Button) { onRemove(attachment.remotePath) }
-                        .semantics { contentDescription = "Remove ${attachment.displayName}" }
-                        .testTag(composerAttachmentRemoveTestTag(attachment.remotePath)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = "×",
-                        color = PocketShellColors.TextSecondary,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                }
             }
         }
     }
 }
+
+@Composable
+private fun AttachmentTypeTile(
+    attachment: PromptComposerViewModel.StagedAttachment,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier.padding(start = 6.dp, end = 6.dp, top = 8.dp, bottom = 18.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = attachment.fileExtensionLabel(),
+            color = PocketShellColors.Accent,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun AttachmentTileLabel(
+    label: String,
+    imageBacked: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val background = if (imageBacked) {
+        PocketShellColors.TermBg.copy(alpha = 0.72f)
+    } else {
+        Color.Transparent
+    }
+    Box(
+        modifier = modifier
+            .background(background)
+            .padding(start = 5.dp, end = 5.dp, bottom = 4.dp, top = 2.dp),
+    ) {
+        Text(
+            text = label,
+            color = if (imageBacked) PocketShellColors.TermText else PocketShellColors.TextSecondary,
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Medium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+private fun decodeAttachmentThumbnail(
+    resolver: android.content.ContentResolver,
+    uri: Uri,
+): ImageBitmap? {
+    return runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input, null, bounds)
+        }
+        val sampleSize = thumbnailSampleSize(bounds, targetSizePx = 192)
+        val options = BitmapFactory.Options().apply { inSampleSize = sampleSize }
+        resolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input, null, options)?.asImageBitmap()
+        }
+    }.getOrNull()
+}
+
+private fun thumbnailSampleSize(options: BitmapFactory.Options, targetSizePx: Int): Int {
+    val height = options.outHeight
+    val width = options.outWidth
+    var sampleSize = 1
+    if (height > targetSizePx || width > targetSizePx) {
+        var halfHeight = height / 2
+        var halfWidth = width / 2
+        while (halfHeight / sampleSize >= targetSizePx && halfWidth / sampleSize >= targetSizePx) {
+            sampleSize *= 2
+        }
+    }
+    return sampleSize.coerceAtLeast(1)
+}
+
+private fun PromptComposerViewModel.StagedAttachment.isImageAttachment(): Boolean {
+    if (mimeType?.startsWith("image/") == true) return true
+    return displayName.substringAfterLast('.', missingDelimiterValue = "")
+        .lowercase(Locale.ROOT) in IMAGE_ATTACHMENT_EXTENSIONS
+}
+
+private fun PromptComposerViewModel.StagedAttachment.fileExtensionLabel(): String {
+    val extension = displayName.substringAfterLast('.', missingDelimiterValue = "")
+        .takeIf { it.isNotBlank() }
+        ?.uppercase(Locale.ROOT)
+        ?.take(5)
+    return extension ?: "FILE"
+}
+
+private val IMAGE_ATTACHMENT_EXTENSIONS = setOf("png", "jpg", "jpeg", "gif", "webp", "bmp", "heic", "heif")
+internal val ATTACHMENT_TILE_SIZE = 64.dp
+internal val ATTACHMENT_TILE_REMOVE_TOUCH_SIZE = 48.dp
+private val ATTACHMENT_TILE_REMOVE_SIZE = 22.dp
 
 /**
  * Issue #453: paperclip attach button (40dp tap target). Renders the
@@ -1839,16 +2014,16 @@ internal const val COMPOSER_SNIPPETS_TAG = "prompt-composer-snippets"
 internal const val COMPOSER_ATTACHMENT_PROGRESS_TAG = "prompt-composer-attachment-progress"
 
 /**
- * Issue #544: the staged-attachment chip row (FlowRow) at the bottom of the
- * composer. Present only while at least one attachment is staged.
+ * Historic tag for the staged-attachment tile grid (FlowRow) at the bottom of
+ * the composer. Present only while at least one attachment is staged.
  */
 internal const val COMPOSER_ATTACHMENT_CHIPS_TAG = "prompt-composer-attachment-chips"
 
-/** Issue #544: per-chip tag, keyed by the attachment's remote path. */
+/** Historic per-tile tag, keyed by the attachment's remote path. */
 internal fun composerAttachmentChipTestTag(remotePath: String): String =
     "prompt-composer-attachment-chip:$remotePath"
 
-/** Issue #544: per-chip `×` remove button tag, keyed by remote path. */
+/** Historic per-tile `×` remove button tag, keyed by remote path. */
 internal fun composerAttachmentRemoveTestTag(remotePath: String): String =
     "prompt-composer-attachment-remove:$remotePath"
 

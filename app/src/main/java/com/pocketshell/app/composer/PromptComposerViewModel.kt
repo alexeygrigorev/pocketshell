@@ -1,6 +1,7 @@
 package com.pocketshell.app.composer
 
 import android.Manifest
+import android.net.Uri
 import androidx.annotation.RequiresPermission
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
@@ -258,14 +259,15 @@ public class PromptComposerViewModel @Inject constructor(
     /**
      * Stage selected files through the host screen's uploader and add the
      * resulting remote paths to the structured [UiState.attachments] list
-     * (issue #544) — the draft text is NEVER mutated. Each staged file
-     * becomes a removable chip; the "Attached files:" suffix is composed
+     * (issue #544/#566) — the draft text is NEVER mutated. Each staged file
+     * becomes a removable tile; the "Attached files:" suffix is composed
      * from this list only at SEND time ([dispatchSendNow]). The existing
      * draft is never cleared before the upload finishes, so a failed upload
      * leaves the user's prompt intact and actionable error copy visible.
      */
     public fun attachFiles(
         count: Int,
+        previews: List<AttachmentPreview> = emptyList(),
         stage: suspend () -> Result<List<String>>,
     ) {
         if (count <= 0 || attachmentJob?.isActive == true) return
@@ -288,16 +290,24 @@ public class PromptComposerViewModel @Inject constructor(
                         }
                         return@fold
                     }
-                    // Issue #544: append the newly staged paths to the
-                    // structured chip list, de-duplicating by remote path so
-                    // re-attaching the same file does not double a chip. The
+                    // Issue #544/#566: append the newly staged paths to the
+                    // structured tile list, de-duplicating by remote path so
+                    // re-attaching the same file does not double a tile. The
                     // draft text is intentionally left untouched.
                     _uiState.update { current ->
                         val existing = current.attachments.map { it.remotePath }.toSet()
-                        val added = paths
+                        val uniquePaths = paths
                             .filter { it.isNotBlank() && it !in existing }
                             .distinct()
-                            .map { StagedAttachment(remotePath = it, displayName = attachmentDisplayName(it)) }
+                        val added = uniquePaths.map { path ->
+                            val preview = previews.getOrNull(paths.indexOf(path))
+                            StagedAttachment(
+                                remotePath = path,
+                                displayName = attachmentDisplayName(path),
+                                previewUri = preview?.uri,
+                                mimeType = preview?.mimeType,
+                            )
+                        }
                         current.copy(
                             attachments = current.attachments + added,
                             attachmentUpload = AttachmentUploadState.Idle,
@@ -319,16 +329,16 @@ public class PromptComposerViewModel @Inject constructor(
 
     /**
      * Issue #560: pre-load an already-uploaded remote file as a composer
-     * attachment chip, without re-running an upload. The share-into-session
+     * attachment tile, without re-running an upload. The share-into-session
      * flow uploads the shared file to the session's `.pocketshell/attachments`
      * scope via the exact #544 [PromptAttachmentStager] mechanic, then hands
      * the resulting remote path here so the user lands in the composer with
-     * the file already staged as a removable chip — ready to type a message
+     * the file already staged as a removable tile — ready to type a message
      * and Send. The draft text is never touched.
      *
      * De-duplicates by remote path so a re-delivered intent (e.g. the
      * activity recreating across a configuration change) cannot double the
-     * chip. No-op on a blank path.
+     * tile. No-op on a blank path.
      */
     public fun seedAttachment(remotePath: String) {
         val trimmed = remotePath.trim()
@@ -349,10 +359,10 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
-     * Issue #544: remove a single staged attachment chip by its remote path.
-     * The draft text is untouched; removing every chip leaves the prompt
+     * Issue #544/#566: remove a single staged attachment tile by its remote path.
+     * The draft text is untouched; removing every tile leaves the prompt
      * exactly as the user typed it, so the "Attached files:" suffix is only
-     * composed at send time from whatever chips remain.
+     * composed at send time from whatever tiles remain.
      */
     public fun removeAttachment(remotePath: String) {
         _uiState.update { current ->
@@ -443,7 +453,7 @@ public class PromptComposerViewModel @Inject constructor(
         val attachments = _uiState.value.attachments
         // Issue #544: compose the outgoing prompt = the user's clean draft
         // + the "Attached files:" suffix appended at the END from whatever
-        // chips remain at send time. The draft stayed clean while composing;
+        // tiles remain at send time. The draft stayed clean while composing;
         // the agent still receives the remote paths.
         val text = appendAttachmentPaths(draft, attachments.map { it.remotePath })
         // Send when there is either typed text or at least one attachment.
@@ -460,7 +470,7 @@ public class PromptComposerViewModel @Inject constructor(
         // collector is mid-recreate (dismiss → re-open) is delivered to
         // the next collector instead of being dropped.
         _sendRequests.trySend(SendRequest(text = text, withEnter = withEnter))
-        // Issue #544: clear the staged chips now that they've been folded
+        // Issue #544/#566: clear the staged tiles now that they've been folded
         // into the dispatched prompt, so the next composer open is a clean
         // slate with no stale attachments.
         if (attachments.isNotEmpty()) {
@@ -1296,21 +1306,36 @@ public class PromptComposerViewModel @Inject constructor(
     }
 
     /**
+     * Optional local preview metadata captured at selection time. The remote
+     * path remains the stable attachment identity; this is only for rendering
+     * a compact image thumbnail while the staged item is visible in the
+     * composer.
+     */
+    public data class AttachmentPreview(
+        val uri: Uri,
+        val mimeType: String?,
+    )
+
+    /**
      * Issue #544: a single staged attachment held as structured state, not
-     * folded into the draft text. The composer renders one removable chip
-     * per entry (file name only); the full [remotePath] is appended to the
-     * outgoing prompt's "Attached files:" suffix at SEND time so the agent
-     * still receives the references.
+     * folded into the draft text. The composer renders one removable tile
+     * per entry; the full [remotePath] is appended to the outgoing prompt's
+     * "Attached files:" suffix at SEND time so the agent still receives the
+     * references.
      *
      * @property remotePath the absolute remote path the file was uploaded to
      *   (the stable identity used by [removeAttachment] and the send-time
      *   composition). Unique per staged file.
-     * @property displayName the short file name shown on the chip — the last
+     * @property displayName the short file name shown on the tile — the last
      *   path segment, never the full remote path.
+     * @property previewUri optional local content Uri for image thumbnails.
+     * @property mimeType optional MIME type for thumbnail/icon selection.
      */
     public data class StagedAttachment(
         val remotePath: String,
         val displayName: String,
+        val previewUri: Uri? = null,
+        val mimeType: String? = null,
     )
 
     /**
@@ -1358,8 +1383,8 @@ public class PromptComposerViewModel @Inject constructor(
         val silenceThresholdSeconds: Float = 0f,
         val attachmentUpload: AttachmentUploadState = AttachmentUploadState.Idle,
         /**
-         * Issue #544: staged attachments held as structured state and
-         * rendered as compact removable chips at the bottom of the composer.
+         * Issue #544/#566: staged attachments held as structured state and
+         * rendered as compact removable tiles at the bottom of the composer.
          * Never folded into [draft]; the "Attached files:" suffix is composed
          * from this list only at SEND time. Cleared once a send dispatches.
          */
@@ -1647,10 +1672,10 @@ internal fun appendAttachmentPaths(draft: String, paths: List<String>): String {
 }
 
 /**
- * Issue #544: derive the short chip label from a staged remote path — the
+ * Issue #544/#566: derive the short tile label from a staged remote path — the
  * last path segment (file name), never the full remote path. Trailing
  * slashes are trimmed first; a path that is all slashes or blank falls back
- * to the original string so the chip is never empty.
+ * to the original string so the tile is never empty.
  */
 internal fun attachmentDisplayName(remotePath: String): String {
     val trimmed = remotePath.trimEnd('/')

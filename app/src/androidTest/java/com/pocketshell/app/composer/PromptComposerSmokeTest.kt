@@ -1,14 +1,20 @@
 package com.pocketshell.app.composer
 
+import android.graphics.Bitmap
+import android.net.Uri
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.assertHeightIsEqualTo
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertWidthIsEqualTo
+import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -35,9 +41,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
 
 /**
  * Emulator hooks for issue #68.
@@ -114,6 +122,89 @@ class PromptComposerSmokeTest {
         // persistent Auto-send toggle).
         compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
+    }
+
+    @Test
+    fun attachmentsRenderAsSquareTilesWrapAndRemoveFromCorner() {
+        val first = "~/.pocketshell/attachments/host-1/20260606-120000-01-very-long-file-name-that-should-not-stretch-layout.txt"
+        val image = "~/.pocketshell/attachments/host-1/20260606-120000-02-screenshot.png"
+        val third = "~/.pocketshell/attachments/host-1/20260606-120000-03-data.csv"
+        val longDisplayName = "20260606-120000-01-very-long-file-name-that-should-not-stretch-layout.txt"
+        val imageUri = writeTinyPreviewPng("composer-attachment-preview.png")
+        var state by mutableStateOf(
+            PromptComposerViewModel.UiState(
+                attachments = listOf(
+                    PromptComposerViewModel.StagedAttachment(
+                        remotePath = first,
+                        displayName = longDisplayName,
+                    ),
+                    PromptComposerViewModel.StagedAttachment(
+                        remotePath = image,
+                        displayName = "20260606-120000-02-screenshot.png",
+                        previewUri = imageUri,
+                        mimeType = "image/png",
+                    ),
+                    PromptComposerViewModel.StagedAttachment(
+                        remotePath = third,
+                        displayName = "20260606-120000-03-data.csv",
+                    ),
+                ),
+            ),
+        )
+        val removed = mutableListOf<String>()
+
+        compose.setContent {
+            PocketShellTheme {
+                Box(modifier = Modifier.width(180.dp)) {
+                    SheetContent(
+                        state = state,
+                        onClose = {},
+                        onDraftChange = {},
+                        onMicTap = {},
+                        onSend = {},
+                        onRemoveAttachment = { remotePath ->
+                            removed += remotePath
+                            state = state.copy(
+                                attachments = state.attachments.filterNot { it.remotePath == remotePath },
+                            )
+                        },
+                    )
+                }
+            }
+        }
+
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(first))
+            .assertWidthIsEqualTo(ATTACHMENT_TILE_SIZE)
+            .assertHeightIsEqualTo(ATTACHMENT_TILE_SIZE)
+        compose.onNodeWithTag(composerAttachmentChipTestTag(image))
+            .assertWidthIsEqualTo(ATTACHMENT_TILE_SIZE)
+            .assertHeightIsEqualTo(ATTACHMENT_TILE_SIZE)
+        compose.onNode(hasContentDescription("Attachment $longDisplayName")).assertExists()
+        compose.onNodeWithTag(composerAttachmentRemoveTestTag(image))
+            .assert(hasContentDescription("Remove 20260606-120000-02-screenshot.png"))
+            .assert(hasClickAction())
+            .assertWidthIsEqualTo(ATTACHMENT_TILE_REMOVE_TOUCH_SIZE)
+            .assertHeightIsEqualTo(ATTACHMENT_TILE_REMOVE_TOUCH_SIZE)
+
+        val firstBounds = compose.onNodeWithTag(composerAttachmentChipTestTag(first))
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val imageBounds = compose.onNodeWithTag(composerAttachmentChipTestTag(image))
+            .fetchSemanticsNode()
+            .boundsInRoot
+        val thirdBounds = compose.onNodeWithTag(composerAttachmentChipTestTag(third))
+            .fetchSemanticsNode()
+            .boundsInRoot
+        assertEquals(firstBounds.top, imageBounds.top, 1f)
+        assertTrue("third tile should wrap below the first row", thirdBounds.top > firstBounds.top)
+
+        compose.onNodeWithTag(composerAttachmentRemoveTestTag(image)).performClick()
+
+        assertEquals(listOf(image), removed)
+        compose.onNodeWithTag(composerAttachmentChipTestTag(image)).assertDoesNotExist()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(first)).assertIsDisplayed()
+        compose.onNodeWithTag(composerAttachmentChipTestTag(third)).assertIsDisplayed()
     }
 
     @Test
@@ -245,5 +336,20 @@ class PromptComposerSmokeTest {
                 )
             }
         }
+    }
+
+    private fun writeTinyPreviewPng(name: String): Uri {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val file = File(context.cacheDir, name)
+        val bitmap = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888)
+        try {
+            bitmap.eraseColor(android.graphics.Color.RED)
+            file.outputStream().use { output ->
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)
+            }
+        } finally {
+            bitmap.recycle()
+        }
+        return Uri.fromFile(file)
     }
 }

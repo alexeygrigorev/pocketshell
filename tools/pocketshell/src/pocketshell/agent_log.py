@@ -2,11 +2,12 @@
 
 Mirrors the per-engine JSONL conversation-log reads the Android app
 currently runs over SSH (see ``AgentConversationRepository`` in
-``app/src/main/java/com/pocketshell/app/session/``). The maintainer's
-2026-05-27 note on issue #170 confirmed the strategy: no reimplementation
-of the parsers themselves — this subcommand just reads the raw JSONL so
-the Android client (and the planned IPC daemon, #219) can cache + serve
-the same bytes the agent CLI wrote to disk.
+``app/src/main/java/com/pocketshell/app/session/``). The default command
+still reads the raw JSONL so the Android client (and the planned IPC
+daemon, #219) can cache + serve the same bytes the agent CLI wrote to
+disk. The ``handoff`` subcommand adds a deliberately smaller export path:
+it parses only user/assistant prose needed for cross-agent continuation
+and skips tool calls/results by default.
 
 Per-engine canonical paths (matching the Kotlin
 ``AgentConversationRepository.detectionCommand`` enumeration):
@@ -32,10 +33,10 @@ Why direct file read instead of a subprocess delegation:
   itself via ``ssh exec 'tail -n N <path>'``. There is no ``quse``- or
   ``tmuxctl``-shaped binary on the host to wrap; reimplementing the
   ``tail -n N`` step in Python is the smallest reasonable parity layer.
-- The JSONL files are append-only, plain text, one event per line. No
-  parsing logic from ``ClaudeCodeParser`` / ``CodexParser`` /
-  ``OpenCodeReader`` is duplicated here — we emit raw lines verbatim.
-  The Kotlin parsers keep owning the structural contract.
+- The JSONL files are append-only, plain text, one event per line. The
+  default read path emits raw lines verbatim. The ``handoff`` path only
+  extracts the portable message subset (human/user + assistant text) so
+  it can produce a compact Markdown artifact without raw tool JSON.
 - ``--json`` wraps the same raw lines in a small envelope (``engine``,
   ``session``, ``path``, ``lines``, ``count``) so machine consumers
   (the planned daemon, integration tests) can pin to a stable shape
@@ -46,9 +47,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
 
 import click
 
@@ -63,6 +66,30 @@ import click
 #          daemon consumer can tell "session id is wrong" apart from
 #          "binary is missing".
 _EXIT_LOG_NOT_FOUND = 66
+_DEFAULT_HANDOFF_MAX_TURNS = 30
+_DEFAULT_HANDOFF_MAX_CHARS = 20_000
+_HANDOFF_PROMPT = (
+    "Read this previous agent conversation and continue from the current state. "
+    "Use only the user and assistant messages below as context; tool calls and "
+    "tool results were omitted. Ask for clarification only if critical context "
+    "is missing."
+)
+_CLAUDE_SYSTEM_NOTE_TAGS = [
+    "system-reminder",
+    "command-name",
+    "command-args",
+    "command-message",
+    "command-stdout",
+    "local-command-stdout",
+]
+
+
+@dataclass(frozen=True)
+class HandoffMessage:
+    """A compact transcript message for cross-agent handoff output."""
+
+    role: str
+    text: str
 
 
 def _claude_projects_root() -> Path:
@@ -225,6 +252,251 @@ def _tail(lines: Iterable[str], n: Optional[int]) -> List[str]:
     return materialised[-n:]
 
 
+def _parse_json_line(line: str) -> Optional[dict[str, Any]]:
+    """Parse one JSONL row, returning ``None`` for malformed/partial rows."""
+    try:
+        value = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _normalise_text(text: str) -> str:
+    """Trim surrounding whitespace and drop blank transcript fragments."""
+    return text.strip()
+
+
+def _text_from_scalar(value: Any) -> Optional[str]:
+    if isinstance(value, str):
+        text = _normalise_text(value)
+        return text if text else None
+    return None
+
+
+def _text_parts_from_content(value: Any, allowed_types: set[str]) -> List[str]:
+    """Extract plain text content blocks without tool-call/tool-result blocks."""
+    if isinstance(value, str):
+        text = _normalise_text(value)
+        return [text] if text else []
+    if isinstance(value, dict):
+        block_type = value.get("type")
+        if isinstance(block_type, str) and block_type not in allowed_types:
+            return []
+        text = _text_from_scalar(value.get("text"))
+        if text is not None:
+            return [text]
+        return _text_parts_from_content(value.get("content"), allowed_types)
+    if isinstance(value, list):
+        parts: List[str] = []
+        for item in value:
+            parts.extend(_text_parts_from_content(item, allowed_types))
+        return parts
+    return []
+
+
+def _strip_claude_system_notes(text: str) -> str:
+    """Remove Claude XML-style system-note blocks from otherwise-human text."""
+    cleaned = text
+    for tag in _CLAUDE_SYSTEM_NOTE_TAGS:
+        cleaned = re.sub(
+            rf"(?is)<{re.escape(tag)}(?:\s[^>]*)?>.*?</{re.escape(tag)}>",
+            "",
+            cleaned,
+        )
+    return _normalise_text(cleaned)
+
+
+def _claude_messages_from_row(row: dict[str, Any]) -> List[HandoffMessage]:
+    message = row.get("message") if isinstance(row.get("message"), dict) else None
+    role = row.get("role") or (message or {}).get("role") or row.get("type")
+    if role not in {"user", "assistant"}:
+        return []
+
+    content = (message or {}).get("content") if message is not None else row.get("content")
+    fragments = _text_parts_from_content(content, {"text"})
+    messages: List[HandoffMessage] = []
+    for fragment in fragments:
+        text = _strip_claude_system_notes(fragment)
+        if text:
+            messages.append(HandoffMessage(role=role, text=text))
+    return messages
+
+
+def _codex_message_text(item: dict[str, Any]) -> Optional[str]:
+    for key in ("message", "text"):
+        text = _text_from_scalar(item.get(key))
+        if text is not None:
+            return text
+    parts = _text_parts_from_content(item.get("content"), {"input_text", "output_text", "text"})
+    return "\n\n".join(parts).strip() if parts else None
+
+
+def _codex_messages_from_row(row: dict[str, Any]) -> List[HandoffMessage]:
+    item = row.get("payload") if isinstance(row.get("payload"), dict) else None
+    if item is None:
+        item = row.get("item") if isinstance(row.get("item"), dict) else row
+
+    item_type = item.get("type") or row.get("type")
+    if item_type == "message":
+        role = item.get("role")
+        if role not in {"user", "assistant"}:
+            return []
+    elif item_type == "user_message":
+        role = "user"
+    elif item_type in {"assistant_message", "agent_message"}:
+        role = "assistant"
+    else:
+        return []
+
+    text = _codex_message_text(item)
+    return [HandoffMessage(role=role, text=text)] if text else []
+
+
+def _json_object_from_string(value: Any) -> Optional[dict[str, Any]]:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _opencode_role(row: dict[str, Any], message_data: Optional[dict[str, Any]]) -> Optional[str]:
+    role = row.get("message_role") or row.get("messageRole") or row.get("role")
+    if role is None and message_data is not None:
+        role = message_data.get("role")
+    return role if role in {"user", "assistant"} else None
+
+
+def _opencode_part_text(part: Optional[dict[str, Any]]) -> Optional[str]:
+    if part is None:
+        return None
+    part_type = part.get("type")
+    if part_type in {"tool_use", "tool", "tool_result", "function_call_output", "reasoning"}:
+        return None
+    if isinstance(part_type, str) and part_type not in {"input_text", "output_text", "text"}:
+        return None
+    parts = _text_parts_from_content(part, {"input_text", "output_text", "text"})
+    return "\n\n".join(parts).strip() if parts else None
+
+
+def _opencode_messages_from_row(row: dict[str, Any]) -> List[HandoffMessage]:
+    message_data = _json_object_from_string(
+        row.get("message_data") or row.get("messageData") or row.get("msg_data")
+    )
+    role = _opencode_role(row, message_data)
+    if role is None:
+        return []
+
+    part_data = _json_object_from_string(row.get("part_data") or row.get("partData"))
+    part_text = _opencode_part_text(part_data)
+    if part_text:
+        return [HandoffMessage(role=role, text=part_text)]
+
+    fallback = (
+        _text_from_scalar(row.get("message_content"))
+        or _text_from_scalar(row.get("messageContent"))
+        or _text_from_scalar(row.get("content"))
+        or _text_from_scalar(row.get("text"))
+        or _opencode_part_text(message_data)
+    )
+    return [HandoffMessage(role=role, text=fallback)] if fallback else []
+
+
+def _handoff_messages_from_lines(engine: str, lines: Iterable[str]) -> List[HandoffMessage]:
+    """Extract user/assistant prose from raw agent JSONL rows."""
+    messages: List[HandoffMessage] = []
+    for line in lines:
+        row = _parse_json_line(line)
+        if row is None:
+            continue
+        if engine == "claude":
+            messages.extend(_claude_messages_from_row(row))
+        elif engine == "codex":
+            messages.extend(_codex_messages_from_row(row))
+        elif engine == "opencode":
+            messages.extend(_opencode_messages_from_row(row))
+    return messages
+
+
+def _bound_handoff_messages(
+    messages: List[HandoffMessage],
+    max_turns: int,
+) -> tuple[List[HandoffMessage], int]:
+    if max_turns <= 0 or max_turns >= len(messages):
+        return list(messages), 0
+    omitted = len(messages) - max_turns
+    return messages[-max_turns:], omitted
+
+
+def _render_message(message: HandoffMessage) -> str:
+    title = "User" if message.role == "user" else "Assistant"
+    return f"### {title}\n\n{message.text}\n"
+
+
+def _render_handoff_markdown(
+    *,
+    engine: str,
+    session: str,
+    messages: List[HandoffMessage],
+    omitted_for_turns: int,
+    max_turns: int,
+    max_chars: int,
+) -> str:
+    session_name = session.removesuffix(".jsonl")
+    header_parts = [
+        "# Agent Handoff",
+        "",
+        "## Ready Prompt",
+        "",
+        _HANDOFF_PROMPT,
+        "",
+        "## Source",
+        "",
+        f"- Engine: {engine}",
+        f"- Session: {session_name}",
+        f"- Messages included: {len(messages)}",
+        f"- Max turns: {max_turns}",
+        f"- Max chars: {max_chars}",
+        "- Omitted by default: tool calls, tool results, command output, reasoning, and system notes",
+        "",
+        "## Conversation",
+        "",
+    ]
+    if omitted_for_turns:
+        header_parts.extend([f"[{omitted_for_turns} earlier message(s) omitted by --max-turns.]", ""])
+
+    header = "\n".join(header_parts)
+    body = "\n".join(_render_message(message) for message in messages)
+    output = header + body
+    if len(output) <= max_chars:
+        return output
+
+    marker = "[Earlier conversation text omitted to fit --max-chars.]\n\n"
+    budget = max_chars - len(header) - len(marker)
+    if budget > 0:
+        trimmed_body = body[-budget:].lstrip()
+        output = header + marker + trimmed_body
+    if len(output) <= max_chars:
+        return output
+
+    # Extremely small limits cannot fit the complete header. Keep the ready
+    # prompt at the front and hard-bound the artifact.
+    truncated = output[:max_chars].rstrip()
+    return truncated + "\n" if len(truncated) < max_chars else truncated
+
+
+def _write_handoff_output(text: str, out: Optional[Path]) -> None:
+    if out is None:
+        sys.stdout.write(text)
+        if not text.endswith("\n"):
+            sys.stdout.write("\n")
+        return
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
+
+
 def _emit_text(lines: List[str]) -> None:
     """Write each line followed by a newline to stdout.
 
@@ -277,15 +549,16 @@ def _emit_json(
     sys.stdout.write("\n")
 
 
-@click.command(
+@click.group(
     "agent-log",
+    invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 @click.option(
     "--session",
     "-s",
     "session",
-    required=True,
+    required=False,
     type=str,
     help=(
         "Session id — usually the JSONL file's basename. Accepts both "
@@ -296,7 +569,7 @@ def _emit_json(
     "--engine",
     "-e",
     "engine",
-    required=True,
+    required=False,
     type=click.Choice(["claude", "codex", "opencode"], case_sensitive=False),
     help="Which agent CLI's log to read.",
 )
@@ -328,8 +601,8 @@ def _emit_json(
 @click.pass_context
 def agent_log_command(
     ctx: click.Context,
-    session: str,
-    engine: str,
+    session: Optional[str],
+    engine: Optional[str],
     cwd: Optional[str],
     tail_count: Optional[int],
     json_output: bool,
@@ -348,6 +621,13 @@ def agent_log_command(
             wrong engine / agent has not written anything yet).
     - 2  -> bad invocation (handled by Click).
     """
+    if ctx.invoked_subcommand is not None:
+        return
+    if session is None:
+        raise click.UsageError("Missing option '--session' / '-s'.")
+    if engine is None:
+        raise click.UsageError("Missing option '--engine' / '-e'.")
+
     engine_normalised = engine.lower()
     path = _resolve_log_path(engine_normalised, session, cwd)
     if path is None:
@@ -371,6 +651,108 @@ def agent_log_command(
         _emit_json(engine_normalised, session, path, lines)
     else:
         _emit_text(lines)
+
+
+@agent_log_command.command(
+    "handoff",
+    context_settings={"help_option_names": ["-h", "--help"]},
+)
+@click.option(
+    "--session",
+    "-s",
+    "session",
+    required=True,
+    type=str,
+    help=(
+        "Session id — usually the JSONL file's basename. Accepts both "
+        "`abc123` and `abc123.jsonl`."
+    ),
+)
+@click.option(
+    "--engine",
+    "-e",
+    "engine",
+    required=True,
+    type=click.Choice(["claude", "codex", "opencode"], case_sensitive=False),
+    help="Which agent CLI's log to export.",
+)
+@click.option(
+    "--cwd",
+    "cwd",
+    type=str,
+    default=None,
+    help=(
+        "Working directory the agent was launched from. Only used for "
+        "Claude Code; ignored for codex and opencode."
+    ),
+)
+@click.option(
+    "--max-turns",
+    "max_turns",
+    type=click.IntRange(min=0),
+    default=_DEFAULT_HANDOFF_MAX_TURNS,
+    show_default=True,
+    help=(
+        "Include at most the last N user/assistant messages after filtering. "
+        "Use 0 for all filtered messages."
+    ),
+)
+@click.option(
+    "--max-chars",
+    "max_chars",
+    type=click.IntRange(min=500),
+    default=_DEFAULT_HANDOFF_MAX_CHARS,
+    show_default=True,
+    help="Hard cap for the rendered Markdown artifact.",
+)
+@click.option(
+    "--out",
+    "out",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write the Markdown artifact to this file. Default: stdout.",
+)
+def handoff_command(
+    session: str,
+    engine: str,
+    cwd: Optional[str],
+    max_turns: int,
+    max_chars: int,
+    out: Optional[Path],
+) -> None:
+    """Export a compact user/assistant transcript for another agent.
+
+    The handoff artifact is Markdown/plain text with a ready-to-paste
+    continuation prompt. Tool calls, tool results, reasoning, command
+    output, and system-note records are excluded by default.
+    """
+    engine_normalised = engine.lower()
+    path = _resolve_log_path(engine_normalised, session, cwd)
+    if path is None:
+        click.echo(
+            (
+                f"pocketshell: no {engine_normalised} session log found for "
+                f"`{session}`. Looked under "
+                f"{_search_root_for(engine_normalised)} "
+                f"(use --cwd for Claude if the session was launched from a "
+                f"specific project directory)."
+            ),
+            err=True,
+        )
+        raise click.exceptions.Exit(_EXIT_LOG_NOT_FOUND)
+
+    raw_lines = _read_lines(path)
+    messages = _handoff_messages_from_lines(engine_normalised, raw_lines)
+    bounded_messages, omitted_for_turns = _bound_handoff_messages(messages, max_turns)
+    output = _render_handoff_markdown(
+        engine=engine_normalised,
+        session=session,
+        messages=bounded_messages,
+        omitted_for_turns=omitted_for_turns,
+        max_turns=max_turns,
+        max_chars=max_chars,
+    )
+    _write_handoff_output(output, out)
 
 
 def _search_root_for(engine: str) -> str:

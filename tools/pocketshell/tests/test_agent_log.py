@@ -17,6 +17,10 @@ The third-PR scope exercises:
 - `--tail N` returns only the last N rows.
 - `--json` wraps the raw lines in a `{engine, session, path, count,
   lines}` envelope.
+- `pocketshell agent-log handoff ...` emits a compact Markdown handoff
+  prompt containing only user/assistant prose.
+- The handoff path excludes tool calls/results and is bounded by
+  `--max-turns` / `--max-chars`.
 - A bare session id (no `.jsonl` suffix) and an explicit `<id>.jsonl`
   both resolve to the same file.
 - Missing log file exits 66 (`EX_NOINPUT`) with a friendly stderr hint.
@@ -107,6 +111,18 @@ def test_agent_log_help_lists_engine_session_tail_json_flags() -> None:
     assert "claude" in lowered
     assert "codex" in lowered
     assert "opencode" in lowered
+
+
+def test_agent_log_handoff_help_lists_export_bounds() -> None:
+    runner = CliRunner()
+    result = runner.invoke(agent_log_command, ["handoff", "--help"])
+    assert result.exit_code == 0, result.output
+    lowered = result.output.lower()
+    assert "--engine" in lowered
+    assert "--session" in lowered
+    assert "--max-turns" in lowered
+    assert "--max-chars" in lowered
+    assert "--out" in lowered
 
 
 # ----- Claude resolution ---------------------------------------------
@@ -357,6 +373,191 @@ def test_json_envelope_with_tail(fake_home: Path) -> None:
     assert envelope["engine"] == "codex"
     assert envelope["count"] == 2
     assert envelope["lines"] == [json.dumps(e, sort_keys=True) for e in events[-2:]]
+
+
+# ----- handoff export ------------------------------------------------
+
+
+def test_handoff_claude_filters_tool_calls_results_and_system_notes(fake_home: Path) -> None:
+    session = "handoff-claude"
+    events = [
+        {
+            "type": "user",
+            "uuid": "u1",
+            "message": {
+                "role": "user",
+                "content": (
+                    "<system-reminder>The date has changed.</system-reminder>\n"
+                    "Please inspect the failing test."
+                ),
+            },
+        },
+        {
+            "type": "assistant",
+            "uuid": "a1",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "I'll inspect the focused test."},
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_1",
+                        "name": "Bash",
+                        "input": {"command": "pytest -q"},
+                    },
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_1",
+                        "content": "FAILED test output",
+                        "is_error": True,
+                    },
+                    {"type": "text", "text": "The likely fix is in the parser."},
+                ],
+            },
+        },
+    ]
+    log_path = fake_home / ".claude" / "projects" / "-home-handoff" / f"{session}.jsonl"
+    _write_jsonl(log_path, events)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agent_log_command,
+        ["handoff", "--engine", "claude", "--session", session, "--cwd", "/home/handoff"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Read this previous agent conversation" in result.output
+    assert "### User" in result.output
+    assert "Please inspect the failing test." in result.output
+    assert "### Assistant" in result.output
+    assert "I'll inspect the focused test." in result.output
+    assert "The likely fix is in the parser." in result.output
+    assert "toolu_1" not in result.output
+    assert "pytest -q" not in result.output
+    assert "FAILED test output" not in result.output
+    assert "system-reminder" not in result.output
+    assert "The date has changed" not in result.output
+
+
+def test_handoff_codex_filters_function_calls_and_bounds_turns(fake_home: Path) -> None:
+    session = "handoff-codex"
+    events = [
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "first user"}},
+        {"type": "event_msg", "payload": {"type": "agent_message", "message": "first answer"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "shell",
+                "arguments": "{\"cmd\":\"cat secrets.txt\"}",
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "raw command output",
+            },
+        },
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "id": "m2",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "second answer"}],
+            },
+        },
+        {"type": "event_msg", "payload": {"type": "user_message", "message": "second user"}},
+    ]
+    log_path = fake_home / ".codex" / "sessions" / "2026" / "06" / "06" / f"{session}.jsonl"
+    _write_jsonl(log_path, events)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agent_log_command,
+        ["handoff", "--engine", "codex", "--session", session, "--max-turns", "2"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "[2 earlier message(s) omitted by --max-turns.]" in result.output
+    assert "second answer" in result.output
+    assert "second user" in result.output
+    assert "first user" not in result.output
+    assert "first answer" not in result.output
+    assert "cat secrets.txt" not in result.output
+    assert "raw command output" not in result.output
+
+
+def test_handoff_respects_max_chars(fake_home: Path) -> None:
+    session = "handoff-chars"
+    events = [
+        {
+            "type": "event_msg",
+            "payload": {"type": "user_message", "message": "start " + "x" * 1200},
+        },
+        {
+            "type": "event_msg",
+            "payload": {"type": "agent_message", "message": "answer " + "y" * 1200},
+        },
+    ]
+    log_path = fake_home / ".codex" / "sessions" / "2026" / "06" / "06" / f"{session}.jsonl"
+    _write_jsonl(log_path, events)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agent_log_command,
+        ["handoff", "--engine", "codex", "--session", session, "--max-chars", "900"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert len(result.output) <= 900
+    assert "omitted to fit --max-chars" in result.output
+
+
+def test_handoff_opencode_writes_out_file(fake_home: Path, tmp_path: Path) -> None:
+    session = "handoff-opencode"
+    events = [
+        {
+            "message_id": "m1",
+            "message_role": "user",
+            "part_id": "p1",
+            "part_data": json.dumps({"type": "input_text", "text": "open the issue"}),
+        },
+        {
+            "message_id": "m2",
+            "message_role": "assistant",
+            "part_id": "p2",
+            "part_data": json.dumps({"type": "output_text", "text": "I read the issue."}),
+        },
+        {
+            "message_id": "m3",
+            "message_role": "assistant",
+            "part_id": "p3",
+            "part_data": json.dumps(
+                {"type": "tool", "tool": "shell", "state": "UNIQUE_OPCODE_PAYLOAD"}
+            ),
+        },
+    ]
+    log_path = fake_home / ".local" / "share" / "opencode" / f"{session}.jsonl"
+    _write_jsonl(log_path, events)
+    out = tmp_path / "handoff.md"
+
+    runner = CliRunner()
+    result = runner.invoke(
+        agent_log_command,
+        ["handoff", "--engine", "opencode", "--session", session, "--out", str(out)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output == ""
+    text = out.read_text(encoding="utf-8")
+    assert "open the issue" in text
+    assert "I read the issue." in text
+    assert "shell" not in text
+    assert "UNIQUE_OPCODE_PAYLOAD" not in text
 
 
 # ----- missing-log handling ------------------------------------------

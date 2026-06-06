@@ -336,7 +336,9 @@ class PromptComposerViewModelTest {
     }
 
     @Test
-    fun attachFilesAppendsRemotePathsToDraft() = runTest {
+    fun attachFilesStagesChipsAndKeepsDraftClean() = runTest {
+        // Issue #544: staging adds structured chips (file name only) to the
+        // attachments list — the draft text is NOT mutated while composing.
         val vm = newVm()
         vm.onDraftChange("Review these")
 
@@ -350,21 +352,87 @@ class PromptComposerViewModelTest {
         }
         advanceUntilIdle()
 
+        // The draft stays exactly what the user typed — no "Attached files:"
+        // bullets folded in.
+        assertEquals("Review these", vm.uiState.value.draft)
         assertEquals(
-            """
-            Review these
-
-            Attached files:
-            - ~/.pocketshell/attachments/host-1/20260601-120000-01-report.txt
-            - ~/.pocketshell/attachments/host-1/20260601-120000-02-data.csv
-            """.trimIndent(),
-            vm.uiState.value.draft,
+            listOf(
+                PromptComposerViewModel.StagedAttachment(
+                    remotePath = "~/.pocketshell/attachments/host-1/20260601-120000-01-report.txt",
+                    displayName = "20260601-120000-01-report.txt",
+                ),
+                PromptComposerViewModel.StagedAttachment(
+                    remotePath = "~/.pocketshell/attachments/host-1/20260601-120000-02-data.csv",
+                    displayName = "20260601-120000-02-data.csv",
+                ),
+            ),
+            vm.uiState.value.attachments,
         )
         assertNull(vm.uiState.value.error)
         assertEquals(
             PromptComposerViewModel.AttachmentUploadState.Idle,
             vm.uiState.value.attachmentUpload,
         )
+    }
+
+    @Test
+    fun attachFilesDeDuplicatesRepeatedRemotePaths() = runTest {
+        // Issue #544: re-attaching the same remote path must not double a chip.
+        val vm = newVm()
+        val path = "~/.pocketshell/attachments/host-1/20260601-120000-01-report.txt"
+
+        vm.attachFiles(count = 1) { Result.success(listOf(path)) }
+        advanceUntilIdle()
+        vm.attachFiles(count = 1) { Result.success(listOf(path)) }
+        advanceUntilIdle()
+
+        assertEquals(1, vm.uiState.value.attachments.size)
+        assertEquals(path, vm.uiState.value.attachments.single().remotePath)
+    }
+
+    @Test
+    fun removeAttachmentDropsOnlyThatChipAndKeepsDraft() = runTest {
+        // Issue #544: the chip's × removes just that attachment; the draft
+        // text the user typed is untouched, and removing all chips leaves a
+        // clean prompt.
+        val vm = newVm()
+        vm.onDraftChange("Look at these")
+        val report = "~/.pocketshell/attachments/host-1/20260601-120000-01-report.txt"
+        val data = "~/.pocketshell/attachments/host-1/20260601-120000-02-data.csv"
+
+        vm.attachFiles(count = 2) { Result.success(listOf(report, data)) }
+        advanceUntilIdle()
+
+        vm.removeAttachment(report)
+
+        assertEquals(
+            listOf(
+                PromptComposerViewModel.StagedAttachment(
+                    remotePath = data,
+                    displayName = "20260601-120000-02-data.csv",
+                ),
+            ),
+            vm.uiState.value.attachments,
+        )
+        assertEquals("Look at these", vm.uiState.value.draft)
+
+        // Removing the last chip leaves the prompt exactly as typed.
+        vm.removeAttachment(data)
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+        assertEquals("Look at these", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun removeAttachmentForUnknownPathIsNoOp() = runTest {
+        val vm = newVm()
+        val path = "~/.pocketshell/attachments/host-1/20260601-120000-01-report.txt"
+        vm.attachFiles(count = 1) { Result.success(listOf(path)) }
+        advanceUntilIdle()
+
+        vm.removeAttachment("~/.pocketshell/attachments/host-1/does-not-exist.txt")
+
+        assertEquals(1, vm.uiState.value.attachments.size)
+        assertEquals(path, vm.uiState.value.attachments.single().remotePath)
     }
 
     @Test
@@ -1567,6 +1635,81 @@ class PromptComposerViewModelTest {
         // After dispatch the draft is cleared so the next composer open
         // starts blank.
         assertEquals("", vm.uiState.value.draft)
+    }
+
+    @Test
+    fun requestSendAppendsAttachmentSuffixToSentPromptAndClearsChips() = runTest {
+        // Issue #544: the "Attached files:" suffix is composed ONLY at SEND
+        // time and appended at the END of the outgoing prompt — it never
+        // appears in the live draft. After send the chips are cleared.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        vm.onDraftChange("Review these")
+        vm.attachFiles(count = 2) {
+            Result.success(
+                listOf(
+                    "~/.pocketshell/attachments/host-1/20260601-120000-01-report.txt",
+                    "~/.pocketshell/attachments/host-1/20260601-120000-02-data.csv",
+                ),
+            )
+        }
+        advanceUntilIdle()
+        // Pre-send invariant: the draft is still clean.
+        assertEquals("Review these", vm.uiState.value.draft)
+
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+
+        // The send buffers in the `sendRequests` channel; a collector
+        // subscribing now still receives it (#254 buffering semantics).
+        val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job: Job = launch { vm.sendRequests.collect { sent += it } }
+        advanceUntilIdle()
+        job.cancelAndJoin()
+
+        assertEquals(1, sent.size)
+        assertEquals(
+            """
+            Review these
+
+            Attached files:
+            - ~/.pocketshell/attachments/host-1/20260601-120000-01-report.txt
+            - ~/.pocketshell/attachments/host-1/20260601-120000-02-data.csv
+            """.trimIndent(),
+            sent[0].text,
+        )
+        assertEquals(true, sent[0].withEnter)
+        // After send the draft is cleared and the chips are gone.
+        assertEquals("", vm.uiState.value.draft)
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+    }
+
+    @Test
+    fun requestSendWithOnlyAttachmentsAndNoDraftStillSends() = runTest {
+        // Issue #544: a pure-attachment send (no typed text) still dispatches
+        // because the composed prompt carries the "Attached files:" suffix.
+        val vm = newVm(samplerDispatcher = StandardTestDispatcher(testScheduler))
+        vm.attachFiles(count = 1) {
+            Result.success(listOf("~/.pocketshell/attachments/host-1/x-report.txt"))
+        }
+        advanceUntilIdle()
+
+        vm.requestSend(withEnter = true)
+        advanceUntilIdle()
+
+        val sent = mutableListOf<PromptComposerViewModel.SendRequest>()
+        val job: Job = launch { vm.sendRequests.collect { sent += it } }
+        advanceUntilIdle()
+        job.cancelAndJoin()
+
+        assertEquals(1, sent.size)
+        assertEquals(
+            """
+            Attached files:
+            - ~/.pocketshell/attachments/host-1/x-report.txt
+            """.trimIndent(),
+            sent[0].text,
+        )
+        assertTrue(vm.uiState.value.attachments.isEmpty())
     }
 
     @Test

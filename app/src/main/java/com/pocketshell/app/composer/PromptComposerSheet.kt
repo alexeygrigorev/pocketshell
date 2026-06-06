@@ -19,6 +19,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -340,6 +341,7 @@ public fun PromptComposerSheet(
             onAttachFiles = if (onStageAttachments != null) {
                 { attachmentLauncher.launch(arrayOf("*/*")) }
             } else null,
+            onRemoveAttachment = viewModel::removeAttachment,
             pendingItems = pendingItems,
             pendingListExpanded = pendingListExpanded,
             onTogglePendingList = { pendingListExpanded = !pendingListExpanded },
@@ -420,6 +422,10 @@ internal fun SheetContent(
     modifier: Modifier = Modifier,
     onSnippets: (() -> Unit)? = null,
     onAttachFiles: (() -> Unit)? = null,
+    // Issue #544: remove a single staged attachment chip by remote path.
+    // Defaults to a no-op so previews / legacy tests that don't stage
+    // attachments keep compiling.
+    onRemoveAttachment: (String) -> Unit = {},
     // Issue #174: dispatched by the cancel `X` chip rendered next to
     // the mic FAB while [PromptComposerViewModel.RecordingState] is
     // [PromptComposerViewModel.RecordingState.Recording]. Defaults to a
@@ -685,6 +691,18 @@ internal fun SheetContent(
                 onRetry = onRetryPending,
                 onDiscard = onDiscardPending,
                 onSaveAsAudio = onSavePendingAsAudio,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+
+        // Issue #544: staged attachments render as compact removable chips
+        // at the bottom of the composer (above the controls row), VS Code /
+        // Cursor style. The draft text stays clean while composing; the
+        // remote paths are folded into the outgoing prompt only at SEND.
+        if (state.attachments.isNotEmpty()) {
+            AttachmentChipRow(
+                attachments = state.attachments,
+                onRemove = onRemoveAttachment,
             )
             Spacer(modifier = Modifier.height(8.dp))
         }
@@ -1091,6 +1109,76 @@ private fun MicTriggerButton(
             tint = if (enabled) PocketShellColors.OnAccent else PocketShellColors.TextMuted,
             modifier = Modifier.size(22.dp),
         )
+    }
+}
+
+/**
+ * Issue #544: the compact removable-chip row for staged attachments,
+ * rendered at the bottom of the composer (VS Code / Cursor reference-file
+ * style). Each chip shows the file name only — never the full remote path —
+ * plus an `×` that removes just that attachment. Chips wrap onto multiple
+ * lines via [FlowRow] so several attachments stay compact instead of
+ * pushing the controls row off-screen.
+ *
+ * The visual recipe reuses the #461/#479 chip vocabulary (`AccentSoft`
+ * fill + `BorderSoft` outline + small rounded corners), matching the dense
+ * dev-tool language of the other chip rows (`WatchedFoldersChipRow`,
+ * `CommandChip`).
+ */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun AttachmentChipRow(
+    attachments: List<PromptComposerViewModel.StagedAttachment>,
+    onRemove: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    FlowRow(
+        modifier = modifier
+            .fillMaxWidth()
+            .testTag(COMPOSER_ATTACHMENT_CHIPS_TAG),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        attachments.forEach { attachment ->
+            Row(
+                modifier = Modifier
+                    .background(
+                        color = PocketShellColors.SurfaceElev,
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = PocketShellColors.BorderSoft,
+                        shape = RoundedCornerShape(8.dp),
+                    )
+                    .padding(start = 10.dp, end = 4.dp, top = 5.dp, bottom = 5.dp)
+                    .testTag(composerAttachmentChipTestTag(attachment.remotePath)),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = attachment.displayName,
+                    color = PocketShellColors.Text,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                Box(
+                    modifier = Modifier
+                        .size(20.dp)
+                        .clickable(role = Role.Button) { onRemove(attachment.remotePath) }
+                        .semantics { contentDescription = "Remove ${attachment.displayName}" }
+                        .testTag(composerAttachmentRemoveTestTag(attachment.remotePath)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "×",
+                        color = PocketShellColors.TextSecondary,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -1712,6 +1800,20 @@ internal const val COMPOSER_MIC_TAG = "prompt-composer-mic"
 internal const val COMPOSER_ATTACH_TAG = "prompt-composer-attach"
 internal const val COMPOSER_SNIPPETS_TAG = "prompt-composer-snippets"
 internal const val COMPOSER_ATTACHMENT_PROGRESS_TAG = "prompt-composer-attachment-progress"
+
+/**
+ * Issue #544: the staged-attachment chip row (FlowRow) at the bottom of the
+ * composer. Present only while at least one attachment is staged.
+ */
+internal const val COMPOSER_ATTACHMENT_CHIPS_TAG = "prompt-composer-attachment-chips"
+
+/** Issue #544: per-chip tag, keyed by the attachment's remote path. */
+internal fun composerAttachmentChipTestTag(remotePath: String): String =
+    "prompt-composer-attachment-chip:$remotePath"
+
+/** Issue #544: per-chip `×` remove button tag, keyed by remote path. */
+internal fun composerAttachmentRemoveTestTag(remotePath: String): String =
+    "prompt-composer-attachment-remove:$remotePath"
 
 /** Issue #453: mockup placeholder text for the empty composer input. */
 internal const val COMPOSER_PLACEHOLDER = "Compose prompt…"

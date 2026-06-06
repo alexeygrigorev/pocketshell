@@ -117,6 +117,47 @@ class PromptComposerVisualScreenshotTest {
         WalkthroughScreenshotArtifacts.capture("08-composer-text-inserted")
     }
 
+    @Test
+    fun capturesAttachmentChips() {
+        // Issue #544: the composer with staged attachments rendered as compact
+        // removable chips at the bottom — the draft text stays clean (no
+        // "Attached files:" bullets folded in) while composing. Captures the
+        // "after" state the maintainer's two screenshots argued against (the
+        // old behaviour dumped the raw remote path into the prompt as text).
+        var state by mutableStateOf(
+            PromptComposerViewModel.UiState(
+                draft = "Review these and tell me what's wrong",
+                recording = PromptComposerViewModel.RecordingState.Idle,
+                attachments = listOf(
+                    PromptComposerViewModel.StagedAttachment(
+                        remotePath = "~/.pocketshell/attachments/host-1/Screenshot_20260606-report.png",
+                        displayName = "Screenshot_20260606-report.png",
+                    ),
+                    PromptComposerViewModel.StagedAttachment(
+                        remotePath = "~/.pocketshell/attachments/host-1/deploy-log.txt",
+                        displayName = "deploy-log.txt",
+                    ),
+                ),
+            ),
+        )
+        renderComposer { state }
+
+        // Warm-up draw cycle so the first PixelCopy lands on a drawn frame.
+        compose.onNodeWithTag(COMPOSER_ATTACHMENT_CHIPS_TAG).assertExists()
+        compose.runOnIdle { state = state.copy(draft = state.draft + " ") }
+        compose.waitForIdle()
+        compose.runOnIdle { state = state.copy(draft = state.draft.trimEnd()) }
+        compose.waitForIdle()
+
+        // The chips show the file names, never the full remote path; the draft
+        // text is clean (no "Attached files:" suffix while composing).
+        compose.onNodeWithText("Screenshot_20260606-report.png").assertIsDisplayed()
+        compose.onNodeWithText("deploy-log.txt").assertIsDisplayed()
+        compose.onNodeWithText("Attached files:", substring = true).assertDoesNotExist()
+        compose.waitForIdle()
+        WalkthroughScreenshotArtifacts.capture("05c-composer-attachment-chips")
+    }
+
     private fun renderComposer(state: () -> PromptComposerViewModel.UiState) {
         compose.activityRule.scenario.onActivity { activity ->
             val dark = PocketShellColors.Background.toArgb()

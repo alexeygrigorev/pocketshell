@@ -199,6 +199,33 @@ through the same issue/backlog/process flow as for an English request. Do not
 treat the language switch as a different priority level or a request to skip
 the implementer/reviewer loop.
 
+## Maintainer Screenshots → Issues (never lose a screenshot)
+
+The maintainer frequently sends screenshots / mockups as feedback (they land in
+`~/inbox/pocketshell/` or `~/.pocketshell/attachments/<host>/` on the dev box).
+**Every such image MUST be attached to the relevant GitHub issue** so
+implementers/reviewers see the real picture — WITHOUT committing it to the repo
+(the maintainer asked not to commit feedback images). This is the
+`screenshot-to-issue` skill; the standing workflow:
+
+1. Read the image first so the issue text matches what it actually shows.
+2. Upload it as an asset to the dedicated `feedback-assets` **prerelease**
+   (create once if missing — a prerelease never shows as "Latest" and never
+   triggers the Build workflow):
+   `cp <inbox-img> /tmp/issue-<N>-<slug>.png && gh release upload feedback-assets /tmp/issue-<N>-<slug>.png --clobber`
+3. Embed the download URL in the issue with
+   `![](https://github.com/<owner>/<repo>/releases/download/feedback-assets/<asset>)`
+   (in the body at creation, or as a comment on an existing issue).
+4. Delete the source image from the inbox so they don't pile up.
+
+The image stays out of git history (no repo push) but is durable + visible on
+the issue. **If the image is too large to read or the API rejects it, still
+upload + attach it** (uploading does not require reading) and note the mapping
+is approximate — the durable copy in `feedback-assets` means it is never lost.
+Genuine design-reference mockups that belong in the committed doc set may still
+be added under `docs/` deliberately; routine feedback screenshots use this
+release-asset path.
+
 ## Workflow Per Issue
 
 1. Orchestrator refines the issue. Acceptance criteria must be specific and verifiable.

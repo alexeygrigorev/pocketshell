@@ -34,12 +34,15 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -58,6 +61,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Unit tests for [TmuxSessionViewModel] that exercise the per-pane
@@ -1427,39 +1431,122 @@ class TmuxSessionViewModelTest {
             "test fixture drift: emitted=$emitted expectedFloor=$CODEX_SCALE_OUTPUT_BYTES",
             emitted >= CODEX_SCALE_OUTPUT_BYTES,
         )
-        val drained = async(start = CoroutineStart.UNDISPATCHED) {
-            var total = 0
-            state.output.first { bytes ->
-                total += bytes.size
-                total >= emitted
+        val observedSideChannelChunks = AtomicInteger(0)
+        val outputCollector = launch {
+            state.output.collect {
+                observedSideChannelChunks.incrementAndGet()
             }
-            total
         }
+        runCurrent()
 
-        payloads.forEach { bytes ->
-            client.emittedEvents.emit(ControlEvent.Output("%0", bytes))
+        try {
+            val sender = async {
+                payloads.forEach { bytes ->
+                    client.emittedEvents.emit(ControlEvent.Output("%0", bytes))
+                }
+            }
+
+            val completed = withTimeoutOrNull(5_000) {
+                while (sender.isActive) {
+                    shadowOf(Looper.getMainLooper()).idle()
+                    runCurrent()
+                    delay(10)
+                }
+                sender.await()
+                true
+            } ?: false
+
+            assertTrue(
+                "tmux %output flood must not stall terminal pane output",
+                completed,
+            )
+            advanceUntilIdle()
+            shadowOf(Looper.getMainLooper()).idle()
+
+            assertTrue(
+                "tmux %output flood should still publish best-effort side-channel chunks",
+                observedSideChannelChunks.get() > 0,
+            )
+            assertTrue(
+                "Codex-scale output flood must not be diagnosed as a transport connection error",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+            assertFalse(
+                "Codex-scale output flood must not flip the tmux disconnected signal",
+                client.disconnectedSignal.value,
+            )
+            assertFalse(
+                "Codex-scale output flood must not mark the local terminal surface as failed",
+                vm.panes.value.single().surfaceError,
+            )
+        } finally {
+            outputCollector.cancel()
         }
+    }
 
+    @Test
+    fun slowTerminalOutputSideChannelDoesNotMisclassifyTmuxPaneAsDisconnected() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "codex", paneIndex = 0)),
+        )
         advanceUntilIdle()
-        shadowOf(Looper.getMainLooper()).idle()
 
-        assertEquals(
-            "tmux %output flood must reach TerminalSurfaceState.output without byte loss",
-            emitted,
-            drained.await(),
-        )
-        assertTrue(
-            "Codex-scale output flood must not be diagnosed as a transport connection error",
-            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
-        )
-        assertFalse(
-            "Codex-scale output flood must not flip the tmux disconnected signal",
-            client.disconnectedSignal.value,
-        )
-        assertFalse(
-            "Codex-scale output flood must not mark the local terminal surface as failed",
-            vm.panes.value.single().surfaceError,
-        )
+        val state = vm.panes.value.single().terminalState
+        val observedSideChannelChunks = AtomicInteger(0)
+        val slowSideChannelCollector = launch {
+            state.output.collect {
+                observedSideChannelChunks.incrementAndGet()
+                delay(60_000)
+            }
+        }
+        runCurrent()
+
+        try {
+            val payloads = issue576BackpressureOutputChunks()
+            val sender = async {
+                payloads.forEach { bytes ->
+                    client.emittedEvents.emit(ControlEvent.Output("%0", bytes))
+                }
+            }
+
+            val completed = withTimeoutOrNull(5_000) {
+                while (sender.isActive) {
+                    shadowOf(Looper.getMainLooper()).idle()
+                    runCurrent()
+                    delay(10)
+                }
+                sender.await()
+                true
+            } ?: false
+
+            assertTrue(
+                "slow terminal output side-channel collector must not stall tmux pane output",
+                completed,
+            )
+            advanceUntilIdle()
+            shadowOf(Looper.getMainLooper()).idle()
+            assertTrue(
+                "slow side-channel collector should prove the secondary output flow was subscribed",
+                observedSideChannelChunks.get() > 0,
+            )
+            assertTrue(
+                "terminal-side backpressure must not be diagnosed as a transport connection error",
+                vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+            )
+            assertFalse(
+                "terminal-side backpressure must not flip the tmux disconnected signal",
+                client.disconnectedSignal.value,
+            )
+            assertFalse(
+                "terminal-side backpressure must not mark the local terminal surface as failed",
+                vm.panes.value.single().surfaceError,
+            )
+        } finally {
+            slowSideChannelCollector.cancel()
+        }
     }
 
     @Test
@@ -3607,28 +3694,51 @@ class TmuxSessionViewModelTest {
         val terminalState = vm.panes.value.single().terminalState
         val payloads = List(CODEX_SCALE_OUTPUT_CHUNKS, ::codexScaleOutputChunk)
         val emitted = payloads.sumOf { it.size }
-        val drained = async(start = CoroutineStart.UNDISPATCHED) {
-            var total = 0
-            terminalState.output.first { bytes ->
-                total += bytes.size
-                total >= emitted
+        assertTrue(
+            "test fixture drift: emitted=$emitted expectedFloor=$CODEX_SCALE_OUTPUT_BYTES",
+            emitted >= CODEX_SCALE_OUTPUT_BYTES,
+        )
+        val observedSideChannelChunks = AtomicInteger(0)
+        val outputCollector = launch {
+            terminalState.output.collect {
+                observedSideChannelChunks.incrementAndGet()
             }
-            total
+        }
+        runCurrent()
+
+        try {
+            assertTrue(vm.retryAgentConversationStreamForPane("%0"))
+            val sender = async {
+                payloads.forEach { bytes ->
+                    client.emittedEvents.emit(ControlEvent.Output("%0", bytes))
+                }
+            }
+            val completed = withTimeoutOrNull(5_000) {
+                while (sender.isActive) {
+                    shadowOf(Looper.getMainLooper()).idle()
+                    runCurrent()
+                    delay(10)
+                }
+                sender.await()
+                true
+            } ?: false
+
+            assertTrue(
+                "Codex-scale terminal output must not stall while Conversation retries",
+                completed,
+            )
+            assertTrue(
+                "Codex-scale terminal output should still publish best-effort side-channel chunks",
+                observedSideChannelChunks.get() > 0,
+            )
+        } finally {
+            outputCollector.cancel()
         }
 
-        assertTrue(vm.retryAgentConversationStreamForPane("%0"))
-        payloads.forEach { bytes ->
-            client.emittedEvents.emit(ControlEvent.Output("%0", bytes))
-        }
         retryGate.complete(Unit)
         advanceUntilIdle()
         shadowOf(Looper.getMainLooper()).idle()
 
-        assertEquals(
-            "Codex-scale terminal output must still drain while Conversation retries",
-            emitted,
-            drained.await(),
-        )
         val state = vm.agentConversations.value["%0"]!!
         val messages = state.events.filterIsInstance<ConversationEvent.Message>()
         assertEquals(AgentConversationSyncStatus.Live, state.syncStatus)
@@ -6573,6 +6683,29 @@ class TmuxSessionViewModelTest {
         add(
             """{"type":"response_item","payload":{"type":"message","id":"issue-576-assistant","role":"assistant","content":[{"type":"output_text","text":${JSONObject.quote(ISSUE_576_CODEX_ASSISTANT_REPLY)}}]}}""",
         )
+    }
+
+    private fun issue576BackpressureOutputChunks(): List<ByteArray> {
+        val chunks = mutableListOf<ByteArray>()
+        chunks += "\u001b[31mISSUE576-VM-START\u001b[0m\r\n".toByteArray(Charsets.UTF_8)
+        chunks += ("VM-LONG-LINE-" + "B".repeat(10_000) + "\r\n").toByteArray(Charsets.UTF_8)
+        chunks += "\u001b[".toByteArray(Charsets.UTF_8)
+        chunks += "?25l".toByteArray(Charsets.UTF_8)
+        repeat(180) { index ->
+            chunks += buildString {
+                append("\u001b[38;5;")
+                append(index % 256)
+                append('m')
+                append("vm-frag-")
+                append(index.toString().padStart(3, '0'))
+                append(' ')
+                append(('A'.code + (index % 26)).toChar().toString().repeat(700))
+                if (index % 7 == 0) append("\u001b[2K")
+                append("\r\n")
+            }.toByteArray(Charsets.UTF_8)
+        }
+        chunks += "\u001b[?25h\u001b[0m\r\nISSUE576-VM-DONE\r\n".toByteArray(Charsets.UTF_8)
+        return chunks
     }
 
     private class QueueLeaseConnector(

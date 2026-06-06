@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.yield
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -22,6 +24,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import java.io.OutputStream
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 @RunWith(RobolectricTestRunner::class)
 class TerminalSurfaceStateInputRoutingTest {
@@ -113,6 +116,61 @@ class TerminalSurfaceStateInputRoutingTest {
             state.detachExternalProducer()
             feedDispatcher.close()
             feedExecutor.shutdownNow()
+        }
+    }
+
+    @Test
+    fun externalProducerDoesNotStallBehindSlowOutputCollectorDuringHugeFragmentedAnsiBurst() = runBlocking {
+        val state = TerminalSurfaceState()
+        val stdout = MutableSharedFlow<ByteArray>()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val producerJob = state.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = RecordingOutputStream(),
+        )
+        val observedSideChannelChunks = AtomicInteger(0)
+        val slowCollector = launch {
+            state.output.collect {
+                observedSideChannelChunks.incrementAndGet()
+                delay(60_000)
+            }
+        }
+        yield()
+
+        try {
+            val chunks = issue576FragmentedAnsiBurstChunks()
+            val sender = launch {
+                chunks.forEach { chunk -> stdout.emit(chunk) }
+            }
+
+            val completed = withTimeoutOrNull(5_000) {
+                while (sender.isActive) {
+                    shadowOf(Looper.getMainLooper()).idle()
+                    delay(10)
+                }
+                sender.join()
+                true
+            } ?: false
+
+            assertTrue(
+                "terminal producer must not wait behind a slow TerminalSurfaceState.output collector",
+                completed,
+            )
+            shadowOf(Looper.getMainLooper()).idle()
+            assertTrue(
+                "slow side-channel collector should prove at least one output subscriber was active",
+                observedSideChannelChunks.get() > 0,
+            )
+            assertTrue(
+                "terminal emulator should still render the end marker from the burst",
+                state.renderedTranscriptForTesting().contains(ISSUE_576_DONE_MARKER),
+            )
+        } finally {
+            slowCollector.cancel()
+            producerJob.cancel()
+            producerScope.cancel()
+            state.detachExternalProducer()
         }
     }
 
@@ -312,6 +370,30 @@ class TerminalSurfaceStateInputRoutingTest {
             thread.name == "PocketShellInputDrainer" && thread.isAlive
         }
 
+    private fun issue576FragmentedAnsiBurstChunks(): List<ByteArray> {
+        val chunks = mutableListOf<ByteArray>()
+        chunks += "\u001b[31mISSUE576-START\u001b[0m\r\n".toByteArray(Charsets.UTF_8)
+        chunks += ("LONG-LINE-" + "A".repeat(12_000) + "\r\n").toByteArray(Charsets.UTF_8)
+        chunks += "\u001b[".toByteArray(Charsets.UTF_8)
+        chunks += "?25l".toByteArray(Charsets.UTF_8)
+        repeat(320) { index ->
+            val line = buildString {
+                append("\u001b[38;5;")
+                append(index % 256)
+                append('m')
+                append("frag-")
+                append(index.toString().padStart(3, '0'))
+                append(' ')
+                append(('a'.code + (index % 26)).toChar().toString().repeat(900))
+                if (index % 5 == 0) append("\u001b[2K")
+                append("\r\n")
+            }
+            chunks += line.toByteArray(Charsets.UTF_8)
+        }
+        chunks += "\u001b[?25h\u001b[0m\r\n$ISSUE_576_DONE_MARKER\r\n".toByteArray(Charsets.UTF_8)
+        return chunks
+    }
+
     private class RecordingOutputStream : OutputStream() {
         private val bytes = mutableListOf<Byte>()
 
@@ -340,5 +422,9 @@ class TerminalSurfaceStateInputRoutingTest {
         fun snapshot(): String = synchronized(bytes) {
             bytes.toByteArray().toString(Charsets.UTF_8)
         }
+    }
+
+    private companion object {
+        private const val ISSUE_576_DONE_MARKER = "ISSUE576-DONE"
     }
 }

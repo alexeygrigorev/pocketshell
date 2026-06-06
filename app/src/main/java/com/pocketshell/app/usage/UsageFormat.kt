@@ -2,6 +2,7 @@ package com.pocketshell.app.usage
 
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageStatus
+import com.pocketshell.core.usage.UsageThresholdState
 import com.pocketshell.core.usage.UsageWindow
 import java.time.Instant
 import java.time.ZoneId
@@ -11,7 +12,7 @@ import kotlin.math.ceil
 import kotlin.math.max
 
 internal fun statusLabel(record: UsageProviderRecord): String = when {
-    record.isBlocked -> "Blocked"
+    record.thresholdState() == UsageThresholdState.Exceeded -> "Exceeded"
     record.status == UsageStatus.Warn || record.isNearLimit -> "Warn"
     record.status == UsageStatus.Ok -> "OK"
     record.status == UsageStatus.Unsupported -> "Unsupported"

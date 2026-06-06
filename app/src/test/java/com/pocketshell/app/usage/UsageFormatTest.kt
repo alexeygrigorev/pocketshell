@@ -2,6 +2,7 @@ package com.pocketshell.app.usage
 
 import com.pocketshell.core.usage.UsageProviderRecord
 import com.pocketshell.core.usage.UsageStatus
+import com.pocketshell.core.usage.UsageThresholdState
 import com.pocketshell.core.usage.UsageWindow
 import java.time.Instant
 import java.time.ZoneId
@@ -190,5 +191,21 @@ class UsageFormatTest {
         )
 
         assertEquals("Warn", statusLabel(record))
+    }
+
+    @Test
+    fun exhaustedCodex_hasClearExceededLabels() {
+        val record = UsageProviderRecord(
+            provider = "codex",
+            status = UsageStatus.Blocked,
+            rawStatus = "quota_exhausted",
+            blockReason = "Codex quota exhausted",
+            windows = emptyList(),
+        )
+
+        assertEquals(UsageThresholdState.Exceeded, record.thresholdState())
+        assertEquals("Exceeded", statusLabel(record))
+        assertEquals("EXCEEDED", thresholdBadgeLabel(record.thresholdState()))
+        assertEquals("Exceeded — provider blocked", thresholdRowDescription(record.thresholdState()))
     }
 }

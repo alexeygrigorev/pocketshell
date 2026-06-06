@@ -132,6 +132,25 @@ class PocketshellUsageJsonParserTest {
     }
 
     @Test
+    fun parse_codexExhaustedStatus_mapsToBlockedExceededRecord() {
+        val records = parser.parse(
+            """{"provider":"codex","status":"quota-exhausted",
+              "short_term":null,"long_term":null,
+              "block_reason":"Codex quota exhausted",
+              "error":null,"details":{"message":"quota exhausted"}}""".trimIndent(),
+        )
+
+        val record = records.single()
+        assertEquals("codex", record.provider)
+        assertEquals(UsageStatus.Blocked, record.status)
+        assertEquals("quota-exhausted", record.rawStatus)
+        assertEquals("Codex quota exhausted", record.blockReason)
+        assertTrue(record.windows.isEmpty())
+        assertTrue(record.isBlocked)
+        assertEquals(UsageThresholdState.Exceeded, record.thresholdState())
+    }
+
+    @Test
     fun parse_acceptsMultipleNdjsonLines() {
         val records = parser.parse(
             """

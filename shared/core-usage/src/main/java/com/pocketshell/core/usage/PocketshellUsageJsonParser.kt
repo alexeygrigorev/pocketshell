@@ -140,10 +140,24 @@ public class PocketshellUsageJsonParser {
         )
     }
 
-    private fun parseStatus(raw: String): UsageStatus = when (raw.lowercase()) {
+    private fun parseStatus(raw: String): UsageStatus = when (
+        raw.lowercase()
+            .replace('-', '_')
+            .replace(' ', '_')
+    ) {
         "ok", "healthy", "available" -> UsageStatus.Ok
         "warn", "warning", "near_limit" -> UsageStatus.Warn
-        "blocked", "limit_reached", "limited" -> UsageStatus.Blocked
+        "blocked",
+        "limit_reached",
+        "limited",
+        "exhausted",
+        "exceeded",
+        "exhausted_quota",
+        "quota_exhausted",
+        "quota_exceeded",
+        "usage_exhausted",
+        "usage_limit_reached",
+        "rate_limited" -> UsageStatus.Blocked
         "error" -> UsageStatus.Error
         "unsupported" -> UsageStatus.Unsupported
         else -> UsageStatus.Unknown

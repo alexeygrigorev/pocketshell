@@ -12,12 +12,16 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.usage.UsageProviderRecord
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.time.Instant
 import javax.inject.Inject
@@ -161,7 +165,7 @@ public class SshHostUsageFetcher : HostUsageFetcher {
  * without re-shaping the data model.
  */
 @HiltViewModel
-open class UsageViewModel @Inject constructor(
+open class UsageViewModel internal constructor(
     private val hostDao: HostDao,
     private val fetcher: HostUsageFetcher,
     // Issue #116 (usage-panel Fix B): the scheduler is the single
@@ -170,11 +174,25 @@ open class UsageViewModel @Inject constructor(
     // model's pull-to-refresh path now feeds the scheduler too so the
     // badges in those surfaces update when the user taps refresh on
     // the Usage screen (AC #4: "both update on pull-to-refresh on
-    // UsageScreen"). Nullable + defaulted so the existing test suite
-    // — which constructs the view model directly with a fake fetcher
-    // — keeps compiling without rewiring every test fixture.
-    private val usageScheduler: UsageScheduler? = null,
+    // UsageScreen"). Nullable + defaulted on the Hilt constructor so
+    // production injection can omit it when the scheduler is absent.
+    private val usageScheduler: UsageScheduler?,
+    private val refreshDispatcher: CoroutineDispatcher,
+    private val refreshTimeoutMillis: Long,
 ) : ViewModel() {
+
+    @Inject
+    public constructor(
+        hostDao: HostDao,
+        fetcher: HostUsageFetcher,
+        usageScheduler: UsageScheduler? = null,
+    ) : this(
+        hostDao = hostDao,
+        fetcher = fetcher,
+        usageScheduler = usageScheduler,
+        refreshDispatcher = Dispatchers.IO,
+        refreshTimeoutMillis = DEFAULT_REFRESH_TIMEOUT_MILLIS,
+    )
 
     private val _state = MutableStateFlow(UsageScreenState())
     val state: StateFlow<UsageScreenState> = _state.asStateFlow()
@@ -197,65 +215,90 @@ open class UsageViewModel @Inject constructor(
         inFlight?.cancel()
         inFlight = viewModelScope.launch {
             _state.value = _state.value.copy(isRefreshing = true)
-            // Issue #525: do NOT filter hosts by `pocketshellVersionCompatible`.
-            // That flag is unreliable — a host whose remote CLI is NEWER than
-            // the app (which #514 considers fully usable) can carry a STALE
-            // `false` written before #514 replaced exact-`==` with semver
-            // semantics, and that stale value silently dropped the host to
-            // "0 hosts" → a blank panel. The fetcher already classifies every
-            // host into Records / ToolMissing / Skipped from the SAME single
-            // usage command the host-list summary runs, so attempting the fetch
-            // for every saved host is both correct and consistent across
-            // surfaces. A host that genuinely cannot serve usage lands in
-            // ToolMissing (explicit empty-reason) or Skipped — never silently
-            // hidden behind a stale compat flag.
-            val hosts = hostDao.getAll().first()
-            val snapshots = mutableListOf<UsageHostSnapshot>()
-            val missing = mutableListOf<UsageMissingToolHost>()
-            val schedulerUpdates = mutableMapOf<Long, UsageSnapshot>()
-
-            hosts.forEach { host ->
-                when (val result = fetcher.fetch(host)) {
-                    is HostUsageFetch.Records -> {
-                        snapshots += UsageHostSnapshot(
-                            hostId = host.id,
-                            hostName = host.name,
-                            records = result.records,
-                            lastSyncedAt = result.syncedAt,
-                        )
-                        schedulerUpdates[host.id] = UsageSnapshot.Records(
-                            hostId = host.id,
-                            hostName = host.name,
-                            records = result.records,
-                            fetchedAt = result.syncedAt,
-                            command = host.usageCommandOverride ?: UsageRemoteSource.defaultUsageCommand,
-                        )
-                    }
-
-                    HostUsageFetch.ToolMissing -> {
-                        missing += UsageMissingToolHost(
-                            hostId = host.id,
-                            hostName = host.name,
-                        )
-                        schedulerUpdates[host.id] = UsageSnapshot.ToolMissing(
-                            hostId = host.id,
-                            hostName = host.name,
-                            fetchedAt = java.time.Instant.now(),
-                        )
-                    }
-
-                    HostUsageFetch.Skipped -> Unit
+            val result = withContext(refreshDispatcher) {
+                withTimeoutOrNull(refreshTimeoutMillis) {
+                    loadUsageState()
                 }
             }
+            if (result == null) {
+                _state.value = _state.value.copy(isRefreshing = false)
+                return@launch
+            }
+            _state.value = result.state
 
-            _state.value = UsageScreenState(
+            // Fan into the scheduler so cross-surface badges update.
+            usageScheduler?.updateSnapshots(result.schedulerUpdates)
+        }
+    }
+
+    private suspend fun loadUsageState(): UsageRefreshResult {
+        // Issue #525: do NOT filter hosts by `pocketshellVersionCompatible`.
+        // That flag is unreliable — a host whose remote CLI is NEWER than
+        // the app (which #514 considers fully usable) can carry a STALE
+        // `false` written before #514 replaced exact-`==` with semver
+        // semantics, and that stale value silently dropped the host to
+        // "0 hosts" → a blank panel. The fetcher already classifies every
+        // host into Records / ToolMissing / Skipped from the SAME single
+        // usage command the host-list summary runs, so attempting the fetch
+        // for every saved host is both correct and consistent across
+        // surfaces. A host that genuinely cannot serve usage lands in
+        // ToolMissing (explicit empty-reason) or Skipped — never silently
+        // hidden behind a stale compat flag.
+        val hosts = hostDao.getAll().first()
+        val snapshots = mutableListOf<UsageHostSnapshot>()
+        val missing = mutableListOf<UsageMissingToolHost>()
+        val schedulerUpdates = mutableMapOf<Long, UsageSnapshot>()
+
+        hosts.forEach { host ->
+            when (val result = fetcher.fetch(host)) {
+                is HostUsageFetch.Records -> {
+                    snapshots += UsageHostSnapshot(
+                        hostId = host.id,
+                        hostName = host.name,
+                        records = result.records,
+                        lastSyncedAt = result.syncedAt,
+                    )
+                    schedulerUpdates[host.id] = UsageSnapshot.Records(
+                        hostId = host.id,
+                        hostName = host.name,
+                        records = result.records,
+                        fetchedAt = result.syncedAt,
+                        command = host.usageCommandOverride ?: UsageRemoteSource.defaultUsageCommand,
+                    )
+                }
+
+                HostUsageFetch.ToolMissing -> {
+                    missing += UsageMissingToolHost(
+                        hostId = host.id,
+                        hostName = host.name,
+                    )
+                    schedulerUpdates[host.id] = UsageSnapshot.ToolMissing(
+                        hostId = host.id,
+                        hostName = host.name,
+                        fetchedAt = java.time.Instant.now(),
+                    )
+                }
+
+                HostUsageFetch.Skipped -> Unit
+            }
+        }
+
+        return UsageRefreshResult(
+            state = UsageScreenState(
                 hosts = snapshots,
                 missingToolHosts = missing,
                 isRefreshing = false,
-            )
+            ),
+            schedulerUpdates = schedulerUpdates,
+        )
+    }
 
-            // Fan into the scheduler so cross-surface badges update.
-            usageScheduler?.updateSnapshots(schedulerUpdates)
-        }
+    private data class UsageRefreshResult(
+        val state: UsageScreenState,
+        val schedulerUpdates: Map<Long, UsageSnapshot>,
+    )
+
+    public companion object {
+        public const val DEFAULT_REFRESH_TIMEOUT_MILLIS: Long = 20_000L
     }
 }

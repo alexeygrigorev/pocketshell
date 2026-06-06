@@ -13,9 +13,14 @@ import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.core.usage.PocketshellUsageJsonParser
 import com.pocketshell.core.usage.UsageProviderRecord
+import com.pocketshell.core.usage.UsageThresholdState
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -116,7 +121,7 @@ class UsageViewModelTest {
             ),
         )
 
-        val viewModel = UsageViewModel(db.hostDao(), fetcher)
+        val viewModel = testViewModel(fetcher, testScheduler)
         advanceUntilIdle()
 
         val state = viewModel.state.value
@@ -145,7 +150,7 @@ class UsageViewModelTest {
         val fetcher = FakeFetcher(
             scripts = mapOf("h1.example" to HostUsageFetch.ToolMissing),
         )
-        val viewModel = UsageViewModel(db.hostDao(), fetcher)
+        val viewModel = testViewModel(fetcher, testScheduler)
         advanceUntilIdle()
         val first = fetcher.callCount
         assertTrue("expected init refresh to fire", first >= 1)
@@ -194,7 +199,7 @@ class UsageViewModelTest {
             ),
         )
 
-        val viewModel = UsageViewModel(db.hostDao(), fetcher)
+        val viewModel = testViewModel(fetcher, testScheduler)
         advanceUntilIdle()
 
         // The stale-flagged host must have been fetched, not silently filtered.
@@ -213,7 +218,7 @@ class UsageViewModelTest {
     @Test
     fun emptyHostList_yieldsEmptyState() = runTest {
         val fetcher = FakeFetcher(scripts = emptyMap())
-        val viewModel = UsageViewModel(db.hostDao(), fetcher)
+        val viewModel = testViewModel(fetcher, testScheduler)
         advanceUntilIdle()
 
         val state = viewModel.state.value
@@ -221,6 +226,70 @@ class UsageViewModelTest {
         assertEquals(0, state.missingToolHosts.size)
         assertFalse(state.isRefreshing)
         assertNotNull(state)
+    }
+
+    @Test
+    fun exhaustedCodexRecord_isNotDroppedAndReachesExceededState() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
+        )
+        val hostId = db.hostDao().insert(
+            HostEntity(
+                name = "agents",
+                hostname = "codex.example",
+                username = "u",
+                keyId = keyId,
+            ),
+        )
+        val records = PocketshellUsageJsonParser().parse(
+            """{"provider":"codex","status":"exhausted",
+              "short_term":null,"long_term":null,
+              "block_reason":"Codex quota exhausted",
+              "error":null,"details":{}}""".trimIndent(),
+        )
+        val fetcher = FakeFetcher(
+            scripts = mapOf("codex.example" to HostUsageFetch.Records(records, Instant.now())),
+        )
+
+        val viewModel = testViewModel(fetcher, testScheduler)
+        advanceUntilIdle()
+
+        val state = viewModel.state.value
+        assertFalse("refresh should settle for exhausted Codex", state.isRefreshing)
+        assertEquals(1, state.hosts.size)
+        assertEquals(hostId, state.hosts.single().hostId)
+        val codex = state.hosts.single().records.single()
+        assertEquals("codex", codex.provider)
+        assertEquals(UsageThresholdState.Exceeded, codex.thresholdState())
+        assertEquals("Exceeded", statusLabel(codex))
+    }
+
+    @Test
+    fun refreshTimeoutClearsRefreshingInsteadOfLeavingPanelStuck() = runTest {
+        val keyId = db.sshKeyDao().insert(
+            SshKeyEntity(name = "k", privateKeyPath = "/dev/null/missing"),
+        )
+        db.hostDao().insert(
+            HostEntity(
+                name = "hung",
+                hostname = "hung.example",
+                username = "u",
+                keyId = keyId,
+            ),
+        )
+        val fetcher = HangingFetcher()
+
+        val viewModel = testViewModel(
+            fetcher = fetcher,
+            testScheduler = testScheduler,
+            refreshTimeoutMillis = 1_000L,
+        )
+        advanceTimeBy(1_001L)
+        advanceUntilIdle()
+
+        assertTrue("hanging fetcher must have been invoked", fetcher.called)
+        assertFalse("timed-out refresh must release the Usage panel", viewModel.state.value.isRefreshing)
+        assertTrue(viewModel.state.value.hosts.isEmpty())
     }
 
     @Test
@@ -354,6 +423,28 @@ class UsageViewModelTest {
             return scripts[host.hostname] ?: HostUsageFetch.Skipped
         }
     }
+
+    private class HangingFetcher : HostUsageFetcher {
+        var called: Boolean = false
+            private set
+
+        override suspend fun fetch(host: HostEntity): HostUsageFetch {
+            called = true
+            awaitCancellation()
+        }
+    }
+
+    private fun testViewModel(
+        fetcher: HostUsageFetcher,
+        testScheduler: TestCoroutineScheduler,
+        refreshTimeoutMillis: Long = UsageViewModel.DEFAULT_REFRESH_TIMEOUT_MILLIS,
+    ): UsageViewModel = UsageViewModel(
+        hostDao = db.hostDao(),
+        fetcher = fetcher,
+        usageScheduler = null,
+        refreshDispatcher = UnconfinedTestDispatcher(testScheduler),
+        refreshTimeoutMillis = refreshTimeoutMillis,
+    )
 
     private class FakeSshSession(
         private val canned: Map<String, ExecResult>,

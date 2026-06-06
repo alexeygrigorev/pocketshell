@@ -1,5 +1,7 @@
 package com.pocketshell.app.tmux
 
+import com.pocketshell.core.terminal.selection.detectLocalhostPortReferences
+
 /**
  * Pure, Android-free helper that scans decoded terminal output for
  * "a server just started listening on port N" signals and decides
@@ -104,6 +106,13 @@ internal class PortDetector(
                 found += port
             }
         }
+        for (reference in detectLocalhostPortReferences(text)) {
+            // Same truncated-port guard as above, but using the shared parser's
+            // source span. A chunk ending in `localhost:51` should wait for the
+            // next bytes before offering what may become `localhost:5173`.
+            if (reference.endExclusive == text.length) continue
+            found += reference.localhostUrl.remotePort
+        }
         val candidates = mutableListOf<Candidate>()
         for (port in found) {
             if (port in handled || port in pendingConfirm) continue
@@ -162,9 +171,12 @@ internal class PortDetector(
         private const val TAIL_LIMIT = 4096
 
         /**
-         * Canonical "a server is now listening" lines printed by dev
-         * servers and agents. Each regex captures the port as a numeric
-         * group; [scan] takes the last numeric group of the match.
+         * Canonical "a server is now listening" lines printed by dev servers
+         * and agents. Each regex captures the port as a numeric group; [scan]
+         * takes the last numeric group of the match. A shared loopback
+         * host/port parser is also applied in [scan] so bare
+         * `localhost:5173` / `127.0.0.1:<port>` references use the same
+         * false-positive guards as Conversation and terminal tap handling.
          *
          * Anchored to "listening"-style phrasing or to a localhost/
          * loopback/0.0.0.0 URL so a bare "port 8080" mention in prose is

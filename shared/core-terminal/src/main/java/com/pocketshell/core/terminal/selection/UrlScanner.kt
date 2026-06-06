@@ -72,11 +72,12 @@ public data class UrlRegion(
  * Schemed URLs (with `http://` or `https://`) are the only candidates the
  * scanner emits, matching the matcher's [TerminalMatch.Url] contract.
  *
- * Issue #488: a second loopback-literal pass also surfaces server-local URLs
- * the framework pattern misses — `http://localhost:3000`, `http://0.0.0.0:8080`,
+ * Issue #488/#582: a second loopback-literal pass also surfaces server-local
+ * URLs / host-port references the framework pattern misses —
+ * `http://localhost:3000`, `localhost:5173`, `0.0.0.0:8080`,
  * `http://[::1]:9000` (and `127.0.0.1`, already covered, de-duped). These are
- * the dev-server URLs that must be tappable so the host can route the tap into
- * the port-forward flow instead of a dead browser open.
+ * the dev-server references that must be tappable so the host can route the tap
+ * into the port-forward flow instead of a dead browser open.
  *
  * Trailing sentence punctuation (`.`, `,`, `;`, `)`, `]`, `!`, `?`,
  * single/double quotes) is stripped from the matched substring's end so the
@@ -174,25 +175,18 @@ public fun findVisibleUrls(view: TerminalView): List<UrlRegion> {
             emitUrlRegions(logical, raw, start, columns, out)
         }
 
-        // Issue #488: the framework `Patterns.WEB_URL` does NOT match
+        // Issue #488/#582: the framework `Patterns.WEB_URL` does NOT match
         // `http://localhost:3000` — `localhost` has no TLD, and `0.0.0.0` /
-        // `[::1]` are not matched either. Those are exactly the server-local
-        // dev-server URLs we most need tappable so a tap can route into the
-        // port-forward flow. Run a second, loopback-literal pass to surface
-        // them. `127.0.0.1` is already covered by the framework pass above, so
-        // we skip any candidate whose start was already claimed.
-        val loopbackMatcher = LOOPBACK_URL_PATTERN.matcher(line)
-        while (loopbackMatcher.find()) {
-            val start = loopbackMatcher.start()
+        // `[::1]` are not matched either. It also does not match bare
+        // `localhost:5173`. Those are exactly the server-local dev-server
+        // references we most need tappable so a tap can route into the
+        // port-forward flow. Run a shared loopback-host pass to surface them.
+        // `127.0.0.1` may already be covered by the framework pass above, so we
+        // skip any candidate whose start was already claimed.
+        for (reference in detectLocalhostPortReferences(line)) {
+            val start = reference.start
             if (start in claimedStarts) continue
-            var raw = loopbackMatcher.group() ?: continue
-            var endTrim = raw.length
-            while (endTrim > 0 && raw[endTrim - 1] in URL_TRAILING_PUNCTUATION) {
-                endTrim--
-            }
-            if (endTrim <= 0) continue
-            if (endTrim != raw.length) raw = raw.substring(0, endTrim)
-            emitUrlRegions(logical, raw, start, columns, out)
+            emitUrlRegions(logical, reference.text, start, columns, out)
         }
     }
     return out
@@ -224,24 +218,6 @@ private fun emitUrlRegions(
         )
     }
 }
-
-/**
- * Loopback-literal URL pattern for issue #488. Matches `http(s)://` URLs whose
- * host is a server-local literal the framework [Patterns.WEB_URL] does not
- * surface (`localhost`, `0.0.0.0`, and the bracketed IPv6 `[::1]`). `127.0.0.1`
- * is matched here too for completeness, but the scanner de-dupes against the
- * framework pass which already claims it.
- *
- * The leading `(?<![\w.-])` keeps the matcher from starting inside a larger
- * token (e.g. `xhttp://localhost`). The body permits an optional `:port` and a
- * path/query/fragment tail using the same character class as
- * [DefaultTerminalMatcher]'s URL pattern.
- */
-private val LOOPBACK_URL_PATTERN: java.util.regex.Pattern = java.util.regex.Pattern.compile(
-    "(?<![\\w.-])https?://(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1\\])" +
-        "(?::\\d+)?(?:/[\\w./?=&%+#~@:!,;-]*)?",
-    java.util.regex.Pattern.CASE_INSENSITIVE,
-)
 
 /** Punctuation characters stripped from URL tails — matches the smart-selection matcher. */
 private val URL_TRAILING_PUNCTUATION: Set<Char> = setOf(

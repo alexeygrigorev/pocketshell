@@ -33,13 +33,13 @@ import java.io.FileOutputStream
  * Issue #488 — connected coverage for routing a tapped server-local (loopback)
  * URL into the port-forward flow.
  *
- * Renders a `http://localhost:3000` dev-server URL and a real-host URL the way
- * an agent would print them into the visible viewport, runs [findVisibleUrls]
- * to recover grid coordinates, hit-tests the centre of each URL's bounding box
- * with [hitTestUrl], and exercises the same `onTapMaybeUrl` tap hook the
- * production [TerminalSurface] installs. The tapped URL string is then run
- * through [classifyLocalhostUrl] — exactly the decision the tmux screen's
- * `onUrlTap` makes — asserting:
+ * Renders `http://localhost:3000`, a bare `localhost:5173` dev-server
+ * reference, and a real-host URL the way an agent would print them into the
+ * visible viewport, runs [findVisibleUrls] to recover grid coordinates,
+ * hit-tests the centre of each URL's bounding box with [hitTestUrl], and
+ * exercises the same `onTapMaybeUrl` tap hook the production [TerminalSurface]
+ * installs. The tapped URL string is then run through [classifyLocalhostUrl] —
+ * exactly the decision the tmux screen's `onUrlTap` makes — asserting:
  *
  * - the loopback URL is recognised as server-side (non-null classification with
  *   the right remote port), so a tap routes to the forward flow; and
@@ -54,7 +54,7 @@ import java.io.FileOutputStream
 class LocalhostUrlTapInstrumentedTest {
 
     @Test
-    fun localhostUrlTapClassifiesAsServerLocalWhileRealHostStaysBrowser() = runBlocking {
+    fun localhostReferencesTapClassifiesAsServerLocalWhileRealHostStaysBrowser() = runBlocking {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val context = instrumentation.targetContext
         val state = TerminalSurfaceState()
@@ -68,8 +68,10 @@ class LocalhostUrlTapInstrumentedTest {
         val client = PocketShellTerminalViewClient()
 
         // A loopback dev-server URL (the motivating case: a Vite/Next server
-        // printed its localhost URL) and a real-host URL on the next row.
+        // printed its localhost URL), a bare loopback reference, and a
+        // real-host URL on the next row.
         val localUrl = "http://localhost:3000"
+        val bareLocal = "localhost:5173"
         val realUrl = "https://example.com/docs"
 
         try {
@@ -87,13 +89,14 @@ class LocalhostUrlTapInstrumentedTest {
             val view = requireNotNull(viewRef[0])
 
             val localPrefix = "Local:   "
+            val barePrefix = "Vite:    "
             val realPrefix = "Docs:    "
-            val output = "$localPrefix$localUrl\r\n$realPrefix$realUrl\r\n"
+            val output = "$localPrefix$localUrl\r\n$barePrefix$bareLocal\r\n$realPrefix$realUrl\r\n"
             state.appendRemoteOutput(output.toByteArray(Charsets.US_ASCII))
 
             val urls = arrayOfNulls<List<UrlRegion>>(1)
             withTimeout(3_000) {
-                while ((urls[0]?.size ?: 0) < 2) {
+                while ((urls[0]?.size ?: 0) < 3) {
                     delay(20)
                     instrumentation.runOnMainSync {
                         urls[0] = findVisibleUrls(view)
@@ -102,13 +105,15 @@ class LocalhostUrlTapInstrumentedTest {
             }
             val found = requireNotNull(urls[0])
             assertEquals(
-                "scanner should surface exactly the two emitted URLs: $found",
-                2,
+                "scanner should surface exactly the three emitted URL targets: $found",
+                3,
                 found.size,
             )
             val localRegion = found.firstOrNull { it.url == localUrl }
+            val bareRegion = found.firstOrNull { it.url == bareLocal }
             val realRegion = found.firstOrNull { it.url == realUrl }
             assertNotNull("localhost URL should be detected", localRegion)
+            assertNotNull("bare localhost reference should be detected", bareRegion)
             assertNotNull("real-host URL should be detected", realRegion)
 
             val renderer = view.mRenderer
@@ -149,11 +154,12 @@ class LocalhostUrlTapInstrumentedTest {
                     }
                 }
                 synthTap(centreX(localRegion!!), centreY(localRegion))
+                synthTap(centreX(bareRegion!!), centreY(bareRegion))
                 synthTap(centreX(realRegion!!), centreY(realRegion))
 
                 assertEquals(
-                    "both URL taps should reach the host onUrlTap callback",
-                    listOf(localUrl, realUrl),
+                    "all URL/reference taps should reach the host onUrlTap callback",
+                    listOf(localUrl, bareLocal, realUrl),
                     tappedUrls,
                 )
             } finally {
@@ -167,9 +173,14 @@ class LocalhostUrlTapInstrumentedTest {
             assertEquals("remote port to forward", 3000, localClass!!.remotePort)
             assertEquals("http://127.0.0.1:4000", localClass.toLocalUrl(4000))
 
+            val bareClass = classifyLocalhostUrl(tappedUrls[1])
+            assertNotNull("tapped bare localhost reference must classify as server-local", bareClass)
+            assertEquals("remote port to forward", 5173, bareClass!!.remotePort)
+            assertEquals("http://127.0.0.1:45173", bareClass.toLocalUrl(45173))
+
             assertNull(
                 "tapped real-host URL must NOT classify as server-local (browser route)",
-                classifyLocalhostUrl(tappedUrls[1]),
+                classifyLocalhostUrl(tappedUrls[2]),
             )
 
             instrumentation.runOnMainSync {

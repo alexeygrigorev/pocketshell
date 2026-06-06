@@ -100,10 +100,11 @@ public fun detectConversationLinks(line: String): List<ConversationLink> {
 private data class DetectedUrl(val text: String, val start: Int, val endExclusive: Int)
 
 /**
- * Detect schemed `http(s)` URLs (framework pattern) plus loopback-literal URLs
- * (`http://localhost:3000`, `http://[::1]:9000`, ...) on [line], with trailing
- * sentence punctuation stripped — the same set the terminal's [findVisibleUrls]
- * surfaces, but over a plain string instead of the grid.
+ * Detect schemed `http(s)` URLs (framework pattern) plus loopback-literal
+ * host/port references (`http://localhost:3000`, `localhost:5173`,
+ * `http://[::1]:9000`, ...) on [line], with trailing sentence punctuation
+ * stripped — the same set the terminal's [findVisibleUrls] surfaces, but over a
+ * plain string instead of the grid.
  */
 private fun detectUrlsInLine(line: String): List<DetectedUrl> {
     val out = mutableListOf<DetectedUrl>()
@@ -126,16 +127,10 @@ private fun detectUrlsInLine(line: String): List<DetectedUrl> {
         out += DetectedUrl(raw, start, start + raw.length)
     }
 
-    val loopback = CONVO_LOOPBACK_URL_PATTERN.matcher(line)
-    while (loopback.find()) {
-        val start = loopback.start()
+    for (reference in detectLocalhostPortReferences(line)) {
+        val start = reference.start
         if (start in claimedStarts) continue
-        var raw = loopback.group() ?: continue
-        var endTrim = raw.length
-        while (endTrim > 0 && raw[endTrim - 1] in CONVO_URL_TRAILING_PUNCTUATION) endTrim--
-        if (endTrim <= 0) continue
-        if (endTrim != raw.length) raw = raw.substring(0, endTrim)
-        out += DetectedUrl(raw, start, start + raw.length)
+        out += DetectedUrl(reference.text, start, reference.endExclusive)
     }
     return out
 }
@@ -189,17 +184,6 @@ private val CONVO_URL_TRAILING_PUNCTUATION: Set<Char> = setOf(
 
 private val DIR_TRAILING_PUNCTUATION: Set<Char> = setOf(
     '.', ',', ';', ':', ')', ']', '}', '!', '?', '\'', '"', '>', '<',
-)
-
-/**
- * Loopback-literal URL pattern, identical body to [UrlScanner]'s private one
- * (kept local so the conversation detector is self-contained without exposing
- * the terminal scanner's internals).
- */
-private val CONVO_LOOPBACK_URL_PATTERN: java.util.regex.Pattern = java.util.regex.Pattern.compile(
-    "(?<![\\w.-])https?://(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1\\])" +
-        "(?::\\d+)?(?:/[\\w./?=&%+#~@:!,;-]*)?",
-    java.util.regex.Pattern.CASE_INSENSITIVE,
 )
 
 /**

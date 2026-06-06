@@ -112,6 +112,22 @@ class ConversationLinkDetectionTest {
     }
 
     @Test
+    fun detectsBareLoopbackHostPortAsUrlLink() {
+        val out = links("dev server on localhost:5173")
+        assertEquals(1, out.size)
+        assertEquals("localhost:5173", out[0].text)
+        assertEquals(ConversationLinkKind.URL, out[0].kind)
+    }
+
+    @Test
+    fun detectsBareIpv4LoopbackHostPortAsUrlLink() {
+        val out = links("open 127.0.0.1:8000, then refresh")
+        assertEquals(1, out.size)
+        assertEquals("127.0.0.1:8000", out[0].text)
+        assertEquals(ConversationLinkKind.URL, out[0].kind)
+    }
+
+    @Test
     fun urlPathTailIsNotReSurfacedAsFile() {
         // The `/repo/main.kt` tail of a URL must NOT also be a file link.
         val out = links("https://github.com/o/repo/main.kt")
@@ -153,6 +169,14 @@ class ConversationLinkDetectionTest {
     fun bareDomainIsNotAUrlLink() {
         // A schemeless domain mentioned in prose is not a tap target.
         assertTrue(links("visit example.com for details").none { it.kind == ConversationLinkKind.URL })
+    }
+
+    @Test
+    fun loopbackSubstringInsideHostnameIsNotAUrlLink() {
+        assertTrue(
+            links("notlocalhost:3000 and localhost.evil.com:3000 are real hostnames")
+                .none { it.kind == ConversationLinkKind.URL },
+        )
     }
 
     @Test

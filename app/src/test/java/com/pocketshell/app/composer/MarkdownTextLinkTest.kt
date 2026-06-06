@@ -64,6 +64,18 @@ class MarkdownTextLinkTest {
     }
 
     @Test
+    fun bareLoopbackPortBecomesAClickableUrlLink() {
+        val tapped = mutableListOf<ConversationLink>()
+        val rendered =
+            renderInline("dev server at localhost:5173") { tapped += it }
+        val links = clickableLinks(rendered)
+        assertEquals(1, links.size)
+        links[0].linkInteractionListener?.onClick(links[0])
+        assertEquals(ConversationLinkKind.URL, tapped[0].kind)
+        assertEquals("localhost:5173", tapped[0].text)
+    }
+
+    @Test
     fun noLinkTapHandlerLeavesTextWithoutClickableLinks() {
         val rendered = renderInline("Wrote out/report.png to disk")
         assertTrue(clickableLinks(rendered).isEmpty())

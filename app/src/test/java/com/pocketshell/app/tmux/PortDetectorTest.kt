@@ -45,6 +45,30 @@ class PortDetectorTest {
     }
 
     @Test
+    fun `matches bare localhost host port`() {
+        assertEquals(
+            listOf(5173),
+            ports(PortDetector(), "Open localhost:5173 in your browser\n"),
+        )
+    }
+
+    @Test
+    fun `matches bare loopback host port`() {
+        assertEquals(
+            listOf(3000),
+            ports(PortDetector(), "Next.js ready on 127.0.0.1:3000\n"),
+        )
+    }
+
+    @Test
+    fun `matches bare any-address host port`() {
+        assertEquals(
+            listOf(9000),
+            ports(PortDetector(), "Serving at 0.0.0.0:9000\n"),
+        )
+    }
+
+    @Test
     fun `matches loopback url`() {
         assertEquals(listOf(5173), ports(PortDetector(), "  http://127.0.0.1:5173/\n"))
     }
@@ -86,6 +110,12 @@ class PortDetectorTest {
     }
 
     @Test
+    fun `ignores loopback substring inside larger hostname`() {
+        val text = "notlocalhost:3000 localhost.evil.com:3001 http://example.com:3002\n"
+        assertTrue(ports(PortDetector(), text).isEmpty())
+    }
+
+    @Test
     fun `ignores out of range port`() {
         assertTrue(ports(PortDetector(), "http://localhost:99999/\n").isEmpty())
     }
@@ -99,6 +129,13 @@ class PortDetectorTest {
         assertTrue(ports(detector, "Listening on http://127.0.0.1:51").isEmpty())
         // Second chunk completes "5173" across the boundary.
         assertEquals(listOf(5173), ports(detector, "73/\n"))
+    }
+
+    @Test
+    fun `finds bare localhost port split across two chunks`() {
+        val detector = PortDetector()
+        assertTrue(ports(detector, "localhost:51").isEmpty())
+        assertEquals(listOf(5173), ports(detector, "73\n"))
     }
 
     // --- de-dup: a confirmed port is never offered twice ---

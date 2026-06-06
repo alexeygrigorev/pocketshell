@@ -61,6 +61,19 @@ public data class LocalhostUrl(
 }
 
 /**
+ * A loopback host/port reference found inside plain terminal or conversation
+ * text. [text] is the literal substring to underline/click; [localhostUrl]
+ * carries the normalized forwarding target. Bare references
+ * (`localhost:5173`) default to `http` when retargeted to the phone.
+ */
+public data class LocalhostPortReference(
+    public val text: String,
+    public val start: Int,
+    public val endExclusive: Int,
+    public val localhostUrl: LocalhostUrl,
+)
+
+/**
  * `true` if [host] is one of the loopback/server-local literals in
  * [LOOPBACK_HOST_LITERALS]. Case-insensitive; tolerates the bracketed IPv6
  * form. A real hostname (`example.com`, `myserver.internal`) returns `false`.
@@ -69,9 +82,10 @@ public fun isLocalhostHost(host: String): Boolean =
     host.trim().lowercase() in LOOPBACK_HOST_LITERALS
 
 /**
- * Classify a tapped `http(s)` URL. Returns a [LocalhostUrl] when the URL's host
- * is server-local (loopback) AND it carries an explicit port, otherwise `null`
- * (the caller opens it as a normal browser link).
+ * Classify a tapped `http(s)` URL or bare loopback `host:port` reference.
+ * Returns a [LocalhostUrl] when the host is server-local (loopback) AND it
+ * carries an explicit port, otherwise `null` (the caller opens it as a normal
+ * browser link or ignores it).
  *
  * Why an explicit port is required: a server-local URL is only actionable for
  * the forward flow if we know which port to forward. `http://localhost/` with
@@ -81,15 +95,25 @@ public fun isLocalhostHost(host: String): Boolean =
  * Parsing is deliberately hand-rolled (not `java.net.URI`) so it stays in the
  * Android-free `core-terminal` test surface and tolerates the exact shapes that
  * appear in terminal output, including the bracketed IPv6 authority
- * `http://[::1]:9000/foo`.
+ * `http://[::1]:9000/foo` and bare dev-server references like
+ * `localhost:5173`.
  */
-public fun classifyLocalhostUrl(url: String): LocalhostUrl? {
-    val schemeSep = url.indexOf("://")
-    if (schemeSep <= 0) return null
-    val scheme = url.substring(0, schemeSep).lowercase()
-    if (scheme != "http" && scheme != "https") return null
+public fun classifyLocalhostReference(reference: String): LocalhostUrl? {
+    val trimmed = reference.trim().trimEndLocalhostReferencePunctuation()
+    if (trimmed.isEmpty()) return null
 
-    val afterScheme = url.substring(schemeSep + 3)
+    val schemeSep = trimmed.indexOf("://")
+    val scheme: String
+    val afterScheme: String
+    if (schemeSep > 0) {
+        scheme = trimmed.substring(0, schemeSep).lowercase()
+        if (scheme != "http" && scheme != "https") return null
+        afterScheme = trimmed.substring(schemeSep + 3)
+    } else {
+        scheme = "http"
+        afterScheme = trimmed
+    }
+
     // Authority ends at the first '/', '?' or '#'.
     val authorityEnd = afterScheme.indexOfFirst { it == '/' || it == '?' || it == '#' }
     val authority = if (authorityEnd < 0) afterScheme else afterScheme.substring(0, authorityEnd)
@@ -105,6 +129,41 @@ public fun classifyLocalhostUrl(url: String): LocalhostUrl? {
     if (port !in 1..65_535) return null
 
     return LocalhostUrl(remotePort = port, scheme = scheme, pathAndQuery = pathAndQuery)
+}
+
+/**
+ * Backwards-compatible name for existing URL-tap callers.
+ */
+public fun classifyLocalhostUrl(url: String): LocalhostUrl? =
+    classifyLocalhostReference(url)
+
+/**
+ * Detect loopback host/port references inside plain text. This intentionally
+ * does not match real hosts or schemeless domains: only localhost literals that
+ * the phone cannot reach directly are emitted. Callers can turn each result
+ * into a port-forward affordance.
+ */
+public fun detectLocalhostPortReferences(line: String): List<LocalhostPortReference> {
+    if (line.isEmpty()) return emptyList()
+    val out = mutableListOf<LocalhostPortReference>()
+    val matcher = LOCALHOST_REFERENCE_PATTERN.matcher(line)
+    while (matcher.find()) {
+        var raw = matcher.group() ?: continue
+        var endTrim = raw.length
+        while (endTrim > 0 && raw[endTrim - 1] in LOCALHOST_REFERENCE_TRAILING_PUNCTUATION) {
+            endTrim--
+        }
+        if (endTrim <= 0) continue
+        if (endTrim != raw.length) raw = raw.substring(0, endTrim)
+        val local = classifyLocalhostReference(raw) ?: continue
+        out += LocalhostPortReference(
+            text = raw,
+            start = matcher.start(),
+            endExclusive = matcher.start() + raw.length,
+            localhostUrl = local,
+        )
+    }
+    return out
 }
 
 /**
@@ -133,3 +192,27 @@ private fun splitHostAndPort(hostPort: String): Pair<String, String?>? {
         hostPort.substring(0, colon) to hostPort.substring(colon + 1)
     }
 }
+
+private fun String.trimEndLocalhostReferencePunctuation(): String {
+    var end = length
+    while (end > 0 && this[end - 1] in LOCALHOST_REFERENCE_TRAILING_PUNCTUATION) end--
+    return substring(0, end)
+}
+
+/**
+ * Loopback host/port references, with optional `http(s)://` scheme and optional
+ * path/query/fragment tail. The leading negative lookbehind prevents matches
+ * inside larger hostnames (`notlocalhost:3000`, `xlocalhost:3000`,
+ * `foo.localhost:3000`) or after unsupported schemes (`ftp://localhost:21`).
+ * The port is filtered by [classifyLocalhostReference].
+ */
+private val LOCALHOST_REFERENCE_PATTERN: java.util.regex.Pattern = java.util.regex.Pattern.compile(
+    "(?<![\\w.-])(?<!://)(?:https?://)?" +
+        "(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1\\])" +
+        ":\\d{1,5}(?!\\d)(?:[/?#][\\w./?=&%+#~@:!,;-]*)?",
+    java.util.regex.Pattern.CASE_INSENSITIVE,
+)
+
+private val LOCALHOST_REFERENCE_TRAILING_PUNCTUATION: Set<Char> = setOf(
+    '.', ',', ';', ':', ')', ']', '!', '?', '\'', '"', '>', '<',
+)

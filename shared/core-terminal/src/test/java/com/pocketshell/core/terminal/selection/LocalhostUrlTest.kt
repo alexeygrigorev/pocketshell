@@ -66,6 +66,22 @@ class LocalhostUrlTest {
     }
 
     @Test
+    fun classifiesBareLocalhostReferenceWithPort() {
+        val r = classifyLocalhostUrl("localhost:5173")
+        assertEquals(5173, r?.remotePort)
+        assertEquals("http", r?.scheme)
+        assertEquals("", r?.pathAndQuery)
+    }
+
+    @Test
+    fun classifiesBareLoopbackReferenceWithPath() {
+        val r = classifyLocalhostUrl("127.0.0.1:3000/admin?tab=logs#tail")
+        assertEquals(3000, r?.remotePort)
+        assertEquals("http", r?.scheme)
+        assertEquals("/admin?tab=logs#tail", r?.pathAndQuery)
+    }
+
+    @Test
     fun preservesSchemeAndPathAndQuery() {
         val r = classifyLocalhostUrl("https://localhost:8443/app/page?x=1#frag")
         assertEquals(8443, r?.remotePort)
@@ -99,7 +115,6 @@ class LocalhostUrlTest {
     fun returnsNullForNonHttpScheme() {
         assertNull(classifyLocalhostUrl("ftp://localhost:21"))
         assertNull(classifyLocalhostUrl("ssh://localhost:22"))
-        assertNull(classifyLocalhostUrl("localhost:3000"))
     }
 
     @Test
@@ -107,5 +122,35 @@ class LocalhostUrlTest {
         assertNull(classifyLocalhostUrl("http://localhost:0"))
         assertNull(classifyLocalhostUrl("http://localhost:70000"))
         assertNull(classifyLocalhostUrl("http://localhost:notaport"))
+    }
+
+    // --- Plain-text scanning ------------------------------------------------
+
+    @Test
+    fun detectsCommonLoopbackReferencesInPlainText() {
+        val refs = detectLocalhostPortReferences(
+            "try http://localhost:3000, localhost:5173, 127.0.0.1:8000 and 0.0.0.0:9000.",
+        )
+
+        assertEquals(
+            listOf(
+                "http://localhost:3000",
+                "localhost:5173",
+                "127.0.0.1:8000",
+                "0.0.0.0:9000",
+            ),
+            refs.map { it.text },
+        )
+        assertEquals(listOf(3000, 5173, 8000, 9000), refs.map { it.localhostUrl.remotePort })
+    }
+
+    @Test
+    fun plainTextScannerRejectsLargerHostnamesAndBadPorts() {
+        val refs = detectLocalhostPortReferences(
+            "notlocalhost:3000 localhost.evil.com:3000 http://example.com:3000 " +
+                "localhost:70000 ftp://localhost:21",
+        )
+
+        assertTrue("expected no loopback references, got $refs", refs.isEmpty())
     }
 }

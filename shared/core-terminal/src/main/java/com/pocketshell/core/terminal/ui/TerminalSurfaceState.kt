@@ -92,10 +92,9 @@ class TerminalSurfaceState internal constructor(
 
     /**
      * Backing flow for [output]. Replay = 0 — bytes are only delivered to
-     * collectors active at the time they arrive. `extraBufferCapacity` is
-     * sized to absorb a small burst from the session's I/O thread without
-     * dropping; `BufferOverflow.SUSPEND` keeps producers honest by
-     * back-pressuring them when there is no collector.
+     * collectors active at the time they arrive. The live terminal producer
+     * treats this flow as a best-effort side channel: terminal rendering is
+     * authoritative and must not wait behind slow diagnostic collectors.
      */
     private val _output = MutableSharedFlow<ByteArray>(
         replay = 0,
@@ -105,10 +104,11 @@ class TerminalSurfaceState internal constructor(
 
     /**
      * Bytes the terminal session emitted since the most recent active
-     * collection started. Cold collectors get no replay — by the time the UI
-     * is in the composition, the [TerminalView] already owns the
-     * authoritative byte stream via the emulator. This flow exists for
-     * non-View consumers (e.g. logging, automation, tests).
+     * collection started. Cold collectors get no replay, and slow collectors
+     * may miss live chunks — by the time the UI is in the composition, the
+     * [TerminalView] already owns the authoritative byte stream via the
+     * emulator. This flow exists for non-View consumers (e.g. logging,
+     * automation, tests) and must not backpressure terminal rendering.
      *
      * Not yet wired in issue #8 — the producer side belongs to #9's
      * PTY/SSH plumbing. The flow is exposed today so downstream callers can
@@ -526,7 +526,7 @@ class TerminalSurfaceState internal constructor(
                         }
                         if (clean.isNotEmpty()) {
                             newBridge.feedBytes(clean)
-                            _output.emit(clean)
+                            _output.tryEmit(clean)
                             // Tick the buffer signal so debounced consumers of
                             // [flowOfMatches] re-run the detector. Cheap: just a
                             // counter increment.

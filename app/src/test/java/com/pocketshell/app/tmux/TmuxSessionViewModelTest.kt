@@ -19,6 +19,7 @@ import com.pocketshell.core.ssh.SshLeaseConnector
 import com.pocketshell.core.ssh.SshLeaseKey
 import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
+import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.uikit.model.KeyModifierState
 import com.pocketshell.core.tmux.TmuxClientException
@@ -6022,6 +6023,185 @@ class TmuxSessionViewModelTest {
             client.detachCleanlyCalled,
         )
         assertTrue("client must be closed after backgrounded detach", client.closed)
+    }
+
+    @Test
+    fun onClearedWhileBackgroundedParksLiveRuntimeInsteadOfClosingLeaseBeforeGrace() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val vm = newVm(runtimeCache = runtimeCache)
+        val client = FakeTmuxClient()
+        val session = FakeSshSession()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+            session = session,
+        )
+        vm.setProcessForegroundForClearedForTest(false)
+
+        vm.clearForTest()
+        runCurrent()
+
+        assertFalse(
+            "background ViewModel clear must not detach the live tmux client before grace elapses",
+            client.detachCleanlyCalled,
+        )
+        assertFalse(
+            "background ViewModel clear must not close the live tmux client before grace elapses",
+            client.closed,
+        )
+        assertFalse(
+            "background ViewModel clear must leave the SSH session open for the grace handoff",
+            session.closed,
+        )
+        assertEquals(
+            "parked runtime should be available for the recreated Activity/ViewModel",
+            listOf(tmuxRuntimeKeyForTest("work")),
+            runtimeCache.snapshotKeys(),
+        )
+    }
+
+    @Test
+    fun onClearedWhileBackgroundedClosesEvictedParkedRuntimeOutsideViewModelScope() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 1)
+        val evictedSession = FakeSshSession()
+        val evictedLeaseManager = SshLeaseManager(
+            connector = SshLeaseConnector { Result.success(evictedSession) },
+            idleTtlMillis = 0L,
+        )
+        val evictedLease = evictedLeaseManager.acquire(testLeaseTarget()).getOrThrow()
+        val evictedClient = FakeTmuxClient()
+        runtimeCache.put(
+            cachedRuntimeForTest(
+                sessionName = "old",
+                client = evictedClient,
+                session = evictedSession,
+                lease = evictedLease,
+            ),
+        )
+        val vm = newVm(runtimeCache = runtimeCache)
+        val activeClient = FakeTmuxClient()
+        val activeSession = FakeSshSession()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = activeClient,
+            session = activeSession,
+        )
+        vm.setProcessForegroundForClearedForTest(false)
+
+        vm.clearForTest()
+        runCurrent()
+
+        assertTrue("evicted parked client must detach during background clear", evictedClient.detachCleanlyCalled)
+        assertTrue("evicted parked client must close during background clear", evictedClient.closed)
+        assertTrue("evicted SSH lease must be released during background clear", evictedSession.closed)
+        assertFalse("newly parked active client must remain live for grace handoff", activeClient.closed)
+        assertFalse("active SSH session must remain live for grace handoff", activeSession.closed)
+        assertEquals(listOf(tmuxRuntimeKeyForTest("work")), runtimeCache.snapshotKeys())
+        assertFalse(runtimeCache.contains(tmuxRuntimeKeyForTest("old")))
+    }
+
+    @Test
+    fun foregroundOnClearedStillClosesLiveRuntimeForUserNavigation() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val vm = newVm(runtimeCache = runtimeCache)
+        val client = FakeTmuxClient()
+        val session = FakeSshSession()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+            session = session,
+        )
+        vm.setProcessForegroundForClearedForTest(true)
+
+        vm.clearForTest()
+        runCurrent()
+
+        assertTrue("foreground clear must keep the explicit detach/close behavior", client.detachCleanlyCalled)
+        assertTrue("foreground clear must close the tmux client", client.closed)
+        assertTrue("foreground clear must close the SSH session", session.closed)
+        assertTrue("foreground clear must not leave a parked runtime", runtimeCache.snapshotKeys().isEmpty())
+    }
+
+    @Test
+    fun restoredParkedRuntimeRebindsViewModelScopedPaneJobsWithoutSshReconnect() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val parkedClient = FakeTmuxClient()
+        val session = FakeSshSession()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val pane = TmuxPaneState(
+            paneId = "%0",
+            windowId = "@0",
+            sessionId = "\$0",
+            title = "work",
+            cwd = "/repo",
+            currentCommand = "bash",
+            paneTty = "/dev/pts/1",
+            terminalState = TerminalSurfaceState(),
+        )
+        runtimeCache.put(
+            CachedTmuxRuntime(
+                key = tmuxRuntimeKeyForTest("work"),
+                hostName = "alpha",
+                startDirectory = null,
+                session = session,
+                client = parkedClient,
+                panes = listOf(pane),
+                paneRows = mapOf("%0" to pane),
+                paneProducerJobs = mapOf("%0" to Job().also { it.cancel() }),
+                paneInputQueues = emptyMap(),
+                paneInputJobs = mapOf("%0" to Job().also { it.cancel() }),
+                paneAgentJobs = emptyMap(),
+                paneAgentInputs = emptyMap(),
+                agentConversations = emptyMap(),
+                remoteColumns = 80,
+                remoteRows = 24,
+            ),
+        )
+        val vm = newVm(
+            runtimeCache = runtimeCache,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+
+        vm.connect(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            passphrase = null,
+            sessionName = "work",
+        )
+        runCurrent()
+
+        assertEquals("cache hit must avoid opening a fresh SSH lease", 0, connector.connectCount)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(listOf("%0"), vm.panes.value.map { it.paneId })
+        assertTrue("restored pane must be reattached to the new ViewModel scope", pane.terminalState.isAttached)
+        vm.tmuxInputSinkForTest("%0").write("x".toByteArray())
+        runCurrent()
+        assertTrue(
+            "rebuilt input queue must send through the parked tmux client",
+            parkedClient.sentCommands.any { it.startsWith("send-keys -l -t %0") },
+        )
     }
 
     @Test

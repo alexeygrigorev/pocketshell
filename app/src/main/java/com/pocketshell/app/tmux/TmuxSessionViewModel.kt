@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import android.os.SystemClock
 import android.util.Log
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ProcessLifecycleOwner
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -657,7 +659,7 @@ public class TmuxSessionViewModel @Inject constructor(
                     // gated for the whole window because the status is
                     // [Switching], not [Connected].
                     val previousFrame = _panes.value
-                    deactivateCurrentRuntimeToCache()
+                    closeCachedRuntimesAsync(deactivateCurrentRuntimeToCache())
                     if (previousFrame.isNotEmpty()) {
                         _panes.value = previousFrame
                     }
@@ -843,6 +845,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var backgroundDetachJob: Job? = null
     private var sessionPrewarmJob: Job? = null
     private var foregroundReattachForTest: (() -> Unit)? = null
+    private var processForegroundForClearedOverrideForTest: Boolean? = null
     private var latestConnectIntent: ConnectIntent? = null
     private var connectGeneration: Long = 0L
 
@@ -1123,6 +1126,10 @@ public class TmuxSessionViewModel @Inject constructor(
 
     internal fun setForegroundReattachForTest(handler: (() -> Unit)?) {
         foregroundReattachForTest = handler
+    }
+
+    internal fun setProcessForegroundForClearedForTest(isForeground: Boolean?) {
+        processForegroundForClearedOverrideForTest = isForeground
     }
 
     /**
@@ -1439,7 +1446,7 @@ public class TmuxSessionViewModel @Inject constructor(
         val generation = latestConnectIntent?.takeIf {
             sameSessionIdentity(it.target, target)
         }?.generation ?: connectGeneration
-        deactivateCurrentRuntimeToCache()
+        closeCachedRuntimesAsync(deactivateCurrentRuntimeToCache())
         restoreCachedRuntime(target, cached)
         StartupTiming.mark(
             "tmux-runtime-cache-hit",
@@ -1512,9 +1519,9 @@ public class TmuxSessionViewModel @Inject constructor(
         return true
     }
 
-    private fun deactivateCurrentRuntimeToCache() {
-        val target = activeTarget ?: return
-        val client = clientRef ?: return
+    private fun deactivateCurrentRuntimeToCache(): List<CachedTmuxRuntime> {
+        val target = activeTarget ?: return emptyList()
+        val client = clientRef ?: return emptyList()
         eventsJob?.cancel()
         eventsJob = null
         disconnectedJob?.cancel()
@@ -1539,7 +1546,7 @@ public class TmuxSessionViewModel @Inject constructor(
             remoteColumns = remoteColumns,
             remoteRows = remoteRows,
         )
-        closeCachedRuntimesAsync(runtimeCache.put(runtime))
+        val evicted = runtimeCache.put(runtime)
         leaseRef = null
         sessionRef = null
         clientRef = null
@@ -1565,6 +1572,31 @@ public class TmuxSessionViewModel @Inject constructor(
         registeredHostId = null
         activeTarget = null
         activeAttachMilestone = null
+        return evicted
+    }
+
+    private fun rebindRestoredRuntimePaneJobsIfNeeded(
+        client: TmuxClient,
+        panes: List<TmuxPaneState>,
+    ) {
+        for (pane in panes) {
+            val paneId = pane.paneId
+            val producerActive = paneProducerJobs[paneId]?.isActive == true
+            val inputActive = paneInputJobs[paneId]?.isActive == true
+            if (producerActive && inputActive && pane.terminalState.isAttached) {
+                startPortDetectionForPane(paneId = paneId, client = client)
+                continue
+            }
+            paneProducerJobs.remove(paneId)?.cancel()
+            paneInputJobs.remove(paneId)?.cancel()
+            paneInputQueues.remove(paneId)?.close()
+            pane.terminalState.detachExternalProducer()
+            attachTerminalProducerForPane(
+                paneId = paneId,
+                state = pane.terminalState,
+                client = client,
+            )
+        }
     }
 
     private fun closeCachedRuntimesAsync(runtimes: List<CachedTmuxRuntime>) {
@@ -1572,6 +1604,17 @@ public class TmuxSessionViewModel @Inject constructor(
         viewModelScope.launch {
             runtimes.forEach { runtime ->
                 runtime.closeCachedRuntime()
+            }
+        }
+    }
+
+    private fun closeCachedRuntimesBlocking(runtimes: List<CachedTmuxRuntime>) {
+        if (runtimes.isEmpty()) return
+        runCatching {
+            runBlocking(Dispatchers.IO) {
+                runtimes.forEach { runtime ->
+                    runtime.closeCachedRuntime(detachTimeoutMs = SYNC_DETACH_TIMEOUT_MS)
+                }
             }
         }
     }
@@ -1605,6 +1648,7 @@ public class TmuxSessionViewModel @Inject constructor(
         remoteRows = runtime.remoteRows
         resetControlClientSizeForAttach()
         bindClientObservers(runtime.client)
+        rebindRestoredRuntimePaneJobsIfNeeded(runtime.client, runtime.panes)
         _panes.value = runtime.panes
         restartAgentConversationsForRestoredRuntime(runtime)
         activeTmuxClients.register(
@@ -2694,7 +2738,7 @@ public class TmuxSessionViewModel @Inject constructor(
         // the rendered frame first so it stays painted across the
         // deactivation (#437 slice A: no blank during a same-host switch).
         val previousFrame = _panes.value
-        deactivateCurrentRuntimeToCache()
+        closeCachedRuntimesAsync(deactivateCurrentRuntimeToCache())
         if (previousFrame.isNotEmpty()) {
             _panes.value = previousFrame
         }
@@ -5503,6 +5547,7 @@ public class TmuxSessionViewModel @Inject constructor(
     internal fun tmuxInputCapacityBytesForTest(): Int = TMUX_INPUT_MAX_PENDING_BYTES
 
     override fun onCleared() {
+        val processForeground = isProcessForegroundForCleared()
         Log.w(
             ISSUE_235_LIFECYCLE_TAG,
             "tmux-viewmodel-cleared " +
@@ -5515,6 +5560,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 "sessionConnected=${sessionRef?.isConnected} " +
                 "hasLease=${leaseRef != null} " +
                 "appActive=$appActive " +
+                "processForeground=$processForeground " +
                 "pendingReattach=${pendingReattach != null} " +
                 "backgroundDetachActive=${backgroundDetachJob?.isActive == true}",
         )
@@ -5522,7 +5568,12 @@ public class TmuxSessionViewModel @Inject constructor(
         connectJob?.cancel()
         connectJob = null
         assistant.dismiss()
-        closeCurrentConnection()
+        val parkedForBackgroundGrace = maybeParkRuntimeForBackgroundViewModelClear(
+            processForeground = processForeground,
+        )
+        if (!parkedForBackgroundGrace) {
+            closeCurrentConnection()
+        }
         // Issue #235: remove the application-scoped lifecycle hooks
         // installed during the first attach. The hooks survive across
         // [closeCurrentConnection*] teardown cycles (otherwise the
@@ -5536,6 +5587,31 @@ public class TmuxSessionViewModel @Inject constructor(
         // call. Explicit cancellation here is redundant — leaving it to
         // the framework keeps the teardown path single-sourced.
         super.onCleared()
+    }
+
+    private fun isProcessForegroundForCleared(): Boolean =
+        processForegroundForClearedOverrideForTest ?: runCatching {
+            ProcessLifecycleOwner.get()
+                .lifecycle
+                .currentState
+                .isAtLeast(Lifecycle.State.STARTED)
+        }.getOrDefault(appActive)
+
+    private fun maybeParkRuntimeForBackgroundViewModelClear(
+        processForeground: Boolean,
+    ): Boolean {
+        if (processForeground) return false
+        if (_connectionStatus.value !is ConnectionStatus.Connected) return false
+        val target = activeTarget ?: return false
+        val client = clientRef ?: return false
+        if (client.disconnected.value) return false
+        if (sessionRef?.isConnected == false) return false
+        Log.i(
+            ISSUE_235_LIFECYCLE_TAG,
+            "tmux-viewmodel-cleared-park-runtime " + targetLogFields(target),
+        )
+        closeCachedRuntimesBlocking(deactivateCurrentRuntimeToCache())
+        return true
     }
 
     private suspend fun releaseCurrentLeaseOrCloseRawSession() {
@@ -5860,18 +5936,7 @@ public class TmuxSessionViewModel @Inject constructor(
         registeredHostId?.let { activeTmuxClients.unregister(it) }
         registeredHostId = null
         closingHostId?.let { hostId ->
-            val cached = runtimeCache.removeHost(hostId)
-            if (cached.isNotEmpty()) {
-                runCatching {
-                    runBlocking(Dispatchers.IO) {
-                        cached.forEach { runtime ->
-                            withTimeoutOrNull(SYNC_DETACH_TIMEOUT_MS) {
-                                runtime.closeCachedRuntime()
-                            }
-                        }
-                    }
-                }
-            }
+            closeCachedRuntimesBlocking(runtimeCache.removeHost(hostId))
         }
         releaseCurrentLeaseOrCloseRawSessionBlocking()
         sessionRef = null

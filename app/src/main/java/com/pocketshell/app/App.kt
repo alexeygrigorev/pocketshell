@@ -11,6 +11,8 @@ import com.pocketshell.app.connectivity.TerminalNetworkObserver
 import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.startup.StartupTiming
+import com.pocketshell.app.tmux.TmuxSessionRuntimeCache
+import com.pocketshell.app.tmux.closeCachedRuntime
 import com.pocketshell.app.usage.UsageScheduler
 import com.pocketshell.core.ssh.SshLeaseManager
 import dagger.hilt.android.HiltAndroidApp
@@ -79,6 +81,9 @@ class App : Application() {
     @Inject
     lateinit var terminalNetworkObserver: TerminalNetworkObserver
 
+    @Inject
+    lateinit var tmuxRuntimeCache: TmuxSessionRuntimeCache
+
     /**
      * Issue #235: scope for fanning out tmux detach/reattach hooks
      * driven by the lifecycle observer. The dispatcher is
@@ -133,6 +138,10 @@ class App : Application() {
         graceMillis = BACKGROUND_GRACE_MILLIS,
         onGraceElapsed = {
             dispatchTmuxBackground()
+            tmuxRuntimeCache.clear().forEach { cached ->
+                runCatching { cached.closeCachedRuntime() }
+                    .onFailure { Log.w(APP_LIFECYCLE_TAG, "tmux cached runtime close failed", it) }
+            }
             sshLeaseLifecycleDispatcher.dispatch(Lifecycle.Event.ON_STOP)
         },
         onForeground = { resumedWithinGrace ->

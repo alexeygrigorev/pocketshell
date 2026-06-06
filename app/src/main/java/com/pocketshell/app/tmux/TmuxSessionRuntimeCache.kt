@@ -165,16 +165,22 @@ internal data class CachedTmuxRuntime(
     val lease: SshLease? = null,
 )
 
-internal suspend fun CachedTmuxRuntime.closeCachedRuntime() {
-    paneProducerJobs.values.forEach { it.cancelAndJoin() }
-    paneInputJobs.values.forEach { it.cancelAndJoin() }
-    paneAgentJobs.values.forEach { it.cancelAndJoin() }
-    paneInputQueues.values.forEach { it.close() }
-    panes.forEach { pane ->
-        runCatching { pane.terminalState.detachExternalProducer() }
-    }
-    runCatching { client.detachCleanly() }
-    withContext(NonCancellable) {
-        runCatching { lease?.release() }
+internal suspend fun CachedTmuxRuntime.closeCachedRuntime(
+    detachTimeoutMs: Long = 1_000L,
+) {
+    try {
+        paneProducerJobs.values.forEach { it.cancelAndJoin() }
+        paneInputJobs.values.forEach { it.cancelAndJoin() }
+        paneAgentJobs.values.forEach { it.cancelAndJoin() }
+        paneInputQueues.values.forEach { it.close() }
+        panes.forEach { pane ->
+            runCatching { pane.terminalState.detachExternalProducer() }
+        }
+        runCatching { client.detachCleanly(timeoutMs = detachTimeoutMs) }
+    } finally {
+        runCatching { client.close() }
+        withContext(NonCancellable) {
+            runCatching { lease?.release() }
+        }
     }
 }

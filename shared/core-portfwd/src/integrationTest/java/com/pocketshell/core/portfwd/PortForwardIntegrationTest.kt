@@ -45,6 +45,16 @@ class PortForwardIntegrationTest {
         private const val CONTAINER_SSH_PORT = 22
 
         /**
+         * Factor applied to locally-tuned timeout budgets when the test
+         * runs on a CI runner (see [ciScaled]). 4x covers the observed
+         * worst-case real-SSH reconnect + local-accept-thread settle on
+         * the shared GitHub Actions host while the sibling `core-ssh`
+         * integration suite and the Testcontainers image build compete
+         * for the same 2 cores — the source of the #545 line-409 flake.
+         */
+        private const val CI_TIMEOUT_MULTIPLIER = 4
+
+        /**
          * Project root — we walk up looking for `tests/docker/Dockerfile.ssh`
          * exactly like `core-ssh`'s integration test does.
          */
@@ -340,12 +350,12 @@ class PortForwardIntegrationTest {
             val job = supervisor.start(scope)
 
             // Wait for the first connect + scan, then opt :22 in.
-            waitUntil(15_000) {
+            waitUntil(ciScaled(15_000)) {
                 supervisor.flowOfConnectionState().value ==
                     AutoForwarderSupervisor.ConnectionState.Connected
             }
             supervisor.togglePort(22)
-            waitUntil(10_000) {
+            waitUntil(ciScaled(10_000)) {
                 supervisor.flowOfTunnels().value().any {
                     it.remotePort == 22 && it.status == TunnelInfo.Status.FORWARDING
                 }
@@ -361,7 +371,7 @@ class PortForwardIntegrationTest {
 
             // The supervisor must re-establish SSH and re-open :22 from its
             // desired-state set — without the user touching anything.
-            waitUntil(20_000) {
+            waitUntil(ciScaled(20_000)) {
                 val reconnected = supervisor.flowOfConnectionState().value ==
                     AutoForwarderSupervisor.ConnectionState.Connected
                 val forwardingAgain = supervisor.flowOfTunnels().value().any {
@@ -391,8 +401,13 @@ class PortForwardIntegrationTest {
     private fun assertBannerReadable(localPort: Int) {
         // The forward's local accept thread can lag a few hundred ms
         // behind the FORWARDING status flip, so retry the read for a
-        // bounded window rather than racing a single attempt.
-        val deadline = System.currentTimeMillis() + 10_000
+        // bounded window rather than racing a single attempt. On the
+        // shared GitHub Actions runner the freshly-reconnected forward's
+        // accept thread can lag well past the local 10 s budget (the
+        // line-409 CI flake in #545: the real-SSH reconnect + local
+        // accept settle competes with a sibling Docker container for the
+        // same 2-core host), so the window scales on CI.
+        val deadline = System.currentTimeMillis() + ciScaled(10_000)
         var lastBanner = ""
         while (System.currentTimeMillis() < deadline) {
             val banner = runCatching {
@@ -421,6 +436,31 @@ class PortForwardIntegrationTest {
     private fun kotlinx.coroutines.flow.Flow<List<TunnelInfo>>.value(): List<TunnelInfo> {
         return (this as kotlinx.coroutines.flow.StateFlow<List<TunnelInfo>>).value
     }
+
+    /**
+     * Multiply a locally-tuned timeout budget by [CI_TIMEOUT_MULTIPLIER]
+     * when running on a CI runner. The deadlines in this real-SSH
+     * reconnect test are tight enough for a fast dev box but flake on the
+     * shared GitHub Actions runner (2 cores, swiftshader-less but sharing
+     * the host with the sibling `core-ssh` integration suite and the
+     * Testcontainers build), where the real SSH connect + scan + local
+     * accept-thread settle can take several times longer. The waits are
+     * already poll-until loops that early-exit the moment the condition
+     * holds, so a generous CI ceiling never slows a healthy local run.
+     *
+     * CI is detected from the runner environment (`CI` / `GITHUB_ACTIONS`),
+     * which GitHub Actions exports for every step. Unlike Android
+     * instrumentation tests (where the env belongs to the workflow VM, not
+     * the on-device test process), this is a forked-JVM Gradle test that
+     * inherits the runner's environment directly, so `System.getenv` is
+     * the right channel here.
+     */
+    private fun ciScaled(localTimeoutMs: Long): Long =
+        if (isRunningOnCi()) localTimeoutMs * CI_TIMEOUT_MULTIPLIER else localTimeoutMs
+
+    private fun isRunningOnCi(): Boolean =
+        System.getenv("CI")?.toBoolean() == true ||
+            System.getenv("GITHUB_ACTIONS")?.toBoolean() == true
 
     private fun waitUntil(timeoutMs: Long, predicate: () -> Boolean) {
         val start = System.currentTimeMillis()

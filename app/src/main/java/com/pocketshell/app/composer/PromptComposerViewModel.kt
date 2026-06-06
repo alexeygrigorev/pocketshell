@@ -1053,8 +1053,8 @@ public class PromptComposerViewModel @Inject constructor(
     /**
      * Issue #174: abort the current recording without transcribing.
      *
-     * Called by the cancel `X` chip the sheet renders next to the
-     * waveform while the FSM is in [RecordingState.Recording]. Behaviour:
+     * Called by the sheet's recording-state "Discard" control while the FSM
+     * is in [RecordingState.Recording]. Behaviour:
      *
      *  - Cancel the silence-watchdog / amplitude-sampler coroutine.
      *  - Stop the underlying [MicCapture] and discard the captured bytes

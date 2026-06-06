@@ -321,11 +321,12 @@ public fun PromptComposerSheet(
                 }
                 viewModel.onMicTap()
             },
-            // Issue #453: the only Cancel affordance in the redesigned
-            // composer lives in the Transcribing state and cancels the
-            // in-flight Whisper round-trip. (Recording is stopped via the
-            // red Stop button, which always transcribes.)
-            onCancelRecording = viewModel::cancelTranscription,
+            // Recording discard and transcription cancel are deliberately
+            // separate. Discard stops the mic and drops the buffer before
+            // Whisper; cancel-transcription aborts an already-started
+            // Whisper round-trip.
+            onCancelRecording = viewModel::cancelRecording,
+            onCancelTranscription = viewModel::cancelTranscription,
             onSend = { withEnter ->
                 // Issue #211: route through the ViewModel so the FSM
                 // decides whether to dispatch now (Idle) or queue for
@@ -426,12 +427,16 @@ internal fun SheetContent(
     // Defaults to a no-op so previews / legacy tests that don't stage
     // attachments keep compiling.
     onRemoveAttachment: (String) -> Unit = {},
-    // Issue #174: dispatched by the cancel `X` chip rendered next to
-    // the mic FAB while [PromptComposerViewModel.RecordingState] is
-    // [PromptComposerViewModel.RecordingState.Recording]. Defaults to a
-    // no-op so existing previews and the legacy connected tests that
-    // bypass the ViewModel keep compiling.
+    // Issue #174: dispatched by the "Discard" control rendered in the
+    // recording panel while [PromptComposerViewModel.RecordingState] is
+    // [PromptComposerViewModel.RecordingState.Recording]. Defaults to a no-op
+    // so existing previews and legacy connected tests that bypass the
+    // ViewModel keep compiling.
     onCancelRecording: () -> Unit = {},
+    // Issue #453: dispatched by the "Cancel" control in Transcribing state.
+    // Separate from recording discard because the audio has already left the
+    // recorder and Whisper may already be in flight.
+    onCancelTranscription: () -> Unit = {},
     // Issue #180: queued failed / offline transcriptions. Defaults to
     // an empty list so older previews + tests that pre-date the queue
     // render the same composer shape they always did.
@@ -568,11 +573,12 @@ internal fun SheetContent(
                     amplitude = state.amplitude,
                     capturing = state.hasDetectedSpeech,
                     elapsedLabel = formatElapsed(state.recordingElapsedMs),
+                    onCancel = onCancelRecording,
                 )
             }
 
             PromptComposerViewModel.RecordingState.Transcribing -> {
-                TranscribingSurface(onCancel = onCancelRecording)
+                TranscribingSurface()
             }
 
             PromptComposerViewModel.RecordingState.Idle -> {
@@ -712,13 +718,14 @@ internal fun SheetContent(
         //  - Left: 📎 attach (paperclip) + `{}` snippets — always present.
         //  - Right, Idle / Text-inserted: a single primary Send button with
         //    a send-arrow glyph (the old Insert/Send pair collapses to one).
-        //  - Right, Recording: two explicit stop actions — "Insert"
-        //    (stop + transcribe into the editable field, nothing sent) and
-        //    "Send" (stop + transcribe + send). The old persistent Auto-send
-        //    toggle is gone (#508): the choice is made per-recording.
+        //  - Recording surface: explicit "Discard" stops the mic and drops
+        //    the buffer without Whisper.
+        //  - Right, Recording: two explicit stop+transcribe actions —
+        //    "Insert" (into the editable field, nothing sent) and "Send"
+        //    (transcribe + send). The old persistent Auto-send toggle is gone
+        //    (#508): the choice is made per-recording.
         //  - Right, Transcribing: Cancel + "Send" (arms the queued send for
         //    the in-flight round-trip).
-        val isRecording = state.recording == PromptComposerViewModel.RecordingState.Recording
         val attachmentBusy = attachmentUploading != null
         Row(
             modifier = Modifier
@@ -794,6 +801,9 @@ internal fun SheetContent(
                     //    through [onSend(true)] which (while Recording) queues
                     //    the send and stops the recorder; the queued send fires
                     //    once Whisper returns with the combined transcript.
+                    // The non-transcribing discard action is intentionally in
+                    // the recording panel itself, not this row, so it cannot be
+                    // confused with either stop+transcribe choice.
                     ToFieldButton(
                         onClick = onMicTap,
                         modifier = Modifier.testTag(COMPOSER_TO_FIELD_TAG),
@@ -815,7 +825,7 @@ internal fun SheetContent(
                     // the round-trip). No persistent Auto-send toggle.
                     GhostButton(
                         label = "Cancel",
-                        onClick = onCancelRecording,
+                        onClick = onCancelTranscription,
                         modifier = Modifier.testTag(COMPOSER_CANCEL_RECORDING_TAG),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
@@ -843,6 +853,7 @@ private fun RecordingSurface(
     amplitude: Float,
     capturing: Boolean,
     elapsedLabel: String,
+    onCancel: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(
@@ -885,6 +896,7 @@ private fun RecordingSurface(
                     }
                 },
         )
+        DiscardRecordingButton(onClick = onCancel)
     }
 }
 
@@ -896,12 +908,8 @@ private fun RecordingSurface(
  */
 @Composable
 private fun TranscribingSurface(
-    onCancel: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    // `onCancel` is consumed by the bottom-row Cancel button; this surface
-    // only renders the status. Kept as a parameter so the surface owns the
-    // full transcribing semantics for a11y.
     // Issue #453: center the spinner + label inside the panel. The old
     // left-aligned 20dp dot rendered as a tiny smudge at the left edge; the
     // mockup centers a clear spinner. The Row wraps its content and is then
@@ -961,6 +969,35 @@ private fun TranscribingSurface(
                 fontWeight = FontWeight.Medium,
             )
         }
+    }
+}
+
+/**
+ * Issue #174: explicit recording-only discard control. It lives inside the
+ * active recording panel, next to the waveform, so it reads as "discard this
+ * captured audio" rather than the header close `×` that dismisses the whole
+ * composer. Tapping it stops the mic and drops the buffer without Whisper.
+ */
+@Composable
+private fun DiscardRecordingButton(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .heightIn(min = 48.dp)
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = "Discard recording without transcribing" }
+            .testTag(COMPOSER_CANCEL_RECORDING_TAG)
+            .padding(horizontal = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "Discard",
+            color = PocketShellColors.TextSecondary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
     }
 }
 
@@ -1199,7 +1236,7 @@ private fun AttachIconButton(
     val tint = if (enabled) PocketShellColors.TextSecondary else PocketShellColors.TextMuted
     Box(
         modifier = modifier
-            .size(40.dp)
+            .size(44.dp)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .semantics { contentDescription = "Attach files" },
         contentAlignment = Alignment.Center,
@@ -1208,7 +1245,7 @@ private fun AttachIconButton(
             imageVector = AttachFileIcon,
             contentDescription = null,
             tint = tint,
-            modifier = Modifier.size(22.dp),
+            modifier = Modifier.size(24.dp),
         )
     }
 }
@@ -1272,7 +1309,7 @@ private fun SnippetsIconButton(
     val tint = if (enabled) PocketShellColors.TextSecondary else PocketShellColors.TextMuted
     Box(
         modifier = modifier
-            .size(40.dp)
+            .size(44.dp)
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
             .semantics { contentDescription = "Insert snippet" },
         contentAlignment = Alignment.Center,
@@ -1865,10 +1902,9 @@ internal fun composerSendTooltipTestTag(label: String): String =
 
 
 /**
- * Issue #174: test tag for the cancel-recording chip rendered next to
- * the mic FAB while the composer is in `Recording`. Connected tests use
- * this tag to locate the affordance, tap it, and assert the resulting
- * FSM transitions back to `Idle` without a Whisper call.
+ * Issue #174: test tag for the recording discard control and the
+ * transcribing cancel control. In `Recording` it stops the mic and drops the
+ * buffer before Whisper; in `Transcribing` it aborts the in-flight round-trip.
  */
 internal const val COMPOSER_CANCEL_RECORDING_TAG = "prompt-composer-cancel-recording"
 

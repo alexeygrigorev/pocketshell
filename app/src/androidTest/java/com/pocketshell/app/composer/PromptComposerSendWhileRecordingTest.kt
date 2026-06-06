@@ -99,7 +99,8 @@ class PromptComposerSendWhileRecordingTest {
                     onDraftChange = vm::onDraftChange,
                     onMicTap = { vm.onMicTap() },
                     onSend = { withEnter -> vm.requestSend(withEnter) },
-                    onCancelRecording = vm::cancelTranscription,
+                    onCancelRecording = vm::cancelRecording,
+                    onCancelTranscription = vm::cancelTranscription,
                 )
             }
         }

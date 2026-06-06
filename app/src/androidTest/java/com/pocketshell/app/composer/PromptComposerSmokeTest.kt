@@ -80,7 +80,9 @@ class PromptComposerSmokeTest {
         compose.onNodeWithText("CAPTURING").assertDoesNotExist()
         compose.onNodeWithText("LISTENING").assertDoesNotExist()
         // Issue #508: the two explicit stop actions replace the old Auto-send
-        // toggle in the Recording state.
+        // toggle in the Recording state. Issue #174 adds a separate Discard
+        // action that does not transcribe.
+        compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed()
         compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
 

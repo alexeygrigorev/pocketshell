@@ -36,8 +36,8 @@ class PromptComposerVisualScreenshotTest {
         // Issue #453: capture the four redesigned composer states matching
         // the maintainer's `issue-453-composer-states-mockup.png`:
         //  1. Idle — empty input "Compose prompt…", 📎/{} + mic + Send.
-        //  2. Recording — waveform + mm:ss timer + Stop; Auto-send + red stop.
-        //  3. Transcribing — "Transcribing…" spinner + Cancel + Auto-send.
+        //  2. Recording — waveform + mm:ss timer + Discard + Insert / Send.
+        //  3. Transcribing — "Transcribing…" spinner + Cancel + Send.
         //  4. Text-inserted — transcript fills the editable input + Send.
         var state by mutableStateOf(
             PromptComposerViewModel.UiState(
@@ -67,8 +67,9 @@ class PromptComposerVisualScreenshotTest {
         // composer screenshot.
         WalkthroughScreenshotArtifacts.capture("05b-composer-idle-draft")
 
-        // State 2: Recording — waveform + timer + the two explicit stop
-        // actions ("Insert" / "Send"). No status text, no Auto-send toggle.
+        // State 2: Recording — waveform + timer + Discard, plus the two
+        // explicit stop+transcribe actions ("Insert" / "Send"). No status
+        // text, no Auto-send toggle.
         compose.runOnIdle {
             state = state.copy(
                 recording = PromptComposerViewModel.RecordingState.Recording,
@@ -79,6 +80,7 @@ class PromptComposerVisualScreenshotTest {
         }
         compose.onNodeWithTag(COMPOSER_TIMER_TAG).assertIsDisplayed()
         compose.onNodeWithText("00:17").assertExists()
+        compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
         // Issue #508: two explicit stop buttons replace the old Stop FAB +
         // Auto-send toggle.
         compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed()

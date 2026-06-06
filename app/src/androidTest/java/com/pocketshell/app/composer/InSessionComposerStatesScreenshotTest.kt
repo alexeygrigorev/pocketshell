@@ -239,8 +239,10 @@ class InSessionComposerStatesScreenshotTest {
                 )
             }
             compose.onNodeWithTag(COMPOSER_TIMER_TAG).assertIsDisplayed()
-            // The recording row now offers the two explicit stop actions (To
-            // field / Send) instead of the removed in-surface "Stop" label.
+            // The recording surface now offers Discard, while the row keeps
+            // the two explicit stop+transcribe actions (To field / Send)
+            // instead of the removed in-surface "Stop" label.
+            compose.onNodeWithTag(COMPOSER_CANCEL_RECORDING_TAG).assertIsDisplayed()
             compose.onNodeWithTag(COMPOSER_TO_FIELD_TAG).assertIsDisplayed()
             compose.onNodeWithTag(COMPOSER_STOP_SEND_TAG).assertIsDisplayed()
             compose.onNodeWithText("Stop").assertDoesNotExist()

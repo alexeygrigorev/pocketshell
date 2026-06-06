@@ -756,6 +756,8 @@ class PromptComposerViewModelTest {
 
         // Seed a typed draft the user expects to keep around.
         vm.onDraftChange("partial typed prompt")
+        val attachmentPath = "~/.pocketshell/attachments/host-1/keep-this.png"
+        vm.seedAttachment(attachmentPath)
         vm.onMicTap()
         runCurrent()
         assertEquals(RecordingState.Recording, vm.uiState.value.recording)
@@ -774,6 +776,15 @@ class PromptComposerViewModelTest {
         assertEquals(0, whisperCalls.get())
         // Pre-existing typed draft is preserved verbatim.
         assertEquals("partial typed prompt", vm.uiState.value.draft)
+        assertEquals(
+            listOf(
+                PromptComposerViewModel.StagedAttachment(
+                    remotePath = attachmentPath,
+                    displayName = "keep-this.png",
+                ),
+            ),
+            vm.uiState.value.attachments,
+        )
         // Cancel is a user-driven discard, not an interruption — no
         // banner.
         assertNull(vm.uiState.value.error)
@@ -791,10 +802,11 @@ class PromptComposerViewModelTest {
 
     @Test
     fun cancelRecordingDuringTranscribingIsNoOp() = runTest {
-        // The cancel chip is hidden during Transcribing, but even if a
-        // stale tap reaches the ViewModel the FSM must not jump back to
-        // Idle while the Whisper response is in flight — that would
-        // race the success path's draft append and drop the transcript.
+        // The recording discard action is separate from Transcribing's cancel
+        // affordance. Even if a stale recording-discard tap reaches the
+        // ViewModel during Transcribing, the FSM must not jump back to Idle
+        // while the Whisper response is in flight — that would race the
+        // success path's draft append and drop the transcript.
         val mic = FakeMicCapture()
         // Gate the Whisper response on an explicit signal so the FSM
         // stays parked on Transcribing across the cancel call. Without
@@ -2018,7 +2030,7 @@ class PromptComposerViewModelTest {
         //   1. User pre-types "old draft text" (or it lands there from a
         //      previous transcription — the test seeds it directly).
         //   2. User taps mic → Recording 1.
-        //   3. User taps X cancel → FSM=Idle, draft preserved.
+        //   3. User taps Discard → FSM=Idle, draft preserved.
         //   4. User taps mic again → Recording 2.
         //   5. User taps Send mid-recording.
         //

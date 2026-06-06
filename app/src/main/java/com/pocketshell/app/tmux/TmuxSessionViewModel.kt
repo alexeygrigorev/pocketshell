@@ -407,6 +407,8 @@ public class TmuxSessionViewModel @Inject constructor(
     // restored runtime never re-prompts a port already handled.
     private val portDetector: PortDetector = PortDetector()
     private val panePortDetectorJobs: MutableMap<String, Job> = ConcurrentHashMap()
+    private val scannedConversationPortEventKeys: MutableSet<String> =
+        ConcurrentHashMap.newKeySet()
 
     // Bridge scope: a child of viewModelScope (parented via the
     // viewModelScope's Job) but with its own SupervisorJob so that a
@@ -4373,6 +4375,7 @@ public class TmuxSessionViewModel @Inject constructor(
         updateAgentConversation(paneId) { current ->
             current.copy(events = boundedDistinctEvents(current.events + events))
         }
+        scanAgentConversationEventsForPortOffers(paneId, events)
     }
 
     private fun markAgentTailStopped(
@@ -4478,6 +4481,39 @@ public class TmuxSessionViewModel @Inject constructor(
             if (updated == current) conversations else conversations + (paneId to updated)
         }
         rememberAgentStatusForPane(paneId)
+        scanAgentConversationEventsForPortOffers(paneId, initialEvents)
+    }
+
+    private fun scanAgentConversationEventsForPortOffers(
+        paneId: String,
+        events: List<ConversationEvent>,
+    ) {
+        if (!appActive || events.isEmpty()) return
+        val candidates = LinkedHashSet<Int>()
+        val scopeKey = activeTarget?.let { "${it.hostId}:${it.sessionName}" } ?: "no-target"
+        for (event in events) {
+            val text = event.portOfferText() ?: continue
+            val key = "$scopeKey:$paneId:${event.id}:${text.hashCode()}:${text.length}"
+            if (!scannedConversationPortEventKeys.add(key)) continue
+            for (candidate in portDetector.scan("$text\n")) {
+                candidates += candidate.port
+            }
+        }
+        if (candidates.isEmpty()) return
+        bridgeScope.launch {
+            for (port in candidates) {
+                confirmAndSurfaceDetectedPort(port)
+            }
+        }
+    }
+
+    private fun ConversationEvent.portOfferText(): String? = when (this) {
+        is ConversationEvent.Message -> text.takeIf {
+            role == ConversationRole.Assistant && it.isNotBlank()
+        }
+        is ConversationEvent.ToolResult -> output.takeIf { it.isNotBlank() }
+        is ConversationEvent.SystemNote -> content.takeIf { it.isNotBlank() }
+        is ConversationEvent.ToolCall -> null
     }
 
     /**

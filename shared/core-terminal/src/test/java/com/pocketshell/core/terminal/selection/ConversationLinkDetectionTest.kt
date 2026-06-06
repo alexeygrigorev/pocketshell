@@ -128,6 +128,14 @@ class ConversationLinkDetectionTest {
     }
 
     @Test
+    fun detectsAnyAddressHostPortAsUrlLink() {
+        val out = links("server bound to 0.0.0.0:8080")
+        assertEquals(1, out.size)
+        assertEquals("0.0.0.0:8080", out[0].text)
+        assertEquals(ConversationLinkKind.URL, out[0].kind)
+    }
+
+    @Test
     fun urlPathTailIsNotReSurfacedAsFile() {
         // The `/repo/main.kt` tail of a URL must NOT also be a file link.
         val out = links("https://github.com/o/repo/main.kt")

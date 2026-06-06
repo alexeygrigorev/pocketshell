@@ -6911,6 +6911,80 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun assistantConversationLocalhostUrlSurfacesPortForwardOverlay() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        val session = FakeSshSession(ssListeningPorts = setOf(5173))
+        vm.attachForPortDetection(client, session)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        advanceUntilIdle()
+
+        vm.appendAgentEventsForTest(
+            "%0",
+            listOf(
+                ConversationEvent.Message(
+                    id = "assistant-localhost",
+                    agent = AgentKind.ClaudeCode,
+                    role = ConversationRole.Assistant,
+                    text = "Preview is ready at http://localhost:5173/",
+                ),
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(5173, vm.detectedPort.value)
+    }
+
+    @Test
+    fun agentToolResultLoopbackPortSurfacesPortForwardOverlay() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        val session = FakeSshSession(ssListeningPorts = setOf(8000))
+        vm.attachForPortDetection(client, session)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        advanceUntilIdle()
+
+        vm.appendAgentEventsForTest(
+            "%0",
+            listOf(
+                ConversationEvent.ToolResult(
+                    id = "tool-localhost",
+                    agent = AgentKind.ClaudeCode,
+                    output = "Server running on 0.0.0.0:8000\n",
+                ),
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(8000, vm.detectedPort.value)
+    }
+
+    @Test
+    fun userConversationLocalhostUrlDoesNotSurfacePortForwardOverlay() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        val session = FakeSshSession(ssListeningPorts = setOf(5173))
+        vm.attachForPortDetection(client, session)
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        advanceUntilIdle()
+
+        vm.appendAgentEventsForTest(
+            "%0",
+            listOf(
+                ConversationEvent.Message(
+                    id = "user-localhost",
+                    agent = AgentKind.ClaudeCode,
+                    role = ConversationRole.User,
+                    text = "Can you check http://localhost:5173?",
+                ),
+            ),
+        )
+        advanceUntilIdle()
+
+        assertNull(vm.detectedPort.value)
+    }
+
+    @Test
     fun echoedPortNotListeningDoesNotSurfaceOverlay() = runTest {
         val vm = newVm()
         val client = FakeTmuxClient()

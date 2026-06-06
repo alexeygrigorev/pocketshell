@@ -1038,8 +1038,8 @@ internal fun formatThresholdLabel(seconds: Float): String {
  * Whisper/OpenAI).
  *
  *  - **Provider** — radio group over [AssistantProvider]. Default OpenAI.
- *    The Anthropic-compatible slot covers both Anthropic and ZAI/GLM via
- *    its base URL.
+ *    ZAI has its own product-facing settings and key, while internally it
+ *    uses the Anthropic-compatible Messages protocol.
  *  - **Base URL / model** — editable per provider; only the active
  *    provider's fields are shown.
  *  - **API key** — masked single-field dialog (`sk-…1234`), KeyStore-backed,
@@ -1080,10 +1080,16 @@ private fun AssistantSection(
                 testTag = ASSISTANT_PROVIDER_OPENAI_TAG,
             )
             AssistantProviderRow(
-                label = "Anthropic / ZAI-GLM",
+                label = "Anthropic",
                 selected = provider == AssistantProvider.Anthropic,
                 onClick = { onProviderSelected(AssistantProvider.Anthropic) },
                 testTag = ASSISTANT_PROVIDER_ANTHROPIC_TAG,
+            )
+            AssistantProviderRow(
+                label = "ZAI",
+                selected = provider == AssistantProvider.Zai,
+                onClick = { onProviderSelected(AssistantProvider.Zai) },
+                testTag = ASSISTANT_PROVIDER_ZAI_TAG,
             )
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -1617,6 +1623,7 @@ internal const val VOICE_SILENCE_VALUE_TAG = "settings:voice:silence-value"
 internal const val VOICE_AI_COSTS_ROW_TAG = "settings:voice:ai-costs-row"
 internal const val ASSISTANT_PROVIDER_OPENAI_TAG = "settings:assistant:provider-openai"
 internal const val ASSISTANT_PROVIDER_ANTHROPIC_TAG = "settings:assistant:provider-anthropic"
+internal const val ASSISTANT_PROVIDER_ZAI_TAG = "settings:assistant:provider-zai"
 internal const val ASSISTANT_BASE_URL_FIELD_TAG = "settings:assistant:base-url-field"
 internal const val ASSISTANT_MODEL_FIELD_TAG = "settings:assistant:model-field"
 internal const val ASSISTANT_API_KEY_ROW_TAG = "settings:assistant:api-key-row"

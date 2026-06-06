@@ -3,14 +3,14 @@ package com.pocketshell.core.assistant
 /**
  * Which provider family the in-app action assistant talks to.
  *
- * `Anthropic` covers both real Anthropic and ZAI/GLM — they share the
- * Messages wire format and differ only by base URL + model (decision D25).
- * `OpenAi` is the chat-completions family. Default selection is [OpenAi]
- * (see [AssistantSettings.DEFAULT_PROVIDER]).
+ * Product-facing providers are kept separate from wire protocols: [Zai]
+ * uses the Anthropic-compatible Messages protocol internally, but it has
+ * its own settings and secret slot.
  */
 public enum class AssistantProvider {
     OpenAi,
     Anthropic,
+    Zai,
     ;
 
     public companion object {
@@ -34,8 +34,8 @@ public enum class AssistantProvider {
  *
  * @property apiKey provider API key.
  * @property baseUrl API base URL (no trailing `/messages` etc. — the client
- *   appends the path). For Anthropic: `https://api.anthropic.com/v1` or the
- *   ZAI/GLM URL `https://api.z.ai/api/anthropic`. For OpenAI:
+ *   appends the path). For Anthropic: `https://api.anthropic.com/v1`.
+ *   For ZAI: `https://api.z.ai/api/anthropic`. For OpenAI:
  *   `https://api.openai.com/v1`.
  * @property model model id, e.g. `gpt-4o`, `claude-3-5-sonnet-latest`,
  *   `glm-4.6`.
@@ -84,9 +84,10 @@ public data class AssistantProviderConfig(
  * @property provider which provider the factory should build a client for.
  * @property openAiBaseUrl OpenAI base URL.
  * @property openAiModel OpenAI model id.
- * @property anthropicBaseUrl Anthropic-compatible base URL (Anthropic or
- *   ZAI/GLM).
- * @property anthropicModel Anthropic-compatible model id.
+ * @property anthropicBaseUrl Anthropic base URL.
+ * @property anthropicModel Anthropic model id.
+ * @property zaiBaseUrl ZAI Anthropic-compatible Messages base URL.
+ * @property zaiModel ZAI model id.
  */
 public data class AssistantSettings(
     val provider: AssistantProvider = DEFAULT_PROVIDER,
@@ -94,6 +95,8 @@ public data class AssistantSettings(
     val openAiModel: String = DEFAULT_OPENAI_MODEL,
     val anthropicBaseUrl: String = DEFAULT_ANTHROPIC_BASE_URL,
     val anthropicModel: String = DEFAULT_ANTHROPIC_MODEL,
+    val zaiBaseUrl: String = DEFAULT_ZAI_BASE_URL,
+    val zaiModel: String = DEFAULT_ZAI_MODEL,
 ) {
     public companion object {
         /** Default provider on a fresh install. Decision D25: OpenAI. */
@@ -105,11 +108,7 @@ public data class AssistantSettings(
         public const val DEFAULT_ANTHROPIC_BASE_URL: String = "https://api.anthropic.com/v1"
         public const val DEFAULT_ANTHROPIC_MODEL: String = "claude-3-5-sonnet-latest"
 
-        /**
-         * ZAI/GLM is the Anthropic wire format pointed at a different base
-         * URL. Surfaced as a constant so the Settings UI can offer a
-         * one-tap "use ZAI/GLM" preset for the Anthropic-compatible slot.
-         */
-        public const val ZAI_GLM_BASE_URL: String = "https://api.z.ai/api/anthropic"
+        public const val DEFAULT_ZAI_BASE_URL: String = "https://api.z.ai/api/anthropic"
+        public const val DEFAULT_ZAI_MODEL: String = "glm-4.6"
     }
 }

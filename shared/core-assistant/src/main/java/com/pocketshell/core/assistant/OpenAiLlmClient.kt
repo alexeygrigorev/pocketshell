@@ -17,9 +17,9 @@ import java.util.concurrent.TimeUnit
  * (`POST <baseUrl>/chat/completions`) with function/tool calling.
  *
  * Base URL is injectable so the same impl can target OpenAI proper or any
- * OpenAI-compatible gateway. Anthropic / ZAI-GLM go through
- * [AnthropicLlmClient] instead — their wire formats are different enough
- * that one client cannot serve both (decision D25).
+ * OpenAI-compatible gateway. Anthropic and ZAI go through
+ * [AnthropicLlmClient] instead because they use the Messages wire format
+ * (decision D25).
  *
  * Wire mapping:
  *  - System / user / assistant text → `messages[]` with matching `role`.

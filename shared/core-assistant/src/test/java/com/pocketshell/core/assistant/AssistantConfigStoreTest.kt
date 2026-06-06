@@ -52,48 +52,56 @@ class AssistantConfigStoreTest {
         assertEquals(AssistantSettings.DEFAULT_OPENAI_MODEL, settings.openAiModel)
         assertEquals(AssistantSettings.DEFAULT_ANTHROPIC_BASE_URL, settings.anthropicBaseUrl)
         assertEquals(AssistantSettings.DEFAULT_ANTHROPIC_MODEL, settings.anthropicModel)
+        assertEquals(AssistantSettings.DEFAULT_ZAI_BASE_URL, settings.zaiBaseUrl)
+        assertEquals(AssistantSettings.DEFAULT_ZAI_MODEL, settings.zaiModel)
     }
 
     @Test
     fun key_is_null_before_first_save() {
         assertNull(newStore().loadKey(AssistantProvider.OpenAi))
         assertNull(newStore().loadKey(AssistantProvider.Anthropic))
+        assertNull(newStore().loadKey(AssistantProvider.Zai))
     }
 
     @Test
     fun per_provider_config_round_trips() {
         val store = newStore()
-        store.setProvider(AssistantProvider.Anthropic)
+        store.setProvider(AssistantProvider.Zai)
         store.setEndpoint(AssistantProvider.OpenAi, "https://oai.example/v1", "gpt-4o-mini")
-        store.setEndpoint(AssistantProvider.Anthropic, AssistantSettings.ZAI_GLM_BASE_URL, "glm-4.6")
+        store.setEndpoint(AssistantProvider.Anthropic, "https://anth.example/v1", "claude-test")
+        store.setEndpoint(AssistantProvider.Zai, AssistantSettings.DEFAULT_ZAI_BASE_URL, "glm-4.6")
         store.saveKey(AssistantProvider.OpenAi, "sk-openai-123".toCharArray())
         store.saveKey(AssistantProvider.Anthropic, "sk-anthropic-456".toCharArray())
+        store.saveKey(AssistantProvider.Zai, "sk-zai-789".toCharArray())
 
         val settings = store.loadSettings()
-        assertEquals(AssistantProvider.Anthropic, settings.provider)
+        assertEquals(AssistantProvider.Zai, settings.provider)
         assertEquals("https://oai.example/v1", settings.openAiBaseUrl)
         assertEquals("gpt-4o-mini", settings.openAiModel)
-        assertEquals(AssistantSettings.ZAI_GLM_BASE_URL, settings.anthropicBaseUrl)
-        assertEquals("glm-4.6", settings.anthropicModel)
+        assertEquals("https://anth.example/v1", settings.anthropicBaseUrl)
+        assertEquals("claude-test", settings.anthropicModel)
+        assertEquals(AssistantSettings.DEFAULT_ZAI_BASE_URL, settings.zaiBaseUrl)
+        assertEquals("glm-4.6", settings.zaiModel)
         assertArrayEquals("sk-openai-123".toCharArray(), store.loadKey(AssistantProvider.OpenAi))
         assertArrayEquals("sk-anthropic-456".toCharArray(), store.loadKey(AssistantProvider.Anthropic))
+        assertArrayEquals("sk-zai-789".toCharArray(), store.loadKey(AssistantProvider.Zai))
     }
 
     @Test
     fun config_survives_process_restart() {
         newStore().apply {
-            setProvider(AssistantProvider.Anthropic)
-            setEndpoint(AssistantProvider.Anthropic, AssistantSettings.ZAI_GLM_BASE_URL, "glm-4.6")
-            saveKey(AssistantProvider.Anthropic, "sk-restart".toCharArray())
+            setProvider(AssistantProvider.Zai)
+            setEndpoint(AssistantProvider.Zai, AssistantSettings.DEFAULT_ZAI_BASE_URL, "glm-4.6")
+            saveKey(AssistantProvider.Zai, "sk-restart".toCharArray())
         }
 
         // Fresh instance == simulated process restart re-reading disk.
         val restarted = newStore()
         val settings = restarted.loadSettings()
-        assertEquals(AssistantProvider.Anthropic, settings.provider)
-        assertEquals(AssistantSettings.ZAI_GLM_BASE_URL, settings.anthropicBaseUrl)
-        assertEquals("glm-4.6", settings.anthropicModel)
-        assertArrayEquals("sk-restart".toCharArray(), restarted.loadKey(AssistantProvider.Anthropic))
+        assertEquals(AssistantProvider.Zai, settings.provider)
+        assertEquals(AssistantSettings.DEFAULT_ZAI_BASE_URL, settings.zaiBaseUrl)
+        assertEquals("glm-4.6", settings.zaiModel)
+        assertArrayEquals("sk-restart".toCharArray(), restarted.loadKey(AssistantProvider.Zai))
     }
 
     @Test
@@ -101,11 +109,13 @@ class AssistantConfigStoreTest {
         val store = newStore()
         store.saveKey(AssistantProvider.OpenAi, "sk-openai".toCharArray())
         store.saveKey(AssistantProvider.Anthropic, "sk-anthropic".toCharArray())
+        store.saveKey(AssistantProvider.Zai, "sk-zai".toCharArray())
 
         store.clearKey(AssistantProvider.OpenAi)
 
         assertNull(store.loadKey(AssistantProvider.OpenAi))
         assertArrayEquals("sk-anthropic".toCharArray(), store.loadKey(AssistantProvider.Anthropic))
+        assertArrayEquals("sk-zai".toCharArray(), store.loadKey(AssistantProvider.Zai))
     }
 
     private fun clearPrefs() {

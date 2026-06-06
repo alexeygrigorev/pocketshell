@@ -15,8 +15,8 @@ import org.junit.Test
 /**
  * Verifies [AnthropicLlmClient] builds Messages-API requests with
  * `tools` / `tool_choice`, parses `tool_use` blocks, feeds `tool_result`
- * back, and honours the injected base URL (Anthropic + ZAI/GLM both ride
- * this client).
+ * back, and honours the injected base URL. Anthropic and ZAI both use this
+ * Messages wire implementation.
  */
 class AnthropicLlmClientTest {
 
@@ -155,8 +155,8 @@ class AnthropicLlmClientTest {
     }
 
     @Test
-    fun base_url_injection_targets_zai_glm_host() = runBlocking {
-        // Same client impl, ZAI/GLM-style base URL pointed at the mock host.
+    fun base_url_injection_targets_zai_host() = runBlocking {
+        // Same client impl, ZAI-style base URL pointed at the mock host.
         server.enqueue(
             MockResponse().setBody(
                 """{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}""",

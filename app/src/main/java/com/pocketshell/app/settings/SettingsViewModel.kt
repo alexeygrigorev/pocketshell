@@ -262,8 +262,11 @@ class SettingsViewModel @Inject constructor(
             openAiModel = settings.openAiModel,
             anthropicBaseUrl = settings.anthropicBaseUrl,
             anthropicModel = settings.anthropicModel,
+            zaiBaseUrl = settings.zaiBaseUrl,
+            zaiModel = settings.zaiModel,
             openAiKey = readAssistantKeyStatus(AssistantProvider.OpenAi),
             anthropicKey = readAssistantKeyStatus(AssistantProvider.Anthropic),
+            zaiKey = readAssistantKeyStatus(AssistantProvider.Zai),
         )
     }
 
@@ -318,24 +321,30 @@ data class AssistantSettingsUiState(
     val openAiModel: String,
     val anthropicBaseUrl: String,
     val anthropicModel: String,
+    val zaiBaseUrl: String,
+    val zaiModel: String,
     val openAiKey: WhisperKeyStatus,
     val anthropicKey: WhisperKeyStatus,
+    val zaiKey: WhisperKeyStatus,
 ) {
     /** Masked key status for whichever provider is currently active. */
     fun keyStatusFor(provider: AssistantProvider): WhisperKeyStatus = when (provider) {
         AssistantProvider.OpenAi -> openAiKey
         AssistantProvider.Anthropic -> anthropicKey
+        AssistantProvider.Zai -> zaiKey
     }
 
     /** Base URL for [provider]. */
     fun baseUrlFor(provider: AssistantProvider): String = when (provider) {
         AssistantProvider.OpenAi -> openAiBaseUrl
         AssistantProvider.Anthropic -> anthropicBaseUrl
+        AssistantProvider.Zai -> zaiBaseUrl
     }
 
     /** Model for [provider]. */
     fun modelFor(provider: AssistantProvider): String = when (provider) {
         AssistantProvider.OpenAi -> openAiModel
         AssistantProvider.Anthropic -> anthropicModel
+        AssistantProvider.Zai -> zaiModel
     }
 }

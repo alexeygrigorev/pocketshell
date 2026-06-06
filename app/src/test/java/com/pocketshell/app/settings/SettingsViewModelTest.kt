@@ -76,6 +76,7 @@ class SettingsViewModelTest {
                 AssistantProvider.OpenAi -> settings.copy(openAiBaseUrl = baseUrl, openAiModel = model)
                 AssistantProvider.Anthropic ->
                     settings.copy(anthropicBaseUrl = baseUrl, anthropicModel = model)
+                AssistantProvider.Zai -> settings.copy(zaiBaseUrl = baseUrl, zaiModel = model)
             }
         }
         override fun saveKey(provider: AssistantProvider, key: CharArray) {
@@ -233,22 +234,24 @@ class SettingsViewModelTest {
         assertEquals(AssistantProvider.OpenAi, state.provider)
         assertEquals(WhisperKeyStatus.Unset, state.openAiKey)
         assertEquals(WhisperKeyStatus.Unset, state.anthropicKey)
+        assertEquals(WhisperKeyStatus.Unset, state.zaiKey)
     }
 
     @Test
     fun `setAssistantProvider switches active provider`() {
         val vm = newVm()
-        vm.setAssistantProvider(AssistantProvider.Anthropic)
-        assertEquals(AssistantProvider.Anthropic, vm.assistantState.value.provider)
+        vm.setAssistantProvider(AssistantProvider.Zai)
+        assertEquals(AssistantProvider.Zai, vm.assistantState.value.provider)
     }
 
     @Test
     fun `setAssistantEndpoint persists base url and model per provider`() {
         val vm = newVm()
-        vm.setAssistantEndpoint(AssistantProvider.Anthropic, AssistantSettings.ZAI_GLM_BASE_URL, "glm-4.6")
+        vm.setAssistantEndpoint(AssistantProvider.Zai, AssistantSettings.DEFAULT_ZAI_BASE_URL, "glm-4.6")
         val state = vm.assistantState.value
-        assertEquals(AssistantSettings.ZAI_GLM_BASE_URL, state.anthropicBaseUrl)
-        assertEquals("glm-4.6", state.anthropicModel)
+        assertEquals(AssistantSettings.DEFAULT_ZAI_BASE_URL, state.zaiBaseUrl)
+        assertEquals("glm-4.6", state.zaiModel)
+        assertEquals(AssistantSettings.DEFAULT_ANTHROPIC_BASE_URL, state.anthropicBaseUrl)
         // OpenAI endpoint untouched.
         assertEquals(AssistantSettings.DEFAULT_OPENAI_BASE_URL, state.openAiBaseUrl)
     }
@@ -262,8 +265,9 @@ class SettingsViewModelTest {
         val set = vm.assistantState.value.openAiKey
         assertTrue("expected Set, got $set", set is WhisperKeyStatus.Set)
         assertEquals("7788", (set as WhisperKeyStatus.Set).maskedTail)
-        // Anthropic key remains unset — keys are per-provider.
+        // Other provider keys remain unset — keys are per-provider.
         assertEquals(WhisperKeyStatus.Unset, vm.assistantState.value.anthropicKey)
+        assertEquals(WhisperKeyStatus.Unset, vm.assistantState.value.zaiKey)
 
         vm.clearAssistantKey(AssistantProvider.OpenAi)
         assertEquals(WhisperKeyStatus.Unset, vm.assistantState.value.openAiKey)
@@ -276,7 +280,7 @@ class SettingsViewModelTest {
         val voiceVault = FakeVault(initial = "sk-whisper-1234".toCharArray())
         val vm = newVm(vault = voiceVault)
 
-        vm.setAssistantProvider(AssistantProvider.Anthropic)
+        vm.setAssistantProvider(AssistantProvider.Zai)
         vm.setAssistantEndpoint(AssistantProvider.OpenAi, "https://oai.example/v1", "gpt-4o-mini")
         vm.saveAssistantKey(AssistantProvider.OpenAi, "sk-assistant-9999".toCharArray())
         vm.clearAssistantKey(AssistantProvider.OpenAi)

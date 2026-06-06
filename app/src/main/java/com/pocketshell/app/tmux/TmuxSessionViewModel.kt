@@ -4768,6 +4768,14 @@ public class TmuxSessionViewModel @Inject constructor(
                 val payload = command + "\r"
                 return writeInputToPaneResult(pane, payload.toByteArray(Charsets.UTF_8))
             }
+            override suspend fun sendPromptToSession(sessionName: String, prompt: String): Result<Unit> {
+                if (sessionName != target.sessionName) {
+                    return Result.failure(IllegalStateException("Session $sessionName is not active."))
+                }
+                val pane = focusedPaneId
+                    ?: return Result.failure(IllegalStateException("No focused pane for assistant prompt."))
+                return sendToAgentPaneResult(pane, prompt)
+            }
             override fun navigate(destination: AppDestination) {
                 _assistantNavRequests.tryEmit(destination)
             }

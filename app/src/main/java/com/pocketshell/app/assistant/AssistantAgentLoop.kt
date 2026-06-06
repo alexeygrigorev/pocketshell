@@ -167,14 +167,30 @@ internal class AssistantAgentLoop(
             )
 
             val results = mutableListOf<LlmToolResult>()
-            for (call in response.toolCalls) {
+            var corrected = false
+            for ((index, call) in response.toolCalls.withIndex()) {
                 val outcome = dispatch(call, confirmGate, choiceGate)
                 if (outcome is DispatchOutcome.CancelLoop) {
                     return Outcome.Cancelled(outcome.message)
                 }
                 results += (outcome as DispatchOutcome.Result).toolResult
+                if (outcome.replan) {
+                    corrected = true
+                    response.toolCalls.drop(index + 1).forEach { skipped ->
+                        results += LlmToolResult(
+                            skipped.id,
+                            "Not executed because the user corrected an earlier tool call. " +
+                                "Revise the plan and issue fresh tool calls.",
+                            isError = true,
+                        )
+                    }
+                    break
+                }
             }
             messages += LlmMessage.toolResults(results)
+            if (corrected) {
+                continue
+            }
         }
         return Outcome.Failed("The assistant reached its step limit before finishing.")
     }
@@ -194,7 +210,10 @@ internal class AssistantAgentLoop(
     }
 
     private sealed interface DispatchOutcome {
-        data class Result(val toolResult: LlmToolResult) : DispatchOutcome
+        data class Result(
+            val toolResult: LlmToolResult,
+            val replan: Boolean = false,
+        ) : DispatchOutcome
         data class CancelLoop(val message: String) : DispatchOutcome
     }
 
@@ -350,6 +369,7 @@ internal class AssistantAgentLoop(
                         "The user did not confirm. Their correction: ${decision.correction}",
                         isError = false,
                     ),
+                    replan = true,
                 )
             is Decision.Cancel ->
                 DispatchOutcome.CancelLoop("Cancelled.")
@@ -378,6 +398,18 @@ internal class AssistantAgentLoop(
                 val agent = args.optString("agent")
                 traceAction(name, host, cwd, mapOf("host" to host, "cwd" to cwd, "agent" to agent)) {
                     actions.startSession(host, cwd, agent)
+                }
+            }
+            AssistantTools.SEND_PROMPT_TO_SESSION -> {
+                val sessionName = args.optString("session_name")
+                val prompt = args.optString("prompt")
+                traceAction(
+                    name,
+                    null,
+                    null,
+                    mapOf("session_name" to sessionName, "prompt" to REDACTED),
+                ) {
+                    actions.sendPromptToSession(sessionName, prompt)
                 }
             }
             AssistantTools.CREATE_PROJECT -> {
@@ -415,6 +447,10 @@ internal class AssistantAgentLoop(
             name,
             "Start ${args.optString("agent")} session in ${args.optString("cwd")} " +
                 "on ${args.optString("host")}",
+        )
+        AssistantTools.SEND_PROMPT_TO_SESSION -> Candidate(
+            name,
+            "Send prompt to ${args.optString("session_name")}: ${args.optString("prompt")}",
         )
         AssistantTools.CREATE_PROJECT -> Candidate(
             name,
@@ -492,8 +528,15 @@ internal class AssistantAgentLoop(
                 "resolve_folder reports a confident match or the user has picked one, call " +
                 "start_session with that cwd; if it finds no match, tell the user and stop. " +
                 "Prefer inspect tools before acting. Mutating tools " +
-                "(run_command, create_file, start_session, create_project, clone_repo) are confirmed by the user " +
+                "(run_command, create_file, start_session, send_prompt_to_session, " +
+                "create_project, clone_repo) are confirmed by the user " +
                 "before they run; if the user corrects you, revise the candidate and try again. " +
+                "For requests to start an agent in a project and give it a task, produce the " +
+                "structured sequence: inspect/resolve the project, start_session with the chosen " +
+                "cwd and agent, then send_prompt_to_session with the user's task prompt. " +
+                "Treat code-editing tasks that name a project the same way; default to the " +
+                "codex agent when the user does not specify an agent. Normalize obvious speech " +
+                "recognition typos in the prompt sent to the agent without changing the task. " +
                 "Keep shell commands short and non-interactive. When the task is complete, reply " +
                 "with a brief confirmation and stop calling tools."
     }

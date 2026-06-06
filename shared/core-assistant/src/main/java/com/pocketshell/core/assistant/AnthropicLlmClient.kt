@@ -16,11 +16,10 @@ import java.util.concurrent.TimeUnit
  * [AssistantLlmClient] backed by the Anthropic Messages API
  * (`POST <baseUrl>/messages`).
  *
- * The same impl serves both real Anthropic and ZAI/GLM: ZAI/GLM is just
- * "the Anthropic SDK pointed at a different `base_url`"
- * (`https://api.z.ai/api/anthropic`, model `glm-*`). The wire format is
- * identical, so a single client with an injectable [config] base URL covers
- * both — see decision D25 and `/home/alexey/git/ai-engineering-field-guide`.
+ * The same wire implementation serves both real Anthropic and ZAI. ZAI is
+ * product-configured as its own provider, then routed here because its API
+ * exposes the Anthropic-compatible Messages protocol at
+ * `https://api.z.ai/api/anthropic` with `glm-*` models.
  *
  * Wire mapping:
  *  - System messages → top-level `system` string (Anthropic does not accept

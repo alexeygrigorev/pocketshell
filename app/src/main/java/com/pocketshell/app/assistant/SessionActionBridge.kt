@@ -35,6 +35,12 @@ internal interface SessionActionBridge {
      */
     suspend fun sendCommand(command: String): Result<Unit>
 
+    /**
+     * Send a user task prompt to an agent session. Implementations may target
+     * the focused agent pane when [sessionName] is the active tmux session.
+     */
+    suspend fun sendPromptToSession(sessionName: String, prompt: String): Result<Unit>
+
     /** Request navigation to [destination] via the app's nav state machine. */
     fun navigate(destination: AppDestination)
 }

@@ -921,6 +921,13 @@ public class SessionViewModel @Inject constructor(
                 sendText(command, withEnter = true)
                 return Result.success(Unit)
             }
+            override suspend fun sendPromptToSession(sessionName: String, prompt: String): Result<Unit> {
+                if (sessionName.isNotBlank() && sessionName != activeSessionName()) {
+                    return Result.failure(IllegalStateException("Session $sessionName is not active."))
+                }
+                sendText(prompt, withEnter = true)
+                return Result.success(Unit)
+            }
             override fun navigate(destination: AppDestination) {
                 _assistantNavRequests.tryEmit(destination)
             }

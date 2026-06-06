@@ -788,6 +788,8 @@ class FolderListViewModel internal constructor(
             override fun currentScreenLabel(): String = "host detail for ${params.hostName}"
             override suspend fun sendCommand(command: String): Result<Unit> =
                 Result.failure(IllegalStateException("No active terminal pane on the host detail screen."))
+            override suspend fun sendPromptToSession(sessionName: String, prompt: String): Result<Unit> =
+                Result.failure(IllegalStateException("No active agent pane on the host detail screen."))
             override fun navigate(destination: AppDestination) {
                 _assistantNavRequests.tryEmit(destination)
             }

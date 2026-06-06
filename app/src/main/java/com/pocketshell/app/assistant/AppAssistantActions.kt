@@ -297,6 +297,32 @@ internal class AppAssistantActions(
         )
     }
 
+    override suspend fun sendPromptToSession(sessionName: String, prompt: String): ActionResult {
+        if (sessionName.isBlank()) return ActionResult.error("Missing target session.")
+        if (prompt.isBlank()) return ActionResult.error("Missing prompt.")
+        bridge.sendPromptToSession(sessionName, prompt).onSuccess {
+            return ActionResult.ok("Sent prompt to session $sessionName.")
+        }
+
+        val params = activeParams()
+            ?: return ActionResult.error("Failed to send prompt to session $sessionName: no active host connection.")
+        return sshExecutor.withSession(params) { session ->
+            val target = shellQuote(sessionName)
+            val command = "tmux send-keys -t $target -l ${shellQuote(prompt)} && tmux send-keys -t $target Enter"
+            val result = session.exec(command)
+            if (result.exitCode == 0) {
+                ActionResult.ok("Sent prompt to session $sessionName.")
+            } else {
+                ActionResult.error(
+                    "Failed to send prompt to session $sessionName: " +
+                        result.stderr.ifBlank { "exit ${result.exitCode}" },
+                )
+            }
+        }.getOrElse {
+            ActionResult.error("Failed to send prompt to session $sessionName: ${it.message ?: it.javaClass.simpleName}")
+        }
+    }
+
     override suspend fun createProject(host: String, parentPath: String, folderName: String): ActionResult {
         val params = resolveParams(host) ?: return ActionResult.error("Unknown host: $host")
         val entity = hostEntity(params) ?: return ActionResult.error("Unknown host: $host")

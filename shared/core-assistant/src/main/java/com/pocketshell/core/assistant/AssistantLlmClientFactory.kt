@@ -63,6 +63,11 @@ public class AssistantLlmClientFactory(
             baseUrl = settings.anthropicBaseUrl,
             model = settings.anthropicModel,
         )
+        AssistantProvider.Zai -> AssistantProviderConfig(
+            apiKey = key,
+            baseUrl = settings.zaiBaseUrl,
+            model = settings.zaiModel,
+        )
     }
 
     public companion object {
@@ -73,6 +78,7 @@ public class AssistantLlmClientFactory(
         ): AssistantLlmClient = when (provider) {
             AssistantProvider.OpenAi -> OpenAiLlmClient(config)
             AssistantProvider.Anthropic -> AnthropicLlmClient(config)
+            AssistantProvider.Zai -> AnthropicLlmClient(config)
         }
     }
 }

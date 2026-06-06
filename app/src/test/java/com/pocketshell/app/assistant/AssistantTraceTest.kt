@@ -42,6 +42,7 @@ class AssistantTraceTest {
         override suspend fun openSession(sessionName: String) = "open"
         override suspend fun openScreen(destination: String) = "open"
         override suspend fun startSession(host: String, cwd: String, agent: String) = ActionResult.ok("ok")
+        override suspend fun sendPromptToSession(sessionName: String, prompt: String) = ActionResult.ok("ok")
         override suspend fun createProject(host: String, parentPath: String, folderName: String) =
             ActionResult.ok("ok")
         override suspend fun runCommand(command: String) = ActionResult.ok("ok")

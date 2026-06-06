@@ -13,9 +13,9 @@ package com.pocketshell.app.assistant
  * the real surfaces.
  *
  * Methods that mutate remote / nav state ([runCommand], [createFile],
- * [startSession], [cloneRepo]) are only invoked by the loop AFTER the user
- * confirms the candidate via the confirm-or-correct gate. Inspect / nav
- * methods auto-run (D25).
+ * [startSession], [sendPromptToSession], [cloneRepo]) are only invoked by the
+ * loop AFTER the user confirms the candidate via the confirm-or-correct gate.
+ * Inspect / nav methods auto-run (D25).
  */
 internal interface AssistantActions {
 
@@ -77,6 +77,13 @@ internal interface AssistantActions {
      * success.
      */
     suspend fun startSession(host: String, cwd: String, agent: String): ActionResult
+
+    /**
+     * Send [prompt] to the agent running in [sessionName]. This is the
+     * explicit action-sequence step for requests like "start Codex in project
+     * X and send it this task".
+     */
+    suspend fun sendPromptToSession(sessionName: String, prompt: String): ActionResult
 
     /**
      * Create an empty project folder under [parentPath] on [host]. Host-detail

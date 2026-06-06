@@ -27,6 +27,7 @@ class AssistantLlmClientFactoryTest {
                 AssistantProvider.OpenAi -> settings.copy(openAiBaseUrl = baseUrl, openAiModel = model)
                 AssistantProvider.Anthropic ->
                     settings.copy(anthropicBaseUrl = baseUrl, anthropicModel = model)
+                AssistantProvider.Zai -> settings.copy(zaiBaseUrl = baseUrl, zaiModel = model)
             }
         }
         override fun saveKey(provider: AssistantProvider, key: CharArray) {
@@ -90,20 +91,20 @@ class AssistantLlmClientFactoryTest {
     fun switching_provider_changes_which_client_is_built() {
         val store = FakeStore()
         store.saveKey(AssistantProvider.OpenAi, "sk-openai".toCharArray())
-        store.saveKey(AssistantProvider.Anthropic, "sk-anthropic".toCharArray())
-        store.setEndpoint(AssistantProvider.Anthropic, AssistantSettings.ZAI_GLM_BASE_URL, "glm-4.6")
+        store.saveKey(AssistantProvider.Zai, "sk-zai".toCharArray())
+        store.setEndpoint(AssistantProvider.Zai, AssistantSettings.DEFAULT_ZAI_BASE_URL, "glm-4.6")
         val recorder = RecordingBuilder()
         val factory = AssistantLlmClientFactory(store, recorder.build)
 
         factory.create()
         assertEquals(AssistantProvider.OpenAi, recorder.lastProvider)
 
-        store.setProvider(AssistantProvider.Anthropic)
+        store.setProvider(AssistantProvider.Zai)
         factory.create()
-        assertEquals(AssistantProvider.Anthropic, recorder.lastProvider)
-        assertEquals(AssistantSettings.ZAI_GLM_BASE_URL, recorder.lastConfig!!.baseUrl)
+        assertEquals(AssistantProvider.Zai, recorder.lastProvider)
+        assertEquals(AssistantSettings.DEFAULT_ZAI_BASE_URL, recorder.lastConfig!!.baseUrl)
         assertEquals("glm-4.6", recorder.lastConfig!!.model)
-        assertEquals(AssistantProvider.Anthropic, factory.activeProvider())
+        assertEquals(AssistantProvider.Zai, factory.activeProvider())
     }
 
     @Test
@@ -116,7 +117,12 @@ class AssistantLlmClientFactoryTest {
             AssistantProvider.Anthropic,
             AssistantProviderConfig("k".toCharArray(), "https://anth/v1", "claude"),
         )
+        val zai = AssistantLlmClientFactory.defaultClientBuilder(
+            AssistantProvider.Zai,
+            AssistantProviderConfig("k".toCharArray(), "https://api.z.ai/api/anthropic", "glm-4.6"),
+        )
         assertTrue(openAi is OpenAiLlmClient)
         assertTrue(anthropic is AnthropicLlmClient)
+        assertTrue(zai is AnthropicLlmClient)
     }
 }

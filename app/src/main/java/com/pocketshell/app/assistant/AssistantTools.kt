@@ -31,6 +31,7 @@ internal object AssistantTools {
     const val OPEN_SCREEN = "open_screen"
 
     const val START_SESSION = "start_session"
+    const val SEND_PROMPT_TO_SESSION = "send_prompt_to_session"
     const val CREATE_PROJECT = "create_project"
     const val RUN_COMMAND = "run_command"
     const val CREATE_FILE = "create_file"
@@ -39,6 +40,7 @@ internal object AssistantTools {
     /** Tools that mutate remote/nav state and must pass the confirm gate. */
     val MUTATING_TOOLS: Set<String> = setOf(
         START_SESSION,
+        SEND_PROMPT_TO_SESSION,
         CREATE_PROJECT,
         RUN_COMMAND,
         CREATE_FILE,
@@ -164,6 +166,19 @@ internal object AssistantTools {
                   "agent":{"type":"string","description":"Agent to launch.",
                     "enum":["claude","codex","opencode","shell"]}
                 },"required":["host","cwd","agent"],"additionalProperties":false}
+            """.trimIndent(),
+        ),
+        ToolSpec(
+            name = SEND_PROMPT_TO_SESSION,
+            description = "Send a task prompt to an agent session after it has been started or opened. " +
+                "Use this for action sequences like: resolve a project, start a Codex session in it, " +
+                "then send the user's requested task prompt to that session. MUTATING: the user " +
+                "confirms the exact target session and prompt before it runs.",
+            parametersJsonSchema = """
+                {"type":"object","properties":{
+                  "session_name":{"type":"string","description":"Target tmux session name returned by start_session or listed by list_sessions."},
+                  "prompt":{"type":"string","description":"The exact task prompt to send to the agent session."}
+                },"required":["session_name","prompt"],"additionalProperties":false}
             """.trimIndent(),
         ),
         ToolSpec(

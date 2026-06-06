@@ -76,6 +76,9 @@ class AssistantAgentLoopTest {
         override suspend fun startSession(host: String, cwd: String, agent: String): ActionResult {
             calls += "start_session($host,$cwd,$agent)"; return ActionResult.ok("started")
         }
+        override suspend fun sendPromptToSession(sessionName: String, prompt: String): ActionResult {
+            calls += "send_prompt_to_session($sessionName,$prompt)"; return ActionResult.ok("sent")
+        }
         override suspend fun createProject(host: String, parentPath: String, folderName: String): ActionResult {
             calls += "create_project($host,$parentPath,$folderName)"; return ActionResult.ok("created")
         }
@@ -92,6 +95,9 @@ class AssistantAgentLoopTest {
 
     private fun toolCall(name: String, args: String, id: String = "c1") =
         LlmResponse(text = null, toolCalls = listOf(LlmToolCall(id, name, args)), stopReason = StopReason.ToolUse)
+
+    private fun toolCalls(vararg calls: LlmToolCall) =
+        LlmResponse(text = null, toolCalls = calls.toList(), stopReason = StopReason.ToolUse)
 
     private fun answer(text: String) = LlmResponse(text = text, stopReason = StopReason.EndTurn)
 
@@ -187,6 +193,112 @@ class AssistantAgentLoopTest {
         assertTrue(outcome is AssistantAgentLoop.Outcome.Answer)
         assertTrue(actions.calls.contains("resolve_folder(dev,workshops)"))
         assertTrue(actions.calls.contains("start_session(dev,/home/dev/proj,claude)"))
+    }
+
+    @Test
+    fun resolveFolder_startSession_thenSendPrompt_sequenceRunsInOrder() = runTest {
+        val client = ScriptedClient(
+            ArrayDeque(
+                listOf(
+                    toolCall(AssistantTools.RESOLVE_FOLDER, """{"host":"dev","query":"course-management-agent"}""", "r1"),
+                    toolCall(
+                        AssistantTools.START_SESSION,
+                        """{"host":"dev","cwd":"/home/dev/proj","agent":"codex"}""",
+                        "s1",
+                    ),
+                    toolCall(
+                        AssistantTools.SEND_PROMPT_TO_SESSION,
+                        """{"session_name":"course-management-agent","prompt":"write the tests"}""",
+                        "p1",
+                    ),
+                    answer("Started Codex and sent the prompt."),
+                ),
+            ),
+        )
+        val actions = RecordingActions()
+        val loop = AssistantAgentLoop(client, actions)
+
+        val outcome = loop.run("start Codex in course-management-agent and send a prompt") {
+            AssistantAgentLoop.Decision.Confirm
+        }
+
+        assertTrue(outcome is AssistantAgentLoop.Outcome.Answer)
+        assertEquals(
+            listOf(
+                "resolve_folder(dev,course-management-agent)",
+                "start_session(dev,/home/dev/proj,codex)",
+                "send_prompt_to_session(course-management-agent,write the tests)",
+            ),
+            actions.calls,
+        )
+    }
+
+    @Test
+    fun correctionStopsLaterToolCallsFromSameModelTurn_untilModelReplans() = runTest {
+        val client = ScriptedClient(
+            ArrayDeque(
+                listOf(
+                    toolCalls(
+                        LlmToolCall(
+                            "s1",
+                            AssistantTools.START_SESSION,
+                            """{"host":"dev","cwd":"/home/dev/wrong","agent":"codex"}""",
+                        ),
+                        LlmToolCall(
+                            "p1",
+                            AssistantTools.SEND_PROMPT_TO_SESSION,
+                            """{"session_name":"wrong","prompt":"write the tests"}""",
+                        ),
+                    ),
+                    toolCalls(
+                        LlmToolCall(
+                            "s2",
+                            AssistantTools.START_SESSION,
+                            """{"host":"dev","cwd":"/home/dev/proj","agent":"codex"}""",
+                        ),
+                        LlmToolCall(
+                            "p2",
+                            AssistantTools.SEND_PROMPT_TO_SESSION,
+                            """{"session_name":"course-management-agent","prompt":"write the tests"}""",
+                        ),
+                    ),
+                    answer("Started Codex and sent the prompt."),
+                ),
+            ),
+        )
+        val actions = RecordingActions()
+        val candidates = mutableListOf<String>()
+        val loop = AssistantAgentLoop(client, actions)
+
+        val outcome = loop.run("start Codex in course-management-agent and send a prompt") { candidate ->
+            candidates += candidate.summary
+            if (candidate.summary.contains("/home/dev/wrong")) {
+                AssistantAgentLoop.Decision.Correct("use /home/dev/proj and the course-management-agent session")
+            } else {
+                AssistantAgentLoop.Decision.Confirm
+            }
+        }
+
+        assertTrue(outcome is AssistantAgentLoop.Outcome.Answer)
+        assertEquals(
+            listOf(
+                "Start codex session in /home/dev/wrong on dev",
+                "Start codex session in /home/dev/proj on dev",
+                "Send prompt to course-management-agent: write the tests",
+            ),
+            candidates,
+        )
+        assertEquals(
+            listOf(
+                "start_session(dev,/home/dev/proj,codex)",
+                "send_prompt_to_session(course-management-agent,write the tests)",
+            ),
+            actions.calls,
+        )
+        val correctionResults = client.turns[1].last().toolResults
+        assertEquals(2, correctionResults.size)
+        assertTrue(correctionResults[0].content.contains("Their correction"))
+        assertTrue(correctionResults[1].content.contains("Not executed"))
     }
 
     @Test

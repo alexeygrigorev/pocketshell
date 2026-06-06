@@ -54,7 +54,9 @@ class AppAssistantActionsTest {
     private class RecordingBridge : SessionActionBridge {
         var host: String? = "dev"
         var sendResult: Result<Unit> = Result.success(Unit)
+        var sendPromptResult: Result<Unit> = Result.success(Unit)
         val sent = mutableListOf<String>()
+        val sentPrompts = mutableListOf<Pair<String, String>>()
         val navigated = mutableListOf<AppDestination>()
         override fun activeHostName(): String? = host
         override fun activeCwd(): String? = "/home/dev/proj"
@@ -63,6 +65,10 @@ class AppAssistantActionsTest {
         override suspend fun sendCommand(command: String): Result<Unit> {
             sent += command
             return sendResult
+        }
+        override suspend fun sendPromptToSession(sessionName: String, prompt: String): Result<Unit> {
+            sentPrompts += sessionName to prompt
+            return sendPromptResult
         }
         override fun navigate(destination: AppDestination) { navigated += destination }
     }
@@ -233,6 +239,45 @@ class AppAssistantActionsTest {
         val result = actions.startSession("dev", "/home/dev/proj", "codex")
         assertTrue(result.ok)
         assertTrue(bridge.navigated.any { it is AppDestination.TmuxSession })
+    }
+
+    @Test
+    fun sendPromptToSession_reachesTerminalBridge() = runTest {
+        val bridge = RecordingBridge()
+        val actions = actions(bridge = bridge, responder = { ExecResult("", "", 0) })
+        val result = actions.sendPromptToSession("course-management-agent", "write tests")
+        assertTrue(result.ok)
+        assertEquals(listOf("course-management-agent" to "write tests"), bridge.sentPrompts)
+    }
+
+    @Test
+    fun sendPromptToSession_paneSendFailureFallsBackToTmuxSendKeys() = runTest {
+        val bridge = RecordingBridge().apply {
+            sendPromptResult = Result.failure(IllegalStateException("no focused agent pane"))
+        }
+        val execed = mutableListOf<String>()
+        val actions = actions(bridge = bridge, responder = {
+            execed += it
+            ExecResult("", "", 0)
+        })
+        val result = actions.sendPromptToSession("course-management-agent", "write tests")
+        assertTrue(result.ok)
+        assertEquals(listOf("course-management-agent" to "write tests"), bridge.sentPrompts)
+        assertEquals(1, execed.size)
+        assertTrue(execed.single().contains("tmux send-keys"))
+        assertTrue(execed.single().contains("course-management-agent"))
+    }
+
+    @Test
+    fun sendPromptToSession_tmuxSendFailureReturnsToolError() = runTest {
+        val bridge = RecordingBridge().apply {
+            sendPromptResult = Result.failure(IllegalStateException("no focused agent pane"))
+        }
+        val actions = actions(bridge = bridge, responder = { ExecResult("", "no tmux target", 1) })
+        val result = actions.sendPromptToSession("course-management-agent", "write tests")
+        assertFalse(result.ok)
+        assertTrue(result.message.contains("Failed to send prompt to session"))
+        assertTrue(result.message.contains("no tmux target"))
     }
 
     @Test

@@ -686,6 +686,69 @@ against the same containers starts from the documented pristine profile.
 
 ---
 
+## Real LLM assistant loop tests
+
+`AssistantAgentLoopRealLlmTest` is an opt-in JVM integration test for the
+in-app assistant's product-level structured `Sequence of Actions` output. It
+is skipped unless `POCKETSHELL_REAL_LLM_TESTS=1` is set, so the normal
+`./gradlew test`, release gates, and CI matrix do not call external model
+providers. Run it with an explicit test filter.
+
+The test reads credentials only from the process environment and the
+PocketShell repo root `.env`. It does not inspect sibling repos, `app/.env`,
+`.env.local`, or any unrelated dotenv files. Do not commit `.env` with real
+keys. Values are never printed by the test; skip messages name only missing
+variable names.
+
+ZAI is the primary target provider. The implementation uses the
+Anthropic-compatible Messages wire format for ZAI, but this is only a wire
+protocol detail; the test and env names treat ZAI as first-class:
+
+```bash
+POCKETSHELL_REAL_LLM_TESTS=1 \
+ZAI_API_KEY=... \
+./gradlew :app:testDebugUnitTest \
+  --tests com.pocketshell.app.assistant.AssistantAgentLoopRealLlmTest
+```
+
+To keep keys repo-local, put the same variables in `/path/to/pocketshell/.env`
+instead of exporting them. Useful ZAI overrides:
+
+```bash
+ZAI_MODEL=glm-4.6
+ZAI_BASE_URL=https://api.z.ai/api/anthropic
+POCKETSHELL_REAL_LLM_MAX_TOKENS=2048
+```
+
+OpenAI is covered by the same scenario when repo-local or process env OpenAI
+variables are present:
+
+```bash
+POCKETSHELL_REAL_LLM_TESTS=1 \
+OPENAI_API_KEY=... \
+OPENAI_MODEL=gpt-4o \
+./gradlew :app:testDebugUnitTest \
+  --tests com.pocketshell.app.assistant.AssistantAgentLoopRealLlmTest
+```
+
+Scenario catalog:
+
+| Scenario | Providers | Expected structured tools |
+|---|---|---|
+| `courseManagementAgentSequence` | ZAI, OpenAI when keys are present | project/folder lookup, `resolve_folder`, `start_session`, `send_prompt_to_session` |
+| `courseManagementAgentSequence_revisesAfterCorrection` | ZAI, OpenAI when keys are present | first `start_session` candidate is corrected, then the model emits a revised `start_session` followed by `send_prompt_to_session` |
+| `llmZoomcampEmojiSequence` | ZAI, OpenAI when keys are present | exact user request `убери все эможди в ллм зумкампе` resolves to `llm-zoomcamp`, starts `codex`, and sends normalized prompt `убери все эмоджи` |
+
+The assertions inspect model tool calls and executed fake actions, not prose:
+tool names, ordering, and important arguments are checked. The model must look
+up the project before choosing it, start `codex` in the expected project
+directory, and call `send_prompt_to_session` with the requested task prompt.
+Current project targets are `/home/dev/projects/course-management-agent` and
+`/home/dev/projects/llm-zoomcamp`. The fake actions used by the tests never
+open SSH sessions or execute shell commands.
+
+---
+
 ## CI matrix
 
 GitHub Actions runs:

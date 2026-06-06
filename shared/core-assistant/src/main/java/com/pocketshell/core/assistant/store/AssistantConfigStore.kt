@@ -88,6 +88,12 @@ public class AndroidKeystoreAssistantConfigStore(
             anthropicModel = prefs.getString(KEY_ANTHROPIC_MODEL, null)
                 ?.takeIf { it.isNotBlank() }
                 ?: AssistantSettings.DEFAULT_ANTHROPIC_MODEL,
+            zaiBaseUrl = prefs.getString(KEY_ZAI_BASE_URL, null)
+                ?.takeIf { it.isNotBlank() }
+                ?: AssistantSettings.DEFAULT_ZAI_BASE_URL,
+            zaiModel = prefs.getString(KEY_ZAI_MODEL, null)
+                ?.takeIf { it.isNotBlank() }
+                ?: AssistantSettings.DEFAULT_ZAI_MODEL,
         )
     }
 
@@ -118,11 +124,13 @@ public class AndroidKeystoreAssistantConfigStore(
         when (provider) {
             AssistantProvider.OpenAi -> KEY_OPENAI_BASE_URL to KEY_OPENAI_MODEL
             AssistantProvider.Anthropic -> KEY_ANTHROPIC_BASE_URL to KEY_ANTHROPIC_MODEL
+            AssistantProvider.Zai -> KEY_ZAI_BASE_URL to KEY_ZAI_MODEL
         }
 
     private fun keyPref(provider: AssistantProvider): String = when (provider) {
         AssistantProvider.OpenAi -> KEY_OPENAI_API_KEY
         AssistantProvider.Anthropic -> KEY_ANTHROPIC_API_KEY
+        AssistantProvider.Zai -> KEY_ZAI_API_KEY
     }
 
     public companion object {
@@ -136,6 +144,9 @@ public class AndroidKeystoreAssistantConfigStore(
         public const val KEY_ANTHROPIC_API_KEY: String = "anthropic_api_key"
         public const val KEY_ANTHROPIC_BASE_URL: String = "anthropic_base_url"
         public const val KEY_ANTHROPIC_MODEL: String = "anthropic_model"
+        public const val KEY_ZAI_API_KEY: String = "zai_api_key"
+        public const val KEY_ZAI_BASE_URL: String = "zai_base_url"
+        public const val KEY_ZAI_MODEL: String = "zai_model"
 
         private fun buildPrefs(context: Context, fileName: String): SharedPreferences {
             val masterKey = MasterKey.Builder(context)

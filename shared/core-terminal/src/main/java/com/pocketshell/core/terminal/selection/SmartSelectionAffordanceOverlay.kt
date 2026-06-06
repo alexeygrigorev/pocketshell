@@ -284,7 +284,7 @@ internal const val HAIRLINE_THICKNESS_PX: Float = 1f
  *
  * Used both by the connected test (to assert the math) and at runtime by
  * [com.pocketshell.core.terminal.ui.PocketShellTerminalViewClient.onSingleTapUp]
- * to decide whether to swallow a tap or fall through to the keyboard summon.
+ * to decide whether to route a tap to a URL or leave it as a plain terminal tap.
  */
 public fun hitTestUrl(
     view: TerminalView,

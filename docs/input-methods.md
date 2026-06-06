@@ -74,6 +74,32 @@ Inline dictation uses the same configured silence window as the prompt composer 
 
 Used for: `git status`, file names mid-command, dictating an `ssh` target.
 
+### Terminal keyboard modes
+
+The embedded `TerminalView` defaults to raw command keyboard mode. Its IME
+`inputType` is:
+
+```
+TYPE_TEXT_VARIATION_VISIBLE_PASSWORD | TYPE_TEXT_FLAG_NO_SUGGESTIONS
+```
+
+Those password-like/no-suggestions flags are intentional. Shell input is
+syntax, not prose: paths, flags, package names, branch names, hashes, and
+commands can be corrupted if the keyboard silently autocorrects a token while
+the text is being written to the PTY.
+
+Settings -> Terminal exposes an explicit Smart text keyboard mode for users
+who want swipe/autocorrect in the terminal. That mode requests:
+
+```
+TYPE_CLASS_TEXT | TYPE_TEXT_VARIATION_NORMAL | TYPE_TEXT_FLAG_AUTO_CORRECT
+```
+
+Smart text mode is still guarded: the input connection stages committed IME
+text locally and sends it to the terminal only when Enter confirms the buffer.
+This avoids byte-by-byte autocorrect churn in a live shell command. Prompt
+Composer remains the preferred surface for prose and longer agent prompts.
+
 ---
 
 ## Key bar

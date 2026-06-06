@@ -19,6 +19,7 @@ import com.pocketshell.core.ssh.SshLeaseManager
 import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.ssh.SshShell
+import com.pocketshell.core.terminal.ui.TerminalRawInputPolicy
 import com.pocketshell.uikit.model.KeyModifierState
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -109,6 +110,13 @@ class SessionViewModelTest {
         assertArrayEquals(byteArrayOf(0x03), vm.unmodifiedBytesFor("^C"))
         assertArrayEquals(byteArrayOf(0x04), vm.unmodifiedBytesFor("Ctrl-D"))
         assertArrayEquals(byteArrayOf(0x04), vm.unmodifiedBytesFor("^D"))
+    }
+
+    @Test
+    fun enterMapsToCarriageReturn() {
+        val vm = newVm()
+        assertArrayEquals(byteArrayOf('\r'.code.toByte()), vm.unmodifiedBytesFor("Enter"))
+        assertArrayEquals(byteArrayOf('\r'.code.toByte()), vm.unmodifiedBytesFor("⏎"))
     }
 
     @Test
@@ -271,6 +279,76 @@ class SessionViewModelTest {
         )
         assertArrayEquals(byteArrayOf(0x1B, 0x03), out)
         assertTrue(vm.armedModifiers.value.isEmpty())
+    }
+
+    @Test
+    fun keyBarCtrlCAndEscClearSmartTextBeforeSendingRawBytes() = runBlocking {
+        val vm = newVm()
+        val stdin = ByteArrayOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerJob = vm.terminalState.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = stdin,
+        )
+        val policies = mutableListOf<TerminalRawInputPolicy>()
+        vm.terminalState.setSmartTextStagingBridgeForTest { policy ->
+            policies += policy
+            if (policy == TerminalRawInputPolicy.FlushSmartText) {
+                vm.terminalState.writeInput("staged".toByteArray(Charsets.UTF_8))
+            }
+        }
+
+        try {
+            vm.onKeyBarKey("Ctrl-C")
+            vm.onKeyBarKey("Esc")
+
+            waitForStdin(stdin, "\u0003\u001b")
+            assertEquals(
+                listOf(TerminalRawInputPolicy.ClearSmartText, TerminalRawInputPolicy.ClearSmartText),
+                policies,
+            )
+            assertEquals("\u0003\u001b", stdin.toString(Charsets.UTF_8.name()))
+        } finally {
+            vm.terminalState.setSmartTextStagingBridgeForTest(null)
+            producerJob.cancel()
+            producerScope.cancel()
+            vm.terminalState.detachExternalProducer()
+        }
+    }
+
+    @Test
+    fun keyBarEnterFlushesSmartTextBeforeSendingCarriageReturn() = runBlocking {
+        val vm = newVm()
+        val stdin = ByteArrayOutputStream()
+        val producerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val stdout = MutableSharedFlow<ByteArray>(extraBufferCapacity = 1)
+        val producerJob = vm.terminalState.attachExternalProducer(
+            scope = producerScope,
+            stdout = stdout,
+            remoteStdin = stdin,
+        )
+        val policies = mutableListOf<TerminalRawInputPolicy>()
+        vm.terminalState.setSmartTextStagingBridgeForTest { policy ->
+            policies += policy
+            if (policy == TerminalRawInputPolicy.FlushSmartText) {
+                vm.terminalState.writeInput("staged".toByteArray(Charsets.UTF_8))
+            }
+        }
+
+        try {
+            vm.onKeyBarKey("Enter")
+
+            waitForStdin(stdin, "staged\r")
+            assertEquals(listOf(TerminalRawInputPolicy.FlushSmartText), policies)
+            assertEquals("staged\r", stdin.toString(Charsets.UTF_8.name()))
+        } finally {
+            vm.terminalState.setSmartTextStagingBridgeForTest(null)
+            producerJob.cancel()
+            producerScope.cancel()
+            vm.terminalState.detachExternalProducer()
+        }
     }
 
     @Test

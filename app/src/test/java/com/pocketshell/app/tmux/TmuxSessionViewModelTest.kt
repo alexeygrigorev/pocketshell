@@ -28,6 +28,7 @@ import com.pocketshell.core.tmux.TmuxClientException
 import com.pocketshell.core.tmux.TmuxClientFactory
 import com.pocketshell.core.tmux.TmuxOutputBacklogOverflow
 import com.pocketshell.core.tmux.protocol.ControlEvent
+import com.pocketshell.core.terminal.ui.TerminalRawInputPolicy
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CompletableJob
@@ -2540,6 +2541,127 @@ class TmuxSessionViewModelTest {
             ),
             sent,
         )
+    }
+
+    @Test
+    fun keyBarControlEscapeAndHotkeysClearSmartTextBeforeTmuxRawSends() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+        )
+        advanceUntilIdle()
+        val state = vm.panes.value.single().terminalState
+        val policies = mutableListOf<TerminalRawInputPolicy>()
+        state.setSmartTextStagingBridgeForTest { policy ->
+            policies += policy
+            if (policy == TerminalRawInputPolicy.FlushSmartText) {
+                client.sentCommands.add("flush-staged")
+            }
+        }
+
+        vm.onKeyBarKey("%0", "^C")
+        vm.onKeyBarKey("%0", "Esc")
+        vm.onKeyBarModifierState("Ctrl", KeyModifierState.OneShot)
+        vm.onKeyBarKey("%0", "›")
+        advanceUntilIdle()
+
+        assertEquals(
+            listOf(
+                TerminalRawInputPolicy.ClearSmartText,
+                TerminalRawInputPolicy.ClearSmartText,
+                TerminalRawInputPolicy.ClearSmartText,
+            ),
+            policies,
+        )
+        assertEquals(
+            listOf(
+                "send-keys -H -t %0 03",
+                "send-keys -t %0 Escape",
+                "send-keys -t %0 C-Right",
+            ),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+        assertFalse(client.sentCommands.contains("flush-staged"))
+    }
+
+    @Test
+    fun keyBarEnterFlushesSmartTextBeforeTmuxEnter() = runTest {
+        val vm = newVm()
+        val literalFlushGate = CompletableDeferred<Unit>()
+        val client = FakeTmuxClient().apply {
+            sendCommandGatePrefix = "send-keys -l -t %0 -- 'staged'"
+            sendCommandGate = literalFlushGate
+        }
+        vm.attachClientForTest(client)
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+        )
+        advanceUntilIdle()
+        val state = vm.panes.value.single().terminalState
+        val policies = mutableListOf<TerminalRawInputPolicy>()
+        state.setSmartTextStagingBridgeForTest { policy ->
+            policies += policy
+            if (policy == TerminalRawInputPolicy.FlushSmartText) {
+                state.writeInput("staged".toByteArray(Charsets.UTF_8))
+            }
+        }
+
+        try {
+            vm.onKeyBarKey("%0", "⏎")
+            waitForSentCommandCount(client, expectedCount = 1)
+
+            assertEquals(listOf(TerminalRawInputPolicy.FlushSmartText), policies)
+            assertEquals(
+                "Enter must wait behind the queued SmartText flush while the literal send is suspended",
+                listOf("send-keys -l -t %0 -- 'staged'"),
+                client.sentCommands.filter { it.startsWith("send-keys") },
+            )
+
+            literalFlushGate.complete(Unit)
+            waitForSentCommandCount(client, expectedCount = 2)
+
+            assertEquals(
+                listOf(
+                    "send-keys -l -t %0 -- 'staged'",
+                    "send-keys -t %0 Enter",
+                ),
+                client.sentCommands.filter { it.startsWith("send-keys") },
+            )
+        } finally {
+            literalFlushGate.complete(Unit)
+            state.setSmartTextStagingBridgeForTest(null)
+        }
+    }
+
+    @Test
+    fun directTmuxControlHotkeyClearsSmartTextBeforeSendingRawBytes() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "shell", paneIndex = 0)),
+        )
+        advanceUntilIdle()
+        val state = vm.panes.value.single().terminalState
+        val policies = mutableListOf<TerminalRawInputPolicy>()
+        state.setSmartTextStagingBridgeForTest { policy ->
+            policies += policy
+            if (policy == TerminalRawInputPolicy.FlushSmartText) {
+                client.sentCommands.add("flush-staged")
+            }
+        }
+
+        vm.sendControlInputToPane("%0", CtrlCByte, repeatCount = 2)
+        advanceUntilIdle()
+
+        assertEquals(listOf(TerminalRawInputPolicy.ClearSmartText), policies)
+        assertEquals(
+            listOf("send-keys -H -t %0 03 03"),
+            client.sentCommands.filter { it.startsWith("send-keys") },
+        )
+        assertFalse(client.sentCommands.contains("flush-staged"))
     }
 
     @Test

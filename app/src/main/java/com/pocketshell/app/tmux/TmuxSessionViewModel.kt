@@ -58,6 +58,7 @@ import com.pocketshell.core.ssh.SshLeaseTarget
 import com.pocketshell.core.ssh.SshSession
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.core.terminal.ui.TerminalRawInputPolicy
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.core.tmux.CommandResponse
 import com.pocketshell.core.tmux.TmuxClient
@@ -4736,9 +4737,17 @@ public class TmuxSessionViewModel @Inject constructor(
         sendInputBytesToPane(client, paneId, bytes)
     }
 
-    internal fun sendControlInputToPane(paneId: String, byte: Int, repeatCount: Int = 1) {
+    internal fun sendControlInputToPane(
+        paneId: String,
+        byte: Int,
+        repeatCount: Int = 1,
+        prepareSmartText: Boolean = true,
+    ) {
         if (byte !in 0x00..0x1F || repeatCount <= 0) return
         val client = clientRef ?: return
+        if (prepareSmartText) {
+            paneRows[paneId]?.terminalState?.prepareForRawTerminalInput(TerminalRawInputPolicy.ClearSmartText)
+        }
         val bytes = ByteArray(repeatCount) { byte.toByte() }
         bridgeScope.launch {
             runCatching {
@@ -5526,7 +5535,8 @@ public class TmuxSessionViewModel @Inject constructor(
             // via the `send-keys -H` overlay path.
             val chordByte = ctrlByteForLetter(label)
             if (chordByte != null) {
-                sendControlInputToPane(paneId, chordByte)
+                paneRows[paneId]?.terminalState?.prepareForRawTerminalInput(TerminalRawInputPolicy.ClearSmartText)
+                sendControlInputToPane(paneId, chordByte, prepareSmartText = false)
                 return
             }
             // Ctrl + a named key tmux understands (arrows → word navigation,
@@ -5536,6 +5546,7 @@ public class TmuxSessionViewModel @Inject constructor(
             // resize/redraw.
             val chordNamed = ctrlChordNamedKeyFor(label)
             if (chordNamed != null) {
+                paneRows[paneId]?.terminalState?.prepareForRawTerminalInput(TerminalRawInputPolicy.ClearSmartText)
                 sendNamedKey(paneId, chordNamed)
                 return
             }
@@ -5582,7 +5593,30 @@ public class TmuxSessionViewModel @Inject constructor(
             else -> null
         }
         if (named != null) {
-            sendNamedKey(paneId, named)
+            val policy = smartTextPolicyForKeyBar(label)
+            val terminalState = paneRows[paneId]?.terminalState
+            terminalState?.prepareForRawTerminalInput(policy)
+            if (policy == TerminalRawInputPolicy.FlushSmartText && named == "Enter") {
+                sendEnterAfterSmartTextFlush(paneId, terminalState)
+            } else {
+                sendNamedKey(paneId, named)
+            }
+        }
+    }
+
+    private fun sendEnterAfterSmartTextFlush(paneId: String, terminalState: TerminalSurfaceState?) {
+        val enterBytes = byteArrayOf('\r'.code.toByte())
+        if (terminalState?.isAttached == true) {
+            terminalState.writeInput(enterBytes)
+        } else {
+            enqueueInputBytesToPane(paneId, enterBytes)
+        }
+    }
+
+    private fun enqueueInputBytesToPane(paneId: String, bytes: ByteArray) {
+        if (bytes.isEmpty() || clientRef == null) return
+        runCatching {
+            inputSinkForPane(paneId).write(bytes)
         }
     }
 
@@ -5603,6 +5637,12 @@ public class TmuxSessionViewModel @Inject constructor(
         "Esc" -> "C-Escape"
         else -> null
     }
+
+    private fun smartTextPolicyForKeyBar(label: String): TerminalRawInputPolicy =
+        when (label) {
+            "⏎", "Enter" -> TerminalRawInputPolicy.FlushSmartText
+            else -> TerminalRawInputPolicy.ClearSmartText
+        }
 
     /**
      * Issue #458: mirror the ui-kit [com.pocketshell.uikit.components.KeyBar]

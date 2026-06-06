@@ -73,7 +73,24 @@ class TerminalSurfaceDefaultsTest {
     }
 
     @Test
-    fun pocketShellClientUsesCharacterBasedImeInput() {
+    fun showTerminalSoftKeyboardRequestsSoftKeyboardExplicitly() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val view = TerminalView(context, null)
+        val client = PocketShellTerminalViewClient()
+        val inputMethodManager = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+
+        view.applyPocketShellDefaults(client)
+
+        assertTrue(showTerminalSoftKeyboard(view))
+        assertTrue("explicit show-keyboard helper should focus the TerminalView", view.isFocused)
+        assertTrue(
+            "explicit show-keyboard helper should ask Android to show the soft keyboard",
+            shadowOf(inputMethodManager).isSoftInputVisible,
+        )
+    }
+
+    @Test
+    fun rawCommandKeyboardUsesNoSuggestionsVisiblePasswordInput() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val view = TerminalView(context, null)
         val client = PocketShellTerminalViewClient()
@@ -84,6 +101,26 @@ class TerminalSurfaceDefaultsTest {
 
         assertEquals(
             InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS,
+            editorInfo.inputType,
+        )
+    }
+
+    @Test
+    fun smartTextKeyboardUsesAutocorrectTextInput() {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val view = TerminalView(context, null)
+        val client = PocketShellTerminalViewClient().apply {
+            terminalKeyboardMode = TerminalKeyboardMode.SmartText
+        }
+        val editorInfo = EditorInfo()
+
+        view.applyPocketShellDefaults(client)
+        view.onCreateInputConnection(editorInfo)
+
+        assertEquals(
+            InputType.TYPE_CLASS_TEXT or
+                InputType.TYPE_TEXT_VARIATION_NORMAL or
+                InputType.TYPE_TEXT_FLAG_AUTO_CORRECT,
             editorInfo.inputType,
         )
     }

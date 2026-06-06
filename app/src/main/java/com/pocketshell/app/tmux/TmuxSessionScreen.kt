@@ -1067,6 +1067,7 @@ public fun TmuxSessionScreen(
                         } else {
                             TerminalSurface(
                                 state = pane.terminalState,
+                                terminalKeyboardMode = appSettings.terminalKeyboardMode,
                                 // Issue #240: cache the phone grid so the
                                 // view model can compare it with tmux's
                                 // current window size and offer an explicit

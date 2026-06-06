@@ -10,6 +10,7 @@ import com.pocketshell.core.assistant.AssistantSettings
 import com.pocketshell.core.assistant.store.AssistantConfigStore
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
+import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
 import com.pocketshell.core.usage.UsageProviderRecord
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -138,6 +139,9 @@ class SettingsViewModel @Inject constructor(
     val assistantState: StateFlow<AssistantSettingsUiState> = _assistantState.asStateFlow()
 
     fun setTerminalFontSizeSp(sizeSp: Float) = repository.setTerminalFontSizeSp(sizeSp)
+
+    fun setTerminalKeyboardMode(mode: TerminalKeyboardMode) =
+        repository.setTerminalKeyboardMode(mode)
 
     /** Issue #496: persist the conversation message-body font size (sp). */
     fun setConversationFontSizeSp(sizeSp: Float) =

@@ -14,6 +14,7 @@ import com.pocketshell.core.storage.AppDatabase
 import com.pocketshell.core.storage.dao.HostDao
 import com.pocketshell.core.storage.entity.HostEntity
 import com.pocketshell.core.storage.entity.SshKeyEntity
+import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.After
@@ -141,6 +142,13 @@ class SettingsViewModelTest {
         val vm = newVm()
         vm.setConversationFontSizeSp(18f)
         assertEquals(18f, repo.settings.value.conversationFontSizeSp, 0f)
+    }
+
+    @Test
+    fun `setTerminalKeyboardMode flows through to repository`() {
+        val vm = newVm()
+        vm.setTerminalKeyboardMode(TerminalKeyboardMode.SmartText)
+        assertEquals(TerminalKeyboardMode.SmartText, repo.settings.value.terminalKeyboardMode)
     }
 
     @Test

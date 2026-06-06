@@ -39,6 +39,7 @@ import com.pocketshell.core.agents.ConversationEvent
 import com.pocketshell.core.storage.entity.SnippetEntity
 import com.pocketshell.core.storage.dao.ProjectRootDao
 import com.pocketshell.core.storage.entity.ProjectRootEntity
+import com.pocketshell.core.terminal.ui.TerminalRawInputPolicy
 import com.pocketshell.core.terminal.ui.TerminalSurfaceState
 import com.pocketshell.uikit.model.KeyModifierState
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -753,6 +754,7 @@ public class SessionViewModel @Inject constructor(
     public fun onKeyBarKey(label: String) {
         val unmodified: ByteArray = unmodifiedBytesFor(label) ?: return
         val modified = applyArmedModifiers(unmodified, label)
+        terminalState.prepareForRawTerminalInput(smartTextPolicyForKeyBar(label))
         sendTerminalInput(modified)
         clearOneShotModifiers()
     }
@@ -1288,6 +1290,7 @@ public class SessionViewModel @Inject constructor(
     internal fun unmodifiedBytesFor(label: String): ByteArray? = when (label) {
         "Esc" -> byteArrayOf(0x1B)
         "Tab" -> byteArrayOf(0x09)
+        "⏎", "Enter" -> byteArrayOf('\r'.code.toByte())
         "^C", "Ctrl-C" -> byteArrayOf(0x03)
         "^D", "Ctrl-D" -> byteArrayOf(0x04)
         // Mock-style arrows from `docs/mockups/session.html` and
@@ -1299,6 +1302,12 @@ public class SessionViewModel @Inject constructor(
         "›", "Right" -> byteArrayOf(0x1B, '['.code.toByte(), 'C'.code.toByte())
         else -> null
     }
+
+    private fun smartTextPolicyForKeyBar(label: String): TerminalRawInputPolicy =
+        when (label) {
+            "⏎", "Enter" -> TerminalRawInputPolicy.FlushSmartText
+            else -> TerminalRawInputPolicy.ClearSmartText
+        }
 
     /**
      * Apply the currently-armed modifiers to a raw key payload. Public via

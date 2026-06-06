@@ -8,6 +8,7 @@ import android.graphics.Typeface
 import android.net.Uri
 import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.inputmethod.InputMethodManager
 import android.widget.Toast
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -210,6 +211,7 @@ public fun openUrlWithFallback(context: Context, url: String) {
 fun TerminalSurface(
     state: TerminalSurfaceState,
     modifier: Modifier = Modifier,
+    terminalKeyboardMode: TerminalKeyboardMode = TerminalKeyboardMode.RawCommand,
     matchListener: ((TerminalMatch) -> Unit)? = null,
     onTerminalSizeChanged: ((columns: Int, rows: Int) -> Unit)? = null,
     onLocalTerminalError: ((Throwable) -> Unit)? = null,
@@ -226,6 +228,7 @@ fun TerminalSurface(
     // do not leak listeners across configuration changes. AndroidView's
     // factory runs once; update runs every recomposition.
     val viewClient = remember { PocketShellTerminalViewClient() }
+    viewClient.terminalKeyboardMode = terminalKeyboardMode
     viewClient.onTerminalSizeChanged = onTerminalSizeChanged
     viewClient.onTerminalSurfaceError = onLocalTerminalError
     var terminalView by remember { mutableStateOf<TerminalView?>(null) }
@@ -233,6 +236,12 @@ fun TerminalSurface(
     val desiredSession = state.session
 
     val context = LocalContext.current
+
+    LaunchedEffect(terminalKeyboardMode, terminalView) {
+        val view = terminalView ?: return@LaunchedEffect
+        val imm = view.context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+        imm?.restartInput(view)
+    }
 
     // Issue #175 — install the system-clipboard sink for the vendored
     // selection action mode's COPY button. When the user long-presses, drags,
@@ -269,6 +278,18 @@ fun TerminalSurface(
             viewportTick += 1
         }
         onDispose { viewClient.onViewportChanged = null }
+    }
+
+    DisposableEffect(state, terminalView) {
+        val view = terminalView
+        state.setSmartTextStagingBridge(
+            if (view == null) {
+                null
+            } else {
+                { policy -> view.prepareForRawTerminalInput(policy.toTerminalViewPolicy()) }
+            },
+        )
+        onDispose { state.setSmartTextStagingBridge(null) }
     }
 
     LaunchedEffect(state, terminalView) {
@@ -506,6 +527,27 @@ fun TerminalSurface(
 fun rememberTerminalSurfaceState(): TerminalSurfaceState =
     remember { TerminalSurfaceState() }
 
+private fun TerminalRawInputPolicy.toTerminalViewPolicy(): TerminalView.SmartTextStagingPolicy =
+    when (this) {
+        TerminalRawInputPolicy.FlushSmartText -> TerminalView.SmartTextStagingPolicy.FLUSH
+        TerminalRawInputPolicy.ClearSmartText -> TerminalView.SmartTextStagingPolicy.CLEAR
+    }
+
+/**
+ * Keyboard policy for TerminalView IME input.
+ *
+ * [RawCommand] is the default and advertises password-like/no-suggestions
+ * input flags so keyboards do not autocorrect shell syntax. [SmartText]
+ * requests a normal autocorrect-capable text keyboard, but the vendored
+ * input connection stages committed text and writes it only when Enter
+ * confirms the buffer. Prompt Composer remains the preferred surface for
+ * prose and longer agent prompts.
+ */
+enum class TerminalKeyboardMode {
+    RawCommand,
+    SmartText,
+}
+
 internal fun TerminalView.applyPocketShellDefaults(viewClient: TerminalViewClient): TerminalView {
     setTerminalViewClient(viewClient)
     if (viewClient is PocketShellTerminalViewClient) {
@@ -536,12 +578,14 @@ private fun TerminalView.applyPocketShellDefaultColors() {
  * [TerminalViewClient] used by PocketShell's embedded terminal.
  *
  * The vendored [TerminalView] owns text and hardware-key routing once the IME
- * is open, but it delegates the "single tap" action to its client. PocketShell
- * keeps that tap available for URL/file handling and terminal focus/selection,
- * while the explicit "show keyboard" chip is the only path that summons IME.
+ * is open, but it delegates tap handling to its client. PocketShell keeps
+ * plain terminal taps independent from IME display and focus: the explicit
+ * show-keyboard accessory calls [showTerminalSoftKeyboard], while this client
+ * uses the tap hook for URL/file routing.
  */
 internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessionClient {
     private var terminalView: TerminalView? = null
+    var terminalKeyboardMode: TerminalKeyboardMode = TerminalKeyboardMode.RawCommand
     var onTerminalSizeChanged: ((columns: Int, rows: Int) -> Unit)? = null
     var onTerminalSurfaceError: ((Throwable) -> Unit)? = null
     var onViewportChanged: (() -> Unit)? = null
@@ -550,8 +594,7 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
      * Hook installed by [TerminalSurface] when URL detection is enabled.
      * Called from [onSingleTapUp] for every confirmed single tap; given the
      * tap coordinates in view-local pixels, the host returns `true` if the
-     * tap landed on a URL (in which case the keyboard is NOT summoned), or
-     * `false` otherwise.
+     * tap landed on a URL and `false` otherwise.
      *
      * Splitting the URL hit-test out of this class (which lives in
      * `core-terminal`) means the host can swap in a stub for tests and lets
@@ -590,8 +633,8 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
     override fun onSingleTapUp(e: MotionEvent?) {
         if (terminalView == null) return
         // Issue #175/#500 — give URL/file hosts first crack at the gesture.
-        // The vendored TerminalView has already handled selection state and
-        // focus before calling us; do not summon IME from a terminal tap.
+        // The vendored TerminalView has already handled selection state before
+        // calling us; do not request focus or summon IME from a terminal tap.
         runCatching {
             if (e != null) onTapMaybeUrl?.invoke(e.x, e.y)
         }.onFailure { onTerminalSurfaceError?.invoke(it) }
@@ -601,6 +644,7 @@ internal class PocketShellTerminalViewClient : TerminalViewClient, TerminalSessi
     }
     override fun shouldBackButtonBeMappedToEscape(): Boolean = false
     override fun shouldEnforceCharBasedInput(): Boolean = true
+    override fun shouldUseSmartTextInput(): Boolean = terminalKeyboardMode == TerminalKeyboardMode.SmartText
     override fun shouldUseCtrlSpaceWorkaround(): Boolean = false
     override fun isTerminalViewSelected(): Boolean = true
     override fun copyModeChanged(copyMode: Boolean) = Unit

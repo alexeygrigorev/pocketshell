@@ -368,6 +368,7 @@ public fun SessionScreen(
                 } else {
                     TerminalSurface(
                         state = viewModel.terminalState,
+                        terminalKeyboardMode = appSettings.terminalKeyboardMode,
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(horizontal = 2.dp, vertical = 4.dp),
@@ -1523,6 +1524,7 @@ internal val SessionTerminalKeyBarLayout: List<KeyBinding> = listOf(
     KeyBinding(label = "Esc", kind = KeyKind.Regular),
     KeyBinding(label = "Ctrl", kind = KeyKind.Modifier),
     KeyBinding(label = "Ctrl-C", kind = KeyKind.Regular),
+    KeyBinding(label = "Enter", kind = KeyKind.Regular),
     KeyBinding(label = "Ctrl-D", kind = KeyKind.Regular),
     KeyBinding(label = "Tab", kind = KeyKind.Regular),
     KeyBinding(label = "‹", kind = KeyKind.Arrow),

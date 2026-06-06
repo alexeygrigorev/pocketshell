@@ -31,6 +31,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.OutputStream
 
+enum class TerminalRawInputPolicy {
+    FlushSmartText,
+    ClearSmartText,
+}
+
 /**
  * Compose-friendly state holder for [TerminalSurface].
  *
@@ -161,6 +166,9 @@ class TerminalSurfaceState internal constructor(
     @Volatile
     private var onCopySelection: ((String) -> Unit)? = null
 
+    @Volatile
+    private var smartTextStagingBridge: ((TerminalRawInputPolicy) -> Unit)? = null
+
     /**
      * Install or replace the [onCopySelection] callback. Pass `null` to
      * detach. Called by [TerminalSurface] on composition to wire the
@@ -168,6 +176,24 @@ class TerminalSurfaceState internal constructor(
      */
     public fun setOnCopySelection(callback: ((String) -> Unit)?) {
         onCopySelection = callback
+    }
+
+    /**
+     * Apply a SmartText staging policy before app-level raw input paths send
+     * bytes outside [TerminalView]'s IME/key-event path. Enter-like actions
+     * can flush staged text first; interrupt/navigation/hotkey actions clear
+     * it so stale text cannot later flush after raw bytes.
+     */
+    public fun prepareForRawTerminalInput(policy: TerminalRawInputPolicy) {
+        smartTextStagingBridge?.invoke(policy)
+    }
+
+    internal fun setSmartTextStagingBridge(callback: ((TerminalRawInputPolicy) -> Unit)?) {
+        smartTextStagingBridge = callback
+    }
+
+    public fun setSmartTextStagingBridgeForTest(callback: ((TerminalRawInputPolicy) -> Unit)?) {
+        setSmartTextStagingBridge(callback)
     }
 
     private val sessionClient = object : TerminalSessionClient {

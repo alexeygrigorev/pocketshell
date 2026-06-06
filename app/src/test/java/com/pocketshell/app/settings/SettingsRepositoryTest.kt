@@ -2,6 +2,7 @@ package com.pocketshell.app.settings
 
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
+import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -45,6 +46,7 @@ class SettingsRepositoryTest {
         // bodyDense rung (13sp) so a fresh install renders unchanged.
         assertEquals(AppSettings.DEFAULT_CONVERSATION_FONT_SP, snap.conversationFontSizeSp, 0f)
         assertEquals(13f, AppSettings.DEFAULT_CONVERSATION_FONT_SP, 0f)
+        assertEquals(TerminalKeyboardMode.RawCommand, snap.terminalKeyboardMode)
         assertTrue(snap.tmuxOnAttachByDefault)
         assertEquals(AppSettings.VOICE_LANGUAGE_AUTO, snap.voiceLanguage)
         assertEquals(
@@ -155,10 +157,37 @@ class SettingsRepositoryTest {
     }
 
     @Test
+    fun `setTerminalKeyboardMode persists and round-trips`() {
+        val repo = SettingsRepository(context)
+        repo.setTerminalKeyboardMode(TerminalKeyboardMode.SmartText)
+        assertEquals(TerminalKeyboardMode.SmartText, repo.settings.value.terminalKeyboardMode)
+        assertEquals(
+            TerminalKeyboardMode.SmartText,
+            SettingsRepository(context).settings.value.terminalKeyboardMode,
+        )
+
+        repo.setTerminalKeyboardMode(TerminalKeyboardMode.RawCommand)
+        assertEquals(TerminalKeyboardMode.RawCommand, repo.settings.value.terminalKeyboardMode)
+    }
+
+    @Test
+    fun `unknown terminal keyboard mode falls back to raw command`() {
+        context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
+            .edit()
+            .putString("terminal_keyboard_mode", "PredictEverything")
+            .commit()
+
+        val repo = SettingsRepository(context)
+
+        assertEquals(TerminalKeyboardMode.RawCommand, repo.settings.value.terminalKeyboardMode)
+    }
+
+    @Test
     fun `wrong typed restored prefs fall back to defaults`() {
         context.getSharedPreferences("app_settings", Context.MODE_PRIVATE)
             .edit()
             .putString("terminal_font_sp", "huge")
+            .putBoolean("terminal_keyboard_mode", true)
             .putString("tmux_on_attach_default", "yes")
             .putString("voice_silence_seconds", "soon")
             .putString("show_system_notes", "maybe")
@@ -171,6 +200,7 @@ class SettingsRepositoryTest {
         val snap = repo.settings.value
 
         assertEquals(AppSettings.DEFAULT_TERMINAL_FONT_SP, snap.terminalFontSizeSp, 0f)
+        assertEquals(TerminalKeyboardMode.RawCommand, snap.terminalKeyboardMode)
         assertTrue(snap.tmuxOnAttachByDefault)
         assertEquals(AppSettings.DEFAULT_VOICE_SILENCE_SECONDS, snap.voiceSilenceThresholdSeconds, 0f)
         assertEquals(AppSettings.DEFAULT_SHOW_SYSTEM_NOTES, snap.showSystemNotes)

@@ -50,6 +50,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.assistant.AssistantProvider
+import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
@@ -159,6 +160,8 @@ fun SettingsScreen(
                     onFontSizeChange = viewModel::setTerminalFontSizeSp,
                     conversationFontSizeSp = settings.conversationFontSizeSp,
                     onConversationFontSizeChange = viewModel::setConversationFontSizeSp,
+                    terminalKeyboardMode = settings.terminalKeyboardMode,
+                    onTerminalKeyboardModeChange = viewModel::setTerminalKeyboardMode,
                     tmuxOnAttach = settings.tmuxOnAttachByDefault,
                     onTmuxOnAttachChange = viewModel::setTmuxOnAttachByDefault,
                     agentSubmitEnterDelayMs = settings.agentSubmitEnterDelayMs,
@@ -477,6 +480,8 @@ private fun TerminalSection(
     onFontSizeChange: (Float) -> Unit,
     conversationFontSizeSp: Float,
     onConversationFontSizeChange: (Float) -> Unit,
+    terminalKeyboardMode: TerminalKeyboardMode,
+    onTerminalKeyboardModeChange: (TerminalKeyboardMode) -> Unit,
     tmuxOnAttach: Boolean,
     onTmuxOnAttachChange: (Boolean) -> Unit,
     agentSubmitEnterDelayMs: Int,
@@ -563,6 +568,49 @@ private fun TerminalSection(
                     style = PocketShellType.bodyDense,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.testTag(CONVERSATION_FONT_VALUE_TAG),
+                )
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Smart text keyboard",
+                        color = PocketShellColors.Text,
+                        style = PocketShellType.bodyDense,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "Enable swipe and autocorrect for terminal text. Text is staged " +
+                            "and sent only when Enter confirms it; keep this off for shell " +
+                            "commands and use Prompt Composer for prose.",
+                        color = PocketShellColors.TextSecondary,
+                        style = MaterialTheme.typography.labelSmall,
+                    )
+                }
+                Switch(
+                    checked = terminalKeyboardMode == TerminalKeyboardMode.SmartText,
+                    onCheckedChange = { enabled ->
+                        onTerminalKeyboardModeChange(
+                            if (enabled) {
+                                TerminalKeyboardMode.SmartText
+                            } else {
+                                TerminalKeyboardMode.RawCommand
+                            },
+                        )
+                    },
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = PocketShellColors.OnAccent,
+                        checkedTrackColor = PocketShellColors.Accent,
+                        uncheckedThumbColor = PocketShellColors.TextSecondary,
+                        uncheckedTrackColor = PocketShellColors.Surface,
+                        uncheckedBorderColor = PocketShellColors.Border,
+                    ),
+                    modifier = Modifier.testTag(TERMINAL_SMART_TEXT_SWITCH_TAG),
                 )
             }
             Spacer(modifier = Modifier.height(16.dp))
@@ -1653,6 +1701,7 @@ internal const val TERMINAL_FONT_SLIDER_TAG = "settings:terminal:font-slider"
 // "XXsp" value label, placed beside the terminal font slider.
 internal const val CONVERSATION_FONT_SLIDER_TAG = "settings:terminal:conversation-font-slider"
 internal const val CONVERSATION_FONT_VALUE_TAG = "settings:terminal:conversation-font-value"
+internal const val TERMINAL_SMART_TEXT_SWITCH_TAG = "settings:terminal:smart-text-switch"
 internal const val TMUX_SWITCH_TAG = "settings:terminal:tmux-switch"
 // Issue #526: agent-submit Enter delay slider + its right-aligned "Xms"
 // value label, placed under Settings → Terminal.

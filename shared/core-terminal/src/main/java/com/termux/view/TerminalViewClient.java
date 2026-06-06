@@ -40,6 +40,18 @@ public interface TerminalViewClient {
 
     boolean shouldUseCtrlSpaceWorkaround();
 
+    /**
+     * Return true to request a normal smart-text IME for terminal input.
+     *
+     * Default false preserves the terminal-safe raw command keyboard: the
+     * TerminalView advertises password-like/no-suggestions flags and forwards
+     * committed characters immediately. Smart text is opt-in because keyboard
+     * autocorrect can mutate shell tokens. When enabled, TerminalView stages
+     * committed IME text locally and only writes it to the PTY after an Enter
+     * confirmation.
+     */
+    default boolean shouldUseSmartTextInput() { return false; }
+
     boolean isTerminalViewSelected();
 
 

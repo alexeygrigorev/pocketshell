@@ -2,6 +2,7 @@ package com.pocketshell.app.settings
 
 import android.content.Context
 import android.content.SharedPreferences
+import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -55,6 +56,12 @@ class SettingsRepository @Inject constructor(
         if (_settings.value.terminalFontSizeSp == clamped) return
         prefs.edit().putFloat(KEY_TERMINAL_FONT_SP, clamped).apply()
         _settings.value = _settings.value.copy(terminalFontSizeSp = clamped)
+    }
+
+    fun setTerminalKeyboardMode(mode: TerminalKeyboardMode) {
+        if (_settings.value.terminalKeyboardMode == mode) return
+        prefs.edit().putString(KEY_TERMINAL_KEYBOARD_MODE, mode.name).apply()
+        _settings.value = _settings.value.copy(terminalKeyboardMode = mode)
     }
 
     /**
@@ -193,6 +200,12 @@ class SettingsRepository @Inject constructor(
             AppSettings.MIN_CONVERSATION_FONT_SP,
             AppSettings.MAX_CONVERSATION_FONT_SP,
         )
+        val terminalKeyboardModeName = prefs.safeString(
+            KEY_TERMINAL_KEYBOARD_MODE,
+            TerminalKeyboardMode.RawCommand.name,
+        ) ?: TerminalKeyboardMode.RawCommand.name
+        val terminalKeyboardMode = runCatching { TerminalKeyboardMode.valueOf(terminalKeyboardModeName) }
+            .getOrDefault(TerminalKeyboardMode.RawCommand)
         val tmux = prefs.safeBoolean(KEY_TMUX_ON_ATTACH, true)
         val language = prefs.safeString(KEY_VOICE_LANGUAGE, AppSettings.VOICE_LANGUAGE_AUTO)
             ?.trim()
@@ -240,6 +253,7 @@ class SettingsRepository @Inject constructor(
         return AppSettings(
             terminalFontSizeSp = font,
             conversationFontSizeSp = conversationFont,
+            terminalKeyboardMode = terminalKeyboardMode,
             tmuxOnAttachByDefault = tmux,
             defaultHostId = defaultHostId,
             voiceLanguage = language,
@@ -333,6 +347,7 @@ class SettingsRepository @Inject constructor(
         const val PREFS_NAME = "app_settings"
         const val KEY_TERMINAL_FONT_SP = "terminal_font_sp"
         const val KEY_CONVERSATION_FONT_SP = "conversation_font_sp"
+        const val KEY_TERMINAL_KEYBOARD_MODE = "terminal_keyboard_mode"
         const val KEY_TMUX_ON_ATTACH = "tmux_on_attach_default"
         const val KEY_DEFAULT_HOST_ID = "default_host_id"
         const val KEY_VOICE_LANGUAGE = "voice_language"

@@ -44,6 +44,10 @@ import com.termux.view.textselection.TextSelectionCursorController;
 
 /** View displaying and interacting with a {@link TerminalSession}. */
 public final class TerminalView extends View {
+    public enum SmartTextStagingPolicy {
+        FLUSH,
+        CLEAR
+    }
 
     /** Log terminal view key and IME events. */
     private static boolean TERMINAL_VIEW_KEY_LOGGING_ENABLED = false;
@@ -74,6 +78,7 @@ public final class TerminalView extends View {
     private int mPendingRenderInvalidationRequests;
     private int mCoalescedRenderInvalidationFrames;
     private int mDefaultBackgroundColor = 0XFF000000;
+    private Editable mSmartTextStagingEditable;
     /** Scratch dirty-row buffer for dirty-region invalidation (#469); main-thread only. */
     private boolean[] mDirtyRowsScratch = new boolean[0];
     private final Runnable mRenderInvalidationRunnable = new Runnable() {
@@ -354,6 +359,7 @@ public final class TerminalView extends View {
     public boolean attachSession(TerminalSession session) {
         if (session == mTermSession) return false;
         mTopRow = 0;
+        clearSmartTextStaging();
 
         mTermSession = session;
         mEmulator = null;
@@ -369,12 +375,23 @@ public final class TerminalView extends View {
 
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
+        final boolean terminalViewSelected = mClient.isTerminalViewSelected();
+        final boolean smartTextKeyboard = terminalViewSelected && mClient.shouldUseSmartTextInput();
+
         // Ensure that inputType is only set if TerminalView is selected view with the keyboard and
         // an alternate view is not selected, like an EditText. This is necessary if an activity is
         // initially started with the alternate view or if activity is returned to from another app
         // and the alternate view was the one selected the last time.
-        if (mClient.isTerminalViewSelected()) {
-            if (mClient.shouldEnforceCharBasedInput()) {
+        if (terminalViewSelected) {
+            if (smartTextKeyboard) {
+                // PocketShell smart text mode is explicit opt-in. This enables
+                // swipe/autocorrect-capable keyboards, but the InputConnection
+                // below stages committed text until Enter so command tokens are
+                // not silently rewritten byte-by-byte in a live shell.
+                outAttrs.inputType = InputType.TYPE_CLASS_TEXT |
+                    InputType.TYPE_TEXT_VARIATION_NORMAL |
+                    InputType.TYPE_TEXT_FLAG_AUTO_CORRECT;
+            } else if (mClient.shouldEnforceCharBasedInput()) {
                 // Some keyboards seems do not reset the internal state on TYPE_NULL.
                 // Affects mostly Samsung stock keyboards.
                 // https://github.com/termux/termux-app/issues/686
@@ -410,11 +427,13 @@ public final class TerminalView extends View {
                     if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) mClient.logInfo(LOG_TAG, "IME: finishComposingText()");
                     super.finishComposingText();
 
-                    sendTextToTerminal(getEditable());
-                    getEditable().clear();
+                    if (!smartTextKeyboard) {
+                        sendTextToTerminal(getEditable());
+                        getEditable().clear();
+                    }
                 } catch (RuntimeException e) {
                     reportTerminalViewFailure("IME finishComposingText failed", e);
-                    getEditable().clear();
+                    if (!smartTextKeyboard) getEditable().clear();
                 }
                 return true;
             }
@@ -425,11 +444,22 @@ public final class TerminalView extends View {
                     if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) {
                         mClient.logInfo(LOG_TAG, "IME: commitText(\"" + text + "\", " + newCursorPosition + ")");
                     }
+                    Editable content = getEditable();
+                    rememberSmartTextStaging(content, smartTextKeyboard);
+                    if (smartTextKeyboard && content.length() > 0 && isMultiCharacterConfirmText(text)) {
+                        // Multi-character text containing Enter is an identifiable paste-like path,
+                        // not the ordinary Enter key. Do not prefix it with stale staged command text.
+                        content.clear();
+                    }
                     super.commitText(text, newCursorPosition);
 
                     if (mEmulator == null) return true;
 
-                    Editable content = getEditable();
+                    content = getEditable();
+                    rememberSmartTextStaging(content, smartTextKeyboard);
+                    if (smartTextKeyboard && !containsConfirmKey(content)) {
+                        return true;
+                    }
                     sendTextToTerminal(content);
                     content.clear();
                 } catch (RuntimeException e) {
@@ -440,9 +470,48 @@ public final class TerminalView extends View {
             }
 
             @Override
+            public boolean performContextMenuAction(int id) {
+                if (smartTextKeyboard && (id == android.R.id.paste || id == android.R.id.pasteAsPlainText)) {
+                    clearSmartTextStaging();
+                    getEditable().clear();
+                }
+                return super.performContextMenuAction(id);
+            }
+
+            @Override
+            public boolean performEditorAction(int actionCode) {
+                if (smartTextKeyboard && isConfirmEditorAction(actionCode)) {
+                    flushSmartTextStagingToTerminal();
+                    sendTextToTerminal("\n");
+                    return true;
+                }
+                if (smartTextKeyboard) clearSmartTextStaging();
+                return super.performEditorAction(actionCode);
+            }
+
+            @Override
+            public boolean sendKeyEvent(KeyEvent event) {
+                if (smartTextKeyboard && event != null && event.getAction() == KeyEvent.ACTION_DOWN) {
+                    if (isPlainEnterKeyEvent(event.getKeyCode(), event)) {
+                        flushSmartTextStagingToTerminal();
+                        sendTextToTerminal("\n");
+                        return true;
+                    } else if (shouldDiscardSmartTextBeforeKeyEvent(event.getKeyCode(), event)) {
+                        clearSmartTextStaging();
+                        getEditable().clear();
+                        return TerminalView.this.onKeyDown(event.getKeyCode(), event);
+                    }
+                }
+                return super.sendKeyEvent(event);
+            }
+
+            @Override
             public boolean deleteSurroundingText(int leftLength, int rightLength) {
                 if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) {
                     mClient.logInfo(LOG_TAG, "IME: deleteSurroundingText(" + leftLength + ", " + rightLength + ")");
+                }
+                if (smartTextKeyboard && getEditable().length() > 0) {
+                    return super.deleteSurroundingText(leftLength, rightLength);
                 }
                 // The stock Samsung keyboard with 'Auto check spelling' enabled sends leftLength > 1.
                 KeyEvent deleteKey = new KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_DEL);
@@ -450,63 +519,148 @@ public final class TerminalView extends View {
                 return super.deleteSurroundingText(leftLength, rightLength);
             }
 
-            void sendTextToTerminal(CharSequence text) {
-                stopTextSelectionMode();
-                final int textLengthInChars = text.length();
-                for (int i = 0; i < textLengthInChars; i++) {
-                    char firstChar = text.charAt(i);
-                    int codePoint;
-                    if (Character.isHighSurrogate(firstChar)) {
-                        if (++i < textLengthInChars) {
-                            codePoint = Character.toCodePoint(firstChar, text.charAt(i));
-                        } else {
-                            // At end of string, with no low surrogate following the high:
-                            codePoint = TerminalEmulator.UNICODE_REPLACEMENT_CHAR;
-                        }
-                    } else {
-                        codePoint = firstChar;
-                    }
+        };
+    }
 
-                    // Check onKeyDown() for details.
-                    if (mClient.readShiftKey())
-                        codePoint = Character.toUpperCase(codePoint);
+    private void rememberSmartTextStaging(Editable editable, boolean smartTextKeyboard) {
+        if (smartTextKeyboard) mSmartTextStagingEditable = editable;
+    }
 
-                    boolean ctrlHeld = false;
-                    if (codePoint <= 31 && codePoint != 27) {
-                        if (codePoint == '\n') {
-                            // The AOSP keyboard and descendants seems to send \n as text when the enter key is pressed,
-                            // instead of a key event like most other keyboard apps. A terminal expects \r for the enter
-                            // key (although when icrnl is enabled this doesn't make a difference - run 'stty -icrnl' to
-                            // check the behaviour).
-                            codePoint = '\r';
-                        }
+    private boolean hasSmartTextStaging() {
+        return mClient != null && mClient.shouldUseSmartTextInput() &&
+            mSmartTextStagingEditable != null && mSmartTextStagingEditable.length() > 0;
+    }
 
-                        // E.g. penti keyboard for ctrl input.
-                        ctrlHeld = true;
-                        switch (codePoint) {
-                            case 31:
-                                codePoint = '_';
-                                break;
-                            case 30:
-                                codePoint = '^';
-                                break;
-                            case 29:
-                                codePoint = ']';
-                                break;
-                            case 28:
-                                codePoint = '\\';
-                                break;
-                            default:
-                                codePoint += 96;
-                                break;
-                        }
-                    }
+    private void clearSmartTextStaging() {
+        if (mSmartTextStagingEditable != null) mSmartTextStagingEditable.clear();
+    }
 
-                    inputCodePoint(KEY_EVENT_SOURCE_SOFT_KEYBOARD, codePoint, ctrlHeld, false);
+    private boolean flushSmartTextStagingToTerminal() {
+        if (!hasSmartTextStaging()) return false;
+        sendTextToTerminal(mSmartTextStagingEditable);
+        clearSmartTextStaging();
+        return true;
+    }
+
+    public void prepareForRawTerminalInput(SmartTextStagingPolicy policy) {
+        if (policy == SmartTextStagingPolicy.FLUSH) {
+            flushSmartTextStagingToTerminal();
+        } else {
+            clearSmartTextStaging();
+        }
+    }
+
+    private boolean isMultiCharacterConfirmText(CharSequence text) {
+        return text != null && text.length() > 1 && containsConfirmKey(text);
+    }
+
+    private boolean containsConfirmKey(CharSequence text) {
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '\n' || c == '\r') return true;
+        }
+        return false;
+    }
+
+    private boolean isConfirmEditorAction(int actionCode) {
+        return actionCode == EditorInfo.IME_ACTION_UNSPECIFIED ||
+            actionCode == EditorInfo.IME_ACTION_DONE ||
+            actionCode == EditorInfo.IME_ACTION_GO ||
+            actionCode == EditorInfo.IME_ACTION_SEARCH ||
+            actionCode == EditorInfo.IME_ACTION_SEND;
+    }
+
+    private boolean isPlainEnterKeyEvent(int keyCode, KeyEvent event) {
+        return (keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER) &&
+            !event.isCtrlPressed() &&
+            !event.isAltPressed() &&
+            !event.isMetaPressed() &&
+            !event.isShiftPressed() &&
+            !event.isFunctionPressed();
+    }
+
+    private boolean shouldDiscardSmartTextBeforeKeyEvent(int keyCode, KeyEvent event) {
+        if (!hasSmartTextStaging()) return false;
+        if (isPlainEnterKeyEvent(keyCode, event)) return false;
+        if (event.getAction() == KeyEvent.ACTION_MULTIPLE) return true;
+        if (event.isCtrlPressed() || event.isAltPressed() || event.isMetaPressed() || event.isFunctionPressed()) return true;
+
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_ESCAPE:
+            case KeyEvent.KEYCODE_BACK:
+            case KeyEvent.KEYCODE_TAB:
+            case KeyEvent.KEYCODE_DEL:
+            case KeyEvent.KEYCODE_FORWARD_DEL:
+            case KeyEvent.KEYCODE_DPAD_UP:
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+            case KeyEvent.KEYCODE_MOVE_HOME:
+            case KeyEvent.KEYCODE_MOVE_END:
+            case KeyEvent.KEYCODE_PAGE_UP:
+            case KeyEvent.KEYCODE_PAGE_DOWN:
+            case KeyEvent.KEYCODE_INSERT:
+            case KeyEvent.KEYCODE_UNKNOWN:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private void sendTextToTerminal(CharSequence text) {
+        stopTextSelectionMode();
+        final int textLengthInChars = text.length();
+        for (int i = 0; i < textLengthInChars; i++) {
+            char firstChar = text.charAt(i);
+            int codePoint;
+            if (Character.isHighSurrogate(firstChar)) {
+                if (++i < textLengthInChars) {
+                    codePoint = Character.toCodePoint(firstChar, text.charAt(i));
+                } else {
+                    // At end of string, with no low surrogate following the high:
+                    codePoint = TerminalEmulator.UNICODE_REPLACEMENT_CHAR;
+                }
+            } else {
+                codePoint = firstChar;
+            }
+
+            // Check onKeyDown() for details.
+            if (mClient.readShiftKey())
+                codePoint = Character.toUpperCase(codePoint);
+
+            boolean ctrlHeld = false;
+            if (codePoint <= 31 && codePoint != 27) {
+                if (codePoint == '\n') {
+                    // The AOSP keyboard and descendants seems to send \n as text when the enter key is pressed,
+                    // instead of a key event like most other keyboard apps. A terminal expects \r for the enter
+                    // key (although when icrnl is enabled this doesn't make a difference - run 'stty -icrnl' to
+                    // check the behaviour).
+                    codePoint = '\r';
+                }
+
+                // E.g. penti keyboard for ctrl input.
+                ctrlHeld = true;
+                switch (codePoint) {
+                    case 31:
+                        codePoint = '_';
+                        break;
+                    case 30:
+                        codePoint = '^';
+                        break;
+                    case 29:
+                        codePoint = ']';
+                        break;
+                    case 28:
+                        codePoint = '\\';
+                        break;
+                    default:
+                        codePoint += 96;
+                        break;
                 }
             }
 
-        };
+            inputCodePoint(KEY_EVENT_SOURCE_SOFT_KEYBOARD, codePoint, ctrlHeld, false);
+        }
     }
 
     @Override
@@ -716,7 +870,10 @@ public final class TerminalView extends View {
                     ClipData.Item clipItem = clipData.getItemAt(0);
                     if (clipItem != null) {
                         CharSequence text = clipItem.coerceToText(getContext());
-                        if (!TextUtils.isEmpty(text)) mEmulator.paste(text.toString());
+                        if (!TextUtils.isEmpty(text)) {
+                            clearSmartTextStaging();
+                            mEmulator.paste(text.toString());
+                        }
                     }
                 }
             } else if (mEmulator.isMouseTrackingActive()) { // BUTTON_PRIMARY.
@@ -866,6 +1023,14 @@ public final class TerminalView extends View {
         if (mEmulator == null) return true;
         if (isSelectingText()) {
             stopTextSelectionMode();
+        }
+
+        if (mClient.shouldUseSmartTextInput() && hasSmartTextStaging()) {
+            if (isPlainEnterKeyEvent(keyCode, event)) {
+                flushSmartTextStagingToTerminal();
+            } else if (shouldDiscardSmartTextBeforeKeyEvent(keyCode, event)) {
+                clearSmartTextStaging();
+            }
         }
 
         if (mClient.onKeyDown(keyCode, event, mTermSession)) {

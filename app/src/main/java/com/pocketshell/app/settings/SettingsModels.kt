@@ -1,5 +1,7 @@
 package com.pocketshell.app.settings
 
+import com.pocketshell.core.terminal.ui.TerminalKeyboardMode
+
 /**
  * Default presentation for the per-host workspace screen.
  *
@@ -73,6 +75,9 @@ enum class VoiceTranscriptionProvider {
  *   Issue #185 raised the minimum bound to 2s; issue #397 makes the
  *   default much more conservative so natural pauses and quieter speech
  *   from a distant phone do not cut dictation off mid-thought.
+ * @property terminalKeyboardMode raw-command terminal keyboard by default,
+ *   or explicit smart text mode. Smart text requests IME suggestions and
+ *   swipe input but stages committed text until Enter confirms the buffer.
  * @property voiceTranscriptionProvider speech-to-text backend for prompt
  *   composer voice input. Defaults to [VoiceTranscriptionProvider.OpenAiWhisper]
  *   so existing users keep the current Whisper behaviour until they opt into
@@ -81,6 +86,7 @@ enum class VoiceTranscriptionProvider {
 data class AppSettings(
     val terminalFontSizeSp: Float = DEFAULT_TERMINAL_FONT_SP,
     val conversationFontSizeSp: Float = DEFAULT_CONVERSATION_FONT_SP,
+    val terminalKeyboardMode: TerminalKeyboardMode = TerminalKeyboardMode.RawCommand,
     val tmuxOnAttachByDefault: Boolean = true,
     val defaultHostId: Long? = null,
     val voiceLanguage: String = VOICE_LANGUAGE_AUTO,

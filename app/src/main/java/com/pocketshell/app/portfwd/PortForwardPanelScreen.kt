@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -41,14 +42,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.portfwd.TunnelInfo
-import com.pocketshell.uikit.theme.JetBrainsMonoFamily
+import com.pocketshell.uikit.theme.LocalPocketShellSemantic
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 
 /** Test tag for the #492 "Show all ports" checkbox row. */
 const val SHOW_ALL_PORTS_TEST_TAG = "port_forward_show_all_ports"
@@ -225,7 +227,7 @@ private fun PanelHeader(
             Text(
                 text = title,
                 color = PocketShellColors.Text,
-                fontSize = 18.sp,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -236,8 +238,7 @@ private fun PanelHeader(
                 Text(
                     text = subtitle.ifBlank { state.label },
                     color = PocketShellColors.TextMuted,
-                    fontFamily = JetBrainsMonoFamily,
-                    fontSize = 12.sp,
+                    style = PocketShellType.bodyMono,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -258,7 +259,7 @@ private fun AutoForwardRow(enabled: Boolean, onEnabledChange: (Boolean) -> Unit)
             Text(
                 text = "Auto-forward",
                 color = PocketShellColors.Text,
-                fontSize = 14.sp,
+                style = MaterialTheme.typography.bodyMedium,
                 fontWeight = FontWeight.SemiBold,
             )
             Text(
@@ -268,7 +269,7 @@ private fun AutoForwardRow(enabled: Boolean, onEnabledChange: (Boolean) -> Unit)
                     "Off; discovery rows do not open local tunnels"
                 },
                 color = PocketShellColors.TextMuted,
-                fontSize = 12.sp,
+                style = PocketShellType.bodyDense,
             )
         }
         Switch(checked = enabled, onCheckedChange = onEnabledChange)
@@ -311,7 +312,7 @@ private fun ShowAllPortsRow(
                 "Show all ports"
             },
             color = PocketShellColors.Text,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
         )
     }
 }
@@ -344,6 +345,13 @@ private fun PortForwardRow(
     onRowClick: (() -> Unit)? = null,
 ) {
     val forwarding = tunnel.status == TunnelInfo.Status.FORWARDING
+    val semantic = LocalPocketShellSemantic.current
+    val statusColor: Color = when (tunnel.status) {
+        TunnelInfo.Status.FORWARDING -> semantic.statusActive
+        TunnelInfo.Status.AVAILABLE -> PocketShellColors.TextSecondary
+        TunnelInfo.Status.FAILED -> semantic.statusError
+        TunnelInfo.Status.STOPPED -> semantic.statusAttention
+    }
     val rowClick: (() -> Unit)? = when {
         forwarding -> onOpen
         onRowClick != null -> onRowClick
@@ -365,7 +373,7 @@ private fun PortForwardRow(
         BodyCell("${tunnel.remotePort}", 0.18f, monospace = true)
         BodyCell("${tunnel.localPort}", 0.16f, monospace = true)
         BodyCell(tunnel.process.ifBlank { "-" }, 0.28f)
-        BodyCell(tunnel.status.label, 0.18f, color = tunnel.status.color)
+        BodyCell(tunnel.status.label, 0.18f, color = statusColor)
         // Issue #456: declutter the table. Discovered/available rows have no
         // traffic yet, so rendering "0 B / 0 B/s" on every row is just noise.
         // Show the traffic figures only for rows that are actually forwarding.
@@ -374,21 +382,18 @@ private fun PortForwardRow(
                 Text(
                     text = formatBytes(tunnel.bytesIn + tunnel.bytesOut),
                     color = PocketShellColors.TextSecondary,
-                    fontFamily = JetBrainsMonoFamily,
-                    fontSize = 11.sp,
+                    style = PocketShellType.labelMono,
                 )
                 Text(
                     text = "${formatBytes(tunnel.speedBps)}/s",
                     color = PocketShellColors.TextMuted,
-                    fontFamily = JetBrainsMonoFamily,
-                    fontSize = 10.sp,
+                    style = PocketShellType.labelMono,
                 )
             } else {
                 Text(
                     text = "-",
                     color = PocketShellColors.TextMuted,
-                    fontFamily = JetBrainsMonoFamily,
-                    fontSize = 11.sp,
+                    style = PocketShellType.labelMono,
                 )
             }
         }
@@ -403,7 +408,7 @@ private fun RowScope.HeaderCell(text: String, weight: Float) {
         text = text.uppercase(),
         modifier = Modifier.weight(weight),
         color = PocketShellColors.TextMuted,
-        fontSize = 10.sp,
+        style = MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.SemiBold,
     )
 }
@@ -413,14 +418,13 @@ private fun RowScope.BodyCell(
     text: String,
     weight: Float,
     monospace: Boolean = false,
-    color: androidx.compose.ui.graphics.Color = PocketShellColors.TextSecondary,
+    color: Color = PocketShellColors.TextSecondary,
 ) {
     Text(
         text = text,
         modifier = Modifier.weight(weight),
         color = color,
-        fontFamily = if (monospace) JetBrainsMonoFamily else null,
-        fontSize = 12.sp,
+        style = if (monospace) PocketShellType.bodyMono else PocketShellType.bodyDense,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
     )
@@ -439,7 +443,7 @@ private fun TextButtonBox(label: String, onClick: () -> Unit) {
         Text(
             text = label,
             color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
     }
@@ -447,10 +451,18 @@ private fun TextButtonBox(label: String, onClick: () -> Unit) {
 
 @Composable
 private fun StatusDot(state: PortForwardConnectionState) {
+    val semantic = LocalPocketShellSemantic.current
+    val color: Color = when (state) {
+        PortForwardConnectionState.Idle -> semantic.statusIdle
+        PortForwardConnectionState.Connecting -> semantic.statusConnecting
+        PortForwardConnectionState.Connected -> semantic.statusActive
+        PortForwardConnectionState.Reconnecting -> semantic.statusConnecting
+        PortForwardConnectionState.Error -> semantic.statusError
+    }
     Box(
         modifier = Modifier
             .size(8.dp)
-            .background(state.color, CircleShape),
+            .background(color, CircleShape),
     )
 }
 
@@ -465,7 +477,7 @@ private fun ErrorBanner(error: String) {
             .border(1.dp, PocketShellColors.Red.copy(alpha = 0.55f), RoundedCornerShape(8.dp))
             .padding(horizontal = 12.dp, vertical = 10.dp),
         color = PocketShellColors.Text,
-        fontSize = 12.sp,
+        style = PocketShellType.bodyDense,
     )
 }
 
@@ -475,7 +487,11 @@ private fun EmptyScanningState(modifier: Modifier) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             CircularProgressIndicator(modifier = Modifier.size(32.dp))
             Spacer(Modifier.height(10.dp))
-            Text("Scanning ports...", color = PocketShellColors.TextSecondary, fontSize = 13.sp)
+            Text(
+                "Scanning ports...",
+                color = PocketShellColors.TextSecondary,
+                style = PocketShellType.bodyDense,
+            )
         }
     }
 }
@@ -486,7 +502,7 @@ private fun DisabledState(scanning: Boolean, modifier: Modifier) {
         Text(
             if (scanning) "Discovering listening ports..." else "No listening ports discovered.",
             color = PocketShellColors.TextSecondary,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
         )
     }
 }
@@ -500,29 +516,12 @@ private val PortForwardConnectionState.label: String
         PortForwardConnectionState.Error -> "Error"
     }
 
-private val PortForwardConnectionState.color: androidx.compose.ui.graphics.Color
-    get() = when (this) {
-        PortForwardConnectionState.Idle -> PocketShellColors.TextMuted
-        PortForwardConnectionState.Connecting -> PocketShellColors.Amber
-        PortForwardConnectionState.Connected -> PocketShellColors.Green
-        PortForwardConnectionState.Reconnecting -> PocketShellColors.Amber
-        PortForwardConnectionState.Error -> PocketShellColors.Red
-    }
-
 private val TunnelInfo.Status.label: String
     get() = when (this) {
         TunnelInfo.Status.FORWARDING -> "Forwarding"
         TunnelInfo.Status.AVAILABLE -> "Available"
         TunnelInfo.Status.FAILED -> "Failed"
         TunnelInfo.Status.STOPPED -> "Stopped"
-    }
-
-private val TunnelInfo.Status.color: androidx.compose.ui.graphics.Color
-    get() = when (this) {
-        TunnelInfo.Status.FORWARDING -> PocketShellColors.Green
-        TunnelInfo.Status.AVAILABLE -> PocketShellColors.TextSecondary
-        TunnelInfo.Status.FAILED -> PocketShellColors.Red
-        TunnelInfo.Status.STOPPED -> PocketShellColors.Amber
     }
 
 internal fun formatBytes(bytes: Long): String = when {

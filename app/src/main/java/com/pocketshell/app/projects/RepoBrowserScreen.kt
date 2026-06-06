@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -33,9 +34,11 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * GitHub repos browser — issue #230 (app-side slice of #205).
@@ -222,44 +225,26 @@ private fun RepoBrowserAppBar(
     cloneRoot: String,
     onBack: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(60.dp)
-            .background(PocketShellColors.Background)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clickable(role = Role.Button, onClick = onBack)
-                .testTag(REPO_BROWSER_BACK_TAG),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "‹",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        Column(modifier = Modifier.padding(start = 4.dp).weight(1f)) {
-            Text(
-                text = "GitHub repos",
-                color = PocketShellColors.Text,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.testTag(REPO_BROWSER_TITLE_TAG),
-            )
-            Text(
-                text = if (cloneRoot == "~/git") hostName else "$hostName · $cloneRoot",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
-            )
-        }
-    }
+    ScreenHeader(
+        title = "GitHub repos",
+        subtitle = if (cloneRoot == "~/git") hostName else "$hostName · $cloneRoot",
+        titleTestTag = REPO_BROWSER_TITLE_TAG,
+        leading = {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clickable(role = Role.Button, onClick = onBack)
+                    .testTag(REPO_BROWSER_BACK_TAG),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "‹",
+                    color = PocketShellColors.TextSecondary,
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+            }
+        },
+    )
 }
 
 @Composable
@@ -286,7 +271,7 @@ private fun RepoErrorPanel(message: String, onRetry: () -> Unit) {
         Text(
             text = message,
             color = PocketShellColors.Text,
-            fontSize = 14.sp,
+            style = PocketShellType.bodyDense,
         )
         TextButton(onClick = onRetry, modifier = Modifier.testTag(REPO_BROWSER_RETRY_TAG)) {
             Text("Retry", color = PocketShellColors.Accent)
@@ -340,14 +325,14 @@ private fun ActionErrorBanner(message: String, onDismiss: () -> Unit) {
         Text(
             text = message,
             color = PocketShellColors.Text,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
             modifier = Modifier.weight(1f),
         )
         TextButton(
             onClick = onDismiss,
             modifier = Modifier.testTag(REPO_BROWSER_ACTION_ERROR_DISMISS_TAG),
         ) {
-            Text("Dismiss", color = PocketShellColors.Red, fontSize = 12.sp)
+            Text("Dismiss", color = PocketShellColors.Red, style = MaterialTheme.typography.labelSmall)
         }
     }
 }
@@ -365,14 +350,14 @@ private fun EmptyState() {
         Text(
             text = "No repositories found",
             color = PocketShellColors.Text,
-            fontSize = 14.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
             text = "Make sure `gh` is authenticated on this host.",
             color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
+            style = MaterialTheme.typography.labelSmall,
         )
     }
 }
@@ -389,61 +374,44 @@ private fun RepoCard(
     anyPending: Boolean,
     onClick: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(12.dp))
-            .border(1.dp, PocketShellColors.BorderSoft, RoundedCornerShape(12.dp))
-            .clickable(enabled = !anyPending, role = Role.Button, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 12.dp)
-            .testTag(repoCardTestTag(repo.fullName)),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = repo.name,
-                color = PocketShellColors.Text,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-            val subtitle = buildString {
-                append(repo.fullName)
-                repo.defaultBranch?.takeIf { it.isNotBlank() }?.let {
-                    append(" · ")
-                    append(it)
-                }
-                if (repo.cloned && repo.path != null) {
-                    append(" · ")
-                    append(repo.path)
-                }
-            }
-            Text(
-                text = subtitle,
-                color = PocketShellColors.TextSecondary,
-                fontSize = 11.sp,
-            )
+    val subtitle = buildString {
+        append(repo.fullName)
+        repo.defaultBranch?.takeIf { it.isNotBlank() }?.let {
+            append(" · ")
+            append(it)
         }
-        Spacer(modifier = Modifier.size(10.dp))
-        when {
-            pending -> CircularProgressIndicator(
-                color = PocketShellColors.Accent,
-                strokeWidth = 2.dp,
-                modifier = Modifier
-                    .size(18.dp)
-                    .testTag(repoCardPendingTestTag(repo.fullName)),
-            )
-            repo.cloned -> ActionPill(
-                label = "Open",
-                fg = PocketShellColors.Accent,
-                bg = PocketShellColors.AccentSoft,
-            )
-            else -> ActionPill(
-                label = "Clone",
-                fg = PocketShellColors.Purple,
-                bg = PocketShellColors.Purple.copy(alpha = 0.12f),
-            )
+        if (repo.cloned && repo.path != null) {
+            append(" · ")
+            append(repo.path)
         }
     }
+    ListRow(
+        title = repo.name,
+        subtitle = subtitle,
+        modifier = Modifier.testTag(repoCardTestTag(repo.fullName)),
+        onClick = onClick.takeIf { !anyPending },
+        trailing = {
+            when {
+                pending -> CircularProgressIndicator(
+                    color = PocketShellColors.Accent,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier
+                        .size(18.dp)
+                        .testTag(repoCardPendingTestTag(repo.fullName)),
+                )
+                repo.cloned -> ActionPill(
+                    label = "Open",
+                    fg = PocketShellColors.Accent,
+                    bg = PocketShellColors.AccentSoft,
+                )
+                else -> ActionPill(
+                    label = "Clone",
+                    fg = PocketShellColors.Purple,
+                    bg = PocketShellColors.Purple.copy(alpha = 0.12f),
+                )
+            }
+        },
+    )
 }
 
 @Composable
@@ -456,7 +424,7 @@ private fun ActionPill(label: String, fg: androidx.compose.ui.graphics.Color, bg
         Text(
             text = label,
             color = fg,
-            fontSize = 12.sp,
+            style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.SemiBold,
         )
     }

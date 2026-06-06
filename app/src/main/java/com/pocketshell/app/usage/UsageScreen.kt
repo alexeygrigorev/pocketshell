@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -39,8 +40,8 @@ import com.pocketshell.uikit.components.ProgressBar
 import com.pocketshell.uikit.model.Crumb
 import com.pocketshell.uikit.model.PillKind
 import com.pocketshell.uikit.model.ProgressKind
-import com.pocketshell.uikit.theme.JetBrainsMonoFamily
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 import java.time.Instant
 import java.time.ZoneId
 
@@ -118,7 +119,7 @@ fun UsageDashboardStrip(
                 Text(
                     text = row.provider,
                     color = PocketShellColors.Text,
-                    fontSize = 13.sp,
+                    style = PocketShellType.bodyDense,
                     fontWeight = FontWeight.Medium,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -131,16 +132,14 @@ fun UsageDashboardStrip(
                     Text(
                         text = formatResetRelative(now, reset, zone),
                         color = PocketShellColors.TextMuted,
-                        fontFamily = JetBrainsMonoFamily,
-                        fontSize = 11.sp,
+                        style = PocketShellType.labelMono,
                         modifier = Modifier.padding(end = 8.dp),
                     )
                 }
                 Text(
                     text = formatPercent(row.percent),
                     color = thresholdTextColor(row.thresholdState),
-                    fontFamily = JetBrainsMonoFamily,
-                    fontSize = 12.sp,
+                    style = PocketShellType.labelMono,
                 )
             }
         }
@@ -178,7 +177,7 @@ fun UsageSessionBlockedBadge(
     Text(
         text = label,
         color = color,
-        fontSize = 10.sp,
+        style = MaterialTheme.typography.labelSmall,
         fontWeight = FontWeight.SemiBold,
         letterSpacing = 0.5.sp,
         modifier = modifier
@@ -233,7 +232,7 @@ private fun UsageProviderStateRow(
             Text(
                 text = record.displayName,
                 color = PocketShellColors.Text,
-                fontSize = 13.sp,
+                style = PocketShellType.bodyDense,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -243,7 +242,7 @@ private fun UsageProviderStateRow(
                 Text(
                     text = thresholdRowDescription(state),
                     color = thresholdAccentColor(state),
-                    fontSize = 11.sp,
+                    style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Medium,
                 )
             } else {
@@ -251,7 +250,7 @@ private fun UsageProviderStateRow(
                 Text(
                     text = "OK",
                     color = PocketShellColors.TextMuted,
-                    fontSize = 11.sp,
+                    style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Medium,
                 )
             }
@@ -260,8 +259,7 @@ private fun UsageProviderStateRow(
             Text(
                 text = formatPercent(percent),
                 color = thresholdTextColor(state),
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 13.sp,
+                style = PocketShellType.bodyMono,
                 fontWeight = FontWeight.Medium,
             )
         }
@@ -321,7 +319,7 @@ fun UsageWarningBanner(
         Text(
             text = headline,
             color = PocketShellColors.Text,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.weight(1f),
             maxLines = 2,
@@ -334,7 +332,7 @@ fun UsageWarningBanner(
             Text(
                 text = "Dismiss",
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.labelSmall,
             )
         }
     }
@@ -351,12 +349,12 @@ private fun UsageMeta(state: UsageScreenState) {
         Text(
             text = if (state.isRefreshing) "Syncing..." else "Last sync: host data",
             color = PocketShellColors.TextMuted,
-            fontSize = 12.sp,
+            style = MaterialTheme.typography.labelSmall,
         )
         Text(
             text = "${state.providerCount} providers · ${state.hostCount} hosts",
             color = PocketShellColors.TextMuted,
-            fontSize = 12.sp,
+            style = MaterialTheme.typography.labelSmall,
         )
     }
 }
@@ -384,7 +382,7 @@ private fun UsageProviderCard(record: UsageProviderRecord, now: Instant) {
                 Text(
                     text = record.displayName,
                     color = PocketShellColors.Text,
-                    fontSize = 15.sp,
+                    style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -406,8 +404,7 @@ private fun UsageProviderCard(record: UsageProviderRecord, now: Instant) {
             Text(
                 text = error,
                 color = PocketShellColors.TextMuted,
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 11.sp,
+                style = PocketShellType.labelMono,
             )
         }
     }
@@ -428,7 +425,7 @@ private fun UsageWindowRow(
             Text(
                 text = windowLabel(window.name),
                 color = PocketShellColors.TextSecondary,
-                fontSize = 12.sp,
+                style = MaterialTheme.typography.labelSmall,
                 fontWeight = FontWeight.SemiBold,
                 letterSpacing = 0.5.sp,
                 maxLines = 1,
@@ -437,8 +434,7 @@ private fun UsageWindowRow(
             Text(
                 text = formatPercent(window.percent),
                 color = PocketShellColors.Text,
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 12.sp,
+                style = PocketShellType.labelMono,
                 fontWeight = FontWeight.Medium,
             )
         }
@@ -474,16 +470,14 @@ private fun UsageResetFoot(
             Text(
                 text = primary,
                 color = PocketShellColors.TextMuted,
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 11.sp,
+                style = PocketShellType.labelMono,
             )
         }
         if (absolute != null) {
             Text(
                 text = absolute,
                 color = PocketShellColors.TextSecondary,
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 10.sp,
+                style = PocketShellType.labelMono,
                 modifier = Modifier.padding(top = 1.dp),
             )
         }
@@ -501,15 +495,14 @@ private fun UsageEmptyHost(host: UsageMissingToolHost) {
         Text(
             text = "${host.hostName}: ${host.toolName} not installed",
             color = PocketShellColors.TextMuted,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
         Text(
             text = "server-side usage tracking unavailable",
             color = PocketShellColors.TextSecondary,
-            fontFamily = JetBrainsMonoFamily,
-            fontSize = 11.sp,
+            style = PocketShellType.labelMono,
             modifier = Modifier.padding(top = 8.dp),
         )
         // Issue #484: this state now only appears when pocketshell is genuinely
@@ -518,7 +511,7 @@ private fun UsageEmptyHost(host: UsageMissingToolHost) {
         Text(
             text = PocketshellCommand.NOT_INSTALLED_HINT,
             color = PocketShellColors.TextMuted,
-            fontSize = 11.sp,
+            style = MaterialTheme.typography.labelSmall,
             modifier = Modifier.padding(top = 8.dp),
         )
     }

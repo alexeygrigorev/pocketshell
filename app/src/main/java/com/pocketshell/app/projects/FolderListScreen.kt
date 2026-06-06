@@ -38,6 +38,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -86,6 +87,7 @@ import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
 import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.components.MicButton
+import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.model.SessionAgentKind
 import com.pocketshell.uikit.theme.LocalPocketShellSemantic
@@ -627,80 +629,53 @@ private fun FolderListAppBar(
     onOpenWorkspaceSettings: () -> Unit,
     onOpenAssistant: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 56.dp)
-            .background(PocketShellColors.Background)
-            .padding(horizontal = 8.dp, vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clickable(role = Role.Button, onClick = onBack)
-                .testTag(FOLDER_LIST_BACK_TAG),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "‹",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        // Single host title with the count subtitle directly beneath it (#522
-        // item 1). A leading green dot marks an active host, harmonised with the
-        // session rows. No second host-name band is rendered in the list.
-        Column(
-            modifier = Modifier
-                .padding(start = 4.dp)
-                .weight(1f)
-                .then(
-                    if (headerGroups != null) {
-                        Modifier.testTag(FOLDER_LIST_FLAT_HEADER_TAG)
-                    } else {
-                        Modifier
-                    },
-                ),
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                if (headerGroups != null) {
-                    StatusDot(
-                        active = headerGroups.activeCount > 0,
-                        modifier = Modifier.testTag(FOLDER_LIST_FLAT_HEADER_DOT_TAG),
-                    )
-                    Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
-                }
+    // #479 Slice A: the reference screen's hand-rolled bar is reconciled onto the
+    // shared [ScreenHeader] so the folder tree is truly canonical for the header
+    // pattern. The back chevron + active dot ride the leading slot; the single
+    // host name is the title; the `N active · M idle · K sessions` line is the
+    // subtitle (#522 item 1); the `⋮` overflow rides the trailing slot. All of
+    // the previous test tags are preserved so existing instrumentation keeps
+    // resolving the back button, header column, title, dot, and count subtitle.
+    ScreenHeader(
+        title = hostName,
+        subtitle = headerGroups?.let { flatHostCountText(it) },
+        titleTestTag = FOLDER_LIST_TITLE_TAG,
+        subtitleTestTag = FOLDER_LIST_FLAT_HEADER_COUNTS_TAG,
+        modifier = if (headerGroups != null) {
+            Modifier.testTag(FOLDER_LIST_FLAT_HEADER_TAG)
+        } else {
+            Modifier
+        },
+        leading = {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clickable(role = Role.Button, onClick = onBack)
+                    .testTag(FOLDER_LIST_BACK_TAG),
+                contentAlignment = Alignment.Center,
+            ) {
                 Text(
-                    text = hostName,
-                    color = PocketShellColors.Text,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .weight(1f, fill = false)
-                        .testTag(FOLDER_LIST_TITLE_TAG),
+                    text = "‹",
+                    color = PocketShellColors.TextSecondary,
+                    style = MaterialTheme.typography.headlineSmall,
                 )
             }
             if (headerGroups != null) {
-                Text(
-                    text = flatHostCountText(headerGroups),
-                    color = PocketShellColors.TextMuted,
-                    style = PocketShellType.labelMono,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.testTag(FOLDER_LIST_FLAT_HEADER_COUNTS_TAG),
+                Spacer(modifier = Modifier.width(PocketShellSpacing.sm))
+                StatusDot(
+                    active = headerGroups.activeCount > 0,
+                    modifier = Modifier.testTag(FOLDER_LIST_FLAT_HEADER_DOT_TAG),
                 )
             }
-        }
-        FolderListOverflowMenu(
-            onBrowseRepos = onBrowseRepos,
-            onOpenAssistant = onOpenAssistant,
-            onOpenWorkspaceSettings = onOpenWorkspaceSettings,
-        )
-    }
+        },
+        trailing = {
+            FolderListOverflowMenu(
+                onBrowseRepos = onBrowseRepos,
+                onOpenAssistant = onOpenAssistant,
+                onOpenWorkspaceSettings = onOpenWorkspaceSettings,
+            )
+        },
+    )
 }
 
 /**

@@ -64,6 +64,8 @@ import com.pocketshell.core.storage.entity.SshKeyEntity
 import com.pocketshell.uikit.components.HostCard
 import com.pocketshell.uikit.components.Kebab
 import com.pocketshell.uikit.components.KebabItem
+import com.pocketshell.uikit.components.ScreenHeader
+import com.pocketshell.uikit.components.SectionHeader
 import com.pocketshell.uikit.model.HostSetupState
 import com.pocketshell.uikit.theme.PocketShellColors
 import kotlinx.coroutines.channels.Channel
@@ -351,6 +353,8 @@ fun HostListScreen(
             // chrome and host-list actions that must remain reachable
             // while the content below scrolls.
             HostsAppBar(
+                hostCount = hosts.size,
+                activeSessionCount = sessions.count { it.attached },
                 onSettingsClick = onOpenSettings,
                 forwardingIndicator = forwardingIndicator,
                 onForwardingIndicatorClick = onOpenPortForwarding,
@@ -527,9 +531,12 @@ fun HostListScreen(
                 }
 
                 item(key = "label:hosts") {
-                    SectionLabel(
+                    // #479 Slice A: the host group label rides the shared
+                    // SectionHeader (title-case `Hosts · N` inline) instead of
+                    // the old UPPERCASE label + count pill.
+                    SectionHeader(
                         label = "Hosts",
-                        count = "${hosts.size} saved",
+                        count = hosts.size,
                     )
                 }
 
@@ -1030,56 +1037,61 @@ internal fun UpdateBanner(info: ReleaseInfo, onUpdate: () -> Unit) {
 }
 
 /**
- * Top app bar matching the original 60dp dashboard chrome: the
- * "PocketShell" wordmark stays on the left and Settings is the rightmost
- * gear button.
- * Issue #299 removes the previous pseudo-tab row because only "Hosts"
- * was a real selected destination; issue #290 moved QR scanning into
- * Add host, and issue #388 moved host import into Settings so it is not
- * mistaken for a generic app import.
+ * Host-list header, routed through the shared [ScreenHeader] (#479 Slice A)
+ * so the dashboard reads as the tight dev-tool block — `bodyDense` SemiBold
+ * title + the live `N hosts · M active` count subtitle — instead of the old
+ * 60dp / 22.sp "PocketShell" marketing bar. The trailing slot keeps the
+ * existing affordances: the global port-forward indicator pill (#446) and the
+ * Settings gear (the only header actions this screen has carried since #299 /
+ * #290 / #388 moved tabs, QR, and import elsewhere).
+ *
+ * The subtitle is built here, not in [ScreenHeader] — the component does not
+ * pluralise (#479 §4); `1 host`/`N hosts` and the active-session count come
+ * from the caller's live state.
  */
 @Composable
 private fun HostsAppBar(
+    hostCount: Int,
+    activeSessionCount: Int,
     onSettingsClick: () -> Unit = {},
     forwardingIndicator: com.pocketshell.app.portfwd.ForwardingIndicatorState =
         com.pocketshell.app.portfwd.ForwardingIndicatorState(),
     onForwardingIndicatorClick: () -> Unit = {},
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(60.dp)
-            .background(PocketShellColors.Background)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-            .padding(horizontal = 16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = "PocketShell",
-            color = PocketShellColors.Text,
-            fontSize = 22.sp,
-            fontWeight = FontWeight.Bold,
-            modifier = Modifier.weight(1f),
-        )
-        // Issue #446: the global "ports forwarding" indicator only appears
-        // while ≥1 host is actively auto-forwarding. Tapping it opens the
-        // port-forward panel entry (same chooser as the QS tile +
-        // notification deep-link).
-        if (forwardingIndicator.visible) {
-            ForwardingIndicatorPill(
-                state = forwardingIndicator,
-                onClick = onForwardingIndicatorClick,
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-        }
-        TopBarIconButton(
-            contentDescription = "Settings",
-            testTag = SETTINGS_BUTTON_TAG,
-            onClick = onSettingsClick,
-        ) {
-            SettingsGearIcon()
-        }
-    }
+    ScreenHeader(
+        title = "Hosts",
+        subtitle = hostsHeaderSubtitle(hostCount, activeSessionCount),
+        modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
+        trailing = {
+            // Issue #446: the global "ports forwarding" indicator only appears
+            // while ≥1 host is actively auto-forwarding. Tapping it opens the
+            // port-forward panel entry (same chooser as the QS tile +
+            // notification deep-link).
+            if (forwardingIndicator.visible) {
+                ForwardingIndicatorPill(
+                    state = forwardingIndicator,
+                    onClick = onForwardingIndicatorClick,
+                )
+            }
+            TopBarIconButton(
+                contentDescription = "Settings",
+                testTag = SETTINGS_BUTTON_TAG,
+                onClick = onSettingsClick,
+            ) {
+                SettingsGearIcon()
+            }
+        },
+    )
+}
+
+/**
+ * Builds the host-list header subtitle (`N hosts · M active`). Pluralisation
+ * lives here because [ScreenHeader] is count-agnostic (#479 §4): the caller
+ * owns the `1 host` vs `N hosts` wording and the active-session facet.
+ */
+internal fun hostsHeaderSubtitle(hostCount: Int, activeSessionCount: Int): String {
+    val hostsLabel = if (hostCount == 1) "1 host" else "$hostCount hosts"
+    return "$hostsLabel · $activeSessionCount active"
 }
 
 // Stable tag for the global port-forward indicator pill. Connected tests
@@ -1631,44 +1643,6 @@ private fun SshPassphraseDialog(
         },
         containerColor = PocketShellColors.Surface,
     )
-}
-
-/**
- * Section header matching `.section-label` in `docs/mockups/styles.css`:
- * 11sp uppercase letter-spaced label with a small pill carrying a count.
- */
-@Composable
-private fun SectionLabel(label: String, count: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(start = 22.dp, end = 22.dp, top = 20.dp, bottom = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = label.uppercase(),
-            color = PocketShellColors.TextMuted,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            letterSpacing = 0.8.sp,
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Box(
-            modifier = Modifier
-                .background(
-                    color = PocketShellColors.Surface,
-                    shape = RoundedCornerShape(10.dp),
-                )
-                .padding(horizontal = 8.dp, vertical = 2.dp),
-        ) {
-            Text(
-                text = count,
-                color = PocketShellColors.TextSecondary,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Medium,
-            )
-        }
-    }
 }
 
 /**

@@ -83,7 +83,7 @@ class ForwardingIndicatorE2eTest {
 
         // 1. With no active forwards the indicator pill is absent.
         compose.waitUntil(timeoutMillis = 10_000) {
-            compose.onAllNodesWithText("PocketShell").fetchSemanticsNodes().isNotEmpty()
+            compose.onAllNodesWithText("Hosts").fetchSemanticsNodes().isNotEmpty()
         }
         assertTrue(
             "Indicator must be hidden when no forwards are active",

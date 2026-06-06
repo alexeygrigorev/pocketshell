@@ -153,14 +153,16 @@ class UiKitPrimitivesTest {
     }
 
     @Test
-    fun sectionHeader_rendersLabelUppercaseWithCount() {
+    fun sectionHeader_rendersTitleCaseLabelWithInlineCount() {
         composeRule.setContent {
             PocketShellTheme {
                 SectionHeader(label = "Sessions", count = 3)
             }
         }
-        composeRule.onNodeWithText("SESSIONS").assertIsDisplayed()
-        composeRule.onNodeWithText("3").assertIsDisplayed()
+        // #479 §4 decision 5: title-case label + inline `· N`, not UPPERCASE +
+        // right-aligned count pill.
+        composeRule.onNodeWithText("Sessions").assertIsDisplayed()
+        composeRule.onNodeWithText(" · 3").assertIsDisplayed()
     }
 
     /**

@@ -339,7 +339,7 @@ class EmulatorDockerSshSmokeTest {
                 label = "host list with walkthrough host and no usage surfaces",
                 timeoutMillis = 20_000,
                 textProbes = listOf(
-                    "PocketShell",
+                    "Hosts",
                     "Walkthrough Docker",
                     DEFAULT_HOST,
                     "Claude Code usage",
@@ -584,7 +584,7 @@ class EmulatorDockerSshSmokeTest {
                 )
                 appendLine(
                     screenDiagnostics(
-                        textProbes = listOf("PocketShell", "Walkthrough Docker", "Usage", "Claude Code usage"),
+                        textProbes = listOf("Hosts", "Walkthrough Docker", "Usage", "Claude Code usage"),
                         tagProbes = hostListDiagnosticTags(hostRowTag),
                     ),
                 )

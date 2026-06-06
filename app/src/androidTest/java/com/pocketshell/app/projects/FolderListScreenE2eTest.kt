@@ -790,9 +790,10 @@ class FolderListScreenE2eTest {
         ).assertTextEquals("2 active · 1 idle · 3 sessions")
         compose.onNodeWithTag(FOLDER_LIST_FLAT_ACTIVE_SECTION_TAG).assertIsDisplayed()
         compose.onNodeWithTag(FOLDER_LIST_FLAT_IDLE_SECTION_TAG).assertIsDisplayed()
-        // Section labels render uppercased (shared SectionHeader contract).
-        compose.onNodeWithText("ACTIVE").assertIsDisplayed()
-        compose.onNodeWithText("IDLE").assertIsDisplayed()
+        // Section labels render title-case with an inline `· N` count
+        // (#479 §4 decision 5 — shared SectionHeader contract).
+        compose.onNodeWithText("Active").assertIsDisplayed()
+        compose.onNodeWithText("Idle").assertIsDisplayed()
         // #522 item 3: each flat session row leads with a terminal tile glyph
         // alongside the status dot.
         compose.onNodeWithTag(

@@ -469,10 +469,7 @@ class HostBootstrapScenarioSuiteTest {
                 compose.onAllNodesWithText("Checking setup")
                     .fetchSemanticsNodes()
                     .isEmpty() &&
-                compose.onAllNodesWithText("PocketShell")
-                    .fetchSemanticsNodes()
-                    .isEmpty() &&
-                compose.onAllNodesWithText("HOSTS")
+                compose.onAllNodesWithText("Hosts")
                     .fetchSemanticsNodes()
                     .isEmpty()
         }
@@ -487,14 +484,8 @@ class HostBootstrapScenarioSuiteTest {
                 .isEmpty(),
         )
         assertTrue(
-            "expected host list app bar to be gone before capturing ready navigation",
-            compose.onAllNodesWithText("PocketShell")
-                .fetchSemanticsNodes()
-                .isEmpty(),
-        )
-        assertTrue(
-            "expected host list section header to be gone before capturing ready navigation",
-            compose.onAllNodesWithText("HOSTS")
+            "expected host list 'Hosts' header/section to be gone before capturing ready navigation",
+            compose.onAllNodesWithText("Hosts")
                 .fetchSemanticsNodes()
                 .isEmpty(),
         )

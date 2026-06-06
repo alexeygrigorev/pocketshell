@@ -157,7 +157,7 @@ class WalkthroughVisualScreenshotTest {
                     .isNotEmpty()
             }
             assertTextsClearOfStatusBar(
-                texts = listOf("PocketShell"),
+                texts = listOf("Hosts"),
                 screenshotName = "01-host-list.png",
                 artifact = hostListScreenshot,
             )
@@ -179,8 +179,7 @@ class WalkthroughVisualScreenshotTest {
                     "Workspace",
                     "Checking setup",
                     "Host setup needed",
-                    "PocketShell",
-                    "HOSTS",
+                    "Hosts",
                     "No active sessions",
                     tmuxSessionName,
                 ),
@@ -191,8 +190,7 @@ class WalkthroughVisualScreenshotTest {
                     hasTag(FOLDER_LIST_NEW_SESSION_FAB_TAG) &&
                     hasText(WALKTHROUGH_HOST_NAME) &&
                     !hasText("Checking setup") &&
-                    !hasText("PocketShell") &&
-                    !hasText("HOSTS") &&
+                    !hasText("Hosts") &&
                     !hasTag(HOST_BOOTSTRAP_SHEET_TAG) &&
                     !hasTag(HOST_LIST_ADD_FAB_TAG)
             }

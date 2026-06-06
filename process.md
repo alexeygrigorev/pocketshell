@@ -18,6 +18,16 @@ isolated in worktrees, and integrate one reviewed slice at a time onto `main`:
   blind-apply a stale-based patch.
 - **Integrate in a clean worktree**, not the polluted root, when assembling and
   testing a merge.
+- **The orchestrator stays on a synced `main`.** Fast-forward the local `main`
+  to `origin/main` after every merge — never leave it stranded on a stale
+  commit. Only sub-agents work in worktrees. If uncommitted WIP blocks the
+  fast-forward, save it to a `wip/<date>` branch first, then fast-forward.
+- **`git worktree remove` right after merging** (and delete the branch). A
+  lingering worktree looks like "uncommitted work" forever — implementers leave
+  their diff uncommitted and the orchestrator applies it to `main` — even though
+  it's already merged; that's how stale worktrees pile up. Prune anytime: a
+  worktree whose issue is CLOSED is safe to remove; never touch locked
+  `.claude/worktrees/agent-*` or open in-flight worktrees.
 - **Release freeze.** During an intermediate release or pre-release, hold
   non-critical merges to `main`. Release-blocker / CI fixes stay allowed because
   they stabilize the cut.

@@ -10,7 +10,9 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.pocketshell.app.voice.SESSION_ENTER_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
+import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.uikit.components.KeyBar
 import com.pocketshell.uikit.model.KeyBinding
 import com.pocketshell.uikit.model.KeyKind
@@ -33,7 +35,7 @@ class InlineDictationUiTest {
     val compose = createComposeRule()
 
     @Test
-    fun rawSshTerminalKeyBarExposesEmergencyKeysWithoutIme() {
+    fun rawSshTerminalKeyBarExposesEmergencyKeysWhenRendered() {
         val taps = mutableListOf<String>()
         compose.setContent {
             PocketShellTheme {
@@ -52,6 +54,45 @@ class InlineDictationUiTest {
         }
 
         assertEquals(listOf("Esc", "Ctrl-C", "Ctrl-D"), taps)
+    }
+
+    @Test
+    fun rawSshKeyboardHiddenShowsEnterAndShowKeyboardWithoutKeyBar() {
+        val keyTaps = mutableListOf<String>()
+        var keyboardTaps = 0
+        compose.setContent {
+            PocketShellTheme {
+                RawSessionBottomControls(
+                    isImeVisible = false,
+                    showConversation = false,
+                    sessionLive = true,
+                    onKey = { keyTaps += it.label },
+                    onChipTap = {},
+                    onDictateTap = {},
+                    onShowKeyboardTap = { keyboardTaps++ },
+                    onAddSnippetTap = null,
+                    onProjectNavigationTap = {},
+                )
+            }
+        }
+
+        compose.onNodeWithText("Esc").assertDoesNotExist()
+        compose.onNodeWithText("Ctrl-C").assertDoesNotExist()
+        compose.onNodeWithText("Ctrl-D").assertDoesNotExist()
+        compose.onNodeWithText("Tab").assertDoesNotExist()
+
+        compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+        compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
+        compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed()
+
+        assertEquals(listOf("Enter"), keyTaps)
+        assertEquals(1, keyboardTaps)
     }
 
     @Test

@@ -27,6 +27,7 @@ import com.pocketshell.app.voice.BottomChipControls
 import com.pocketshell.app.voice.DefaultSessionChips
 import com.pocketshell.app.voice.InlineDictationErrorStrip
 import com.pocketshell.app.voice.SESSION_ADD_SNIPPET_CHIP_TAG
+import com.pocketshell.app.voice.SESSION_ENTER_CHIP_TAG
 import com.pocketshell.app.voice.SESSION_MIC_FAB_TAG
 import com.pocketshell.app.voice.SHOW_KEYBOARD_CHIP_TAG
 import com.pocketshell.app.voice.SnippetsChipIcon
@@ -254,24 +255,27 @@ class TmuxSessionVoiceSurfaceUiTest {
     }
 
     /**
-     * Issue #459: the Terminal tab keeps the same unified composer mic FAB
+     * Issue #459/#584: the Terminal tab keeps the same unified composer mic FAB
      * AND the Terminal-only "show keyboard" chip (which raises the soft
-     * keyboard / key bar for raw-key entry). Paired with
+     * keyboard / key bar for raw-key entry), plus standalone Enter while the
+     * IME is hidden. Paired with
      * [conversationBottomIsUnifiedComposerWithoutShowKeyboardChip] this proves
      * the two bottoms share the composer while the show-keyboard / key-bar
      * affordance is Terminal-only.
      */
     @Test
-    fun terminalBottomKeepsUnifiedComposerPlusShowKeyboardChip() {
+    fun terminalBottomKeepsEnterAndShowKeyboardWithoutKeyBar() {
+        var enterTaps = 0
         compose.setContent {
             PocketShellTheme {
                 // How TmuxSessionScreen renders the bottom band on the
-                // Terminal tab of an agent pane: same mic FAB, plus the
-                // show-keyboard chip.
+                // Terminal tab of an agent pane when the IME is hidden:
+                // same mic FAB, plus standalone Enter and show-keyboard.
                 BottomChipControls(
                     chips = AgentExitChips,
                     onChipTap = {},
                     onDictateTap = {},
+                    onEnterTap = { enterTaps++ },
                     onShowKeyboardTap = {},
                     onAddSnippetTap = {},
                     addSnippetLabel = ADD_PROMPT_CHIP_LABEL,
@@ -284,8 +288,17 @@ class TmuxSessionVoiceSurfaceUiTest {
         captureViewportArtifact("issue459-terminal-bottom-unified-composer.png")
 
         compose.onNodeWithTag(SESSION_MIC_FAB_TAG).assertIsDisplayed()
+        compose.onNodeWithTag(SESSION_ENTER_CHIP_TAG)
+            .assertIsDisplayed()
+            .assertHasClickAction()
+            .performClick()
         compose.onNodeWithTag(SHOW_KEYBOARD_CHIP_TAG).assertIsDisplayed()
         compose.onNodeWithText("show keyboard").assertIsDisplayed()
+        compose.onNodeWithText("Esc").assertDoesNotExist()
+        compose.onNodeWithText("^C").assertDoesNotExist()
+        compose.onNodeWithText("^D").assertDoesNotExist()
+        compose.onNodeWithText("Tab").assertDoesNotExist()
+        assertEquals(1, enterTaps)
     }
 
     @Test

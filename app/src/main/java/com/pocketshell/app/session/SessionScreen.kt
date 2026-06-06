@@ -1498,26 +1498,19 @@ internal fun RawSessionBottomControls(
             onModifierStateChange = onModifierStateChange,
         )
     } else {
-        Column {
-            if (!showConversation) {
-                KeyBar(
-                    keys = SessionTerminalKeyBarLayout,
-                    onKey = if (sessionLive) onKey else { _ -> },
-                    modifierStates = modifierStates,
-                    onModifierStateChange = onModifierStateChange,
-                )
-            }
-            BottomChipControls(
-                chips = DefaultSessionChips,
-                onChipTap = onChipTap,
-                onDictateTap = onDictateTap,
-                onShowKeyboardTap = onShowKeyboardTap,
-                onAddSnippetTap = onAddSnippetTap,
-                onProjectNavigationTap = onProjectNavigationTap,
-                // Issue #249: gate chips + dictate mic on liveness.
-                inputEnabled = sessionLive,
-            )
-        }
+        BottomChipControls(
+            chips = DefaultSessionChips,
+            onChipTap = onChipTap,
+            onDictateTap = onDictateTap,
+            onEnterTap = if (!showConversation) {
+                { onKey(KeyBinding(label = "Enter", kind = KeyKind.Regular)) }
+            } else null,
+            onShowKeyboardTap = onShowKeyboardTap,
+            onAddSnippetTap = onAddSnippetTap,
+            onProjectNavigationTap = onProjectNavigationTap,
+            // Issue #249: gate chips + dictate mic on liveness.
+            inputEnabled = sessionLive,
+        )
     }
 }
 
@@ -1545,7 +1538,7 @@ private fun DirectoryShortcutRow(item: ProjectNavigationItem, onClick: () -> Uni
  *
  * The row keeps the original one-tap Esc/Tab/arrows and sticky Ctrl
  * affordances, and adds direct `Ctrl-C` / `Ctrl-D` emergency controls so
- * interrupt/EOF are reachable even when the software keyboard never opens.
+ * interrupt/EOF are one tap away while the software keyboard is open.
  *
  * `Ctrl` remains a [KeyKind.Modifier] so the ui-kit can render one-shot and
  * locked state while the screen mirrors those transitions into

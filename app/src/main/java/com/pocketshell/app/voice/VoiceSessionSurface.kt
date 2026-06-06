@@ -338,35 +338,43 @@ private fun ScrollableChipStrip(
  * Non-scrolling sticky cluster of primary chips, rendered after the
  * scrollable [ScrollableChipStrip] in [BottomChipControls].
  *
- * The cluster pins `show keyboard` (#131) and the picker chip to the right edge of
- * the bottom toolbar regardless of how many static command chips
+ * The cluster pins `Enter` (#568), `show keyboard` (#131), and the picker chip to
+ * the right edge of the bottom toolbar regardless of how many static command chips
  * [ScrollableChipStrip] is asked to render. The right-thumb ergonomics
  * goal of design-system §9 only holds if these primary affordances are
  * actually visible without horizontal-scrolling — see the
  * KDoc on [ScrollableChipStrip] for the round-1 regression that motivated
  * splitting them out.
  *
- * Order inside the cluster (left → right): `show keyboard` → picker. Both chips are optional;
- * the cluster collapses to zero width when both callbacks are null
- * (currently the cluster is always non-empty on the tmux + raw-SSH
- * routes, but the optional API keeps the helper composable for callers
- * that wire fewer affordances).
+ * Order inside the cluster (left → right): `Enter` → `show keyboard` → picker.
+ * All chips are optional; the cluster collapses to zero width when no callbacks
+ * are supplied (currently the cluster is always non-empty on the tmux + raw-SSH
+ * routes, but the optional API keeps the helper composable for callers that wire
+ * fewer affordances).
  */
 @Composable
 private fun PrimaryChipCluster(
+    onEnterTap: (() -> Unit)?,
     onShowKeyboardTap: (() -> Unit)?,
     onAddSnippetTap: (() -> Unit)?,
     addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
     addSnippetIcon: ImageVector? = SnippetsChipIcon,
     modifier: Modifier = Modifier,
 ) {
-    if (onShowKeyboardTap == null && onAddSnippetTap == null) return
+    if (onEnterTap == null && onShowKeyboardTap == null && onAddSnippetTap == null) return
     Row(
         modifier = modifier
             .padding(top = 8.dp, bottom = 8.dp, end = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (onEnterTap != null) {
+            CommandChip(
+                label = ENTER_CHIP_LABEL,
+                onClick = onEnterTap,
+                modifier = Modifier.testTag(SESSION_ENTER_CHIP_TAG),
+            )
+        }
         if (onShowKeyboardTap != null) {
             CommandChip(
                 label = SHOW_KEYBOARD_CHIP_LABEL,
@@ -396,8 +404,8 @@ private fun PrimaryChipCluster(
  *
  * 1. [ScrollableChipStrip] (`weight(1f)`) — scrollable, holds the
  *    low-frequency static command chips plus optional `dirs`.
- * 2. [PrimaryChipCluster] (sticky, non-scrolling) — `show keyboard` and
- *    the picker chip pinned to the right side of the chip area so they sit
+ * 2. [PrimaryChipCluster] (sticky, non-scrolling) — `Enter`, `show keyboard`,
+ *    and the picker chip pinned to the right side of the chip area so they sit
  *    inside the right-thumb arc on a Pixel-class viewport regardless of
  *    how many static chips precede them.
  * 3. Optional mic FAB (sticky, non-scrolling) — raw SSH still keeps the
@@ -421,6 +429,7 @@ internal fun BottomChipControls(
     chips: List<String>,
     onChipTap: (String) -> Unit,
     onDictateTap: (() -> Unit)?,
+    onEnterTap: (() -> Unit)? = null,
     onShowKeyboardTap: (() -> Unit)? = null,
     onAddSnippetTap: (() -> Unit)? = null,
     addSnippetLabel: String = ADD_SNIPPET_CHIP_LABEL,
@@ -449,6 +458,9 @@ internal fun BottomChipControls(
             modifier = Modifier.weight(1f),
         )
         PrimaryChipCluster(
+            onEnterTap = onEnterTap?.let { callback ->
+                if (inputEnabled) callback else ({})
+            },
             onShowKeyboardTap = onShowKeyboardTap,
             onAddSnippetTap = onAddSnippetTap,
             addSnippetLabel = addSnippetLabel,
@@ -484,6 +496,7 @@ internal val DefaultSessionChips: List<String> = listOf(
 )
 
 internal const val SHOW_KEYBOARD_CHIP_LABEL: String = "show keyboard"
+internal const val ENTER_CHIP_LABEL: String = "Enter"
 
 // Issue #454: the saved-snippet picker chip. The old `+ snippet` / `+ prompt`
 // / `+ command` labels were unclear — the leading `+` read as "add a NEW
@@ -564,6 +577,13 @@ private fun ImageVector.Builder.addSnippetsPath(fill: SolidColor): ImageVector.B
  * relying on its visible label.
  */
 internal const val SHOW_KEYBOARD_CHIP_TAG: String = "session:show-keyboard-chip"
+
+/**
+ * Issue #568/#584: stable tag for the standalone hidden-keyboard Enter chip.
+ * The full terminal key bar is keyboard-up only; this chip keeps Enter
+ * reachable next to `show keyboard` and the mic when the IME is hidden.
+ */
+internal const val SESSION_ENTER_CHIP_TAG: String = "session:enter-chip"
 
 /**
  * Issue #221: stable test tag on the bottom-toolbar mic FAB container.

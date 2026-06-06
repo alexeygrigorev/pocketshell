@@ -373,6 +373,177 @@ class TmuxExternalUpdateDockerTest {
         Unit
     }
 
+    @Test
+    fun codexScaleExternalTmuxBurstKeepsViewportResponsive() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val key = instrumentation.context
+            .assets
+            .open("test_key")
+            .bufferedReader()
+            .use { it.readText() }
+
+        waitForSshFixtureReady(SshKey.Pem(key))
+
+        val marker = System.currentTimeMillis().toString()
+        val sessionName = "issue576-$marker"
+        resolvedSessionName = sessionName
+        val startMarker = "ISSUE576-BURST-START-$marker"
+        val doneMarker = "ISSUE576-BURST-DONE-$marker"
+        val scriptPath = "/tmp/issue576-overload-$marker.sh"
+
+        val session = withTimeout(20_000) {
+            SshConnection.connect(
+                host = DEFAULT_HOST,
+                port = DEFAULT_PORT,
+                user = DEFAULT_USER,
+                key = SshKey.Pem(key),
+                knownHosts = KnownHostsPolicy.AcceptAll,
+                timeoutMs = 15_000,
+            ).getOrThrow()
+        }
+        sshSession = session
+        runCatching {
+            session.exec("tmux kill-session -t '$sessionName' 2>/dev/null || true")
+        }
+        val writeScript = session.exec(
+            "cat > '$scriptPath' <<'SH'\n" +
+                "set -eu\n" +
+                "payload='xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" +
+                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" +
+                "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'\n" +
+                "printf '%s\\n' '$startMarker'\n" +
+                "i=0\n" +
+                "while [ \"\$i\" -lt 7200 ]; do\n" +
+                "  printf 'codex-overload-%05d %s\\n' \"\$i\" \"\$payload\"\n" +
+                "  i=\$((i + 1))\n" +
+                "done\n" +
+                "printf '%s\\n' '$doneMarker'\n" +
+                "SH\n",
+        )
+        assertTrue(
+            "expected overload script write to succeed, got exit=${writeScript.exitCode} stderr='${writeScript.stderr}'",
+            writeScript.exitCode == 0,
+        )
+
+        val client = TmuxClientFactory(tmuxClientScope).create(
+            session = session,
+            sessionName = sessionName,
+        )
+        tmuxClient = client
+        outputDrainJob = parentScope.launch {
+            terminalState.output.collect { bytes ->
+                synchronized(outputDrain) {
+                    outputDrain.append(String(bytes, Charsets.UTF_8))
+                    if (outputDrain.length > MAX_OUTPUT_DRAIN_CHARS) {
+                        outputDrain.delete(0, outputDrain.length - MAX_OUTPUT_DRAIN_CHARS)
+                    }
+                }
+            }
+        }
+
+        client.connect()
+        val paneId = withTimeout(10_000) {
+            var resp = client.sendCommand("display-message -p \"#{pane_id}\"")
+            var attempts = 0
+            while ((resp.isError || resp.output.firstOrNull()?.trim().isNullOrBlank()) && attempts < 10) {
+                delay(100)
+                resp = client.sendCommand("display-message -p \"#{pane_id}\"")
+                attempts += 1
+            }
+            assertFalse(
+                "expected display-message -p '#{pane_id}' to succeed, got ${resp.output}",
+                resp.isError,
+            )
+            val id = resp.output.firstOrNull()?.trim().orEmpty()
+            assertTrue(
+                "expected pane id starting with %, got '$id' from ${resp.output}",
+                id.startsWith("%"),
+            )
+            id
+        }
+
+        producerJob = terminalState.attachExternalProducer(
+            scope = parentScope,
+            stdout = client.outputFor(paneId).map { it.data },
+            remoteStdin = null,
+        )
+        compose.setContent {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(DefaultTerminalBackground)
+                    .testTag(SURFACE_HOST_TAG),
+            ) {
+                TerminalSurface(
+                    state = terminalState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(4.dp),
+                )
+            }
+        }
+        compose.onNodeWithTag(SURFACE_HOST_TAG).assertExists()
+        waitForTerminalViewAttached()
+
+        val runStartedAt = SystemClock.elapsedRealtime()
+        val start = client.sendCommand(
+            "send-keys -t $paneId 'sh $scriptPath' Enter",
+        )
+        assertFalse("expected tmux send-keys for overload script to succeed, got ${start.output}", start.isError)
+
+        val deadline = SystemClock.elapsedRealtime() + OVERLOAD_VISIBLE_DEADLINE_MS
+        var firstSeenAt = -1L
+        while (SystemClock.elapsedRealtime() < deadline) {
+            val visible = visibleTerminalText()
+            val drainedTail = synchronized(outputDrain) { outputDrain.toString() }
+            if (doneMarker in visible || doneMarker in drainedTail) {
+                firstSeenAt = SystemClock.elapsedRealtime()
+                break
+            }
+            delay(50)
+        }
+        val burstVisibleMs = if (firstSeenAt >= 0) firstSeenAt - runStartedAt else -1L
+        recordTiming("issue576_burst_done_visible_or_drained_ms", burstVisibleMs)
+        recordTiming("issue576_burst_payload_lines", 7200L)
+        recordTiming("issue576_burst_payload_bytes_approx", 1_800_000L)
+
+        val afterArtifact = captureViewportAndSidecar("issue576-overload-after")
+        writeTimings()
+        TerminalLabArtifacts.writeText(
+            "issue576-overload-summary.txt",
+            buildString {
+                appendLine("scenario=issue-576-codex-scale-tmux-overload")
+                appendLine("tmux_session=$sessionName")
+                appendLine("pane_id=$paneId")
+                appendLine("start_marker=$startMarker")
+                appendLine("done_marker=$doneMarker")
+                appendLine("done_seen_ms=$burstVisibleMs")
+                appendLine("tmux_disconnected=${client.disconnected.value}")
+                appendLine("viewport_sha256=${afterArtifact.sha256}")
+                appendLine("visible_terminal_chars=${afterArtifact.visibleText.length}")
+                appendLine("output_drain_tail_chars=${synchronized(outputDrain) { outputDrain.length }}")
+                appendLine()
+                appendLine("visible_terminal:")
+                appendLine(afterArtifact.visibleText)
+            },
+        )
+
+        assertTrue(
+            "expected overload done marker '$doneMarker' to reach visible terminal text or output drain " +
+                "within ${OVERLOAD_VISIBLE_DEADLINE_MS}ms; visible was:\n${afterArtifact.visibleText}",
+            firstSeenAt >= 0,
+        )
+        assertFalse(
+            "Codex-scale tmux output must not disconnect the tmux client",
+            client.disconnected.value,
+        )
+        assertTrue(
+            "expected final viewport or output drain to retain done marker after overload",
+            doneMarker in afterArtifact.visibleText || doneMarker in synchronized(outputDrain) { outputDrain.toString() },
+        )
+        Unit
+    }
+
     // ----------------------------------------------------------------
     // helpers
     // ----------------------------------------------------------------
@@ -610,5 +781,7 @@ class TmuxExternalUpdateDockerTest {
          * test-suite timeout.
          */
         const val EXTERNAL_REPAINT_DEADLINE_MS: Long = 10_000L
+        const val OVERLOAD_VISIBLE_DEADLINE_MS: Long = 30_000L
+        const val MAX_OUTPUT_DRAIN_CHARS: Int = 500_000
     }
 }

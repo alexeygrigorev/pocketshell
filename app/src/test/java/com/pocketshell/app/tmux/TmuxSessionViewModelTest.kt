@@ -1326,6 +1326,58 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun codexScaleTmuxOutputFloodKeepsTerminalAndConnectionStateConsistent() = runTest {
+        val vm = newVm()
+        val client = FakeTmuxClient()
+        vm.attachClientForTest(client)
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%0", "@0", "\$0", "codex", paneIndex = 0)),
+        )
+        advanceUntilIdle()
+
+        val state = vm.panes.value.single().terminalState
+        val payloads = List(CODEX_SCALE_OUTPUT_CHUNKS, ::codexScaleOutputChunk)
+        val emitted = payloads.sumOf { it.size }
+        assertTrue(
+            "test fixture drift: emitted=$emitted expectedFloor=$CODEX_SCALE_OUTPUT_BYTES",
+            emitted >= CODEX_SCALE_OUTPUT_BYTES,
+        )
+        val drained = async(start = CoroutineStart.UNDISPATCHED) {
+            var total = 0
+            state.output.first { bytes ->
+                total += bytes.size
+                total >= emitted
+            }
+            total
+        }
+
+        payloads.forEach { bytes ->
+            client.emittedEvents.emit(ControlEvent.Output("%0", bytes))
+        }
+
+        advanceUntilIdle()
+        shadowOf(Looper.getMainLooper()).idle()
+
+        assertEquals(
+            "tmux %output flood must reach TerminalSurfaceState.output without byte loss",
+            emitted,
+            drained.await(),
+        )
+        assertTrue(
+            "Codex-scale output flood must not be diagnosed as a transport connection error",
+            vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected,
+        )
+        assertFalse(
+            "Codex-scale output flood must not flip the tmux disconnected signal",
+            client.disconnectedSignal.value,
+        )
+        assertFalse(
+            "Codex-scale output flood must not mark the local terminal surface as failed",
+            vm.panes.value.single().surfaceError,
+        )
+    }
+
+    @Test
     fun terminalSurfaceFailureDoesNotMarkTmuxTransportDisconnectedOrReconnect() = runTest {
         TMUX_CONNECT_ATTEMPTS.set(0)
         val vm = newVm()
@@ -6322,6 +6374,14 @@ class TmuxSessionViewModelTest {
             key = SshKey.Path(File("/keys/a")),
         )
 
+    private fun codexScaleOutputChunk(index: Int): ByteArray {
+        val linePrefix = "codex-overload-${index.toString().padStart(4, '0')}"
+        val line = "$linePrefix " + "x".repeat(240) + "\r\n"
+        return buildString {
+            repeat(CODEX_SCALE_OUTPUT_LINES_PER_CHUNK) { append(line) }
+        }.toByteArray(Charsets.UTF_8)
+    }
+
     private class QueueLeaseConnector(
         private vararg val sessions: FakeSshSession,
     ) : SshLeaseConnector {
@@ -6334,6 +6394,12 @@ class TmuxSessionViewModelTest {
             connectCount += 1
             return Result.success(next)
         }
+    }
+
+    private companion object {
+        const val CODEX_SCALE_OUTPUT_CHUNKS = 320
+        const val CODEX_SCALE_OUTPUT_LINES_PER_CHUNK = 20
+        const val CODEX_SCALE_OUTPUT_BYTES = 1_500_000
     }
 
     /**

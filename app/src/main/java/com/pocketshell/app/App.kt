@@ -6,6 +6,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import com.pocketshell.app.connectivity.TerminalNetworkChange
+import com.pocketshell.app.connectivity.TerminalNetworkObserver
 import com.pocketshell.app.crash.CrashReporter
 import com.pocketshell.app.sessions.ActiveTmuxClients
 import com.pocketshell.app.startup.StartupTiming
@@ -18,6 +20,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -73,6 +76,9 @@ class App : Application() {
     @Inject
     lateinit var sshLeaseManager: SshLeaseManager
 
+    @Inject
+    lateinit var terminalNetworkObserver: TerminalNetworkObserver
+
     /**
      * Issue #235: scope for fanning out tmux detach/reattach hooks
      * driven by the lifecycle observer. The dispatcher is
@@ -91,6 +97,12 @@ class App : Application() {
 
     private val sshLifecycleScope: CoroutineScope =
         CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private val terminalNetworkScope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    private var processForeground: Boolean = false
+    private var pendingTerminalNetworkChange: TerminalNetworkChange? = null
 
     /**
      * Issue #450: scope that runs the bounded grace-window timer. Uses
@@ -139,8 +151,16 @@ class App : Application() {
 
     private val terminalLifecycleObserver = LifecycleEventObserver { _: LifecycleOwner, event ->
         when (event) {
-            Lifecycle.Event.ON_STOP -> backgroundGraceController.onBackground()
-            Lifecycle.Event.ON_START -> backgroundGraceController.onForeground()
+            Lifecycle.Event.ON_STOP -> {
+                processForeground = false
+                backgroundGraceController.onBackground()
+            }
+            Lifecycle.Event.ON_START -> {
+                processForeground = true
+                backgroundGraceController.onForeground()
+                drainPendingTerminalNetworkChange()
+                terminalNetworkObserver.refresh("process-foreground")
+            }
             else -> Unit
         }
     }
@@ -170,7 +190,44 @@ class App : Application() {
         // app-switch that returns within the grace window never tears the
         // terminal connection down.
         ProcessLifecycleOwner.get().lifecycle.addObserver(terminalLifecycleObserver)
+        terminalNetworkScope.launch {
+            terminalNetworkObserver.changes.collect { change ->
+                if (processForeground) {
+                    dispatchTerminalNetworkChange(change)
+                } else {
+                    pendingTerminalNetworkChange = change
+                    Log.i(
+                        TERMINAL_NETWORK_TAG,
+                        "terminal-network-change-deferred sequence=${change.sequence} " +
+                            "reason=${change.reason}",
+                    )
+                }
+            }
+        }
         StartupTiming.mark("app-on-create-end")
+    }
+
+    private fun drainPendingTerminalNetworkChange() {
+        val change = pendingTerminalNetworkChange ?: return
+        pendingTerminalNetworkChange = null
+        dispatchTerminalNetworkChange(change)
+    }
+
+    private fun dispatchTerminalNetworkChange(change: TerminalNetworkChange) {
+        val hooks = activeTmuxClients.lifecycleHooksSnapshot()
+        if (hooks.isEmpty()) return
+        Log.i(
+            TERMINAL_NETWORK_TAG,
+            "terminal-network-change-fanout count=${hooks.size} " +
+                "sequence=${change.sequence} reason=${change.reason} " +
+                "previous=${change.previous.logValue} current=${change.current.logValue}",
+        )
+        for (hook in hooks) {
+            terminalNetworkScope.launch {
+                runCatching { hook.onNetworkChanged(change.reason) }
+                    .onFailure { Log.w(TERMINAL_NETWORK_TAG, "terminal network hook failed", it) }
+            }
+        }
     }
 
     private fun dispatchTmuxBackground() {
@@ -210,6 +267,8 @@ class App : Application() {
  * older Android versions.
  */
 private const val APP_LIFECYCLE_TAG: String = "PsAppTmuxLifecycle"
+
+private const val TERMINAL_NETWORK_TAG: String = "PsAppTerminalNet"
 
 /**
  * Issue #450: logcat tag for the bounded background grace-window state

@@ -231,5 +231,6 @@ class ActiveTmuxClients @Inject constructor() {
     class LifecycleHooks(
         val onBackground: suspend () -> Unit,
         val onForeground: suspend () -> Unit,
+        val onNetworkChanged: suspend (reason: String) -> Unit = {},
     )
 }

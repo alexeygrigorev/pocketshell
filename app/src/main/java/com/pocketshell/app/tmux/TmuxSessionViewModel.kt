@@ -1364,9 +1364,37 @@ public class TmuxSessionViewModel @Inject constructor(
             hooks = ActiveTmuxClients.LifecycleHooks(
                 onBackground = { onAppBackgrounded() },
                 onForeground = { onAppForegrounded() },
+                onNetworkChanged = { reason -> onNetworkChanged(reason) },
             ),
         )
         lifecycleHookHostId = hostId
+    }
+
+    /**
+     * Issue #548: when Android reports a validated default-network change
+     * while the terminal is foregrounded, reconnect immediately instead of
+     * waiting for sshj's reader to discover that the old TCP path died.
+     */
+    public fun onNetworkChanged(reason: String) {
+        if (!appActive) return
+        if (autoReconnectJob?.isActive == true) return
+        val current = _connectionStatus.value
+        if (current !is ConnectionStatus.Connected) return
+        val target = activeTarget ?: connectingTarget ?: return
+        if (clientRef == null && sessionRef == null) return
+        val reconnectReason = "Network changed; reconnecting ${current.user}@${current.host}:${current.port}."
+        Log.i(
+            ISSUE_548_NETWORK_TAG,
+            "tmux-network-proactive-reconnect reason=$reason " +
+                targetLogFields(target),
+        )
+        registeredHostId?.let { activeTmuxClients.unregister(it) }
+        registeredHostId = null
+        scheduleAutoReconnect(
+            target = target,
+            reason = reconnectReason,
+            trigger = TmuxConnectTrigger.NetworkReconnect,
+        )
     }
 
     private fun tryActivateCachedRuntime(
@@ -2425,7 +2453,11 @@ public class TmuxSessionViewModel @Inject constructor(
         }
     }
 
-    private fun scheduleAutoReconnect(target: ConnectionTarget, reason: String) {
+    private fun scheduleAutoReconnect(
+        target: ConnectionTarget,
+        reason: String,
+        trigger: TmuxConnectTrigger = TmuxConnectTrigger.AutoReconnect,
+    ) {
         if (!appActive) {
             activeTarget = target
             connectingTarget = null
@@ -2443,7 +2475,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 val generation = nextConnectGeneration()
                 latestConnectIntent = ConnectIntent(
                     target = target,
-                    trigger = TmuxConnectTrigger.AutoReconnect,
+                    trigger = trigger,
                     generation = generation,
                 )
                 _connectionStatus.value = ConnectionStatus.Reconnecting(
@@ -2465,14 +2497,14 @@ public class TmuxSessionViewModel @Inject constructor(
                     "host" to target.host,
                     "port" to target.port,
                     "session" to target.sessionName,
-                    "trigger" to TmuxConnectTrigger.AutoReconnect.logValue,
-                    "requestedTrigger" to TmuxConnectTrigger.AutoReconnect.logValue,
+                    "trigger" to trigger.logValue,
+                    "requestedTrigger" to trigger.logValue,
                     "generation" to generation,
                 )
                 Log.i(
                     ISSUE_145_RECONNECT_TAG,
-                    "tmux-connect-attempt count=$attempt trigger=${TmuxConnectTrigger.AutoReconnect.logValue} " +
-                        "requestedTrigger=${TmuxConnectTrigger.AutoReconnect.logValue} generation=$generation " +
+                    "tmux-connect-attempt count=$attempt trigger=${trigger.logValue} " +
+                        "requestedTrigger=${trigger.logValue} generation=$generation " +
                         targetLogFields(target),
                 )
                 withContext(NonCancellable) {
@@ -2480,7 +2512,7 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
                 connectingTarget = target
                 refreshReconnectAvailability()
-                runConnect(target, attempt, TmuxConnectTrigger.AutoReconnect)
+                runConnect(target, attempt, trigger)
                 if (_connectionStatus.value is ConnectionStatus.Connected) {
                     autoReconnectJob = null
                     return@launch
@@ -6604,6 +6636,8 @@ internal const val TMUX_INPUT_MAX_PENDING_CHUNKS: Int =
  */
 internal const val ISSUE_145_RECONNECT_TAG: String = "PsTmuxReconnect"
 
+internal const val ISSUE_548_NETWORK_TAG: String = "PsTmuxNetwork"
+
 /**
  * Issue #235: logcat tag for the auto-detach-on-background +
  * reattach-on-foreground lifecycle journey, plus the manual Detach
@@ -6698,6 +6732,7 @@ public enum class TmuxConnectTrigger(public val logValue: String) {
     FastSwitch("fast-switch"),
     Reconnect("reconnect"),
     AutoReconnect("auto-reconnect"),
+    NetworkReconnect("network-reconnect"),
 }
 
 public data class TmuxRestoreIntentSnapshot(

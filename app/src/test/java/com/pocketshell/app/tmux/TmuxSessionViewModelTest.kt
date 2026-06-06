@@ -1014,6 +1014,89 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun networkChangeLifecycleHookEntersReconnectingWithoutConnectionError() = runTest {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setAutoReconnectDelaysForTest(listOf(60_000L))
+        val client = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+        )
+        runCurrent()
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged("validated-default-network-changed")
+        runCurrent()
+
+        assertEquals(
+            "network change should not wait for the tmux reader EOF",
+            0,
+            connector.connectCount,
+        )
+        val status = vm.connectionStatus.value
+        assertTrue(
+            "network change must show reconnect-in-progress, not a connection error; got $status",
+            status is TmuxSessionViewModel.ConnectionStatus.Reconnecting,
+        )
+        assertTrue(
+            "reconnect reason should avoid misleading manual retry wording",
+            "Tap Reconnect" !in (status as TmuxSessionViewModel.ConnectionStatus.Reconnecting).reason,
+        )
+        assertEquals(TmuxConnectTrigger.NetworkReconnect, vm.latestRestoreIntentSnapshot()?.trigger)
+        assertTrue("manual reconnect remains available during proactive reconnect", vm.canReconnect.value)
+        assertTrue(
+            "proactive reconnect should remove the stale active client from the registry",
+            registry.clients.value.isEmpty(),
+        )
+    }
+
+    @Test
+    fun networkChangeLifecycleHookProactivelyReattachesTmuxSession() = runTest {
+        val registry = ActiveTmuxClients()
+        val connector = QueueLeaseConnector(FakeSshSession())
+        val reconnectClient = FakeTmuxClient().withSinglePane("work", "%1")
+        val vm = newVm(
+            registry = registry,
+            sshLeaseManager = SshLeaseManager(connector = connector, scope = this, idleTtlMillis = 0L),
+        )
+        vm.setTmuxClientFactoryForTest { _, sessionName, _ ->
+            assertEquals("work", sessionName)
+            reconnectClient
+        }
+        vm.setAutoReconnectDelaysForTest(listOf(0L))
+        val oldClient = FakeTmuxClient()
+        vm.replaceClientForTest(
+            hostId = 7L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = oldClient,
+        )
+
+        registry.lifecycleHooksSnapshot().single().onNetworkChanged("validated-default-network-changed")
+        advanceUntilIdle()
+
+        assertEquals(1, connector.connectCount)
+        assertTrue("old tmux control client must be detached during reconnect", oldClient.detachCleanlyCalled)
+        assertSame(reconnectClient, registry.clients.value[7L]?.client)
+        assertTrue(vm.connectionStatus.value is TmuxSessionViewModel.ConnectionStatus.Connected)
+        assertEquals(TmuxConnectTrigger.NetworkReconnect, vm.latestRestoreIntentSnapshot()?.trigger)
+    }
+
+    @Test
     fun eofDisconnectAutoReconnectStopsAfterBoundedFailures() = runTest {
         val registry = ActiveTmuxClients()
         val vm = newVm(registry)

@@ -90,6 +90,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import com.pocketshell.app.conversation.ConversationMessageTurn
 import com.pocketshell.app.composer.PromptComposerSheet
 import com.pocketshell.app.composer.PromptComposerViewModel
@@ -266,6 +268,13 @@ public fun TmuxSessionScreen(
     suggestStartDirectories: (suspend (String) -> List<String>)? = null,
     connectTrigger: TmuxConnectTrigger = TmuxConnectTrigger.UserTap,
 ) {
+    LifecycleEventEffect(Lifecycle.Event.ON_START) {
+        viewModel.onScreenStarted()
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        viewModel.onScreenStopped()
+    }
+
     LaunchedEffect(Unit) {
         StartupTiming.markOnce(
             "tmux-screen-composed",

@@ -334,6 +334,7 @@ public class TmuxSessionViewModel @Inject constructor(
     private var connectJob: Job? = null
     private var autoReconnectJob: Job? = null
     private var appActive: Boolean = true
+    private var screenStartedForCleared: Boolean = true
     private var eventsJob: Job? = null
     private var outputOverflowJob: Job? = null
     private var disconnectedJob: Job? = null
@@ -1038,6 +1039,22 @@ public class TmuxSessionViewModel @Inject constructor(
                 trigger = TmuxConnectTrigger.LifecycleReattach,
             )
         }
+    }
+
+    /**
+     * Activity-level visibility signal used only by [onCleared]'s runtime
+     * parking decision. [ProcessLifecycleOwner] delays `ON_STOP`, so a
+     * backgrounded Activity can destroy this ViewModel before the process
+     * lifecycle state flips to stopped. The screen-level signal closes that
+     * debounce hole while keeping explicit in-app navigation on the normal
+     * foreground close path.
+     */
+    public fun onScreenStarted() {
+        screenStartedForCleared = true
+    }
+
+    public fun onScreenStopped() {
+        screenStartedForCleared = false
     }
 
     private fun resumePausedAutoReconnect(paused: PausedAutoReconnect) {
@@ -5747,12 +5764,12 @@ public class TmuxSessionViewModel @Inject constructor(
     }
 
     private fun isProcessForegroundForCleared(): Boolean =
-        processForegroundForClearedOverrideForTest ?: runCatching {
+        (processForegroundForClearedOverrideForTest ?: runCatching {
             ProcessLifecycleOwner.get()
                 .lifecycle
                 .currentState
                 .isAtLeast(Lifecycle.State.STARTED)
-        }.getOrDefault(appActive)
+        }.getOrDefault(appActive)) && screenStartedForCleared
 
     private fun maybeParkRuntimeForBackgroundViewModelClear(
         processForeground: Boolean,

@@ -6737,6 +6737,38 @@ class TmuxSessionViewModelTest {
     }
 
     @Test
+    fun onClearedAfterScreenStopParksRuntimeDuringProcessLifecycleStopDebounce() = runTest {
+        val runtimeCache = TmuxSessionRuntimeCache()
+        val vm = newVm(runtimeCache = runtimeCache)
+        val client = FakeTmuxClient()
+        val session = FakeSshSession()
+        vm.replaceClientForTest(
+            hostId = 1L,
+            hostName = "alpha",
+            host = "alpha.example",
+            port = 22,
+            user = "alex",
+            keyPath = "/keys/a",
+            sessionName = "work",
+            client = client,
+            session = session,
+        )
+        vm.setProcessForegroundForClearedForTest(true)
+
+        vm.onScreenStopped()
+        vm.clearForTest()
+        runCurrent()
+
+        assertFalse(
+            "screen-stopped clear must not detach during ProcessLifecycleOwner ON_STOP debounce",
+            client.detachCleanlyCalled,
+        )
+        assertFalse("screen-stopped clear must keep the tmux client alive", client.closed)
+        assertFalse("screen-stopped clear must keep the SSH session alive", session.closed)
+        assertEquals(listOf(tmuxRuntimeKeyForTest("work")), runtimeCache.snapshotKeys())
+    }
+
+    @Test
     fun onClearedWhileBackgroundedClosesEvictedParkedRuntimeOutsideViewModelScope() = runTest {
         val runtimeCache = TmuxSessionRuntimeCache(maxEntries = 1)
         val evictedSession = FakeSshSession()

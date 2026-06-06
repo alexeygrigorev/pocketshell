@@ -685,30 +685,36 @@ verification gate.
 
 Release build steps:
 
-1. Pick the next semantic version after the latest GitHub Release/tag.
-2. Update Android metadata before tagging:
+1. Before starting an intermediate or normal release, check GitHub Actions for
+   the current `origin/main` HEAD. Do not bump, tag, or release if any relevant
+   CI run for that commit has failed or is still in progress. If CI is red,
+   inspect the failed jobs/logs first, fix or rerun until `origin/main` HEAD is
+   green, then continue the release. A passing branch run is not enough when
+   `main` has a later failed run.
+2. Pick the next semantic version after the latest GitHub Release/tag.
+3. Update Android metadata before tagging:
    - `versionName` must equal the tag without the leading `v`.
    - `versionCode` must increase monotonically.
-3. Run the normal verification gate before committing the version bump.
-4. Commit the version bump on `main` and push `main` first. Confirm the
+4. Run the normal verification gate before committing the version bump.
+5. Commit the version bump on `main` and push `main` first. Confirm the
    checkout is clean and `HEAD` equals `origin/main` before creating or pushing
    any tag.
-5. From that stable pushed `main`, run the emulator-only release validation:
+6. From that stable pushed `main`, run the emulator-only release validation:
    - `scripts/pre-release-confidence-gate.sh`
    - `scripts/phone-walkthrough.sh terminal-lab`
    - `scripts/phone-walkthrough.sh tmux-existing-session`
    - `scripts/phone-walkthrough.sh setup-detection`
    - visual-audit screenshot capture, then inspect the screenshots
-6. Prefer the wrapper that runs that sequence and writes the required summary:
+7. Prefer the wrapper that runs that sequence and writes the required summary:
    `scripts/release-emulator-validation.sh`.
-7. For terminal/tmux-heavy releases, opt into the long-running evidence before
+8. For terminal/tmux-heavy releases, opt into the long-running evidence before
    tagging:
    `TERMINAL_RELEASE_GATE=1 LONG_RUNNING_TEST=1 scripts/release-emulator-validation.sh`.
    Link `build/long-running-session/<run-id>-long-running/` from the release
    issue or PR. The hold remains optional for unrelated small releases.
-8. Push the matching tag with the guarded tag helper, for example
+9. Push the matching tag with the guarded tag helper, for example
    `scripts/push-release-tag.sh --visual-audit-inspected v0.2.1 build/release-emulator-validation/<run-id>/summary.md`.
-9. Watch the tag-triggered Build workflow and verify the uploaded APK artifact.
+10. Watch the tag-triggered Build workflow and verify the uploaded APK artifact.
 
 Manual Release Emulator Validation can also be run from GitHub Actions when a
 local emulator is unavailable:

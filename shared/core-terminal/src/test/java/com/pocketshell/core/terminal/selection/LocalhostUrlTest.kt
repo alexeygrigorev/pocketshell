@@ -145,6 +145,29 @@ class LocalhostUrlTest {
     }
 
     @Test
+    fun plainTextScannerStripsValidSentencePunctuation() {
+        val refs = detectLocalhostPortReferences(
+            "try (localhost:5173), \"http://localhost:3000.\" and 127.0.0.1:8000!",
+        )
+
+        assertEquals(
+            listOf("localhost:5173", "http://localhost:3000", "127.0.0.1:8000"),
+            refs.map { it.text },
+        )
+        assertEquals(listOf(5173, 3000, 8000), refs.map { it.localhostUrl.remotePort })
+    }
+
+    @Test
+    fun plainTextScannerRejectsLoopbackPrefixInsideLargerTokens() {
+        val refs = detectLocalhostPortReferences(
+            "bad localhost:5173abc localhost:5173_ms localhost:5173.evil " +
+                "http://localhost:3000abc http://localhost:3000_ms http://localhost:3000.evil",
+        )
+
+        assertTrue("expected no loopback references, got $refs", refs.isEmpty())
+    }
+
+    @Test
     fun plainTextScannerRejectsLargerHostnamesAndBadPorts() {
         val refs = detectLocalhostPortReferences(
             "notlocalhost:3000 localhost.evil.com:3000 http://example.com:3000 " +

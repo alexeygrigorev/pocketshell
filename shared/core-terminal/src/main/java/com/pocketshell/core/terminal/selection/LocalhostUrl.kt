@@ -204,12 +204,16 @@ private fun String.trimEndLocalhostReferencePunctuation(): String {
  * path/query/fragment tail. The leading negative lookbehind prevents matches
  * inside larger hostnames (`notlocalhost:3000`, `xlocalhost:3000`,
  * `foo.localhost:3000`) or after unsupported schemes (`ftp://localhost:21`).
+ * The trailing lookahead requires a real delimiter after a bare port so larger
+ * tokens (`localhost:5173abc`, `localhost:5173_ms`, `localhost:5173.evil`) do
+ * not emit partial `localhost:5173` references.
  * The port is filtered by [classifyLocalhostReference].
  */
 private val LOCALHOST_REFERENCE_PATTERN: java.util.regex.Pattern = java.util.regex.Pattern.compile(
     "(?<![\\w.-])(?<!://)(?:https?://)?" +
         "(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1\\])" +
-        ":\\d{1,5}(?!\\d)(?:[/?#][\\w./?=&%+#~@:!,;-]*)?",
+        ":\\d{1,5}(?!\\d)(?:(?:[/?#][\\w./?=&%+#~@:!,;-]*)|" +
+        "(?=$|[\\s,;:)\\]!?'\"><]|\\.(?:$|\\s|[)\\]!?'\"><,;:])))",
     java.util.regex.Pattern.CASE_INSENSITIVE,
 )
 

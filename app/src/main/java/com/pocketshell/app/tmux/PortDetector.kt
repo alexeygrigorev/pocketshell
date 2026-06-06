@@ -177,6 +177,8 @@ internal class PortDetector(
          * host/port parser is also applied in [scan] so bare
          * `localhost:5173` / `127.0.0.1:<port>` references use the same
          * false-positive guards as Conversation and terminal tap handling.
+         * Regex matches use the same port-token boundary so `localhost:5173abc`
+         * is not treated as a completed port.
          *
          * Anchored to "listening"-style phrasing or to a localhost/
          * loopback/0.0.0.0 URL so a bare "port 8080" mention in prose is
@@ -189,21 +191,24 @@ internal class PortDetector(
             // "Listening on port 3000", "listening at :4321"
             Regex(
                 """(?i)listening\s+(?:on|at)\s+(?:https?://)?""" +
-                    """(?:[\w.-]+)?:?(?:port\s+)?(\d{2,5})\b""",
+                    """(?:[\w.-]+)?:?(?:port\s+)?(\d{2,5})$PORT_TOKEN_BOUNDARY""",
             ),
             // Vite/Next style: "Local:   http://localhost:5173/"
-            Regex("""(?i)local:\s+https?://[\w.-]+:(\d{2,5})\b"""),
+            Regex("""(?i)local:\s+https?://[\w.-]+:(\d{2,5})$PORT_TOKEN_BOUNDARY"""),
             // "running on http://0.0.0.0:5000", "running on port 8080",
             // "Server running at http://localhost:4000"
             Regex(
                 """(?i)running\s+(?:on|at)\s+(?:https?://)?""" +
-                    """(?:[\w.-]+)?:?(?:port\s+)?(\d{2,5})\b""",
+                    """(?:[\w.-]+)?:?(?:port\s+)?(\d{2,5})$PORT_TOKEN_BOUNDARY""",
             ),
             // Bare loopback/any URLs the regexes above didn't anchor:
             // "http://localhost:8888", "http://127.0.0.1:5173",
             // "http://0.0.0.0:9000". Loopback/any-host only, so a remote
             // URL in prose isn't matched.
-            Regex("""https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})\b"""),
+            Regex("""https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})$PORT_TOKEN_BOUNDARY"""),
         )
+
+        private const val PORT_TOKEN_BOUNDARY =
+            """(?=$|[/?#\s,;:)\]!?'"<>]|\.(?:$|\s|[)\]!?'"<>,;:]))"""
     }
 }

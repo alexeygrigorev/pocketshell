@@ -116,6 +116,24 @@ class PortDetectorTest {
     }
 
     @Test
+    fun `ignores loopback prefix inside larger token`() {
+        val text = "Open localhost:5173abc localhost:5173_ms localhost:5173.evil " +
+            "http://localhost:3000abc http://localhost:3000_ms http://localhost:3000.evil\n"
+        assertTrue(ports(PortDetector(), text).isEmpty())
+    }
+
+    @Test
+    fun `matches loopback port followed by sentence punctuation`() {
+        assertEquals(
+            setOf(5173, 3000, 8000),
+            ports(
+                PortDetector(),
+                "Open (localhost:5173), http://localhost:3000. and 127.0.0.1:8000!\n",
+            ).toSet(),
+        )
+    }
+
+    @Test
     fun `ignores out of range port`() {
         assertTrue(ports(PortDetector(), "http://localhost:99999/\n").isEmpty())
     }

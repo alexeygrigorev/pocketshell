@@ -158,6 +158,14 @@ class ConversationLinkDetectionTest {
         assertEquals("out/r.png", byKind[ConversationLinkKind.FILE])
     }
 
+    @Test
+    fun loopbackUrlWithSentencePunctuationIsStripped() {
+        val out = links("open (localhost:5173), then http://localhost:3000.")
+
+        assertEquals(listOf("localhost:5173", "http://localhost:3000"), out.map { it.text })
+        assertTrue(out.all { it.kind == ConversationLinkKind.URL })
+    }
+
     // --- Negatives ----------------------------------------------------------
 
     @Test
@@ -176,6 +184,16 @@ class ConversationLinkDetectionTest {
         assertTrue(
             links("notlocalhost:3000 and localhost.evil.com:3000 are real hostnames")
                 .none { it.kind == ConversationLinkKind.URL },
+        )
+    }
+
+    @Test
+    fun loopbackPrefixInsideLargerTokenIsNotAUrlLink() {
+        assertTrue(
+            links(
+                "localhost:5173abc localhost:5173_ms localhost:5173.evil " +
+                    "http://localhost:3000abc http://localhost:3000_ms http://localhost:3000.evil",
+            ).none { it.kind == ConversationLinkKind.URL },
         )
     }
 

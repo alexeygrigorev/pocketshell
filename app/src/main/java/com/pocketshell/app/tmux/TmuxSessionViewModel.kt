@@ -378,6 +378,16 @@ public class TmuxSessionViewModel @Inject constructor(
     // (cwd, command) would treat that as already-seen and skip the
     // round-trip, leaving the cached "no agent" verdict in place.
     private val paneAgentInputs: MutableMap<String, Triple<String, String, String>> = ConcurrentHashMap()
+    // Issue #554: count consecutive null detections for a pane whose window
+    // has a remembered agent status (the #495 optimistic seed). On reconnect,
+    // live detection can transiently read "no agent" before the agent's JSONL
+    // log / process is observable on the fresh reattach. Forgetting + dropping
+    // the seeded Conversation UI on that FIRST transient null is exactly the
+    // "we forget it's an agent and bounce to plain shell" regression. We keep
+    // the seeded agent UI and re-confirm; only after
+    // [AGENT_EXIT_CONFIRMATIONS] consecutive nulls do we treat the agent as
+    // genuinely exited and reconcile it away.
+    private val paneAgentNullDetections: MutableMap<String, Int> = ConcurrentHashMap()
     private val paneInputQueues: MutableMap<String, TmuxPaneInputQueue> = ConcurrentHashMap()
     private val paneInputJobs: MutableMap<String, Job> = ConcurrentHashMap()
 
@@ -1473,6 +1483,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentJobs.clear()
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
+        paneAgentNullDetections.clear()
         clearAgentConversations()
         // Issue #448: drop any pending forward overlay when this runtime
         // is parked to the cache — it belongs to the view we're leaving.
@@ -1518,6 +1529,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentJobs.clear()
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
+        paneAgentNullDetections.clear()
         paneAgentInputs.putAll(runtime.paneAgentInputs)
         replaceAgentConversations(runtime.agentConversations)
         remoteColumns = runtime.remoteColumns
@@ -1764,6 +1776,24 @@ public class TmuxSessionViewModel @Inject constructor(
                 trigger = trigger,
             )
             maybeRefreshControlClientSize()
+            // Issue #553: tmux `-CC` does not re-emit existing pane content on
+            // a fresh control-client attach — only subsequent `%output`
+            // deltas. Re-seed every visible pane from a `capture-pane`
+            // snapshot now that the handshake is complete, so EVERY reconnect
+            // (manual Reconnect AND the #444 auto-reconnect path both reach
+            // here via [runConnect]) repaints the full prior screen instead of
+            // leaving it blank with only the live timer/spinner painting
+            // against black. [preloadVisibleContentForNewPanes] already seeds
+            // the freshly-created pane rows; this is the safety net for panes
+            // reused across a racing reconcile and the authoritative
+            // post-attach repaint.
+            reseedAllVisiblePanes(
+                RuntimeRefreshGuard(
+                    generation = connectGeneration,
+                    target = target,
+                    client = client,
+                ),
+            )
         } catch (t: Throwable) {
             if (t is CancellationException) throw t
             failConnectAttempt(
@@ -3071,6 +3101,7 @@ public class TmuxSessionViewModel @Inject constructor(
             paneAgentJobs.remove(paneId)?.cancel()
             paneAgentTailGenerations.remove(paneId)
             paneAgentInputs.remove(paneId)
+            paneAgentNullDetections.remove(paneId)
             paneInputJobs.remove(paneId)?.cancel()
             paneInputQueues.remove(paneId)?.close()
             paneSurfaceRecoveryTimestamps.remove(paneId)
@@ -3354,75 +3385,12 @@ public class TmuxSessionViewModel @Inject constructor(
             return
         }
         try {
-        for (pane in newPanes) {
-            if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
-            val captureStartedAtMs = SystemClock.elapsedRealtime()
-            val response = runCatching {
-                client.sendCommand("capture-pane -p -e -S -200 -t ${pane.paneId}")
-            }.getOrNull()
-            TmuxSessionLatencyTelemetry.record(
-                name = "capture_pane",
-                durationMs = SystemClock.elapsedRealtime() - captureStartedAtMs,
-                sessionName = activeTarget?.sessionName,
-                paneId = pane.paneId,
-                trigger = activeAttachMilestone?.trigger,
-                detail = "success=${response != null && !response.isError}",
-            )
-            if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
-            if (response == null || response.isError || response.output.isEmpty()) continue
-            // Issue #259: ask tmux for the pane's true cursor position so the
-            // seed can restore it after replaying the capture. Without this the
-            // emulator's cursor lands below the captured content, and the
-            // agent's next in-place status/spinner rewrite (`\r` + frame, no
-            // re-home) paints on the wrong row — stranding the seeded frame
-            // above the live one and mashing fragments of different frames
-            // together (the reported garble). A missing/old/malformed reply
-            // degrades to a seed with no explicit cursor restore.
-            val cursorStartedAtMs = SystemClock.elapsedRealtime()
-            val cursor = runCatching {
-                client.sendCommand(
-                    "display-message -p -t ${pane.paneId} '#{cursor_x},#{cursor_y}'",
-                )
-            }.getOrNull()
-                .also { cursorResponse ->
-                    TmuxSessionLatencyTelemetry.record(
-                        name = "cursor_query",
-                        durationMs = SystemClock.elapsedRealtime() - cursorStartedAtMs,
-                        sessionName = activeTarget?.sessionName,
-                        paneId = pane.paneId,
-                        trigger = activeAttachMilestone?.trigger,
-                        detail = "success=${cursorResponse != null && !cursorResponse.isError}",
-                    )
-                }
-                ?.takeUnless { it.isError }
-                ?.output
-                ?.firstOrNull()
-                .let { parseTmuxPaneCursor(it) }
-            if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
-            val appendStartedAtMs = SystemClock.elapsedRealtime()
-            pane.terminalState.appendRemoteOutput(
-                response.output.toTerminalViewportBytes(cursor),
-            )
-            seededPaneIds.add(pane.paneId)
-            activeAttachMilestone?.let { milestone ->
-                if (!milestone.firstCaptureReadyLogged) {
-                    milestone.firstCaptureReadyLogged = true
-                    recordWarmSwitchMilestone(
-                        milestone = milestone,
-                        name = "warm_switch_terminal_capture_ready",
-                        paneId = pane.paneId,
-                        detail = "lines=${response.output.size}",
-                    )
+            for (pane in newPanes) {
+                if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
+                if (seedPaneFromCapture(client, pane, refreshGuard, recordMilestone = true)) {
+                    seededPaneIds.add(pane.paneId)
                 }
             }
-            TmuxSessionLatencyTelemetry.record(
-                name = "terminal_output_append_to_buffer",
-                durationMs = SystemClock.elapsedRealtime() - appendStartedAtMs,
-                sessionName = activeTarget?.sessionName,
-                paneId = pane.paneId,
-                trigger = activeAttachMilestone?.trigger,
-            )
-        }
         } finally {
             // Issue #468: open the gate for every pane that did not get a seed
             // applied (capture failed/empty, runtime superseded mid-loop, or an
@@ -3434,6 +3402,127 @@ public class TmuxSessionViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    /**
+     * Issue #553: re-seed every visible pane's current content after the
+     * reattach handshake completes.
+     *
+     * tmux `-CC` control mode does NOT re-emit a pane's existing content when
+     * a fresh control client attaches — it only streams the *subsequent*
+     * incremental `%output` deltas. (Verified against tmux: a reattach yields
+     * only the new `\033[..H` rewrites, never the static frame that was
+     * already on screen, and `refresh-client` does not force a re-dump.) So
+     * after a reconnect the local emulator is empty and only the live deltas
+     * (e.g. an agent's per-second status/timer line) paint against black — the
+     * exact "blank except a timer" symptom the maintainer reported.
+     *
+     * [preloadVisibleContentForNewPanes] already seeds panes that are *new* in
+     * a reconcile. This method closes the gap for panes that are *reused*
+     * across a reconcile (a `%layout-change` round-trip racing the first
+     * post-attach reconcile, or any reattach that keeps the [TmuxPaneState]
+     * rows): it re-captures and re-applies the snapshot for the panes
+     * currently rendered, so EVERY reconnect repaints the full pane content
+     * rather than leaving it blank. Idempotent and cheap: the snapshot's
+     * leading `ESC[2J` clear means a redundant re-seed cleanly replaces the
+     * same frame in place instead of duplicating it.
+     */
+    private suspend fun reseedAllVisiblePanes(refreshGuard: RuntimeRefreshGuard? = null) {
+        val client = clientRef ?: return
+        val panes = paneRows.values.toList()
+        for (pane in panes) {
+            if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return
+            // [seedPaneFromCapture] feeds the snapshot through
+            // [TerminalSurfaceState.appendRemoteOutput], which is safe to call
+            // on an already-open gate (it is a feed + an open no-op), so a pane
+            // that was already seeded as "new" simply gets its current frame
+            // re-painted in place.
+            seedPaneFromCapture(client, pane, refreshGuard, recordMilestone = false)
+        }
+    }
+
+    /**
+     * Capture a single pane's current content with `capture-pane -p -e` and
+     * feed it (with the restored cursor) into the pane's emulator, restoring
+     * the visible screen + colors after a tmux reattach. Returns true when a
+     * snapshot was actually applied. Shared by the new-pane preload
+     * ([preloadVisibleContentForNewPanes]) and the all-visible-pane reseed
+     * ([reseedAllVisiblePanes]).
+     */
+    private suspend fun seedPaneFromCapture(
+        client: TmuxClient,
+        pane: TmuxPaneState,
+        refreshGuard: RuntimeRefreshGuard?,
+        recordMilestone: Boolean,
+    ): Boolean {
+        val captureStartedAtMs = SystemClock.elapsedRealtime()
+        val response = runCatching {
+            client.sendCommand("capture-pane -p -e -S -200 -t ${pane.paneId}")
+        }.getOrNull()
+        TmuxSessionLatencyTelemetry.record(
+            name = "capture_pane",
+            durationMs = SystemClock.elapsedRealtime() - captureStartedAtMs,
+            sessionName = activeTarget?.sessionName,
+            paneId = pane.paneId,
+            trigger = activeAttachMilestone?.trigger,
+            detail = "success=${response != null && !response.isError}",
+        )
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
+        if (response == null || response.isError || response.output.isEmpty()) return false
+        // Issue #259: ask tmux for the pane's true cursor position so the
+        // seed can restore it after replaying the capture. Without this the
+        // emulator's cursor lands below the captured content, and the
+        // agent's next in-place status/spinner rewrite (`\r` + frame, no
+        // re-home) paints on the wrong row — stranding the seeded frame
+        // above the live one and mashing fragments of different frames
+        // together (the reported garble). A missing/old/malformed reply
+        // degrades to a seed with no explicit cursor restore.
+        val cursorStartedAtMs = SystemClock.elapsedRealtime()
+        val cursor = runCatching {
+            client.sendCommand(
+                "display-message -p -t ${pane.paneId} '#{cursor_x},#{cursor_y}'",
+            )
+        }.getOrNull()
+            .also { cursorResponse ->
+                TmuxSessionLatencyTelemetry.record(
+                    name = "cursor_query",
+                    durationMs = SystemClock.elapsedRealtime() - cursorStartedAtMs,
+                    sessionName = activeTarget?.sessionName,
+                    paneId = pane.paneId,
+                    trigger = activeAttachMilestone?.trigger,
+                    detail = "success=${cursorResponse != null && !cursorResponse.isError}",
+                )
+            }
+            ?.takeUnless { it.isError }
+            ?.output
+            ?.firstOrNull()
+            .let { parseTmuxPaneCursor(it) }
+        if (refreshGuard != null && !isCurrentRuntime(refreshGuard)) return false
+        val appendStartedAtMs = SystemClock.elapsedRealtime()
+        pane.terminalState.appendRemoteOutput(
+            response.output.toTerminalViewportBytes(cursor),
+        )
+        if (recordMilestone) {
+            activeAttachMilestone?.let { milestone ->
+                if (!milestone.firstCaptureReadyLogged) {
+                    milestone.firstCaptureReadyLogged = true
+                    recordWarmSwitchMilestone(
+                        milestone = milestone,
+                        name = "warm_switch_terminal_capture_ready",
+                        paneId = pane.paneId,
+                        detail = "lines=${response.output.size}",
+                    )
+                }
+            }
+        }
+        TmuxSessionLatencyTelemetry.record(
+            name = "terminal_output_append_to_buffer",
+            durationMs = SystemClock.elapsedRealtime() - appendStartedAtMs,
+            sessionName = activeTarget?.sessionName,
+            paneId = pane.paneId,
+            trigger = activeAttachMilestone?.trigger,
+        )
+        return true
     }
 
     /**
@@ -3593,15 +3682,92 @@ public class TmuxSessionViewModel @Inject constructor(
             }.getOrNull()
             if (!isCurrentRuntime(guard)) return@launch
             if (detection == null) {
-                // Issue #186: when a pane that previously had a
-                // detection no longer does (the user exited Claude /
-                // Codex / OpenCode, or the agent process died), clear
-                // the per-pane conversation state so the Conversation
-                // tab disappears for this window.
-                clearAgentDetectionForPane(paneId)
+                handleNullAgentDetection(pane, guard)
                 return@launch
             }
+            // A real detection cancels any in-flight exit-confirmation count.
+            paneAgentNullDetections.remove(paneId)
             startAgentConversationForPane(session, paneId, detection, guard)
+        }
+    }
+
+    /**
+     * Issue #554: reconcile a null agent detection for [pane].
+     *
+     * A window we restored optimistically from [agentSessionMemory] (the #495
+     * seed) must NOT be torn back down to a plain shell on the FIRST null
+     * detection after a reattach — live detection routinely reads "no agent"
+     * for a beat while the agent's JSONL log / process becomes observable on
+     * the fresh connection. Downgrading there is the "we forget it's an agent
+     * and bounce to plain-shell-then-back" regression the maintainer reported.
+     * So when the window has a remembered agent status, keep the seeded agent
+     * UI and re-confirm; only treat the agent as genuinely exited after
+     * [AGENT_EXIT_CONFIRMATIONS] consecutive nulls.
+     *
+     * Returns true when the agent was treated as genuinely exited (the row was
+     * cleared), false when the downgrade was deferred and a re-check scheduled.
+     */
+    private fun handleNullAgentDetection(pane: TmuxPaneState, guard: RuntimeRefreshGuard): Boolean {
+        val paneId = pane.paneId
+        if (shouldDeferAgentDowngrade(paneId)) {
+            val nulls = (paneAgentNullDetections[paneId] ?: 0) + 1
+            paneAgentNullDetections[paneId] = nulls
+            if (nulls < AGENT_EXIT_CONFIRMATIONS) {
+                scheduleAgentDetectionRecheck(pane, guard)
+                return false
+            }
+        }
+        // Issue #186: when a pane that previously had a detection no longer
+        // does (the user exited Claude / Codex / OpenCode, or the agent
+        // process died), clear the per-pane conversation state so the
+        // Conversation tab disappears for this window.
+        paneAgentNullDetections.remove(paneId)
+        clearAgentDetectionForPane(paneId)
+        return true
+    }
+
+    /**
+     * Issue #554: true when a null detection for [paneId] should be deferred
+     * rather than immediately downgrading the pane to a plain shell — i.e. the
+     * pane's window has a remembered agent status (so we optimistically showed
+     * the agent UI on reattach) AND the pane currently still shows an agent
+     * detection. In that state a transient null after a reconnect is almost
+     * always a detection-not-yet-warm race, not a genuine agent exit, so we
+     * hold the agent UI and re-confirm before tearing it down.
+     */
+    private fun shouldDeferAgentDowngrade(paneId: String): Boolean {
+        val target = activeTarget ?: return false
+        val windowId = paneRows[paneId]?.windowId ?: return false
+        if (windowId.isBlank()) return false
+        val remembered = agentSessionMemory.recall(
+            hostId = target.hostId,
+            sessionName = target.sessionName,
+            windowId = windowId,
+        ) ?: return false
+        // Only defer while the seeded agent UI is actually still showing; once
+        // detection has confirmed an exit and the row is gone, there is
+        // nothing to protect.
+        return remembered.detection != null &&
+            _agentConversations.value[paneId]?.detection != null
+    }
+
+    /**
+     * Issue #554: re-run per-pane agent detection after a short delay to
+     * confirm a (possibly transient) null verdict before downgrading a
+     * remembered agent window. Forces a fresh round-trip by clearing the
+     * detection de-dup input for the pane.
+     */
+    private fun scheduleAgentDetectionRecheck(pane: TmuxPaneState, guard: RuntimeRefreshGuard) {
+        val paneId = pane.paneId
+        paneAgentJobs.remove(paneId)?.cancel()
+        paneAgentJobs[paneId] = bridgeScope.launch {
+            delay(AGENT_EXIT_RECHECK_DELAY_MS)
+            if (!isCurrentRuntime(guard)) return@launch
+            // Clear the de-dup key so [startAgentDetectionForPane] does not
+            // short-circuit the re-detection as already-seen.
+            paneAgentInputs.remove(paneId)
+            val current = paneRows[paneId] ?: return@launch
+            startAgentDetectionForPane(current, guard)
         }
     }
 
@@ -4242,6 +4408,42 @@ public class TmuxSessionViewModel @Inject constructor(
      */
     internal fun clearAgentDetectionForPaneForTest(paneId: String) {
         clearAgentDetectionForPane(paneId)
+    }
+
+    /**
+     * Issue #554 test seam: seed [agentSessionMemory] without the SSH/JSONL
+     * round-trip so tests can assert the optimistic-reconnect reconciliation.
+     */
+    internal fun rememberAgentForTest(
+        windowId: String,
+        detection: AgentDetection,
+        wasOnConversation: Boolean,
+    ) {
+        val target = activeTarget ?: return
+        agentSessionMemory.remember(
+            hostId = target.hostId,
+            sessionName = target.sessionName,
+            windowId = windowId,
+            detection = detection,
+            wasOnConversation = wasOnConversation,
+        )
+    }
+
+    /**
+     * Issue #554 test seam: drive the null-detection reconciliation directly
+     * (the path [startAgentDetectionForPane] takes when live detection comes
+     * back null) without standing up the SSH/JSONL detection round-trip.
+     * Returns true when the agent was treated as exited (row cleared), false
+     * when the downgrade was deferred for confirmation.
+     */
+    internal fun handleNullAgentDetectionForTest(paneId: String): Boolean {
+        val pane = paneRows[paneId] ?: return true
+        val guard = RuntimeRefreshGuard(
+            generation = connectGeneration,
+            target = activeTarget ?: return true,
+            client = clientRef ?: return true,
+        )
+        return handleNullAgentDetection(pane, guard)
     }
 
     /**
@@ -5321,6 +5523,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentJobs.clear()
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
+        paneAgentNullDetections.clear()
         paneInputJobs.clear()
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
@@ -5410,6 +5613,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentJobs.clear()
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
+        paneAgentNullDetections.clear()
         paneInputJobs.clear()
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
@@ -5532,6 +5736,7 @@ public class TmuxSessionViewModel @Inject constructor(
         paneAgentJobs.clear()
         paneAgentTailGenerations.clear()
         paneAgentInputs.clear()
+        paneAgentNullDetections.clear()
         paneInputJobs.clear()
         paneInputQueues.clear()
         _agentConversations.value = emptyMap()
@@ -6413,6 +6618,17 @@ internal const val SURFACE_RECOVERY_STORM_THRESHOLD: Int = 4
 
 /** Sliding window for [SURFACE_RECOVERY_STORM_THRESHOLD]. */
 internal const val SURFACE_RECOVERY_WINDOW_MS: Long = 4_000L
+
+/**
+ * Issue #554: how many consecutive null agent detections a remembered agent
+ * window must produce before its optimistic seed is reconciled away. The first
+ * null right after a reattach is almost always a detection-not-yet-warm race,
+ * so we require a confirming re-detection before dropping the agent UI.
+ */
+internal const val AGENT_EXIT_CONFIRMATIONS: Int = 2
+
+/** Delay before the issue #554 agent-exit confirmation re-detection. */
+internal const val AGENT_EXIT_RECHECK_DELAY_MS: Long = 1_200L
 
 public enum class TmuxConnectTrigger(public val logValue: String) {
     UserTap("user-tap"),

@@ -2627,6 +2627,107 @@ class TmuxSessionViewModelTest {
         assertNull("no Conversation tab for the exited agent's window", vm.agentForWindow("@0"))
     }
 
+    // ─── Issue #554: transient null detection must not forget the agent ──
+
+    /**
+     * Issue #554: on reconnect, live detection routinely reads "no agent" for
+     * a beat before the agent's JSONL log / process is observable on the fresh
+     * connection. A remembered (seeded) agent window must NOT be downgraded to
+     * a plain shell on that FIRST transient null — the seeded Conversation UI
+     * stays up and detection re-confirms. Downgrading there was the
+     * "we forget it's an agent and bounce to plain-shell-then-back" regression.
+     */
+    @Test
+    fun transientNullDetectionDoesNotForgetRememberedAgentOnReconnect() = runTest {
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        runCurrent()
+
+        // Reconnect: a rotated pane id under the same window, seeded from
+        // memory so the agent UI shows immediately.
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%7", "@0", "$0", "shell", paneIndex = 0, sessionName = "work")),
+        )
+        runCurrent()
+        assertEquals(
+            "precondition: agent UI restored immediately on reattach",
+            AgentKind.ClaudeCode,
+            vm.agentConversations.value["%7"]?.detection?.agent,
+        )
+
+        // First live-detection null right after the reattach: DEFER, do not
+        // forget. The seeded agent UI must survive.
+        val downgraded = vm.handleNullAgentDetectionForTest("%7")
+        runCurrent()
+        assertFalse("first transient null must be deferred, not a downgrade", downgraded)
+        assertEquals(
+            "the seeded agent UI must survive a single transient null",
+            AgentKind.ClaudeCode,
+            vm.agentConversations.value["%7"]?.detection?.agent,
+        )
+        assertEquals(
+            "the Conversation tab stays available for the window",
+            AgentKind.ClaudeCode,
+            vm.agentForWindow("@0"),
+        )
+    }
+
+    /**
+     * Issue #554: the deferral is a confirmation window, not a permanent
+     * pin. A genuinely-exited agent (null detection persisting past
+     * [AGENT_EXIT_CONFIRMATIONS]) still reconciles away so a stale
+     * Conversation tab does not linger.
+     */
+    @Test
+    fun persistentNullDetectionEventuallyDowngradesAnExitedAgent() = runTest {
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        vm.startAgentConversationForTest("%0", newClaudeDetection())
+        vm.selectSessionTab("%0", SessionTab.Conversation)
+        runCurrent()
+
+        vm.applyParsedPanesForTest(
+            listOf(TmuxSessionViewModel.ParsedPane("%7", "@0", "$0", "shell", paneIndex = 0, sessionName = "work")),
+        )
+        runCurrent()
+
+        // Drive null detections up to the confirmation threshold. The last one
+        // must downgrade the window to a plain shell.
+        var downgraded = false
+        repeat(AGENT_EXIT_CONFIRMATIONS) {
+            downgraded = vm.handleNullAgentDetectionForTest("%7")
+            runCurrent()
+        }
+
+        assertTrue("a persistently-null agent must eventually downgrade", downgraded)
+        assertNull(
+            "an agent that genuinely exited must reconcile away after confirmation",
+            vm.agentConversations.value["%7"],
+        )
+        assertNull("no Conversation tab once the agent is confirmed gone", vm.agentForWindow("@0"))
+    }
+
+    /**
+     * Issue #554: a null detection for a window that was NEVER an agent (no
+     * remembered status, no seeded UI) downgrades immediately — the
+     * confirmation window is only for protecting a remembered agent seed, not
+     * for delaying the normal plain-shell verdict.
+     */
+    @Test
+    fun nullDetectionDowngradesImmediatelyWhenWindowWasNeverAnAgent() = runTest {
+        val vm = newVm()
+        vm.connectWithPaneForTest(paneId = "%0", windowId = "@0")
+        runCurrent()
+
+        val downgraded = vm.handleNullAgentDetectionForTest("%0")
+        runCurrent()
+
+        assertTrue("a never-agent window has no seed to protect — downgrade now", downgraded)
+        assertNull(vm.agentConversations.value["%0"])
+    }
+
     @Test
     fun liveDetectionRefiningSameAgentKeepsRestoredConversationTab() = runTest {
         val vm = newVm()

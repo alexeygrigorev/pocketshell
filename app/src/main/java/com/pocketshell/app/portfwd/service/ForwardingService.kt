@@ -77,6 +77,8 @@ class ForwardingService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var observeJob: Job? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    @Volatile
+    private var defaultNetworkWasLost = false
     private var hasStartedForeground = false
 
     companion object {
@@ -226,15 +228,16 @@ class ForwardingService : Service() {
 
     private fun registerNetworkCallback() {
         if (networkCallback != null) return
+        defaultNetworkWasLost = false
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
             ?: return
         val cb = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                // Network came back. Nudge the supervisor(s) so any
-                // in-flight backoff sleep cancels and a reconnect
-                // attempt happens immediately. Idempotent inside the
-                // supervisor.
-                controller.reconnectNow()
+                handleDefaultNetworkAvailable()
+            }
+
+            override fun onLost(network: Network) {
+                handleDefaultNetworkLost()
             }
         }
         try {
@@ -258,6 +261,28 @@ class ForwardingService : Service() {
             // quickly). Safe to ignore.
         }
         networkCallback = null
+        defaultNetworkWasLost = false
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun handleDefaultNetworkAvailable() {
+        // Network came back. Nudge the supervisor(s) so any in-flight
+        // backoff sleep cancels and a reconnect attempt happens
+        // immediately. If we observed an actual default-network loss
+        // first, force a transport rebuild: sshj can leave the old
+        // session looking "connected" after Android swaps networks,
+        // while the forwards are already dead.
+        if (defaultNetworkWasLost) {
+            defaultNetworkWasLost = false
+            controller.forceReconnectNow()
+        } else {
+            controller.reconnectNow()
+        }
+    }
+
+    @androidx.annotation.VisibleForTesting
+    internal fun handleDefaultNetworkLost() {
+        defaultNetworkWasLost = true
     }
 
     private fun stopForwarding() {

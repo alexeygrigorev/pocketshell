@@ -83,6 +83,7 @@ class ForwardingController @Inject constructor(
         hostId: Long,
         hostName: String,
         reconnectHook: (() -> Unit)? = null,
+        forceReconnectHook: (() -> Unit)? = null,
     ) {
         val existing = activeHosts.firstOrNull { it.hostId == hostId }
         if (existing != null) {
@@ -93,12 +94,20 @@ class ForwardingController @Inject constructor(
                 hostId = hostId,
                 hostName = hostName,
                 reconnectHook = reconnectHook,
+                forceReconnectHook = forceReconnectHook,
                 tunnelCount = existing.tunnelCount,
                 activeRemotePorts = existing.activeRemotePorts,
+                forwardedPortMap = existing.forwardedPortMap,
                 restoring = existing.restoring,
             )
         } else {
-            activeHosts += ActiveHost(hostId, hostName, reconnectHook, tunnelCount = 0)
+            activeHosts += ActiveHost(
+                hostId = hostId,
+                hostName = hostName,
+                reconnectHook = reconnectHook,
+                forceReconnectHook = forceReconnectHook,
+                tunnelCount = 0,
+            )
         }
         recomputeSnapshot()
         if (activeHostCount.value == 1) {
@@ -187,6 +196,20 @@ class ForwardingController @Inject constructor(
         activeHosts.forEach { runCatching { it.reconnectHook?.invoke() } }
     }
 
+    /**
+     * Stronger network-recovery hint used after the foreground service
+     * has observed an actual default-network loss. This may rebuild a
+     * session that still reports "connected" but whose forwards died
+     * under the old network.
+     */
+    fun forceReconnectNow() {
+        activeHosts.forEach {
+            runCatching {
+                (it.forceReconnectHook ?: it.reconnectHook)?.invoke()
+            }
+        }
+    }
+
     private fun recomputeSnapshot() {
         activeHostCount.update { activeHosts.size }
         totalTunnelCount.update { activeHosts.sumOf { it.tunnelCount } }
@@ -215,6 +238,7 @@ class ForwardingController @Inject constructor(
         val hostId: Long,
         val hostName: String,
         val reconnectHook: (() -> Unit)?,
+        val forceReconnectHook: (() -> Unit)? = null,
         val tunnelCount: Int,
         val activeRemotePorts: Set<Int> = emptySet(),
         // Issue #488: remote → local port mapping for the active forwards.

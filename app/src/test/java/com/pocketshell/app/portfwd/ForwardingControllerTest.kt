@@ -232,10 +232,32 @@ class ForwardingControllerTest {
     }
 
     @Test
+    fun `forceReconnectNow uses force hooks without disturbing normal reconnect hook`() {
+        val controller = ForwardingController(context)
+        val normalCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        val forceCalls = java.util.concurrent.atomic.AtomicInteger(0)
+
+        controller.registerActiveHost(
+            hostId = 1,
+            hostName = "alpha",
+            reconnectHook = { normalCalls.incrementAndGet() },
+            forceReconnectHook = { forceCalls.incrementAndGet() },
+        )
+
+        controller.reconnectNow()
+        assertEquals(1, normalCalls.get())
+        assertEquals(0, forceCalls.get())
+
+        controller.forceReconnectNow()
+        assertEquals(1, normalCalls.get())
+        assertEquals(1, forceCalls.get())
+    }
+
+    @Test
     fun `registerActiveHost twice with same id updates fields and does not duplicate`() {
         val controller = ForwardingController(context)
         controller.registerActiveHost(hostId = 1, hostName = "alpha")
-        controller.updateTunnelCount(1, 3)
+        controller.updateActiveTunnels(1, mapOf(3000 to 9000, 8080 to 18080))
         controller.registerActiveHost(hostId = 1, hostName = "alpha-renamed")
 
         assertEquals(1, controller.flowOfActiveHostCount().value)
@@ -244,7 +266,11 @@ class ForwardingControllerTest {
         // Re-registration must preserve the cached tunnel count (we
         // don't want a panel re-build to reset the count to zero between
         // the register and the first tunnel snapshot).
-        assertEquals(3, controller.flowOfTotalTunnelCount().value)
+        assertEquals(2, controller.flowOfTotalTunnelCount().value)
+        assertEquals(
+            mapOf(3000 to 9000, 8080 to 18080),
+            controller.flowOfHostSnapshots().value.getValue(1L).forwardedPortMap,
+        )
     }
 
     @Test
@@ -392,6 +418,38 @@ class ForwardingControllerTest {
         assertTrue(
             "a restoring host must read 'Restoring…', not '0 tunnels': '$body'",
             body.contains("Restoring…") && !body.contains("0 tunnel"),
+        )
+    }
+
+    @Test
+    fun `service forces reconnect only after observed default network loss`() {
+        val controller = ForwardingController(context)
+        val normalCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        val forceCalls = java.util.concurrent.atomic.AtomicInteger(0)
+        controller.registerActiveHost(
+            hostId = 1,
+            hostName = "alpha",
+            reconnectHook = { normalCalls.incrementAndGet() },
+            forceReconnectHook = { forceCalls.incrementAndGet() },
+        )
+        val service = Robolectric.buildService(ForwardingService::class.java).get()
+        service.controller = controller
+
+        service.handleDefaultNetworkAvailable()
+        assertEquals(
+            "initial onAvailable during callback registration must not churn a healthy tunnel",
+            1,
+            normalCalls.get(),
+        )
+        assertEquals(0, forceCalls.get())
+
+        service.handleDefaultNetworkLost()
+        service.handleDefaultNetworkAvailable()
+        assertEquals(1, normalCalls.get())
+        assertEquals(
+            "onAvailable after an observed loss must force rebuild stale connected transports",
+            1,
+            forceCalls.get(),
         )
     }
 

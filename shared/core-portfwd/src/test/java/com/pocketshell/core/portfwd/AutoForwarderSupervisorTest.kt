@@ -192,6 +192,47 @@ class AutoForwarderSupervisorTest {
     }
 
     @Test
+    fun `forced reconnect rebuilds a stale connected session without waiting for backoff`() = runTest {
+        val factory = SequentialSessionFactory().apply {
+            addSession { setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))") }
+            addSession { setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))") }
+        }
+        val supervisor = AutoForwarderSupervisor(
+            sessionFactory = { factory.next() },
+            config = smallConfig(),
+            initialReconnectDelayMs = 60_000L,
+            maxReconnectDelayMs = 60_000L,
+            sessionHealthPollMs = 100L,
+        )
+        val job = supervisor.start(this)
+        runCurrent()
+        val firstSession = requireNotNull(factory.last)
+        assertEquals(1, firstSession.openForwards.size)
+
+        supervisor.reconnectNow(force = true)
+        advanceTimeBy(150L)
+        runCurrent()
+
+        val secondSession = requireNotNull(factory.last)
+        assertNotSame(firstSession, secondSession)
+        assertEquals(
+            "forced reconnect should skip the long post-drop backoff",
+            2,
+            factory.attempts(),
+        )
+        assertTrue("old session must be closed by force reconnect", !firstSession.isConnected)
+        assertEquals(1, secondSession.openForwards.count { it.remotePort == 3000 })
+        assertEquals(
+            AutoForwarderSupervisor.ConnectionState.Connected,
+            supervisor.flowOfConnectionState().value,
+        )
+
+        supervisor.stop()
+        job.cancel()
+        runCurrent()
+    }
+
+    @Test
     fun `tunnel snapshots flip to STOPPED while supervisor reconnects`() = runTest {
         val factory = SequentialSessionFactory().apply {
             addSession { setListening("0.0.0.0:3000 users:((\"app\",pid=1,fd=4))") }

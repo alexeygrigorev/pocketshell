@@ -133,6 +133,9 @@ public class AutoForwarderSupervisor(
     @Volatile
     private var reconnectWaiter: CompletableDeferred<Unit>? = null
 
+    @Volatile
+    private var reconnectImmediately: Boolean = false
+
     private val mutex = Mutex()
 
     /**
@@ -246,12 +249,22 @@ public class AutoForwarderSupervisor(
      * attempt window. No-op if the supervisor isn't currently in
      * backoff.
      */
-    public fun reconnectNow() {
+    public fun reconnectNow(force: Boolean = false) {
         // Wake any pending backoff sleep. Completing the deferred is a
         // no-op if no sleep is in flight, so this is safe to call from
         // any state.
         reconnectWaiter?.complete(Unit)
         reconnectWaiter = null
+        if (force) {
+            // A real default-network loss/recovery can leave sshj's
+            // session object reporting "connected" even though the
+            // phone-side forwards are dead. Force closes the transport
+            // and skips the normal post-drop backoff so the next fresh
+            // session restores desired forwards promptly.
+            reconnectImmediately = true
+            runCatching { currentSession?.close() }
+            return
+        }
         // Do not churn a healthy connected tunnel: Android may deliver
         // onAvailable immediately for the already-active default
         // network. Once the supervisor has entered reconnect/backoff,
@@ -368,6 +381,12 @@ public class AutoForwarderSupervisor(
 
             if (stopped) break
 
+            if (reconnectImmediately) {
+                reconnectImmediately = false
+                reconnectDelay = initialReconnectDelayMs
+                continue
+            }
+
             if (maxReconnectAttempts != null && consecutiveFailures >= maxReconnectAttempts) {
                 connectionState.value = ConnectionState.Lost
                 eventsFlow.tryEmit(Event.ConnectionLost("max reconnect attempts reached"))
@@ -384,6 +403,7 @@ public class AutoForwarderSupervisor(
                 }
                 reconnectWaiter = null
                 if (stopped) break
+                reconnectImmediately = false
                 consecutiveFailures = 0
                 reconnectDelay = initialReconnectDelayMs
                 continue
@@ -400,7 +420,12 @@ public class AutoForwarderSupervisor(
             }
             reconnectWaiter = null
 
-            reconnectDelay = (reconnectDelay * 2).coerceAtMost(maxReconnectDelayMs)
+            if (reconnectImmediately) {
+                reconnectImmediately = false
+                reconnectDelay = initialReconnectDelayMs
+            } else {
+                reconnectDelay = (reconnectDelay * 2).coerceAtMost(maxReconnectDelayMs)
+            }
         }
     }
 

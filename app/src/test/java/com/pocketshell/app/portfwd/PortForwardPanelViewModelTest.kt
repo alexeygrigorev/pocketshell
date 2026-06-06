@@ -1032,6 +1032,89 @@ class PortForwardPanelViewModelTest {
     }
 
     @Test
+    fun backgroundForegroundNetworkRecoveryForceRestoresStaleActiveForward() = runTest {
+        val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
+        val firstSession = FakeSshSession(
+            ssOutput = "127.0.0.1:22 users:((\"sshd\",pid=1,fd=3))\n",
+        )
+        val recoveredSession = FakeSshSession(
+            ssOutput = "127.0.0.1:22 users:((\"sshd\",pid=1,fd=3))\n",
+        )
+        val connector = QueueConnector(
+            listOf(Result.success(firstSession), Result.success(recoveredSession)),
+        )
+        val forwardingController = ForwardingController(context)
+        val viewModel = newViewModel(
+            connector = connector,
+            forwardingController = forwardingController,
+        )
+        val owner = ManualLifecycleOwner().also { it.moveTo(Lifecycle.State.RESUMED) }
+        viewModel.observeProcessLifecycle(owner)
+        runCurrent()
+
+        viewModel.load(hostId, "/tmp/key", "secret".toCharArray())
+        runCurrent()
+        viewModel.setAutoForwardEnabled(true)
+        runCurrent()
+        viewModel.startPort(22)
+        runCurrent()
+
+        assertEquals(PortForwardConnectionState.Connected, viewModel.state.value.connectionState)
+        assertEquals(1, forwardingController.flowOfActiveHostCount().value)
+        assertEquals(1, forwardingController.flowOfTotalTunnelCount().value)
+        assertEquals(
+            com.pocketshell.core.portfwd.TunnelInfo.Status.FORWARDING,
+            viewModel.state.value.tunnels.single { it.remotePort == 22 }.status,
+        )
+        assertEquals(listOf(22), firstSession.openedForwards.map { it.remotePort })
+
+        owner.moveTo(Lifecycle.State.CREATED)
+        runCurrent()
+        firstSession.simulateDeadForwardButStillConnected()
+        advanceTimeBy(5_000L)
+        runCurrent()
+
+        assertTrue(
+            "the stale session models sshj still reporting connected after the forward died",
+            firstSession.isConnected,
+        )
+        assertEquals(
+            "plain backgrounding must keep the enabled host registered",
+            1,
+            forwardingController.flowOfActiveHostCount().value,
+        )
+        assertEquals(
+            "without a forced network-loss recovery hint the stale connected session is not rebuilt",
+            listOf("dev"),
+            connector.hosts,
+        )
+
+        owner.moveTo(Lifecycle.State.RESUMED)
+        runCurrent()
+        forwardingController.forceReconnectNow()
+        advanceTimeBy(1_100L)
+        runCurrent()
+
+        assertEquals(listOf("dev", "dev"), connector.hosts)
+        assertEquals(listOf("secret", "secret"), connector.passphrases)
+        assertTrue("force reconnect must close the stale session", firstSession.closed)
+        assertEquals(PortForwardConnectionState.Connected, viewModel.state.value.connectionState)
+        assertEquals(
+            com.pocketshell.core.portfwd.TunnelInfo.Status.FORWARDING,
+            viewModel.state.value.tunnels.single { it.remotePort == 22 }.status,
+        )
+        assertEquals(
+            "manual out-of-window forward must be restored on the fresh SSH session",
+            listOf(22),
+            recoveredSession.openedForwards.map { it.remotePort },
+        )
+        assertEquals(1, forwardingController.flowOfTotalTunnelCount().value)
+
+        viewModel.leavePanel()
+        runCurrent()
+    }
+
+    @Test
     fun reconnectNowWhileAlreadyConnectedDoesNotChurnHealthyTunnel() = runTest {
         val hostId = insertHost(maxAutoPort = 4000, skipPortsBelow = 1000)
         val session = FakeSshSession(
@@ -1233,12 +1316,20 @@ class PortForwardPanelViewModelTest {
         val openedForwards = mutableListOf<FakePortForward>()
         var closed = false
             private set
+        private var staleConnectedFailure = false
 
         override val isConnected: Boolean
             get() = !closed
 
-        override suspend fun exec(command: String): ExecResult =
-            ExecResult(stdout = ssOutput, stderr = "", exitCode = 0)
+        fun simulateDeadForwardButStillConnected() {
+            staleConnectedFailure = true
+            openedForwards.forEach { it.close() }
+        }
+
+        override suspend fun exec(command: String): ExecResult {
+            if (closed || staleConnectedFailure) throw RuntimeException("session transport is stale")
+            return ExecResult(stdout = ssOutput, stderr = "", exitCode = 0)
+        }
 
         override fun tail(path: String, onLine: (String) -> Unit): Job = Job()
 
@@ -1247,6 +1338,7 @@ class PortForwardPanelViewModelTest {
             remotePort: Int,
             localPort: Int,
         ): SshPortForward {
+            if (closed || staleConnectedFailure) throw RuntimeException("session transport is stale")
             return FakePortForward(remoteHost, remotePort, localPort).also { openedForwards += it }
         }
 

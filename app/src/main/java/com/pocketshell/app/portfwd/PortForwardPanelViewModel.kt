@@ -472,7 +472,8 @@ class PortForwardPanelViewModel @Inject constructor(
             forwardingController.registerActiveHost(
                 hostId = host.id,
                 hostName = host.name,
-                reconnectHook = autoForwarderSupervisor::reconnectNow,
+                reconnectHook = { autoForwarderSupervisor.reconnectNow() },
+                forceReconnectHook = { autoForwarderSupervisor.reconnectNow(force = true) },
             )
             registeredHostId = host.id
             // User-driven enable: persist only after the SSH connect +

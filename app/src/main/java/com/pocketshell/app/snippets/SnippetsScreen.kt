@@ -1,11 +1,9 @@
 package com.pocketshell.app.snippets
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,7 +15,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,6 +22,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -46,7 +44,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.storage.entity.SnippetEntity
-import com.pocketshell.uikit.theme.JetBrainsMonoFamily
+import com.pocketshell.uikit.components.Kebab
+import com.pocketshell.uikit.components.KebabItem
+import com.pocketshell.uikit.components.ListRow
+import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 
 /**
@@ -306,38 +307,32 @@ private fun emptyMessageForKind(kind: SnippetKind, libraryIsEmpty: Boolean): Str
         "Switch tabs or add a ${kind.label.lowercase()} snippet."
     }
 
+/**
+ * Snippets header, routed through the shared [ScreenHeader] (#479 Slice B1)
+ * so this management screen reads as the same tight dev-tool block as the host
+ * list and folder tree instead of the old bespoke 60dp / 22.sp app bar. The
+ * back `‹` chevron lives in the header's leading slot.
+ */
 @Composable
 private fun SnippetsAppBar(onBack: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(60.dp)
-            .background(PocketShellColors.Background)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clickable(onClick = onBack),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "‹",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        Text(
-            text = "Snippets",
-            color = PocketShellColors.Text,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier.padding(start = 4.dp),
-        )
-    }
+    ScreenHeader(
+        title = "Snippets",
+        modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
+        leading = {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clickable(onClick = onBack),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "‹",
+                    color = PocketShellColors.TextSecondary,
+                    style = MaterialTheme.typography.headlineSmall,
+                )
+            }
+        },
+    )
 }
 
 /**
@@ -415,12 +410,17 @@ internal fun snippetKindTabTag(kind: SnippetKind): String =
     "snippets-kind-tab-${kind.storageValue}"
 
 /**
- * Single snippet row — mirrors the host-card visual treatment. Two
- * trailing text buttons (Edit / Delete) carry the primary actions, and
- * a long-press anywhere on the row opens the rename affordance from
- * issue #190.
+ * Single snippet row, composed from the shared dense-row primitives (#479
+ * Slice B1). [ListRow] carries the snippet label (`bodyDense`) + a one-line
+ * mono body preview in the subtitle slot (`bodyMono`); the [KindTag] command/
+ * prompt pill and a per-row [Kebab] sit in the trailing slot.
+ *
+ * The former inline `Edit` / `Delete` text buttons and the long-press-only
+ * rename gesture all collapse into the one kebab (§4 decision 4). Rename was
+ * previously reachable only by long-press — folding it into the visible
+ * overflow makes it discoverable, which the inline-buttons removal would
+ * otherwise have hidden entirely.
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SnippetRow(
     snippet: SnippetEntity,
@@ -430,64 +430,28 @@ private fun SnippetRow(
 ) {
     val kind = SnippetKind.fromStorage(snippet.kind)
     val explicit = snippet.hasExplicitLabel()
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(14.dp))
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(14.dp),
-            )
-            // Long-press anywhere on the card opens the rename dialog.
-            // `combinedClickable` carries the regular tap as a no-op so
-            // the surface still ripples on contact.
-            .combinedClickable(
-                onClick = {},
-                onLongClick = onRename,
-            )
-            .padding(horizontal = 14.dp, vertical = 12.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text = snippet.displayLabel(),
-                color = PocketShellColors.Text,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f),
-            )
-            Spacer(modifier = Modifier.width(8.dp))
-            KindTag(kind)
-        }
-        // Show the body preview only when the label is overridden — when
-        // the label IS the derived first line of the body, the preview
-        // would just repeat the primary text. (Issue #190.)
-        if (explicit) {
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(
-                text = snippet.body,
-                color = PocketShellColors.TextSecondary,
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 12.sp,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Spacer(modifier = Modifier.height(8.dp))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.End,
-        ) {
-            TextButton(onClick = onEdit) {
-                Text("Edit", color = PocketShellColors.Accent, fontSize = 13.sp)
-            }
-            TextButton(onClick = onDelete) {
-                Text("Delete", color = PocketShellColors.Red, fontSize = 13.sp)
-            }
-        }
+    // Show the body preview only when the label is overridden — when the label
+    // IS the derived first line of the body, the preview would just repeat the
+    // primary text (issue #190). Collapse to a single line for the dense row.
+    val subtitle = if (explicit) {
+        snippet.body.lineSequence().firstOrNull()?.takeIf { it.isNotBlank() }
+    } else {
+        null
     }
+    ListRow(
+        title = snippet.displayLabel(),
+        subtitle = subtitle,
+        trailing = {
+            KindTag(kind)
+            Kebab(
+                items = listOf(
+                    KebabItem(label = "Edit", onClick = onEdit),
+                    KebabItem(label = "Rename", onClick = onRename),
+                    KebabItem(label = "Delete", onClick = onDelete),
+                ),
+            )
+        },
+    )
 }
 
 /**

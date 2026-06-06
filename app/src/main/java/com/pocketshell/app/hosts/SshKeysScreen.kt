@@ -5,7 +5,6 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -39,15 +37,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.hilt.navigation.compose.hiltViewModel
 import com.pocketshell.core.storage.entity.SshKeyEntity
-import com.pocketshell.uikit.theme.JetBrainsMonoFamily
+import com.pocketshell.uikit.components.Kebab
+import com.pocketshell.uikit.components.KebabItem
+import com.pocketshell.uikit.components.ListRow
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Manage SSH keys: list, add (import or generate), delete.
@@ -373,74 +373,57 @@ internal fun formatSshKeyUnlockLaunchError(throwable: Throwable): String {
 }
 
 /**
- * A single key card. Mirrors the host-row shape from `docs/mockups/styles.css`:
- * surface background, 14dp corner radius, 1dp soft border. Trailing
- * "Delete" affordance opens the confirmation dialog.
+ * A single key row, composed from the shared dense-row primitives (#479
+ * Slice B1): [ListRow] carries the key name (`bodyDense`) + the private-key
+ * path (`bodyMono` via [ListRow]'s subtitle slot) and a `K` avatar tile in
+ * the leading slot. The lone destructive action moves into a per-row [Kebab]
+ * (§4 decision 4) so the row has one overflow affordance instead of an inline
+ * "Delete" text button.
+ *
+ * The passphrase note is appended to the mono subtitle (it is incidental
+ * metadata, not a second scan line) so the row stays single-subtitle like the
+ * folder-tree / host-list rows it now matches.
  */
 @Composable
 private fun KeyRow(
     key: SshKeyEntity,
     onDeleteRequest: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(PocketShellColors.Surface, RoundedCornerShape(14.dp))
-            .border(
-                width = 1.dp,
-                color = PocketShellColors.BorderSoft,
-                shape = RoundedCornerShape(14.dp),
-            )
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .background(
-                    color = PocketShellColors.SurfaceElev,
-                    shape = RoundedCornerShape(12.dp),
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "K",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-        Spacer(modifier = Modifier.width(12.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = key.name,
-                color = PocketShellColors.Text,
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = key.privateKeyPath,
-                color = PocketShellColors.TextMuted,
-                fontFamily = JetBrainsMonoFamily,
-                fontSize = 11.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (key.hasPassphrase) {
-                Spacer(modifier = Modifier.height(2.dp))
+    val subtitle = if (key.hasPassphrase) {
+        "${key.privateKeyPath}  · passphrase not stored"
+    } else {
+        key.privateKeyPath
+    }
+    ListRow(
+        title = key.name,
+        subtitle = subtitle,
+        leading = {
+            Box(
+                modifier = Modifier
+                    .size(32.dp)
+                    .background(
+                        color = PocketShellColors.SurfaceElev,
+                        shape = RoundedCornerShape(8.dp),
+                    ),
+                contentAlignment = Alignment.Center,
+            ) {
                 Text(
-                    text = "Passphrase-protected; passphrase is not stored",
+                    text = "K",
                     color = PocketShellColors.TextSecondary,
-                    fontSize = 11.sp,
+                    style = PocketShellType.bodyDense,
+                    fontWeight = FontWeight.SemiBold,
                 )
             }
-        }
-        Spacer(modifier = Modifier.width(12.dp))
-        TextButton(onClick = onDeleteRequest) {
-            Text("Delete", color = PocketShellColors.Red, fontSize = 13.sp)
-        }
-    }
+        },
+        trailing = {
+            Kebab(
+                items = listOf(
+                    KebabItem(
+                        label = "Delete",
+                        onClick = onDeleteRequest,
+                    ),
+                ),
+            )
+        },
+    )
 }

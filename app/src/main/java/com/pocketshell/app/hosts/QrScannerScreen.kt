@@ -7,6 +7,7 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -38,7 +40,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -48,7 +49,9 @@ import com.journeyapps.barcodescanner.DecoratedBarcodeView
 import com.journeyapps.barcodescanner.DefaultDecoderFactory
 import com.google.zxing.BarcodeFormat
 import com.pocketshell.app.R
+import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
+import com.pocketshell.uikit.theme.PocketShellType
 
 /**
  * Live QR scanner screen (issue #129).
@@ -132,28 +135,24 @@ fun QrScannerScreen(
             .testTag(QR_SCANNER_ROOT_TAG),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(56.dp)
-                    .padding(horizontal = 16.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = context.getString(R.string.qr_scanner_title),
-                    color = PocketShellColors.Text,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = onClose) {
-                    Text(
-                        text = context.getString(R.string.qr_scanner_close),
-                        color = PocketShellColors.Accent,
-                        fontSize = 13.sp,
-                    )
-                }
-            }
+            // Slice E1a: the bespoke 56dp / 18.sp app bar is replaced by the
+            // shared [ScreenHeader] dev-tool block. The camera viewport,
+            // viewfinder overlay, and scan flow below are untouched. The Close
+            // affordance moves into the header's trailing slot and drops its
+            // raw 13.sp for the muted `labelSmall` token.
+            ScreenHeader(
+                title = context.getString(R.string.qr_scanner_title),
+                modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
+                trailing = {
+                    TextButton(onClick = onClose) {
+                        Text(
+                            text = context.getString(R.string.qr_scanner_close),
+                            color = PocketShellColors.Accent,
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                },
+            )
 
             when (val current = state) {
                 is QrScannerViewModel.State.RequestingPermission -> {
@@ -193,7 +192,7 @@ fun QrScannerScreen(
                         Text(
                             text = context.getString(R.string.qr_scanner_prompt),
                             color = PocketShellColors.TextSecondary,
-                            fontSize = 12.sp,
+                            style = MaterialTheme.typography.labelSmall,
                             modifier = Modifier.padding(horizontal = 24.dp, vertical = 16.dp),
                         )
                     }
@@ -244,7 +243,7 @@ private fun ScanningPrompt(state: QrScannerViewModel.State.Scanning) {
                         state.scanTotal,
                     ),
                     color = PocketShellColors.Text,
-                    fontSize = 12.sp,
+                    style = MaterialTheme.typography.labelSmall,
                     fontWeight = FontWeight.Medium,
                 )
             }
@@ -268,7 +267,7 @@ private fun PermissionDeniedBlock(
         Text(
             text = context.getString(R.string.qr_scanner_permission_denied),
             color = PocketShellColors.TextSecondary,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
         )
         Spacer(modifier = Modifier.height(16.dp))
         if (onRetry != null) {
@@ -313,14 +312,14 @@ private fun ErrorBlock(
         Text(
             text = message,
             color = PocketShellColors.Red,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
             text = context.getString(R.string.qr_scanner_error_generic),
             color = PocketShellColors.TextSecondary,
-            fontSize = 12.sp,
+            style = MaterialTheme.typography.labelSmall,
         )
         Spacer(modifier = Modifier.height(16.dp))
         Row {
@@ -357,14 +356,13 @@ private fun InfoCard(title: String, body: String) {
         Text(
             text = title,
             color = PocketShellColors.Text,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold,
+            style = MaterialTheme.typography.titleMedium,
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
             text = body,
             color = PocketShellColors.TextSecondary,
-            fontSize = 13.sp,
+            style = PocketShellType.bodyDense,
         )
     }
 }

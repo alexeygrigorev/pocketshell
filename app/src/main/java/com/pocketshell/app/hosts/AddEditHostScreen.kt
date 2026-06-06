@@ -41,11 +41,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
+import com.pocketshell.uikit.components.ScreenHeader
 import com.pocketshell.uikit.theme.PocketShellColors
 
 /**
@@ -193,7 +194,7 @@ fun AddEditHostScreen(
             .background(PocketShellColors.Background),
     ) {
         Column(modifier = Modifier.fillMaxSize()) {
-            FormAppBar(
+            FormHeader(
                 title = if (hostId == null) "Add host" else "Edit host",
                 onScanQr = onScanQr.takeIf { hostId == null },
                 onBack = {
@@ -299,7 +300,7 @@ fun AddEditHostScreen(
                             Text(
                                 text = err,
                                 color = PocketShellColors.Red,
-                                fontSize = 13.sp,
+                                style = MaterialTheme.typography.labelSmall,
                             )
                         }
 
@@ -369,60 +370,58 @@ private fun AddEditHostTabs(
 }
 
 /**
- * Top app bar matching the dashboard's appbar height + chrome but with a
- * back affordance instead of a title-only layout.
+ * Add/Edit host header, routed through the shared [ScreenHeader] (#479
+ * Slice E1a) so the screen reads as the tight dev-tool block — `bodyDense`
+ * SemiBold title + `‹` back chevron in the leading slot — instead of the
+ * old bespoke 60dp / 22.sp / 18.sp `FormAppBar`. This header is shared by
+ * both the Host-details and Manage-keys tabs (the SSH-keys management pane
+ * carries no separate header of its own), so migrating it onto the shared
+ * primitive also closes the Slice B1 keys-header gap.
+ *
+ * The `‹` back affordance keeps the same 40dp tap target the old bar used;
+ * the Scan-QR action keeps its `ADD_HOST_SCAN_QR_TAG` so the Add-host
+ * instrumentation keeps resolving it after the migration. The Scan-QR
+ * label drops its raw `13.sp` for the muted `labelSmall` type token.
  */
 @Composable
-private fun FormAppBar(
+private fun FormHeader(
     title: String,
     onScanQr: (() -> Unit)?,
     onBack: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(60.dp)
-            .background(PocketShellColors.Background)
-            .border(width = 1.dp, color = PocketShellColors.BorderSoft)
-            .padding(horizontal = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clickable(onClick = onBack),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = "‹",
-                color = PocketShellColors.TextSecondary,
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-            )
-        }
-        Text(
-            text = title,
-            color = PocketShellColors.Text,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold,
-            modifier = Modifier
-                .padding(start = 4.dp)
-                .weight(1f),
-        )
-        if (onScanQr != null) {
-            TextButton(
-                onClick = onScanQr,
-                modifier = Modifier.testTag(ADD_HOST_SCAN_QR_TAG),
+    ScreenHeader(
+        title = title,
+        modifier = Modifier.border(width = 1.dp, color = PocketShellColors.BorderSoft),
+        leading = {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clickable(role = Role.Button, onClick = onBack),
+                contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    text = "Scan QR",
-                    color = PocketShellColors.Accent,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
+                    text = "‹",
+                    color = PocketShellColors.TextSecondary,
+                    style = MaterialTheme.typography.headlineSmall,
                 )
             }
-        }
-    }
+        },
+        trailing = {
+            if (onScanQr != null) {
+                TextButton(
+                    onClick = onScanQr,
+                    modifier = Modifier.testTag(ADD_HOST_SCAN_QR_TAG),
+                ) {
+                    Text(
+                        text = "Scan QR",
+                        color = PocketShellColors.Accent,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+        },
+    )
 }
 
 /**
@@ -629,7 +628,7 @@ private fun KeySelector(
                                 Text(
                                     "Search keys",
                                     color = PocketShellColors.TextMuted,
-                                    fontSize = 13.sp,
+                                    style = MaterialTheme.typography.labelSmall,
                                 )
                             },
                             modifier = Modifier

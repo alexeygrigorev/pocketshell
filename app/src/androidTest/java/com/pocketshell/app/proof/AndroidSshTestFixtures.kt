@@ -5,9 +5,13 @@ import android.graphics.Bitmap
 import android.os.Build
 import android.os.SystemClock
 import androidx.test.platform.app.InstrumentationRegistry
+import com.pocketshell.core.ssh.ExecResult
+import com.pocketshell.core.ssh.KnownHostsPolicy
 import com.pocketshell.core.ssh.SshConnection
 import com.pocketshell.core.ssh.SshKey
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -93,6 +97,97 @@ suspend fun waitForSshFixtureReady(
         SystemClock.sleep(1_000)
     }
     error("SSH fixture on $DEFAULT_HOST:$port was not ready after $attempt attempts:\n${failures.takeLast(10).joinToString("\n")}")
+}
+
+/**
+ * Issue #532: connected-test remote setup (creating a deterministic tmux
+ * session, seeding a script, resetting the tmux server) used to be a
+ * single-shot `withTimeout(20_000) { SshConnection.connect(...).exec(...) }`
+ * that asserted on the first attempt. On the GitHub Actions emulator the
+ * Android device, the host JVM, and the Docker `agents` container share two
+ * cores and a swiftshader GPU, so a single connect+auth+exec can either run
+ * slow enough to blow the fixed 20 s window or hit a transient connect/auth
+ * failure — and there was no retry, so the whole prep failed and surfaced as
+ * "tmux claude-main prep times out".
+ *
+ * This helper replaces those single-shot prep calls with a poll-until loop:
+ * it re-connects and re-runs the remote command until [isReady] is satisfied
+ * (default: exit code 0), backing off [pollIntervalMs] between attempts,
+ * inside a CI-aware deadline. This mirrors the already-robust
+ * `cleanupRemoteWalkthroughArtifacts` loop in the smoke test and the
+ * retry-until-ready shape of [waitForSshFixtureReady]. There are no new fixed
+ * `sleep`s on the success path — every attempt early-exits as soon as the
+ * remote command reports ready.
+ */
+suspend fun execRemoteSetupUntilReady(
+    key: SshKey.Pem,
+    command: String,
+    description: String,
+    host: String = DEFAULT_HOST,
+    port: Int = DEFAULT_PORT,
+    user: String = DEFAULT_USER,
+    timeoutMs: Long = SshSetupTimeouts.remoteSetupTimeoutMs(),
+    pollIntervalMs: Long = 500,
+    isReady: (ExecResult) -> Boolean = { it.exitCode == 0 },
+): ExecResult {
+    var attempt = 0
+    var lastFailure = "remote setup never ran"
+    var lastResult: ExecResult? = null
+    val satisfied = runCatching {
+        withTimeout(timeoutMs) {
+            while (true) {
+                attempt += 1
+                val outcome = SshConnection.connect(
+                    host = host,
+                    port = port,
+                    user = user,
+                    key = key,
+                    knownHosts = KnownHostsPolicy.AcceptAll,
+                    timeoutMs = 15_000,
+                ).mapCatching { session ->
+                    session.use { it.exec(command) }
+                }
+                val result = outcome.getOrNull()
+                if (result != null && isReady(result)) {
+                    lastResult = result
+                    return@withTimeout result
+                }
+                lastFailure = "attempt $attempt: " +
+                    (outcome.exceptionOrNull()?.toString()
+                        ?: "exit=${result?.exitCode} stdout='${result?.stdout}' stderr='${result?.stderr}'")
+                result?.let { lastResult = it }
+                delay(pollIntervalMs)
+            }
+            @Suppress("UNREACHABLE_CODE")
+            lastResult
+        }
+    }.getOrNull()
+    return satisfied ?: error(
+        "expected $description to become ready within ${timeoutMs}ms; " +
+            "last failure after $attempt attempts: $lastFailure",
+    )
+}
+
+/**
+ * CI-aware deadline for connected-test remote SSH setup (issue #532). The
+ * single-shot prep helpers previously used a flat `withTimeout(20_000)`,
+ * which is comfortable on a dedicated dev emulator but too tight once the CI
+ * emulator is sharing two cores and a swiftshader GPU with a parallel Docker
+ * `agents` container. The CI window is widened while the local window stays
+ * tight so a real dev-box regression still surfaces quickly. The
+ * `pocketshellCi=true` instrumentation argument is set only from the CI
+ * workflow, matching [TerminalTestTimeouts].
+ */
+object SshSetupTimeouts {
+    private const val LOCAL_REMOTE_SETUP_TIMEOUT_MS: Long = 30_000L
+    private const val CI_REMOTE_SETUP_TIMEOUT_MS: Long = 90_000L
+
+    fun remoteSetupTimeoutMs(): Long =
+        if (TerminalTestTimeouts.isRunningOnCi()) {
+            CI_REMOTE_SETUP_TIMEOUT_MS
+        } else {
+            LOCAL_REMOTE_SETUP_TIMEOUT_MS
+        }
 }
 
 /**

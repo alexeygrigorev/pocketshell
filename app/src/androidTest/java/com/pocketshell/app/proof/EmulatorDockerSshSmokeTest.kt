@@ -390,15 +390,10 @@ class EmulatorDockerSshSmokeTest {
                 hasTag(folderRowTestTag(tmpDir)) &&
                     hasTag(folderHeaderClickTestTag(tmpDir))
             }
-            compose.onNodeWithTag(folderHeaderClickTestTag(tmpDir), useUnmergedTree = true).performClick()
-            waitUntilWithDiagnostics(
-                label = "existing tmux session $existingTmuxSessionName under $tmpDir",
-                timeoutMillis = 20_000,
-                textProbes = listOf("Walkthrough Docker", tmpDir.substringAfterLast('/'), existingTmuxSessionName),
-                tagProbes = hostDetailDiagnosticTags(tmpDir, existingTmuxSessionName),
-            ) {
-                hasTag(folderDetailRowTestTag(tmpDir, existingTmuxSessionName))
-            }
+            expandFolderUntilSessionRowVisible(
+                folderPath = tmpDir,
+                sessionName = existingTmuxSessionName,
+            )
             val attachTapAt = SystemClock.elapsedRealtime()
             compose.onNodeWithTag(folderDetailRowTestTag(tmpDir, existingTmuxSessionName), useUnmergedTree = true)
                 .performClick()
@@ -503,6 +498,70 @@ class EmulatorDockerSshSmokeTest {
             )
         }
         Unit
+    }
+
+    /**
+     * Issue #532 root cause + fix. The host-detail tree auto-expands any
+     * folder that has ≥1 session (FolderListViewModel #471 auto-expand), and
+     * that expanded emission lands asynchronously — on first `ready` and on
+     * every 5 s discovery poll. The walkthrough previously did a single
+     * unconditional `performClick()` on the folder header and then waited for
+     * the `claude-main` detail row. That tap is a *toggle*:
+     *
+     *  - If the tap raced ahead of the auto-expand emission (folder still
+     *    collapsed), the tap expanded it → detail row appeared → pass.
+     *  - If the auto-expand emission had already landed (folder already
+     *    expanded), the same tap COLLAPSED it and pinned it collapsed in the
+     *    view model's `userCollapsedProjectPaths`, so no later poll re-opened
+     *    it → the `folderDetailRowTestTag` wait timed out after 20 s. On a
+     *    loaded emulator that ordering is non-deterministic, which is exactly
+     *    the intermittent "tmux claude-main prep times out" flake.
+     *
+     * Make the interaction converge instead of toggling blindly: poll until
+     * the session detail row is visible, tapping the header only while the row
+     * is still hidden. A tap when the folder is already expanded would be
+     * wrong (it collapses), so we re-check expansion each cycle and tap at
+     * most once per still-collapsed observation. The deadline is CI-aware via
+     * [SshSetupTimeouts] so a loaded CI emulator gets the same generous window
+     * the rest of the walkthrough already uses.
+     */
+    private fun expandFolderUntilSessionRowVisible(
+        folderPath: String,
+        sessionName: String,
+    ) {
+        val detailTag = folderDetailRowTestTag(folderPath, sessionName)
+        val headerTag = folderHeaderClickTestTag(folderPath)
+        val deadline = SystemClock.elapsedRealtime() + SshSetupTimeouts.remoteSetupTimeoutMs()
+        var taps = 0
+        while (SystemClock.elapsedRealtime() < deadline) {
+            compose.waitForIdle()
+            if (hasTag(detailTag)) {
+                Log.i(LOG_TAG, "folder $folderPath expanded; session row $sessionName visible after $taps tap(s)")
+                return
+            }
+            // Folder still collapsed (or the auto-expand emission has not
+            // landed yet). Tap the header to request expansion. If a tap and
+            // an auto-expand emission ever both fire in the same window the
+            // next loop iteration re-reads the row and stops, so we never
+            // over-toggle into a collapsed state.
+            if (hasTag(headerTag)) {
+                compose.onNodeWithTag(headerTag, useUnmergedTree = true).performClick()
+                taps += 1
+            }
+            // Short settle so the toggle emission + recomposition can render
+            // the detail row before the next observation; this is a bounded
+            // poll interval, not a fixed pre-action sleep.
+            SystemClock.sleep(250)
+        }
+        // Final authoritative check + rich diagnostics on failure.
+        waitUntilWithDiagnostics(
+            label = "expanded folder $folderPath showing session row $sessionName (after $taps tap(s))",
+            timeoutMillis = 5_000,
+            textProbes = listOf("Walkthrough Docker", folderPath.substringAfterLast('/'), sessionName),
+            tagProbes = hostDetailDiagnosticTags(folderPath, sessionName),
+        ) {
+            hasTag(detailTag)
+        }
     }
 
     private fun waitUntilWithDiagnostics(
@@ -826,23 +885,13 @@ class EmulatorDockerSshSmokeTest {
             "$script\n" +
             "POCKETSHELL_ISSUE78_SCRIPT\n" +
             "chmod +x ${shellQuote("$tmpDir/run.sh")}"
-        val prepared = withTimeout(20_000) {
-            SshConnection.connect(
-                host = DEFAULT_HOST,
-                port = DEFAULT_PORT,
-                user = DEFAULT_USER,
-                key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
-                timeoutMs = 15_000,
-            ).mapCatching { session ->
-                session.use { it.exec(setupCommand) }
-            }
-        }
-        val result = prepared.getOrNull()
-        assertTrue(
-            "expected remote issue #78 script setup to succeed, got ${prepared.exceptionOrNull()} " +
-                "stdout='${result?.stdout}' stderr='${result?.stderr}'",
-            result?.exitCode == 0,
+        // Issue #532: poll-until + CI-aware deadline instead of a single-shot
+        // `withTimeout(20_000)` connect. Writing the script is idempotent
+        // (`mkdir -p` + truncating heredoc redirect), so retrying is safe.
+        execRemoteSetupUntilReady(
+            key = SshKey.Pem(key),
+            command = setupCommand,
+            description = "remote issue #78 walkthrough script setup",
         )
     }
 
@@ -851,6 +900,21 @@ class EmulatorDockerSshSmokeTest {
         sessionName: String,
         cwd: String,
     ) {
+        // Issue #532: this prep used to be a single-shot
+        // `withTimeout(20_000) { connect().exec(...) }` that asserted on the
+        // first attempt, so a slow/transient connect on a loaded CI emulator
+        // (sharing cores + GPU with the Docker `agents` container) surfaced
+        // as the "tmux claude-main prep times out" flake. It now polls
+        // connect+exec until ready inside a CI-aware deadline.
+        //
+        // The remote command is idempotent (`tmux kill-session` before
+        // `new-session`) so retrying is safe, and the final
+        // `pane_current_path` check stays inside the retried command: after
+        // `tmux new-session -d`, the pane's reported cwd is read from the
+        // freshly exec'd shell, which can briefly lag the `-c` directory.
+        // Keeping that `test` as the readiness gate (the whole command's
+        // exit code) means the loop re-runs until tmux settles the pane path
+        // rather than failing on a single early sample.
         val setupCommand = listOf(
             "mkdir -p ${shellQuote(cwd)}",
             "tmux kill-session -t ${shellQuote(sessionName)} 2>/dev/null || true",
@@ -858,46 +922,21 @@ class EmulatorDockerSshSmokeTest {
                 shellQuote("printf 'existing tmux walkthrough ready\\n'; exec sh -i"),
             "test \"$(tmux display-message -p -t ${shellQuote(sessionName)} '#{pane_current_path}')\" = ${shellQuote(cwd)}",
         ).joinToString(separator = "; ")
-        val prepared = withTimeout(20_000) {
-            SshConnection.connect(
-                host = DEFAULT_HOST,
-                port = DEFAULT_PORT,
-                user = DEFAULT_USER,
-                key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
-                timeoutMs = 15_000,
-            ).mapCatching { session ->
-                session.use { it.exec(setupCommand) }
-            }
-        }
-        val result = prepared.getOrNull()
-        assertTrue(
-            "expected existing tmux session $sessionName in $cwd, got ${prepared.exceptionOrNull()} " +
-                "stdout='${result?.stdout}' stderr='${result?.stderr}'",
-            result?.exitCode == 0,
+        execRemoteSetupUntilReady(
+            key = SshKey.Pem(key),
+            command = setupCommand,
+            description = "existing tmux session $sessionName in $cwd",
         )
     }
 
     private suspend fun resetRemoteTmuxServer(key: String) {
-        val reset = withTimeout(20_000) {
-            SshConnection.connect(
-                host = DEFAULT_HOST,
-                port = DEFAULT_PORT,
-                user = DEFAULT_USER,
-                key = SshKey.Pem(key),
-                knownHosts = KnownHostsPolicy.AcceptAll,
-                timeoutMs = 15_000,
-            ).mapCatching { session ->
-                session.use {
-                    it.exec("tmux kill-server 2>/dev/null || true")
-                }
-            }
-        }
-        val result = reset.getOrNull()
-        assertTrue(
-            "expected remote tmux reset to succeed, got ${reset.exceptionOrNull()} " +
-                "stdout='${result?.stdout}' stderr='${result?.stderr}'",
-            result?.exitCode == 0,
+        // Issue #532: poll-until + CI-aware deadline instead of a single-shot
+        // `withTimeout(20_000)` connect so a transient/slow connect on a
+        // loaded CI emulator retries rather than failing the prep.
+        execRemoteSetupUntilReady(
+            key = SshKey.Pem(key),
+            command = "tmux kill-server 2>/dev/null || true",
+            description = "remote tmux server reset",
         )
     }
 
